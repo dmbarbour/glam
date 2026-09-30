@@ -2242,9 +2242,20 @@ inventory relatch:
            all-target inventory from 285 to 237; the remaining `Clone` and
            diagnostic-formatting errors stay visible for their distinct
            migration checkpoints.
-      3. Add owner-local recursive test relations for `g_syntax` carriers and
-         migrate compiler/front-end fixtures without giving semantic values
-         syntax-layer equality traits.
+      3. **Owner-local front-end relation and fixture migration complete
+         2026-09-30 (D.2h.2i).** `ResolvedExpr<V>` and its path components now
+         implement the test-only representation relation in their owning
+         module, recursively reusing one runtime access while leaving their
+         ordinary generic syntax-only equality available. Conditional and
+         `do` resolver fixtures, macro/reflection fixtures, source-evaluation
+         fixtures, abstract-path assertions, and diagnostic-context searches
+         use that relation or the owning compiler value factory. Public macro
+         heap values use the assembler reflection observer rather than the
+         crate-private raw-value fixture API. No `g_syntax` source now
+         contributes an equality error; this checkpoint reduces the
+         all-target inventory from 237 to 156. The remaining front-end
+         duplication and formatting errors stay assigned to their distinct
+         migration checkpoints.
       4. Migrate reflection, API, builtin-net, and generic interaction-net
          fixtures. Use public observers for public values and explicit local
          payload/topology relations for generic nets.

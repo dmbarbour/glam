@@ -182,6 +182,114 @@ impl<V> ResolvedExpr<V> {
 }
 
 #[cfg(test)]
+impl<V, W> crate::core::SameRepresentationForTest<ResolvedExpr<W>> for ResolvedExpr<V>
+where
+    V: crate::core::SameRepresentationForTest<W>,
+{
+    fn same_representation_for_test(
+        &self,
+        other: &ResolvedExpr<W>,
+        access: &crate::core::RuntimeValueAccess<'_>,
+    ) -> bool {
+        use crate::core::SameRepresentationForTest;
+
+        match (self, other) {
+            (Self::Embedded(left), ResolvedExpr::Embedded(right))
+            | (Self::Provided(left), ResolvedExpr::Provided(right)) => {
+                left.same_representation_for_test(right, access)
+            }
+            (Self::Local(left), ResolvedExpr::Local(right)) => left == right,
+            (Self::List(left), ResolvedExpr::List(right)) => {
+                left.same_representation_for_test(right, access)
+            }
+            (
+                Self::Access {
+                    base: left_base,
+                    path: left_path,
+                },
+                ResolvedExpr::Access {
+                    base: right_base,
+                    path: right_path,
+                },
+            ) => {
+                left_base.same_representation_for_test(right_base, access)
+                    && left_path.len() == right_path.len()
+                    && left_path
+                        .iter()
+                        .zip(right_path)
+                        .all(|(left, right)| left.same_representation_for_test(right, access))
+            }
+            (
+                Self::Lambda {
+                    parameters: left_parameters,
+                    body: left_body,
+                },
+                ResolvedExpr::Lambda {
+                    parameters: right_parameters,
+                    body: right_body,
+                },
+            ) => {
+                left_parameters == right_parameters
+                    && left_body.same_representation_for_test(right_body, access)
+            }
+            (
+                Self::Apply {
+                    function: left_function,
+                    arguments: left_arguments,
+                },
+                ResolvedExpr::Apply {
+                    function: right_function,
+                    arguments: right_arguments,
+                },
+            ) => {
+                left_function.same_representation_for_test(right_function, access)
+                    && left_arguments.same_representation_for_test(right_arguments, access)
+            }
+            (
+                Self::ApplyLambda {
+                    parameters: left_parameters,
+                    body: left_body,
+                    arguments: left_arguments,
+                },
+                ResolvedExpr::ApplyLambda {
+                    parameters: right_parameters,
+                    body: right_body,
+                    arguments: right_arguments,
+                },
+            ) => {
+                left_parameters == right_parameters
+                    && left_body.same_representation_for_test(right_body, access)
+                    && left_arguments.same_representation_for_test(right_arguments, access)
+            }
+            _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+impl<V, W> crate::core::SameRepresentationForTest<ResolvedPathPart<W>> for ResolvedPathPart<V>
+where
+    V: crate::core::SameRepresentationForTest<W>,
+{
+    fn same_representation_for_test(
+        &self,
+        other: &ResolvedPathPart<W>,
+        access: &crate::core::RuntimeValueAccess<'_>,
+    ) -> bool {
+        use crate::core::SameRepresentationForTest;
+
+        match (self, other) {
+            (Self::Key(left), ResolvedPathPart::Key(right)) => left == right,
+            (Self::Index(left), ResolvedPathPart::Index(right))
+            | (Self::PathIndex(left), ResolvedPathPart::PathIndex(right)) => {
+                left.same_representation_for_test(right, access)
+            }
+            _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

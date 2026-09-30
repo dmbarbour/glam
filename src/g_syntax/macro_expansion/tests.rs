@@ -273,11 +273,11 @@ fn unstarted_reflection_result_uses_runtime_default_profile_from_macro_demand() 
         .expect("a macro-started reflection result should complete");
 
     values.with_runtime_value_access(|access| {
-        assert_eq!(
-            result.clone_core_with(&access),
-            Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(
-                "assembler"
-            )))
+        access.assert_same_representation_for_test(
+            &result.clone_core_with(&access),
+            &Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(
+                "assembler",
+            ))),
         );
     });
 }
@@ -387,15 +387,22 @@ fn macro_reflection_heap_is_shared_with_the_evaluation_runtime() {
         .get(&execution.macro_heap(), "macro_only")
         .expect("macro heap read should succeed");
     let assembler_value = assembler.get(&assembler.test_reflection_heap(), "macro_only");
-    assert_eq!(
-        macro_value.clone_core_for_test(),
-        Value::binary_from_text("yes")
+    let expected = assembler.values().text("yes");
+    assert!(
+        assembler
+            .reflection()
+            .same_representation(&macro_value, &expected)
+            .expect("macro heap value should belong to the assembler runtime")
     );
-    assert_eq!(
-        assembler_value
-            .expect("the assembler session should see the runtime reflection heap")
-            .clone_core_for_test(),
-        Value::binary_from_text("yes")
+    assert!(
+        assembler
+            .reflection()
+            .same_representation(
+                &assembler_value
+                    .expect("the assembler session should see the runtime reflection heap"),
+                &expected,
+            )
+            .expect("assembler heap value should belong to the assembler runtime")
     );
 }
 

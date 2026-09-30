@@ -197,7 +197,7 @@ mod tests {
         let first = values.with_runtime_value_access(|access| value(&access));
         let second = values.with_runtime_value_access(|access| value(&access));
         assert!(matches!(first, Value::Function(_)));
-        assert_eq!(first, second);
+        values.assert_same_representation_for_test(&first, &second);
         let live = values
             .collect_managed_for_test()
             .expect("the cached formatter root should survive collection");

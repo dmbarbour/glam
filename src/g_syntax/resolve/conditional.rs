@@ -535,13 +535,24 @@ mod tests {
         SyntaxExpr::Number(value.into())
     }
 
+    fn same_resolved(left: &ResolvedExpr<Value>, right: &ResolvedExpr<Value>) -> bool {
+        crate::compiler::test_value_factory().same_representation_for_test(left, right)
+    }
+
+    #[track_caller]
+    fn assert_same_resolved(left: &ResolvedExpr<Value>, right: &ResolvedExpr<Value>) {
+        crate::compiler::test_value_factory().assert_same_representation_for_test(left, right);
+    }
+
     fn is_root_effect_call(expression: &ResolvedExpr<Value>, name: &str) -> bool {
         let values = crate::compiler::test_value_factory();
         matches!(
             expression,
             ResolvedExpr::Apply { function, .. }
-                if function.as_ref()
-                    == &ResolvedExpr::Embedded(compiler_values::effect_test_value(&values, name))
+                if same_resolved(
+                    function,
+                    &ResolvedExpr::Embedded(compiler_values::effect_test_value(&values, name)),
+                )
         )
     }
 
@@ -555,47 +566,47 @@ mod tests {
 
     #[test]
     fn zero_alternatives_lower_to_one_cut_around_failure() {
-        assert_eq!(
-            resolve(&[]),
-            effect_call_resolved(
+        assert_same_resolved(
+            &resolve(&[]),
+            &effect_call_resolved(
                 &crate::compiler::test_value_factory(),
                 "cut",
                 [lower_effect_expr_resolved(
                     &crate::compiler::test_value_factory(),
                     "fail",
                 )],
-            )
+            ),
         );
     }
 
     #[test]
     fn one_alternative_has_one_cut_and_no_redundant_alt() {
         let result = number(1);
-        assert_eq!(
-            resolve(&[pass(&result)]),
-            effect_call_resolved(&crate::compiler::test_value_factory(), "cut", [returned(1)])
+        assert_same_resolved(
+            &resolve(&[pass(&result)]),
+            &effect_call_resolved(&crate::compiler::test_value_factory(), "cut", [returned(1)]),
         );
     }
 
     #[test]
     fn tentative_results_are_emitted_as_effects_without_an_automatic_return() {
         let result = SyntaxExpr::Effect(vec!["fail".to_owned()]);
-        assert_eq!(
-            resolve(&[GuardChoiceArm {
+        assert_same_resolved(
+            &resolve(&[GuardChoiceArm {
                 line: 1,
                 guards: &[],
                 result_line: 1,
                 result_mode: ConditionalResultMode::Tentative,
                 result: &result,
             }]),
-            effect_call_resolved(
+            &effect_call_resolved(
                 &crate::compiler::test_value_factory(),
                 "cut",
                 [lower_effect_expr_resolved(
                     &crate::compiler::test_value_factory(),
                     "fail",
                 )],
-            )
+            ),
         );
     }
 
@@ -603,15 +614,15 @@ mod tests {
     fn pass_guard_adds_no_semantic_step() {
         let guards = [SyntaxGuardClause::Pass];
         let result = number(1);
-        assert_eq!(
-            resolve(&[GuardChoiceArm {
+        assert_same_resolved(
+            &resolve(&[GuardChoiceArm {
                 line: 1,
                 guards: &guards,
                 result_line: 1,
                 result_mode: ConditionalResultMode::Ordinary,
                 result: &result,
             }]),
-            resolve(&[pass(&result)])
+            &resolve(&[pass(&result)]),
         );
     }
 
@@ -637,9 +648,9 @@ mod tests {
             )],
         );
 
-        assert_eq!(
-            resolve(&[pass(&first), pass(&second), pass(&third)]),
-            expected
+        assert_same_resolved(
+            &resolve(&[pass(&first), pass(&second), pass(&third)]),
+            &expected,
         );
     }
 
@@ -683,9 +694,9 @@ mod tests {
             matches!(value, ResolvedExpr::Embedded(Value::Number(number))
                 if *number == Number::from(42_i64))
         );
-        assert_eq!(
+        assert_same_resolved(
             alternative_value(alternative),
-            &ResolvedExpr::Local(*binding)
+            &ResolvedExpr::Local(*binding),
         );
         assert!(locals.is_empty());
     }
@@ -756,13 +767,13 @@ mod tests {
         let first_binding = value_binding(first);
         let second_binding = value_binding(second);
         assert_ne!(first_binding, second_binding);
-        assert_eq!(
+        assert_same_resolved(
             alternative_value(first),
-            &ResolvedExpr::Local(first_binding)
+            &ResolvedExpr::Local(first_binding),
         );
-        assert_eq!(
+        assert_same_resolved(
             alternative_value(second),
-            &ResolvedExpr::Local(second_binding)
+            &ResolvedExpr::Local(second_binding),
         );
         assert!(locals.is_empty());
     }
@@ -852,9 +863,9 @@ mod tests {
             &mut ResolverContext::default(),
         )
         .expect("empty open host match should resolve");
-        assert_eq!(
-            resolved_host,
-            lower_effect_expr_resolved(&crate::compiler::test_value_factory(), "fail")
+        assert_same_resolved(
+            &resolved_host,
+            &lower_effect_expr_resolved(&crate::compiler::test_value_factory(), "fail"),
         );
 
         let pure = MatchWhenExpr {
@@ -870,12 +881,12 @@ mod tests {
             &mut ResolverContext::default(),
         )
         .expect("empty open pure match should resolve");
-        assert_eq!(
-            resolved_pure,
-            compiler_values::run_pure_open_match_test_resolved(
+        assert_same_resolved(
+            &resolved_pure,
+            &compiler_values::run_pure_open_match_test_resolved(
                 &crate::compiler::test_value_factory(),
                 lower_effect_expr_resolved(&crate::compiler::test_value_factory(), "fail"),
-            )
+            ),
         );
         assert!(!contains_effect(&resolved_pure, "cut"));
     }
@@ -1012,7 +1023,9 @@ mod tests {
         let target =
             compiler_values::effect_test_value(&crate::compiler::test_value_factory(), name);
         match expression {
-            ResolvedExpr::Embedded(value) | ResolvedExpr::Provided(value) => value == &target,
+            ResolvedExpr::Embedded(value) | ResolvedExpr::Provided(value) => {
+                crate::compiler::test_value_factory().same_representation_for_test(value, &target)
+            }
             ResolvedExpr::Local(_) => false,
             ResolvedExpr::List(items) => items.iter().any(|item| contains_effect(item, name)),
             ResolvedExpr::Access { base, path } => {

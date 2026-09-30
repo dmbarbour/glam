@@ -20,6 +20,15 @@ fn test_eval_context() -> crate::evaluation::EvalContext {
     test_assembler().eval_context()
 }
 
+fn same_value_representation(left: &Value, right: &Value) -> bool {
+    crate::compiler::test_value_factory().same_representation_for_test(left, right)
+}
+
+#[track_caller]
+fn assert_same_value_representation(left: &Value, right: &Value) {
+    crate::compiler::test_value_factory().assert_same_representation_for_test(left, right);
+}
+
 fn context_final_defs(context: &CompileContext) -> Value {
     context
         .values()
@@ -434,9 +443,9 @@ fn staged_module_lowering_matches_batch_module_values() {
     assert_eq!(batch.diagnostics, staged.diagnostics);
     let batch = evaluated_module_value(&batch_context, &batch);
     let staged = evaluated_module_value(&staged_context, &staged);
-    assert_eq!(
-        resolved_value_at_path(&batch, &["answer"]),
-        resolved_value_at_path(&staged, &["answer"])
+    assert_same_value_representation(
+        &resolved_value_at_path(&batch, &["answer"]),
+        &resolved_value_at_path(&staged, &["answer"]),
     );
 }
 
@@ -2075,9 +2084,11 @@ fn hanging_do_and_let_layout_evaluate() {
     assert_eq!(lowered.diagnostics, []);
     let value = evaluated_module_value(&context, &lowered);
     for path in ["do_result", "let_result"] {
-        assert_eq!(
-            fully_evaluated_value(resolved_value_at_path(&value, &["asm", path])),
-            Value::Number(n(72)),
+        assert!(
+            same_value_representation(
+                &fully_evaluated_value(resolved_value_at_path(&value, &["asm", path])),
+                &Value::Number(n(72)),
+            ),
             "{path}"
         );
     }
@@ -2105,9 +2116,11 @@ fn hanging_where_and_with_layout_evaluate() {
     assert_eq!(lowered.diagnostics, []);
     let value = evaluated_module_value(&context, &lowered);
     for (path, expected) in [("where_result", 42), ("with_result", 72)] {
-        assert_eq!(
-            fully_evaluated_value(resolved_value_at_path(&value, &["asm", path])),
-            Value::Number(n(expected)),
+        assert!(
+            same_value_representation(
+                &fully_evaluated_value(resolved_value_at_path(&value, &["asm", path])),
+                &Value::Number(n(expected)),
+            ),
             "{path}"
         );
     }
@@ -2138,16 +2151,20 @@ fn braced_do_evaluates_like_layout_do_and_supports_empty_blocks() {
     assert_eq!(lowered.diagnostics, []);
     let value = evaluated_module_value(&context, &lowered);
     for path in ["braced", "nested", "patterned"] {
-        assert_eq!(
-            fully_evaluated_value(resolved_value_at_path(&value, &["asm", path])),
-            Value::Number(n(72)),
+        assert!(
+            same_value_representation(
+                &fully_evaluated_value(resolved_value_at_path(&value, &["asm", path])),
+                &Value::Number(n(72)),
+            ),
             "{path}"
         );
     }
     for path in ["empty", "commented"] {
-        assert_eq!(
-            fully_evaluated_value(resolved_value_at_path(&value, &["asm", path])),
-            crate::core::keys::unit_value(),
+        assert!(
+            same_value_representation(
+                &fully_evaluated_value(resolved_value_at_path(&value, &["asm", path])),
+                &crate::core::keys::unit_value(),
+            ),
             "{path}"
         );
     }
@@ -2315,9 +2332,11 @@ fn recursive_do_uses_standard_fix_and_preserves_region_locals() {
         "independent",
         "hierarchical",
     ] {
-        assert_eq!(
-            fully_evaluated_value(resolved_value_at_path(&value, &["asm", path])),
-            Value::Number(n(72)),
+        assert!(
+            same_value_representation(
+                &fully_evaluated_value(resolved_value_at_path(&value, &["asm", path])),
+                &Value::Number(n(72)),
+            ),
             "{path}"
         );
     }
@@ -2359,9 +2378,9 @@ fn crossing_recursive_do_promotes_fix_scope_without_leaking_name_visibility() {
         0
     );
     let value = evaluated_module_value(&context, &lowered);
-    assert_eq!(
-        fully_evaluated_value(resolved_value_at_path(&value, &["asm", "crossing"])),
-        Value::Number(n(1))
+    assert_same_value_representation(
+        &fully_evaluated_value(resolved_value_at_path(&value, &["asm", "crossing"])),
+        &Value::Number(n(1)),
     );
 }
 
@@ -3848,9 +3867,9 @@ fn flat_match_supports_patterns_guards_and_ordered_fallback() {
             "{path}"
         );
     }
-    assert_eq!(
-        resolved_value_at_path(&value, &["asm", "predicate"]),
-        Value::Number(Number::from(66_i64))
+    assert_same_value_representation(
+        &resolved_value_at_path(&value, &["asm", "predicate"]),
+        &Value::Number(Number::from(66_i64)),
     );
 }
 
@@ -4004,9 +4023,9 @@ ordinary = "ordinary"
     let (assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["host_try_test"], &[]);
 
-    assert_eq!(
-        resolved_value_at_path_with_context(&context, &module, &["ordinary"]),
-        Value::binary_from_text("ordinary")
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["ordinary"]),
+        &Value::binary_from_text("ordinary"),
     );
     let crate::api::RuntimeReadiness::Ready(snapshot) = assembler.drain_reasoning() else {
         panic!("successful host choices should leave the runtime ready")
@@ -4146,9 +4165,9 @@ fn abstract_objects_retain_specs_without_instantiating_members() {
         panic!("abstract expression specification should evaluate to a dictionary");
     };
     assert!(expression_spec.get(&*keys::NAME).is_none());
-    assert_eq!(
-        resolved_value_at_path(&value, &["observed_name"]),
-        Value::Dict(Dict::new_sync())
+    assert_same_value_representation(
+        &resolved_value_at_path(&value, &["observed_name"]),
+        &Value::Dict(Dict::new_sync()),
     );
     assert_eq!(
         output_bytes(&fully_evaluated_value(resolved_value_at_path(
@@ -4664,9 +4683,9 @@ fn repeated_anonymous_object_mixins_are_not_deduplicated() {
     assert_eq!(lowered.diagnostics, []);
 
     let value = evaluated_module_value(&context, &lowered);
-    assert_eq!(
-        fully_evaluated_value(resolved_value_at_path(&value, &["asm", "result"])),
-        Value::Number(3.into())
+    assert_same_value_representation(
+        &fully_evaluated_value(resolved_value_at_path(&value, &["asm", "result"])),
+        &Value::Number(3.into()),
     );
 }
 
@@ -5165,17 +5184,17 @@ fn operator_sections_evaluate_as_curried_functions() {
     assert_eq!(lowered.diagnostics, []);
 
     let value = evaluated_module_value(&context, &lowered);
-    assert_eq!(
-        fully_evaluated_value(resolved_value_at_path(&value, &["asm", "sum"])),
-        Value::Number(n(50))
+    assert_same_value_representation(
+        &fully_evaluated_value(resolved_value_at_path(&value, &["asm", "sum"])),
+        &Value::Number(n(50)),
     );
-    assert_eq!(
-        fully_evaluated_value(resolved_value_at_path(&value, &["asm", "diff"])),
-        Value::Number(n(34))
+    assert_same_value_representation(
+        &fully_evaluated_value(resolved_value_at_path(&value, &["asm", "diff"])),
+        &Value::Number(n(34)),
     );
-    assert_eq!(
-        fully_evaluated_value(resolved_value_at_path(&value, &["asm", "full_sum"])),
-        Value::Number(n(50))
+    assert_same_value_representation(
+        &fully_evaluated_value(resolved_value_at_path(&value, &["asm", "full_sum"])),
+        &Value::Number(n(50)),
     );
     assert_eq!(
         output_bytes(&fully_evaluated_value(resolved_value_at_path(
@@ -5422,9 +5441,9 @@ fn list_effect_handler_runs_standard_backtracking_effects() {
         ))),
         b"F"
     );
-    assert_eq!(
-        fully_evaluated_value(resolved_value_at_path(&value, &["asm", "head"])),
-        Value::Number(n(72))
+    assert_same_value_representation(
+        &fully_evaluated_value(resolved_value_at_path(&value, &["asm", "head"])),
+        &Value::Number(n(72)),
     );
     assert_eq!(
         output_bytes(&fully_evaluated_value(resolved_value_at_path(
@@ -5624,13 +5643,13 @@ fn lowering_starts_from_prior_dictionary() {
     assert_eq!(lowered.diagnostics, []);
 
     let value = evaluated_module_value(&context, &lowered);
-    assert_eq!(
-        value.get_atom_path(&[Atom::from_key(&Key::binary_from_text("hello"))]),
-        Some(&Value::binary_from_text("Hello"))
+    crate::compiler::test_value_factory().assert_same_representation_for_test(
+        &value.get_atom_path(&[Atom::from_key(&Key::binary_from_text("hello"))]),
+        &Some(&Value::binary_from_text("Hello")),
     );
-    assert_eq!(
-        fully_evaluated_value(resolved_value_at_path(&value, &["world"])),
-        Value::binary_from_text("World")
+    assert_same_value_representation(
+        &fully_evaluated_value(resolved_value_at_path(&value, &["world"])),
+        &Value::binary_from_text("World"),
     );
 }
 
@@ -5910,13 +5929,13 @@ fn builtin_list_at_is_exposed_by_list_and_std_modules() {
     assert_eq!(lowered.diagnostics, []);
 
     let value = evaluated_module_value(&context, &lowered);
-    assert_eq!(
-        fully_evaluated_value(resolved_value_at_path(&value, &["from_std"])),
-        Value::Number(n(i64::from(b'B')))
+    assert_same_value_representation(
+        &fully_evaluated_value(resolved_value_at_path(&value, &["from_std"])),
+        &Value::Number(n(i64::from(b'B'))),
     );
-    assert_eq!(
-        fully_evaluated_value(resolved_value_at_path(&value, &["from_list"])),
-        Value::Number(n(20))
+    assert_same_value_representation(
+        &fully_evaluated_value(resolved_value_at_path(&value, &["from_list"])),
+        &Value::Number(n(20)),
     );
 }
 
@@ -5983,7 +6002,7 @@ fn interaction_net_bind_calls_an_embedded_source_function() {
 
     let definitions = evaluated_module_value(&context, &lowered);
     let result = resolved_value_at_path(&definitions, &["result"]);
-    assert_eq!(fully_evaluated_value(result), Value::Number(n(42)));
+    assert_same_value_representation(&fully_evaluated_value(result), &Value::Number(n(42)));
 }
 
 #[test]
@@ -6012,7 +6031,7 @@ fn interaction_net_function_call_returns_an_ordinary_partial_function() {
     let partial = resolved_value_at_path(&definitions, &["partial"]);
     assert!(matches!(partial, Value::Function(_)));
     let result = resolved_value_at_path(&definitions, &["result"]);
-    assert_eq!(fully_evaluated_value(result), Value::Number(n(42)));
+    assert_same_value_representation(&fully_evaluated_value(result), &Value::Number(n(42)));
 }
 
 #[test]
@@ -6042,7 +6061,7 @@ fn interaction_net_function_calls_chain_through_explicit_binds() {
 
     let definitions = evaluated_module_value(&context, &lowered);
     let result = resolved_value_at_path(&definitions, &["result"]);
-    assert_eq!(fully_evaluated_value(result), Value::Number(n(42)));
+    assert_same_value_representation(&fully_evaluated_value(result), &Value::Number(n(42)));
 }
 
 #[test]
@@ -6069,7 +6088,7 @@ fn interaction_net_function_call_preserves_captures() {
 
     let definitions = evaluated_module_value(&context, &lowered);
     let result = resolved_value_at_path(&definitions, &["result"]);
-    assert_eq!(fully_evaluated_value(result), Value::Number(n(42)));
+    assert_same_value_representation(&fully_evaluated_value(result), &Value::Number(n(42)));
 }
 
 #[test]
@@ -6220,9 +6239,9 @@ fn interaction_net_construction_preserves_structured_effect_failures() {
     else {
         panic!("construction failure emission should be a dictionary")
     };
-    assert_eq!(
-        emission.get(&Key::atom_from_text("detail")),
-        Some(&Value::Number(n(7)))
+    crate::compiler::test_value_factory().assert_same_representation_for_test(
+        &emission.get(&Key::atom_from_text("detail")),
+        &Some(&Value::Number(n(7))),
     );
 
     let net = crate::diagnostic::evaluation_context_frame("net_construction");
@@ -6230,7 +6249,7 @@ fn interaction_net_construction_preserves_structured_effect_failures() {
         .contexts()
         .iter()
         .enumerate()
-        .filter_map(|(index, context)| (context == &net).then_some(index))
+        .filter_map(|(index, context)| same_value_representation(context, &net).then_some(index))
         .collect::<Vec<_>>();
     assert_eq!(
         net_indices.len(),
@@ -6240,7 +6259,9 @@ fn interaction_net_construction_preserves_structured_effect_failures() {
     let source_index = failure
         .contexts()
         .iter()
-        .position(|context| context == &Value::binary_from_text("net effect"))
+        .position(|context| {
+            same_value_representation(context, &Value::binary_from_text("net effect"))
+        })
         .expect("the original effect context should survive");
     assert!(net_indices[0] < source_index);
 }
@@ -6301,7 +6322,7 @@ fn interaction_net_finalization_reports_invalid_topology() {
             failure
                 .contexts()
                 .iter()
-                .filter(|context| *context == &frame)
+                .filter(|context| same_value_representation(context, &frame))
                 .count(),
             1,
             "{name} should retain one public construction frame"
@@ -6378,13 +6399,13 @@ fn lowers_unique_declarations_via_abstract_global_paths() {
     assert_eq!(lowered.diagnostics, []);
 
     let value = evaluated_module_value(&context, &lowered);
-    assert_eq!(
-        value.get_atom_path(&[Atom::from_key(&Key::binary_from_text("Foo"))]),
-        Some(&abstract_path_atom(&["pkg", "module", "Foo"]))
+    crate::compiler::test_value_factory().assert_same_representation_for_test(
+        &value.get_atom_path(&[Atom::from_key(&Key::binary_from_text("Foo"))]),
+        &Some(&abstract_path_atom(&["pkg", "module", "Foo"])),
     );
-    assert_eq!(
-        value_at_atom_path(&value, &["palette", "Blue"]).as_ref(),
-        Some(&abstract_path_atom(&["pkg", "module", "palette", "Blue"]))
+    crate::compiler::test_value_factory().assert_same_representation_for_test(
+        &value_at_atom_path(&value, &["palette", "Blue"]).as_ref(),
+        &Some(&abstract_path_atom(&["pkg", "module", "palette", "Blue"])),
     );
 }
 
@@ -6403,15 +6424,15 @@ fn abstract_global_path_keyword_qualifies_static_module_names() {
     assert_eq!(lowered.diagnostics, []);
 
     let value = evaluated_module_value(&context, &lowered);
-    assert_eq!(
-        resolved_value_at_path(&value, &["direct"]),
-        abstract_path_atom(&["pkg", "module", "foo"])
+    assert_same_value_representation(
+        &resolved_value_at_path(&value, &["direct"]),
+        &abstract_path_atom(&["pkg", "module", "foo"]),
     );
     let nested = abstract_path_atom(&["pkg", "module", "foo", "bar"]);
-    assert_eq!(resolved_value_at_path(&value, &["nested"]), nested);
-    assert_eq!(
-        resolved_value_at_path(&value, &["explicit"]),
-        abstract_path_atom(&["pkg", "module", "foo", "bar"])
+    assert_same_value_representation(&resolved_value_at_path(&value, &["nested"]), &nested);
+    assert_same_value_representation(
+        &resolved_value_at_path(&value, &["explicit"]),
+        &abstract_path_atom(&["pkg", "module", "foo", "bar"]),
     );
 }
 
@@ -6463,13 +6484,13 @@ fn explicit_module_abstract_global_paths_escape_object_scope() {
     assert_eq!(lowered.diagnostics, []);
 
     let value = evaluated_module_value(&context, &lowered);
-    assert_eq!(
-        resolved_value_at_path(&value, &["holder", "path"]),
-        abstract_path_atom(&["pkg", "module", "target"])
+    assert_same_value_representation(
+        &resolved_value_at_path(&value, &["holder", "path"]),
+        &abstract_path_atom(&["pkg", "module", "target"]),
     );
-    assert_eq!(
-        resolved_value_at_path(&value, &["aliased", "path"]),
-        abstract_path_atom(&["pkg", "module", "target"])
+    assert_same_value_representation(
+        &resolved_value_at_path(&value, &["aliased", "path"]),
+        &abstract_path_atom(&["pkg", "module", "target"]),
     );
 }
 
@@ -6514,9 +6535,9 @@ fn compile_source_emits_relative_diagnostics_through_context() {
     let Some(Value::Dict(location)) = interface.get(&*crate::core::keys::LOCATION) else {
         panic!("diagnostic message must provide msg.location");
     };
-    assert_eq!(
-        location.get(&*crate::core::keys::LINE),
-        Some(&Value::Number(crate::number::Number::from_usize(2)))
+    crate::compiler::test_value_factory().assert_same_representation_for_test(
+        &location.get(&*crate::core::keys::LINE),
+        &Some(&Value::Number(crate::number::Number::from_usize(2))),
     );
     assert!(matches!(
         interface.get(&*crate::core::keys::TEXT),
@@ -6544,10 +6565,11 @@ fn inline_builtin_imports_follow_ordered_module_updates() {
         panic!("math should evaluate to a dictionary");
     };
 
-    assert_eq!(
-        math.get(&Key::atom_from_text("answer"))
-            .map(|value| fully_evaluated_value(value.clone())),
-        Some(Value::Number(42.into()))
+    crate::compiler::test_value_factory().assert_same_representation_for_test(
+        &math.get(&Key::atom_from_text("answer")).map(|value| {
+            fully_evaluated_value(value.duplicate_for_test(&crate::compiler::test_value_factory()))
+        }),
+        &Some(Value::Number(42.into())),
     );
     assert!(matches!(
         math.get(&Key::atom_from_text("floor")),
@@ -6567,9 +6589,9 @@ fn introduce_and_override_checks_are_deferred_until_observed() {
     assert_eq!(lowered.diagnostics, []);
 
     let value = evaluated_module_value(&context, &lowered);
-    assert_eq!(
-        fully_evaluated_value(resolved_value_at_path(&value, &["ok"])),
-        Value::binary_from_text("ok")
+    assert_same_value_representation(
+        &fully_evaluated_value(resolved_value_at_path(&value, &["ok"])),
+        &Value::binary_from_text("ok"),
     );
 
     let foo = value
@@ -6590,9 +6612,9 @@ fn duplicate_introductions_fail_lazily_against_prior_module_updates() {
     assert_eq!(lowered.diagnostics, []);
 
     let value = evaluated_module_value(&context, &lowered);
-    assert_eq!(
-        fully_evaluated_value(resolved_value_at_path(&value, &["ok"])),
-        Value::binary_from_text("ok")
+    assert_same_value_representation(
+        &fully_evaluated_value(resolved_value_at_path(&value, &["ok"])),
+        &Value::binary_from_text("ok"),
     );
 
     let foo = value
@@ -6613,9 +6635,9 @@ fn update_definitions_observe_prior_module_state() {
     assert_eq!(lowered.diagnostics, []);
 
     let value = evaluated_module_value(&context, &lowered);
-    assert_eq!(
-        fully_evaluated_value(resolved_value_at_path(&value, &["foo"])),
-        Value::Number(2.into())
+    assert_same_value_representation(
+        &fully_evaluated_value(resolved_value_at_path(&value, &["foo"])),
+        &Value::Number(2.into()),
     );
 }
 
@@ -6634,27 +6656,27 @@ probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join scanne
     let (_assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["module_refl_test"], &[("guard", "refl")]);
 
-    assert_eq!(
-        resolved_value_at_path_with_context(&context, &module, &["meta", "hidden"]),
-        Value::binary_from_text("metadata")
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["meta", "hidden"]),
+        &Value::binary_from_text("metadata"),
     );
-    assert_eq!(
-        resolved_value_at_path_with_context(&context, &module, &["spec", "hidden"]),
-        Value::binary_from_text("specification")
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["spec", "hidden"]),
+        &Value::binary_from_text("specification"),
     );
     assert!(take_reflection_diagnostics(&diagnostics).is_empty());
 
-    assert_eq!(
-        resolved_value_at_path_with_context(&context, &module, &["ordinary"]),
-        Value::binary_from_text("ordinary")
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["ordinary"]),
+        &Value::binary_from_text("ordinary"),
     );
-    assert_eq!(
-        resolved_value_at_path_with_context(&context, &module, &["probe"]),
-        Value::binary_from_text("probe")
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["probe"]),
+        &Value::binary_from_text("probe"),
     );
-    assert_eq!(
-        resolved_value_at_path_with_context(&context, &module, &["ordinary_two"]),
-        Value::binary_from_text("ordinary two")
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["ordinary_two"]),
+        &Value::binary_from_text("ordinary two"),
     );
 
     let diagnostics = take_reflection_diagnostics(&diagnostics);
@@ -6676,19 +6698,19 @@ object foo with
     let (_assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["object_refl_test"], &[]);
 
-    assert_eq!(
-        resolved_value_at_path_with_context(&context, &module, &["foo", "meta", "hidden"]),
-        Value::binary_from_text("metadata")
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["foo", "meta", "hidden"]),
+        &Value::binary_from_text("metadata"),
     );
     assert!(take_reflection_diagnostics(&diagnostics).is_empty());
 
-    assert_eq!(
-        resolved_value_at_path_with_context(&context, &module, &["foo", "value"]),
-        Value::binary_from_text("value")
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["foo", "value"]),
+        &Value::binary_from_text("value"),
     );
-    assert_eq!(
-        resolved_value_at_path_with_context(&context, &module, &["meta", "probe"]),
-        Value::binary_from_text("probe")
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["meta", "probe"]),
+        &Value::binary_from_text("probe"),
     );
 
     let diagnostics = take_reflection_diagnostics(&diagnostics);
@@ -6712,13 +6734,13 @@ extend parent.child with
     let (_assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["nested_object_refl_test"], &[]);
 
-    assert_eq!(
-        resolved_value_at_path_with_context(&context, &module, &["parent", "child", "value"]),
-        Value::binary_from_text("nested value")
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["parent", "child", "value"]),
+        &Value::binary_from_text("nested value"),
     );
-    assert_eq!(
-        resolved_value_at_path_with_context(&context, &module, &["meta", "probe"]),
-        Value::binary_from_text("probe")
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["meta", "probe"]),
+        &Value::binary_from_text("probe"),
     );
 
     let diagnostics = take_reflection_diagnostics(&diagnostics);
@@ -6741,25 +6763,25 @@ object derived extends base with
     let (_assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["inherited_object_refl_test"], &[]);
 
-    assert_eq!(
-        resolved_value_at_path_with_context(&context, &module, &["derived", "inherited"]),
-        Value::binary_from_text("inherited value")
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["derived", "inherited"]),
+        &Value::binary_from_text("inherited value"),
     );
-    assert_eq!(
-        resolved_value_at_path_with_context(&context, &module, &["meta", "derived_probe"]),
-        Value::binary_from_text("derived probe")
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["meta", "derived_probe"]),
+        &Value::binary_from_text("derived probe"),
     );
     let derived_diagnostics = take_reflection_diagnostics(&diagnostics);
     assert_eq!(derived_diagnostics.len(), 1);
     assert_eq!(derived_diagnostics[0].message(), "derived reflection task");
 
-    assert_eq!(
-        resolved_value_at_path_with_context(&context, &module, &["base", "inherited"]),
-        Value::binary_from_text("inherited value")
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["base", "inherited"]),
+        &Value::binary_from_text("inherited value"),
     );
-    assert_eq!(
-        resolved_value_at_path_with_context(&context, &module, &["meta", "base_probe"]),
-        Value::binary_from_text("base probe")
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["meta", "base_probe"]),
+        &Value::binary_from_text("base probe"),
     );
     let base_diagnostics = take_reflection_diagnostics(&diagnostics);
     assert_eq!(base_diagnostics.len(), 1);
@@ -6781,13 +6803,13 @@ object declared with
     let (_assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["object_expression_refl_test"], &[]);
 
-    assert_eq!(
-        resolved_value_at_path_with_context(&context, &module, &["value", "ordinary"]),
-        Value::binary_from_text("ordinary")
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["value", "ordinary"]),
+        &Value::binary_from_text("ordinary"),
     );
-    assert_eq!(
-        resolved_value_at_path_with_context(&context, &module, &["declared", "meta", "ordinary"]),
-        Value::binary_from_text("excluded ordinary")
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["declared", "meta", "ordinary"]),
+        &Value::binary_from_text("excluded ordinary"),
     );
     assert!(take_reflection_diagnostics(&diagnostics).is_empty());
 }
@@ -6804,13 +6826,13 @@ ordinary = "ordinary"
     let (_assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["disabled_refl_test"], &[("guard", "refl")]);
 
-    assert_eq!(
-        resolved_value_at_path_with_context(&context, &module, &["ordinary"]),
-        Value::binary_from_text("ordinary")
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["ordinary"]),
+        &Value::binary_from_text("ordinary"),
     );
-    assert_eq!(
-        resolved_value_at_path_with_context(&context, &module, &["meta", "probe"]),
-        Value::binary_from_text("probe")
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["meta", "probe"]),
+        &Value::binary_from_text("probe"),
     );
     assert!(take_reflection_diagnostics(&diagnostics).is_empty());
 }
@@ -6826,13 +6848,13 @@ ordinary = "ordinary"
     let (_assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["unit_refl_test"], &[("guard", "refl")]);
 
-    assert_eq!(
-        resolved_value_at_path_with_context(&context, &module, &["ordinary"]),
-        Value::binary_from_text("ordinary")
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["ordinary"]),
+        &Value::binary_from_text("ordinary"),
     );
-    assert_eq!(
-        resolved_value_at_path_with_context(&context, &module, &["meta", "probe"]),
-        Value::binary_from_text("probe")
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["meta", "probe"]),
+        &Value::binary_from_text("probe"),
     );
     assert!(take_reflection_diagnostics(&diagnostics).is_empty());
 }
@@ -6845,9 +6867,9 @@ fn update_definitions_can_use_named_updater_functions() {
     assert_eq!(lowered.diagnostics, []);
 
     let value = evaluated_module_value(&context, &lowered);
-    assert_eq!(
-        fully_evaluated_value(resolved_value_at_path(&value, &["foo"])),
-        Value::Number(2.into())
+    assert_same_value_representation(
+        &fully_evaluated_value(resolved_value_at_path(&value, &["foo"])),
+        &Value::Number(2.into()),
     );
 }
 
@@ -6862,8 +6884,8 @@ fn overrides_replace_prior_definitions_without_union_ambiguity() {
 
     let value = evaluated_module_value(&context, &lowered);
 
-    assert_eq!(
-        fully_evaluated_value(resolved_value_at_path(&value, &["foo"])),
-        Value::Number(2.into())
+    assert_same_value_representation(
+        &fully_evaluated_value(resolved_value_at_path(&value, &["foo"])),
+        &Value::Number(2.into()),
     );
 }

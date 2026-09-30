@@ -453,44 +453,59 @@ mod tests {
         }
     }
 
+    #[track_caller]
+    fn assert_same_resolved(left: &ResolvedExpr<Value>, right: &ResolvedExpr<Value>) {
+        crate::compiler::test_value_factory().assert_same_representation_for_test(left, right);
+    }
+
     fn count_embedded_value(expr: &ResolvedExpr<Value>, target: &Value) -> usize {
-        let own = usize::from(matches!(expr, ResolvedExpr::Embedded(value) if value == target));
+        crate::compiler::test_value_factory()
+            .with_runtime_value_access(|access| count_embedded_value_in(expr, target, &access))
+    }
+
+    fn count_embedded_value_in(
+        expr: &ResolvedExpr<Value>,
+        target: &Value,
+        access: &crate::core::RuntimeValueAccess<'_>,
+    ) -> usize {
+        let own = usize::from(matches!(expr, ResolvedExpr::Embedded(value)
+            if access.same_representation(value, target)));
         own + match expr {
             ResolvedExpr::Embedded(_) | ResolvedExpr::Provided(_) | ResolvedExpr::Local(_) => 0,
             ResolvedExpr::List(items) => items
                 .iter()
-                .map(|item| count_embedded_value(item, target))
+                .map(|item| count_embedded_value_in(item, target, access))
                 .sum(),
             ResolvedExpr::Access { base, path } => {
-                count_embedded_value(base, target)
+                count_embedded_value_in(base, target, access)
                     + path
                         .iter()
                         .map(|part| match part {
                             ResolvedPathPart::Key(_) => 0,
                             ResolvedPathPart::Index(expr) | ResolvedPathPart::PathIndex(expr) => {
-                                count_embedded_value(expr, target)
+                                count_embedded_value_in(expr, target, access)
                             }
                         })
                         .sum::<usize>()
             }
-            ResolvedExpr::Lambda { body, .. } => count_embedded_value(body, target),
+            ResolvedExpr::Lambda { body, .. } => count_embedded_value_in(body, target, access),
             ResolvedExpr::Apply {
                 function,
                 arguments,
             } => {
-                count_embedded_value(function, target)
+                count_embedded_value_in(function, target, access)
                     + arguments
                         .iter()
-                        .map(|argument| count_embedded_value(argument, target))
+                        .map(|argument| count_embedded_value_in(argument, target, access))
                         .sum::<usize>()
             }
             ResolvedExpr::ApplyLambda {
                 body, arguments, ..
             } => {
-                count_embedded_value(body, target)
+                count_embedded_value_in(body, target, access)
                     + arguments
                         .iter()
-                        .map(|argument| count_embedded_value(argument, target))
+                        .map(|argument| count_embedded_value_in(argument, target, access))
                         .sum::<usize>()
             }
         }
@@ -517,7 +532,7 @@ mod tests {
         let rooted = crate::runtime::RuntimeValueRoot::new(&values, value.clone());
         let resolved = resolve(&SyntaxExpr::Embedded(rooted));
 
-        assert_eq!(resolved, ResolvedExpr::Embedded(value));
+        assert_same_resolved(&resolved, &ResolvedExpr::Embedded(value));
     }
 
     #[test]
@@ -634,9 +649,9 @@ mod tests {
             },
         };
 
-        assert_eq!(
-            resolve(&expression(guarded)),
-            resolve(&expression(SyntaxPattern::wildcard()))
+        assert_same_resolved(
+            &resolve(&expression(guarded)),
+            &resolve(&expression(SyntaxPattern::wildcard())),
         );
     }
 
@@ -662,7 +677,10 @@ mod tests {
                 arguments,
             } if parameters.len() == 1
                 && matches!(body.as_ref(), ResolvedExpr::Embedded(value)
-                    if *value == crate::core::keys::unit_value())
+                    if crate::compiler::test_value_factory().same_representation_for_test(
+                        value,
+                        &crate::core::keys::unit_value(),
+                    ))
                 && matches!(arguments.as_slice(),
                     [ResolvedExpr::Embedded(Value::Number(number))]
                         if *number == Number::from(42_i64))
