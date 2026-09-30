@@ -12,7 +12,7 @@ use crate::evaluation::{
 
 fn reduce_checkpoint(values: &CoreValueFactory, runtime: &CoreRuntimeNet, pair: ActivePairKey) {
     let reduction = runtime
-        .test_with_optional_mut(values, |net| net.reduce_pair(pair))
+        .test_reduce_pair(values, pair)
         .expect("the ready callable checkpoint must be claimable");
     assert!(matches!(
         reduction.kind,
@@ -69,21 +69,20 @@ fn blocked_checkpoint(
 #[test]
 fn callable_checkpoint_covers_lazy_and_mixed_dependency_chains_once() {
     let context = test_context();
-    let terminal = Value::Builtin(Builtin::Add);
-
     let inner_runs = Arc::new(AtomicUsize::new(0));
     let observed_inner = Arc::clone(&inner_runs);
     let inner = LazyValue::semantic_thunk(context.values(), "NC5 inner lazy", move |_| {
         observed_inner.fetch_add(1, Ordering::SeqCst);
-        Ok(terminal.clone())
+        Ok(Value::Builtin(Builtin::Add))
     });
     let inner_id = inner.id(context.values());
     let outer_runs = Arc::new(AtomicUsize::new(0));
     let observed_outer = Arc::clone(&outer_runs);
     let outer_inner = Value::Lazy(inner);
+    let outer_values = context.values().clone();
     let outer = LazyValue::semantic_thunk(context.values(), "NC5 outer lazy", move |_| {
         observed_outer.fetch_add(1, Ordering::SeqCst);
-        Ok(outer_inner.clone())
+        Ok(outer_inner.duplicate_for_test(&outer_values))
     });
     let outer_id = outer.id(context.values());
     let (runtime, call) = claimed_core_call_in(context.values(), Value::Lazy(outer));
@@ -126,10 +125,11 @@ fn callable_checkpoint_covers_lazy_and_mixed_dependency_chains_once() {
     let promise_id = promise.id(context.values());
     let mixed_runs = Arc::new(AtomicUsize::new(0));
     let observed_mixed = Arc::clone(&mixed_runs);
-    let promised = Value::Promised(promise.clone());
+    let promised = Value::Promised(promise.duplicate_for_test(context.values()));
+    let mixed_values = context.values().clone();
     let mixed = LazyValue::semantic_thunk(context.values(), "NC5 mixed lazy", move |_| {
         observed_mixed.fetch_add(1, Ordering::SeqCst);
-        Ok(promised.clone())
+        Ok(promised.duplicate_for_test(&mixed_values))
     });
     let mixed_id = mixed.id(context.values());
     let (runtime, call) = claimed_core_call_in(context.values(), Value::Lazy(mixed));
@@ -253,9 +253,12 @@ fn callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures() {
         "NC5 assigned promise failure",
     )
     .expect_without_debug("promise accepts its failure");
+    let failed_values = context.values().clone();
     let leading =
         LazyValue::semantic_thunk(context.values(), "NC5 promise failure leader", move |_| {
-            Ok(Value::Promised(failed_promise.clone()))
+            Ok(Value::Promised(
+                failed_promise.duplicate_for_test(&failed_values),
+            ))
         });
     let (runtime, call) = claimed_core_call_in(context.values(), Value::Lazy(leading));
     assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
@@ -314,13 +317,13 @@ fn block_task_promise(
     let template = net.finish(Port::auxiliary(bind, 1));
     let (root, runtime, call) = observer.values().with_runtime_value_access(|access| {
         let runtime = access
-            .construct_managed_core_net(template.instantiate())
+            .construct_managed_core_net(template.instantiate_with(&access))
             .expect("managed task-promise net must fit one collector run");
         let root = runtime.root_in(&access);
         let runtime_access = runtime.access(&access);
         let pair = runtime_access.with(|net| net.active_pairs().next().unwrap());
         let reduction = runtime_access
-            .with_optional_mut(|net| net.reduce_pair(pair))
+            .reduce_pair_for_test(pair)
             .expect("task-promise call fixture must be claimable");
         let ReductionKind::Call { bind, data } = reduction.kind else {
             panic!("bind-data fixture must produce a call")
@@ -550,11 +553,11 @@ fn rooted_claimed_core_call_in(
     let erase = net.push(crate::interaction_net::Node::Erase);
     net.wire(Port::principal(bind), data);
     net.wire(Port::auxiliary(bind, 2), Port::principal(erase));
-    let prepared = net.finish(Port::auxiliary(bind, 1)).instantiate();
+    let template = net.finish(Port::auxiliary(bind, 1));
 
     values.with_runtime_value_access(|access| {
         let root = access
-            .construct_rooted_managed_core_net(prepared)
+            .construct_rooted_managed_core_net(template.instantiate_with(&access))
             .expect("managed core-call fixture must fit one collector run");
         let runtime = CoreRuntimeNet::from_root(&root, &access);
         let call = {
@@ -563,7 +566,7 @@ fn rooted_claimed_core_call_in(
                 .with(|net| net.active_pairs().next())
                 .expect("call pair must be active");
             let reduction = net
-                .with_optional_mut(|net| net.reduce_pair(pair))
+                .reduce_pair_for_test(pair)
                 .expect("call pair must be claimable");
             let ReductionKind::Call { bind, data } = reduction.kind else {
                 panic!("bind-data fixture must produce a call")
@@ -622,7 +625,7 @@ fn claimed_applied_core_call_in(
         net.active_pairs().next().expect("call pair must be active")
     });
     let reduction = runtime
-        .test_with_optional_mut(values, |net| net.reduce_pair(pair))
+        .test_reduce_pair(values, pair)
         .expect("call pair must be claimable");
     let ReductionKind::Call { bind, data } = reduction.kind else {
         panic!("bind-data fixture must produce a call")
@@ -644,8 +647,8 @@ fn two_workers_contend_for_one_linear_checkpoint_payload() {
 
     let first_context = EvalContext::isolated(values.clone());
     let second_context = EvalContext::isolated(values);
-    let first_runtime = runtime.clone();
-    let second_runtime = runtime.clone();
+    let first_runtime = runtime.duplicate_for_test(first_context.values());
+    let second_runtime = runtime.duplicate_for_test(second_context.values());
     let interlock = Arc::new(Barrier::new(2));
     let first_interlock = Arc::clone(&interlock);
     let first = std::thread::spawn(move || {
@@ -767,7 +770,7 @@ fn assert_cursor_defers_to_checkpoint(
     };
     let dependency = match target.test_step_cursor(values, cursor) {
         CursorStep::Dependency(dependency) => dependency,
-        step => panic!("checkpoint cursor must defer to source progress, got {step:?}"),
+        _ => panic!("checkpoint cursor must defer to source progress"),
     };
     assert!(matches!(
         dependency,
@@ -789,7 +792,10 @@ fn cursor_deferral_and_collection_retain_only_the_source_checkpoint() {
     );
     let context = EvalContext::isolated(values.clone());
     let promise = PromisedValue::new(&values, "NC5 cursor dependency");
-    let (source, call) = claimed_applied_core_call_in(&values, Value::Promised(promise.clone()));
+    let (source, call) = claimed_applied_core_call_in(
+        &values,
+        Value::Promised(promise.duplicate_for_test(&values)),
+    );
     let source_root = values.root_core_net(&source);
 
     values
@@ -812,8 +818,10 @@ fn cursor_deferral_and_collection_retain_only_the_source_checkpoint() {
         .collect_managed_for_test()
         .expect("collection at ready checkpoint publication must succeed");
 
-    let (ready_target, ready_interface) =
-        CoreRuntimeNet::test_copy_layer(&values, source.clone());
+    let (ready_target, ready_interface) = CoreRuntimeNet::test_copy_layer(
+        &values,
+        source.duplicate_for_test(&values),
+    );
     let ready_root = values.root_core_net(&ready_target);
     assert_cursor_defers_to_checkpoint(
         &values,
@@ -832,8 +840,10 @@ fn cursor_deferral_and_collection_retain_only_the_source_checkpoint() {
         .collect_managed_for_test()
         .expect("collection after dependency admission must succeed");
 
-    let (blocked_target, blocked_interface) =
-        CoreRuntimeNet::test_copy_layer(&values, source.clone());
+    let (blocked_target, blocked_interface) = CoreRuntimeNet::test_copy_layer(
+        &values,
+        source.duplicate_for_test(&values),
+    );
     let blocked_root = values.root_core_net(&blocked_target);
     assert_cursor_defers_to_checkpoint(
         &values,

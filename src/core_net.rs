@@ -330,6 +330,15 @@ impl CoreRuntimeNet {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_reduce_pair(
+        &self,
+        values: &CoreValueFactory,
+        pair: ActivePairKey,
+    ) -> Option<Reduction> {
+        self.with_test_access(values, |access| access.reduce_pair_for_test(pair))
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_poll_interface_demand(
         &self,
         values: &CoreValueFactory,

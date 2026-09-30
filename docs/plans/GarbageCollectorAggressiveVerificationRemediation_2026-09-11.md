@@ -2418,6 +2418,16 @@ inventory relatch:
            This clears the W7B fixture family and reduces the all-target
            inventory from 396 to 386 without changing the forced scheduling
            or small-stack witnesses.
+         - **D.2h.2x — NC5 callable-checkpoint ownership slice complete
+           2026-09-30.** A test-only, value-qualified
+           `CoreRuntimeNet::test_reduce_pair` gateway centralizes the managed
+           payload transition already required by core-net access. NC5
+           fixtures instantiate templates under active access, duplicate
+           captured lazy/promise/net edges through their factory, and rebuild
+           cursor assertions without ambient carrier `Debug`. This removes all
+           27 NC5 compiler failures and reduces the all-target inventory from
+           386 to 359. Callable-checkpoint scheduling and topology semantics
+           are unchanged.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived
