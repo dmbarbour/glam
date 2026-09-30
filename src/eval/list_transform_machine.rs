@@ -81,9 +81,9 @@ impl RegionalTextLinesMachine {
                         ));
                     }
                 };
-            let item = EvaluatedValue::from_whnf(item)
+            let item = EvaluatedValue::from_whnf_in(access.values(), item)
                 .expect("text-lines item demand must reach WHNF")
-                .into_value();
+                .into_value_in(access.values());
             let byte = match item {
                 Value::Number(number) => match number.to_u8_if_integer() {
                     Some(byte) => byte,
@@ -349,9 +349,9 @@ fn poll_regional_source(
         RegionalWhnfStatus::Ready(source) => {
             *demand = None;
             RegionalSourcePoll::Ready(
-                EvaluatedValue::from_whnf(source)
+                EvaluatedValue::from_whnf_in(access.values(), source)
                     .expect("regional list-transform source demand must reach WHNF")
-                    .into_value(),
+                    .into_value_in(access.values()),
             )
         }
         RegionalWhnfStatus::Boundary(request) => RegionalSourcePoll::Boundary(request),

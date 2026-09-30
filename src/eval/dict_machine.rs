@@ -179,9 +179,11 @@ impl RegionalDictBuiltinMachine {
                 let dict =
                     match drive_regional_in_place(access, dict, step_budget, reduce_semantic_shell)
                     {
-                        RegionalWhnfStatus::Ready(value) => EvaluatedValue::from_whnf(value)
-                            .expect("dictionary demand must reach WHNF")
-                            .into_value(),
+                        RegionalWhnfStatus::Ready(value) => {
+                            EvaluatedValue::from_whnf_in(access.values(), value)
+                                .expect("dictionary demand must reach WHNF")
+                                .into_value_in(access.values())
+                        }
                         RegionalWhnfStatus::Boundary(request) => {
                             return RegionalBuiltinPoll::Boundary(request);
                         }
@@ -273,9 +275,9 @@ impl RegionalSequentialDemands {
         ) {
             RegionalWhnfStatus::Ready(value) => {
                 self.ready.push(
-                    EvaluatedValue::from_whnf(value)
+                    EvaluatedValue::from_whnf_in(access.values(), value)
                         .expect("sequential demand must reach WHNF")
-                        .into_value(),
+                        .into_value_in(access.values()),
                 );
                 self.demand = None;
                 RegionalSequentialDemandPoll::Yielded

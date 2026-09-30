@@ -2681,6 +2681,17 @@ inventory relatch:
     callback rather than relying on an authority-free function pointer.
     Focused carrier, update, and strategy suites pass, leaving six raw
     violations in evaluated-value conversion and failure diagnostics.
+  - **D.2h.3f — evaluated-value access migration complete 2026-09-30.** Core
+    `EvaluatedValue` construction and extraction now require the matching
+    `RuntimeValueAccess`; the authority-free `TryFrom<Value>` conversion is
+    removed. Evaluator machines, value helpers, net construction, polling,
+    cache fixtures, and WHNF tests reuse their existing admitted region rather
+    than opening nested access or adding transitional roots. This is an
+    internal core-boundary change: the public API's evaluated-value facade
+    continues to pair observation with its runtime service. All targets
+    compile, and focused outer-WHNF, bounded-lazy publication, and cached-net
+    failure fixtures pass. The raw ledger now contains only the three settled
+    failure-diagnostic exceptions owned by the next closure slice.
 - **D.2h.4 — dynamic closure:** run focused ordinary/aggressive ownership
   checks followed by the routine workspace gates and the complete aggressive
   workspace suite.

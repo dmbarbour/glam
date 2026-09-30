@@ -489,7 +489,9 @@ fn cached_lazy_failure_is_already_evaluated_by_construction() {
     crate::core::cache_test_lazy(
         context.values(),
         &lazy,
-        Ok(EvaluatedValue::from_whnf(Value::Builtin(Builtin::Add)).unwrap()),
+        Ok(context.values().with_runtime_value_access(|access| {
+            EvaluatedValue::from_whnf_in(&access, Value::Builtin(Builtin::Add)).unwrap()
+        })),
     )
     .expect_without_debug("fresh cache fixture accepts its result");
     let (runtime, call) = claimed_core_call_in(context.values(), Value::Lazy(lazy));

@@ -756,9 +756,11 @@ fn spark_checkpoint_resumes_on_another_small_stack_poller() {
             let owner = thread::current().id();
             let result = loop {
                 if let Some(result) = lazy.cached(context.values()) {
-                    break result
-                        .expect_without_debug("the spark application chain should not fail")
-                        .into_value();
+                    let result =
+                        result.expect_without_debug("the spark application chain should not fail");
+                    break context
+                        .values()
+                        .with_runtime_value_access(|access| result.into_value_in(&access));
                 }
                 assert!(
                     context.poll_one_executor_work_for_test(),

@@ -185,9 +185,11 @@ impl RegionalSemanticUndefined {
             step_budget,
             reduce_semantic_shell,
         ) {
-            RegionalWhnfStatus::Ready(value) => EvaluatedValue::from_whnf(value)
-                .expect("semantic-undefined demand must reach WHNF")
-                .into_value(),
+            RegionalWhnfStatus::Ready(value) => {
+                EvaluatedValue::from_whnf_in(access.values(), value)
+                    .expect("semantic-undefined demand must reach WHNF")
+                    .into_value_in(access.values())
+            }
             RegionalWhnfStatus::Boundary(request) => {
                 return RegionalSemanticUndefinedPoll::Boundary(request);
             }

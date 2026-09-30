@@ -942,7 +942,7 @@ pub(crate) fn reduce_semantic_shell(
         Value::Lazy(lazy) => match access.lazy(lazy).cached() {
             Some(Ok(value)) => {
                 work.0.followed.insert(access.lazy(lazy).id().into());
-                RegionalWhnfStep::Delegate(value.into_value())
+                RegionalWhnfStep::Delegate(value.into_value_in(access.values()))
             }
             Some(Err(failure)) => RegionalWhnfStep::Failed(failure),
             None => {

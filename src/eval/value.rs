@@ -240,9 +240,9 @@ impl LazyTaskMachine {
         let result =
             context.with_value_access(|access| self.lazy.cache(access.values(), Ok(value)));
         match result {
-            Ok(value) => {
-                EvaluationMachinePoll::Complete(context.root_value(|_| value.into_value()))
-            }
+            Ok(value) => EvaluationMachinePoll::Complete(
+                context.root_value(|access| value.into_value_in(access.values())),
+            ),
             Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }
     }
@@ -255,7 +255,9 @@ impl LazyTaskMachine {
         self.complete(
             context,
             context
-                .project_root(value, |_, value| EvaluatedValue::from_whnf(value))
+                .project_root(value, |access, value| {
+                    EvaluatedValue::from_whnf_in(access.values(), value)
+                })
                 .expect("WHNF owner completion must eliminate the outer deferred variant"),
         )
     }
@@ -263,9 +265,9 @@ impl LazyTaskMachine {
     fn cached_poll(&self, context: &EvaluatorStepContext<'_>) -> EvaluationMachinePoll {
         let result = context.with_value_access(|access| access.lazy_root(&self.lazy).cached());
         match result.expect("a released lazy source must have a terminal cache") {
-            Ok(value) => {
-                EvaluationMachinePoll::Complete(context.root_value(|_| value.into_value()))
-            }
+            Ok(value) => EvaluationMachinePoll::Complete(
+                context.root_value(|access| value.into_value_in(access.values())),
+            ),
             Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }
     }
@@ -393,11 +395,13 @@ impl LazyTaskMachine {
                 .with_access_transition_in(&access, |machine| machine.poll_in(&access, step_budget))
             {
                 AccessRegionalPoll::Ready(value) => {
-                    let evaluated = EvaluatedValue::from_whnf(value)
+                    let evaluated = EvaluatedValue::from_whnf_in(access.values(), value)
                         .expect("computed access must demand its final selected value to WHNF");
                     match self.lazy.cache(access.values(), Ok(evaluated)) {
                         Ok(value) => Transition::Complete(
-                            access.values().root_runtime_value(value.into_value()),
+                            access
+                                .values()
+                                .root_runtime_value(value.into_value_in(access.values())),
                         ),
                         Err(failure) => {
                             Transition::Failed(access.values().root_runtime_failure(failure))
@@ -428,7 +432,9 @@ impl LazyTaskMachine {
                 AccessRegionalPoll::Failed(failure) => {
                     match self.lazy.cache(access.values(), Err(failure)) {
                         Ok(value) => Transition::Complete(
-                            access.values().root_runtime_value(value.into_value()),
+                            access
+                                .values()
+                                .root_runtime_value(value.into_value_in(access.values())),
                         ),
                         Err(failure) => {
                             Transition::Failed(access.values().root_runtime_failure(failure))
@@ -507,11 +513,13 @@ impl LazyTaskMachine {
             }
             match checkpoint.with_object_fixpoint_transition_in(&access, step_budget) {
                 RegionalObjectFixpointPoll::Ready(value) => {
-                    let evaluated = EvaluatedValue::from_whnf(value)
+                    let evaluated = EvaluatedValue::from_whnf_in(access.values(), value)
                         .expect("object construction must produce a WHNF object value");
                     match self.lazy.cache(access.values(), Ok(evaluated)) {
                         Ok(value) => Transition::Complete(
-                            access.values().root_runtime_value(value.into_value()),
+                            access
+                                .values()
+                                .root_runtime_value(value.into_value_in(access.values())),
                         ),
                         Err(failure) => {
                             Transition::Failed(access.values().root_runtime_failure(failure))
@@ -523,7 +531,9 @@ impl LazyTaskMachine {
                 RegionalObjectFixpointPoll::Failed(failure) => {
                     match self.lazy.cache(access.values(), Err(failure)) {
                         Ok(value) => Transition::Complete(
-                            access.values().root_runtime_value(value.into_value()),
+                            access
+                                .values()
+                                .root_runtime_value(value.into_value_in(access.values())),
                         ),
                         Err(failure) => {
                             Transition::Failed(access.values().root_runtime_failure(failure))
@@ -620,7 +630,9 @@ impl LazyTaskMachine {
                 RegionalListEffectPoll::Failed(failure) => {
                     return match self.lazy.cache(access.values(), Err(failure)) {
                         Ok(value) => Transition::Complete(
-                            access.values().root_runtime_value(value.into_value()),
+                            access
+                                .values()
+                                .root_runtime_value(value.into_value_in(access.values())),
                             None,
                         ),
                         Err(failure) => {
@@ -629,11 +641,13 @@ impl LazyTaskMachine {
                     };
                 }
             };
-            let evaluated = EvaluatedValue::from_whnf(value)
+            let evaluated = EvaluatedValue::from_whnf_in(access.values(), value)
                 .expect("list-effect construction must produce a WHNF list value");
             match self.lazy.cache(access.values(), Ok(evaluated)) {
                 Ok(value) => Transition::Complete(
-                    access.values().root_runtime_value(value.into_value()),
+                    access
+                        .values()
+                        .root_runtime_value(value.into_value_in(access.values())),
                     publication,
                 ),
                 Err(failure) => Transition::Failed(access.values().root_runtime_failure(failure)),
@@ -994,7 +1008,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 return match result {
                     Ok(value) => {
                         EvaluationMachinePoll::Complete(
-                            context.root_value(|_| value.into_value()),
+                            context.root_value(|access| value.into_value_in(access.values())),
                         )
                     }
                     Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
@@ -1478,9 +1492,9 @@ impl LazyTaskMachine {
         let result =
             context.with_value_access(|access| self.lazy.cache(access.values(), Err(failure)));
         match result {
-            Ok(value) => {
-                EvaluationMachinePoll::Complete(context.root_value(|_| value.into_value()))
-            }
+            Ok(value) => EvaluationMachinePoll::Complete(
+                context.root_value(|access| value.into_value_in(access.values())),
+            ),
             Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }
     }
@@ -1644,10 +1658,11 @@ pub(super) fn split_result_value(
 }
 
 pub(super) fn number_from_evaluated(
+    access: &RuntimeValueAccess<'_>,
     value: EvaluatedValue,
     builtin_name: &str,
 ) -> Result<Number, EvaluationHalt> {
-    let value = value.into_value();
+    let value = value.into_value_in(access);
     let Value::Number(number) = value else {
         return Err(EvaluationHalt::new(format!(
             "{builtin_name} builtin requires number values"
@@ -1657,10 +1672,11 @@ pub(super) fn number_from_evaluated(
 }
 
 pub(super) fn index_from_evaluated(
+    access: &RuntimeValueAccess<'_>,
     value: EvaluatedValue,
     builtin_name: &str,
 ) -> Result<usize, EvaluationHalt> {
-    let value = value.into_value();
+    let value = value.into_value_in(access);
     let Value::Number(number) = value else {
         return Err(EvaluationHalt::new(format!(
             "{builtin_name} builtin requires number values"
@@ -1882,8 +1898,10 @@ mod ownership_tests {
         let result = crate::core::cache_test_lazy(
             context.values(),
             &source,
-            Ok(EvaluatedValue::from_whnf(Value::Number(97.into()))
-                .expect("a number is already in WHNF")),
+            Ok(context.values().with_runtime_value_access(|access| {
+                EvaluatedValue::from_whnf_in(&access, Value::Number(97.into()))
+                    .expect("a number is already in WHNF")
+            })),
         );
         assert!(result.is_ok(), "the fixture lazy should cache a number");
         context

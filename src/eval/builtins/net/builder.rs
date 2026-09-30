@@ -693,9 +693,9 @@ impl RegionalBuilderBuiltinMachine {
                 }
             };
             self.evaluated_operands.push(
-                EvaluatedValue::from_whnf(operand)
+                EvaluatedValue::from_whnf_in(access.values(), operand)
                     .expect("builder operand demand must reach WHNF")
-                    .into_value(),
+                    .into_value_in(access.values()),
             );
             self.operand_demand = None;
             return RegionalBuiltinPoll::Yielded;
@@ -722,9 +722,9 @@ impl RegionalBuilderBuiltinMachine {
                         return RegionalBuiltinPoll::Failed(failure);
                     }
                 };
-            let state = EvaluatedValue::from_whnf(state)
+            let state = EvaluatedValue::from_whnf_in(access.values(), state)
                 .expect("builder state demand must reach WHNF")
-                .into_value();
+                .into_value_in(access.values());
             self.decoded = match decode_builder_state(access.values(), &state) {
                 Ok(state) => Some(state),
                 Err(error) => {
@@ -780,9 +780,9 @@ impl RegionalBuilderBuiltinMachine {
                         return RegionalBuiltinPoll::Failed(failure);
                     }
                 };
-            let value = EvaluatedValue::from_whnf(value)
+            let value = EvaluatedValue::from_whnf_in(access.values(), value)
                 .expect("builder state read must reach WHNF")
-                .into_value();
+                .into_value_in(access.values());
             return self.finish_in(access, value, None);
         }
 
@@ -891,9 +891,9 @@ impl RegionalBuilderBuiltinMachine {
                 return RegionalBuiltinPoll::Failed(failure);
             }
         };
-        let state = EvaluatedValue::from_whnf(state)
+        let state = EvaluatedValue::from_whnf_in(access.values(), state)
             .expect("builder state update must reach WHNF")
-            .into_value();
+            .into_value_in(access.values());
         if !matches!(state, Value::Dict(_)) {
             return RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(
                 "interaction-net builder user state must be a dictionary",

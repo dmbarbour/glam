@@ -303,9 +303,11 @@ impl ValueComparisonFrame {
         });
         let value =
             match drive_regional_in_place(access, demand, step_budget, reduce_semantic_shell) {
-                RegionalWhnfStatus::Ready(value) => EvaluatedValue::from_whnf(value)
-                    .expect("comparison operand must reach WHNF")
-                    .into_value(),
+                RegionalWhnfStatus::Ready(value) => {
+                    EvaluatedValue::from_whnf_in(access.values(), value)
+                        .expect("comparison operand must reach WHNF")
+                        .into_value_in(access.values())
+                }
                 RegionalWhnfStatus::Boundary(request) => {
                     return FrameAction::Boundary(request);
                 }
@@ -350,10 +352,12 @@ fn classify_values(
     let right = right
         .as_ref()
         .expect("right comparison operand must be ready");
-    let left_value = EvaluatedValue::from_whnf(access.values().duplicate_value(left))
-        .expect("comparison operand must be in WHNF");
-    let right_value = EvaluatedValue::from_whnf(access.values().duplicate_value(right))
-        .expect("comparison operand must be in WHNF");
+    let left_value =
+        EvaluatedValue::from_whnf_in(access.values(), access.values().duplicate_value(left))
+            .expect("comparison operand must be in WHNF");
+    let right_value =
+        EvaluatedValue::from_whnf_in(access.values(), access.values().duplicate_value(right))
+            .expect("comparison operand must be in WHNF");
     match mode {
         ComparisonMode::Ordering => classify_ordering(
             access,
@@ -385,7 +389,10 @@ fn classify_ordering(
     source_owner: LazyId,
     name: &'static str,
 ) -> FrameAction {
-    match (left.into_value(), right.into_value()) {
+    match (
+        left.into_value_in(access.values()),
+        right.into_value_in(access.values()),
+    ) {
         (Value::Lazy(_), _)
         | (_, Value::Lazy(_))
         | (Value::Promised(_), _)
@@ -459,7 +466,10 @@ fn classify_equality(
     source_owner: LazyId,
     name: &'static str,
 ) -> FrameAction {
-    match (left.into_value(), right.into_value()) {
+    match (
+        left.into_value_in(access.values()),
+        right.into_value_in(access.values()),
+    ) {
         (Value::Lazy(_), _)
         | (_, Value::Lazy(_))
         | (Value::Promised(_), _)
@@ -857,9 +867,11 @@ fn demand_tuple_payload(
     });
     let value =
         match drive_regional_in_place(access, computation, step_budget, reduce_semantic_shell) {
-            RegionalWhnfStatus::Ready(value) => EvaluatedValue::from_whnf(value)
-                .expect("tuple payload must reach WHNF")
-                .into_value(),
+            RegionalWhnfStatus::Ready(value) => {
+                EvaluatedValue::from_whnf_in(access.values(), value)
+                    .expect("tuple payload must reach WHNF")
+                    .into_value_in(access.values())
+            }
             RegionalWhnfStatus::Boundary(request) => {
                 return TuplePayloadPoll::Boundary(request);
             }

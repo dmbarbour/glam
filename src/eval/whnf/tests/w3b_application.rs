@@ -304,7 +304,7 @@ fn saturated_result_is_demanded_before_any_extra_argument_is_applied() {
         lazy.cache(
             &access,
             Ok(
-                crate::core::EvaluatedValue::from_whnf(Value::Number(5.into()))
+                crate::core::EvaluatedValue::from_whnf_in(&access, Value::Number(5.into()))
                     .expect("a number is already in WHNF"),
             ),
         )

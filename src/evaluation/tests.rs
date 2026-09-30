@@ -3281,10 +3281,12 @@ impl EvaluationTaskMachine for CacheLazyFailure {
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let result = self.values.with_runtime_value_access(|access| {
-            self.lazy.cache(&access, Err(self.failure.clone()))
+            self.lazy
+                .cache(&access, Err(self.failure.clone()))
+                .map(|value| access.root_runtime_value(value.into_value_in(&access)))
         });
         match result {
-            Ok(value) => EvaluationMachinePoll::Complete(context.root_value(value.into_value())),
+            Ok(value) => EvaluationMachinePoll::Complete(value),
             Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }
     }
@@ -4566,16 +4568,15 @@ fn patient_deferred_demand_retries_when_disturbance_races_no_progress() {
                     error: None,
                 })
             } else {
-                let value = crate::core::EvaluatedValue::from_whnf(crate::core::keys::unit_value())
-                    .expect("unit is already in WHNF");
-                let published = self
-                    .context
-                    .values()
-                    .with_runtime_value_access(|access| self.lazy.cache(&access, Ok(value)));
+                let published = self.context.values().with_runtime_value_access(|access| {
+                    let value = crate::core::EvaluatedValue::from_whnf_in(&access, access.unit())
+                        .expect("unit is already in WHNF");
+                    self.lazy
+                        .cache(&access, Ok(value))
+                        .map(|value| access.root_runtime_value(value.into_value_in(&access)))
+                });
                 match published {
-                    Ok(value) => {
-                        EvaluationMachinePoll::Complete(context.root_value(value.into_value()))
-                    }
+                    Ok(value) => EvaluationMachinePoll::Complete(value),
                     Err(failure) => EvaluationMachinePoll::Failed(context.root_failure(failure)),
                 }
             }

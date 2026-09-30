@@ -541,9 +541,9 @@ impl RegionalConditionalMachine {
                         return RegionalBuiltinPoll::Failed(failure);
                     }
                 };
-            let results = EvaluatedValue::from_whnf(results)
+            let results = EvaluatedValue::from_whnf_in(access.values(), results)
                 .expect("conditional result-list demand must reach WHNF")
-                .into_value();
+                .into_value_in(access.values());
             if !matches!(results, Value::List(_)) {
                 return RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(format!(
                     "{} search did not produce a result list",
@@ -622,9 +622,9 @@ impl RegionalAssertionMachine {
                 }
             };
         self.demand = None;
-        let value = EvaluatedValue::from_whnf(value)
+        let value = EvaluatedValue::from_whnf_in(access.values(), value)
             .expect("assertion operand demand must reach WHNF")
-            .into_value();
+            .into_value_in(access.values());
 
         match self.phase {
             RegionalAssertionPhase::Value => {
@@ -691,14 +691,15 @@ impl RegionalNumericMachine {
                         return RegionalBuiltinPoll::Failed(failure);
                     }
                 };
-            let value =
-                EvaluatedValue::from_whnf(value).expect("numeric operand demand must reach WHNF");
-            let number = match number_from_evaluated(value, numeric_name(self.builtin)) {
-                Ok(number) => number,
-                Err(error) => {
-                    return RegionalBuiltinPoll::Failed(error.into_permanent_failure());
-                }
-            };
+            let value = EvaluatedValue::from_whnf_in(access.values(), value)
+                .expect("numeric operand demand must reach WHNF");
+            let number =
+                match number_from_evaluated(access.values(), value, numeric_name(self.builtin)) {
+                    Ok(number) => number,
+                    Err(error) => {
+                        return RegionalBuiltinPoll::Failed(error.into_permanent_failure());
+                    }
+                };
             self.numbers.push(number);
             self.next += 1;
             self.demand = None;
@@ -775,7 +776,9 @@ impl RegionalNetMachine {
                     }
                 };
                 let arity = match index_from_evaluated(
-                    EvaluatedValue::from_whnf(arity).expect("net arity demand must reach WHNF"),
+                    access.values(),
+                    EvaluatedValue::from_whnf_in(access.values(), arity)
+                        .expect("net arity demand must reach WHNF"),
                     "net_arity",
                 ) {
                     Ok(arity) => arity,
@@ -806,9 +809,9 @@ impl RegionalNetMachine {
                         return RegionalBuiltinPoll::Failed(failure);
                     }
                 };
-                let net = EvaluatedValue::from_whnf(net)
+                let net = EvaluatedValue::from_whnf_in(access.values(), net)
                     .expect("net operand demand must reach WHNF")
-                    .into_value();
+                    .into_value_in(access.values());
                 let Value::Net(net) = net else {
                     return RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(
                         "net_arity builtin requires an interaction-net value",
@@ -868,9 +871,9 @@ impl RegionalProvenanceMachine {
                 return RegionalBuiltinPoll::Failed(failure.into_permanent_failure());
             }
         };
-        let origin = EvaluatedValue::from_whnf(origin)
+        let origin = EvaluatedValue::from_whnf_in(access.values(), origin)
             .expect("origin demand must reach WHNF")
-            .into_value();
+            .into_value_in(access.values());
         let Value::Opaque(origin) = origin else {
             return RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(
                 "origin inspection requires an opaque compilation origin",
@@ -946,9 +949,9 @@ impl RegionalStrategyMachine {
             };
 
         if matches!(self.phase, RegionalStrategyPhase::First) {
-            let metadata = EvaluatedValue::from_whnf(ready)
+            let metadata = EvaluatedValue::from_whnf_in(access.values(), ready)
                 .expect("strategy demand must produce WHNF")
-                .into_value()
+                .into_value_in(access.values())
                 .associated_metadata(access.values());
             if let Some(metadata) = metadata {
                 self.demand = Some(

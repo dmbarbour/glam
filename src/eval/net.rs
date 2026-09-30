@@ -2321,10 +2321,10 @@ mod driver_tests {
         crate::core::cache_test_lazy(
             context.values(),
             &lazy,
-            Ok(
-                crate::core::EvaluatedValue::from_whnf(Value::Builtin(Builtin::Add))
-                    .expect("a builtin is already in WHNF"),
-            ),
+            Ok(context.values().with_runtime_value_access(|access| {
+                crate::core::EvaluatedValue::from_whnf_in(&access, Value::Builtin(Builtin::Add))
+                    .expect("a builtin is already in WHNF")
+            })),
         )
         .expect_without_debug("fresh callable lazy accepts its cached result");
         let (runtime, call) = claimed_core_call_in(&values, Value::Lazy(lazy));
@@ -3631,8 +3631,10 @@ mod driver_tests {
             crate::core::cache_test_lazy(
                 context.values(),
                 &lazy,
-                Ok(crate::core::EvaluatedValue::from_whnf(lazy_result)
-                    .expect("callable families are already in WHNF")),
+                Ok(context.values().with_runtime_value_access(|access| {
+                    crate::core::EvaluatedValue::from_whnf_in(&access, lazy_result)
+                        .expect("callable families are already in WHNF")
+                })),
             )
             .expect_without_debug("fresh callable lazy must accept its cached result");
             let (runtime, call) = claimed_core_call(Value::Lazy(lazy));

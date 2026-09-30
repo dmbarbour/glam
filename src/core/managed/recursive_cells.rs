@@ -2150,10 +2150,9 @@ mod tests {
                 .construct_rooted_managed_lazy("prepared lazy", LazySource::Error)
                 .expect("the managed lazy cell should fit a run")
         });
-        let winner = EvaluatedValue::from_whnf(Value::Number(42.into())).unwrap();
-        let loser = EvaluatedValue::from_whnf(Value::Number(73.into())).unwrap();
-
         values.with_runtime_value_access(|access| {
+            let winner = EvaluatedValue::from_whnf_in(&access, Value::Number(42.into())).unwrap();
+            let loser = EvaluatedValue::from_whnf_in(&access, Value::Number(73.into())).unwrap();
             let lazy = root
                 .access(&access)
                 .expect("the matching value domain should authorize its lazy cell");
@@ -2234,11 +2233,13 @@ mod tests {
                     },
                 )
                 .expect("the managed lazy cell should fit a run");
-            let result =
-                EvaluatedValue::from_whnf(Value::List(List::from_values(vec![Value::Lazy(
+            let result = EvaluatedValue::from_whnf_in(
+                &access,
+                Value::List(List::from_values(vec![Value::Lazy(
                     sentinel.duplicate_in(&access),
-                )])))
-                .expect("a list is already in weak-head normal form");
+                )])),
+            )
+            .expect("a list is already in weak-head normal form");
             let cached = root.cache(&access, Ok(result.duplicate_in(&access)));
             access.assert_same_representation_for_test(&cached, &Ok(result));
             assert!(root.access(&access).unwrap().source_snapshot().is_none());

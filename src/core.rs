@@ -111,7 +111,7 @@ impl Ord for DeferredValueId {
 pub(crate) struct EvaluatedValue(Value);
 
 impl EvaluatedValue {
-    pub(crate) fn into_value(self) -> Value {
+    pub(crate) fn into_value_in(self, _access: &RuntimeValueAccess<'_>) -> Value {
         self.0
     }
 
@@ -119,7 +119,7 @@ impl EvaluatedValue {
         Self(access.duplicate_value(&self.0))
     }
 
-    pub(crate) fn from_whnf(value: Value) -> Result<Self, ()> {
+    pub(crate) fn from_whnf_in(_access: &RuntimeValueAccess<'_>, value: Value) -> Result<Self, ()> {
         if matches!(value, Value::Lazy(_) | Value::Promised(_)) {
             Err(())
         } else {
@@ -136,18 +136,6 @@ impl EvaluatedValue {
 }
 
 pub(crate) type LazyResult = Result<EvaluatedValue, Arc<EvaluationFailure>>;
-
-impl TryFrom<Value> for EvaluatedValue {
-    type Error = Value;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        if matches!(value, Value::Lazy(_) | Value::Promised(_)) {
-            Err(value)
-        } else {
-            Ok(Self(value))
-        }
-    }
-}
 
 pub(crate) struct EvaluationFailure {
     kind: EvaluationFailureKind,
@@ -3863,7 +3851,9 @@ mod tests {
             .source_snapshot(&values)
             .expect("an unresolved lazy should expose a source snapshot");
 
-        let result = EvaluatedValue::from_whnf(values.unit()).expect("unit is already evaluated");
+        let result = values.with_runtime_value_access(|access| {
+            EvaluatedValue::from_whnf_in(&access, access.unit()).expect("unit is already evaluated")
+        });
         assert!(cache_test_lazy(&values, &observer, Ok(result)).is_ok());
         assert!(
             lazy.source_snapshot(&values).is_none(),
@@ -4471,23 +4461,27 @@ mod tests {
         ));
         let sealed = Value::initial_metadata_carrier(&values);
 
-        let evaluated = EvaluatedValue::from_whnf(container.duplicate_for_test(&values))
-            .expect("a container with a lazy field is in outer WHNF");
-        values.assert_same_representation_for_test(&evaluated.into_value(), &container);
-        values.assert_same_representation_for_test(
-            &EvaluatedValue::from_whnf(sealed.duplicate_for_test(&values))
-                .expect("a sealed carrier is already in outer WHNF")
-                .into_value(),
-            &sealed,
-        );
-        assert!(matches!(
-            EvaluatedValue::try_from(field),
-            Err(Value::Lazy(_))
-        ));
-        assert!(matches!(
-            EvaluatedValue::try_from(Value::Promised(promise)),
-            Err(Value::Promised(_))
-        ));
+        values.with_runtime_value_access(|access| {
+            let evaluated =
+                EvaluatedValue::from_whnf_in(&access, access.duplicate_value(&container))
+                    .expect("a container with a lazy field is in outer WHNF");
+            access
+                .assert_same_representation_for_test(&evaluated.into_value_in(&access), &container);
+            access.assert_same_representation_for_test(
+                &EvaluatedValue::from_whnf_in(&access, access.duplicate_value(&sealed))
+                    .expect("a sealed carrier is already in outer WHNF")
+                    .into_value_in(&access),
+                &sealed,
+            );
+            assert!(matches!(
+                EvaluatedValue::from_whnf_in(&access, field),
+                Err(())
+            ));
+            assert!(matches!(
+                EvaluatedValue::from_whnf_in(&access, Value::Promised(promise)),
+                Err(())
+            ));
+        });
     }
 
     #[test]

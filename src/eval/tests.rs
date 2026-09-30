@@ -83,10 +83,12 @@ fn apply_test_values(function: Value, arguments: impl IntoIterator<Item = Value>
 }
 
 fn cached_value(lazy: &LazyValue) -> Value {
-    lazy.cached(&crate::core::test_value_factory())
+    let values = crate::core::test_value_factory();
+    let value = lazy
+        .cached(&values)
         .expect("lazy value should be cached")
-        .expect_without_debug("lazy value should succeed")
-        .into_value()
+        .expect_without_debug("lazy value should succeed");
+    values.with_runtime_value_access(|access| value.into_value_in(&access))
 }
 
 fn list_return_effect(value: Value) -> Value {
@@ -2028,10 +2030,12 @@ fn computed_lazy_waits_on_an_empty_promise_without_caching_its_error() {
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
         &n(42),
     );
-    context.values().assert_same_representation_for_test(
-        &lazy.cached(context.values()),
-        &Some(Ok(EvaluatedValue::from_whnf(n(42)).unwrap())),
-    );
+    let expected = context.values().with_runtime_value_access(|access| {
+        Some(Ok(EvaluatedValue::from_whnf_in(&access, n(42)).unwrap()))
+    });
+    context
+        .values()
+        .assert_same_representation_for_test(&lazy.cached(context.values()), &expected);
 }
 
 #[test]
@@ -2138,10 +2142,12 @@ fn promised_assignment_follows_a_lazy_without_resolving_the_raw_assignment() {
             .values()
             .same_representation_for_test(&assigned, &target)
     );
-    context.values().assert_same_representation_for_test(
-        &target.cached(context.values()),
-        &Some(Ok(EvaluatedValue::from_whnf(n(42)).unwrap())),
-    );
+    let expected = context.values().with_runtime_value_access(|access| {
+        Some(Ok(EvaluatedValue::from_whnf_in(&access, n(42)).unwrap()))
+    });
+    context
+        .values()
+        .assert_same_representation_for_test(&target.cached(context.values()), &expected);
 }
 
 #[test]

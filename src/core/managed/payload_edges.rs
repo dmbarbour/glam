@@ -480,15 +480,19 @@ mod tests {
             [second],
             return_first_capture,
         );
-        let evaluated = EvaluatedValue::from_whnf(first.duplicate_for_test(&values))
-            .expect("a number is already in weak-head normal form");
+        let evaluated = values.with_runtime_value_access(|access| {
+            EvaluatedValue::from_whnf_in(&access, access.duplicate_value(&first))
+                .expect("a number is already in weak-head normal form")
+        });
         let cached = crate::core::cache_test_lazy(&values, &complete, Ok(evaluated));
         let Ok(cached) = cached else {
             panic!("the completed lazy should accept its first result")
         };
         values.assert_same_representation_for_test(
             &cached,
-            &EvaluatedValue::from_whnf(first.duplicate_for_test(&values)).unwrap(),
+            &values.with_runtime_value_access(|access| {
+                EvaluatedValue::from_whnf_in(&access, access.duplicate_value(&first)).unwrap()
+            }),
         );
         let Some(Ok(cached)) = complete.cached(&values) else {
             panic!("the completed lazy must retain its successful result")

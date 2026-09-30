@@ -74,12 +74,14 @@ fn lazy_source_result_is_installed_once_before_following_a_promise() {
     let cached = lazy
         .cached(context.values())
         .expect("the lazy task must publish one terminal cache");
-    context.values().assert_same_representation_for_test(
-        &cached
-            .expect_without_debug("the retained promise should succeed")
-            .into_value(),
-        &Value::Number(79.into()),
-    );
+    context.values().with_runtime_value_access(|access| {
+        access.assert_same_representation_for_test(
+            &cached
+                .expect_without_debug("the retained promise should succeed")
+                .into_value_in(&access),
+            &Value::Number(79.into()),
+        );
+    });
     assert!(lazy.source_snapshot(context.values()).is_none());
 }
 

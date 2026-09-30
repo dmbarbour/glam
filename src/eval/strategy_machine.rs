@@ -74,9 +74,9 @@ impl StrategyDemandMachine {
 
         if matches!(self.phase, StrategyDemandPhase::Value) {
             let metadata = context.with_value_access(|access| {
-                EvaluatedValue::from_whnf(access.clone_root(&ready))
+                EvaluatedValue::from_whnf_in(access.values(), access.clone_root(&ready))
                     .expect("strategy demand must produce WHNF")
-                    .into_value()
+                    .into_value_in(access.values())
                     .associated_metadata(access.values())
                     .map(|value| access.values().root_runtime_value(value))
             });
