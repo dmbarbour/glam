@@ -467,25 +467,8 @@ pub(crate) fn prepend_contexts(
     message: Value,
     contexts: &[Value],
 ) -> Result<Value, crate::core::EvaluationHalt> {
-    let Value::Dict(message) = message else {
-        return Err(crate::core::EvaluationHalt::new(
-            "diagnostic context requires an immediately structured diagnostic",
-        ));
-    };
-    let interface = match message.get(&*keys::MSG) {
-        Some(Value::Dict(interface)) => interface.clone(),
-        _ => Dict::new_sync(),
-    };
-    let existing = match interface.get(&*keys::CONTEXT) {
-        Some(Value::List(contexts)) => contexts.clone(),
-        Some(context) => List::from_values(vec![context.clone()]),
-        None => List::empty(),
-    };
-    let contexts = List::concat(List::from_values(contexts.to_vec()), existing);
-    let interface = interface.insert((*keys::CONTEXT).clone(), Value::List(contexts));
-    Ok(Value::Dict(
-        message.insert((*keys::MSG).clone(), Value::Dict(interface)),
-    ))
+    let values = crate::compiler::test_value_factory();
+    values.with_runtime_value_access(|access| prepend_contexts_in(&access, message, contexts))
 }
 
 fn apply_updates_root(
@@ -721,17 +704,17 @@ mod tests {
         SourceArtifact::new(Bytes::from_static(b"source"), SourceIdentity::file(path))
     }
 
-    fn list_values(list: &List) -> Vec<Value> {
-        let mut values = Vec::new();
+    fn list_values(values: &crate::core::CoreValueFactory, list: &List) -> Vec<Value> {
+        let mut items = Vec::new();
         list.for_each_segment(
             &mut |bytes| panic!("provenance lists must not contain byte segments: {bytes:?}"),
             &mut |segment| {
-                values.extend_from_slice(segment);
+                items.extend(segment.iter().map(|value| value.duplicate_for_test(values)));
                 Ok::<_, ()>(())
             },
         )
         .expect("closed provenance list should not fail");
-        values
+        items
     }
 
     fn trace_origin_value(trace: &CompilationTrace) -> Value {
@@ -744,6 +727,17 @@ mod tests {
         values.with_runtime_value_access(|access| digest.value(&access))
     }
 
+    fn assert_optional_value(
+        values: &crate::core::CoreValueFactory,
+        actual: Option<&Value>,
+        expected: &Value,
+    ) {
+        let Some(actual) = actual else {
+            panic!("expected a diagnostic field")
+        };
+        crate::core::assert_same_representation_for_test(values, actual, expected);
+    }
+
     #[test]
     fn opaque_edge_free_families_have_no_runtime_or_managed_edge() {
         assert_compilation_origin_family_shape();
@@ -752,6 +746,7 @@ mod tests {
 
     #[test]
     fn imported_trace_projects_a_root_to_parent_chain() {
+        let values = crate::compiler::test_value_factory();
         let root_source = file_source("root.g");
         let root = Arc::new(CompilationTrace::root(
             CompilationInvocationId::new(1),
@@ -780,35 +775,39 @@ mod tests {
         let Value::Dict(origin) = trace_origin_value(&leaf) else {
             unreachable!()
         };
-        assert_eq!(
+        assert_optional_value(
+            &values,
             origin.get(&*keys::INVOCATION),
-            Some(&Value::Number(Number::from_u64(3)))
+            &Value::Number(Number::from_u64(3)),
         );
-        assert_eq!(
+        assert_optional_value(
+            &values,
             origin.get(&*keys::SOURCE),
-            Some(&Value::Dict(Dict::new_sync().insert(
-                (*keys::FILE).clone(),
-                Value::binary_from_text("lib/leaf.g")
-            )))
+            &Value::Dict(
+                Dict::new_sync()
+                    .insert((*keys::FILE).clone(), Value::binary_from_text("lib/leaf.g")),
+            ),
         );
-        assert_eq!(
+        assert_optional_value(
+            &values,
             origin.get(&*keys::DIGEST),
-            Some(&digest_value(ContentDigest::of(b"source")))
+            &digest_value(ContentDigest::of(b"source")),
         );
         let Some(Value::List(namespace)) = origin.get(&*keys::NAMESPACE) else {
             panic!("origin should contain its global namespace");
         };
-        assert_eq!(
-            list_values(namespace),
-            [
+        crate::core::assert_same_representation_for_test(
+            &values,
+            &list_values(&values, namespace),
+            &vec![
                 Value::binary_from_text("pkg"),
-                Value::binary_from_text("child")
-            ]
+                Value::binary_from_text("child"),
+            ],
         );
         let Some(Value::List(imports)) = origin.get(&*keys::IMPORT_CHAIN) else {
             panic!("origin should contain an import chain");
         };
-        let imports = list_values(imports);
+        let imports = list_values(&values, imports);
         assert_eq!(imports.len(), 2);
         let Value::Dict(root_edge) = &imports[0] else {
             unreachable!()
@@ -819,32 +818,40 @@ mod tests {
         let Some(Value::Dict(root_request)) = root_edge.get(&*keys::REQUEST) else {
             panic!("import edge should contain a tagged request");
         };
-        assert_eq!(
+        assert_optional_value(
+            &values,
             root_request.get(&*keys::FILE),
-            Some(&Value::binary_from_text("lib/child.g"))
+            &Value::binary_from_text("lib/child.g"),
         );
         let Some(Value::List(extends)) = root_edge.get(&*keys::EXTENDS) else {
             panic!("import edge should say which relative namespace it extends");
         };
-        assert_eq!(list_values(extends), [Value::binary_from_text("child")]);
+        crate::core::assert_same_representation_for_test(
+            &values,
+            &list_values(&values, extends),
+            &vec![Value::binary_from_text("child")],
+        );
         let Some(Value::Dict(child_request)) = child_edge.get(&*keys::REQUEST) else {
             panic!("import edge should contain a tagged request");
         };
-        assert_eq!(
+        assert_optional_value(
+            &values,
             child_request.get(&*keys::FILE),
-            Some(&Value::binary_from_text("leaf.g"))
+            &Value::binary_from_text("leaf.g"),
         );
         let Some(Value::Dict(child_importer)) = child_edge.get(&*keys::IMPORTER) else {
             panic!("import edge should identify its importer");
         };
-        assert_eq!(
+        assert_optional_value(
+            &values,
             child_importer.get(&*keys::INVOCATION),
-            Some(&Value::Number(Number::from_u64(2)))
+            &Value::Number(Number::from_u64(2)),
         );
     }
 
     #[test]
     fn inline_script_source_is_tagged_with_its_text() {
+        let values = crate::compiler::test_value_factory();
         let bytes = Bytes::from_static(b"language g0\nbroken =\n");
         let source =
             SourceArtifact::new(bytes.clone(), SourceIdentity::script("<script.g>", bytes));
@@ -859,11 +866,10 @@ mod tests {
         let Some(Value::Dict(source)) = origin.get(&*keys::SOURCE) else {
             panic!("source should be tagged");
         };
-        assert_eq!(
+        assert_optional_value(
+            &values,
             source.get(&crate::core::Key::atom_from_text("script")),
-            Some(&Value::Binary(Bytes::from_static(
-                b"language g0\nbroken =\n"
-            )))
+            &Value::Binary(Bytes::from_static(b"language g0\nbroken =\n")),
         );
         assert!(source.get(&*keys::FILE).is_none());
     }

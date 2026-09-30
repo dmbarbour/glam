@@ -2089,6 +2089,11 @@ inventory relatch:
       now duplicate and compare their semantic payloads through their owning
       evaluation context or compiler value factory. Cross-thread compiler
       helper tests explicitly duplicate the function edge before transfer.
+    - **Diagnostic provenance fixture seam: complete 2026-09-30.** Test
+      context-prepending now delegates to the production access-qualified
+      transformation, while source-origin/import-chain fixtures copy list
+      segments and compare nested diagnostic fields through the compiler value
+      factory.
   - **D.2h.2c — managed facade and collector cutover:** remove the thirteen
     managed-facade traits/identity shims and the five `Gc<T>` traits, add the
     negative compile/source gates, and make the full workspace compile.
