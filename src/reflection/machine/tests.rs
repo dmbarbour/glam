@@ -4621,7 +4621,9 @@ fn isolated_search_reports_and_resumes_lazy_dependencies() {
     let effect = eval::apply_values(
         &observer,
         function.clone_core_for_test(),
-        vec![Value::Promised(promised.clone())],
+        vec![Value::Promised(
+            promised.duplicate_for_test(observer.values()),
+        )],
     )
     .unwrap();
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
@@ -6260,7 +6262,12 @@ fn suspended_request_failure_preserves_context_without_replay() {
             .forcing_unfused()
             .run()
             .expect_err_without_debug("uninterrupted message construction should fail");
-    let uninterrupted_contexts = uninterrupted_error.into_failure().contexts().to_vec();
+    let uninterrupted_contexts = uninterrupted_error
+        .into_failure()
+        .contexts()
+        .iter()
+        .map(|context| context.duplicate_for_test(&assembler.core_values()))
+        .collect::<Vec<_>>();
     assert!(
         assembler
             .core_values()
@@ -6367,7 +6374,9 @@ fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
     let effect = eval::apply_values(
         &observer,
         function.clone_core_for_test(),
-        vec![Value::Promised(promised.clone())],
+        vec![Value::Promised(
+            promised.duplicate_for_test(observer.values()),
+        )],
     )
     .unwrap();
     let effect = root_value(&observer, effect);
@@ -6400,7 +6409,10 @@ fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
     let Some(error) = result.get(&*keys::ERR) else {
         panic!("eval should return the dependency failure under err");
     };
-    let error = public_value(&assembler.core_values(), error.clone());
+    let error = public_value(
+        &assembler.core_values(),
+        error.duplicate_for_test(&assembler.core_values()),
+    );
     assert_eq!(
         assembler
             .to_binary(&assembler.get(&error, "msg.text").unwrap())
@@ -6417,7 +6429,10 @@ fn specialization_host_activity_is_not_reentered_after_owned_demand_suspends() {
         .task_owned_promise(Arc::from("specialization demand dependency"))
         .unwrap();
     let observer = session.with_new_task().unwrap();
-    let promised_value = public_value(&assembler.core_values(), Value::Promised(promised.clone()));
+    let promised_value = public_value(
+        &assembler.core_values(),
+        Value::Promised(promised.duplicate_for_test(observer.values())),
+    );
     let effect = assembler.apply(&function, [promised_value]).unwrap();
     let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
     let effect = root_value(&observer, effect.clone_core_for_test());
@@ -6512,7 +6527,9 @@ fn specialization_request_propagates_terminal_demand_failure_without_replay() {
     let effect = eval::apply_values(
         &observer,
         function.clone_core_for_test(),
-        vec![Value::Promised(promised.clone())],
+        vec![Value::Promised(
+            promised.duplicate_for_test(observer.values()),
+        )],
     )
     .unwrap();
     let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
@@ -7465,7 +7482,12 @@ fn task_halt_conversions_preserve_evaluation_and_public_error_structure() {
                 Value::Number(Number::from(7)),
             ),
     );
-    let failure = Arc::new(EvaluationFailure::emission(emission).with_context(frame.clone()));
+    let failure = assembler.core_values().with_runtime_value_access(|access| {
+        Arc::new(
+            EvaluationFailure::emission(emission)
+                .with_context_in(&access, access.duplicate_value(&frame)),
+        )
+    });
 
     let evaluation_halt = TaskHalt::from(EvaluationHalt::failure(failure.clone()));
     let evaluation_diagnostic = evaluation_halt.diagnostic(&assembler.values());
@@ -8592,8 +8614,12 @@ fn task_failure_propagates_one_structured_failure_to_owned_promises() {
             .insert(detail, Value::Number(Number::integer(7))),
     );
     let frame = crate::diagnostic::evaluation_context_frame("producer_test");
-    let failure =
-        Arc::new(EvaluationFailure::emission(emission.clone()).with_context(frame.clone()));
+    let failure = context.values().with_runtime_value_access(|access| {
+        Arc::new(
+            EvaluationFailure::emission(access.duplicate_value(&emission))
+                .with_context_in(&access, access.duplicate_value(&frame)),
+        )
+    });
     context.fail_wait_with_failure(owner_task.wait(), failure.clone());
 
     for (promise, wait) in unresolved.into_iter().zip(waits) {

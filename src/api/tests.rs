@@ -225,13 +225,15 @@ fn runtimes_own_independent_local_identity_domains_and_value_factories() {
 
     let first_values = first.values().core;
     let first_unit = first_values.unit();
+    let first_thunk_values = first_values.clone();
     let first_lazy = LazyValue::semantic_thunk(&first_values, "first runtime", move |_| {
-        Ok(first_unit.clone())
+        Ok(first_unit.duplicate_for_test(&first_thunk_values))
     });
     let second_values = second.values().core;
     let second_unit = second_values.unit();
+    let second_thunk_values = second_values.clone();
     let second_lazy = LazyValue::semantic_thunk(&second_values, "second runtime", move |_| {
-        Ok(second_unit.clone())
+        Ok(second_unit.duplicate_for_test(&second_thunk_values))
     });
     assert_eq!(
         first_lazy.id(&first_values).get(),
@@ -452,9 +454,10 @@ fn access_and_annotation_construction_do_not_demand_inputs() {
     let demanded_by_thunk = demanded.clone();
     let core_values = assembler.core_values();
     let unit = core_values.unit();
+    let thunk_values = core_values.clone();
     let lazy = public_semantic_thunk(&core_values, "no-demand facade fixture", move |_| {
         demanded_by_thunk.store(true, Ordering::SeqCst);
-        Ok(unit.clone())
+        Ok(unit.duplicate_for_test(&thunk_values))
     });
     let (promise, resolver) = assembler.promise("no-demand facade fixture");
 
@@ -1138,7 +1141,9 @@ fn evaluated_array_items_accept_only_one_strict_value_leaf() {
     };
     let deferred_spine = public_value(
         &core_values,
-        CoreValue::List(List::from_thunk(promise_core.clone().into())),
+        CoreValue::List(List::from_thunk(
+            promise_core.duplicate_for_test(&core_values).into(),
+        )),
     );
     assert!(
         EvaluatedValue::from_whnf(&values, deferred_spine)
@@ -1212,7 +1217,7 @@ fn value_evaluator_resumes_a_retained_resolver_promise_subscription() {
     let CoreValue::Promised(promise_core) = promise.clone_core_for_test() else {
         unreachable!("public promise must contain a promised core value")
     };
-    let promise_core = promise_core.clone();
+    let promise_core = promise_core.duplicate_for_test(&assembler.core_values());
     let waiting = values
         .anno_binary(promise)
         .expect("binary annotation should wrap the promise without observing it");
@@ -1454,7 +1459,7 @@ fn semantic_binary_slice_does_not_force_an_unused_poisoned_tail() {
         &core_values,
         CoreValue::List(List::concat(
             List::from_bytes(Bytes::from_static(b"ok")),
-            List::from_thunk(poison.clone().into()),
+            List::from_thunk(poison.duplicate_for_test(&core_values).into()),
         )),
     );
     let binary = values
@@ -1973,14 +1978,16 @@ fn source_definitions_add_shallow_opaque_origin_context() {
         else {
             return None;
         };
-        frame.get(&Key::atom_from_text("manual")).cloned()
+        frame
+            .get(&Key::atom_from_text("manual"))
+            .map(|value| value.duplicate_for_test(&assembler.core_values()))
     });
     assert!(
         assembler
             .core_values()
             .same_representation_for_test(&manual_origin.as_ref(), &Some(&automatic_origin),),
-        "module_origin should expose the same opaque token used by automatic frames; contexts: {:?}",
-        failure.contexts()
+        "module_origin should expose the same opaque token used by automatic frames; context count: {}",
+        failure.contexts().len()
     );
 }
 

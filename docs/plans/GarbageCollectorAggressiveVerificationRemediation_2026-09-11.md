@@ -2350,8 +2350,21 @@ inventory relatch:
            ordinary scalar and host errors retain standard Rust diagnostics.
            This removes 228 more formatting-bound failures and reduces the
            all-target compiler inventory from 732 to 504. The remaining 93
-           formatting errors are actual carrier/debug or container-
-           duplication seams rather than generic result control flow.
+         formatting errors are actual carrier/debug or container-
+         duplication seams rather than generic result control flow.
+         - **D.2h.2r — API and reflection ownership slice complete
+           2026-09-30.** The remaining API fixtures now duplicate lazy,
+           promise, origin, and recursive diagnostic values only through the
+           runtime-local value factory that owns them. Reflection-machine
+           fixtures likewise duplicate promise arguments, failure contexts,
+           emissions, and context frames under their observer or evaluation
+           access; the removed ambient `with_context` helper is replaced by
+           `with_context_in`. Diagnostic assertion text reports scalar context
+           counts rather than demanding raw semantic `Debug`. These fixture
+           families now compile under the negative trait contracts and reduce
+           the all-target compiler inventory from 504 to 484. The remaining
+           failures are concentrated in evaluator, net, and syntax fixture
+           ownership rather than requiring a new public duplication API.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived

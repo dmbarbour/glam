@@ -729,7 +729,7 @@ fn diagnostic_enrichment_is_an_authoritative_object_mixin() {
     };
     let CoreValue::Dict(interface) = message
         .get(&*crate::core::keys::MSG)
-        .cloned()
+        .map(|value| value.duplicate_for_test(&crate::core::test_value_factory()))
         .expect("text diagnostic should provide msg")
     else {
         unreachable!()
