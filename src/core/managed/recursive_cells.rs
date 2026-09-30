@@ -84,44 +84,11 @@ pub(crate) struct ManagedCoreNetCell {
     runtime: RuntimeNetCell<CoreSpecialization>,
 }
 
-#[derive(Clone)]
 pub(crate) struct ManagedLazyEdge(Gc<ManagedLazyCell>);
 
-impl PartialEq for ManagedLazyEdge {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.ptr_eq(other.0)
-    }
-}
-
-impl Eq for ManagedLazyEdge {}
-
-#[derive(Clone)]
 pub(crate) struct ManagedPromiseEdge(Gc<ManagedPromiseCell>);
 
-impl PartialEq for ManagedPromiseEdge {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.ptr_eq(other.0)
-    }
-}
-
-impl Eq for ManagedPromiseEdge {}
-
-#[derive(Clone)]
 pub(crate) struct ManagedCoreNetEdge(Gc<ManagedCoreNetCell>);
-
-impl fmt::Debug for ManagedCoreNetEdge {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ManagedCoreNetEdge(..)")
-    }
-}
-
-impl PartialEq for ManagedCoreNetEdge {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.ptr_eq(other.0)
-    }
-}
-
-impl Eq for ManagedCoreNetEdge {}
 
 /// Durable external owners retain registered roots, never bare managed edges.
 #[derive(Clone, Debug)]
@@ -2023,6 +1990,50 @@ mod tests {
         core_net_access_is_not_sync,
         ManagedCoreNetAccess<'static, 'static>,
         Sync
+    );
+
+    assert_does_not_implement!(managed_lazy_edge_is_not_copy, ManagedLazyEdge, Copy);
+    assert_does_not_implement!(managed_lazy_edge_is_not_clone, ManagedLazyEdge, Clone);
+    assert_does_not_implement!(
+        managed_lazy_edge_is_not_partialeq,
+        ManagedLazyEdge,
+        PartialEq
+    );
+    assert_does_not_implement!(managed_lazy_edge_is_not_eq, ManagedLazyEdge, Eq);
+    assert_does_not_implement!(
+        managed_lazy_edge_is_not_debug,
+        ManagedLazyEdge,
+        std::fmt::Debug
+    );
+    assert_does_not_implement!(managed_promise_edge_is_not_copy, ManagedPromiseEdge, Copy);
+    assert_does_not_implement!(managed_promise_edge_is_not_clone, ManagedPromiseEdge, Clone);
+    assert_does_not_implement!(
+        managed_promise_edge_is_not_partialeq,
+        ManagedPromiseEdge,
+        PartialEq
+    );
+    assert_does_not_implement!(managed_promise_edge_is_not_eq, ManagedPromiseEdge, Eq);
+    assert_does_not_implement!(
+        managed_promise_edge_is_not_debug,
+        ManagedPromiseEdge,
+        std::fmt::Debug
+    );
+    assert_does_not_implement!(managed_core_net_edge_is_not_copy, ManagedCoreNetEdge, Copy);
+    assert_does_not_implement!(
+        managed_core_net_edge_is_not_clone,
+        ManagedCoreNetEdge,
+        Clone
+    );
+    assert_does_not_implement!(
+        managed_core_net_edge_is_not_partialeq,
+        ManagedCoreNetEdge,
+        PartialEq
+    );
+    assert_does_not_implement!(managed_core_net_edge_is_not_eq, ManagedCoreNetEdge, Eq);
+    assert_does_not_implement!(
+        managed_core_net_edge_is_not_debug,
+        ManagedCoreNetEdge,
+        std::fmt::Debug
     );
 
     #[test]

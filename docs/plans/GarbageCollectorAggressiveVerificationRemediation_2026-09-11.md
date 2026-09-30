@@ -2051,6 +2051,14 @@ inventory relatch:
   - **D.2h.2c — managed facade and collector cutover:** remove the thirteen
     managed-facade traits/identity shims and the five `Gc<T>` traits, add the
     negative compile/source gates, and make the full workspace compile.
+    - **Production trait seam: complete 2026-09-30.** `Gc<T>` no longer
+      implements `Copy`, `Clone`, `PartialEq`, `Eq`, or `Debug`, and no longer
+      exposes unqualified `ptr_eq`. The three managed edge facades likewise
+      expose none of those ambient traits; the ten facade trait dependencies
+      and their three hidden `ptr_eq` calls are gone. Compile-time negative
+      trait contracts and source latches guard both layers. The production
+      library and the complete `glam-gc` library suite pass at this boundary;
+      workspace fixture migration and final inventory closure remain below.
 - **D.2h.3 — ledger closure:** require zero raw violations, zero persistent
   typed-edge defects, no pending production root/admission disposition, and no
   unreviewed fixture exception. Update exact counts and fingerprints only from

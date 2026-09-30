@@ -1,4 +1,3 @@
-use std::fmt;
 use std::ptr::NonNull;
 
 use crate::{Mutator, Trace, trace::ErasedGc};
@@ -104,15 +103,6 @@ impl<T: Trace> Gc<T> {
         self.pointer == other.pointer
     }
 
-    /// Transitional unqualified address comparison.
-    ///
-    /// New code uses [`Gc::same_allocation_in`]. This compatibility operation
-    /// remains only until the P4 standard-trait cutover.
-    #[must_use]
-    pub fn ptr_eq(self, other: Self) -> bool {
-        self.pointer == other.pointer
-    }
-
     pub(crate) fn erase(&self) -> ErasedGc {
         ErasedGc::new(self.pointer.cast())
     }
@@ -145,28 +135,6 @@ impl<T: Trace> Gc<T> {
     }
 }
 
-impl<T: Trace> Copy for Gc<T> {}
-
-impl<T: Trace> Clone for Gc<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T: Trace> PartialEq for Gc<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.pointer == other.pointer
-    }
-}
-
-impl<T: Trace> Eq for Gc<T> {}
-
-impl<T: Trace> fmt::Debug for Gc<T> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_tuple("Gc").field(&self.pointer).finish()
-    }
-}
-
 // SAFETY: a `Gc<T>` grants no access without a non-`Send`, heap-qualified
 // mutator. Moving a handle between threads is valid when the eventual shared
 // access and destruction of `T` are both thread-safe.
@@ -178,33 +146,59 @@ unsafe impl<T: Trace> Sync for Gc<T> {}
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Debug;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     use crate::{Heap, Trace, Visitor};
 
     use super::Gc;
 
-    const PENDING_STANDARD_TRAIT_CUTOVER: &[&str] = &[
-        "impl<T: Trace> Copy for Gc<T>",
-        "impl<T: Trace> Clone for Gc<T>",
-        "impl<T: Trace> PartialEq for Gc<T>",
-        "impl<T: Trace> Eq for Gc<T>",
-        "impl<T: Trace> fmt::Debug for Gc<T>",
-    ];
+    macro_rules! assert_does_not_implement {
+        ($module:ident, $type:ty, $trait:path) => {
+            mod $module {
+                use super::*;
+
+                trait AmbiguousIfImplemented<Discriminator> {
+                    fn verify() {}
+                }
+
+                struct Implemented;
+
+                impl<T: ?Sized> AmbiguousIfImplemented<()> for T {}
+                impl<T: ?Sized + $trait> AmbiguousIfImplemented<Implemented> for T {}
+
+                const _: fn() = || {
+                    <$type as AmbiguousIfImplemented<_>>::verify();
+                };
+            }
+        };
+    }
+
+    assert_does_not_implement!(gc_is_not_copy, Gc<u64>, Copy);
+    assert_does_not_implement!(gc_is_not_clone, Gc<u64>, Clone);
+    assert_does_not_implement!(gc_is_not_partialeq, Gc<u64>, PartialEq);
+    assert_does_not_implement!(gc_is_not_eq, Gc<u64>, Eq);
+    assert_does_not_implement!(gc_is_not_debug, Gc<u64>, Debug);
 
     #[test]
-    fn persistent_edge_standard_trait_cutover_is_explicitly_pending() {
+    fn persistent_edge_standard_trait_cutover_is_closed() {
         let source = include_str!("pointer.rs");
         let production = source
             .split_once("#[cfg(test)]")
             .expect("pointer module must keep one test boundary")
             .0;
 
-        for pending in PENDING_STANDARD_TRAIT_CUTOVER {
-            assert_eq!(
-                production.matches(pending).count(),
-                1,
-                "the transitional `{pending}` surface changed; complete or update the P4 cutover latch"
+        for forbidden in [
+            "impl<T: Trace> Copy for Gc<T>",
+            "impl<T: Trace> Clone for Gc<T>",
+            "impl<T: Trace> PartialEq for Gc<T>",
+            "impl<T: Trace> Eq for Gc<T>",
+            "impl<T: Trace> fmt::Debug for Gc<T>",
+            "pub fn ptr_eq",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "the forbidden `{forbidden}` persistent-edge surface reopened"
             );
         }
     }
