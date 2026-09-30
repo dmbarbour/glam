@@ -802,13 +802,13 @@ fn opaque_representation_plan_links_are_consistent() {
 }
 
 fn return_second_capture(
-    _context: &EvaluatorStepContext<'_>,
+    context: &EvaluatorStepContext<'_>,
     captures: &[Value],
 ) -> Result<Value, EvaluationHalt> {
     let [_, result] = captures else {
         unreachable!("the semantic-computation fixture has two captures")
     };
-    Ok(result.clone())
+    Ok(context.with_value_access(|access| access.values().duplicate_value(result)))
 }
 
 #[test]
@@ -825,9 +825,8 @@ fn semantic_computation_captures_are_explicit() {
     };
 
     assert_eq!(computation.captures.len(), 2);
-    assert_eq!(
-        computation.captures[1],
-        Value::Number(2.into()),
+    assert!(
+        computation.captures[1].same_representation_for_test(&Value::Number(2.into()), &values,),
         "the function pointer receives the exact ordered capture array"
     );
 }
@@ -894,12 +893,14 @@ fn external_closure_bundle_retains_only_declared_roots() {
         panic!("external host call should retain its classified source")
     };
 
-    let result = producer
-        .invoke(&values)
-        .expect("the explicit root-bundle callback should succeed");
-    assert_eq!(
-        result.clone_core_for_test(),
-        Value::Number(42.into()),
+    let result = match producer.invoke(&values) {
+        Ok(result) => result,
+        Err(_) => panic!("the explicit root-bundle callback should succeed"),
+    };
+    assert!(
+        result
+            .clone_core_for_test()
+            .same_representation_for_test(&Value::Number(42.into()), &values),
         "the callback receives the declared semantic value as a temporary runtime root"
     );
     assert_eq!(
@@ -929,11 +930,13 @@ fn managed_deferred_state_cycle_reclaims() {
                 "src/core/managed/containment_inventory.rs",
                 "one explicit promised value",
             ),
-            [Value::Promised(promise.clone())],
+            [Value::Promised(promise.duplicate_for_test(&values))],
             |_| Err(Arc::new(EvaluationFailure::message("not invoked"))),
         );
-        set_test_promise(&values, &promise, Value::Lazy(lazy))
-            .expect("the cycle promise should start unassigned");
+        assert!(
+            set_test_promise(&values, &promise, Value::Lazy(lazy)).is_ok(),
+            "the cycle promise should start unassigned"
+        );
     }
 
     let reclaimed = values

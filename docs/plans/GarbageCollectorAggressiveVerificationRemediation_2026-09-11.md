@@ -2055,6 +2055,16 @@ inventory relatch:
       handles retain only opaque or display-derived Rust formatting. WHNF
       assertions use an edge-free result so panic formatting cannot restore a
       hidden raw-value observation dependency.
+    - **Managed-payload fixture seam: complete 2026-09-30.** Compatibility
+      payload, persistent-container, runtime-net, owner, containment, and
+      value-node fixtures now duplicate and compare semantic values only
+      through an explicitly named value factory/access region. The generic
+      managed runtime-net fixture supplies its own mutator-qualified payload
+      duplicator, and core-net reduction fixtures use the specialization's
+      mutation gateway rather than falling back to the removed ambient traits.
+      Test-expression lowering likewise borrows syntax and duplicates embedded
+      semantic values through its lowering access instead of depending on
+      `Clone` for either layer.
   - **D.2h.2c — managed facade and collector cutover:** remove the thirteen
     managed-facade traits/identity shims and the five `Gc<T>` traits, add the
     negative compile/source gates, and make the full workspace compile.

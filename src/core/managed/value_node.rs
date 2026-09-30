@@ -210,7 +210,9 @@ mod tests {
     }
 
     fn project(value: &PreparedRuntimeValueRoot, values: &CoreValueFactory) -> Option<Value> {
-        values.with_runtime_value_access(|access| value.with_value(&access, Clone::clone))
+        values.with_runtime_value_access(|access| {
+            value.with_value(&access, |value| access.duplicate_value(value))
+        })
     }
 
     fn prepare(values: &CoreValueFactory, value: Value) -> PreparedRuntimeValueRoot {
@@ -403,10 +405,11 @@ mod tests {
 
         assert_eq!(values.managed_statistics(), before);
         assert!(roots.iter().enumerate().all(|(offset, root)| {
-            project(root, &values)
-                == Some(Value::Number(Number::integer(
-                    i64::try_from(offset).unwrap() - 512,
-                )))
+            matches!(
+                project(root, &values),
+                Some(Value::Number(number))
+                    if number == Number::integer(i64::try_from(offset).unwrap() - 512)
+            )
         }));
     }
 
@@ -426,7 +429,12 @@ mod tests {
         let worker = std::thread::spawn(move || project(&alias, &worker_values))
             .join()
             .expect("managed-root projection worker should not panic");
-        assert_eq!(worker, Some(Value::Number(large_integer)));
+        let worker = worker.expect("the managed root should project in its runtime");
+        crate::core::assert_same_representation_for_test(
+            &values,
+            &worker,
+            &Value::Number(large_integer),
+        );
         assert_eq!(format!("{root:?}"), "RuntimeValueRoot");
 
         let live = values
@@ -454,10 +462,15 @@ mod tests {
         let inline = prepare(&owner, Value::Number(42.into()));
         let managed = prepare(&owner, Value::Dict(crate::core::Dict::new_sync()));
 
-        assert_eq!(project(&inline, &owner), Some(Value::Number(42.into())));
+        let projected = project(&inline, &owner).expect("the inline root should project");
+        crate::core::assert_same_representation_for_test(
+            &owner,
+            &projected,
+            &Value::Number(42.into()),
+        );
         assert!(matches!(project(&managed, &owner), Some(Value::Dict(dict)) if dict.is_empty()));
-        assert_eq!(project(&inline, &other), None);
-        assert_eq!(project(&managed, &other), None);
+        assert!(project(&inline, &other).is_none());
+        assert!(project(&managed, &other).is_none());
     }
 
     #[test]
@@ -471,8 +484,8 @@ mod tests {
         assert!(domain.upgrade().is_none());
 
         let other = values();
-        assert_eq!(project(&inline, &other), None);
-        assert_eq!(project(&managed, &other), None);
+        assert!(project(&inline, &other).is_none());
+        assert!(project(&managed, &other).is_none());
     }
 
     #[test]

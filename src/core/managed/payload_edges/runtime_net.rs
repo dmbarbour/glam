@@ -97,6 +97,7 @@ mod tests {
     use crate::core_net::{CoreDataKey, CoreRuntimeNet, CoreSpecialization};
     use crate::interaction_net::{
         NetBuilder, NetSpecialization, OperatorCall, ReductionKind, RuntimeNet, RuntimeNetPayload,
+        RuntimeNetPayloadDuplicator,
     };
     use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
@@ -125,8 +126,11 @@ mod tests {
             1,
             3,
         ));
-        let supplied: Arc<[Value]> = Arc::from([first.clone(), second.clone()]);
-        let one_supplied: Arc<[Value]> = Arc::from([first.clone()]);
+        let supplied: Arc<[Value]> = Arc::from([
+            first.duplicate_for_test(&values),
+            second.duplicate_for_test(&values),
+        ]);
+        let one_supplied: Arc<[Value]> = Arc::from([first.duplicate_for_test(&values)]);
         let operators = [
             (
                 CoreOperator::ApplyArity {
@@ -167,7 +171,10 @@ mod tests {
                 }),
                 1,
             ),
-            (CoreOperator::Applicable(first.clone()), 1),
+            (
+                CoreOperator::Applicable(first.duplicate_for_test(&values)),
+                1,
+            ),
             (
                 CoreOperator::List {
                     arity: 3,
@@ -200,7 +207,7 @@ mod tests {
         for (operator, expected_values) in operators {
             let mut value_edges = Vec::new();
             operator.visit_compatibility_value_edges(&mut |value| {
-                value_edges.push(value.clone());
+                value_edges.push(value.duplicate_for_test(&values));
             });
             assert_eq!(value_edges.len(), expected_values);
         }
@@ -227,11 +234,11 @@ mod tests {
         let retained_code = Arc::downgrade(&code);
         let operator = CoreOperator::FunctionCaptures {
             code,
-            supplied: Arc::from([supplied.clone()]),
+            supplied: Arc::from([supplied.duplicate_for_test(&values)]),
         };
         let mut builder = NetBuilder::<CoreSpecialization>::new();
         let [operator_port, result] = builder.operator(operator);
-        let data = builder.data(deferred.clone());
+        let data = builder.data(deferred.duplicate_for_test(&values));
         builder.wire(operator_port, data);
         let runtime = values.instantiate_core_net(&builder.finish(result));
 
@@ -240,8 +247,8 @@ mod tests {
         let pair = runtime
             .test_with(&values, |net| net.active_pairs().next())
             .expect("the operator/data fixture should begin active");
-        let reduction = runtime
-            .test_with_optional_mut(&values, |net| net.reduce_pair(pair))
+        let reduction = values
+            .with_runtime_value_access(|access| runtime.access(&access).reduce_pair_for_test(pair))
             .expect("the ready operator pair should be claimed");
         let ReductionKind::OperatorCall { operator, data } = reduction.kind else {
             panic!("the fixture should claim an operator call")
@@ -253,7 +260,7 @@ mod tests {
                     operator,
                     data,
                 },
-                EvaluationHalt::from_value(&value_access, failure.clone()),
+                EvaluationHalt::from_value(&value_access, value_access.duplicate_value(&failure)),
             );
         });
 
@@ -296,6 +303,14 @@ mod tests {
         type WaitToken = ();
         type StuckReason = ();
         type CallableCheckpoint = ();
+    }
+
+    impl RuntimeNetPayloadDuplicator<ManagedNetFixtureSpecialization> for glam_gc::Mutator<'_> {
+        fn duplicate_data(&self, data: &Gc<ManagedNetFixtureNode>) -> Gc<ManagedNetFixtureNode> {
+            data.duplicate_in(self)
+        }
+
+        fn duplicate_operator(&self, (): &()) {}
     }
 
     struct ManagedNetFixtureNode {
@@ -361,16 +376,17 @@ mod tests {
                 drops: drops.clone(),
             });
             let mut builder = NetBuilder::<ManagedNetFixtureSpecialization>::new();
-            let exposed = builder.data(node);
-            let runtime = builder.finish(exposed).instantiate();
+            let exposed = builder.data(node.duplicate_in(scope.mutator));
+            let runtime = builder.finish(exposed).instantiate_with(scope.mutator);
 
             // SAFETY: `node` is the live owner and target in this matching
             // heap. Its runtime changes from absent to exactly one self edge.
             unsafe {
                 let owner = scope.get_traced_edge(&node);
+                let entering = node.duplicate_in(scope.mutator);
                 scope
                     .mutator
-                    .with_edge_replacement(&node, None, Some(&node), || {
+                    .with_edge_replacement(&node, None, Some(&entering), || {
                         assert!(
                             owner
                                 .runtime

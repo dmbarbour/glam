@@ -112,7 +112,10 @@ mod tests {
 
     impl ManagedIdentityStops for SyntheticStops {
         fn visit_stop(&self, value: &Value, visitor: &mut Visitor<'_>) -> bool {
-            if value == &self.marker {
+            if matches!(
+                (value, &self.marker),
+                (Value::Number(left), Value::Number(right)) if left == right
+            ) {
                 self.marker_visits.fetch_add(1, Ordering::Relaxed);
                 visitor.visit(&self.leaf);
                 return true;
@@ -273,18 +276,23 @@ mod tests {
             &values,
             "I5B raw lazy stop",
             [marker()],
-            |_context, captures| Ok(captures[0].clone()),
+            |context, captures| {
+                Ok(context
+                    .with_value_access(|access| access.values().duplicate_value(&captures[0])))
+            },
         );
         let promise = PromisedValue::new(&values, "I5B raw promise stop");
-        crate::core::set_test_promise(&values, &promise, marker())
-            .expect("the fresh raw promise should accept one assignment");
+        assert!(
+            crate::core::set_test_promise(&values, &promise, marker()).is_ok(),
+            "the fresh raw promise should accept one assignment"
+        );
         let mut builder = NetBuilder::<CoreSpecialization>::new();
         let exposed = builder.data(marker());
         let net = crate::core::NetValue::new(values.instantiate_core_net(&builder.finish(exposed)));
         let stopped = Value::List(List::from_values(vec![
             Value::Lazy(lazy),
             Value::Promised(promise),
-            Value::Function(FunctionValue::new(net.clone(), 1)),
+            Value::Function(FunctionValue::new(net.duplicate_for_test(&values), 1)),
             Value::Net(net),
         ]));
 

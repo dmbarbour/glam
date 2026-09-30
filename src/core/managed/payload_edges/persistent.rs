@@ -134,56 +134,94 @@ mod tests {
         Value::Number(value.into())
     }
 
-    fn edges(value: &impl CompatibilityValueEdges) -> Vec<Value> {
+    fn edges(values: &CoreValueFactory, value: &impl CompatibilityValueEdges) -> Vec<Value> {
         let mut edges = Vec::new();
-        value.visit_compatibility_value_edges(&mut |value| edges.push(value.clone()));
+        values.with_runtime_value_access(|access| {
+            value.visit_compatibility_value_edges(&mut |value| {
+                edges.push(access.duplicate_value(value));
+            });
+        });
         edges
     }
 
     #[test]
     fn persistent_representation_to_visitor_inventory_is_complete() {
+        let values = crate::core::test_value_factory();
         let first = number(1);
         let second = number(2);
 
         let empty = List::empty();
         let mut empty_edges = Vec::new();
-        let empty_stats = visit_list_edges(&empty, &mut |value| empty_edges.push(value.clone()));
+        let empty_stats = visit_list_edges(&empty, &mut |value| {
+            empty_edges.push(value.duplicate_for_test(&values));
+        });
         assert!(empty_edges.is_empty());
         assert_eq!(empty_stats.list.node_visits, 1);
 
-        let singleton = List::from_values(vec![first.clone()]);
-        assert_eq!(edges(&singleton), vec![first.clone()]);
+        let singleton = List::from_values(vec![first.duplicate_for_test(&values)]);
+        crate::core::assert_same_representation_for_test(
+            &values,
+            &edges(&values, &singleton),
+            &vec![first.duplicate_for_test(&values)],
+        );
 
-        let shared = List::from_values(vec![first.clone(), second.clone()]);
+        let shared = List::from_values(vec![
+            first.duplicate_for_test(&values),
+            second.duplicate_for_test(&values),
+        ]);
         let shared_twice = List::concat(shared.clone(), shared);
         let mut shared_edges = Vec::new();
-        let shared_stats =
-            visit_list_edges(&shared_twice, &mut |value| shared_edges.push(value.clone()));
-        assert_eq!(
-            shared_edges,
-            [first.clone(), second.clone(), first.clone(), second.clone()]
+        let shared_stats = visit_list_edges(&shared_twice, &mut |value| {
+            shared_edges.push(value.duplicate_for_test(&values));
+        });
+        crate::core::assert_same_representation_for_test(
+            &values,
+            &shared_edges,
+            &vec![
+                first.duplicate_for_test(&values),
+                second.duplicate_for_test(&values),
+                first.duplicate_for_test(&values),
+                second.duplicate_for_test(&values),
+            ],
         );
         assert_eq!(shared_stats.list.node_visits, 3);
         assert_eq!(shared_stats.list.shared_value_slices, 2);
         assert_eq!(shared_stats.list.value_items, 4);
         assert_eq!(shared_stats.semantic_edges, 4);
 
-        let sliced = List::from_values(vec![number(0), first.clone(), number(3)]).slice(1, 2);
+        let sliced = List::from_values(vec![
+            number(0),
+            first.duplicate_for_test(&values),
+            number(3),
+        ])
+        .slice(1, 2);
         let mut sliced_edges = Vec::new();
-        let sliced_stats = visit_list_edges(&sliced, &mut |value| sliced_edges.push(value.clone()));
-        assert_eq!(sliced_edges, vec![first.clone()]);
+        let sliced_stats = visit_list_edges(&sliced, &mut |value| {
+            sliced_edges.push(value.duplicate_for_test(&values));
+        });
+        crate::core::assert_same_representation_for_test(
+            &values,
+            &sliced_edges,
+            &vec![first.duplicate_for_test(&values)],
+        );
         assert_eq!(sliced_stats.list.shared_value_slices, 1);
         assert_eq!(sliced_stats.list.value_items, 1);
         assert_eq!(sliced_stats.semantic_edges, 1);
 
         let finger = List::concat(
             List::from_bytes(Bytes::from_static(b"bytes")),
-            List::from_values(vec![second.clone()]),
+            List::from_values(vec![second.duplicate_for_test(&values)]),
         )
         .balanced();
         let mut finger_edges = Vec::new();
-        let finger_stats = visit_list_edges(&finger, &mut |value| finger_edges.push(value.clone()));
-        assert_eq!(finger_edges, vec![second.clone()]);
+        let finger_stats = visit_list_edges(&finger, &mut |value| {
+            finger_edges.push(value.duplicate_for_test(&values));
+        });
+        crate::core::assert_same_representation_for_test(
+            &values,
+            &finger_edges,
+            &vec![second.duplicate_for_test(&values)],
+        );
         assert_eq!(finger_stats.list.node_visits, 1);
         assert_eq!(finger_stats.list.chunk_visits, 2);
         assert_eq!(finger_stats.list.byte_segments, 1);
@@ -199,9 +237,11 @@ mod tests {
                 panic!("persistent collection tracing must not force a thunk")
             },
         );
-        let thunk = List::from_thunk(ListThunk::Lazy(lazy.clone()));
+        let thunk = List::from_thunk(ListThunk::Lazy(lazy.duplicate_for_test(&values)));
         let mut thunk_edges = Vec::new();
-        let thunk_stats = visit_list_edges(&thunk, &mut |value| thunk_edges.push(value.clone()));
+        let thunk_stats = visit_list_edges(&thunk, &mut |value| {
+            thunk_edges.push(value.duplicate_for_test(&values));
+        });
         assert!(thunk_edges.is_empty());
         assert_eq!(thunk_stats.list.thunk_items, 1);
         assert_eq!(thunk_stats.semantic_edges, 1);
@@ -212,29 +252,37 @@ mod tests {
             "persistent adapter promise",
         );
         let promise_thunk = List::from_thunk(ListThunk::Promised(promise));
-        assert!(edges(&promise_thunk).is_empty());
+        assert!(edges(&values, &promise_thunk).is_empty());
 
         let nested_key = Key::Dict(Arc::from([(
             Key::List(Arc::from([Key::Number(3.into()), Key::Number(4.into())])),
             Key::Atom(crate::core::Atom::from_key(&Key::binary_from_text("label"))),
         )]));
-        let base = Dict::new_sync().insert(nested_key, first.clone());
-        let version = base
-            .clone()
-            .insert(Key::binary_from_text("second"), second.clone());
+        let base = Dict::new_sync().insert(nested_key, first.duplicate_for_test(&values));
+        let version = base.clone().insert(
+            Key::binary_from_text("second"),
+            second.duplicate_for_test(&values),
+        );
         let mut base_edges = Vec::new();
-        let base_stats = visit_dict_edges(&base, &mut |value| base_edges.push(value.clone()));
-        assert_eq!(base_edges, vec![first.clone()]);
+        let base_stats = visit_dict_edges(&base, &mut |value| {
+            base_edges.push(value.duplicate_for_test(&values));
+        });
+        crate::core::assert_same_representation_for_test(
+            &values,
+            &base_edges,
+            &vec![first.duplicate_for_test(&values)],
+        );
         assert_eq!(base_stats.map_entries, 1);
         assert_eq!(base_stats.key_nodes, 6);
         assert_eq!(base_stats.semantic_edges, 1);
         let mut version_edges = Vec::new();
-        let version_stats =
-            visit_dict_edges(&version, &mut |value| version_edges.push(value.clone()));
+        let version_stats = visit_dict_edges(&version, &mut |value| {
+            version_edges.push(value.duplicate_for_test(&values));
+        });
         assert_eq!(version_edges.len(), 2);
         assert_eq!(version_stats.map_entries, 2);
         assert_eq!(version_stats.semantic_edges, 2);
-        assert!(edges(&Dict::new_sync()).is_empty());
+        assert!(edges(&values, &Dict::new_sync()).is_empty());
     }
 
     enum PersistentFixturePayload {
@@ -322,6 +370,8 @@ mod tests {
                 .expect("the persistent fixture layout should be supported");
             let list_node = allocator.alloc(PersistentFixtureNode::empty(&drops));
             let dict_node = allocator.alloc(PersistentFixtureNode::empty(&drops));
+            let dict_list_edge = dict_node.duplicate_in(scope.mutator);
+            let list_dict_edge = list_node.duplicate_in(scope.mutator);
 
             // SAFETY: both pointers are live in this scope's exact heap. Each
             // closure performs one initially-empty to one-edge replacement.
@@ -336,7 +386,7 @@ mod tests {
                             .expect("persistent fixture payload should not be poisoned") =
                             PersistentFixturePayload::List(crate::list::List::concat(
                                 crate::list::List::from_bytes(Bytes::from_static(b"leaf")),
-                                crate::list::List::from_thunk(dict_node),
+                                crate::list::List::from_thunk(dict_list_edge),
                             ));
                     });
 
@@ -350,7 +400,7 @@ mod tests {
                             .expect("persistent fixture payload should not be poisoned") =
                             PersistentFixturePayload::Dict(
                                 RedBlackTreeMapSync::new_sync()
-                                    .insert(Key::binary_from_text("backedge"), list_node),
+                                    .insert(Key::binary_from_text("backedge"), list_dict_edge),
                             );
                     });
             }

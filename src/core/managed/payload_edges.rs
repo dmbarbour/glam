@@ -270,10 +270,24 @@ mod tests {
         Value::Number(value.into())
     }
 
-    fn edges(value: &impl CompatibilityValueEdges) -> Vec<Value> {
+    fn edges(values: &CoreValueFactory, value: &impl CompatibilityValueEdges) -> Vec<Value> {
         let mut edges = Vec::new();
-        value.visit_compatibility_value_edges(&mut |value| edges.push(value.clone()));
+        value.visit_compatibility_value_edges(&mut |value| {
+            edges.push(value.duplicate_for_test(values));
+        });
         edges
+    }
+
+    fn assert_edges(
+        values: &CoreValueFactory,
+        value: &impl CompatibilityValueEdges,
+        expected: &[Value],
+    ) {
+        let actual = edges(values, value);
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            crate::core::assert_same_representation_for_test(values, actual, expected);
+        }
     }
 
     fn fixture_function(values: &CoreValueFactory) -> FunctionValue {
@@ -284,50 +298,78 @@ mod tests {
     }
 
     fn return_first_capture(
-        _context: &crate::evaluation::EvaluatorStepContext<'_>,
+        context: &crate::evaluation::EvaluatorStepContext<'_>,
         captures: &[Value],
     ) -> Result<Value, crate::core::EvaluationHalt> {
         let [first, ..] = captures else {
             unreachable!("the fixture always supplies a capture")
         };
-        Ok(first.clone())
+        Ok(context.with_value_access(|access| access.values().duplicate_value(first)))
     }
 
     #[test]
     fn argument_and_application_visitors_enumerate_exact_edges() {
+        let values = values();
         let first = number(1);
         let second = number(2);
         let third = number(3);
         let call = BuiltinCall {
             builtin: Builtin::Append,
-            arguments: Arc::from([first.clone(), second.clone()]),
+            arguments: Arc::from([
+                first.duplicate_for_test(&values),
+                second.duplicate_for_test(&values),
+            ]),
         };
-        assert_eq!(edges(&call), [first.clone(), second.clone()]);
+        assert_edges(
+            &values,
+            &call,
+            &[
+                first.duplicate_for_test(&values),
+                second.duplicate_for_test(&values),
+            ],
+        );
 
         let application = LazyApplication {
-            function: first.clone(),
-            arguments: Arc::from([second.clone(), third.clone()]),
+            function: first.duplicate_for_test(&values),
+            arguments: Arc::from([
+                second.duplicate_for_test(&values),
+                third.duplicate_for_test(&values),
+            ]),
         };
-        assert_eq!(
-            edges(&application),
-            [first.clone(), second.clone(), third.clone()]
+        assert_edges(
+            &values,
+            &application,
+            &[
+                first.duplicate_for_test(&values),
+                second.duplicate_for_test(&values),
+                third.duplicate_for_test(&values),
+            ],
         );
 
         let access = LazySource::Access {
             path: Arc::from([CoreDataKey::Index]),
-            arguments: Arc::from([first.clone(), second.clone()]),
+            arguments: Arc::from([
+                first.duplicate_for_test(&values),
+                second.duplicate_for_test(&values),
+            ]),
         };
-        assert_eq!(edges(&access), [first.clone(), second.clone()]);
+        assert_edges(
+            &values,
+            &access,
+            &[
+                first.duplicate_for_test(&values),
+                second.duplicate_for_test(&values),
+            ],
+        );
 
         let function_call = LazySource::FunctionCall {
-            function: fixture_function(&values()),
-            arguments: Arc::from([second.clone(), third.clone()]),
+            function: fixture_function(&values),
+            arguments: Arc::from([
+                second.duplicate_for_test(&values),
+                third.duplicate_for_test(&values),
+            ]),
         };
-        assert_eq!(
-            edges(&function_call),
-            [second, third],
-            "the function stage is a net edge owned by I4E, not a hidden Value edge"
-        );
+        assert_edges(&values, &function_call, &[second, third]);
     }
 
     #[test]
@@ -340,23 +382,40 @@ mod tests {
 
         let semantic = SemanticComputation {
             operation: return_first_capture,
-            captures: Arc::from([first.clone(), second.clone()]),
+            captures: Arc::from([
+                first.duplicate_for_test(&values),
+                second.duplicate_for_test(&values),
+            ]),
         };
-        assert_eq!(edges(&semantic), [first.clone(), second.clone()]);
-        assert_eq!(
-            edges(&FixpointComputation::Function(first.clone())),
-            vec![first.clone()]
+        assert_edges(
+            &values,
+            &semantic,
+            &[
+                first.duplicate_for_test(&values),
+                second.duplicate_for_test(&values),
+            ],
         );
-        assert_eq!(
-            edges(&FixpointComputation::ObjectInstance(first.clone())),
-            vec![first.clone()]
+        assert_edges(
+            &values,
+            &FixpointComputation::Function(first.duplicate_for_test(&values)),
+            &[first.duplicate_for_test(&values)],
         );
-        assert_eq!(
-            edges(&MetadataCarrier::new(second.clone())),
-            vec![second.clone()]
+        assert_edges(
+            &values,
+            &FixpointComputation::ObjectInstance(first.duplicate_for_test(&values)),
+            &[first.duplicate_for_test(&values)],
+        );
+        assert_edges(
+            &values,
+            &MetadataCarrier::new(second.duplicate_for_test(&values)),
+            &[second.duplicate_for_test(&values)],
         );
 
-        let reflection_value = Value::reflection_gate(&values, first.clone(), second.clone());
+        let reflection_value = Value::reflection_gate(
+            &values,
+            first.duplicate_for_test(&values),
+            second.duplicate_for_test(&values),
+        );
         let Value::Lazy(reflection_lazy) = reflection_value else {
             unreachable!("the reflection fixture must be lazy")
         };
@@ -364,39 +423,61 @@ mod tests {
         else {
             unreachable!("the reflection fixture must retain its source")
         };
-        assert_eq!(
-            edges(reflection.as_ref()),
-            [first.clone(), second.clone()],
-            "reflection effect and target are direct managed semantic edges"
+        assert_edges(
+            &values,
+            reflection.as_ref(),
+            &[
+                first.duplicate_for_test(&values),
+                second.duplicate_for_test(&values),
+            ],
         );
 
         let promise = PromisedValue::new(&values, "compatibility visitor promise");
-        crate::core::set_test_promise(&values, &promise, first.clone())
-            .expect("the fresh promise should accept one assignment");
-        assert_eq!(promise.assignment(&values), Some(Ok(first.clone())));
+        assert!(
+            crate::core::set_test_promise(&values, &promise, first.duplicate_for_test(&values))
+                .is_ok(),
+            "the fresh promise should accept one assignment"
+        );
+        crate::core::assert_same_representation_for_test(
+            &values,
+            &promise.assignment(&values),
+            &Some(Ok(first.duplicate_for_test(&values))),
+        );
 
         let failed_promise = PromisedValue::new(&values, "compatibility visitor failure");
-        crate::core::fail_test_promise(
-            &values,
-            &failed_promise,
-            Arc::new(
-                EvaluationFailure::emission(failure_emission.clone())
-                    .with_context(failure_context.clone()),
-            ),
-        )
-        .expect("the fresh promise should accept one failure");
+        assert!(
+            crate::core::fail_test_promise(
+                &values,
+                &failed_promise,
+                Arc::new(values.with_runtime_value_access(|access| {
+                    EvaluationFailure::emission(access.duplicate_value(&failure_emission))
+                        .with_context_in(&access, access.duplicate_value(&failure_context))
+                })),
+            )
+            .is_ok()
+        );
         assert!(matches!(failed_promise.assignment(&values), Some(Err(_))));
 
         let pending = LazyValue::semantic_computation(
             &values,
             "compatibility visitor semantic source",
-            [first.clone(), second.clone()],
+            [
+                first.duplicate_for_test(&values),
+                second.duplicate_for_test(&values),
+            ],
             return_first_capture,
         );
         let source = pending
             .source_snapshot(&values)
             .expect("the pending lazy must retain its source");
-        assert_eq!(edges(&source), [first.clone(), second.clone()]);
+        assert_edges(
+            &values,
+            &source,
+            &[
+                first.duplicate_for_test(&values),
+                second.duplicate_for_test(&values),
+            ],
+        );
 
         let complete = LazyValue::semantic_computation(
             &values,
@@ -404,26 +485,26 @@ mod tests {
             [second],
             return_first_capture,
         );
-        let evaluated = EvaluatedValue::from_whnf(first.clone())
+        let evaluated = EvaluatedValue::from_whnf(first.duplicate_for_test(&values))
             .expect("a number is already in weak-head normal form");
-        assert_eq!(
-            crate::core::cache_test_lazy(&values, &complete, Ok(evaluated)),
-            Ok(EvaluatedValue(first.clone()))
+        let cached = crate::core::cache_test_lazy(&values, &complete, Ok(evaluated));
+        let Ok(cached) = cached else {
+            panic!("the completed lazy should accept its first result")
+        };
+        crate::core::assert_same_representation_for_test(
+            &values,
+            &cached,
+            &EvaluatedValue::from_whnf(first.duplicate_for_test(&values)).unwrap(),
         );
-        assert_eq!(
-            edges(
-                &complete
-                    .cached(&values)
-                    .expect("the completed lazy must retain its result")
-                    .expect("the completed lazy should succeed")
-            ),
-            [first],
-            "terminal result publication replaces the source capture edge"
-        );
+        let Some(Ok(cached)) = complete.cached(&values) else {
+            panic!("the completed lazy must retain its successful result")
+        };
+        assert_edges(&values, &cached, &[first]);
     }
 
     #[test]
     fn shared_cyclic_failure_context_traces_exactly() {
+        let values = values();
         let shared = Value::List(crate::core::List::from_values(vec![number(7)]));
         let cycle = Arc::new(LazyCycle {
             members: vec![
@@ -438,11 +519,19 @@ mod tests {
             ]
             .into_boxed_slice(),
         });
-        let failure = EvaluationFailure::dependency_cycle(cycle.clone())
-            .with_context(shared.clone())
-            .with_context(shared.clone());
+        let failure = values.with_runtime_value_access(|access| {
+            let first = access.duplicate_value(&shared);
+            let second = access.duplicate_value(&shared);
+            EvaluationFailure::dependency_cycle(cycle.clone())
+                .with_context_in(&access, first)
+                .with_context_in(&access, second)
+        });
 
-        assert_eq!(edges(&failure), [shared.clone(), shared]);
+        assert_edges(
+            &values,
+            &failure,
+            &[shared.duplicate_for_test(&values), shared],
+        );
         assert_eq!(
             failure
                 .dependency_cycle_value()
@@ -454,10 +543,11 @@ mod tests {
 
     #[test]
     fn failure_trace_invokes_no_semantic_service() {
+        let values = values();
         let forced = Arc::new(AtomicBool::new(false));
         let forced_by_thunk = forced.clone();
         let sentinel = Value::Lazy(LazyValue::semantic_thunk(
-            &values(),
+            &values,
             "failure visitor sentinel",
             move |_| {
                 forced_by_thunk.store(true, Ordering::Release);
@@ -466,9 +556,16 @@ mod tests {
         ));
         assert!(!forced.load(Ordering::Acquire));
 
-        let failure = EvaluationFailure::emission(sentinel.clone()).with_context(sentinel.clone());
+        let failure = values.with_runtime_value_access(|access| {
+            EvaluationFailure::emission(access.duplicate_value(&sentinel))
+                .with_context_in(&access, access.duplicate_value(&sentinel))
+        });
 
-        assert_eq!(edges(&failure), [sentinel.clone(), sentinel]);
+        assert_edges(
+            &values,
+            &failure,
+            &[sentinel.duplicate_for_test(&values), sentinel],
+        );
         assert!(!forced.load(Ordering::Acquire));
     }
 
@@ -484,12 +581,12 @@ mod tests {
                 "src/core/managed/payload_edges.rs",
                 "one explicit semantic capture",
             ),
-            [capture.clone()],
+            [capture.duplicate_for_test(&values)],
             |_| Err(Arc::new(EvaluationFailure::message("not invoked"))),
         )
         .source_snapshot(&values)
         .expect("the host call should remain pending");
 
-        assert_eq!(edges(&source), [capture]);
+        assert_edges(&values, &source, &[capture]);
     }
 }

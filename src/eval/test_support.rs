@@ -34,7 +34,6 @@ impl ResumableTestValueDemand {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum TestExpr {
     Value(Value),
     List(Arc<[Arc<TestExpr>]>),
@@ -47,7 +46,6 @@ pub(super) enum TestExpr {
     Access(Arc<TestExpr>, Arc<[TestKey]>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum TestKey {
     Key(Key),
     PathIndex(Arc<TestExpr>),
@@ -73,7 +71,7 @@ pub(super) fn eval_closed_expr_in(
     context: &EvalContext,
     expr: &TestExpr,
 ) -> Result<Value, EvaluationHalt> {
-    let code = lower_test_function_code_in(context.values(), 0, expr.clone());
+    let code = lower_test_function_code_in(context.values(), 0, expr);
     assert_eq!(code.capture_count(), 0, "test computation must be closed");
     let computation = Value::Lazy(LazyValue::from_net_computation(
         context.values(),
@@ -104,7 +102,10 @@ pub(super) fn eval_key(value: &Value) -> Result<Key, EvaluationHalt> {
     let singleton = apply_values(
         &context,
         Value::Builtin(Builtin::DictSingleton),
-        vec![value.clone(), Value::Number(1.into())],
+        vec![
+            value.duplicate_for_test(context.values()),
+            Value::Number(1.into()),
+        ],
     )?;
     let Value::Dict(singleton) = context.evaluate_compatibility_whnf(&singleton)? else {
         unreachable!("dictionary singleton must produce a dictionary")
@@ -135,7 +136,7 @@ pub(super) fn closed_function_value_with_access(
     arity: usize,
     body: TestExpr,
 ) -> Value {
-    let code = lower_test_function_code_with_access(access, arity, body);
+    let code = lower_test_function_code_with_access(access, arity, &body);
     assert_eq!(code.capture_count(), 0, "test function must be closed");
     Value::Function(FunctionValue::new(
         NetValue::new(code.runtime().duplicate_in(access)),
@@ -143,24 +144,27 @@ pub(super) fn closed_function_value_with_access(
     ))
 }
 
-pub(super) fn lower_test_function_code(arity: usize, body: TestExpr) -> FunctionCode {
+pub(super) fn lower_test_function_code(
+    arity: usize,
+    body: impl std::borrow::Borrow<TestExpr>,
+) -> FunctionCode {
     lower_test_function_code_in(&crate::core::test_value_factory(), arity, body)
 }
 
 pub(super) fn lower_test_function_code_in(
     values: &CoreValueFactory,
     arity: usize,
-    body: TestExpr,
+    body: impl std::borrow::Borrow<TestExpr>,
 ) -> FunctionCode {
     values.with_runtime_value_access(|access| {
-        lower_test_function_code_with_access(&access, arity, body)
+        lower_test_function_code_with_access(&access, arity, std::borrow::Borrow::borrow(&body))
     })
 }
 
 fn lower_test_function_code_with_access(
     access: &RuntimeValueAccess<'_>,
     arity: usize,
-    body: TestExpr,
+    body: &TestExpr,
 ) -> FunctionCode {
     let mut lowerer = FixtureNetLowerer {
         net: NetBuilder::new(),
@@ -168,7 +172,7 @@ fn lower_test_function_code_with_access(
         access,
     };
     let boundary = lowerer.net.copy(1);
-    lowerer.compile_into(&body, boundary.outputs[0]);
+    lowerer.compile_into(body, boundary.outputs[0]);
     let capture_count = lowerer.local_uses.len().saturating_sub(arity);
     let bind_count = arity + capture_count;
     let exposed = if bind_count == 0 {
@@ -190,7 +194,7 @@ fn lower_test_function_code_with_access(
     };
     let template = lowerer.net.finish(exposed);
     let runtime = access
-        .construct_managed_core_net(template.instantiate())
+        .construct_managed_core_net(template.instantiate_with(access))
         .expect("managed core-net representation must fit one collector run");
     FunctionCode::new(runtime, arity, capture_count)
 }
@@ -204,7 +208,7 @@ struct FixtureNetLowerer<'access, 'scope> {
 impl FixtureNetLowerer<'_, '_> {
     fn compile_into(&mut self, expr: &TestExpr, target: Port) {
         match expr {
-            TestExpr::Value(value) => self.data_into(value.clone(), target),
+            TestExpr::Value(value) => self.data_into(self.access.duplicate_value(value), target),
             TestExpr::List(items) => {
                 if items.is_empty() {
                     self.data_into(Value::List(List::empty()), target);
@@ -314,14 +318,10 @@ impl FixtureNetLowerer<'_, '_> {
 
     fn compile_lazy_into(&mut self, expr: &TestExpr, target: Port) {
         if let TestExpr::Value(value) = expr {
-            self.data_into(value.clone(), target);
+            self.data_into(self.access.duplicate_value(value), target);
             return;
         }
-        let code = Arc::new(lower_test_function_code_with_access(
-            self.access,
-            0,
-            expr.clone(),
-        ));
+        let code = Arc::new(lower_test_function_code_with_access(self.access, 0, expr));
         if code.capture_count() == 0 {
             self.data_into(
                 Value::Lazy(LazyValue::from_net_computation_in(

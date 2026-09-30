@@ -1042,10 +1042,15 @@ fn production_reflection_result_edges_do_not_need_an_external_root() {
     {
         let promise = PromisedValue::new(&values, "reflection effect backedge");
         let reflected = values.with_runtime_value_access(|access| {
-            Value::reflection_task_result_in(&access, Value::Promised(promise.clone()))
+            Value::reflection_task_result_in(
+                &access,
+                Value::Promised(promise.duplicate_in(&access)),
+            )
         });
-        set_test_promise(&values, &promise, reflected.clone())
-            .expect("the reflection backedge promise should start unassigned");
+        assert!(
+            set_test_promise(&values, &promise, reflected).is_ok(),
+            "the reflection backedge promise should start unassigned"
+        );
     }
     let reclaimed = values
         .collect_managed_for_test()
@@ -1076,11 +1081,13 @@ fn production_reflection_gate_target_backedge_reclaims_without_an_external_root(
             Value::Lazy(LazyValue::from_reflection_gate_in(
                 &access,
                 values.unit(),
-                Value::Promised(promise.clone()),
+                Value::Promised(promise.duplicate_in(&access)),
             ))
         });
-        set_test_promise(&values, &promise, reflected.clone())
-            .expect("the reflection target promise should start unassigned");
+        assert!(
+            set_test_promise(&values, &promise, reflected).is_ok(),
+            "the reflection target promise should start unassigned"
+        );
     }
 
     let reclaimed = values

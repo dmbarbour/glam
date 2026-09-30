@@ -570,6 +570,15 @@ impl CoreRuntimeNetAccess<'_, '_> {
             .with_optional_mut_via(&self.runtime, update)
     }
 
+    #[cfg(test)]
+    pub(crate) fn reduce_pair_for_test(&self, pair: ActivePairKey) -> Option<Reduction> {
+        self.runtime
+            .cell()
+            .with_optional_mut_via(&self.runtime, |runtime| {
+                runtime.reduce_pair_with_gateway(pair, &self.runtime)
+            })
+    }
+
     pub(crate) fn poll_interface_demand(&self, interface: Port) -> InterfaceDemand {
         self.runtime
             .cell()
