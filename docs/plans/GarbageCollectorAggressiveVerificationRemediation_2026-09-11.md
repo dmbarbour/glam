@@ -2590,6 +2590,35 @@ inventory relatch:
   typed-edge defects, no pending production root/admission disposition, and no
   unreviewed fixture exception. Update exact counts and fingerprints only from
   the resulting source.
+  - **Pre-closure core-boundary audit, 2026-09-30 — decision required before
+    migration.** The completed all-target trait cutover leaves exactly 26 raw
+    API violations, all in `src/core.rs`: nine `CoreValueFactory` scalar/root
+    projections, three `EvaluatedValue` conversions, two failure operations,
+    two host-call capture operations, two key conversions, two lazy-application
+    borrows, one metadata constructor, three `Value` helpers, and two
+    structural helper functions. Do not turn this into a blind signature
+    rewrite:
+    - `CoreValues` currently registers runtime roots for six canonical atoms
+      and each factory projection opens a new mutator merely to copy an atom.
+      Because the atoms contain no managed edge, the preferred simplification
+      is to retain a root only for initial metadata, construct canonical atoms
+      through caller-held `RuntimeValueAccess`, and then migrate the factory
+      call sites. Confirm this representation decision before changing the
+      roughly 150 unit/scalar call sites.
+    - `EvaluationFailure::Display` reaches into its structured emission to
+      recover a compatibility string/kind without value access. A Rust
+      formatter cannot accept a mutator. Prefer an edge-free display summary
+      captured when the structured failure is constructed; confirm the small
+      duplicated summary field rather than silently weakening the raw-value
+      boundary or degrading compatibility messages.
+    - collector traversal of failure and host-call captures intentionally runs
+      with mutators stopped. These operations must become private tracing
+      implementation details (or explicitly recognized collector primitives),
+      not acquire fake runtime access. This is a correction to the former
+      blanket “remove, not reclassify” wording for the two genuine tracing
+      operations only.
+    The equality/source gate is already closed; these decisions concern raw
+    transport and observation, not restoration of any ambient trait.
 - **D.2h.4 — dynamic closure:** run focused ordinary/aggressive ownership
   checks followed by the routine workspace gates and the complete aggressive
   workspace suite.
