@@ -4955,10 +4955,11 @@ fn abandoned_lazy_claim_can_be_reclaimed_without_poisoning_the_lazy() {
         let expected = owner.values().unit();
         let lazy = LazyValue::semantic_thunk(owner.values(), "reclaimable lazy", {
             let forced = forced.clone();
-            let expected = expected.clone();
+            let values = owner.values().clone();
+            let expected = expected.duplicate_for_test(&values);
             move |_| {
                 forced.store(true, Ordering::Release);
-                Ok(expected.clone())
+                Ok(expected.duplicate_for_test(&values))
             }
         });
         let wait = owner
@@ -4974,7 +4975,7 @@ fn abandoned_lazy_claim_can_be_reclaimed_without_poisoning_the_lazy() {
     );
     let actual = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &observer,
-        &Value::Lazy(lazy.clone()),
+        &Value::Lazy(lazy.duplicate_for_test(observer.values())),
     )
     .expect("another session should reclaim the lazy");
     observer
@@ -4995,13 +4996,14 @@ fn abandoned_whnf_producer_resumes_from_the_lazy_owned_checkpoint() {
         let owner = fixture.context();
         let (promise, promise_root, promise_value) =
             rooted_promise_value(owner.values(), "checkpointed session handoff");
-        let followed = promise.clone();
+        let values = owner.values().clone();
+        let followed = promise.duplicate_for_test(&values);
         let (lazy, lazy_value) =
             rooted_semantic_lazy_value(owner.values(), "checkpointed producer", {
                 let forced = forced.clone();
                 move |_| {
                     forced.fetch_add(1, Ordering::AcqRel);
-                    Ok(Value::Promised(followed.clone()))
+                    Ok(Value::Promised(followed.duplicate_for_test(&values)))
                 }
             });
         let root = lazy.root(owner.values());
@@ -5042,7 +5044,7 @@ fn abandoned_whnf_producer_resumes_from_the_lazy_owned_checkpoint() {
         .expect_without_debug("the shared dependency should accept its assignment");
     let actual = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &observer,
-        &Value::Lazy(lazy.clone()),
+        &Value::Lazy(lazy.duplicate_for_test(observer.values())),
     )
     .expect("a later session should resume the lazy-owned checkpoint");
     observer
@@ -5069,11 +5071,12 @@ fn closing_first_observer_preserves_another_sessions_lazy_route_demand() {
         rooted_promise_value(owner.values(), "cross-session route gate");
     let source_polls = Arc::new(AtomicUsize::new(0));
     let observed = source_polls.clone();
-    let followed = promise.clone();
+    let values = owner.values().clone();
+    let followed = promise.duplicate_for_test(&values);
     let (lazy, _lazy_value) =
         rooted_semantic_lazy_value(owner.values(), "shared route", move |_| {
             observed.fetch_add(1, Ordering::AcqRel);
-            Ok(Value::Promised(followed.clone()))
+            Ok(Value::Promised(followed.duplicate_for_test(&values)))
         });
     let root = lazy.root(owner.values());
     let first = crate::eval::lazy_root_wait(&owner, &root).expect("first demand should admit");
@@ -5118,11 +5121,12 @@ fn last_lazy_route_demand_retires_without_losing_its_checkpoint() {
     drop(promise_value);
     let source_polls = Arc::new(AtomicUsize::new(0));
     let observed = source_polls.clone();
-    let followed = promise.clone();
+    let values = context.values().clone();
+    let followed = promise.duplicate_for_test(&values);
     let (lazy, lazy_value) =
         rooted_semantic_lazy_value(context.values(), "retirable route", move |_| {
             observed.fetch_add(1, Ordering::AcqRel);
-            Ok(Value::Promised(followed.clone()))
+            Ok(Value::Promised(followed.duplicate_for_test(&values)))
         });
     let root = lazy.root(context.values());
     drop(lazy_value);
@@ -5166,7 +5170,7 @@ fn last_lazy_route_demand_retires_without_losing_its_checkpoint() {
     assert_ne!(second.get(), first_id);
     let actual = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &context,
-        &Value::Lazy(lazy.clone()),
+        &Value::Lazy(lazy.duplicate_for_test(context.values())),
     )
     .unwrap();
     context
@@ -5237,11 +5241,12 @@ fn client_and_spark_share_a_lazy_checkpoint_after_client_route_loss() {
         rooted_promise_value(context.values(), "client-spark gate");
     let source_polls = Arc::new(AtomicUsize::new(0));
     let observed = source_polls.clone();
-    let followed = promise.clone();
+    let values = context.values().clone();
+    let followed = promise.duplicate_for_test(&values);
     let (lazy, value) =
         rooted_semantic_lazy_value(context.values(), "client-spark source", move |_| {
             observed.fetch_add(1, Ordering::AcqRel);
-            Ok(Value::Promised(followed.clone()))
+            Ok(Value::Promised(followed.duplicate_for_test(&values)))
         });
     let root = lazy.root(context.values());
     let client = context
@@ -5308,11 +5313,12 @@ fn client_and_background_reflection_share_lazy_progress_after_first_session_clos
         rooted_promise_value(owner.values(), "client-reflection gate");
     let source_polls = Arc::new(AtomicUsize::new(0));
     let observed = source_polls.clone();
-    let followed = promise.clone();
+    let values = owner.values().clone();
+    let followed = promise.duplicate_for_test(&values);
     let (lazy, value) =
         rooted_semantic_lazy_value(owner.values(), "client-reflection source", move |_| {
             observed.fetch_add(1, Ordering::AcqRel);
-            Ok(Value::Promised(followed.clone()))
+            Ok(Value::Promised(followed.duplicate_for_test(&values)))
         });
     let root = lazy.root(owner.values());
     let client = owner
@@ -5479,8 +5485,12 @@ fn settled_task_promise_has_no_rooted_wait_backedge() {
         .task_owned_promise(Arc::from("self-referential task promise"))
         .expect("task-owned promise should register");
 
-    set_promise(&context, &promise, Value::Promised(promise.clone()))
-        .expect_without_debug("the promise should accept a recursive semantic assignment");
+    set_promise(
+        &context,
+        &promise,
+        Value::Promised(promise.duplicate_for_test(context.values())),
+    )
+    .expect_without_debug("the promise should accept a recursive semantic assignment");
     assert!(
         promise
             .task(context.values())
@@ -5512,11 +5522,13 @@ fn owner_session_drop_exactly_wakes_a_task_promise_follower() {
         let lazy = LazyValue::from_access(
             observer.values(),
             Arc::from([]),
-            Arc::from([Value::Promised(promise.clone())]),
+            Arc::from([Value::Promised(
+                promise.duplicate_for_test(observer.values()),
+            )]),
         );
         let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &observer,
-            &Value::Lazy(lazy.clone()),
+            &Value::Lazy(lazy.duplicate_for_test(observer.values())),
         )
         .expect_err_without_debug("the unresolved task promise should block its follower");
         assert!(blocked.blocked_on().is_some());
@@ -5549,12 +5561,14 @@ fn task_cancellation_exactly_wakes_its_promise_follower() {
     let lazy = LazyValue::from_access(
         observer.values(),
         Arc::from([]),
-        Arc::from([Value::Promised(promise.clone())]),
+        Arc::from([Value::Promised(
+            promise.duplicate_for_test(observer.values()),
+        )]),
     );
 
     let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &observer,
-        &Value::Lazy(lazy.clone()),
+        &Value::Lazy(lazy.duplicate_for_test(observer.values())),
     )
     .expect_err_without_debug("the unresolved task promise should block its follower");
     assert!(blocked.blocked_on().is_some());
@@ -5594,7 +5608,7 @@ fn task_terminal_surfaces_publish_under_one_mutation_admission() {
     let values = context.values().clone();
     let probed_dropped_wait = dropped_wait.clone();
     coordinator.set_terminal_publication_probe({
-        let promise = promise.clone();
+        let promise = promise.duplicate_for_test(&values);
         move || {
             let admission_is_held = weak_coordinator
                 .upgrade()
@@ -5643,7 +5657,7 @@ fn assigned_task_promise_is_removed_before_later_task_terminalization() {
         .schedule_task(move |task_context| {
             let promise = PromisedValue::fixpoint(&task_context, "assigned task promise")?;
             promise_sender
-                .send(promise.clone())
+                .send(promise.duplicate_for_test(task_context.values()))
                 .expect("test should receive its task-owned promise");
             Ok(Box::new(AssignPromiseThenYield {
                 promise: Some(

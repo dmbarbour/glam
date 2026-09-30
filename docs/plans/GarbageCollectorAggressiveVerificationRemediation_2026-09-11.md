@@ -2476,6 +2476,16 @@ inventory relatch:
            `src/evaluation/tests.rs` fixture failures and reduces the
            all-target compiler inventory from 188 to 182 without changing
            publication, collection, or scheduling behavior.
+         - **D.2h.2ad — lazy-route and task-promise ownership slice complete
+           2026-09-30.** Abandoned/reclaimed lazy routes, lazy-owned WHNF
+           checkpoints, shared client/spark/background progress, recursive
+           task promises, exact promise followers, and terminal-publication
+           probes now duplicate semantic edges through the context that owns
+           them. Re-entrant lazy sources duplicate captured results on each
+           invocation. This clears 16 more `src/evaluation/tests.rs` fixture
+           failures and reduces the all-target compiler inventory from 182 to
+           166 without changing route retention, cancellation, or atomic
+           terminal-publication semantics.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived
