@@ -32,10 +32,10 @@ fn context() -> OwnedEvalContext {
 }
 
 fn return_first_capture(
-    _context: &EvaluatorStepContext<'_>,
+    context: &EvaluatorStepContext<'_>,
     captures: &[Value],
 ) -> Result<Value, EvaluationHalt> {
-    Ok(captures[0].clone())
+    Ok(context.with_value_access(|access| access.values().duplicate_value(&captures[0])))
 }
 
 fn assigned_promise_chain_value(context: &EvalContext, depth: usize) -> Value {

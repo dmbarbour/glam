@@ -21,7 +21,7 @@ fn install_self_checkpoint(
     poll.with_value_access(context, |access| {
         let work = RegionalWhnfWork::from_parts(
             &access,
-            Value::Lazy(lazy.clone()),
+            Value::Lazy(lazy.duplicate_in(access.values())),
             Vec::new(),
             Default::default(),
             Some(root.id()),

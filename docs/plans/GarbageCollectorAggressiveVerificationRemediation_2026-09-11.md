@@ -2387,6 +2387,17 @@ inventory relatch:
            traits and reduce the all-target compiler inventory from 457 to
            428. Their state-machine protocols and suspension boundaries are
            unchanged.
+         - **D.2h.2u — WHNF support and coordinator ownership slice complete
+           2026-09-30.** Focused WHNF application/access/checkpoint fixtures,
+           lazy-source evaluation, coordinator admission, and the W7C capture
+           callback now preserve semantic edges through their existing value
+           access. Code already inside evaluator or runtime access uses the
+           admitted mutator directly; re-entrant test closures capture the
+           owning factory and duplicate explicitly on each invocation.
+           Runtime-root handoffs duplicate under the named domain instead of
+           cloning a bare value. These fixtures reduce the all-target compiler
+           inventory from 428 to 407 without changing scheduling, yield, or
+           ownership semantics.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived

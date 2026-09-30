@@ -41,8 +41,10 @@ fn static_access_resumes_at_the_exact_intermediate_dictionary() {
     let outer = Key::atom_from_text("outer");
     let leaf = Key::atom_from_text("leaf");
     let promise = PromisedValue::new(context.values(), "access intermediate");
-    let base =
-        Value::Dict(Dict::new_sync().insert(outer.clone(), Value::Promised(promise.clone())));
+    let base = Value::Dict(Dict::new_sync().insert(
+        outer.clone(),
+        Value::Promised(promise.duplicate_for_test(context.values())),
+    ));
     let mut computation = static_access(&context, base, [outer, leaf.clone()]);
 
     assert!(matches!(

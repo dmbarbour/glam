@@ -111,7 +111,7 @@ fn promised_callable_resumes_at_function_demand_before_applying_arguments() {
     let promise = PromisedValue::new(context.values(), "promised callable");
     let mut computation = application(
         &context,
-        Value::Promised(promise.clone()),
+        Value::Promised(promise.duplicate_for_test(context.values())),
         &[Value::Number(41.into()), Value::Number(1.into())],
     );
 
@@ -177,9 +177,10 @@ fn function_application_batches_arguments_without_intermediate_roots() {
 fn effect_payload_undefined_check_resumes_from_the_exact_promise() {
     let context = context();
     let promise = PromisedValue::new(context.values(), "effect payload");
-    let effect = Value::Dict(
-        Dict::new_sync().insert(Key::atom_from_text("eff"), Value::Promised(promise.clone())),
-    );
+    let effect = Value::Dict(Dict::new_sync().insert(
+        Key::atom_from_text("eff"),
+        Value::Promised(promise.duplicate_for_test(context.values())),
+    ));
     let mut computation = application(&context, effect, &[Value::Number(23.into())]);
 
     let WhnfPoll::Deferred(WhnfDeferredRequest::Promise(root)) =
@@ -214,7 +215,7 @@ fn nested_undefined_extra_resumes_without_restarting_tag_recognition() {
     let promise = PromisedValue::new(context.values(), "nested undefined extra");
     let nested = Value::Dict(Dict::new_sync().insert(
         Key::atom_from_text("nested"),
-        Value::Promised(promise.clone()),
+        Value::Promised(promise.duplicate_for_test(context.values())),
     ));
     let effect = Value::Dict(
         Dict::new_sync()
@@ -243,7 +244,7 @@ fn promised_apply_member_resumes_before_the_original_argument_is_consumed() {
     let promise = PromisedValue::new(context.values(), "promised apply member");
     let applicable = Value::Dict(Dict::new_sync().insert(
         Key::atom_from_text("apply"),
-        Value::Promised(promise.clone()),
+        Value::Promised(promise.duplicate_for_test(context.values())),
     ));
     let mut computation = application(
         &context,

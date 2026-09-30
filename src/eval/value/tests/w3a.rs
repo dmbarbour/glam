@@ -24,13 +24,16 @@ fn lazy_source_result_is_installed_once_before_following_a_promise() {
     let _promise_root = promise.root(context.values());
     let evaluations = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&evaluations);
-    let returned = promise.clone();
+    let returned = promise.duplicate_for_test(context.values());
+    let returned_values = context.values().clone();
     let lazy = LazyValue::semantic_thunk(
         context.values(),
         "source result retained by WHNF",
         move |_| {
             observed.fetch_add(1, Ordering::SeqCst);
-            Ok(Value::Promised(returned.clone()))
+            Ok(Value::Promised(
+                returned.duplicate_for_test(&returned_values),
+            ))
         },
     );
     let (lazy, mut machine) = lazy_machine(&context, lazy);

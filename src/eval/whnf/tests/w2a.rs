@@ -15,7 +15,7 @@ fn lazy_computation(
     let mut lazy = None;
     let root = values.construct_runtime_value_root(|access| {
         let value = construct(access);
-        lazy = Some(value.clone());
+        lazy = Some(value.duplicate_in(access));
         Value::Lazy(value)
     });
     (

@@ -36,8 +36,7 @@ fn one_poll_aggregates_every_focus_and_frame_edit_into_one_edge_transition() {
     let values = context.values();
     let (old_root, old) = values.rooted_error_lazy_for_test("W6G.3e old edge");
     let (new_root, new) = values.rooted_error_lazy_for_test("W6G.3e new edge");
-    let focus = values
-        .construct_runtime_value_root(|access| access.duplicate_value(&Value::Lazy(old.clone())));
+    let focus = values.construct_runtime_value_root(|access| Value::Lazy(old.duplicate_in(access)));
     let mut computation = WhnfComputation::from_root(focus);
     let expected = wait(&context);
     let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
@@ -54,19 +53,21 @@ fn one_poll_aggregates_every_focus_and_frame_edit_into_one_edge_transition() {
                         WhnfFrame {
                             kind: WhnfFrameKind::CollectionWalk,
                             cursor: 0,
-                            retained: vec![Value::Lazy(old.clone())],
+                            retained: vec![Value::Lazy(old.duplicate_in(access.values()))],
                         }
                         .into(),
                     );
-                    RegionalWhnfStep::Delegate(Value::Lazy(new.clone()))
+                    RegionalWhnfStep::Delegate(Value::Lazy(new.duplicate_in(access.values())))
                 }
                 2 => {
                     let WhnfContinuation::Generic(frame) = &mut work.frames[0] else {
                         panic!("aggregate poll must retain its installed generic frame")
                     };
                     frame.cursor = 1;
-                    frame.retained.push(Value::Lazy(new.clone()));
-                    RegionalWhnfStep::Delegate(Value::Lazy(old.clone()))
+                    frame
+                        .retained
+                        .push(Value::Lazy(new.duplicate_in(access.values())));
+                    RegionalWhnfStep::Delegate(Value::Lazy(old.duplicate_in(access.values())))
                 }
                 3 => RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Dependency(
                     WhnfDependency::Wait(expected.clone()),

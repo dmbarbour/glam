@@ -3743,7 +3743,7 @@ fn racing_deferred_candidates_install_one_dormant_machine_and_drop_the_loser_unl
             .expect("candidate wait identity should allocate");
         let coordinator = coordinator.clone();
         let demand = session.demand.clone();
-        let lazy = lazy.clone();
+        let lazy = lazy.duplicate_for_test(&session.demand.values);
         let barrier = barrier.clone();
         let drops = drops.clone();
         let all_drops_unlocked = all_drops_unlocked.clone();
@@ -3902,7 +3902,10 @@ fn running_deferred_machine_does_not_serialize_same_session_client_admission() {
     let context = session.context();
     let expected = context.values().unit();
     let client = context
-        .demand_whnf(RuntimeValueRoot::new(context.values(), expected.clone()))
+        .demand_whnf(RuntimeValueRoot::new(
+            context.values(),
+            expected.duplicate_for_test(context.values()),
+        ))
         .expect("same-session client demand should be admitted");
     let client_claim = coordinator
         .claim_client_demand(client.work())
@@ -3975,7 +3978,10 @@ fn retired_deferred_machine_does_not_delay_same_session_client_admission() {
     let context = session.context();
     let expected = context.values().unit();
     let client = context
-        .demand_whnf(RuntimeValueRoot::new(context.values(), expected.clone()))
+        .demand_whnf(RuntimeValueRoot::new(
+            context.values(),
+            expected.duplicate_for_test(context.values()),
+        ))
         .expect("same-session client demand should be admitted");
     let claimed = coordinator
         .claim_client_demand(client.work())
@@ -3996,7 +4002,10 @@ fn worker_and_runtime_pump_selectors_reject_foreground_client_demand() {
     let context = session.context();
     let expected = context.values().unit();
     let client = context
-        .demand_whnf(RuntimeValueRoot::new(context.values(), expected.clone()))
+        .demand_whnf(RuntimeValueRoot::new(
+            context.values(),
+            expected.duplicate_for_test(context.values()),
+        ))
         .expect("foreground demand should be admitted");
 
     assert!(

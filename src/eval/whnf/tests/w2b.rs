@@ -16,9 +16,8 @@ fn promise_computation(
     label: &'static str,
 ) -> (PromisedValue, WhnfComputation) {
     let promise = PromisedValue::new(values, label);
-    let root = values.construct_runtime_value_root(|access| {
-        access.duplicate_value(&Value::Promised(promise.clone()))
-    });
+    let root =
+        values.construct_runtime_value_root(|access| Value::Promised(promise.duplicate_in(access)));
     (promise, WhnfComputation::from_root(root))
 }
 
@@ -70,8 +69,12 @@ fn repeated_assigned_promise_requests_the_canonical_follower() {
     let context = EvalContext::isolated(values.clone());
     let poll = EvaluationPollContext::for_context(&context);
     let (promise, mut computation) = promise_computation(&values, "assigned recursion");
-    crate::core::set_test_promise(&values, &promise, Value::Promised(promise.clone()))
-        .expect_without_debug("promise should accept its own assignment");
+    crate::core::set_test_promise(
+        &values,
+        &promise,
+        Value::Promised(promise.duplicate_for_test(&values)),
+    )
+    .expect_without_debug("promise should accept its own assignment");
     let expected_id = poll.with_value_access(&context, |access| access.promise(&promise).id());
 
     let outcome = poll.with_value_access(&context, |access| {
