@@ -2514,6 +2514,16 @@ inventory relatch:
            outputs per invocation. This clears 31 more `src/eval/tests.rs`
            failures and reduces the all-target compiler inventory from 139 to
            108 without changing retry, caching, or cycle semantics.
+         - **D.2h.2ah — fixpoint, forwarding, and list-fixture ownership slice
+           complete 2026-09-30.** Computed fixpoints, guarded recursion,
+           forwarding chains, lazy WHNF checkpoints, contended producers,
+           recursive-dictionary helpers, list-segment collection, and binary
+           extraction contexts now duplicate values through their owning
+           access or test value domain. Segment collectors perform explicit
+           per-value duplication instead of `cloned`/`to_vec`. This clears 28
+           more `src/eval/tests.rs` failures and reduces the all-target
+           compiler inventory from 108 to 80 without changing evaluation or
+           list traversal behavior.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived

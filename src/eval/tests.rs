@@ -2515,7 +2515,9 @@ fn fixpoint_builtin_resumes_from_its_exact_function_operand() {
     let fixpoint = apply_values(
         &observer,
         Value::Builtin(Builtin::Fixpoint),
-        vec![Value::Promised(function.clone())],
+        vec![Value::Promised(
+            function.duplicate_for_test(observer.values()),
+        )],
     )
     .expect("fixpoint application should build");
 
@@ -2581,13 +2583,16 @@ fn computed_fixpoint_uses_session_local_waits_while_sharing_its_result() {
         &crate::core::test_value_factory(),
         "cross-session fixpoint input",
     );
-    let function = closed_function_value(1, TestExpr::Value(Value::Promised(promise.clone())));
+    let function = closed_function_value(
+        1,
+        TestExpr::Value(Value::Promised(promise.duplicate_for_test(first.values()))),
+    );
     let lazy = LazyValue::computed_fixpoint(
         &crate::core::test_value_factory(),
         "cross-session value fixpoint",
         FixpointComputation::Function(function),
     );
-    let fixpoint = Value::Lazy(lazy.clone());
+    let fixpoint = Value::Lazy(lazy.duplicate_for_test(first.values()));
 
     let first_block =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&first, &fixpoint)
@@ -2617,7 +2622,10 @@ fn computed_fixpoint_uses_session_local_waits_while_sharing_its_result() {
 fn computed_fixpoint_preserves_a_forwarded_structured_failure() {
     let context = test_context();
     let source = LazyValue::error(&crate::core::test_value_factory(), "fixpoint source failed");
-    let function = closed_function_value(1, TestExpr::Value(Value::Lazy(source.clone())));
+    let function = closed_function_value(
+        1,
+        TestExpr::Value(Value::Lazy(source.duplicate_for_test(context.values()))),
+    );
     let fixpoint = LazyValue::computed_fixpoint(
         &crate::core::test_value_factory(),
         "failed value fixpoint",
@@ -2626,7 +2634,7 @@ fn computed_fixpoint_preserves_a_forwarded_structured_failure() {
 
     let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &context,
-        &Value::Lazy(fixpoint.clone()),
+        &Value::Lazy(fixpoint.duplicate_for_test(context.values())),
     )
     .expect_err_without_debug("the source failure should fail the fixpoint");
     assert_eq!(error.to_string(), "fixpoint source failed");
@@ -2683,20 +2691,24 @@ fn forcing_a_lazy_value_reaches_outer_whnf_without_forcing_lazy_fields() {
             Ok(n(42))
         },
     );
-    let expected_field = field.clone();
+    let values = context.values().clone();
+    let expected_field = field.duplicate_for_test(&values);
+    let field = field.duplicate_for_test(&values);
     let forwarded = Value::semantic_thunk(
         &crate::core::test_value_factory(),
         "forwarded dictionary",
         move |_| {
-            Ok(Value::Dict(
-                Dict::new_sync().insert(Key::atom_from_text("field"), field.clone()),
-            ))
+            Ok(Value::Dict(Dict::new_sync().insert(
+                Key::atom_from_text("field"),
+                field.duplicate_for_test(&values),
+            )))
         },
     );
+    let values = context.values().clone();
     let root = Value::semantic_thunk(
         &crate::core::test_value_factory(),
         "forwarding root",
-        move |_| Ok(forwarded.clone()),
+        move |_| Ok(forwarded.duplicate_for_test(&values)),
     );
 
     let forced = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &root)
@@ -2716,6 +2728,7 @@ fn guarded_lazy_self_reference_reaches_dictionary_whnf() {
     let context = test_context();
     let self_reference = Arc::new(std::sync::OnceLock::<LazyValue>::new());
     let captured = self_reference.clone();
+    let values = context.values().clone();
     let lazy = LazyValue::semantic_thunk(
         &crate::core::test_value_factory(),
         "guarded self reference",
@@ -2727,19 +2740,19 @@ fn guarded_lazy_self_reference_reaches_dictionary_whnf() {
                         captured
                             .get()
                             .expect("guarded self reference should be installed")
-                            .clone(),
+                            .duplicate_for_test(&values),
                     ),
                 ),
             ))
         },
     );
     self_reference
-        .set(lazy.clone())
+        .set(lazy.duplicate_for_test(context.values()))
         .expect_without_debug("guarded self reference should be installed once");
 
     let forced = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &context,
-        &Value::Lazy(lazy.clone()),
+        &Value::Lazy(lazy.duplicate_for_test(context.values())),
     )
     .expect("a lazy reference under a dictionary constructor is guarded");
     let Value::Dict(dict) = forced else {
@@ -2760,13 +2773,14 @@ fn lazy_aliases_share_and_cache_their_final_whnf() {
     let Value::Lazy(target_lazy) = &target else {
         unreachable!()
     };
-    let target_lazy = target_lazy.clone();
+    let target_lazy = target_lazy.duplicate_for_test(context.values());
+    let values = context.values().clone();
     let root = LazyValue::semantic_thunk(
         &crate::core::test_value_factory(),
         "shallow alias",
-        move |_| Ok(target.clone()),
+        move |_| Ok(target.duplicate_for_test(&values)),
     );
-    let value = Value::Lazy(root.clone());
+    let value = Value::Lazy(root.duplicate_for_test(context.values()));
 
     assert_eq!(context.deferred_task_count(), 0);
     context.values().assert_same_representation_for_test(
@@ -2805,14 +2819,14 @@ fn demanded_forwarding_chain_caches_whnf_in_every_lazy_member() {
         let middle = LazyValue::from_application_in(
             &access,
             access.duplicate_value(&identity),
-            Arc::from([Value::Lazy(leaf.clone())]),
+            Arc::from([Value::Lazy(leaf.duplicate_in(&access))]),
         );
         let root = LazyValue::from_application_in(
             &access,
             identity,
-            Arc::from([Value::Lazy(middle.clone())]),
+            Arc::from([Value::Lazy(middle.duplicate_in(&access))]),
         );
-        let root_owner = access.root_runtime_value(Value::Lazy(root.clone()));
+        let root_owner = access.root_runtime_value(Value::Lazy(root.duplicate_in(&access)));
         (leaf, middle, root, root_owner)
     });
 
@@ -2842,7 +2856,9 @@ fn lazy_whnf_checkpoint_survives_yield_and_dependency_until_terminal_cache() {
     let lazy = LazyValue::from_application(
         context.values(),
         closed_function_value(1, TestExpr::Local(0)),
-        Arc::from([Value::Promised(promise.clone())]),
+        Arc::from([Value::Promised(
+            promise.duplicate_for_test(context.values()),
+        )]),
     );
     let root = lazy.root(context.values());
     let wait = lazy_root_wait(&context, &root).expect("lazy producer should be admitted");
@@ -2901,12 +2917,12 @@ fn forwarding_chain_preserves_one_structured_failure() {
     let root = LazyValue::from_application(
         &crate::core::test_value_factory(),
         identity,
-        Arc::from([Value::Lazy(leaf.clone())]),
+        Arc::from([Value::Lazy(leaf.duplicate_for_test(context.values()))]),
     );
 
     let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &context,
-        &Value::Lazy(root.clone()),
+        &Value::Lazy(root.duplicate_for_test(context.values())),
     )
     .expect_err_without_debug("forwarding into an error should fail");
     assert_eq!(error.to_string(), "shared failure");
@@ -2957,7 +2973,7 @@ fn concurrent_host_calls_share_one_rooted_producer_across_patient_client_demands
     });
     let value = Value::Lazy(lazy);
     let producer_context = context.clone();
-    let producer_value = value.clone();
+    let producer_value = value.duplicate_for_test(context.values());
     let producer = std::thread::spawn(move || {
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &producer_context,
@@ -2971,7 +2987,7 @@ fn concurrent_host_calls_share_one_rooted_producer_across_patient_client_demands
     let (waiting_sender, waiting_receiver) = std::sync::mpsc::channel();
     let observer_context =
         EvalContext::clone(&context).with_claimed_task_wait_probe(waiting_sender);
-    let observer_value = value.clone();
+    let observer_value = value.duplicate_for_test(context.values());
     let observer = std::thread::spawn(move || {
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &observer_context,
@@ -3166,7 +3182,7 @@ fn module_value_expr(value: &Value) -> TestExpr {
             }
             expr
         }
-        _ => TestExpr::Value(value.clone()),
+        _ => TestExpr::Value(value.duplicate_for_test(&crate::core::test_value_factory())),
     }
 }
 
@@ -3181,7 +3197,7 @@ fn apply_rooted_fixture(root: &Value, expr: TestExpr) -> Value {
     apply_values(
         &test_context(),
         closed_function_value(1, expr),
-        vec![root.clone()],
+        vec![root.duplicate_for_test(&crate::core::test_value_factory())],
     )
     .expect("rooted test expression should lower to a callable function")
 }
@@ -3242,7 +3258,11 @@ fn appends_lists() {
     };
     let mut values = Vec::new();
     list.for_each_segment(&mut |_bytes| Ok::<_, ()>(()), &mut |segment| {
-        values.extend(segment.iter().cloned());
+        values.extend(
+            segment
+                .iter()
+                .map(|value| value.duplicate_for_test(&crate::core::test_value_factory())),
+        );
         Ok(())
     })
     .expect("should walk list");
@@ -3265,14 +3285,19 @@ fn evaluates_mixed_list_segments() {
         panic!("list expression should produce a list");
     };
     let mut saw_bytes = Vec::new();
-    let mut saw_values = Vec::new();
+    let mut saw_values: Vec<Vec<Value>> = Vec::new();
     list.for_each_segment(
         &mut |bytes| {
             saw_bytes.push(bytes.to_vec());
             Ok::<_, ()>(())
         },
         &mut |segment| {
-            saw_values.push(segment.to_vec());
+            saw_values.push(
+                segment
+                    .iter()
+                    .map(|value| value.duplicate_for_test(&crate::core::test_value_factory()))
+                    .collect::<Vec<_>>(),
+            );
             Ok(())
         },
     )
@@ -3344,7 +3369,7 @@ fn binary_output_does_not_flatten_nested_binary_values() {
         .expect_err_without_debug("nested binary values must not be flattened during extraction");
     assert!(error.to_string().contains("byte integers"));
     crate::core::test_value_factory()
-        .assert_same_representation_for_test(failure_context_items(&error), &[]);
+        .assert_same_representation_for_test(&failure_context_items(&error), &[]);
 }
 
 #[test]
@@ -3358,7 +3383,7 @@ fn binary_output_contextualizes_only_nested_evaluation_failures() {
         .expect_err_without_debug("a failed byte computation must propagate");
 
     crate::core::test_value_factory().assert_same_representation_for_test(
-        failure_context_items(&error),
+        &failure_context_items(&error),
         &[evaluation_context_frame("binary_extraction")],
     );
 }
