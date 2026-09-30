@@ -1319,9 +1319,9 @@ fn promise_resolver_drop_invokes_idempotent_retire_once() {
         let CoreValue::Promised(resolved_promise) = promise.clone_core_for_test() else {
             panic!("public promise should retain its managed promise identity")
         };
-        assert_eq!(
-            resolved_promise.assignment(&values.core),
-            Some(Ok(CoreValue::Number(Number::integer(37))))
+        values.core.assert_same_representation_for_test(
+            &resolved_promise.assignment(&values.core),
+            &Some(Ok(CoreValue::Number(Number::integer(37)))),
         );
     }
 
@@ -1664,12 +1664,12 @@ fn public_error_contexts_prepend_without_rewriting_the_message() {
         .unwrap();
 
     assert_eq!(error.to_string(), "original");
-    assert_eq!(
-        diagnostic_contexts(&assembler, &error.diagnostic(&values).unwrap()),
-        [
+    assembler.core_values().assert_same_representation_for_test(
+        &diagnostic_contexts(&assembler, &error.diagnostic(&values).unwrap()),
+        &[
             values.clone_core(&outer).unwrap(),
-            values.clone_core(&inner).unwrap()
-        ]
+            values.clone_core(&inner).unwrap(),
+        ],
     );
 }
 
@@ -1749,9 +1749,9 @@ fn callers_can_attach_path_context_to_semantic_access() {
         .eval(&candidate)
         .expect_err("forcing an intermediate path value should fail");
     assert_eq!(error.to_string(), "path target failed");
-    assert_eq!(
-        diagnostic_contexts(&assembler, &error.diagnostic(&assembler.values()).unwrap()),
-        [values.clone_core(&frame).unwrap()]
+    assembler.core_values().assert_same_representation_for_test(
+        &diagnostic_contexts(&assembler, &error.diagnostic(&assembler.values()).unwrap()),
+        &[values.clone_core(&frame).unwrap()],
     );
 
     let missing = values
@@ -1817,7 +1817,11 @@ fn opaque_compilation_origin_round_trips_only_through_its_reflection_cap() {
     let expected = assembler
         .core_values()
         .with_runtime_value_access(|access| trace.origin_value(&access));
-    assert_eq!(projected.clone_core_for_test(), expected);
+    assert!(same_representation(
+        &assembler,
+        &projected,
+        &public_value(&assembler.core_values(), expected),
+    ));
 }
 
 #[test]
@@ -1891,13 +1895,13 @@ fn source_definitions_add_shallow_opaque_origin_context() {
         .iter()
         .find_map(definition_context)
         .expect("definition initialization should carry source context");
-    assert_eq!(
-        context.get(&*keys::DEFINITION),
-        Some(&CoreValue::binary_from_text("broken"))
+    assembler.core_values().assert_same_representation_for_test(
+        &context.get(&*keys::DEFINITION),
+        &Some(&CoreValue::binary_from_text("broken")),
     );
-    assert_eq!(
-        context.get(&*keys::LINE),
-        Some(&CoreValue::Number(Number::from_usize(3)))
+    assembler.core_values().assert_same_representation_for_test(
+        &context.get(&*keys::LINE),
+        &Some(&CoreValue::Number(Number::from_usize(3))),
     );
     let automatic_origin = context
         .get(&*keys::ORIGIN)
@@ -1940,13 +1944,13 @@ fn source_definitions_add_shallow_opaque_origin_context() {
         .iter()
         .find_map(definition_context)
         .expect("object member initialization should carry source context");
-    assert_eq!(
-        context.get(&*keys::DEFINITION),
-        Some(&CoreValue::binary_from_text("broken"))
+    assembler.core_values().assert_same_representation_for_test(
+        &context.get(&*keys::DEFINITION),
+        &Some(&CoreValue::binary_from_text("broken")),
     );
-    assert_eq!(
-        context.get(&*keys::LINE),
-        Some(&CoreValue::Number(Number::from_usize(6)))
+    assembler.core_values().assert_same_representation_for_test(
+        &context.get(&*keys::LINE),
+        &Some(&CoreValue::Number(Number::from_usize(6))),
     );
 
     let manual = access_path(&assembler, module.value(), "manual")
@@ -1968,9 +1972,10 @@ fn source_definitions_add_shallow_opaque_origin_context() {
         };
         frame.get(&Key::atom_from_text("manual")).cloned()
     });
-    assert_eq!(
-        manual_origin.as_ref(),
-        Some(&automatic_origin),
+    assert!(
+        assembler
+            .core_values()
+            .same_representation_for_test(&manual_origin.as_ref(), &Some(&automatic_origin),),
         "module_origin should expose the same opaque token used by automatic frames; contexts: {:?}",
         failure.contexts()
     );
@@ -2262,23 +2267,21 @@ fn retained_reflection_profile_keeps_only_shared_resources_alive() {
         .expect("the retained profile host should keep runtime resources alive");
     assert!(value_domain.upgrade().is_some());
     let (_, snapshot) = retained.reflection_snapshot();
-    assert_eq!(
-        retained.values().clone_core(snapshot.root()).unwrap(),
+    assert!(
         retained
             .values()
-            .clone_core(&retained.values().empty_dict())
+            .same_representation_for_test(snapshot.root(), &retained.values().empty_dict())
             .unwrap()
     );
     let initial = retained.values().empty_dict();
     let volume = retained
         .create_volume(initial.clone())
         .expect("retained resources should still create volumes");
-    assert_eq!(
+    assert!(
         retained
             .values()
-            .clone_core(&retained.revoke_volume(volume).unwrap())
-            .unwrap(),
-        retained.values().clone_core(&initial).unwrap()
+            .same_representation_for_test(&retained.revoke_volume(volume).unwrap(), &initial)
+            .unwrap()
     );
     drop(snapshot);
     drop(retained);
@@ -2308,7 +2311,9 @@ fn evaluation_context_retains_runtime_cache_and_profile_without_a_cycle() {
     assert!(resources.upgrade().is_some());
     assert!(profile.upgrade().is_some());
     assert!(value_domain.upgrade().is_some());
-    assert_eq!(context.values().unit(), unit);
+    context
+        .values()
+        .assert_same_representation_for_test(&context.values().unit(), &unit);
 
     drop(context);
     assert!(resources.upgrade().is_none());

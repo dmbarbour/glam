@@ -2296,10 +2296,21 @@ inventory relatch:
            observer rather than projected into the crate-private raw-value
            assertion surface. Exact task roots and propagated failure
            allocations retain pointer-identity assertions. The reflection
-           machine fixture now contributes no equality errors and reduces the
-           all-target inventory from 74 to 35; its distinct raw-value
-           duplication and diagnostic-formatting failures remain visible for
-           the subsequent ownership checkpoints.
+         machine fixture now contributes no equality errors and reduces the
+         all-target inventory from 74 to 35; its distinct raw-value
+         duplication and diagnostic-formatting failures remain visible for
+         the subsequent ownership checkpoints.
+         - **D.2h.2m — public API fixture equality complete 2026-09-30.**
+           Promise assignment, diagnostic enrichment and context, compilation
+           origin, runtime-volume, retained-context, and public-value fixtures
+           now compare through either the public `Values` observer or the
+           owning internal factory according to the API layer under test.
+           Public handles are never unwrapped merely to recover ambient raw
+           equality; recursive diagnostic payloads remain within their value
+           domain. The API fixture family now contributes no equality errors
+           and reduces the all-target inventory from 35 to 16. Its remaining
+           raw-value duplication failures stay assigned to the separate
+           ownership migration.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived

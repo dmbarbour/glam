@@ -13,11 +13,10 @@ use crate::reflection::RuntimeInputSequence;
 use super::{FailedReasoningTask, assert_unclaimed_lazy, public_value};
 
 fn same_representation(runtime: &EvaluationRuntime, left: &Value, right: &Value) -> bool {
-    runtime.values().with_access(|values| {
-        let left = values.clone_core(left).unwrap();
-        let right = values.clone_core(right).unwrap();
-        left == right
-    })
+    runtime
+        .values()
+        .same_representation_for_test(left, right)
+        .expect("test values should belong to the runtime")
 }
 
 #[test]

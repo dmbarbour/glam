@@ -755,9 +755,9 @@ fn diagnostic_enrichment_is_an_authoritative_object_mixin() {
     let Some(CoreValue::Dict(interface)) = emission.get(&*crate::core::keys::MSG) else {
         panic!("raw diagnostic should provide msg");
     };
-    assert_eq!(
-        interface.get(&*crate::core::keys::SEVERITY),
-        Some(&crate::core::test_value_factory().error())
+    values.core().assert_same_representation_for_test(
+        &interface.get(&*crate::core::keys::SEVERITY),
+        &Some(&crate::core::test_value_factory().error()),
     );
     assert!(interface.get(&*crate::core::keys::ORIGIN).is_none());
     assert!(emission.get(&*crate::core::keys::SPEC).is_none());
@@ -772,12 +772,12 @@ fn diagnostic_enrichment_is_an_authoritative_object_mixin() {
     let Some(CoreValue::Dict(interface)) = enriched.get(&*crate::core::keys::MSG) else {
         panic!("enriched diagnostic should provide msg");
     };
-    assert_eq!(
-        interface.get(&*crate::core::keys::SEVERITY),
-        Some(&values.core.warn())
+    values.core().assert_same_representation_for_test(
+        &interface.get(&*crate::core::keys::SEVERITY),
+        &Some(&values.core.warn()),
     );
-    assert_eq!(
-        interface
+    values.core().assert_same_representation_for_test(
+        &interface
             .get(&*crate::core::keys::ORIGIN)
             .and_then(|origin| match origin {
                 CoreValue::Dict(origin) => origin.get(&*crate::core::keys::SOURCE),
@@ -787,7 +787,7 @@ fn diagnostic_enrichment_is_an_authoritative_object_mixin() {
                 CoreValue::Dict(source) => source.get(&*crate::core::keys::FILE),
                 _ => None,
             }),
-        Some(&CoreValue::binary_from_text("test.g"))
+        &Some(&CoreValue::binary_from_text("test.g")),
     );
 
     let Some(CoreValue::Dict(spec)) = enriched.get(&*crate::core::keys::SPEC) else {
@@ -818,7 +818,9 @@ fn prepared_diagnostic_enrichment_defers_work_and_matches_eager_enrichment() {
         .enrich(&values)
         .expect("eager enrichment should evaluate")
         .clone_core_for_test();
-    assert_eq!(prepared, eager);
+    values
+        .core()
+        .assert_same_representation_for_test(&prepared, &eager);
 }
 
 #[test]
@@ -856,13 +858,13 @@ fn viewers_can_inherit_one_diagnostic_independently() {
         unreachable!()
     };
     assert!(original.get(&viewer_key).is_none());
-    assert_eq!(
-        first.get(&viewer_key),
-        Some(&CoreValue::binary_from_text("terminal"))
+    values.core().assert_same_representation_for_test(
+        &first.get(&viewer_key),
+        &Some(&CoreValue::binary_from_text("terminal")),
     );
-    assert_eq!(
-        second.get(&viewer_key),
-        Some(&CoreValue::binary_from_text("ide"))
+    values.core().assert_same_representation_for_test(
+        &second.get(&viewer_key),
+        &Some(&CoreValue::binary_from_text("ide")),
     );
     assert!(matches!(
         first
