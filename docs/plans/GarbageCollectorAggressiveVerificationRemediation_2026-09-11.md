@@ -2065,6 +2065,13 @@ inventory relatch:
       Test-expression lowering likewise borrows syntax and duplicates embedded
       semantic values through its lowering access instead of depending on
       `Clone` for either layer.
+    - **Recursive managed-cell fixture seam: complete 2026-09-30.** Lazy,
+      promise, and core-net publication/cycle fixtures now construct nets,
+      duplicate assignments, compare terminal results, and report mutation
+      transitions under their existing runtime access. Promise publication
+      assertions no longer require `Debug` on rejected semantic payloads, and
+      managed self-cycle construction uses explicit persistent-edge duplicates
+      for every independently stored edge.
   - **D.2h.2c — managed facade and collector cutover:** remove the thirteen
     managed-facade traits/identity shims and the five `Gc<T>` traits, add the
     negative compile/source gates, and make the full workspace compile.

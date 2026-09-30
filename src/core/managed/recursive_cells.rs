@@ -1352,14 +1352,40 @@ mod tests {
         CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new())
     }
 
-    fn runtime_with_data(value: Value) -> RuntimeNet<CoreSpecialization> {
+    fn runtime_with_data(
+        access: &RuntimeValueAccess<'_>,
+        value: Value,
+    ) -> RuntimeNet<CoreSpecialization> {
         let mut builder = NetBuilder::<CoreSpecialization>::new();
         let exposed = builder.data(value);
-        builder.finish(exposed).instantiate()
+        builder.finish(exposed).instantiate_with(access)
     }
 
-    fn prepared_runtime(value: i64) -> RuntimeNet<CoreSpecialization> {
-        runtime_with_data(Value::Number(value.into()))
+    fn prepared_runtime(
+        access: &RuntimeValueAccess<'_>,
+        value: i64,
+    ) -> RuntimeNet<CoreSpecialization> {
+        runtime_with_data(access, Value::Number(value.into()))
+    }
+
+    fn duplicate_lazy_result(
+        access: &RuntimeValueAccess<'_>,
+        result: &crate::core::LazyResult,
+    ) -> crate::core::LazyResult {
+        match result {
+            Ok(value) => Ok(value.duplicate_in(access)),
+            Err(failure) => Err(Arc::new(failure.duplicate_in(access))),
+        }
+    }
+
+    fn duplicate_promise_assignment(
+        access: &RuntimeValueAccess<'_>,
+        assignment: &ManagedPromiseAssignment,
+    ) -> ManagedPromiseAssignment {
+        match assignment {
+            Ok(value) => Ok(access.duplicate_value(value)),
+            Err(failure) => Err(Arc::new(failure.duplicate_in(access))),
+        }
     }
 
     fn replace_lazy_source_for_cycle<Edge: Trace>(
@@ -1400,10 +1426,12 @@ mod tests {
                 .construct_rooted_managed_promise(label)
                 .expect("the managed promise cell should fit a run");
             let promise = PromisedValue::from_root(&root, &access);
-            root.access(&access)
-                .expect("the rooted promise should be accessible")
-                .publish(Ok(wrap(Value::Promised(promise))))
-                .expect("the fresh promise should accept its compatibility cycle");
+            assert!(
+                root.access(&access)
+                    .expect("the rooted promise should be accessible")
+                    .publish(Ok(wrap(Value::Promised(promise))))
+                    .is_ok()
+            );
             root
         });
 
@@ -1423,7 +1451,7 @@ mod tests {
 
     fn assert_single_promise_failure_cycle_through(
         label: &str,
-        wrap: impl FnOnce(Value) -> EvaluationFailure,
+        wrap: impl FnOnce(&RuntimeValueAccess<'_>, Value) -> EvaluationFailure,
     ) {
         let values = new_values();
         let baseline = values.collect_managed_for_test().unwrap_or_else(|failure| {
@@ -1434,10 +1462,12 @@ mod tests {
                 .construct_rooted_managed_promise(label)
                 .expect("the managed promise cell should fit a run");
             let promise = PromisedValue::from_root(&root, &access);
-            root.access(&access)
-                .expect("the rooted promise should be accessible")
-                .publish(Err(Arc::new(wrap(Value::Promised(promise)))))
-                .expect("the fresh promise should accept its failure cycle");
+            assert!(
+                root.access(&access)
+                    .expect("the rooted promise should be accessible")
+                    .publish(Err(Arc::new(wrap(&access, Value::Promised(promise)))))
+                    .is_ok()
+            );
             root
         });
 
@@ -1481,11 +1511,13 @@ mod tests {
                 &promise_edge.0,
                 source_for(Value::Promised(promise)),
             );
-            promise_root
-                .access(&access)
-                .expect("the rooted promise should be accessible")
-                .publish(Ok(Value::Lazy(lazy)))
-                .expect("the fresh promise should accept its lazy assignment");
+            assert!(
+                promise_root
+                    .access(&access)
+                    .expect("the rooted promise should be accessible")
+                    .publish(Ok(Value::Lazy(lazy)))
+                    .is_ok()
+            );
             drop(promise_root);
             lazy_root
         });
@@ -2080,7 +2112,7 @@ mod tests {
             let mut builder = NetBuilder::<CoreSpecialization>::new();
             let exposed = builder.data(Value::Number(67.into()));
             let net = access
-                .construct_managed_core_net(builder.finish(exposed).instantiate())
+                .construct_managed_core_net(builder.finish(exposed).instantiate_with(access))
                 .expect("managed core-net representation must fit one collector run");
             assert!(matches!(
                 values.collect_managed_for_test(),
@@ -2127,9 +2159,23 @@ mod tests {
             assert_eq!(lazy.id(), root.id());
             assert_eq!(lazy.label().as_ref(), "prepared lazy");
             assert!(lazy.source_snapshot().is_some());
-            assert_eq!(root.cache(&access, Ok(winner.clone())), Ok(winner.clone()));
-            assert_eq!(root.cache(&access, Ok(loser)), Ok(winner.clone()));
-            assert_eq!(lazy.cached(), Some(Ok(winner)));
+            let first = root.cache(&access, Ok(winner.duplicate_in(&access)));
+            crate::core::assert_same_representation_for_test(
+                &values,
+                &first,
+                &Ok(winner.duplicate_in(&access)),
+            );
+            let second = root.cache(&access, Ok(loser));
+            crate::core::assert_same_representation_for_test(
+                &values,
+                &second,
+                &Ok(winner.duplicate_in(&access)),
+            );
+            crate::core::assert_same_representation_for_test(
+                &values,
+                &lazy.cached(),
+                &Some(Ok(winner)),
+            );
             assert!(lazy.source_snapshot().is_none());
         });
 
@@ -2158,15 +2204,21 @@ mod tests {
             assert_eq!(promise.id(), root.id());
             assert_eq!(promise.runtime_id(), values.runtime_id());
             assert!(promise.producer().is_none());
-            assert_eq!(
-                root.publish_detached(&access, Ok(winner.clone()), |_| ()),
-                Ok(())
+            assert!(
+                root.publish_detached(&access, Ok(access.duplicate_value(&winner)), |_| (),)
+                    .is_ok()
             );
-            assert_eq!(
-                root.publish_detached(&access, Ok(loser.clone()), |_| ()),
-                Err(Ok(loser))
+            let rejected =
+                root.publish_detached(&access, Ok(access.duplicate_value(&loser)), |_| ());
+            let Err(rejected) = rejected else {
+                panic!("the second promise publication should lose")
+            };
+            crate::core::assert_same_representation_for_test(&values, &rejected, &Ok(loser));
+            crate::core::assert_same_representation_for_test(
+                &values,
+                &promise.assignment(),
+                &Some(Ok(winner)),
             );
-            assert_eq!(promise.assignment(), Some(Ok(winner)));
         });
         assert!(root.is_terminal());
 
@@ -2193,16 +2245,17 @@ mod tests {
                     "transitioning lazy",
                     LazySource::Access {
                         path: Arc::from([]),
-                        arguments: Arc::from([Value::Lazy(sentinel.clone())]),
+                        arguments: Arc::from([Value::Lazy(sentinel.duplicate_in(&access))]),
                     },
                 )
                 .expect("the managed lazy cell should fit a run");
             let result =
                 EvaluatedValue::from_whnf(Value::List(List::from_values(vec![Value::Lazy(
-                    sentinel.clone(),
+                    sentinel.duplicate_in(&access),
                 )])))
                 .expect("a list is already in weak-head normal form");
-            assert_eq!(root.cache(&access, Ok(result.clone())), Ok(result));
+            let cached = root.cache(&access, Ok(result.duplicate_in(&access)));
+            crate::core::assert_same_representation_for_test(&values, &cached, &Ok(result));
             assert!(root.access(&access).unwrap().source_snapshot().is_none());
         });
 
@@ -2237,7 +2290,8 @@ mod tests {
             let failure = Arc::new(EvaluationFailure::emission(Value::List(List::from_values(
                 vec![Value::Promised(emitted)],
             ))));
-            assert_eq!(root.cache(&access, Err(Arc::clone(&failure))), Err(failure));
+            let cached = root.cache(&access, Err(Arc::clone(&failure)));
+            crate::core::assert_same_representation_for_test(&values, &cached, &Err(failure));
             assert!(root.access(&access).unwrap().source_snapshot().is_none());
         });
 
@@ -2267,9 +2321,15 @@ mod tests {
                 .expect("the managed promise cell should fit a run");
             let promise = root.access(&access).unwrap();
             let detached = promise
-                .publish_detached(Ok(target.clone()), |assignment| assignment.clone())
-                .expect("the first detached publication should win");
-            assert_eq!(detached, Ok(target.clone()));
+                .publish_detached(Ok(access.duplicate_value(&target)), |assignment| {
+                    duplicate_promise_assignment(&access, assignment)
+                })
+                .unwrap_or_else(|_| panic!("the first detached publication should win"));
+            crate::core::assert_same_representation_for_test(
+                &values,
+                &detached,
+                &Ok(access.duplicate_value(&target)),
+            );
 
             let guarded_root = access
                 .construct_rooted_managed_promise("guarded publication ordering")
@@ -2280,13 +2340,18 @@ mod tests {
                 .publish_guarded(
                     &coordinator,
                     &mutation,
-                    Err(Arc::new(EvaluationFailure::emission(target.clone()))),
-                    |assignment| assignment.clone(),
+                    Err(Arc::new(EvaluationFailure::emission(
+                        access.duplicate_value(&target),
+                    ))),
+                    |assignment| duplicate_promise_assignment(&access, assignment),
                 )
-                .expect("the first guarded publication should win");
-            assert_eq!(
-                observed,
-                Err(Arc::new(EvaluationFailure::emission(target.clone())))
+                .unwrap_or_else(|_| panic!("the first guarded publication should win"));
+            crate::core::assert_same_representation_for_test(
+                &values,
+                &observed,
+                &Err(Arc::new(EvaluationFailure::emission(
+                    access.duplicate_value(&target),
+                ))),
             );
             drop(mutation);
             wake.notify();
@@ -2339,7 +2404,7 @@ mod tests {
 
         let winner_values = values.clone();
         let winner_root = promise_root.clone();
-        let winner_assignment_for_thread = first_assignment.clone();
+        let winner_assignment_for_thread = first_assignment.duplicate_for_test(&values);
         let winner = std::thread::spawn(move || {
             let published = winner_values.with_runtime_value_access(|access| {
                 winner_root
@@ -2363,12 +2428,13 @@ mod tests {
             })
         });
 
-        assert_eq!(winner.join().expect("winner thread panicked"), Ok(()));
+        assert!(winner.join().expect("winner thread panicked").is_ok());
         assert!(loser.join().expect("loser thread panicked").is_err());
         values.with_runtime_value_access(|access| {
-            assert_eq!(
-                promise_root.access(&access).unwrap().assignment(),
-                Some(Ok(first_assignment))
+            crate::core::assert_same_representation_for_test(
+                &values,
+                &promise_root.access(&access).unwrap().assignment(),
+                &Some(Ok(first_assignment)),
             );
         });
         let records = probe.records();
@@ -2385,7 +2451,7 @@ mod tests {
         let values = new_values();
         let root = values.with_runtime_value_access(|access| {
             access
-                .construct_rooted_managed_core_net(prepared_runtime(5))
+                .construct_rooted_managed_core_net(prepared_runtime(&access, 5))
                 .expect("the managed core net should fit one collector slot")
         });
 
@@ -2393,9 +2459,15 @@ mod tests {
             let net = root
                 .access(&access)
                 .expect("the matching value domain should authorize its core net");
-            assert_eq!(
-                net.with(|runtime| runtime.interface_data(runtime.exposed()).cloned()),
-                Some(Value::Number(5.into()))
+            let data = net.with(|runtime| {
+                runtime
+                    .interface_data(runtime.exposed())
+                    .map(|value| access.duplicate_value(value))
+            });
+            crate::core::assert_same_representation_for_test(
+                &values,
+                &data,
+                &Some(Value::Number(5.into())),
             );
             let before = net.cell().with_revisions(|_| ()).1;
             net.with_mut(|_| ());
@@ -2422,7 +2494,9 @@ mod tests {
             builder.wire(erase, data);
             let exposed = builder.data(Value::Number(97.into()));
             let net_root = access
-                .construct_rooted_managed_core_net(builder.finish(exposed).instantiate())
+                .construct_rooted_managed_core_net(
+                    builder.finish(exposed).instantiate_with(&access),
+                )
                 .expect("the managed core net should fit one collector slot");
             (lazy_root, net_root)
         });
@@ -2501,7 +2575,7 @@ mod tests {
                     .construct_rooted_managed_promise("rooted promise")
                     .expect("the managed promise cell should fit a run"),
                 access
-                    .construct_rooted_managed_core_net(prepared_runtime(17))
+                    .construct_rooted_managed_core_net(prepared_runtime(&access, 17))
                     .expect("the managed core-net cell should fit a run"),
             )
         });
@@ -2511,11 +2585,15 @@ mod tests {
                 lazy.access(&access).unwrap().label().as_ref(),
                 "rooted lazy"
             );
-            assert_eq!(
-                net.access(&access)
-                    .unwrap()
-                    .with(|runtime| runtime.interface_data(runtime.exposed()).cloned()),
-                Some(Value::Number(17.into()))
+            let data = net.access(&access).unwrap().with(|runtime| {
+                runtime
+                    .interface_data(runtime.exposed())
+                    .map(|value| access.duplicate_value(value))
+            });
+            crate::core::assert_same_representation_for_test(
+                &values,
+                &data,
+                &Some(Value::Number(17.into())),
             );
         });
 
@@ -2551,15 +2629,19 @@ mod tests {
                 .allocate_managed_promise("split promise")
                 .expect("the managed promise cell should fit a run");
             let net_edge = access
-                .allocate_managed_core_net(prepared_runtime(61))
+                .allocate_managed_core_net(prepared_runtime(&access, 61))
                 .expect("the managed core-net cell should fit a run");
 
             assert_eq!(lazy_edge.access(&access).label().as_ref(), "split lazy");
-            assert_eq!(
-                net_edge
-                    .access(&access)
-                    .with(|runtime| runtime.interface_data(runtime.exposed()).cloned()),
-                Some(Value::Number(61.into()))
+            let data = net_edge.access(&access).with(|runtime| {
+                runtime
+                    .interface_data(runtime.exposed())
+                    .map(|value| access.duplicate_value(value))
+            });
+            crate::core::assert_same_representation_for_test(
+                &values,
+                &data,
+                &Some(Value::Number(61.into())),
             );
 
             (
@@ -2619,7 +2701,7 @@ mod tests {
                 .construct_managed_promise("returned regional promise")
                 .expect("the returned managed promise should fit a run");
             let net = access
-                .construct_managed_core_net(prepared_runtime(83))
+                .construct_managed_core_net(prepared_runtime(&access, 83))
                 .expect("the returned managed core net should fit a run");
             Value::List(List::from_values(vec![
                 Value::Lazy(lazy),
@@ -2663,7 +2745,11 @@ mod tests {
             let lazy = access
                 .construct_failed_managed_lazy("prepared failure", failure.clone())
                 .expect("the managed failed lazy should fit a run");
-            assert_eq!(lazy.access(access).cached(), Some(Err(failure.clone())));
+            crate::core::assert_same_representation_for_test(
+                &values,
+                &lazy.access(access).cached(),
+                &Some(Err(failure.clone())),
+            );
             assert!(lazy.access(access).source_snapshot().is_none());
             Value::Lazy(lazy)
         });
@@ -2691,7 +2777,7 @@ mod tests {
                 .construct_managed_lazy("abandoned partial lazy", LazySource::Error)
                 .expect("the partial managed lazy should fit a run");
             let _net = access
-                .construct_managed_core_net(prepared_runtime(89))
+                .construct_managed_core_net(prepared_runtime(&access, 89))
                 .expect("the partial managed core net should fit a run");
             Err::<Value, &'static str>("construction stopped")
         });
@@ -2770,10 +2856,12 @@ mod tests {
                 .construct_rooted_managed_promise("promise self cycle")
                 .expect("the managed promise cell should fit a run");
             let promise = PromisedValue::from_root(&root, &access);
-            root.access(&access)
-                .expect("the rooted promise should be accessible")
-                .publish(Ok(Value::Promised(promise)))
-                .expect("the fresh promise should accept its self assignment");
+            assert!(
+                root.access(&access)
+                    .expect("the rooted promise should be accessible")
+                    .publish(Ok(Value::Promised(promise)))
+                    .is_ok()
+            );
             root
         });
 
@@ -2801,8 +2889,8 @@ mod tests {
             let allocator = access
                 .allocator::<ManagedCoreNetCell>()
                 .expect("the managed core-net cell should fit a run");
-            let edge = allocator.alloc(ManagedCoreNetCell::new(prepared_runtime(23)));
-            let managed_edge = ManagedCoreNetEdge(edge);
+            let edge = allocator.alloc(ManagedCoreNetCell::new(prepared_runtime(&access, 23)));
+            let managed_edge = ManagedCoreNetEdge(access.duplicate_edge(&edge));
 
             // SAFETY: `edge` is live in this access region's exact heap and
             // representation. The replacement adds precisely the self edge
@@ -2814,7 +2902,7 @@ mod tests {
                     .scope
                     .mutator
                     .with_edge_replacement(&edge, None, Some(&edge), || {
-                        cell.runtime.with_mut(|runtime| {
+                        managed_edge.access(&access).with_mut(|runtime| {
                             runtime.begin_copy(PreparedCopySource::new(
                                 crate::core_net::CoreRuntimeNet::from_managed_edge(
                                     managed_edge.duplicate_in(&access),
@@ -2883,7 +2971,7 @@ mod tests {
             let lazy_root = access.root_managed_lazy(&lazy_edge);
             let lazy = LazyValue::from_root(&lazy_root, &access);
             let net_edge = access
-                .allocate_managed_core_net(runtime_with_data(Value::Lazy(lazy)))
+                .allocate_managed_core_net(runtime_with_data(&access, Value::Lazy(lazy)))
                 .expect("the managed core-net cell should fit a run");
             let net_root = access.root_managed_core_net(&net_edge);
             let net =
@@ -2926,17 +3014,19 @@ mod tests {
             let promise_root = access.root_managed_promise(&promise_edge);
             let promise = PromisedValue::from_root(&promise_root, &access);
             let net_edge = access
-                .allocate_managed_core_net(runtime_with_data(Value::Promised(promise)))
+                .allocate_managed_core_net(runtime_with_data(&access, Value::Promised(promise)))
                 .expect("the managed core-net cell should fit a run");
             let net_root = access.root_managed_core_net(&net_edge);
             let net =
                 crate::core_net::CoreRuntimeNet::from_managed_edge(net_edge.duplicate_in(&access));
 
-            promise_root
-                .access(&access)
-                .expect("the rooted promise should be accessible")
-                .publish(Ok(Value::Net(NetValue::new(net))))
-                .expect("the fresh promise should accept its net assignment");
+            assert!(
+                promise_root
+                    .access(&access)
+                    .expect("the rooted promise should be accessible")
+                    .publish(Ok(Value::Net(NetValue::new(net))))
+                    .is_ok()
+            );
             drop(net_root);
             promise_root
         });
@@ -2973,7 +3063,7 @@ mod tests {
             let lazy = LazyValue::from_root(&lazy_root, &access);
             let promise = PromisedValue::from_root(&promise_root, &access);
             let net_edge = access
-                .allocate_managed_core_net(runtime_with_data(Value::Promised(promise)))
+                .allocate_managed_core_net(runtime_with_data(&access, Value::Promised(promise)))
                 .expect("the managed core-net cell should fit a run");
             let net_root = access.root_managed_core_net(&net_edge);
             let net =
@@ -2985,11 +3075,13 @@ mod tests {
                 &net_edge.0,
                 LazySource::NetComputation(NetValue::new(net)),
             );
-            promise_root
-                .access(&access)
-                .expect("the rooted promise should be accessible")
-                .publish(Ok(Value::Lazy(lazy)))
-                .expect("the fresh promise should accept its lazy assignment");
+            assert!(
+                promise_root
+                    .access(&access)
+                    .expect("the rooted promise should be accessible")
+                    .publish(Ok(Value::Lazy(lazy)))
+                    .is_ok()
+            );
             drop((promise_root, net_root));
             lazy_root
         });
@@ -3076,18 +3168,20 @@ mod tests {
             let promise_root = access.root_managed_promise(&promise_edge);
             let promise = PromisedValue::from_root(&promise_root, &access);
             let net_edge = access
-                .allocate_managed_core_net(runtime_with_data(Value::Promised(promise)))
+                .allocate_managed_core_net(runtime_with_data(&access, Value::Promised(promise)))
                 .expect("the managed core-net cell should fit a run");
             let net_root = access.root_managed_core_net(&net_edge);
             let stage = NetValue::new(crate::core_net::CoreRuntimeNet::from_managed_edge(net_edge));
 
-            promise_root
-                .access(&access)
-                .expect("the rooted promise should be accessible")
-                .publish(Ok(Value::Function(crate::core::FunctionValue::new(
-                    stage, 1,
-                ))))
-                .expect("the fresh promise should accept its function-stage cycle");
+            assert!(
+                promise_root
+                    .access(&access)
+                    .expect("the rooted promise should be accessible")
+                    .publish(Ok(Value::Function(crate::core::FunctionValue::new(
+                        stage, 1,
+                    ))))
+                    .is_ok()
+            );
             drop(net_root);
             promise_root
         });
@@ -3110,15 +3204,19 @@ mod tests {
     fn managed_promise_cycle_through_failure_emission_is_traced_and_reclaimed() {
         assert_single_promise_failure_cycle_through(
             "failure emission compatibility",
-            EvaluationFailure::emission,
+            |_, backedge| EvaluationFailure::emission(backedge),
         );
     }
 
     #[test]
     fn managed_promise_cycle_through_failure_context_is_traced_and_reclaimed() {
-        assert_single_promise_failure_cycle_through("failure context compatibility", |backedge| {
-            EvaluationFailure::message("compatibility failure").with_context(backedge)
-        });
+        assert_single_promise_failure_cycle_through(
+            "failure context compatibility",
+            |access, backedge| {
+                EvaluationFailure::message("compatibility failure")
+                    .with_context_in(access, backedge)
+            },
+        );
     }
 
     #[test]
@@ -3134,9 +3232,13 @@ mod tests {
             let supplied = builder.data(Value::Number(1.into()));
             builder.wire(function, callable);
             builder.wire(argument, supplied);
-            let mut runtime = builder.finish(result).instantiate();
+            let mut runtime = builder.finish(result).instantiate_with(&access);
+            let pair = runtime
+                .active_pairs()
+                .next()
+                .expect("the Bind/Data pair should begin ready");
             let reduction = runtime
-                .reduce_next()
+                .reduce_pair_with_gateway(pair, &access)
                 .expect("the Bind/Data pair should become a claimed call");
             let crate::interaction_net::ReductionKind::Call { bind, data } = reduction.kind else {
                 panic!("the stuck-reason fixture should claim a call")
@@ -3194,7 +3296,7 @@ mod tests {
                 ));
                 let argument = builder.data(Value::Number(2.into()));
                 builder.wire(input, argument);
-                let runtime = builder.finish(result).instantiate();
+                let runtime = builder.finish(result).instantiate_with(&access);
                 let pair = runtime
                     .active_pairs()
                     .next()
@@ -3205,13 +3307,15 @@ mod tests {
                 let net_root = access.root_managed_core_net(&net_edge);
                 let net = crate::core_net::CoreRuntimeNet::from_managed_edge(net_edge);
 
-                promise_root
-                    .access(&access)
-                    .expect("the rooted promise should be accessible")
-                    .publish(Ok(Value::Net(NetValue::new(
-                        net.duplicate_for_test(&values),
-                    ))))
-                    .expect("the fresh promise should accept its operator-work cycle");
+                assert!(
+                    promise_root
+                        .access(&access)
+                        .expect("the rooted promise should be accessible")
+                        .publish(Ok(Value::Net(NetValue::new(
+                            net.duplicate_for_test(&values),
+                        ))))
+                        .is_ok()
+                );
                 if claim {
                     assert!(matches!(
                         net.access(&access).step_active_pair(pair),
@@ -3258,7 +3362,7 @@ mod tests {
             let promise_root = access.root_managed_promise(&promise_edge);
             let promise = PromisedValue::from_root(&promise_root, &access);
 
-            let source_runtime = runtime_with_data(Value::Promised(promise));
+            let source_runtime = runtime_with_data(&access, Value::Promised(promise));
             let remote = source_runtime.exposed();
             let source_edge = access
                 .allocate_managed_core_net(source_runtime)
@@ -3266,7 +3370,7 @@ mod tests {
             let source_root = access.root_managed_core_net(&source_edge);
             let source = crate::core_net::CoreRuntimeNet::from_managed_edge(source_edge);
 
-            let mut target_runtime = prepared_runtime(0);
+            let mut target_runtime = prepared_runtime(&access, 0);
             let cursor = target_runtime.begin_copy(PreparedCopySource::new(source, remote));
             assert_ne!(
                 cursor,
@@ -3279,11 +3383,13 @@ mod tests {
             let target_root = access.root_managed_core_net(&target_edge);
             let target = crate::core_net::CoreRuntimeNet::from_managed_edge(target_edge);
 
-            promise_root
-                .access(&access)
-                .expect("the rooted promise should be accessible")
-                .publish(Ok(Value::Net(NetValue::new(target))))
-                .expect("the fresh promise should accept its cursor cycle");
+            assert!(
+                promise_root
+                    .access(&access)
+                    .expect("the rooted promise should be accessible")
+                    .publish(Ok(Value::Net(NetValue::new(target))))
+                    .is_ok()
+            );
             drop((source_root, target_root));
             promise_root
         });

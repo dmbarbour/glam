@@ -1194,8 +1194,10 @@ mod tests {
                 resource: PassiveResource(resource_count),
             });
             let owner = owners.alloc(TransitionFixture {
-                edges: Mutex::new(vec![old]),
+                edges: Mutex::new(vec![old.duplicate_in(access.scope.mutator)]),
             });
+            let first_transition = first.duplicate_in(access.scope.mutator);
+            let second_transition = second.duplicate_in(access.scope.mutator);
             // SAFETY: every allocation belongs to this exact access region.
             // The visitors report the one old and two new edges around the
             // single mutex-protected representation update.
@@ -1203,13 +1205,17 @@ mod tests {
                 access.with_managed_edge_transition(
                     &owner,
                     |visitor| old.trace(visitor),
-                    |visitor| [first, second].trace(visitor),
+                    |visitor| {
+                        first.trace(visitor);
+                        second.trace(visitor);
+                    },
                     || {
                         *owner
                             .get_unchecked(access.scope.mutator)
                             .edges
                             .lock()
-                            .expect("transition fixture mutex was poisoned") = vec![first, second];
+                            .expect("transition fixture mutex was poisoned") =
+                            vec![first_transition, second_transition];
                     },
                 );
             }
@@ -1233,7 +1239,8 @@ mod tests {
                 .alloc(TransitionFixture {
                     edges: Mutex::new(Vec::new()),
                 });
-            (access.root(owner), owner)
+            let root = access.root(owner.duplicate_in(access.scope.mutator));
+            (root, owner)
         });
         let changed = AtomicUsize::new(0);
 
