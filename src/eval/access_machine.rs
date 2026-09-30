@@ -1331,7 +1331,7 @@ mod tests {
             &chunk,
             Value::Binary(bytes::Bytes::from_static(&[2_u8, 3_u8])),
         )
-        .expect("the deferred binary key-list chunk should accept its assignment");
+        .expect_without_debug("the deferred binary key-list chunk should accept its assignment");
 
         let keys = loop {
             match poll_key_list(&mut machine, &context, 1) {
@@ -1386,7 +1386,7 @@ mod tests {
             .collect_managed_for_test()
             .expect("the lazy-owned access checkpoint must survive route loss");
         crate::core::set_test_promise(context.values(), &promise, Value::Number(42.into()))
-            .expect("the dynamic key promise should accept its assignment");
+            .expect_without_debug("the dynamic key promise should accept its assignment");
 
         context.values().assert_same_representation_for_test(
             &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
@@ -1412,7 +1412,7 @@ mod tests {
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
             .expect_err_without_debug("the recursive key member must remain a dependency");
         crate::core::set_test_promise(context.values(), &promise, Value::Number(7.into()))
-            .expect("the recursive key promise should accept its assignment");
+            .expect_without_debug("the recursive key promise should accept its assignment");
         context.values().assert_same_representation_for_test(
             &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
                 .expect("recursive key should resume"),
@@ -1443,7 +1443,7 @@ mod tests {
             &promise,
             Value::List(List::from_values(vec![Value::Number(2.into())])),
         )
-        .expect("the path chunk promise should accept its assignment");
+        .expect_without_debug("the path chunk promise should accept its assignment");
         context.values().assert_same_representation_for_test(
             &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
                 .expect("computed path should resume"),
@@ -1494,7 +1494,7 @@ mod tests {
             &middle,
             Value::List(List::from_values(vec![Value::Number(2.into())])),
         )
-        .expect("the middle path promise should accept its assignment");
+        .expect_without_debug("the middle path promise should accept its assignment");
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
             .expect_err_without_debug("the completed path must next demand the selected base");
         context
@@ -1511,7 +1511,7 @@ mod tests {
                 ),
             )),
         )
-        .expect("the selected base promise should accept its assignment");
+        .expect_without_debug("the selected base promise should accept its assignment");
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
             .expect_err_without_debug("the selected value must be demanded before completion");
         context
@@ -1519,7 +1519,7 @@ mod tests {
             .collect_managed_for_test()
             .expect("the WHNF handoff must survive while its result is pending");
         crate::core::set_test_promise(context.values(), &result, Value::binary_from_text("done"))
-            .expect("the selected result promise should accept its assignment");
+            .expect_without_debug("the selected result promise should accept its assignment");
         context.values().assert_same_representation_for_test(
             &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
                 .expect("the resumed route should demand the selected result"),

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::core::{CoreValueFactory, EvaluationFailure, PromisedValue, Value};
 use crate::evaluation::{EvalContext, EvaluationPollContext};
 use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
+use crate::test_support::ResultTestExt as _;
 
 use super::*;
 
@@ -28,7 +29,7 @@ fn assigned_promise_success_delegates_without_a_follower() {
     let poll = EvaluationPollContext::for_context(&context);
     let (promise, mut computation) = promise_computation(&values, "assigned success");
     crate::core::set_test_promise(&values, &promise, Value::Number(47.into()))
-        .expect("promise should accept one assignment");
+        .expect_without_debug("promise should accept one assignment");
 
     let outcome = poll.with_value_access(&context, |access| {
         computation.poll_semantic_in(&access, &mut WhnfStepBudget::new(2))
@@ -51,7 +52,7 @@ fn assigned_promise_failure_remains_the_original_structured_failure() {
     let (promise, mut computation) = promise_computation(&values, "assigned failure");
     let failure = Arc::new(EvaluationFailure::message("promise failed"));
     crate::core::fail_test_promise(&values, &promise, failure.clone())
-        .expect("promise should accept one failure");
+        .expect_without_debug("promise should accept one failure");
 
     let outcome = poll.with_value_access(&context, |access| {
         computation.poll_semantic_in(&access, &mut WhnfStepBudget::new(1))
@@ -70,7 +71,7 @@ fn repeated_assigned_promise_requests_the_canonical_follower() {
     let poll = EvaluationPollContext::for_context(&context);
     let (promise, mut computation) = promise_computation(&values, "assigned recursion");
     crate::core::set_test_promise(&values, &promise, Value::Promised(promise.clone()))
-        .expect("promise should accept its own assignment");
+        .expect_without_debug("promise should accept its own assignment");
     let expected_id = poll.with_value_access(&context, |access| access.promise(&promise).id());
 
     let outcome = poll.with_value_access(&context, |access| {
@@ -101,7 +102,7 @@ fn unassigned_promise_leaves_as_its_exact_root_then_resumes_after_assignment() {
     assert_eq!(context.deferred_task_count(), 0);
 
     crate::core::set_test_promise(&values, &promise, Value::Number(53.into()))
-        .expect("promise should remain assignable after inspection");
+        .expect_without_debug("promise should remain assignable after inspection");
     let resumed = poll.with_value_access(&context, |access| {
         computation.poll_semantic_in(&access, &mut WhnfStepBudget::new(2))
     });

@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
+use crate::test_support::ResultTestExt as _;
 
 fn lazy_machine(context: &EvalContext, lazy: LazyValue) -> (LazyValue, LazyTaskMachine) {
     let root = lazy.root(context.values());
@@ -52,7 +53,7 @@ fn lazy_source_result_is_installed_once_before_following_a_promise() {
     }
 
     crate::core::set_test_promise(context.values(), &promise, Value::Number(79.into()))
-        .expect("the source-result promise should accept one assignment");
+        .expect_without_debug("the source-result promise should accept one assignment");
     assert!(matches!(
         machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)),
         EvaluationMachinePoll::Yielded
@@ -72,7 +73,7 @@ fn lazy_source_result_is_installed_once_before_following_a_promise() {
         .expect("the lazy task must publish one terminal cache");
     context.values().assert_same_representation_for_test(
         &cached
-            .expect("the retained promise should succeed")
+            .expect_without_debug("the retained promise should succeed")
             .into_value(),
         &Value::Number(79.into()),
     );

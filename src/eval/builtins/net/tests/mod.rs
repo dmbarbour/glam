@@ -97,7 +97,7 @@ fn initial_pure_builder_state_has_one_brand_and_empty_journals() {
         ]: [Value; 6] = super::netlist::strict_record(access, &state, "initial builder state")
             .expect("initial builder state must be strict")
             .try_into()
-            .expect("initial builder state must retain fixed arity");
+            .expect_without_debug("initial builder state must retain fixed arity");
 
         let Value::Opaque(encoded_brand) = encoded_brand else {
             panic!("initial builder brand must be opaque")
@@ -440,7 +440,7 @@ fn public_construction_data_backedge_is_lazy_and_reclaimed_after_roots_drop() {
         )
     });
     crate::core::set_test_promise(values, &promise, backedge)
-        .expect("the backedge promise should accept the owning construction");
+        .expect_without_debug("the backedge promise should accept the owning construction");
     let live = values
         .collect_managed_for_test()
         .expect("the rooted construction cycle should be collectible");

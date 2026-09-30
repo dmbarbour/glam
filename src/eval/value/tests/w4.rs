@@ -448,7 +448,7 @@ fn w6g1f3i_application_checkpoint_survives_promise_and_route_loss() {
     assert_lazy_checkpoint_kind(&context, &machine, ManagedLazyCheckpointKindTag::Whnf);
 
     crate::core::set_test_promise(context.values(), &function, Value::Builtin(Builtin::Add))
-        .expect("the function promise should accept its assignment");
+        .expect_without_debug("the function promise should accept its assignment");
     let machine = resume_after_lazy_route_loss(&context, &retained, machine);
     assert_same_value(
         &context,
@@ -492,7 +492,7 @@ fn w6g1f3i_function_fixpoint_checkpoint_survives_promise_and_route_loss() {
     assert!(blocked.blocked_on().is_some());
 
     crate::core::set_test_promise(context.values(), &result, number(17))
-        .expect("the fixpoint result promise should accept its assignment");
+        .expect_without_debug("the fixpoint result promise should accept its assignment");
     assert_same_value(
         &context,
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
@@ -522,7 +522,7 @@ fn w6g1f3i_static_access_checkpoint_survives_promise_and_route_loss() {
     assert_lazy_checkpoint_kind(&context, &machine, ManagedLazyCheckpointKindTag::Whnf);
 
     crate::core::set_test_promise(context.values(), &result, number(23))
-        .expect("the static access result promise should accept its assignment");
+        .expect_without_debug("the static access result promise should accept its assignment");
     let machine = resume_after_lazy_route_loss(&context, &retained, machine);
     assert_same_value(
         &context,
@@ -585,7 +585,7 @@ fn w6g1f3i_semantic_thunk_result_survives_route_loss_without_callback_replay() {
     assert_lazy_checkpoint_kind(&context, &machine, ManagedLazyCheckpointKindTag::Whnf);
 
     crate::core::set_test_promise(context.values(), &result, number(31))
-        .expect("the semantic thunk result promise should accept assignment");
+        .expect_without_debug("the semantic thunk result promise should accept assignment");
     let machine = resume_after_lazy_route_loss(&context, &retained, machine);
     assert_same_value(
         &context,
@@ -622,7 +622,7 @@ fn w6g1f3i_semantic_computation_result_survives_route_loss() {
     assert_lazy_checkpoint_kind(&context, &machine, ManagedLazyCheckpointKindTag::Whnf);
 
     crate::core::set_test_promise(context.values(), &result, number(37))
-        .expect("the semantic computation result promise should accept assignment");
+        .expect_without_debug("the semantic computation result promise should accept assignment");
     let machine = resume_after_lazy_route_loss(&context, &retained, machine);
     assert_same_value(
         &context,
@@ -1185,7 +1185,7 @@ fn net_whnf_checkpoint_survives_route_loss_and_collection() {
         crate::eval::test_support::TestExpr::Value(context.values().unit()),
     );
     crate::core::set_test_promise(context.values(), &promise, callable)
-        .expect("the retained callable promise should accept its assignment");
+        .expect_without_debug("the retained callable promise should accept its assignment");
     pump_to_ready(&context, &wait);
 
     let retained = context
@@ -1273,7 +1273,7 @@ fn object_checkpoint_preserves_linearization_prefixes_across_route_loss_and_coll
                 ),
         ),
     )
-    .expect("the retained root spec should accept its assignment");
+    .expect_without_debug("the retained root spec should accept its assignment");
 
     let _name_wait = poll_object_until_blocked(&mut machine, &poll);
     machine = resume_after_object_route_loss(&context, &retained, machine);
@@ -1282,7 +1282,7 @@ fn object_checkpoint_preserves_linearization_prefixes_across_route_loss_and_coll
         &root_name,
         Value::binary_from_text("root"),
     )
-    .expect("the retained root name should accept its assignment");
+    .expect_without_debug("the retained root name should accept its assignment");
 
     let _chunk_wait = poll_object_until_blocked(&mut machine, &poll);
     machine = resume_after_object_route_loss(&context, &retained, machine);
@@ -1294,7 +1294,7 @@ fn object_checkpoint_preserves_linearization_prefixes_across_route_loss_and_coll
             Value::Promised(second_dependency.clone()),
         ])),
     )
-    .expect("the retained dependency chunk should accept its assignment");
+    .expect_without_debug("the retained dependency chunk should accept its assignment");
 
     let first_dependency_wait = poll_object_until_blocked(&mut machine, &poll);
     let WorkDependency::Wait(first_dependency_wait) = first_dependency_wait else {
@@ -1310,7 +1310,7 @@ fn object_checkpoint_preserves_linearization_prefixes_across_route_loss_and_coll
         &second_dependency,
         object_spec("second dependency", Value::List(List::empty())),
     )
-    .expect("the retained nested dependency should accept its assignment");
+    .expect_without_debug("the retained nested dependency should accept its assignment");
 
     let value = 'complete: {
         for attempt in 0..256 {
@@ -1406,7 +1406,7 @@ fn object_checkpoint_does_not_replay_mixin_stages_after_route_loss() {
     collect_between_handoffs(&context);
     assert_eq!(defs_demands.load(Ordering::SeqCst), 1);
     crate::core::set_test_promise(context.values(), &base_result, self_function)
-        .expect("the retained base application should accept its function result");
+        .expect_without_debug("the retained base application should accept its function result");
 
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
         .expect_err_without_debug("the self application must suspend");
@@ -1417,7 +1417,7 @@ fn object_checkpoint_does_not_replay_mixin_stages_after_route_loss() {
         &self_result,
         Value::Dict(Dict::new_sync().insert(Key::binary_from_text("answer"), number(42))),
     )
-    .expect("the retained self application should accept its result");
+    .expect_without_debug("the retained self application should accept its result");
 
     let Value::Dict(value) =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
@@ -1522,7 +1522,7 @@ fn list_effect_sequence_and_cut_checkpoints_survive_deferred_chunks_and_route_lo
         &sequence_chunk,
         Value::List(List::from_values(vec![number(1)])),
     )
-    .expect("the deferred sequence chunk should accept its assignment");
+    .expect_without_debug("the deferred sequence chunk should accept its assignment");
     assert!(matches!(
         drive_list_effect_after_route_loss(&context, &sequence_retained, sequence_machine,),
         Value::List(_)
@@ -1545,7 +1545,7 @@ fn list_effect_sequence_and_cut_checkpoints_survive_deferred_chunks_and_route_lo
         &cut_operation,
         list_effect_value(fixed_list_handler(&context, number(43))),
     )
-    .expect("the deferred cut operation should accept its assignment");
+    .expect_without_debug("the deferred cut operation should accept its assignment");
     if let WorkDependency::Wait(wait) = cut_dependency {
         pump_to_ready(&context, &wait);
     }
@@ -1588,7 +1588,7 @@ fn direct_result_list_effect_recipes_preserve_order_and_route_loss_progress() {
         &first_chunk,
         Value::List(List::from_values(vec![number(1)])),
     )
-    .expect("the direct-result prefix should accept its assignment");
+    .expect_without_debug("the direct-result prefix should accept its assignment");
     let mapped = drive_list_effect_after_route_loss(&context, &retained, machine);
 
     for (index, expected) in [number(1), number(2)].into_iter().enumerate() {
@@ -1720,7 +1720,7 @@ fn list_effect_fix_allocates_one_future_for_each_observed_alternative() {
         let assigned = future
             .assignment(context.values())
             .expect("the future must be assigned when its alternative publishes")
-            .expect("the selected future must be assigned successfully");
+            .expect_without_debug("the selected future must be assigned successfully");
         let Value::Promised(assigned) = assigned else {
             panic!("the selected head must assign the alternative's own future")
         };
@@ -1799,7 +1799,7 @@ fn builder_checkpoint_survives_path_and_state_dependencies_without_replay() {
         &path_promise,
         path_root.clone_core_for_test(),
     )
-    .expect("the path dependency should accept its assignment");
+    .expect_without_debug("the path dependency should accept its assignment");
 
     let (machine, dependency) =
         poll_until_blocked_after_route_loss(&context, &retained, machine, &mut route_losses);
@@ -1814,7 +1814,7 @@ fn builder_checkpoint_survives_path_and_state_dependencies_without_replay() {
         &state_promise,
         state_root.clone_core_for_test(),
     )
-    .expect("the state dependency should accept its assignment");
+    .expect_without_debug("the state dependency should accept its assignment");
 
     let results = drive_after_route_loss(&context, &retained, machine, &mut route_losses);
     let (outcome, tail) =
@@ -1883,7 +1883,7 @@ fn builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencie
         machine = resume_after_builtin_route_loss(&context, &retained, blocked);
         route_losses += 1;
         crate::core::set_test_promise(context.values(), promise, value.clone_core_for_test())
-            .expect("the builder wire dependency should accept its assignment");
+            .expect_without_debug("the builder wire dependency should accept its assignment");
     }
 
     let results = drive_after_route_loss(&context, &retained, machine, &mut route_losses);
@@ -1954,7 +1954,7 @@ fn builder_copy_checkpoint_preserves_count_then_state_dependencies_without_repla
         machine = resume_after_builtin_route_loss(&context, &retained, blocked);
         route_losses += 1;
         crate::core::set_test_promise(context.values(), promise, value.clone_core_for_test())
-            .expect("the builder copy dependency should accept its assignment");
+            .expect_without_debug("the builder copy dependency should accept its assignment");
     }
 
     let results = drive_after_route_loss(&context, &retained, machine, &mut route_losses);
@@ -2467,7 +2467,7 @@ fn public_construction_waits_for_first_result_before_ready_right_branch() {
         &first,
         Value::List(List::from_values(vec![number(1)])),
     )
-    .expect("the first construction result should accept its assignment");
+    .expect_without_debug("the first construction result should accept its assignment");
 
     let failure = drive_failure_after_route_loss(&context, &retained, machine, &mut route_losses);
     assert!(failure.to_string().contains("produced multiple results"));
@@ -2510,7 +2510,7 @@ fn public_construction_retains_first_result_while_second_promise_blocks() {
         &second,
         Value::List(List::from_values(vec![number(2)])),
     )
-    .expect("the second construction result should accept its assignment");
+    .expect_without_debug("the second construction result should accept its assignment");
 
     let failure = drive_failure_after_route_loss(&context, &retained, machine, &mut route_losses);
     assert!(failure.to_string().contains("produced multiple results"));
@@ -2547,7 +2547,7 @@ fn public_construction_exposed_port_promise_retains_one_context_after_route_loss
     let machine = resume_after_builtin_route_loss(&context, &retained, machine);
     route_losses += 1;
     crate::core::set_test_promise(context.values(), &exposed, number(42))
-        .expect("the exposed-port promise should accept its assignment");
+        .expect_without_debug("the exposed-port promise should accept its assignment");
 
     let failure = drive_failure_after_route_loss(&context, &retained, machine, &mut route_losses);
     assert!(failure.to_string().contains("requires a construction port"));
@@ -2606,7 +2606,7 @@ fn public_construction_builder_operand_promise_resumes_same_program() {
     let machine = resume_after_builtin_route_loss(&context, &retained, machine);
     route_losses += 1;
     crate::core::set_test_promise(context.values(), &count, number(0))
-        .expect("the copy-count promise should accept its assignment");
+        .expect_without_debug("the copy-count promise should accept its assignment");
     pump_to_ready(&context, &wait);
 
     let net = drive_after_route_loss(&context, &retained, machine, &mut route_losses);
@@ -2649,7 +2649,7 @@ fn public_construction_checkpoint_cycle_is_reclaimed_after_roots_drop() {
     let backedge = values
         .with_runtime_value_access(|access| Value::Lazy(LazyValue::from_root(&retained, &access)));
     crate::core::set_test_promise(values, &count, backedge)
-        .expect("the count promise should accept a backedge to its construction");
+        .expect_without_debug("the count promise should accept a backedge to its construction");
     let live = values
         .collect_managed_for_test()
         .expect("the rooted construction checkpoint cycle should be collectible");

@@ -3,6 +3,7 @@
 //! Every ordering assertion is driven by explicit single-poll calls. Repeated
 //! execution under an uncontrolled scheduler is deliberately not evidence.
 
+use crate::test_support::ResultTestExt as _;
 use std::sync::{Arc, Mutex};
 
 use super::coordinator::{
@@ -42,7 +43,7 @@ fn assigned_promise_chain_value(context: &EvalContext, depth: usize) -> Value {
     for _ in 0..depth {
         let promise = PromisedValue::new(context.values(), "W7C assigned promise alias");
         crate::core::set_test_promise(context.values(), &promise, current)
-            .expect("a fresh promise alias should accept its assignment");
+            .expect_without_debug("a fresh promise alias should accept its assignment");
         current = Value::Promised(promise);
     }
     current

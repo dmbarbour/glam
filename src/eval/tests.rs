@@ -79,7 +79,7 @@ fn apply_test_values(function: Value, arguments: impl IntoIterator<Item = Value>
 fn cached_value(lazy: &LazyValue) -> Value {
     lazy.cached(&crate::core::test_value_factory())
         .expect("lazy value should be cached")
-        .expect("lazy value should succeed")
+        .expect_without_debug("lazy value should succeed")
         .into_value()
 }
 
@@ -342,7 +342,7 @@ fn object_local_name_resumes_a_lazy_parts_tail_without_replaying_its_name() {
         .expect_err_without_debug("a later route must resume the exact lazy parts tail");
     assert_eq!(name_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &tail, Value::List(List::from_values(vec![n(2)])))
-        .expect("the parts tail should accept its assignment");
+        .expect_without_debug("the parts tail should accept its assignment");
     observer
         .values()
         .collect_managed_for_test()
@@ -418,7 +418,7 @@ fn object_with_defs_resumes_a_promised_spec_without_replaying_its_object() {
             ),
     );
     set_promise(&owner, &spec, resolved_spec)
-        .expect("the object specification should accept its assignment");
+        .expect_without_debug("the object specification should accept its assignment");
     observer
         .values()
         .collect_managed_for_test()
@@ -496,7 +496,7 @@ fn composed_object_defs_resume_the_extension_without_replaying_prior_defs() {
         )),
     );
     set_promise(&owner, &extension, extension_defs)
-        .expect("the composed extension should accept its assignment");
+        .expect_without_debug("the composed extension should accept its assignment");
     observer
         .values()
         .collect_managed_for_test()
@@ -593,7 +593,7 @@ fn object_override_resumes_a_nested_prior_without_replaying_completed_prefix() {
             Dict::new_sync().insert(Key::binary_from_text("old"), Value::binary_from_text("old")),
         ),
     )
-    .expect("the nested prior should accept its assignment");
+    .expect_without_debug("the nested prior should accept its assignment");
     observer
         .values()
         .collect_managed_for_test()
@@ -702,7 +702,7 @@ fn object_dict_defs_resume_the_dict_without_replaying_the_base() {
         &dict,
         Value::Dict(Dict::new_sync().insert(Key::binary_from_text("dict"), n(42))),
     )
-    .expect("the definitions dictionary should accept its assignment");
+    .expect_without_debug("the definitions dictionary should accept its assignment");
     observer
         .values()
         .collect_managed_for_test()
@@ -776,7 +776,7 @@ fn object_from_dict_resumes_a_promised_spec_without_replaying_its_dictionary() {
         .expect_err_without_debug("a later route must resume the exact dictionary specification");
     assert_eq!(dictionary_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &spec, Value::Dict(Dict::new_sync()))
-        .expect("the specification should accept its undefined assignment");
+        .expect_without_debug("the specification should accept its undefined assignment");
     observer
         .values()
         .collect_managed_for_test()
@@ -1148,7 +1148,8 @@ fn net_arity_does_not_demand_the_net_before_its_arity() {
     assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
     assert_eq!(net_demands.load(Ordering::SeqCst), 0);
 
-    set_promise(&context, &arity, n(0)).expect("the arity should accept its assignment");
+    set_promise(&context, &arity, n(0))
+        .expect_without_debug("the arity should accept its assignment");
     context.values().assert_same_representation_for_test(
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &application)
             .expect("net arity should resume in source order"),
@@ -1199,7 +1200,7 @@ fn net_arity_resumes_its_net_without_replaying_the_completed_arity() {
         application
     });
     set_promise(&context, &net, Value::Net(identity))
-        .expect("the net operand should accept its assignment");
+        .expect_without_debug("the net operand should accept its assignment");
     context
         .values()
         .collect_managed_for_test()
@@ -1563,7 +1564,7 @@ fn promised_values_fail_fast_without_poisoning_later_assignment() {
         "promised value was observed before initialization"
     );
     assert!(promised.assignment(context.values()).is_none());
-    set_promise(&context, &promised, n(42)).unwrap();
+    set_promise(&context, &promised, n(42)).unwrap_without_debug();
     context.values().assert_same_representation_for_test(
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
         &n(42),
@@ -1604,7 +1605,7 @@ fn deferred_computation_blockage_does_not_poison_its_lazy_cache() {
         "the scheduler must not record a permanent lazy failure while its input may change"
     );
 
-    set_promise(&session, &promise, n(42)).unwrap();
+    set_promise(&session, &promise, n(42)).unwrap_without_debug();
     observer.values().assert_same_representation_for_test(
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value).unwrap(),
         &n(42),
@@ -1718,7 +1719,7 @@ fn deferred_list_effect_work_blocks_and_resumes() {
     assert!(blocked.blocked_on().is_some());
 
     let return_effect = list_return_effect(n(42));
-    set_promise(&session, &promise, return_effect).unwrap();
+    set_promise(&session, &promise, return_effect).unwrap_without_debug();
 
     observer.values().assert_same_representation_for_test(
         &list_to_value_items(&observer, &results)
@@ -1757,7 +1758,7 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
         &continuation,
         closed_function_value(1, TestExpr::Value(list_return_effect(n(42)))),
     )
-    .expect("the sequence continuation should accept its assignment");
+    .expect_without_debug("the sequence continuation should accept its assignment");
     session.values().assert_same_representation_for_test(
         &list_to_value_items(&session, &sequence).unwrap(),
         &[n(42)],
@@ -1782,7 +1783,7 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
             .is_some()
     );
     set_promise(&session, &cut_operation, list_return_effect(n(43)))
-        .expect("the cut operation should accept its assignment");
+        .expect_without_debug("the cut operation should accept its assignment");
     session.values().assert_same_representation_for_test(
         &list_to_value_items(&session, &cut).unwrap(),
         &[n(43)],
@@ -1809,7 +1810,7 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
             .is_some()
     );
     set_promise(&session, &fix_operation, list_return_effect(n(44)))
-        .expect("the fix operation should accept its assignment");
+        .expect_without_debug("the fix operation should accept its assignment");
     session.values().assert_same_representation_for_test(
         &list_to_value_items(&session, &fixed).unwrap(),
         &[n(44)],
@@ -1855,7 +1856,7 @@ fn list_effect_fix_defers_function_demand_and_resumes_without_replay() {
         &function_promise,
         closed_function_value(1, TestExpr::Value(list_return_effect(n(45)))),
     )
-    .expect("the fix function should accept its assignment");
+    .expect_without_debug("the fix function should accept its assignment");
     session.values().assert_same_representation_for_test(
         &list_to_value_items(&session, &fixed).expect("fix should resume at its function"),
         &[n(45)],
@@ -1976,7 +1977,7 @@ fn computed_lazy_waits_on_an_empty_promise_without_caching_its_error() {
     assert!(lazy.cached(context.values()).is_none());
     assert!(promise.assignment(context.values()).is_none());
 
-    set_promise(&context, &promise, n(42)).unwrap();
+    set_promise(&context, &promise, n(42)).unwrap_without_debug();
     assert_eq!(promise.exact_subscription_count(context.values()), 0);
     context.values().assert_same_representation_for_test(
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
@@ -2005,7 +2006,7 @@ fn resolver_failure_exactly_wakes_its_deferred_follower() {
     assert_eq!(promise.exact_subscription_count(context.values()), 1);
 
     fail_promise_message(&context, &promise, "resolver failed deliberately")
-        .expect("the unresolved resolver promise should fail once");
+        .expect_without_debug("the unresolved resolver promise should fail once");
     assert_eq!(promise.exact_subscription_count(context.values()), 0);
     assert_eq!(
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
@@ -2039,7 +2040,8 @@ fn resolver_completion_wakes_only_its_cross_session_deferred_follower() {
     assert_eq!(promise_a.exact_subscription_count(owner.values()), 1);
     assert_eq!(promise_b.exact_subscription_count(owner.values()), 1);
 
-    set_promise(&owner, &promise_a, n(41)).expect("promise A should accept its assignment");
+    set_promise(&owner, &promise_a, n(41))
+        .expect_without_debug("promise A should accept its assignment");
     assert_eq!(promise_a.exact_subscription_count(owner.values()), 0);
     assert_eq!(promise_b.exact_subscription_count(owner.values()), 1);
     observer.values().assert_same_representation_for_test(
@@ -2047,7 +2049,8 @@ fn resolver_completion_wakes_only_its_cross_session_deferred_follower() {
         &n(41),
     );
 
-    set_promise(&owner, &promise_b, n(42)).expect("promise B should accept its assignment");
+    set_promise(&owner, &promise_b, n(42))
+        .expect_without_debug("promise B should accept its assignment");
     assert_eq!(promise_b.exact_subscription_count(owner.values()), 0);
     observer.values().assert_same_representation_for_test(
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &lazy_b).unwrap(),
@@ -2063,7 +2066,7 @@ fn promised_assignment_follows_a_lazy_without_resolving_the_raw_assignment() {
             Ok(n(42))
         });
     let promise = PromisedValue::new(&crate::core::test_value_factory(), "forwarding promise");
-    set_promise(&context, &promise, Value::Lazy(target.clone())).unwrap();
+    set_promise(&context, &promise, Value::Lazy(target.clone())).unwrap_without_debug();
 
     context.values().assert_same_representation_for_test(
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(
@@ -2116,7 +2119,7 @@ fn promised_failure_preserves_structured_diagnostic_and_identity() {
         Arc::new(EvaluationFailure::emission(emission.clone()).with_context(frame.clone()));
 
     fail_promise(&session, &promise, failure.clone())
-        .expect("new promise should accept one permanent failure");
+        .expect_without_debug("new promise should accept one permanent failure");
 
     let observed = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &observer,
@@ -2150,7 +2153,7 @@ fn promise_only_cycle_remains_blocked_without_poisoning_its_assignment() {
     let context = test_context();
     let promise = PromisedValue::new(&crate::core::test_value_factory(), "promise cycle");
     set_promise(&context, &promise, Value::Promised(promise.clone()))
-        .expect("promise should accept its own named assignment");
+        .expect_without_debug("promise should accept its own named assignment");
 
     let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &context,
@@ -2178,7 +2181,7 @@ fn mixed_promise_lazy_cycle_remains_retryable_without_poisoning_the_lazy() {
         Arc::from([]),
         Arc::from([Value::Promised(promise.clone())]),
     );
-    set_promise(&context, &promise, Value::Lazy(lazy.clone())).unwrap();
+    set_promise(&context, &promise, Value::Lazy(lazy.clone())).unwrap_without_debug();
 
     let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &context,
@@ -2232,7 +2235,7 @@ fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
     assert_eq!(counts.promises_terminal, 0);
     assert_eq!(counts.owned_promise_waits, 1);
 
-    set_promise(&session, &fixpoint, n(42)).unwrap();
+    set_promise(&session, &fixpoint, n(42)).unwrap_without_debug();
     assert_eq!(fixpoint.exact_subscription_count(session.values()), 0);
     observer
         .values()
@@ -2310,7 +2313,8 @@ fn explicitly_failed_task_promise_retires_its_wait_record() {
         .wait()
         .clone();
 
-    fail_promise_message(&session, &fixpoint, "fixpoint failed deliberately").unwrap();
+    fail_promise_message(&session, &fixpoint, "fixpoint failed deliberately")
+        .unwrap_without_debug();
 
     assert!(matches!(
         session.poll_wait(&wait),
@@ -2463,7 +2467,7 @@ fn fixpoint_builtin_resumes_from_its_exact_function_operand() {
         &function,
         closed_function_value_in(observer.values(), 1, TestExpr::Value(n(42))),
     )
-    .expect("the owner should resolve the promised function");
+    .expect_without_debug("the owner should resolve the promised function");
     observer.values().assert_same_representation_for_test(
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &fixpoint)
             .expect("fixpoint construction should resume"),
@@ -2534,7 +2538,7 @@ fn computed_fixpoint_uses_session_local_waits_while_sharing_its_result() {
     assert!(second_block.blocked_on().is_some());
     assert!(lazy.cached(first.values()).is_none());
 
-    set_promise(&first, &promise, n(42)).unwrap();
+    set_promise(&first, &promise, n(42)).unwrap_without_debug();
     first.values().assert_same_representation_for_test(
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&first, &fixpoint).unwrap(),
         &n(42),
@@ -2670,7 +2674,7 @@ fn guarded_lazy_self_reference_reaches_dictionary_whnf() {
     );
     self_reference
         .set(lazy.clone())
-        .expect("guarded self reference should be installed once");
+        .expect_without_debug("guarded self reference should be installed once");
 
     let forced = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &context,
@@ -2800,7 +2804,8 @@ fn lazy_whnf_checkpoint_survives_yield_and_dependency_until_terminal_cache() {
         .values()
         .collect_managed_for_test()
         .expect("the lazy-owned checkpoint should survive collection while blocked");
-    set_promise(&context, &promise, n(42)).expect("the dependency should accept its assignment");
+    set_promise(&context, &promise, n(42))
+        .expect_without_debug("the dependency should accept its assignment");
     for _ in 0..32 {
         if !matches!(context.poll_wait(&wait), EvaluationWaitPoll::Pending(_)) {
             break;
@@ -3413,7 +3418,7 @@ fn list_concat_resumes_after_its_source_becomes_available() {
         &source,
         Value::List(List::from_values(vec![Value::binary_from_text("A")])),
     )
-    .expect("the owner should resolve the concat source");
+    .expect_without_debug("the owner should resolve the concat source");
     let Value::List(flattened) =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
             .expect("list concat should resume")
@@ -3477,7 +3482,7 @@ fn promised_list_chunks_remain_assignable_after_early_observation() {
         &promise,
         Value::Binary(Bytes::from_static(b"assigned")),
     )
-    .expect("early observation must not fill the promise");
+    .expect_without_debug("early observation must not fill the promise");
     assert_eq!(
         list_output_bytes(&test_context(), &list).expect("assigned list promise should resolve"),
         b"assigned"
@@ -3880,7 +3885,7 @@ fn map_resumes_after_its_source_becomes_available_without_forcing_the_callable()
     assert_eq!(callable_demands.load(Ordering::SeqCst), 0);
 
     set_promise(&owner, &source, Value::List(List::from_values(vec![n(8)])))
-        .expect("the owner should resolve the map source");
+        .expect_without_debug("the owner should resolve the map source");
     let Value::List(mapped) =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
             .expect("map should resume")
@@ -4074,7 +4079,7 @@ fn compiler_pattern_binary_list_equality_resumes_without_replaying_the_literal()
         .expect_err_without_debug("a later route must resume the exact promised list item");
     assert_eq!(literal_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &item, n(i64::from(b'A')))
-        .expect("the owner should resolve the promised list item");
+        .expect_without_debug("the owner should resolve the promised list item");
     observer
         .values()
         .collect_managed_for_test()
@@ -4193,7 +4198,7 @@ fn compiler_pattern_path_equality_resumes_without_replaying_the_expected_path() 
         .expect_err_without_debug("a later route must resume the exact promised subject item");
     assert_eq!(expected_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &actual_item, n(42))
-        .expect("the owner should resolve the promised subject item");
+        .expect_without_debug("the owner should resolve the promised subject item");
     observer
         .values()
         .collect_managed_for_test()
@@ -4236,7 +4241,7 @@ fn compiler_pattern_dictionary_operations_preserve_remainders() {
         run_pattern_builtin2(Builtin::PatternDictTryTake, path, Value::Dict(dict))
             .expect("a present static dictionary path should match")
             .try_into()
-            .expect("successful extraction should return one parts value");
+            .expect_without_debug("successful extraction should return one parts value");
     let Value::Dict(parts) = parts else {
         panic!("dictionary extraction should return a parts dictionary");
     };
@@ -4303,7 +4308,8 @@ fn compiler_pattern_dictionary_take_resumes_without_replaying_a_completed_prefix
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
         .expect_err_without_debug("a later route must resume the exact promised dictionary leaf");
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
-    set_promise(&owner, &promised_leaf, n(7)).expect("the owner should resolve the leaf");
+    set_promise(&owner, &promised_leaf, n(7))
+        .expect_without_debug("the owner should resolve the leaf");
     observer
         .values()
         .collect_managed_for_test()
@@ -4323,7 +4329,7 @@ fn compiler_pattern_dictionary_take_resumes_without_replaying_a_completed_prefix
     let [parts]: [Value; 1] = list_to_value_items(&observer, &results)
         .expect("the pattern result should be readable")
         .try_into()
-        .expect("successful extraction should return one parts value");
+        .expect_without_debug("successful extraction should return one parts value");
     let Value::Dict(parts) = parts else {
         panic!("dictionary extraction should return a parts dictionary")
     };
@@ -4443,7 +4449,7 @@ fn compiler_pattern_dictionary_emptiness_resumes_without_replaying_prior_members
         .expect_err_without_debug("a later route must resume the exact promised member");
     assert_eq!(first_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &second, Value::Dict(Dict::new_sync()))
-        .expect("the owner should resolve the second dictionary member");
+        .expect_without_debug("the owner should resolve the second dictionary member");
     observer
         .values()
         .collect_managed_for_test()
@@ -4486,7 +4492,7 @@ fn compiler_pattern_optional_dictionary_operations_preserve_absence_and_errors()
     )
     .expect("an optional absent path should succeed")
     .try_into()
-    .expect("optional extraction should return one parts value");
+    .expect_without_debug("optional extraction should return one parts value");
     let Value::Dict(parts) = parts else {
         panic!("optional dictionary extraction should return a parts dictionary");
     };
@@ -4512,7 +4518,7 @@ fn compiler_pattern_optional_dictionary_operations_preserve_absence_and_errors()
     )
     .expect("an optional present path should extract normally")
     .try_into()
-    .expect("optional extraction should return one parts value");
+    .expect_without_debug("optional extraction should return one parts value");
     let Value::Dict(parts) = parts else {
         panic!("optional dictionary extraction should return a parts dictionary");
     };
@@ -4565,7 +4571,7 @@ fn compiler_pattern_list_decomposition_preserves_compact_remainders() {
         run_pattern_builtin(Builtin::PatternListTryUncons, Value::binary_from_text("AB"))
             .expect("a compact binary should uncons")
             .try_into()
-            .expect("a successful match should have one result");
+            .expect_without_debug("a successful match should have one result");
     let Value::Dict(uncons) = uncons else {
         panic!("uncons should return a parts dictionary");
     };
@@ -4582,7 +4588,7 @@ fn compiler_pattern_list_decomposition_preserves_compact_remainders() {
     )
     .expect("a flat value list should uncons")
     .try_into()
-    .expect("a successful match should have one result");
+    .expect_without_debug("a successful match should have one result");
     let Value::Dict(uncons) = uncons else {
         panic!("uncons should return a parts dictionary");
     };
@@ -4602,7 +4608,7 @@ fn compiler_pattern_list_decomposition_preserves_compact_remainders() {
         run_pattern_builtin(Builtin::PatternListTryUnsnoc, Value::binary_from_text("AB"))
             .expect("a compact binary should unsnoc")
             .try_into()
-            .expect("a successful match should have one result");
+            .expect_without_debug("a successful match should have one result");
     let Value::Dict(unsnoc) = unsnoc else {
         panic!("unsnoc should return a parts dictionary");
     };
@@ -4651,7 +4657,7 @@ fn compiler_pattern_unsnoc_does_not_force_an_unrelated_prefix_hole() {
     let [parts]: [Value; 1] = run_pattern_builtin(Builtin::PatternListTryUnsnoc, Value::List(list))
         .expect("a known suffix should unsnoc without its prefix")
         .try_into()
-        .expect("a successful match should have one result");
+        .expect_without_debug("a successful match should have one result");
     let Value::Dict(parts) = parts else {
         panic!("unsnoc should return a parts dictionary");
     };
@@ -4684,7 +4690,7 @@ fn compiler_pattern_unsnoc_resumes_a_promised_suffix_without_forcing_its_prefix(
             .expect_err_without_debug("the unresolved suffix should suspend pattern unsnoc");
     assert!(blocked.blocked_on().is_some());
     set_promise(&owner, &tail, Value::List(List::from_values(vec![n(9)])))
-        .expect("the owner should resolve the promised suffix");
+        .expect_without_debug("the owner should resolve the promised suffix");
 
     let effect =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
@@ -4700,7 +4706,7 @@ fn compiler_pattern_unsnoc_resumes_a_promised_suffix_without_forcing_its_prefix(
     let [parts]: [Value; 1] = list_to_value_items(&observer, &results)
         .expect("the pattern result should be readable")
         .try_into()
-        .expect("a successful match should have one result");
+        .expect_without_debug("a successful match should have one result");
     let Value::Dict(parts) = parts else {
         panic!("unsnoc should return a parts dictionary")
     };
@@ -4758,7 +4764,8 @@ fn text_lines_resumes_a_promised_item_without_replaying_its_prefix() {
     assert!(blocked.blocked_on().is_some());
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
 
-    set_promise(&owner, &item, n(b'b' as i64)).expect("the owner should resolve the promised byte");
+    set_promise(&owner, &item, n(b'b' as i64))
+        .expect_without_debug("the owner should resolve the promised byte");
     let Value::List(lines) =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
             .expect("text lines should resume")
@@ -4798,7 +4805,7 @@ fn text_lines_resumes_a_promised_list_chunk() {
         &tail,
         Value::List(List::from_bytes(Bytes::from_static(b"b\nc"))),
     )
-    .expect("the owner should resolve the promised list tail");
+    .expect_without_debug("the owner should resolve the promised list tail");
 
     let Value::List(lines) =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
@@ -5126,7 +5133,7 @@ fn effect_apply_resumes_from_its_exact_function_operand() {
     assert!(blocked.blocked_on().is_some());
 
     set_promise(&owner, &function, Value::Builtin(Builtin::Add))
-        .expect("the owner should resolve the promised function");
+        .expect_without_debug("the owner should resolve the promised function");
     observer.values().assert_same_representation_for_test(
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
             .expect("effect application should resume"),
@@ -5188,7 +5195,7 @@ fn effect_call_finishes_its_argument_spine_before_observing_the_api() {
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
 
     set_promise(&owner, &tail, Value::List(List::from_values(vec![n(23)])))
-        .expect("the owner should resolve the promised argument tail");
+        .expect_without_debug("the owner should resolve the promised argument tail");
     observer
         .values()
         .collect_managed_for_test()
@@ -5247,7 +5254,7 @@ fn effect_map_finishes_its_list_front_before_observing_the_api() {
     assert_eq!(method_demands.load(Ordering::SeqCst), 0);
 
     set_promise(&owner, &tail, Value::List(List::empty()))
-        .expect("the owner should resolve the promised map tail");
+        .expect_without_debug("the owner should resolve the promised map tail");
     observer
         .values()
         .collect_managed_for_test()
@@ -5591,7 +5598,7 @@ fn dictionary_union_resumes_without_replaying_a_completed_operand() {
         &right,
         Value::Dict(Dict::new_sync().insert(right_key.clone(), n(42))),
     )
-    .expect("the owner should resolve the right operand");
+    .expect_without_debug("the owner should resolve the right operand");
     let value =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
             .expect("dictionary union should resume after promise assignment");
@@ -5641,7 +5648,7 @@ fn dictionary_duplicate_merge_resumes_its_second_operand() {
         &right,
         Value::Dict(Dict::new_sync().insert(right_key.clone(), n(42))),
     )
-    .expect("the owner should resolve the duplicate operand");
+    .expect_without_debug("the owner should resolve the duplicate operand");
     let value =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
             .expect("duplicate merge should resume after promise assignment");
@@ -5687,7 +5694,7 @@ fn list_at_resumes_without_replaying_a_completed_lazy_chunk() {
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
 
     set_promise(&owner, &tail, Value::List(List::from_values(vec![n(42)])))
-        .expect("the owner should resolve the list tail");
+        .expect_without_debug("the owner should resolve the list tail");
     observer.values().assert_same_representation_for_test(
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
             .expect("list-at should resume"),
@@ -5726,7 +5733,7 @@ fn split_end_resumes_from_the_back_without_forcing_an_unrelated_prefix() {
             .expect_err_without_debug("the unresolved tail should suspend split-end");
     assert!(blocked.blocked_on().is_some());
     set_promise(&owner, &tail, Value::List(List::from_values(vec![n(42)])))
-        .expect("the owner should resolve the list tail");
+        .expect_without_debug("the owner should resolve the list tail");
 
     let Value::Dict(split) =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
@@ -6168,7 +6175,7 @@ fn assert_unit_annotation_resumes_diagnostic_context_after_collection_without_re
         &diagnostic_context,
         Value::binary_from_text("assertion result"),
     )
-    .expect("the owner should resolve the promised diagnostic context");
+    .expect_without_debug("the owner should resolve the promised diagnostic context");
     observer
         .values()
         .collect_managed_for_test()
@@ -6742,7 +6749,7 @@ fn metadata_update_resumes_without_replaying_a_completed_carrier() {
     assert_eq!(first_demands.load(Ordering::SeqCst), 1);
 
     set_promise(&owner, &second, Value::metadata_carrier(n(2)))
-        .expect("the owner should resolve the promised carrier");
+        .expect_without_debug("the owner should resolve the promised carrier");
     observer
         .values()
         .collect_managed_for_test()
@@ -7390,7 +7397,7 @@ fn binary_annotation_resumes_without_replaying_a_completed_prefix() {
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
 
     set_promise(&owner, &item, n(i64::from(b'b')))
-        .expect("the owner should resolve the promised byte");
+        .expect_without_debug("the owner should resolve the promised byte");
     observer
         .values()
         .collect_managed_for_test()
@@ -8532,7 +8539,7 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
         });
     let promise = PromisedValue::new(context.values(), "resolved spark input");
     set_promise(&context, &promise, Value::Lazy(promised_work.clone()))
-        .expect("test promise should accept its one assignment");
+        .expect_without_debug("test promise should accept its one assignment");
     context.spark(Value::Promised(promise));
 
     let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
@@ -8591,7 +8598,7 @@ fn spark_resumes_after_a_resolver_owned_promise_completes() {
         Ok(n(7))
     });
     set_promise(&context, &promise, Value::Lazy(assigned.clone()))
-        .expect("promise should accept its one assignment");
+        .expect_without_debug("promise should accept its one assignment");
 
     forced_receiver
         .recv_timeout(std::time::Duration::from_secs(2))
@@ -8651,7 +8658,7 @@ fn metadata_seq_preserves_retryable_promise_blockage() {
         .expect_err_without_debug("seq should block on unresolved hidden metadata");
     assert!(blocked.blocked_on().is_some());
 
-    set_promise(&observer, &promise, n(7)).unwrap();
+    set_promise(&observer, &promise, n(7)).unwrap_without_debug();
     observer.values().assert_same_representation_for_test(
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &applied)
             .expect("seq should resume after hidden metadata completes"),

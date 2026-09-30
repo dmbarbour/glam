@@ -2324,7 +2324,7 @@ mod driver_tests {
                     .expect("a builtin is already in WHNF"),
             ),
         )
-        .expect("fresh callable lazy accepts its cached result");
+        .expect_without_debug("fresh callable lazy accepts its cached result");
         let (runtime, call) = claimed_core_call_in(&values, Value::Lazy(lazy));
         assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
 
@@ -2342,13 +2342,13 @@ mod driver_tests {
         let context = EvalContext::isolated(values.clone());
         let terminal = PromisedValue::new(context.values(), "profiled terminal callable");
         crate::core::set_test_promise(context.values(), &terminal, Value::Builtin(Builtin::Add))
-            .expect("terminal promise accepts its callable result");
+            .expect_without_debug("terminal promise accepts its callable result");
         let mut focus = terminal;
         for label in ["third", "second", "first"] {
             let prior = Value::Promised(focus);
             let next = PromisedValue::new(context.values(), format!("{label} profiled callable"));
             crate::core::set_test_promise(context.values(), &next, prior)
-                .expect("promise accepts its delegated focus");
+                .expect_without_debug("promise accepts its delegated focus");
             focus = next;
         }
         let (runtime, call) = claimed_core_call_in(&values, Value::Promised(focus));
@@ -3062,7 +3062,7 @@ mod driver_tests {
             crate::eval::test_support::TestExpr::Value(context.values().unit()),
         );
         crate::core::set_test_promise(context.values(), &promise, callable)
-            .expect("the callable promise should accept its assignment");
+            .expect_without_debug("the callable promise should accept its assignment");
         assert!(matches!(
             context.pump_wait(&wait.0, 256),
             crate::evaluation::EvaluationPumpOutcome::TargetReady
@@ -3147,7 +3147,7 @@ mod driver_tests {
             crate::eval::test_support::TestExpr::Value(context.values().unit()),
         );
         crate::core::set_test_promise(context.values(), &promise, callable)
-            .expect("the callable promise should accept its assignment");
+            .expect_without_debug("the callable promise should accept its assignment");
         assert!(matches!(
             context.pump_wait(&wait.0, 256),
             crate::evaluation::EvaluationPumpOutcome::TargetReady
@@ -3600,7 +3600,7 @@ mod driver_tests {
                 Ok(crate::core::EvaluatedValue::from_whnf(lazy_result)
                     .expect("callable families are already in WHNF")),
             )
-            .expect("fresh callable lazy must accept its cached result");
+            .expect_without_debug("fresh callable lazy must accept its cached result");
             let (runtime, call) = claimed_core_call(Value::Lazy(lazy));
             assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
             assert_eq!(
@@ -3611,7 +3611,7 @@ mod driver_tests {
 
             let promise = PromisedValue::new(context.values(), format!("assigned {name} callable"));
             crate::core::set_test_promise(context.values(), &promise, promise_result)
-                .expect("fresh callable promise must accept its assignment");
+                .expect_without_debug("fresh callable promise must accept its assignment");
             let (runtime, call) = claimed_core_call(Value::Promised(promise));
             assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
             assert_eq!(
@@ -3675,7 +3675,7 @@ mod driver_tests {
         let context = test_context();
         let terminal = PromisedValue::new(context.values(), "terminal callable focus");
         crate::core::set_test_promise(context.values(), &terminal, Value::Builtin(Builtin::Add))
-            .expect("terminal promise accepts its callable result");
+            .expect_without_debug("terminal promise accepts its callable result");
         let mut focus = terminal;
         for label in ["third", "second", "first"] {
             let prior = context
@@ -3683,7 +3683,7 @@ mod driver_tests {
                 .with_runtime_value_access(|access| Value::Promised(focus.duplicate_in(&access)));
             let next = PromisedValue::new(context.values(), format!("{label} callable focus"));
             crate::core::set_test_promise(context.values(), &next, prior)
-                .expect("promise accepts its delegated focus");
+                .expect_without_debug("promise accepts its delegated focus");
             focus = next;
         }
         let (runtime, call) = claimed_core_call(Value::Promised(focus));
@@ -3759,7 +3759,7 @@ mod driver_tests {
                     &promise,
                     Value::Builtin(Builtin::Add),
                 )
-                .expect("completion barrier assigns the observed promise");
+                .expect_without_debug("completion barrier assigns the observed promise");
             })
         })
         .unwrap();
@@ -3859,7 +3859,7 @@ mod driver_tests {
             .with_runtime_value_access(|access| Value::Promised(inner.duplicate_in(&access)));
         let outer = PromisedValue::new(context.values(), "framed checkpoint delegate");
         crate::core::set_test_promise(context.values(), &outer, inner_value)
-            .expect("outer promise delegates to the unresolved inner promise");
+            .expect_without_debug("outer promise delegates to the unresolved inner promise");
         let (runtime, call) = claimed_core_call(context.values().unit());
 
         let expected = crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
@@ -3924,7 +3924,7 @@ mod driver_tests {
         assert_eq!(blocked_identity, expected);
 
         crate::core::set_test_promise(context.values(), &inner, Value::Builtin(Builtin::Add))
-            .expect("inner promise accepts the eventual callable");
+            .expect_without_debug("inner promise accepts the eventual callable");
         assert!(matches!(
             context.pump_wait(&blocked.wait.0, 256),
             crate::evaluation::EvaluationPumpOutcome::TargetReady

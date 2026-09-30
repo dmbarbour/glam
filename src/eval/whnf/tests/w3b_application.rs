@@ -2,6 +2,7 @@ use crate::core::{Builtin, Dict, Key, LazySource, PromisedValue, Value};
 use crate::eval::test_support::{TestExpr, closed_function_value_in};
 use crate::evaluation::{EvalContext, EvaluationPollContext, OwnedEvalContext};
 use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
+use crate::test_support::ResultTestExt as _;
 
 use super::*;
 
@@ -122,7 +123,7 @@ fn promised_callable_resumes_at_function_demand_before_applying_arguments() {
     assert_eq!(root.id(), promise.id(context.values()));
 
     crate::core::set_test_promise(context.values(), &promise, Value::Builtin(Builtin::Add))
-        .expect("the callable promise should accept its assignment");
+        .expect_without_debug("the callable promise should accept its assignment");
     assert!(matches!(
         poll(&context, &mut computation, 1),
         WhnfPoll::Yielded
@@ -190,7 +191,7 @@ fn effect_payload_undefined_check_resumes_from_the_exact_promise() {
     assert_eq!(root.id(), expected);
 
     crate::core::set_test_promise(context.values(), &promise, Value::Number(29.into()))
-        .expect("the effect payload should accept its assignment");
+        .expect_without_debug("the effect payload should accept its assignment");
     let result = ready_after_yields(&context, &mut computation, 4).clone_core_for_test();
     let Value::Dict(effect) = result else {
         panic!("a semantically defined singleton tag must produce an effect")
@@ -227,7 +228,7 @@ fn nested_undefined_extra_resumes_without_restarting_tag_recognition() {
         WhnfPoll::Deferred(WhnfDeferredRequest::Promise(_))
     ));
     crate::core::set_test_promise(context.values(), &promise, Value::Dict(Dict::new_sync()))
-        .expect("the nested extra should accept its undefined assignment");
+        .expect_without_debug("the nested extra should accept its undefined assignment");
 
     let result = ready_after_yields(&context, &mut computation, 8).clone_core_for_test();
     assert!(
@@ -262,7 +263,7 @@ fn promised_apply_member_resumes_before_the_original_argument_is_consumed() {
     assert_eq!(root.id(), promise.id(context.values()));
 
     crate::core::set_test_promise(context.values(), &promise, Value::Builtin(Builtin::Add))
-        .expect("the apply member should accept its assignment");
+        .expect_without_debug("the apply member should accept its assignment");
     assert!(matches!(
         poll(&context, &mut computation, 1),
         WhnfPoll::Yielded

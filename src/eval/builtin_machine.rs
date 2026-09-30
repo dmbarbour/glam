@@ -1063,7 +1063,7 @@ mod tests {
         assert_eq!(first_demands.load(Ordering::Relaxed), 1);
 
         crate::core::set_test_promise(context.values(), &second, Value::Number(2.into()))
-            .expect("the second operand should accept its assignment");
+            .expect_without_debug("the second operand should accept its assignment");
         context
             .values()
             .collect_managed_for_test()
@@ -1152,7 +1152,7 @@ mod tests {
             &diagnostic_context,
             Value::binary_from_text("definition foo"),
         )
-        .expect("the diagnostic context should accept its assignment");
+        .expect_without_debug("the diagnostic context should accept its assignment");
         context
             .values()
             .collect_managed_for_test()
@@ -1250,7 +1250,7 @@ mod tests {
                 42.into(),
             )])),
         )
-        .expect("the deferred front should accept its result list");
+        .expect_without_debug("the deferred front should accept its result list");
         context
             .values()
             .collect_managed_for_test()
@@ -1302,7 +1302,7 @@ mod tests {
             &second,
             Value::Dict(crate::core::Dict::new_sync()),
         )
-        .expect("the second dictionary operand should accept its assignment");
+        .expect_without_debug("the second dictionary operand should accept its assignment");
         context
             .values()
             .collect_managed_for_test()
@@ -1345,7 +1345,7 @@ mod tests {
             Err(EvaluationHalt::new("origin production failed"))
         });
         crate::core::set_test_promise(context.values(), &origin, failed)
-            .expect("the origin operand should accept its assignment");
+            .expect_without_debug("the origin operand should accept its assignment");
         context
             .values()
             .collect_managed_for_test()
@@ -1396,7 +1396,7 @@ mod tests {
             .expect_err_without_debug("a later route must retain the same comparison dependency");
         assert_eq!(first_demands.load(Ordering::Relaxed), 1);
         crate::core::set_test_promise(context.values(), &second, Value::Number(7.into()))
-            .expect("the second operand should accept its assignment");
+            .expect_without_debug("the second operand should accept its assignment");
         context
             .values()
             .collect_managed_for_test()
@@ -1448,7 +1448,7 @@ mod tests {
                 2.into(),
             )])),
         )
-        .expect("the list tail should accept its assignment");
+        .expect_without_debug("the list tail should accept its assignment");
         context
             .values()
             .collect_managed_for_test()
@@ -1507,7 +1507,7 @@ mod tests {
                 42.into(),
             )])),
         )
-        .expect("the deferred front tail should accept its assignment");
+        .expect_without_debug("the deferred front tail should accept its assignment");
         context
             .values()
             .collect_managed_for_test()
@@ -1569,7 +1569,7 @@ mod tests {
                 41.into(),
             )])),
         )
-        .expect("the deferred back prefix should accept its assignment");
+        .expect_without_debug("the deferred back prefix should accept its assignment");
         context
             .values()
             .collect_managed_for_test()
@@ -1623,7 +1623,7 @@ mod tests {
                 42.into(),
             )])),
         )
-        .expect("the deferred prefix should accept its assignment");
+        .expect_without_debug("the deferred prefix should accept its assignment");
         context
             .values()
             .collect_managed_for_test()
@@ -1672,7 +1672,7 @@ mod tests {
             &item,
             Value::Number(Number::from_u8(b'b')),
         )
-        .expect("the deferred byte should accept its assignment");
+        .expect_without_debug("the deferred byte should accept its assignment");
         context
             .values()
             .collect_managed_for_test()

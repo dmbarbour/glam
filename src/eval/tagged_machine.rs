@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+#[cfg(test)]
+use crate::test_support::ResultTestExt as _;
 use glam_gc::Visitor;
 
 use crate::core::{
@@ -336,7 +338,7 @@ mod tests {
         }
 
         crate::core::set_test_promise(context.values(), &promise, Value::Dict(Dict::new_sync()))
-            .expect("nested undefined promise should accept its assignment");
+            .expect_without_debug("nested undefined promise should accept its assignment");
         let payload = loop {
             match poll(&mut machine, &context) {
                 RegionalTaggedPayloadPoll::Yielded => {}

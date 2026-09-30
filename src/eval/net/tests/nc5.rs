@@ -145,7 +145,7 @@ fn callable_checkpoint_covers_lazy_and_mixed_dependency_chains_once() {
     ));
     assert_eq!(mixed_runs.load(Ordering::SeqCst), 1);
     crate::core::set_test_promise(context.values(), &promise, Value::Builtin(Builtin::Add))
-        .expect("the mixed dependency accepts its callable result");
+        .expect_without_debug("the mixed dependency accepts its callable result");
     assert!(matches!(
         context.pump_wait(&blocked.wait.0, 256),
         EvaluationPumpOutcome::TargetReady
@@ -167,14 +167,14 @@ fn callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures() {
     let context = test_context();
     let terminal = PromisedValue::new(context.values(), "NC5 terminal promise");
     crate::core::set_test_promise(context.values(), &terminal, Value::Builtin(Builtin::Add))
-        .expect("terminal promise accepts its callable result");
+        .expect_without_debug("terminal promise accepts its callable result");
     let terminal_id = terminal.id(context.values());
     let first = PromisedValue::new(context.values(), "NC5 first promise");
     let terminal_value = context
         .values()
         .with_runtime_value_access(|access| Value::Promised(terminal.duplicate_in(&access)));
     crate::core::set_test_promise(context.values(), &first, terminal_value)
-        .expect("first promise delegates to terminal promise");
+        .expect_without_debug("first promise delegates to terminal promise");
     let first_id = first.id(context.values());
     let (runtime, call) = claimed_core_call_in(context.values(), Value::Promised(first));
 
@@ -206,7 +206,7 @@ fn callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures() {
         .values()
         .with_runtime_value_access(|access| Value::Promised(cycle.duplicate_in(&access)));
     crate::core::set_test_promise(context.values(), &cycle, cycle_value)
-        .expect("promise accepts its own semantic identity");
+        .expect_without_debug("promise accepts its own semantic identity");
     let (runtime, call) = claimed_core_call_in(context.values(), Value::Promised(cycle));
     assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
     let blocked = blocked_checkpoint(context.values(), &runtime, call.pair);
@@ -234,7 +234,7 @@ fn callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures() {
     let failed_lazy = LazyValue::error(context.values(), "NC5 cached lazy failure");
     let leading = PromisedValue::new(context.values(), "NC5 failure leader");
     crate::core::set_test_promise(context.values(), &leading, Value::Lazy(failed_lazy))
-        .expect("leader accepts failed lazy focus");
+        .expect_without_debug("leader accepts failed lazy focus");
     let (runtime, call) = claimed_core_call_in(context.values(), Value::Promised(leading));
     crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
         let mut budget = crate::evaluation::EvaluationStepBudget::new(1);
@@ -252,7 +252,7 @@ fn callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures() {
         &failed_promise,
         "NC5 assigned promise failure",
     )
-    .expect("promise accepts its failure");
+    .expect_without_debug("promise accepts its failure");
     let leading =
         LazyValue::semantic_thunk(context.values(), "NC5 promise failure leader", move |_| {
             Ok(Value::Promised(failed_promise.clone()))
@@ -488,7 +488,7 @@ fn cached_lazy_failure_is_already_evaluated_by_construction() {
         &lazy,
         Ok(EvaluatedValue::from_whnf(Value::Builtin(Builtin::Add)).unwrap()),
     )
-    .expect("fresh cache fixture accepts its result");
+    .expect_without_debug("fresh cache fixture accepts its result");
     let (runtime, call) = claimed_core_call_in(context.values(), Value::Lazy(lazy));
     assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
     assert_eq!(
@@ -855,7 +855,7 @@ fn cursor_deferral_and_collection_retain_only_the_source_checkpoint() {
         &promise,
         result,
     )
-    .expect("cursor dependency accepts its semantic net result");
+    .expect_without_debug("cursor dependency accepts its semantic net result");
     assert!(matches!(
         context.pump_wait(&blocked.wait.0, 256),
         EvaluationPumpOutcome::TargetReady
@@ -911,13 +911,13 @@ fn callable_checkpoint_usage_distinguishes_production_from_frame_fixture() {
     let context = test_context();
     let terminal = PromisedValue::new(context.values(), "NC5D terminal promise");
     crate::core::set_test_promise(context.values(), &terminal, Value::Builtin(Builtin::Add))
-        .expect("terminal promise accepts its callable result");
+        .expect_without_debug("terminal promise accepts its callable result");
     let first = PromisedValue::new(context.values(), "NC5D first promise");
     let terminal_value = context
         .values()
         .with_runtime_value_access(|access| Value::Promised(terminal.duplicate_in(&access)));
     crate::core::set_test_promise(context.values(), &first, terminal_value)
-        .expect("first promise delegates to the terminal promise");
+        .expect_without_debug("first promise delegates to the terminal promise");
     let (runtime, call) = claimed_core_call_in(context.values(), Value::Promised(first));
 
     crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {

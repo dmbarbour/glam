@@ -57,7 +57,7 @@ fn evaluated_module_value(context: &CompileContext, lowered: &LoweredSource) -> 
         panic!("final module binding should be a promised value");
     };
     crate::core::set_test_promise(context.values(), &final_defs, lowered.definitions.clone())
-        .expect("future should not be set yet");
+        .expect_without_debug("future should not be set yet");
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_eval_context(),
         &lowered.definitions,
@@ -301,7 +301,7 @@ fn reflection_test_module(
         panic!("final module binding should be promised");
     };
     crate::core::set_test_promise(context.values(), &final_defs, lowered.definitions.clone())
-        .expect("final module binding should be unset");
+        .expect_without_debug("final module binding should be unset");
 
     let eval_context = assembler.eval_context();
     let definitions = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
@@ -361,7 +361,7 @@ fn latent_source_meta_refl_cycle_reclaims_with_its_module() {
             panic!("final module binding should be promised");
         };
         crate::core::set_test_promise(context.values(), &final_defs, lowered.definitions.clone())
-            .expect("final module binding should start unassigned");
+            .expect_without_debug("final module binding should start unassigned");
 
         let eval_context = assembler.eval_context();
         let module = crate::evaluation::EvalContext::evaluate_compatibility_whnf(

@@ -2292,7 +2292,7 @@ fn reset_stack_decoder_resumes_a_promised_numeric_field() {
     };
     assert_eq!(dependency.id(), promised.id(&values));
     crate::core::set_test_promise(&values, &promised, Value::Number(4.into()))
-        .expect("promise should publish once");
+        .expect_without_debug("promise should publish once");
 
     let decoded = drive_reset_stack_decoder(&mut decoder, &context)
         .expect("published scope should resume decoding");
@@ -2418,7 +2418,7 @@ fn dropping_a_blocked_reset_stack_decoder_releases_its_owner_without_consuming_t
     }
     drop(decoder);
     crate::core::set_test_promise(&values, &promised, Value::List(List::empty()))
-        .expect("dropping the decoder must not consume resolver authority");
+        .expect_without_debug("dropping the decoder must not consume resolver authority");
     values
         .collect_managed_for_test()
         .expect("retired decoder roots must not obstruct collection");
@@ -2503,7 +2503,7 @@ fn reset_control_work_does_not_publish_before_its_key_resolves() {
     );
 
     crate::core::set_test_promise(&values, &key, Value::binary_from_text("prompt"))
-        .expect("reset key should publish once");
+        .expect_without_debug("reset key should publish once");
     let TaskOutcome::Complete(result) = task.run().expect("resumed reset should finish") else {
         panic!("resumed reset should complete")
     };
@@ -2559,7 +2559,7 @@ fn shift_control_work_does_not_capture_before_its_key_resolves() {
     );
 
     crate::core::set_test_promise(&values, &key, Value::binary_from_text("missing"))
-        .expect("shift key should publish once");
+        .expect_without_debug("shift key should publish once");
     let error = match task.run() {
         Ok(_) => panic!("resolved unmatched shift should fail"),
         Err(error) => error,
@@ -2646,7 +2646,7 @@ fn captured_control_installation_waits_before_publishing_its_resume_layer() {
     assert!(branch.control.delimiters.is_empty());
 
     crate::core::set_test_promise(&values, &stack, Value::List(List::empty()))
-        .expect("caller stack should publish once");
+        .expect_without_debug("caller stack should publish once");
     let TaskOutcome::Complete(result) = task.run().expect("installation should resume") else {
         panic!("installation should complete")
     };
@@ -2702,7 +2702,7 @@ fn initial_fixpoint_waits_for_the_reset_stack_before_allocating_control() {
     assert!(branch.control.sequence.is_empty());
 
     crate::core::set_test_promise(&values, &stack, Value::List(List::empty()))
-        .expect("fixpoint stack should publish once");
+        .expect_without_debug("fixpoint stack should publish once");
     let TaskOutcome::Complete(result) = task.run().expect("fixpoint should resume") else {
         panic!("fixpoint should complete")
     };
@@ -2796,7 +2796,7 @@ fn fixpoint_restart_retains_its_selection_while_the_entry_stack_is_blocked() {
     assert!(Arc::ptr_eq(retained, &root));
 
     crate::core::set_test_promise(&values, &stack, Value::List(List::empty()))
-        .expect("restart stack should publish once");
+        .expect_without_debug("restart stack should publish once");
     let TaskOutcome::Complete(result) = task.run().expect("restart should resume") else {
         panic!("restart should complete")
     };
@@ -2884,7 +2884,7 @@ fn delivery_selects_reset_or_delimiter_only_after_stack_decoding() {
             )
         });
         crate::core::set_test_promise(&values, &stack, Value::List(List::from_values(vec![frame])))
-            .expect("delivery stack should publish once");
+            .expect_without_debug("delivery stack should publish once");
         while task.execution.controlling.is_some() {
             assert!(matches!(task.poll(1), EffectTaskPoll::Yielded));
         }
@@ -2963,7 +2963,7 @@ fn restore_delimiter_waits_for_its_saved_stack_before_replacing_control() {
     assert_eq!(branch.control.delimiters.len(), 1);
 
     crate::core::set_test_promise(&values, &saved, Value::List(List::empty()))
-        .expect("saved restore stack should publish once");
+        .expect_without_debug("saved restore stack should publish once");
     while task.execution.controlling.is_some() {
         assert!(matches!(task.poll(1), EffectTaskPoll::Yielded));
     }
@@ -4657,7 +4657,7 @@ fn isolated_search_reports_and_resumes_lazy_dependencies() {
         &promised,
         Value::Binary(Bytes::from_static(b"ready")),
     )
-    .expect("test dependency should resolve once");
+    .expect_without_debug("test dependency should resolve once");
 
     let results = poll_isolated_search(&mut search);
     assert_eq!(results.len(), 1);
@@ -6389,7 +6389,7 @@ fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
     assert!(blocked.dependency.is_some());
 
     crate::core::fail_test_promise_message(session.values(), &promised, "dependency failed")
-        .expect("test promise should fail once");
+        .expect_without_debug("test promise should fail once");
     let poll = task.poll(256);
     let EffectTaskPoll::Complete(value) = poll else {
         panic!("eval should retry a terminal dependency and return err");
@@ -6442,7 +6442,7 @@ fn specialization_host_activity_is_not_reentered_after_owned_demand_suspends() {
         &promised,
         Value::Binary(Bytes::from_static(b"ready")),
     )
-    .expect("the hostile demand dependency should resolve once");
+    .expect_without_debug("the hostile demand dependency should resolve once");
     let value = loop {
         match task.poll(256) {
             EffectTaskPoll::Yielded => {}
@@ -6537,7 +6537,7 @@ fn specialization_request_propagates_terminal_demand_failure_without_replay() {
         &promised,
         "specialization dependency failed",
     )
-    .expect("specialization dependency should fail once");
+    .expect_without_debug("specialization dependency should fail once");
     let error = loop {
         match task.poll(64) {
             EffectTaskPoll::Yielded => {}
@@ -8577,7 +8577,7 @@ fn task_failure_propagates_one_structured_failure_to_owned_promises() {
         &resolved,
         Value::Number(Number::integer(42)),
     )
-    .expect("one owned promise should resolve before task failure");
+    .expect_without_debug("one owned promise should resolve before task failure");
 
     let detail = Key::atom_from_text("detail");
     let emission = Value::Dict(

@@ -6,6 +6,8 @@
 
 use std::sync::{Arc, Mutex, TryLockError};
 
+#[cfg(test)]
+use crate::test_support::ResultTestExt as _;
 use glam_gc::{Root, Trace, Visitor};
 
 use crate::core::{
@@ -535,7 +537,7 @@ mod tests {
             &chunk,
             Value::Binary(bytes::Bytes::from_static(&[2_u8, 3_u8])),
         )
-        .expect("the deferred binary chunk should accept its assignment");
+        .expect_without_debug("the deferred binary chunk should accept its assignment");
 
         let (item, tail) = loop {
             match poll_front(&mut machine, &context, 1) {

@@ -884,17 +884,17 @@ mod tests {
                 ),
         );
         crate::core::set_test_promise(context.values(), &spec, spec_value)
-            .expect("the object spec promise should accept its assignment");
+            .expect_without_debug("the object spec promise should accept its assignment");
 
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
             .expect_err_without_debug("object construction must resume at its name");
         crate::core::set_test_promise(context.values(), &name, Value::binary_from_text("root"))
-            .expect("the object name promise should accept its assignment");
+            .expect_without_debug("the object name promise should accept its assignment");
 
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
             .expect_err_without_debug("object construction must resume at its dependency chunk");
         crate::core::set_test_promise(context.values(), &deps, Value::List(List::empty()))
-            .expect("the dependency chunk should accept its assignment");
+            .expect_without_debug("the dependency chunk should accept its assignment");
 
         let Value::Dict(result) =
             crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
@@ -934,7 +934,7 @@ mod tests {
                     .insert((*keys::DEPS).clone(), Value::List(List::empty())),
             ),
         )
-        .expect("the dependency spec should accept its assignment");
+        .expect_without_debug("the dependency spec should accept its assignment");
 
         let Value::Dict(result) =
             crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
@@ -975,7 +975,7 @@ mod tests {
             TestExpr::Value(Value::Promised(second_result.clone())),
         );
         crate::core::set_test_promise(context.values(), &first_result, second_stage)
-            .expect("the first application should accept its function result");
+            .expect_without_debug("the first application should accept its function result");
 
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
             .expect_err_without_debug("the second definitions application must suspend");
@@ -986,7 +986,7 @@ mod tests {
             &second_result,
             Value::Dict(expected.clone()),
         )
-        .expect("the second application should accept its dictionary result");
+        .expect_without_debug("the second application should accept its dictionary result");
 
         let Value::Dict(result) =
             crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)

@@ -2338,9 +2338,20 @@ inventory relatch:
            cursor dependencies, or source-frontier state. Generic shared-net
            helpers state the exact `Data`/`Operator` duplication bounds they
            exercise; core evaluation remains on its managed gateway. This
-           removes the remaining implicit generic runtime-source operations
-           and reduces the all-target compiler inventory from 757 to 732
-           without restoring ambient traits to runtime-net carriers.
+         removes the remaining implicit generic runtime-source operations
+         and reduces the all-target compiler inventory from 757 to 732
+         without restoring ambient traits to runtime-net carriers.
+         - **D.2h.2q — non-observing successful-result extraction complete
+           2026-09-30; dynamic fixture pending compile closure.** The same
+           test-only result vocabulary now extracts expected successes without
+           requiring a semantic failure payload to implement `Debug`.
+           Compiler-selected `expect`/`unwrap` call sites migrated only where
+           the standard helper introduced that forbidden formatting bound;
+           ordinary scalar and host errors retain standard Rust diagnostics.
+           This removes 228 more formatting-bound failures and reduces the
+           all-target compiler inventory from 732 to 504. The remaining 93
+           formatting errors are actual carrier/debug or container-
+           duplication seams rather than generic result control flow.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived

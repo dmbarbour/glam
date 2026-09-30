@@ -6,6 +6,7 @@ use crate::core::{Builtin, Key, Value as CoreValue};
 use crate::diagnostic::Severity;
 use crate::evaluation::{EvalContext, EvaluationMachinePoll, EvaluationTaskMachine};
 use crate::reflection::{StoreCommitResult, StoreJournal};
+use crate::test_support::ResultTestExt as _;
 
 use super::test_compilation_trace;
 use crate::api::diagnostics::DiagnosticCallback;
@@ -252,7 +253,7 @@ fn diagnostic_consumer_activation_hides_route_root_intermediate_state() {
     let context = EvalContext::new(&session);
     let prepared = context
         .prepare_machine(None, |_| Ok(Box::new(CompleteTask)))
-        .expect("diagnostic consumer should prepare");
+        .expect_without_debug("diagnostic consumer should prepare");
 
     let activation_runtime = runtime.clone();
     let activation_ingress = ingress.clone();
