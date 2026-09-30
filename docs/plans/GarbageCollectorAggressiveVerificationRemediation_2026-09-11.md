@@ -2457,6 +2457,16 @@ inventory relatch:
            This clears all 65 `src/eval/net.rs` fixture failures and reduces
            the all-target compiler inventory from 284 to 219 without changing
            net scheduling, checkpoint, or reduction semantics.
+         - **D.2h.2ab — client-demand ownership slice complete 2026-09-30.**
+           Foreground client-demand, exact-subscription, cross-session,
+           promise-assignment, lazy-cycle, and result-retention fixtures now
+           duplicate repeated semantic edges through their owning evaluation
+           context. Re-entrant lazy callbacks duplicate their captured values
+           per invocation, and structured failure construction admits the
+           value domain while attaching context. This clears the first 31
+           `src/evaluation/tests.rs` fixture failures and reduces the
+           all-target compiler inventory from 219 to 188 without changing
+           demand, wake, abandonment, or retry semantics.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived

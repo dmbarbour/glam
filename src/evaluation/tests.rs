@@ -264,9 +264,10 @@ fn counted_client_lazy(
 ) -> (RuntimeValueRoot, Arc<std::sync::atomic::AtomicUsize>) {
     let evaluations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed = evaluations.clone();
+    let values = context.values().clone();
     let (_lazy, root) = rooted_semantic_lazy_value(context.values(), label, move |_| {
         observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(value.clone())
+        Ok(value.duplicate_for_test(&values))
     });
     (root, evaluations)
 }
@@ -384,7 +385,10 @@ fn client_demand_completes_whnf_into_its_result_cell() {
     let coordinator = context.coordinator().expect("coordinator should be live");
     let expected = Value::Number(42.into());
     let handle = context
-        .demand_whnf(RuntimeValueRoot::new(context.values(), expected.clone()))
+        .demand_whnf(RuntimeValueRoot::new(
+            context.values(),
+            expected.duplicate_for_test(context.values()),
+        ))
         .expect("same-runtime client demand should be admitted");
 
     assert_eq!(handle.runtime_id(), fixture.runtime.id());
@@ -426,7 +430,7 @@ fn client_demand_retirement_publishes_after_runtime_unlock() {
     let mut blocked = context
         .demand_whnf(RuntimeValueRoot::new(
             context.values(),
-            Value::Promised(promise.clone()),
+            Value::Promised(promise.duplicate_for_test(context.values())),
         ))
         .expect("promise demand should be admitted");
     assert!(poll_one_runtime_work(&coordinator));
@@ -469,7 +473,10 @@ fn foreground_client_demand_closes_the_retirement_publication_handoff() {
     let context = EvalContext::new(&session);
     let expected = context.values().unit();
     let handle = context
-        .demand_whnf(RuntimeValueRoot::new(context.values(), expected.clone()))
+        .demand_whnf(RuntimeValueRoot::new(
+            context.values(),
+            expected.duplicate_for_test(context.values()),
+        ))
         .expect("unit demand should be admitted");
     let work = handle.work();
 
@@ -531,7 +538,10 @@ fn client_demand_exactly_restarts_after_promise_assignment() {
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
     let promise = PromisedValue::new(context.values(), "client input");
-    let root = RuntimeValueRoot::new(context.values(), Value::Promised(promise.clone()));
+    let root = RuntimeValueRoot::new(
+        context.values(),
+        Value::Promised(promise.duplicate_for_test(context.values())),
+    );
     let handle = context
         .demand_whnf(root)
         .expect("promise demand should be admitted");
@@ -541,8 +551,12 @@ fn client_demand_exactly_restarts_after_promise_assignment() {
     assert_eq!(promise.exact_subscription_count(context.values()), 1);
 
     let expected = Value::Number(7.into());
-    set_promise(&context, &promise, expected.clone())
-        .expect_without_debug("host promise should resolve once");
+    set_promise(
+        &context,
+        &promise,
+        expected.duplicate_for_test(context.values()),
+    )
+    .expect_without_debug("host promise should resolve once");
     assert_eq!(promise.exact_subscription_count(context.values()), 0);
     let mut claimed = coordinator
         .claim_client_demand(handle.work())
@@ -576,7 +590,7 @@ fn lazy_producer_completion_before_client_subscription_requeues_exactly_once() {
     let (root, evaluations) = counted_client_lazy(
         &context,
         "producer before subscription",
-        Value::Promised(promise.clone()),
+        Value::Promised(promise.duplicate_for_test(context.values())),
     );
     let handle = context
         .demand_whnf(root)
@@ -642,7 +656,7 @@ fn client_subscription_before_lazy_producer_receives_one_exact_wake() {
     let (root, evaluations) = counted_client_lazy(
         &context,
         "subscription before producer",
-        Value::Promised(promise.clone()),
+        Value::Promised(promise.duplicate_for_test(context.values())),
     );
     let handle = context
         .demand_whnf(root)
@@ -699,7 +713,7 @@ fn blocked_client_cannot_abandon_after_its_producer_is_claimed() {
     let (root, evaluations) = counted_client_lazy(
         &context,
         "producer claimed before stable abandonment",
-        Value::Promised(promise.clone()),
+        Value::Promised(promise.duplicate_for_test(context.values())),
     );
     let mut handle = context
         .demand_whnf(root)
@@ -762,7 +776,7 @@ fn blocked_client_cannot_abandon_a_dormant_causal_tail() {
     let (root, evaluations) = counted_client_lazy(
         &context,
         "dormant causal tail before stable abandonment",
-        Value::Promised(promise.clone()),
+        Value::Promised(promise.duplicate_for_test(context.values())),
     );
     let mut handle = context
         .demand_whnf(root)
@@ -874,7 +888,10 @@ fn client_demand_observes_one_canonical_pure_lazy_cycle_failure() {
         .set(wait.clone())
         .expect("self-cycle dependency should be installed once");
     let handle = context
-        .demand_whnf(client_lazy_root(&context, lazy.clone()))
+        .demand_whnf(client_lazy_root(
+            &context,
+            lazy.duplicate_for_test(context.values()),
+        ))
         .expect("cycle demand should be admitted");
 
     let failure = context
@@ -910,7 +927,10 @@ fn client_demand_preserves_a_promise_inclusive_retryable_cycle() {
         .set(lazy_wait.clone())
         .expect("promise dependency should be installed once");
     let handle = context
-        .demand_whnf(client_lazy_root(&context, lazy.clone()))
+        .demand_whnf(client_lazy_root(
+            &context,
+            lazy.duplicate_for_test(context.values()),
+        ))
         .expect("retryable cycle demand should be admitted");
 
     assert!(poll_one_runtime_work(
@@ -977,7 +997,10 @@ fn abandoning_one_client_demand_preserves_another_exact_consumer() {
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
     let promise = PromisedValue::new(context.values(), "shared client input");
-    let root = RuntimeValueRoot::new(context.values(), Value::Promised(promise.clone()));
+    let root = RuntimeValueRoot::new(
+        context.values(),
+        Value::Promised(promise.duplicate_for_test(context.values())),
+    );
     let abandoned = context
         .demand_whnf(root.clone())
         .expect("first demand should be admitted");
@@ -993,8 +1016,12 @@ fn abandoning_one_client_demand_preserves_another_exact_consumer() {
     assert!(promise.assignment(context.values()).is_none());
 
     let expected = Value::Number(11.into());
-    set_promise(&context, &promise, expected.clone())
-        .expect_without_debug("abandoning a consumer must not poison its producer");
+    set_promise(
+        &context,
+        &promise,
+        expected.duplicate_for_test(context.values()),
+    )
+    .expect_without_debug("abandoning a consumer must not poison its producer");
     assert!(poll_one_runtime_work(&coordinator));
     let Some(ClientDemandResult::Complete(value)) = survivor.poll() else {
         panic!("the surviving demand should complete")
@@ -1010,14 +1037,18 @@ fn client_demand_can_follow_a_lazy_producer_owned_by_another_session() {
     let coordinator = owner.coordinator().expect("coordinator should be live");
     let promise = PromisedValue::new(owner.values(), "cross-session lazy input");
     let lazy = LazyValue::semantic_thunk(owner.values(), "cross-session client lazy", {
-        let promise = promise.clone();
+        let promise = promise.duplicate_for_test(owner.values());
+        let values = owner.values().clone();
         move |context| {
             context
                 .context()
-                .evaluate_compatibility_whnf(&Value::Promised(promise.clone()))
+                .evaluate_compatibility_whnf(&Value::Promised(promise.duplicate_for_test(&values)))
         }
     });
-    let root = RuntimeValueRoot::new(owner.values(), Value::Lazy(lazy.clone()));
+    let root = RuntimeValueRoot::new(
+        owner.values(),
+        Value::Lazy(lazy.duplicate_for_test(owner.values())),
+    );
     let owner_demand = owner
         .demand_whnf(root.clone())
         .expect("owner demand should be admitted");
@@ -1042,8 +1073,12 @@ fn client_demand_can_follow_a_lazy_producer_owned_by_another_session() {
     );
 
     let expected = Value::Number(19.into());
-    set_promise(&owner, &promise, expected.clone())
-        .expect_without_debug("cross-session input should resolve once");
+    set_promise(
+        &owner,
+        &promise,
+        expected.duplicate_for_test(owner.values()),
+    )
+    .expect_without_debug("cross-session input should resolve once");
     poll_runtime_until(&coordinator, || {
         owner_demand.poll().is_some() && observer_demand.poll().is_some()
     });
@@ -1109,7 +1144,10 @@ fn client_demand_operation_and_result_roots_follow_owner_lifecycle() {
 
     let expected = Value::binary_from_text("terminal client result");
     let completed = context
-        .demand_whnf(RuntimeValueRoot::new(context.values(), expected.clone()))
+        .demand_whnf(RuntimeValueRoot::new(
+            context.values(),
+            expected.duplicate_for_test(context.values()),
+        ))
         .expect("the completing client demand should be admitted");
     assert!(poll_one_runtime_work(&coordinator));
     let result_live = context
@@ -1143,12 +1181,14 @@ fn client_failure_root_survives_work_and_owner_session_retirement() {
         Value::Number(37.into()),
     ));
     let frame = crate::diagnostic::evaluation_context_frame("client_demand_retention");
-    let failure = Arc::new(EvaluationFailure::emission(emission).with_context(frame));
+    let failure = Arc::new(context.values().with_runtime_value_access(|access| {
+        EvaluationFailure::emission(emission).with_context_in(&access, frame)
+    }));
     let promise = PromisedValue::new(context.values(), "failed client demand");
     let handle = context
         .demand_whnf(RuntimeValueRoot::new(
             context.values(),
-            Value::Promised(promise.clone()),
+            Value::Promised(promise.duplicate_for_test(context.values())),
         ))
         .expect("the failed client demand should be admitted");
 
@@ -1197,7 +1237,7 @@ fn client_demand_owner_close_and_forced_kill_answer_once() {
         let handle = owner
             .demand_whnf(RuntimeValueRoot::new(
                 owner.values(),
-                Value::Promised(promise.clone()),
+                Value::Promised(promise.duplicate_for_test(owner.values())),
             ))
             .expect("closing demand should be admitted");
         let coordinator = owner.coordinator().expect("coordinator should be live");
@@ -1218,7 +1258,7 @@ fn client_demand_owner_close_and_forced_kill_answer_once() {
     let handle = context
         .demand_whnf(RuntimeValueRoot::new(
             context.values(),
-            Value::Promised(promise.clone()),
+            Value::Promised(promise.duplicate_for_test(context.values())),
         ))
         .expect("killable demand should be admitted");
     assert!(poll_one_runtime_work(&coordinator));
@@ -1239,7 +1279,7 @@ fn synchronous_whnf_facade_preserves_retryable_promise_behavior() {
     let coordinator = context.coordinator().expect("coordinator should be live");
     let (promise, _promise_root, _promise_value_root) =
         rooted_promise_value(context.values(), "synchronous client input");
-    let promised = Value::Promised(promise.clone());
+    let promised = Value::Promised(promise.duplicate_for_test(context.values()));
 
     let halt = context
         .evaluate_compatibility_whnf(&promised)
@@ -1252,8 +1292,12 @@ fn synchronous_whnf_facade_preserves_retryable_promise_behavior() {
     assert_eq!(coordinator.client_demand_count(), 0);
 
     let expected = Value::Number(23.into());
-    set_promise(&context, &promise, expected.clone())
-        .expect_without_debug("host promise should remain assignable after stable abandonment");
+    set_promise(
+        &context,
+        &promise,
+        expected.duplicate_for_test(context.values()),
+    )
+    .expect_without_debug("host promise should remain assignable after stable abandonment");
     context.values().assert_same_representation_for_test(
         &context
             .evaluate_compatibility_whnf(&promised)
@@ -1275,7 +1319,9 @@ fn synchronous_client_demand_does_not_pump_unrelated_reflection_work() {
         .expect("unrelated reflection task should schedule");
 
     let halt = context
-        .evaluate_compatibility_whnf(&Value::Promised(promise.clone()))
+        .evaluate_compatibility_whnf(&Value::Promised(
+            promise.duplicate_for_test(context.values()),
+        ))
         .expect_err_without_debug("unassigned promise has no causal producer");
     assert_eq!(
         halt.unassigned_promise_root().map(ManagedPromiseRoot::id),
@@ -1305,7 +1351,7 @@ fn synchronous_client_demand_does_not_wait_for_unrelated_worker_progress() {
     let promise_values = producer.values().clone();
     let background = producer
         .schedule_task({
-            let expected = expected.clone();
+            let expected = expected.duplicate_for_test(&promise_values);
             move |_| {
                 Ok(Box::new(AssignPromiseAfterRelease {
                     promise: promise_root,
@@ -1324,7 +1370,7 @@ fn synchronous_client_demand_does_not_wait_for_unrelated_worker_progress() {
     let (completed, client_completed) = mpsc::channel();
     let (wait_probe, first_client_event) = mpsc::channel();
     let consumer = EvalContext::clone(&consumer).with_claimed_task_wait_probe(wait_probe.clone());
-    let client_promise = promise.clone();
+    let client_promise = promise.duplicate_for_test(producer.values());
     let client = std::thread::spawn(move || {
         completed
             .send(consumer.evaluate_compatibility_whnf(&Value::Promised(client_promise)))
@@ -1371,7 +1417,7 @@ fn retained_client_handle_waits_across_external_disturbance_without_a_lost_wake(
     let handle = context
         .demand_whnf(RuntimeValueRoot::new(
             context.values(),
-            Value::Promised(promise.clone()),
+            Value::Promised(promise.duplicate_for_test(context.values())),
         ))
         .expect("retained demand should be admitted");
     assert!(poll_one_runtime_work(&coordinator));
@@ -1386,8 +1432,12 @@ fn retained_client_handle_waits_across_external_disturbance_without_a_lost_wake(
     });
     parking.wait();
     let expected = Value::Number(29.into());
-    set_promise(&context, &promise, expected.clone())
-        .expect_without_debug("external producer should resolve once");
+    set_promise(
+        &context,
+        &promise,
+        expected.duplicate_for_test(context.values()),
+    )
+    .expect_without_debug("external producer should resolve once");
     assert!(poll_one_runtime_work(&coordinator));
     let ClientDemandResult::Complete(value) = waiter.join().expect("client waiter should finish")
     else {
@@ -1499,7 +1549,7 @@ fn synchronous_client_demand_waits_for_worker_owned_task_promise() {
         let (release_sender, release_receiver) = mpsc::channel();
         owner
             .schedule_task({
-                let expected = expected.clone();
+                let expected = expected.duplicate_for_test(owner.values());
                 move |task_context| {
                     let promise = PromisedValue::fixpoint(
                         &task_context,
@@ -1648,7 +1698,7 @@ fn generic_client_demand_resumes_composed_access_and_binary_annotation() {
             crate::core::Key::atom_from_text("member"),
             Value::List(crate::core::List::from_values(vec![
                 Value::Number(1.into()),
-                Value::Promised(byte.clone()),
+                Value::Promised(byte.duplicate_for_test(context.values())),
             ])),
         )),
     )
