@@ -1924,8 +1924,7 @@ mod tests {
         let values = Values::from_core_factory(core);
         let encoded = task_status_public_value(&values, EvaluationTaskStatus::Abandoned);
 
-        crate::core::assert_same_representation_for_test(
-            values.core(),
+        values.core().assert_same_representation_for_test(
             &values.clone_core(&encoded).unwrap(),
             &values.core().key_value(&keys::ABANDONED),
         );
@@ -1940,8 +1939,7 @@ mod tests {
         let core = crate::core::test_value_factory();
         let values = Values::from_core_factory(core.clone());
         let exited = task_status_public_value(&values, EvaluationTaskStatus::Exited);
-        crate::core::assert_same_representation_for_test(
-            values.core(),
+        values.core().assert_same_representation_for_test(
             &values.clone_core(&exited).unwrap(),
             &values.core().key_value(&keys::EXITED),
         );
@@ -1957,8 +1955,7 @@ mod tests {
                 Arc::new(crate::core::EvaluationFailure::message("killed fixture")),
             )),
         );
-        crate::core::assert_same_representation_for_test(
-            values.core(),
+        values.core().assert_same_representation_for_test(
             &values.clone_core(&killed).unwrap(),
             &values.core().key_value(&keys::KILLED),
         );
@@ -2023,8 +2020,7 @@ mod tests {
         };
         let updates = updates.lock().expect("test query updates were poisoned");
         assert_eq!(updates.len(), 1);
-        crate::core::assert_same_representation_for_test(
-            &values,
+        values.assert_same_representation_for_test(
             &public_values.clone_core(&updates[0]).unwrap(),
             &values.key_value(&keys::BLOCKED),
         );

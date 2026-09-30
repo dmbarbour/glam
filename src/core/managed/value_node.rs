@@ -430,11 +430,7 @@ mod tests {
             .join()
             .expect("managed-root projection worker should not panic");
         let worker = worker.expect("the managed root should project in its runtime");
-        crate::core::assert_same_representation_for_test(
-            &values,
-            &worker,
-            &Value::Number(large_integer),
-        );
+        values.assert_same_representation_for_test(&worker, &Value::Number(large_integer));
         assert_eq!(format!("{root:?}"), "RuntimeValueRoot");
 
         let live = values
@@ -463,11 +459,7 @@ mod tests {
         let managed = prepare(&owner, Value::Dict(crate::core::Dict::new_sync()));
 
         let projected = project(&inline, &owner).expect("the inline root should project");
-        crate::core::assert_same_representation_for_test(
-            &owner,
-            &projected,
-            &Value::Number(42.into()),
-        );
+        owner.assert_same_representation_for_test(&projected, &Value::Number(42.into()));
         assert!(matches!(project(&managed, &owner), Some(Value::Dict(dict)) if dict.is_empty()));
         assert!(project(&inline, &other).is_none());
         assert!(project(&managed, &other).is_none());

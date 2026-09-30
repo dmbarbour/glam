@@ -648,8 +648,7 @@ mod tests {
                     request.get(&*keys::FILE)
                 })
                 .expect("invalid request should retain its source spelling");
-            crate::core::assert_same_representation_for_test(
-                eval_context.values(),
+            eval_context.values().assert_same_representation_for_test(
                 request,
                 &Value::binary_from_text("../outside.g"),
             );
@@ -796,11 +795,9 @@ mod tests {
             ))
             .expect("the rooted compiler suspension should resume");
 
-        crate::core::assert_same_representation_for_test(
-            eval_context.values(),
-            &loaded,
-            &Value::Number(1.into()),
-        );
+        eval_context
+            .values()
+            .assert_same_representation_for_test(&loaded, &Value::Number(1.into()));
     }
 
     #[test]
@@ -810,8 +807,7 @@ mod tests {
         let path = context.values().with_runtime_value_access(|access| {
             context.abstract_global_path(&access, "nested.Name")
         });
-        crate::core::assert_same_representation_for_test(
-            context.values(),
+        context.values().assert_same_representation_for_test(
             &path,
             &Value::Atom(Atom::from_key(&Key::abstract_global_path([
                 "root", "module", "nested", "Name",
@@ -823,8 +819,7 @@ mod tests {
     fn compile_context_defaults_prior_to_empty_dict() {
         let context = CompileContext::default();
 
-        crate::core::assert_same_representation_for_test(
-            context.values(),
+        context.values().assert_same_representation_for_test(
             &context.prior_defs(),
             &Value::Dict(Dict::new_sync()),
         );
@@ -841,13 +836,16 @@ mod tests {
             Key::binary_from_text("unit"),
         ]))));
 
-        crate::core::assert_same_representation_for_test(
-            context.values(),
+        context.values().assert_same_representation_for_test(
             &unit,
             &Value::Atom(Atom::from_key(&Key::abstract_global_path([
                 "builtin", "unit",
             ]))),
         );
-        assert!(!unit.same_representation_for_test(&forged, context.values()));
+        assert!(
+            !context
+                .values()
+                .same_representation_for_test(&unit, &forged)
+        );
     }
 }

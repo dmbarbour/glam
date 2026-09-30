@@ -595,8 +595,7 @@ mod tests {
 
         assert_eq!(snapshot.generation(), 1);
         assert_eq!(snapshot.extra(), &());
-        crate::core::assert_same_representation_for_test(
-            public_values.core(),
+        public_values.core().assert_same_representation_for_test(
             &public_values
                 .clone_core(&host.reflection_environment())
                 .expect("host environment belongs to the search runtime"),

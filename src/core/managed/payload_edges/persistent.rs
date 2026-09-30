@@ -159,8 +159,7 @@ mod tests {
         assert_eq!(empty_stats.list.node_visits, 1);
 
         let singleton = List::from_values(vec![first.duplicate_for_test(&values)]);
-        crate::core::assert_same_representation_for_test(
-            &values,
+        values.assert_same_representation_for_test(
             &edges(&values, &singleton),
             &vec![first.duplicate_for_test(&values)],
         );
@@ -174,8 +173,7 @@ mod tests {
         let shared_stats = visit_list_edges(&shared_twice, &mut |value| {
             shared_edges.push(value.duplicate_for_test(&values));
         });
-        crate::core::assert_same_representation_for_test(
-            &values,
+        values.assert_same_representation_for_test(
             &shared_edges,
             &vec![
                 first.duplicate_for_test(&values),
@@ -199,8 +197,7 @@ mod tests {
         let sliced_stats = visit_list_edges(&sliced, &mut |value| {
             sliced_edges.push(value.duplicate_for_test(&values));
         });
-        crate::core::assert_same_representation_for_test(
-            &values,
+        values.assert_same_representation_for_test(
             &sliced_edges,
             &vec![first.duplicate_for_test(&values)],
         );
@@ -217,8 +214,7 @@ mod tests {
         let finger_stats = visit_list_edges(&finger, &mut |value| {
             finger_edges.push(value.duplicate_for_test(&values));
         });
-        crate::core::assert_same_representation_for_test(
-            &values,
+        values.assert_same_representation_for_test(
             &finger_edges,
             &vec![second.duplicate_for_test(&values)],
         );
@@ -267,8 +263,7 @@ mod tests {
         let base_stats = visit_dict_edges(&base, &mut |value| {
             base_edges.push(value.duplicate_for_test(&values));
         });
-        crate::core::assert_same_representation_for_test(
-            &values,
+        values.assert_same_representation_for_test(
             &base_edges,
             &vec![first.duplicate_for_test(&values)],
         );

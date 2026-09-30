@@ -544,9 +544,7 @@ mod tests {
                 .all(|value| value.runtime_id() == values.runtime_id())
         );
         assert!(root.direct_value_roots().iter().all(|value| {
-            value
-                .clone_core_for_test()
-                .same_representation_for_test(&repeated, &values)
+            values.same_representation_for_test(&value.clone_core_for_test(), &repeated)
         }));
         assert!(Arc::ptr_eq(&root.clone().into_failure(), &failure));
         assert_eq!(
@@ -592,8 +590,7 @@ mod tests {
         let root = RuntimeFailureRoot::new(&values, failure);
 
         assert_eq!(root.direct_value_roots().len(), 1);
-        crate::core::assert_same_representation_for_test(
-            &values,
+        values.assert_same_representation_for_test(
             &root.direct_value_roots()[0].clone_core_for_test(),
             &lazy,
         );

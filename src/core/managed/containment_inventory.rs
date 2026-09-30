@@ -826,7 +826,7 @@ fn semantic_computation_captures_are_explicit() {
 
     assert_eq!(computation.captures.len(), 2);
     assert!(
-        computation.captures[1].same_representation_for_test(&Value::Number(2.into()), &values,),
+        values.same_representation_for_test(&computation.captures[1], &Value::Number(2.into())),
         "the function pointer receives the exact ordered capture array"
     );
 }
@@ -898,9 +898,10 @@ fn external_closure_bundle_retains_only_declared_roots() {
         Err(_) => panic!("the explicit root-bundle callback should succeed"),
     };
     assert!(
-        result
-            .clone_core_for_test()
-            .same_representation_for_test(&Value::Number(42.into()), &values),
+        values.same_representation_for_test(
+            &result.clone_core_for_test(),
+            &Value::Number(42.into()),
+        ),
         "the callback receives the declared semantic value as a temporary runtime root"
     );
     assert_eq!(

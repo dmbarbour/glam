@@ -1777,8 +1777,7 @@ mod ownership_tests {
         ) else {
             panic!("the yielded follower must resume from the assigned value")
         };
-        crate::core::assert_same_representation_for_test(
-            context.values(),
+        context.values().assert_same_representation_for_test(
             &value.clone_core_for_test(),
             &Value::Number(73.into()),
         );
@@ -1853,8 +1852,7 @@ mod ownership_tests {
                 }
             }
         };
-        crate::core::assert_same_representation_for_test(
-            context.values(),
+        context.values().assert_same_representation_for_test(
             &completed.clone_core_for_test(),
             &Value::Number(91.into()),
         );
@@ -1898,8 +1896,7 @@ mod ownership_tests {
             ) else {
                 panic!("the stale net route must observe the winning terminal cache")
             };
-            crate::core::assert_same_representation_for_test(
-                context.values(),
+            context.values().assert_same_representation_for_test(
                 &value.clone_core_for_test(),
                 &Value::Number(97.into()),
             );

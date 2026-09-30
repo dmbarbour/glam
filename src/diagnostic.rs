@@ -735,7 +735,7 @@ mod tests {
         let Some(actual) = actual else {
             panic!("expected a diagnostic field")
         };
-        crate::core::assert_same_representation_for_test(values, actual, expected);
+        values.assert_same_representation_for_test(actual, expected);
     }
 
     #[test]
@@ -796,8 +796,7 @@ mod tests {
         let Some(Value::List(namespace)) = origin.get(&*keys::NAMESPACE) else {
             panic!("origin should contain its global namespace");
         };
-        crate::core::assert_same_representation_for_test(
-            &values,
+        values.assert_same_representation_for_test(
             &list_values(&values, namespace),
             &vec![
                 Value::binary_from_text("pkg"),
@@ -826,8 +825,7 @@ mod tests {
         let Some(Value::List(extends)) = root_edge.get(&*keys::EXTENDS) else {
             panic!("import edge should say which relative namespace it extends");
         };
-        crate::core::assert_same_representation_for_test(
-            &values,
+        values.assert_same_representation_for_test(
             &list_values(&values, extends),
             &vec![Value::binary_from_text("child")],
         );

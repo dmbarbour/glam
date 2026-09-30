@@ -2309,11 +2309,7 @@ mod tests {
                     .map(|value| access.values().duplicate_value(value))
             })
         });
-        crate::core::assert_same_representation_for_test(
-            &values,
-            &retained_data,
-            &Some(values.unit()),
-        );
+        values.assert_same_representation_for_test(&retained_data, &Some(values.unit()));
         drop(retained_code);
         drop(owner);
         values
@@ -2427,7 +2423,7 @@ mod tests {
                     .interface_data(runtime.exposed())
                     .map(|value| access.duplicate_value(value))
             });
-            crate::core::assert_same_representation_for_test(&first, &data, &Some(first.unit()));
+            access.assert_same_representation_for_test(&data, &Some(access.unit()));
         });
     }
 

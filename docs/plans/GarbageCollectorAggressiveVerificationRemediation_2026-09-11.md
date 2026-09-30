@@ -2099,6 +2099,76 @@ inventory relatch:
       compare decoded status/store payloads under the owning runtime. Public
       rooted values retain ordinary handle cloning; the change does not
       confuse that durable operation with raw core-value duplication.
+    - **Remaining fixture equality migration — reviewed 2026-09-30.** Do not
+      continue the remaining workspace cutover as an undifferentiated
+      compiler-error rewrite. The current all-target compile reports 547
+      distinct equality-error locations. Of those, 337 compare `Value`
+      directly, 72 compare `Option<&Value>`, 57 compare `Vec<Value>`, and 13
+      compare value slices; 516 are at or immediately within `assert_eq!`.
+      These counts describe the present migration surface, not a permanent
+      source baseline. Most errors are repeated consequences of one missing
+      test assertion vocabulary.
+
+      Use the value domain itself as the common assertion locus. Add a
+      `#[cfg(test)]`, `#[track_caller]`
+      `CoreValueFactory::assert_same_representation_for_test<L, R>` operation,
+      where `L: SameRepresentationForTest<R>`, backed by the existing explicit
+      test relation. It opens one bounded matching value-access region, creates
+      no root, and reports the compared Rust type names plus runtime identity
+      without restoring `Debug`, `PartialEq`, or `Eq`. Migrate the provisional
+      free assertion function into this method rather than retaining two
+      common factory entry points. A paired method on `RuntimeValueAccess`
+      reuses an already-open region so assertions inside evaluator or managed
+      mutation scopes do not recursively enter the heap. Both forms delegate
+      to the same relation and remain visibly value-domain-qualified. Keep the
+      Boolean relation available on both authorities for match guards,
+      filters, and negative assertions. Do not introduce an exported assertion
+      macro: a macro would improve expression spelling in panic text but would
+      hide the value-domain authority which this cutover is intended to
+      expose.
+
+      Broaden only the test relation's structural adapters needed by existing
+      fixtures: references, `Arc`, `Option`, `Result`, slices, vectors, and
+      fixed arrays, including the common vector/slice/array cross-shapes. A
+      recursive carrier which embeds values, such as
+      `ResolvedExpr<Value>`, implements the relation in its owning module.
+      Generic interaction-net fixtures likewise retain their own payload
+      relation or scalar/topology assertion. Neither dependency is a reason
+      for `core` to know front-end syntax or generic-net types. Public rooted
+      facade tests continue to use their public evaluator/reflection observer;
+      they must not reach through to this crate-private raw-value fixture API.
+
+      Execute the remainder in reviewable checkpoints:
+
+      1. **Assertion vocabulary implemented 2026-09-30; dynamic fixture pending
+         compile closure.** Add the factory/scoped-access assertions,
+         structural adapters, and focused positive, negative, nested-container,
+         borrowed-value, and cross-shape tests. The recursive relation now
+         receives the one scoped access instead of reopening a mutator for
+         every leaf. Existing provisional free-function callers use the new
+         authorities, including managed-cell assertions which reuse their
+         surrounding access. The focused fixture latches maximum access depth
+         one and zero root registrations. Production `cargo check --lib
+         --all-features` passes and the all-target compiler reports no helper
+         errors; executing the fixture remains dependent on completing the
+         already-known workspace test migration below.
+      2. Migrate the high-density `eval` and `evaluation` fixtures under the
+         exact factory/context which owns each compared value. Keep missing
+         duplication and failure-formatting repairs as separately visible
+         work; the assertion helper must not become a general compatibility
+         escape hatch.
+      3. Add owner-local recursive test relations for `g_syntax` carriers and
+         migrate compiler/front-end fixtures without giving semantic values
+         syntax-layer equality traits.
+      4. Migrate reflection, API, builtin-net, and generic interaction-net
+         fixtures. Use public observers for public values and explicit local
+         payload/topology relations for generic nets.
+      5. Re-run the all-target compile, inventory every remaining equality
+         error by intended relation, and add a source gate rejecting
+         `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived
+         equality whose operand transitively includes raw semantic values.
+         Only then resume the distinct duplication, formatting, and ownership
+         parts of workspace compile closure.
   - **D.2h.2c — managed facade and collector cutover:** remove the thirteen
     managed-facade traits/identity shims and the five `Gc<T>` traits, add the
     negative compile/source gates, and make the full workspace compile.

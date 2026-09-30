@@ -1132,21 +1132,13 @@ mod tests {
         let values = crate::compiler::test_value_factory();
         let first_effect = effect_test_value(&values, "compiler_cache_test");
         let second_effect = effect_test_value(&values, "compiler_cache_test");
-        crate::core::assert_same_representation_for_test(&values, &first_effect, &second_effect);
+        values.assert_same_representation_for_test(&first_effect, &second_effect);
         assert!(matches!(first_effect, Value::Dict(_)));
 
         let first_std = builtin_test_module(&values, "std").expect("std should be built in");
         let second_std = builtin_test_module(&values, "std").expect("std should remain built in");
-        crate::core::assert_same_representation_for_test(
-            &values,
-            &first_std.value,
-            &second_std.value,
-        );
-        crate::core::assert_same_representation_for_test(
-            &values,
-            &first_std.definitions,
-            &second_std.definitions,
-        );
+        values.assert_same_representation_for_test(&first_std.value, &second_std.value);
+        values.assert_same_representation_for_test(&first_std.definitions, &second_std.definitions);
         assert!(matches!(first_std.definitions, Value::Function(_)));
         with_values(&values, |compiler| {
             assert!(matches!(
@@ -1273,8 +1265,7 @@ mod tests {
         values
             .collect_managed_for_test()
             .expect("publishing an immediate result should remain traceable");
-        crate::core::assert_same_representation_for_test(
-            &values,
+        values.assert_same_representation_for_test(
             &project_test_value(&values, &immediate),
             &Value::Number(Number::integer(42)),
         );
@@ -1391,8 +1382,7 @@ mod tests {
             let result = evaluator
                 .join()
                 .expect("cached compiler helper evaluation should not panic");
-            crate::core::assert_same_representation_for_test(
-                &values,
+            values.assert_same_representation_for_test(
                 &project_test_value(&values, &result),
                 &Value::binary_from_text("g0"),
             );
@@ -1424,13 +1414,11 @@ mod tests {
                 path: vec![ResolvedPathPart::Key(name_as_key("language"))],
             },
         );
-        crate::core::assert_same_representation_for_test(
-            &values,
+        values.assert_same_representation_for_test(
             &project_test_value(&values, &existing),
             &Value::Number(Number::integer(1)),
         );
-        crate::core::assert_same_representation_for_test(
-            &values,
+        values.assert_same_representation_for_test(
             &project_test_value(&values, &language),
             &Value::binary_from_text("g0"),
         );
@@ -1481,8 +1469,7 @@ mod tests {
                 path: vec![ResolvedPathPart::Key(name_as_key("adapted"))],
             },
         );
-        crate::core::assert_same_representation_for_test(
-            &values,
+        values.assert_same_representation_for_test(
             &project_test_value(&values, &adapted),
             &Value::binary_from_text("g0"),
         );

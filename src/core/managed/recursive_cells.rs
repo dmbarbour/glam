@@ -2160,22 +2160,10 @@ mod tests {
             assert_eq!(lazy.label().as_ref(), "prepared lazy");
             assert!(lazy.source_snapshot().is_some());
             let first = root.cache(&access, Ok(winner.duplicate_in(&access)));
-            crate::core::assert_same_representation_for_test(
-                &values,
-                &first,
-                &Ok(winner.duplicate_in(&access)),
-            );
+            access.assert_same_representation_for_test(&first, &Ok(winner.duplicate_in(&access)));
             let second = root.cache(&access, Ok(loser));
-            crate::core::assert_same_representation_for_test(
-                &values,
-                &second,
-                &Ok(winner.duplicate_in(&access)),
-            );
-            crate::core::assert_same_representation_for_test(
-                &values,
-                &lazy.cached(),
-                &Some(Ok(winner)),
-            );
+            access.assert_same_representation_for_test(&second, &Ok(winner.duplicate_in(&access)));
+            access.assert_same_representation_for_test(&lazy.cached(), &Some(Ok(winner)));
             assert!(lazy.source_snapshot().is_none());
         });
 
@@ -2213,12 +2201,8 @@ mod tests {
             let Err(rejected) = rejected else {
                 panic!("the second promise publication should lose")
             };
-            crate::core::assert_same_representation_for_test(&values, &rejected, &Ok(loser));
-            crate::core::assert_same_representation_for_test(
-                &values,
-                &promise.assignment(),
-                &Some(Ok(winner)),
-            );
+            access.assert_same_representation_for_test(&rejected, &Ok(loser));
+            access.assert_same_representation_for_test(&promise.assignment(), &Some(Ok(winner)));
         });
         assert!(root.is_terminal());
 
@@ -2255,7 +2239,7 @@ mod tests {
                 )])))
                 .expect("a list is already in weak-head normal form");
             let cached = root.cache(&access, Ok(result.duplicate_in(&access)));
-            crate::core::assert_same_representation_for_test(&values, &cached, &Ok(result));
+            access.assert_same_representation_for_test(&cached, &Ok(result));
             assert!(root.access(&access).unwrap().source_snapshot().is_none());
         });
 
@@ -2291,7 +2275,7 @@ mod tests {
                 vec![Value::Promised(emitted)],
             ))));
             let cached = root.cache(&access, Err(Arc::clone(&failure)));
-            crate::core::assert_same_representation_for_test(&values, &cached, &Err(failure));
+            access.assert_same_representation_for_test(&cached, &Err(failure));
             assert!(root.access(&access).unwrap().source_snapshot().is_none());
         });
 
@@ -2325,8 +2309,7 @@ mod tests {
                     duplicate_promise_assignment(&access, assignment)
                 })
                 .unwrap_or_else(|_| panic!("the first detached publication should win"));
-            crate::core::assert_same_representation_for_test(
-                &values,
+            access.assert_same_representation_for_test(
                 &detached,
                 &Ok(access.duplicate_value(&target)),
             );
@@ -2346,8 +2329,7 @@ mod tests {
                     |assignment| duplicate_promise_assignment(&access, assignment),
                 )
                 .unwrap_or_else(|_| panic!("the first guarded publication should win"));
-            crate::core::assert_same_representation_for_test(
-                &values,
+            access.assert_same_representation_for_test(
                 &observed,
                 &Err(Arc::new(EvaluationFailure::emission(
                     access.duplicate_value(&target),
@@ -2431,8 +2413,7 @@ mod tests {
         assert!(winner.join().expect("winner thread panicked").is_ok());
         assert!(loser.join().expect("loser thread panicked").is_err());
         values.with_runtime_value_access(|access| {
-            crate::core::assert_same_representation_for_test(
-                &values,
+            access.assert_same_representation_for_test(
                 &promise_root.access(&access).unwrap().assignment(),
                 &Some(Ok(first_assignment)),
             );
@@ -2464,11 +2445,7 @@ mod tests {
                     .interface_data(runtime.exposed())
                     .map(|value| access.duplicate_value(value))
             });
-            crate::core::assert_same_representation_for_test(
-                &values,
-                &data,
-                &Some(Value::Number(5.into())),
-            );
+            access.assert_same_representation_for_test(&data, &Some(Value::Number(5.into())));
             let before = net.cell().with_revisions(|_| ()).1;
             net.with_mut(|_| ());
             let after = net.cell().with_revisions(|_| ()).1;
@@ -2590,11 +2567,7 @@ mod tests {
                     .interface_data(runtime.exposed())
                     .map(|value| access.duplicate_value(value))
             });
-            crate::core::assert_same_representation_for_test(
-                &values,
-                &data,
-                &Some(Value::Number(17.into())),
-            );
+            access.assert_same_representation_for_test(&data, &Some(Value::Number(17.into())));
         });
 
         let unrelated = new_values();
@@ -2638,11 +2611,7 @@ mod tests {
                     .interface_data(runtime.exposed())
                     .map(|value| access.duplicate_value(value))
             });
-            crate::core::assert_same_representation_for_test(
-                &values,
-                &data,
-                &Some(Value::Number(61.into())),
-            );
+            access.assert_same_representation_for_test(&data, &Some(Value::Number(61.into())));
 
             (
                 access.root_managed_lazy(&lazy_edge),
@@ -2745,8 +2714,7 @@ mod tests {
             let lazy = access
                 .construct_failed_managed_lazy("prepared failure", failure.clone())
                 .expect("the managed failed lazy should fit a run");
-            crate::core::assert_same_representation_for_test(
-                &values,
+            access.assert_same_representation_for_test(
                 &lazy.access(access).cached(),
                 &Some(Err(failure.clone())),
             );

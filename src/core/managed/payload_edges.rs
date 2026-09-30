@@ -286,7 +286,7 @@ mod tests {
         let actual = edges(values, value);
         assert_eq!(actual.len(), expected.len());
         for (actual, expected) in actual.iter().zip(expected) {
-            crate::core::assert_same_representation_for_test(values, actual, expected);
+            values.assert_same_representation_for_test(actual, expected);
         }
     }
 
@@ -438,8 +438,7 @@ mod tests {
                 .is_ok(),
             "the fresh promise should accept one assignment"
         );
-        crate::core::assert_same_representation_for_test(
-            &values,
+        values.assert_same_representation_for_test(
             &promise.assignment(&values),
             &Some(Ok(first.duplicate_for_test(&values))),
         );
@@ -491,8 +490,7 @@ mod tests {
         let Ok(cached) = cached else {
             panic!("the completed lazy should accept its first result")
         };
-        crate::core::assert_same_representation_for_test(
-            &values,
+        values.assert_same_representation_for_test(
             &cached,
             &EvaluatedValue::from_whnf(first.duplicate_for_test(&values)).unwrap(),
         );

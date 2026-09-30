@@ -51,8 +51,7 @@ fn assert_list_values(assembler: &Assembler, actual: &PublicValue, expected: &Pu
     let Value::List(expected) = &expected else {
         panic!("expected value should be a list")
     };
-    crate::core::assert_same_representation_for_test(
-        &assembler.core_values(),
+    assembler.core_values().assert_same_representation_for_test(
         &crate::eval::list_to_value_items(&assembler.eval_context(), actual).unwrap(),
         &crate::eval::list_to_value_items(&assembler.eval_context(), expected).unwrap(),
     );

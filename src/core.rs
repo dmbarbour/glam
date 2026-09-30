@@ -133,16 +133,6 @@ impl EvaluatedValue {
     pub(crate) fn duplicate_for_test(&self, values: &CoreValueFactory) -> Self {
         values.with_runtime_value_access(|access| self.duplicate_in(&access))
     }
-
-    /// Test-only representation comparison under the named value domain.
-    #[cfg(test)]
-    pub(crate) fn same_representation_for_test(
-        &self,
-        other: &Self,
-        values: &CoreValueFactory,
-    ) -> bool {
-        values.with_runtime_value_access(|access| access.same_representation(&self.0, &other.0))
-    }
 }
 
 pub(crate) type LazyResult = Result<EvaluatedValue, Arc<EvaluationFailure>>;
@@ -262,41 +252,6 @@ impl EvaluationFailure {
     #[cfg(test)]
     pub(crate) fn duplicate_for_test(&self, values: &CoreValueFactory) -> Self {
         values.with_runtime_value_access(|access| self.duplicate_in(&access))
-    }
-
-    /// Test-only comparison of failure representations under the named value
-    /// domain. Dependency-cycle reports retain their ordinary structural
-    /// relation; semantic values use the same regional comparison as `Value`.
-    #[cfg(test)]
-    pub(crate) fn same_representation_for_test(
-        &self,
-        other: &Self,
-        values: &CoreValueFactory,
-    ) -> bool {
-        values.with_runtime_value_access(|access| {
-            let same_kind = match (&self.kind, &other.kind) {
-                (
-                    EvaluationFailureKind::Emission(left),
-                    EvaluationFailureKind::Emission(right),
-                ) => access.same_representation(left, right),
-                (
-                    EvaluationFailureKind::DependencyCycle(left),
-                    EvaluationFailureKind::DependencyCycle(right),
-                ) => left == right,
-                (EvaluationFailureKind::Emission(_), EvaluationFailureKind::DependencyCycle(_))
-                | (
-                    EvaluationFailureKind::DependencyCycle(_),
-                    EvaluationFailureKind::Emission(_),
-                ) => false,
-            };
-            same_kind
-                && self.contexts.len() == other.contexts.len()
-                && self
-                    .contexts
-                    .iter()
-                    .zip(other.contexts.iter())
-                    .all(|(left, right)| access.same_representation(left, right))
-        })
     }
 
     /// Borrows the immediate emission only while matching value access is
@@ -3097,43 +3052,88 @@ impl RuntimeValueAccess<'_> {
 /// `PartialEq` on semantic values.
 #[cfg(test)]
 pub(crate) trait SameRepresentationForTest<Rhs: ?Sized = Self> {
-    fn same_representation_for_test(&self, other: &Rhs, values: &CoreValueFactory) -> bool;
+    fn same_representation_for_test(&self, other: &Rhs, access: &RuntimeValueAccess<'_>) -> bool;
 }
 
 #[cfg(test)]
 impl SameRepresentationForTest for Value {
-    fn same_representation_for_test(&self, other: &Self, values: &CoreValueFactory) -> bool {
-        Value::same_representation_for_test(self, other, values)
+    fn same_representation_for_test(&self, other: &Self, access: &RuntimeValueAccess<'_>) -> bool {
+        access.same_representation(self, other)
     }
 }
 
 #[cfg(test)]
 impl SameRepresentationForTest for EvaluatedValue {
-    fn same_representation_for_test(&self, other: &Self, values: &CoreValueFactory) -> bool {
-        EvaluatedValue::same_representation_for_test(self, other, values)
+    fn same_representation_for_test(&self, other: &Self, access: &RuntimeValueAccess<'_>) -> bool {
+        access.same_representation(&self.0, &other.0)
     }
 }
 
 #[cfg(test)]
 impl SameRepresentationForTest for EvaluationFailure {
-    fn same_representation_for_test(&self, other: &Self, values: &CoreValueFactory) -> bool {
-        EvaluationFailure::same_representation_for_test(self, other, values)
+    fn same_representation_for_test(&self, other: &Self, access: &RuntimeValueAccess<'_>) -> bool {
+        let same_kind = match (&self.kind, &other.kind) {
+            (EvaluationFailureKind::Emission(left), EvaluationFailureKind::Emission(right)) => {
+                access.same_representation(left, right)
+            }
+            (
+                EvaluationFailureKind::DependencyCycle(left),
+                EvaluationFailureKind::DependencyCycle(right),
+            ) => left == right,
+            (EvaluationFailureKind::Emission(_), EvaluationFailureKind::DependencyCycle(_))
+            | (EvaluationFailureKind::DependencyCycle(_), EvaluationFailureKind::Emission(_)) => {
+                false
+            }
+        };
+        same_kind
+            && self.contexts.len() == other.contexts.len()
+            && self
+                .contexts
+                .iter()
+                .zip(other.contexts.iter())
+                .all(|(left, right)| access.same_representation(left, right))
     }
 }
 
 #[cfg(test)]
-impl<T: SameRepresentationForTest + ?Sized> SameRepresentationForTest for Arc<T> {
-    fn same_representation_for_test(&self, other: &Self, values: &CoreValueFactory) -> bool {
+impl<T, U> SameRepresentationForTest<Arc<U>> for Arc<T>
+where
+    T: SameRepresentationForTest<U> + ?Sized,
+    U: ?Sized,
+{
+    fn same_representation_for_test(
+        &self,
+        other: &Arc<U>,
+        access: &RuntimeValueAccess<'_>,
+    ) -> bool {
         self.as_ref()
-            .same_representation_for_test(other.as_ref(), values)
+            .same_representation_for_test(other.as_ref(), access)
     }
 }
 
 #[cfg(test)]
-impl<T: SameRepresentationForTest> SameRepresentationForTest for Option<T> {
-    fn same_representation_for_test(&self, other: &Self, values: &CoreValueFactory) -> bool {
+impl<T, U> SameRepresentationForTest<&U> for &T
+where
+    T: SameRepresentationForTest<U> + ?Sized,
+    U: ?Sized,
+{
+    fn same_representation_for_test(&self, other: &&U, access: &RuntimeValueAccess<'_>) -> bool {
+        (*self).same_representation_for_test(*other, access)
+    }
+}
+
+#[cfg(test)]
+impl<T, U> SameRepresentationForTest<Option<U>> for Option<T>
+where
+    T: SameRepresentationForTest<U>,
+{
+    fn same_representation_for_test(
+        &self,
+        other: &Option<U>,
+        access: &RuntimeValueAccess<'_>,
+    ) -> bool {
         match (self, other) {
-            (Some(left), Some(right)) => left.same_representation_for_test(right, values),
+            (Some(left), Some(right)) => left.same_representation_for_test(right, access),
             (None, None) => true,
             (Some(_), None) | (None, Some(_)) => false,
         }
@@ -3141,50 +3141,196 @@ impl<T: SameRepresentationForTest> SameRepresentationForTest for Option<T> {
 }
 
 #[cfg(test)]
-impl<T, E> SameRepresentationForTest for Result<T, E>
+impl<T, E, U, F> SameRepresentationForTest<Result<U, F>> for Result<T, E>
 where
-    T: SameRepresentationForTest,
-    E: SameRepresentationForTest,
+    T: SameRepresentationForTest<U>,
+    E: SameRepresentationForTest<F>,
 {
-    fn same_representation_for_test(&self, other: &Self, values: &CoreValueFactory) -> bool {
+    fn same_representation_for_test(
+        &self,
+        other: &Result<U, F>,
+        access: &RuntimeValueAccess<'_>,
+    ) -> bool {
         match (self, other) {
-            (Ok(left), Ok(right)) => left.same_representation_for_test(right, values),
-            (Err(left), Err(right)) => left.same_representation_for_test(right, values),
+            (Ok(left), Ok(right)) => left.same_representation_for_test(right, access),
+            (Err(left), Err(right)) => left.same_representation_for_test(right, access),
             (Ok(_), Err(_)) | (Err(_), Ok(_)) => false,
         }
     }
 }
 
 #[cfg(test)]
-impl<T: SameRepresentationForTest> SameRepresentationForTest for [T] {
-    fn same_representation_for_test(&self, other: &Self, values: &CoreValueFactory) -> bool {
+impl<T, U> SameRepresentationForTest<[U]> for [T]
+where
+    T: SameRepresentationForTest<U>,
+{
+    fn same_representation_for_test(&self, other: &[U], access: &RuntimeValueAccess<'_>) -> bool {
         self.len() == other.len()
             && self
                 .iter()
                 .zip(other.iter())
-                .all(|(left, right)| left.same_representation_for_test(right, values))
+                .all(|(left, right)| left.same_representation_for_test(right, access))
     }
 }
 
 #[cfg(test)]
-impl<T: SameRepresentationForTest> SameRepresentationForTest for Vec<T> {
-    fn same_representation_for_test(&self, other: &Self, values: &CoreValueFactory) -> bool {
-        self.as_slice()
-            .same_representation_for_test(other.as_slice(), values)
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn assert_same_representation_for_test<T>(values: &CoreValueFactory, left: &T, right: &T)
+impl<T, U> SameRepresentationForTest<Vec<U>> for Vec<T>
 where
-    T: SameRepresentationForTest + ?Sized,
+    T: SameRepresentationForTest<U>,
 {
-    assert!(
-        left.same_representation_for_test(right, values),
-        "{} representations differ under runtime {}",
-        std::any::type_name::<T>(),
-        values.runtime_id().get()
-    );
+    fn same_representation_for_test(
+        &self,
+        other: &Vec<U>,
+        access: &RuntimeValueAccess<'_>,
+    ) -> bool {
+        self.as_slice()
+            .same_representation_for_test(other.as_slice(), access)
+    }
+}
+
+#[cfg(test)]
+impl<T, U> SameRepresentationForTest<[U]> for Vec<T>
+where
+    T: SameRepresentationForTest<U>,
+{
+    fn same_representation_for_test(&self, other: &[U], access: &RuntimeValueAccess<'_>) -> bool {
+        self.as_slice().same_representation_for_test(other, access)
+    }
+}
+
+#[cfg(test)]
+impl<T, U> SameRepresentationForTest<Vec<U>> for [T]
+where
+    T: SameRepresentationForTest<U>,
+{
+    fn same_representation_for_test(
+        &self,
+        other: &Vec<U>,
+        access: &RuntimeValueAccess<'_>,
+    ) -> bool {
+        self.same_representation_for_test(other.as_slice(), access)
+    }
+}
+
+#[cfg(test)]
+impl<T, U, const N: usize, const M: usize> SameRepresentationForTest<[U; M]> for [T; N]
+where
+    T: SameRepresentationForTest<U>,
+{
+    fn same_representation_for_test(
+        &self,
+        other: &[U; M],
+        access: &RuntimeValueAccess<'_>,
+    ) -> bool {
+        self.as_slice()
+            .same_representation_for_test(other.as_slice(), access)
+    }
+}
+
+#[cfg(test)]
+impl<T, U, const N: usize> SameRepresentationForTest<[U; N]> for Vec<T>
+where
+    T: SameRepresentationForTest<U>,
+{
+    fn same_representation_for_test(
+        &self,
+        other: &[U; N],
+        access: &RuntimeValueAccess<'_>,
+    ) -> bool {
+        self.as_slice()
+            .same_representation_for_test(other.as_slice(), access)
+    }
+}
+
+#[cfg(test)]
+impl<T, U, const N: usize> SameRepresentationForTest<Vec<U>> for [T; N]
+where
+    T: SameRepresentationForTest<U>,
+{
+    fn same_representation_for_test(
+        &self,
+        other: &Vec<U>,
+        access: &RuntimeValueAccess<'_>,
+    ) -> bool {
+        self.as_slice()
+            .same_representation_for_test(other.as_slice(), access)
+    }
+}
+
+#[cfg(test)]
+impl<T, U, const N: usize> SameRepresentationForTest<[U]> for [T; N]
+where
+    T: SameRepresentationForTest<U>,
+{
+    fn same_representation_for_test(&self, other: &[U], access: &RuntimeValueAccess<'_>) -> bool {
+        self.as_slice().same_representation_for_test(other, access)
+    }
+}
+
+#[cfg(test)]
+impl<T, U, const N: usize> SameRepresentationForTest<[U; N]> for [T]
+where
+    T: SameRepresentationForTest<U>,
+{
+    fn same_representation_for_test(
+        &self,
+        other: &[U; N],
+        access: &RuntimeValueAccess<'_>,
+    ) -> bool {
+        self.same_representation_for_test(other.as_slice(), access)
+    }
+}
+
+#[cfg(test)]
+impl CoreValueFactory {
+    pub(crate) fn same_representation_for_test<L, R>(&self, left: &L, right: &R) -> bool
+    where
+        L: SameRepresentationForTest<R> + ?Sized,
+        R: ?Sized,
+    {
+        self.with_runtime_value_access(|access| access.same_representation_for_test(left, right))
+    }
+
+    #[track_caller]
+    pub(crate) fn assert_same_representation_for_test<L, R>(&self, left: &L, right: &R)
+    where
+        L: SameRepresentationForTest<R> + ?Sized,
+        R: ?Sized,
+    {
+        assert!(
+            self.same_representation_for_test(left, right),
+            "{} and {} representations differ under runtime {}",
+            std::any::type_name::<L>(),
+            std::any::type_name::<R>(),
+            self.runtime_id().get()
+        );
+    }
+}
+
+#[cfg(test)]
+impl RuntimeValueAccess<'_> {
+    pub(crate) fn same_representation_for_test<L, R>(&self, left: &L, right: &R) -> bool
+    where
+        L: SameRepresentationForTest<R> + ?Sized,
+        R: ?Sized,
+    {
+        left.same_representation_for_test(right, self)
+    }
+
+    #[track_caller]
+    pub(crate) fn assert_same_representation_for_test<L, R>(&self, left: &L, right: &R)
+    where
+        L: SameRepresentationForTest<R> + ?Sized,
+        R: ?Sized,
+    {
+        assert!(
+            self.same_representation_for_test(left, right),
+            "{} and {} representations differ under runtime {}",
+            std::any::type_name::<L>(),
+            std::any::type_name::<R>(),
+            self.runtime_id().get()
+        );
+    }
 }
 
 impl Value {
@@ -3193,16 +3339,6 @@ impl Value {
     #[cfg(test)]
     pub(crate) fn duplicate_for_test(&self, values: &CoreValueFactory) -> Self {
         values.with_runtime_value_access(|access| access.duplicate_value(self))
-    }
-
-    /// Test-only representation comparison under the named value domain.
-    #[cfg(test)]
-    pub(crate) fn same_representation_for_test(
-        &self,
-        other: &Self,
-        values: &CoreValueFactory,
-    ) -> bool {
-        values.with_runtime_value_access(|access| access.same_representation(self, other))
     }
 
     /// Test-only owned diagnostic text produced under the named value domain.
@@ -3345,6 +3481,48 @@ mod tests {
     }
 
     #[test]
+    fn test_representation_assertions_use_one_unrooted_value_access_region() {
+        let factory = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            RuntimeIds::new(),
+        );
+        let registrations = factory.managed_root_registrations_for_test();
+        reset_runtime_value_access_depth_for_test();
+
+        let left = vec![Value::Number(1.into()), Value::binary_from_text("two")];
+        let right = [Value::Number(1.into()), Value::binary_from_text("two")];
+        factory.assert_same_representation_for_test(&left, &right);
+
+        let borrowed_left = Some(&left[0]);
+        let borrowed_right = Some(&right[0]);
+        factory.assert_same_representation_for_test(&borrowed_left, &borrowed_right);
+
+        let nested_left: Result<Option<Value>, Value> = Ok(Some(Value::Number(3.into())));
+        let nested_right: Result<Option<Value>, Value> = Ok(Some(Value::Number(3.into())));
+        factory.assert_same_representation_for_test(&nested_left, &nested_right);
+        assert!(!factory.same_representation_for_test(
+            &nested_left,
+            &Ok::<Option<Value>, Value>(Some(Value::Number(4.into())))
+        ));
+
+        assert_eq!(max_runtime_value_access_depth_for_test(), 1);
+        reset_runtime_value_access_depth_for_test();
+        factory.with_runtime_value_access(|access| {
+            access.assert_same_representation_for_test(left.as_slice(), &right);
+            assert_eq!(
+                max_runtime_value_access_depth_for_test(),
+                1,
+                "an access-qualified assertion must reuse its caller's region"
+            );
+        });
+        assert_eq!(
+            factory.managed_root_registrations_for_test(),
+            registrations,
+            "test comparisons must not register temporary roots"
+        );
+    }
+
+    #[test]
     fn canonical_cache_publishes_one_complete_root_bundle() {
         let runtime = crate::runtime::allocate_evaluation_runtime_id();
         let factory = CoreValueFactory::new(runtime, RuntimeIds::new());
@@ -3360,60 +3538,43 @@ mod tests {
         ];
 
         assert!(roots.iter().all(|root| root.runtime_id() == runtime));
-        assert_same_representation_for_test(
-            &factory,
-            &factory.unit(),
-            &core.unit.clone_core_for_test(),
-        );
-        assert_same_representation_for_test(
-            &factory,
+        factory
+            .assert_same_representation_for_test(&factory.unit(), &core.unit.clone_core_for_test());
+        factory.assert_same_representation_for_test(
             &factory.object_reflection_guard(),
             &core.object_reflection_guard.clone_core_for_test(),
         );
-        assert_same_representation_for_test(
-            &factory,
+        factory.assert_same_representation_for_test(
             &factory.tuple(),
             &core.tuple.clone_core_for_test(),
         );
-        assert_same_representation_for_test(
-            &factory,
-            &factory.info(),
-            &core.info.clone_core_for_test(),
-        );
-        assert_same_representation_for_test(
-            &factory,
-            &factory.warn(),
-            &core.warn.clone_core_for_test(),
-        );
-        assert_same_representation_for_test(
-            &factory,
+        factory
+            .assert_same_representation_for_test(&factory.info(), &core.info.clone_core_for_test());
+        factory
+            .assert_same_representation_for_test(&factory.warn(), &core.warn.clone_core_for_test());
+        factory.assert_same_representation_for_test(
             &factory.error(),
             &core.error.clone_core_for_test(),
         );
-        assert_same_representation_for_test(
-            &factory,
+        factory.assert_same_representation_for_test(
             &factory.initial_metadata(),
             &core.initial_metadata.clone_core_for_test(),
         );
 
         let scoped = factory.scoped();
-        assert_same_representation_for_test(
-            &factory,
+        factory.assert_same_representation_for_test(
             &scoped.initial_metadata(),
             &factory.initial_metadata(),
         );
-        assert_same_representation_for_test(&factory, &scoped.unit(), &factory.unit());
+        factory.assert_same_representation_for_test(&scoped.unit(), &factory.unit());
 
         let live = factory
             .collect_managed_for_test()
             .expect("the canonical bundle should survive collection");
         assert_eq!(live.root_entries(), roots.len());
         assert_eq!(live.marked_slots(), roots.len());
-        assert_same_representation_for_test(
-            &factory,
-            &factory.unit(),
-            &core.unit.clone_core_for_test(),
-        );
+        factory
+            .assert_same_representation_for_test(&factory.unit(), &core.unit.clone_core_for_test());
     }
 
     #[test]
@@ -3705,8 +3866,7 @@ mod tests {
             .collect_managed_for_test()
             .expect("the runtime cache should retain its registered root");
         assert_eq!(live.root_entries(), baseline.root_entries() + 1);
-        assert_same_representation_for_test(
-            &factory,
+        factory.assert_same_representation_for_test(
             &owner.root.clone_core_for_test(),
             &Value::binary_from_text("cached root"),
         );
@@ -3802,7 +3962,7 @@ mod tests {
         let actual = value
             .get_atom_path(&[asm])
             .expect("the atom path should select its value");
-        assert_same_representation_for_test(&values(), actual, &Value::binary_from_text("atom"));
+        values().assert_same_representation_for_test(actual, &Value::binary_from_text("atom"));
     }
 
     #[test]
@@ -4277,15 +4437,14 @@ mod tests {
             carrier.duplicate_for_test(&values),
         ));
 
-        assert_same_representation_for_test(
-            &values,
+        values.assert_same_representation_for_test(
             &list,
             &Value::List(List::from_values(vec![carrier.duplicate_for_test(&values)])),
         );
         let actual = dict
             .get_key_path(&[Key::atom_from_text("trace")])
             .expect("the metadata carrier should remain in the dictionary");
-        assert_same_representation_for_test(&values, actual, &carrier);
+        values.assert_same_representation_for_test(actual, &carrier);
     }
 
     #[test]
@@ -4347,9 +4506,8 @@ mod tests {
 
         let evaluated = EvaluatedValue::from_whnf(container.duplicate_for_test(&values))
             .expect("a container with a lazy field is in outer WHNF");
-        assert_same_representation_for_test(&values, &evaluated.into_value(), &container);
-        assert_same_representation_for_test(
-            &values,
+        values.assert_same_representation_for_test(&evaluated.into_value(), &container);
+        values.assert_same_representation_for_test(
             &EvaluatedValue::from_whnf(sealed.duplicate_for_test(&values))
                 .expect("a sealed carrier is already in outer WHNF")
                 .into_value(),
@@ -4390,7 +4548,7 @@ mod tests {
             Some(Err(_)) => panic!("the ready promise should succeed"),
             None => panic!("the ready promise should have an assignment"),
         };
-        assert_same_representation_for_test(&values, &assignment, &Value::Number(42.into()));
+        values.assert_same_representation_for_test(&assignment, &Value::Number(42.into()));
     }
 
     #[test]
@@ -4494,7 +4652,7 @@ mod tests {
         let actual = value
             .get_key_path(&[list_key])
             .expect("the list key should select its value");
-        assert_same_representation_for_test(&values(), actual, &Value::Number(7.into()));
+        values().assert_same_representation_for_test(actual, &Value::Number(7.into()));
     }
 
     #[test]
@@ -4539,8 +4697,7 @@ mod tests {
             )
             .expect("balanced list should walk");
         assert_eq!(bytes.into_inner(), b"Hell");
-        assert_same_representation_for_test(
-            &factory,
+        factory.assert_same_representation_for_test(
             &collected_values.into_inner(),
             &vec![Value::Number(111.into()), Value::Number(33.into())],
         );
@@ -4576,8 +4733,7 @@ mod tests {
             )
             .expect("sliced list should walk");
         assert_eq!(bytes.into_inner(), b"ello");
-        assert_same_representation_for_test(
-            &factory,
+        factory.assert_same_representation_for_test(
             &collected_values.into_inner(),
             &vec![Value::Number(44.into())],
         );
