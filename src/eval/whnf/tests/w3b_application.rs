@@ -68,9 +68,9 @@ fn builtin_application_batches_only_to_saturation() {
         panic!("the application frame must preserve the ordinary builtin source")
     };
     assert_eq!(call.builtin, Builtin::Add);
-    assert_eq!(
+    context.values().assert_same_representation_for_test(
         call.arguments.as_ref(),
-        [Value::Number(2.into()), Value::Number(3.into())]
+        &[Value::Number(2.into()), Value::Number(3.into())],
     );
 }
 
@@ -98,9 +98,9 @@ fn partial_builtin_resumes_without_replaying_supplied_arguments() {
     let Some(LazySource::Builtin(call)) = source else {
         panic!("the resumed partial builtin must retain a builtin source")
     };
-    assert_eq!(
+    context.values().assert_same_representation_for_test(
         call.arguments.as_ref(),
-        [Value::Number(7.into()), Value::Number(11.into())]
+        &[Value::Number(7.into()), Value::Number(11.into())],
     );
 }
 
@@ -202,7 +202,9 @@ fn effect_payload_undefined_check_resumes_from_the_exact_promise() {
         panic!("effect application must append through EffectApply")
     };
     assert_eq!(call.builtin, Builtin::EffectApply);
-    assert_eq!(call.arguments[1], Value::Number(23.into()));
+    context
+        .values()
+        .assert_same_representation_for_test(&call.arguments[1], &Value::Number(23.into()));
 }
 
 #[test]

@@ -104,8 +104,10 @@ fn managed_checkpoint_resumes_on_another_worker_after_collection() {
 
     let mut first_budget = WhnfStepBudget::new(1);
     let first = poll.with_value_access(&context, |access| {
-        computation.poll_in(&access, &mut first_budget, |_access, work| {
-            assert_eq!(work.focus, Value::Number(1.into()));
+        computation.poll_in(&access, &mut first_budget, |access, work| {
+            access
+                .values()
+                .assert_same_representation_for_test(&work.focus, &Value::Number(1.into()));
             work.frames.push(
                 WhnfFrame {
                     kind: WhnfFrameKind::DiagnosticContext,
@@ -127,8 +129,10 @@ fn managed_checkpoint_resumes_on_another_worker_after_collection() {
         let poll = EvaluationPollContext::for_context(&worker_context);
         let mut resume_budget = WhnfStepBudget::new(1);
         let resumed = poll.with_value_access(&worker_context, |access| {
-            computation.poll_in(&access, &mut resume_budget, |_access, work| {
-                assert_eq!(work.focus, Value::Number(3.into()));
+            computation.poll_in(&access, &mut resume_budget, |access, work| {
+                access
+                    .values()
+                    .assert_same_representation_for_test(&work.focus, &Value::Number(3.into()));
                 let WhnfContinuation::Generic(frame) = &work.frames[0] else {
                     panic!("cross-worker resumption must retain its exact frame")
                 };
@@ -136,7 +140,10 @@ fn managed_checkpoint_resumes_on_another_worker_after_collection() {
                     (frame.kind, frame.cursor),
                     (WhnfFrameKind::DiagnosticContext, 17)
                 );
-                assert_eq!(frame.retained, [Value::Number(2.into())]);
+                access.values().assert_same_representation_for_test(
+                    &frame.retained,
+                    &[Value::Number(2.into())],
+                );
                 RegionalWhnfStep::Ready(Value::Number(5.into()))
             })
         });
@@ -144,7 +151,10 @@ fn managed_checkpoint_resumes_on_another_worker_after_collection() {
         let WhnfPoll::Ready(result) = resumed else {
             panic!("cross-worker resumption must complete")
         };
-        assert_eq!(result.clone_core_for_test(), Value::Number(5.into()));
+        values.assert_same_representation_for_test(
+            &result.clone_core_for_test(),
+            &Value::Number(5.into()),
+        );
     })
     .join()
     .expect("cross-worker WHNF resumption must not panic");

@@ -159,7 +159,7 @@ fn managed_seed_promotion(frame_count: usize) {
     ) else {
         panic!("the baseline computation must retain its result semantics")
     };
-    assert_eq!(ready.clone_core_for_test(), text("ready"));
+    values.assert_same_representation_for_test(&ready.clone_core_for_test(), &text("ready"));
     assert_eq!((ready_budget.spent(), ready_budget.remaining()), (1, 0));
     assert_eq!(
         values.managed_root_registrations_for_test() - registrations_before_ready,
@@ -296,5 +296,8 @@ fn structured_constructors_publish_canonical_state_under_existing_access() {
     ) else {
         panic!("the static-access probe should return its deliberate result")
     };
-    assert_eq!(result.clone_core_for_test(), Value::Number(3.into()));
+    values.assert_same_representation_for_test(
+        &result.clone_core_for_test(),
+        &Value::Number(3.into()),
+    );
 }

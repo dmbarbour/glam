@@ -187,10 +187,10 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
         );
     }
 
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &computation)
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &computation)
             .unwrap(),
-        n(42)
+        &n(42),
     );
     assert_eq!(context.client_demand_count_for_test(), 0);
     assert!(computation_lazy.source_snapshot(context.values()).is_none());
@@ -353,9 +353,9 @@ fn object_local_name_resumes_a_lazy_parts_tail_without_replaying_its_name() {
     else {
         panic!("object local name should produce a list")
     };
-    assert_eq!(
-        list_to_value_items(&observer, &name).expect("the local name should be readable"),
-        [Value::binary_from_text("root"), n(1), n(2)]
+    observer.values().assert_same_representation_for_test(
+        &list_to_value_items(&observer, &name).expect("the local name should be readable"),
+        &[Value::binary_from_text("root"), n(1), n(2)],
     );
     assert_eq!(name_demands.load(Ordering::SeqCst), 1);
     drop(application_root);
@@ -429,7 +429,10 @@ fn object_with_defs_resumes_a_promised_spec_without_replaying_its_object() {
     else {
         panic!("object extension should produce an object dictionary")
     };
-    assert_eq!(result.get(&Key::binary_from_text("extended")), Some(&n(42)));
+    observer.values().assert_same_representation_for_test(
+        &result.get(&Key::binary_from_text("extended")),
+        &Some(&n(42)),
+    );
     assert_eq!(object_demands.load(Ordering::SeqCst), 1);
     drop(application_root);
 }
@@ -504,7 +507,10 @@ fn composed_object_defs_resume_the_extension_without_replaying_prior_defs() {
     else {
         panic!("composed definitions should produce a dictionary")
     };
-    assert_eq!(result.get(&Key::binary_from_text("extended")), Some(&n(42)));
+    observer.values().assert_same_representation_for_test(
+        &result.get(&Key::binary_from_text("extended")),
+        &Some(&n(42)),
+    );
     assert_eq!(prior_demands.load(Ordering::SeqCst), 1);
     drop(application_root);
 }
@@ -598,17 +604,20 @@ fn object_override_resumes_a_nested_prior_without_replaying_completed_prefix() {
     else {
         panic!("object override should produce a dictionary")
     };
-    assert_eq!(result.get(&Key::binary_from_text("a_early")), Some(&n(42)));
+    observer.values().assert_same_representation_for_test(
+        &result.get(&Key::binary_from_text("a_early")),
+        &Some(&n(42)),
+    );
     let Some(Value::Dict(nested)) = result.get(&Key::binary_from_text("z_nested")) else {
         panic!("the nested object override should remain a dictionary")
     };
-    assert_eq!(
-        nested.get(&Key::binary_from_text("old")),
-        Some(&Value::binary_from_text("old"))
+    observer.values().assert_same_representation_for_test(
+        &nested.get(&Key::binary_from_text("old")),
+        &Some(&Value::binary_from_text("old")),
     );
-    assert_eq!(
-        nested.get(&Key::binary_from_text("new")),
-        Some(&Value::binary_from_text("new"))
+    observer.values().assert_same_representation_for_test(
+        &nested.get(&Key::binary_from_text("new")),
+        &Some(&Value::binary_from_text("new")),
     );
     assert_eq!(update_demands.load(Ordering::SeqCst), 1);
     assert_eq!(base_demands.load(Ordering::SeqCst), 1);
@@ -638,9 +647,9 @@ fn object_instance_from_parts_builds_through_the_resumable_builtin_owner() {
     let Some(Value::Dict(spec)) = object.get(&*keys::SPEC) else {
         panic!("the constructed object should publish its specification")
     };
-    assert_eq!(
-        spec.get(&*keys::NAME),
-        Some(&Value::binary_from_text("root"))
+    context.values().assert_same_representation_for_test(
+        &spec.get(&*keys::NAME),
+        &Some(&Value::binary_from_text("root")),
     );
 }
 
@@ -702,8 +711,14 @@ fn object_dict_defs_resume_the_dict_without_replaying_the_base() {
     else {
         panic!("dictionary definitions should produce a dictionary")
     };
-    assert_eq!(result.get(&Key::binary_from_text("base")), Some(&n(19)));
-    assert_eq!(result.get(&Key::binary_from_text("dict")), Some(&n(42)));
+    observer.values().assert_same_representation_for_test(
+        &result.get(&Key::binary_from_text("base")),
+        &Some(&n(19)),
+    );
+    observer.values().assert_same_representation_for_test(
+        &result.get(&Key::binary_from_text("dict")),
+        &Some(&n(42)),
+    );
     assert_eq!(base_demands.load(Ordering::SeqCst), 1);
     drop(application_root);
 }
@@ -768,7 +783,10 @@ fn object_from_dict_resumes_a_promised_spec_without_replaying_its_dictionary() {
     else {
         panic!("plain-dictionary conversion should produce an object dictionary")
     };
-    assert_eq!(object.get(&Key::binary_from_text("answer")), Some(&n(42)));
+    observer.values().assert_same_representation_for_test(
+        &object.get(&Key::binary_from_text("answer")),
+        &Some(&n(42)),
+    );
     assert!(matches!(object.get(&*keys::SPEC), Some(Value::Dict(_))));
     assert_eq!(dictionary_demands.load(Ordering::SeqCst), 1);
     drop(application_root);
@@ -914,11 +932,11 @@ fn terminal_lazy_evaluation_releases_successful_and_failed_sources() {
         },
     );
 
-    assert_eq!(
-        context
+    context.values().assert_same_representation_for_test(
+        &context
             .evaluate_compatibility_whnf(&Value::Lazy(success.clone()))
             .expect("lazy source should succeed"),
-        unit_value()
+        &unit_value(),
     );
     assert!(success.source_snapshot(context.values()).is_none());
     assert!(
@@ -950,24 +968,24 @@ fn terminal_lazy_evaluation_releases_successful_and_failed_sources() {
 
 #[test]
 fn evaluation_context_frames_use_an_atom_operation_and_optional_named_arguments() {
-    assert_eq!(
-        evaluation_context_frame("list_index"),
-        Value::Dict(Dict::new_sync().insert(
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &evaluation_context_frame("list_index"),
+        &Value::Dict(Dict::new_sync().insert(
             (*keys::EVAL).clone(),
             Value::Dict(Dict::new_sync().insert(
                 (*keys::OP).clone(),
                 Key::atom_from_text("list_index").to_value_with(&crate::core::test_value_factory()),
             )),
-        ))
+        )),
     );
 
     let args = Dict::new_sync().insert(
         Key::atom_from_text("path"),
         Value::binary_from_text("conf.env"),
     );
-    assert_eq!(
-        evaluation_context_frame_with_args("path_lookup", args.clone()),
-        Value::Dict(
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &evaluation_context_frame_with_args("path_lookup", args.clone()),
+        &Value::Dict(
             Dict::new_sync().insert(
                 (*keys::EVAL).clone(),
                 Value::Dict(
@@ -979,8 +997,8 @@ fn evaluation_context_frames_use_an_atom_operation_and_optional_named_arguments(
                         )
                         .insert((*keys::ARGS).clone(), Value::Dict(args)),
                 ),
-            )
-        )
+            ),
+        ),
     );
 }
 
@@ -1005,13 +1023,19 @@ fn immediate_diagnostic_shell_operations_share_one_root_neutral_access_region() 
         let Value::Dict(diagnostic) = failure_diagnostic_value_in(&access, &failure) else {
             panic!("a dictionary emission should remain a diagnostic dictionary")
         };
-        assert_eq!(diagnostic.get(&detail), Some(&n(7)));
+        access
+            .values()
+            .assert_same_representation_for_test(&diagnostic.get(&detail), &Some(&n(7)));
 
         let Value::Dict(split) = split_result_value(&access, n(1), n(2)) else {
             panic!("a split result should be a dictionary")
         };
-        assert_eq!(split.get(&*keys::LEFT), Some(&n(1)));
-        assert_eq!(split.get(&*keys::RIGHT), Some(&n(2)));
+        access
+            .values()
+            .assert_same_representation_for_test(&split.get(&*keys::LEFT), &Some(&n(1)));
+        access
+            .values()
+            .assert_same_representation_for_test(&split.get(&*keys::RIGHT), &Some(&n(2)));
         assert!(is_undefined_dict_value(
             &access,
             &Value::Dict(Dict::new_sync())
@@ -1031,24 +1055,25 @@ fn raw_net_values_are_opaque_while_net_computations_expose_data() {
     let net = closed_net(|builder| builder.data(n(42)));
     let raw = Value::Net(net.clone());
 
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &raw).unwrap(),
-        raw
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &raw)
+            .unwrap(),
+        &raw,
     );
 
     let computation = Value::Lazy(LazyValue::from_net_computation(
         &crate::core::test_value_factory(),
         net,
     ));
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &computation)
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &computation)
             .unwrap(),
-        n(42)
+        &n(42),
     );
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &computation)
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &computation)
             .unwrap(),
-        n(42)
+        &n(42),
     );
 }
 
@@ -1067,7 +1092,8 @@ fn net_arity_functions_attach_to_applications_through_cursors() {
         Arc::new(TestExpr::Value(n(42))),
     );
 
-    assert_eq!(eval_closed_expr(&expression).unwrap(), n(42));
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&eval_closed_expr(&expression).unwrap(), &n(42));
 }
 
 #[test]
@@ -1088,9 +1114,9 @@ fn net_arity_contextualizes_failure_while_demanding_its_arity() {
     let error =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &application)
             .expect_err("failure while evaluating net arity must propagate");
-    assert_eq!(
-        failure_context_items(&error),
-        [evaluation_context_frame("net_arity")]
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &failure_context_items(&error),
+        &[evaluation_context_frame("net_arity")],
     );
 }
 
@@ -1118,10 +1144,10 @@ fn net_arity_does_not_demand_the_net_before_its_arity() {
     assert_eq!(net_demands.load(Ordering::SeqCst), 0);
 
     set_promise(&context, &arity, n(0)).expect("the arity should accept its assignment");
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &application)
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &application)
             .expect("net arity should resume in source order"),
-        n(42)
+        &n(42),
     );
     assert_eq!(net_demands.load(Ordering::SeqCst), 1);
 }
@@ -1193,13 +1219,13 @@ fn observing_a_function_net_preserves_the_net_value() {
     });
     let expected = identity.clone();
 
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &test_context(),
-            &Value::Net(identity)
+            &Value::Net(identity),
         )
         .unwrap(),
-        Value::Net(expected)
+        &Value::Net(expected),
     );
 }
 
@@ -1222,9 +1248,9 @@ fn net_backed_lazy_values_require_an_exposed_data_node() {
         error.to_string(),
         "lazy net computation exposed a bind instead of data"
     );
-    assert_eq!(
-        failure_context_items(&error),
-        [evaluation_context_frame("net_computation")]
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &failure_context_items(&error),
+        &[evaluation_context_frame("net_computation")],
     );
 }
 
@@ -1243,9 +1269,9 @@ fn net_backed_lazy_values_reject_non_data_normal_forms() {
         error.to_string(),
         "lazy net computation reached a non-data normal form"
     );
-    assert_eq!(
-        failure_context_items(&error),
-        [evaluation_context_frame("net_computation")]
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &failure_context_items(&error),
+        &[evaluation_context_frame("net_computation")],
     );
 }
 
@@ -1288,10 +1314,10 @@ fn net_arity_bridges_opaque_nets_to_computations_and_functions() {
         Value::Builtin(Builtin::NetArity),
         [n(0), Value::Net(data_net)],
     );
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &computation)
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &computation)
             .unwrap(),
-        n(42)
+        &n(42),
     );
 
     let identity = closed_net(|builder| {
@@ -1311,10 +1337,10 @@ fn net_arity_bridges_opaque_nets_to_computations_and_functions() {
     };
     assert_eq!(function.remaining_arity(), 1);
     let result = apply_test_values(Value::Function(function), [n(43)]);
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &result)
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &result)
             .unwrap(),
-        n(43)
+        &n(43),
     );
 }
 
@@ -1349,13 +1375,16 @@ fn zero_arity_apply_operator_is_data_identity() {
         .values()
         .with_runtime_value_access(|access| apply_arity_operator(&access, 0, Arc::from([])));
 
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
-            evaluator.with_value_access(|access| apply_core_operator(&access, &operator, &data))
-        })
-        .unwrap(),
-        OperatorYield::Data(data)
-    );
+    let result = crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
+        evaluator.with_value_access(|access| apply_core_operator(&access, &operator, &data))
+    })
+    .unwrap();
+    let OperatorYield::Data(actual) = result else {
+        panic!("the zero-arity operator should preserve its data input")
+    };
+    context
+        .values()
+        .assert_same_representation_for_test(&actual, &data);
 }
 
 #[test]
@@ -1405,10 +1434,10 @@ fn curried_function_partial_application_retains_a_shared_stage() {
     });
 
     let result = apply_test_values(partially_applied, [n(22), n(33)]);
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &result)
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &result)
             .unwrap(),
-        n(11)
+        &n(11),
     );
 }
 
@@ -1431,13 +1460,13 @@ fn function_application_accepts_a_cursor_backed_function_argument_without_forcin
     .expect("net attachment must not demand a callable argument as embedded data");
     assert!(matches!(partial, Value::Function(_)));
 
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &test_context(),
-            &apply_test_values(partial, [n(42)])
+            &apply_test_values(partial, [n(42)]),
         )
         .unwrap(),
-        n(42)
+        &n(42),
     );
 }
 
@@ -1457,10 +1486,10 @@ fn batched_application_spine_keeps_unused_arguments_lazy() {
         [n(11), lazy_argument("second"), lazy_argument("third")],
     );
 
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &application)
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &application)
             .unwrap(),
-        n(11)
+        &n(11),
     );
     assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
@@ -1478,10 +1507,10 @@ fn batched_application_preserves_captured_access() {
     let dict = Value::Dict(Dict::new_sync().insert(key, n(42)));
     let application = apply_test_values(function, [dict, n(0)]);
 
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &application)
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &application)
             .unwrap(),
-        n(42)
+        &n(42),
     );
 }
 

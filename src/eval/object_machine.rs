@@ -992,9 +992,9 @@ mod tests {
         else {
             panic!("object construction must produce a dictionary")
         };
-        assert_eq!(
-            result.get(&Key::binary_from_text("answer")),
-            expected.get(&Key::binary_from_text("answer"))
+        context.values().assert_same_representation_for_test(
+            &result.get(&Key::binary_from_text("answer")),
+            &expected.get(&Key::binary_from_text("answer")),
         );
         assert!(result.get(&*keys::SPEC).is_some());
     }
@@ -1032,9 +1032,9 @@ mod tests {
         else {
             panic!("object construction must produce a dictionary")
         };
-        assert_eq!(
-            result.get(&Key::binary_from_text("answer")),
-            expected.get(&Key::binary_from_text("answer"))
+        context.values().assert_same_representation_for_test(
+            &result.get(&Key::binary_from_text("answer")),
+            &expected.get(&Key::binary_from_text("answer")),
         );
         assert!(result.get(&*keys::SPEC).is_some());
     }

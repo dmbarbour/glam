@@ -279,22 +279,25 @@ mod tests {
             .insert(tag.clone(), payload.clone())
             .insert(Key::atom_from_text("ignored"), recursively_empty.clone());
 
-        assert_eq!(recognize(&context, &tagged, &tag), Some(payload));
-        assert_eq!(
-            recognize(
+        context.values().assert_same_representation_for_test(
+            &recognize(&context, &tagged, &tag),
+            &Some(payload),
+        );
+        context.values().assert_same_representation_for_test(
+            &recognize(
                 &context,
                 &tagged.insert(Key::atom_from_text("defined"), Value::Number(1.into())),
                 &tag,
             ),
-            None
+            &None::<Value>,
         );
-        assert_eq!(
-            recognize(
+        context.values().assert_same_representation_for_test(
+            &recognize(
                 &context,
                 &Dict::new_sync().insert(tag.clone(), recursively_empty),
                 &tag,
             ),
-            None
+            &None::<Value>,
         );
     }
 
@@ -349,6 +352,8 @@ mod tests {
                 }
             }
         };
-        assert_eq!(payload, Value::Number(7.into()));
+        context
+            .values()
+            .assert_same_representation_for_test(&payload, &Value::Number(7.into()));
     }
 }

@@ -71,7 +71,10 @@ fn static_access_resumes_at_the_exact_intermediate_dictionary() {
     let WhnfPoll::Ready(result) = poll(&context, &mut computation) else {
         panic!("the retained path must finish after the intermediate assignment")
     };
-    assert_eq!(result.clone_core_for_test(), Value::Number(42.into()));
+    context.values().assert_same_representation_for_test(
+        &result.clone_core_for_test(),
+        &Value::Number(42.into()),
+    );
 }
 
 #[test]

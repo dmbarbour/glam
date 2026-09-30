@@ -83,7 +83,9 @@ fn borrowed_multi_frame_yield_preserves_containers_without_projection_or_roots()
 
         assert!(matches!(status, RegionalWhnfStatus::Yielded));
         assert_eq!((budget.spent(), budget.remaining()), (1, 0));
-        assert_eq!(work.focus, Value::Number(1.into()));
+        access
+            .values()
+            .assert_same_representation_for_test(&work.focus, &Value::Number(1.into()));
         assert_eq!(work.container_identities_for_test(), identities);
     });
 

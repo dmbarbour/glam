@@ -47,7 +47,11 @@ fn managed_root_projects_only_under_matching_runtime_access() {
             .access(&access)
             .expect("owner access must project root");
         assert_eq!(
-            state.inspect(|state| state.focus == Value::Number(7.into())),
+            state.inspect(|state| {
+                access
+                    .values()
+                    .same_representation_for_test(&state.focus, &Value::Number(7.into()))
+            }),
             Ok(true)
         );
     });

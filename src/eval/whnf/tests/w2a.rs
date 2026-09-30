@@ -50,7 +50,10 @@ fn cached_lazy_success_delegates_to_its_value_without_a_boundary() {
     let WhnfPoll::Ready(value) = outcome else {
         panic!("cached lazy success must complete without orchestration")
     };
-    assert_eq!(value.clone_core_for_test(), Value::Number(41.into()));
+    values.assert_same_representation_for_test(
+        &value.clone_core_for_test(),
+        &Value::Number(41.into()),
+    );
     assert_eq!(context.deferred_task_count(), 0);
 }
 
@@ -109,5 +112,8 @@ fn uncached_lazy_leaves_as_its_exact_root_and_resumes_from_that_identity() {
     let WhnfPoll::Ready(value) = resumed else {
         panic!("the exact checkpointed lazy must observe its completed cache")
     };
-    assert_eq!(value.clone_core_for_test(), Value::Number(43.into()));
+    values.assert_same_representation_for_test(
+        &value.clone_core_for_test(),
+        &Value::Number(43.into()),
+    );
 }

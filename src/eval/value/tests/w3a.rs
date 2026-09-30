@@ -62,16 +62,19 @@ fn lazy_source_result_is_installed_once_before_following_a_promise() {
     else {
         panic!("the assigned promise must complete the owning lazy")
     };
-    assert_eq!(value.clone_core_for_test(), Value::Number(79.into()));
+    context.values().assert_same_representation_for_test(
+        &value.clone_core_for_test(),
+        &Value::Number(79.into()),
+    );
     assert_eq!(evaluations.load(Ordering::SeqCst), 1);
     let cached = lazy
         .cached(context.values())
         .expect("the lazy task must publish one terminal cache");
-    assert_eq!(
-        cached
+    context.values().assert_same_representation_for_test(
+        &cached
             .expect("the retained promise should succeed")
             .into_value(),
-        Value::Number(79.into())
+        &Value::Number(79.into()),
     );
     assert!(lazy.source_snapshot(context.values()).is_none());
 }

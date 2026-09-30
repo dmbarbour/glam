@@ -2157,6 +2157,20 @@ inventory relatch:
          duplication and failure-formatting repairs as separately visible
          work; the assertion helper must not become a general compatibility
          escape hatch.
+         - **D.2h.2a — first evaluator fixture slice complete 2026-09-30.**
+           The smaller WHNF/value-machine fixtures and the first bounded
+           section of the central evaluator fixtures now assert semantic
+           representation through their existing runtime value authority.
+           Assertions already inside an evaluator access reuse
+           `access.values()`; fixtures with a durable context use that
+           context; singleton test-domain fixtures use `test_value_factory()`.
+           The one enclosing `OperatorYield` comparison was destructured so
+           only its semantic payload crosses the value assertion boundary.
+           This slice reduces the all-target equality-error inventory from
+           547 to 479 without hiding the distinct outstanding `Clone` and
+           `Debug` migrations. The remainder of the central `eval` fixture
+           and the `evaluation` lifecycle/coordinator fixtures stay in this
+           checkpoint family.
       3. Add owner-local recursive test relations for `g_syntax` carriers and
          migrate compiler/front-end fixtures without giving semantic values
          syntax-layer equality traits.

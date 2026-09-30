@@ -61,7 +61,9 @@ fn immediate_completion_returns_whnf_in_one_step() {
         let RegionalWhnfDrive::Ready(actual) = outcome else {
             panic!("immediate work must complete")
         };
-        assert_eq!(actual, expected);
+        access
+            .values()
+            .assert_same_representation_for_test(&actual, &expected);
         assert_eq!(budget.remaining(), 0);
     });
 }
@@ -101,7 +103,9 @@ fn tail_delegation_is_iterative_and_does_not_push_or_root() {
         let RegionalWhnfDrive::Ready(actual) = outcome else {
             panic!("bounded tail delegation must complete")
         };
-        assert_eq!(actual, expected);
+        access
+            .values()
+            .assert_same_representation_for_test(&actual, &expected);
         assert_eq!(transitions, DELEGATIONS);
         assert_eq!(budget.remaining(), 0);
     });
@@ -372,12 +376,12 @@ fn dependency_resumes_at_the_recorded_phase_without_replaying_completed_work() {
                 "failure",
             ]
         );
-        assert_eq!(
+        access.values().assert_same_representation_for_test(
             failure.contexts(),
-            [
+            &[
                 Value::binary_from_text("outer"),
                 Value::binary_from_text("after"),
-            ]
+            ],
         );
     });
 }

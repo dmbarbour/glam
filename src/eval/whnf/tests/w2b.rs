@@ -36,7 +36,10 @@ fn assigned_promise_success_delegates_without_a_follower() {
     let WhnfPoll::Ready(value) = outcome else {
         panic!("assigned promise must delegate directly to its value")
     };
-    assert_eq!(value.clone_core_for_test(), Value::Number(47.into()));
+    values.assert_same_representation_for_test(
+        &value.clone_core_for_test(),
+        &Value::Number(47.into()),
+    );
     assert_eq!(context.deferred_task_count(), 0);
 }
 
@@ -105,5 +108,8 @@ fn unassigned_promise_leaves_as_its_exact_root_then_resumes_after_assignment() {
     let WhnfPoll::Ready(value) = resumed else {
         panic!("the same promise checkpoint must observe its assignment")
     };
-    assert_eq!(value.clone_core_for_test(), Value::Number(53.into()));
+    values.assert_same_representation_for_test(
+        &value.clone_core_for_test(),
+        &Value::Number(53.into()),
+    );
 }

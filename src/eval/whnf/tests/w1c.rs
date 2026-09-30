@@ -33,8 +33,10 @@ fn external_boundary_publishes_the_complete_checkpoint_before_access_closes() {
 
     let mut budget = WhnfStepBudget::new(1);
     let outcome = poll.with_value_access(&context, |access| {
-        let outcome = computation.poll_in(&access, &mut budget, |_access, work| {
-            assert_eq!(work.focus, text("initial"));
+        let outcome = computation.poll_in(&access, &mut budget, |access, work| {
+            access
+                .values()
+                .assert_same_representation_for_test(&work.focus, &text("initial"));
             assert!(work.frames.is_empty());
             work.focus = text("replacement");
             work.frames.push(
@@ -75,22 +77,30 @@ fn external_boundary_publishes_the_complete_checkpoint_before_access_closes() {
 
     let mut resume_budget = WhnfStepBudget::new(1);
     let completed = poll.with_value_access(&context, |access| {
-        computation.poll_in(&access, &mut resume_budget, |_access, work| {
-            assert_eq!(work.focus, text("replacement"));
+        computation.poll_in(&access, &mut resume_budget, |access, work| {
+            access
+                .values()
+                .assert_same_representation_for_test(&work.focus, &text("replacement"));
             assert_eq!(work.frames.len(), 1);
             let WhnfContinuation::Generic(frame) = &work.frames[0] else {
                 panic!("expected a generic ordered-operands frame")
             };
             assert_eq!(frame.kind, WhnfFrameKind::OrderedOperands);
             assert_eq!(frame.cursor, 7);
-            assert_eq!(frame.retained, [text("left"), text("right")]);
+            access.values().assert_same_representation_for_test(
+                &frame.retained,
+                &[text("left"), text("right")],
+            );
             RegionalWhnfStep::Ready(Value::Number(42.into()))
         })
     });
     let WhnfPoll::Ready(completed) = completed else {
         panic!("the resumed checkpoint must complete")
     };
-    assert_eq!(completed.clone_core_for_test(), Value::Number(42.into()));
+    values.assert_same_representation_for_test(
+        &completed.clone_core_for_test(),
+        &Value::Number(42.into()),
+    );
 }
 
 #[test]
@@ -122,7 +132,7 @@ fn permanent_failure_is_rooted_inside_the_regional_poll() {
         panic!("the permanent failure must leave as a rooted failure")
     };
     assert_eq!(failure.direct_value_roots().len(), 2);
-    assert_eq!(failure.as_failure().contexts(), [text("context")]);
+    values.assert_same_representation_for_test(failure.as_failure().contexts(), &[text("context")]);
 }
 
 #[test]
@@ -157,8 +167,10 @@ fn unwind_poison_is_reported_without_reentering_the_reducer() {
     let unwind = catch_unwind(AssertUnwindSafe(|| {
         let mut panic_budget = WhnfStepBudget::new(1);
         poll.with_value_access(&context, |access| {
-            computation.poll_in(&access, &mut panic_budget, |_access, work| {
-                assert_eq!(work.focus, text("prior"));
+            computation.poll_in(&access, &mut panic_budget, |access, work| {
+                access
+                    .values()
+                    .assert_same_representation_for_test(&work.focus, &text("prior"));
                 assert_eq!(work.frames.len(), 1);
                 work.focus = text("transient");
                 work.frames.clear();

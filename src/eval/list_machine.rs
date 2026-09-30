@@ -556,13 +556,16 @@ mod tests {
             }
         };
 
-        assert_eq!(item.clone_core_for_test(), Value::Number(2.into()));
-        assert_eq!(
-            tail.clone_core_for_test(),
-            Value::List(List::concat(
+        context.values().assert_same_representation_for_test(
+            &item.clone_core_for_test(),
+            &Value::Number(2.into()),
+        );
+        context.values().assert_same_representation_for_test(
+            &tail.clone_core_for_test(),
+            &Value::List(List::concat(
                 List::from_bytes(bytes::Bytes::from_static(&[3_u8])),
                 List::from_values(vec![Value::Number(4.into())]),
-            ))
+            )),
         );
     }
 }
