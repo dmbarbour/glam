@@ -1,6 +1,7 @@
 use crate::compiler::CompileContext;
 use crate::core::{Dict, Key, Value};
 use crate::number::Number;
+use crate::test_support::ResultTestExt as _;
 
 fn test_assembler() -> &'static crate::api::Assembler {
     static ASSEMBLER: std::sync::LazyLock<crate::api::Assembler> = std::sync::LazyLock::new(|| {
@@ -4488,7 +4489,7 @@ fn object_parents_reject_implicit_dictionary_conversion() {
             &test_eval_context(),
             &result,
         )
-        .expect_err("plain dictionary parent should fail");
+        .expect_err_without_debug("plain dictionary parent should fail");
         assert!(
             error
                 .to_string()
@@ -4510,7 +4511,7 @@ fn object_from_dict_rejects_existing_objects() {
     let result = value_at_atom_path(&value, &["asm", "result"]).expect("result should exist");
     let error =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_eval_context(), &result)
-            .expect_err("converting an existing object should fail");
+            .expect_err_without_debug("converting an existing object should fail");
     assert_eq!(
         error.to_string(),
         "object_from_dict requires a plain dictionary, not an object"

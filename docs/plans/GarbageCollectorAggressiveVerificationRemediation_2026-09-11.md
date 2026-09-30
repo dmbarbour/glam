@@ -2317,9 +2317,21 @@ inventory relatch:
            variant; and cursor dependencies are checked through their local
            topology identity. Generic nets gain no semantic payload equality
            and core gains no dependency on the test specialization. The
-           all-target equality-error inventory is now zero. The remaining
-           generic-net duplication and mutation-gateway errors stay visible
-           for the subsequent ownership migration.
+         all-target equality-error inventory is now zero. The remaining
+         generic-net duplication and mutation-gateway errors stay visible
+         for the subsequent ownership migration.
+         - **D.2h.2o — non-observing test result extraction implemented
+           2026-09-30; dynamic fixture pending compile closure.** A narrow
+           test-only `ResultTestExt` extracts expected failures without
+           requiring the successful semantic payload to implement `Debug`.
+           The affected evaluator, API, reflection, syntax, and coordinator
+           fixtures use it for `expect_err`/`unwrap_err` control flow; actual
+           failure diagnostics remain access-qualified and no production
+           result API changes. This removes 246 formatting-bound compiler
+           failures, reducing the all-target error inventory from 1,003 to
+           757. Expected-success extraction, explicit managed-edge
+           duplication, and genuine diagnostic formatting remain separate
+           work below.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived

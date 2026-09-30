@@ -14,6 +14,8 @@ use crate::core::{
 };
 use crate::evaluation::EvaluationValueAccess;
 use crate::number::Number;
+#[cfg(test)]
+use crate::test_support::ResultTestExt as _;
 
 use super::annotation_machine::RegionalAnnotationMachine;
 use super::builtins::{
@@ -1045,7 +1047,9 @@ mod tests {
         let sum_root = sum_lazy.root(context.values());
 
         let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &sum)
-            .expect_err("the second operand must remain an exact suspension boundary");
+            .expect_err_without_debug(
+                "the second operand must remain an exact suspension boundary",
+            );
         assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
         assert_eq!(first_demands.load(Ordering::Relaxed), 1);
         context
@@ -1053,7 +1057,9 @@ mod tests {
             .collect_managed_for_test()
             .expect("the numeric checkpoint must survive loss of its first poll route");
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &sum)
-            .expect_err("a later route must resume the same second-operand dependency");
+            .expect_err_without_debug(
+                "a later route must resume the same second-operand dependency",
+            );
         assert_eq!(first_demands.load(Ordering::Relaxed), 1);
 
         crate::core::set_test_promise(context.values(), &second, Value::Number(2.into()))
@@ -1081,7 +1087,7 @@ mod tests {
         );
         assert_eq!(
             crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &divide)
-                .expect_err("division by zero must remain a permanent failure")
+                .expect_err_without_debug("division by zero must remain a permanent failure")
                 .to_string(),
             "divide builtin cannot divide by zero"
         );
@@ -1093,7 +1099,7 @@ mod tests {
         );
         assert_eq!(
             crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &invalid)
-                .expect_err("numeric kind validation must remain a permanent failure")
+                .expect_err_without_debug("numeric kind validation must remain a permanent failure")
                 .to_string(),
             "floor builtin requires number values"
         );
@@ -1126,7 +1132,9 @@ mod tests {
 
         let blocked =
             crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &assertion)
-                .expect_err("assertion failure should suspend on its diagnostic context");
+                .expect_err_without_debug(
+                    "assertion failure should suspend on its diagnostic context",
+                );
         assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
         assert_eq!(value_demands.load(Ordering::Relaxed), 1);
         context
@@ -1134,7 +1142,9 @@ mod tests {
             .collect_managed_for_test()
             .expect("the assertion checkpoint must survive route loss");
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &assertion)
-            .expect_err("a later route must resume the diagnostic-context dependency");
+            .expect_err_without_debug(
+                "a later route must resume the diagnostic-context dependency",
+            );
         assert_eq!(value_demands.load(Ordering::Relaxed), 1);
 
         crate::core::set_test_promise(
@@ -1149,7 +1159,7 @@ mod tests {
             .expect("the assigned assertion checkpoint must retain its diagnostic phase");
         assert_eq!(
             crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &assertion)
-                .expect_err("the resumed assertion must report its failure")
+                .expect_err_without_debug("the resumed assertion must report its failure")
                 .to_string(),
             "definition foo: unit expected, received Number"
         );
@@ -1183,7 +1193,7 @@ mod tests {
         );
         assert_eq!(
             crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &empty_if)
-                .expect_err("an if search should never exhaust its else branch")
+                .expect_err_without_debug("an if search should never exhaust its else branch")
                 .to_string(),
             "if search exhausted despite its required `else` branch"
         );
@@ -1195,7 +1205,7 @@ mod tests {
         );
         assert_eq!(
             crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &empty_match)
-                .expect_err("an empty match should be diagnosed")
+                .expect_err_without_debug("an empty match should be diagnosed")
                 .to_string(),
             "match search exhausted despite its compiler-provided fallback"
         );
@@ -1222,7 +1232,7 @@ mod tests {
 
         let blocked =
             crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &selection)
-                .expect_err("the deferred list front must suspend selection");
+                .expect_err_without_debug("the deferred list front must suspend selection");
         assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
         assert_eq!(result_demands.load(Ordering::Relaxed), 1);
         context
@@ -1230,7 +1240,7 @@ mod tests {
             .collect_managed_for_test()
             .expect("the conditional checkpoint must trace its deferred list-front work");
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &selection)
-            .expect_err("a later route must resume the exact deferred front");
+            .expect_err_without_debug("a later route must resume the exact deferred front");
         assert_eq!(result_demands.load(Ordering::Relaxed), 1);
 
         crate::core::set_test_promise(
@@ -1276,7 +1286,7 @@ mod tests {
         let union_root = union_lazy.root(context.values());
 
         let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &union)
-            .expect_err("the second dictionary operand must suspend");
+            .expect_err_without_debug("the second dictionary operand must suspend");
         assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
         assert_eq!(first_demands.load(Ordering::Relaxed), 1);
         context
@@ -1284,7 +1294,7 @@ mod tests {
             .collect_managed_for_test()
             .expect("the dictionary checkpoint must trace its completed prefix");
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &union)
-            .expect_err("a later route must retain the same dictionary dependency");
+            .expect_err_without_debug("a later route must retain the same dictionary dependency");
         assert_eq!(first_demands.load(Ordering::Relaxed), 1);
 
         crate::core::set_test_promise(
@@ -1322,14 +1332,14 @@ mod tests {
 
         let blocked =
             crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &inspection)
-                .expect_err("unassigned origin demand must remain resumable");
+                .expect_err_without_debug("unassigned origin demand must remain resumable");
         assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
         context
             .values()
             .collect_managed_for_test()
             .expect("the provenance checkpoint must survive route loss");
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &inspection)
-            .expect_err("a later route must resume the exact origin dependency");
+            .expect_err_without_debug("a later route must resume the exact origin dependency");
 
         let failed = Value::semantic_thunk(context.values(), "failed origin", |_| {
             Err(EvaluationHalt::new("origin production failed"))
@@ -1342,7 +1352,7 @@ mod tests {
             .expect("the provenance checkpoint must retain its assigned origin");
         let failure =
             crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &inspection)
-                .expect_err("origin demand failure must propagate")
+                .expect_err_without_debug("origin demand failure must propagate")
                 .into_permanent_failure();
         assert_eq!(failure.to_string(), "origin production failed");
         context.values().assert_same_representation_for_test(
@@ -1376,14 +1386,14 @@ mod tests {
         let comparison_root = comparison_lazy.root(context.values());
 
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &comparison)
-            .expect_err("the second comparison operand must suspend");
+            .expect_err_without_debug("the second comparison operand must suspend");
         assert_eq!(first_demands.load(Ordering::Relaxed), 1);
         context
             .values()
             .collect_managed_for_test()
             .expect("the comparison checkpoint must trace its completed first operand");
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &comparison)
-            .expect_err("a later route must retain the same comparison dependency");
+            .expect_err_without_debug("a later route must retain the same comparison dependency");
         assert_eq!(first_demands.load(Ordering::Relaxed), 1);
         crate::core::set_test_promise(context.values(), &second, Value::Number(7.into()))
             .expect("the second operand should accept its assignment");
@@ -1422,14 +1432,14 @@ mod tests {
         let comparison_root = comparison_lazy.root(context.values());
 
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &comparison)
-            .expect_err("the deferred list tail must suspend comparison");
+            .expect_err_without_debug("the deferred list tail must suspend comparison");
         assert_eq!(prefix_demands.load(Ordering::Relaxed), 1);
         context
             .values()
             .collect_managed_for_test()
             .expect("the comparison checkpoint must trace its list-front state");
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &comparison)
-            .expect_err("a later route must retain the exact deferred list tail");
+            .expect_err_without_debug("a later route must retain the exact deferred list tail");
         assert_eq!(prefix_demands.load(Ordering::Relaxed), 1);
         crate::core::set_test_promise(
             context.values(),
@@ -1480,14 +1490,14 @@ mod tests {
         let observation_root = observation_lazy.root(context.values());
 
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &observation)
-            .expect_err("the deferred list tail must suspend observation");
+            .expect_err_without_debug("the deferred list tail must suspend observation");
         assert_eq!(prefix_demands.load(Ordering::Relaxed), 1);
         context
             .values()
             .collect_managed_for_test()
             .expect("the list observation checkpoint must trace its completed front chunk");
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &observation)
-            .expect_err("a later route must retain the exact deferred front tail");
+            .expect_err_without_debug("a later route must retain the exact deferred front tail");
         assert_eq!(prefix_demands.load(Ordering::Relaxed), 1);
 
         crate::core::set_test_promise(
@@ -1542,14 +1552,14 @@ mod tests {
         let observation_root = observation_lazy.root(context.values());
 
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &observation)
-            .expect_err("the deferred list prefix must suspend back observation");
+            .expect_err_without_debug("the deferred list prefix must suspend back observation");
         assert_eq!(suffix_demands.load(Ordering::Relaxed), 1);
         context
             .values()
             .collect_managed_for_test()
             .expect("the list observation checkpoint must trace its completed back chunk");
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &observation)
-            .expect_err("a later route must retain the exact deferred back prefix");
+            .expect_err_without_debug("a later route must retain the exact deferred back prefix");
         assert_eq!(suffix_demands.load(Ordering::Relaxed), 1);
 
         crate::core::set_test_promise(
@@ -1596,14 +1606,14 @@ mod tests {
         let pattern_root = pattern_lazy.root(context.values());
 
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &pattern)
-            .expect_err("the deferred list prefix must suspend pattern unsnoc");
+            .expect_err_without_debug("the deferred list prefix must suspend pattern unsnoc");
         assert_eq!(suffix_demands.load(Ordering::Relaxed), 1);
         context
             .values()
             .collect_managed_for_test()
             .expect("the pattern-list checkpoint must trace its completed suffix");
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &pattern)
-            .expect_err("a later route must retain the exact deferred prefix");
+            .expect_err_without_debug("a later route must retain the exact deferred prefix");
         assert_eq!(suffix_demands.load(Ordering::Relaxed), 1);
 
         crate::core::set_test_promise(
@@ -1647,14 +1657,14 @@ mod tests {
         let lines_root = lines_lazy.root(context.values());
 
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &lines)
-            .expect_err("the deferred byte must suspend text-lines traversal");
+            .expect_err_without_debug("the deferred byte must suspend text-lines traversal");
         assert_eq!(prefix_demands.load(Ordering::Relaxed), 1);
         context
             .values()
             .collect_managed_for_test()
             .expect("the text-lines checkpoint must trace its completed bytes");
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &lines)
-            .expect_err("a later route must retain the exact deferred byte");
+            .expect_err_without_debug("a later route must retain the exact deferred byte");
         assert_eq!(prefix_demands.load(Ordering::Relaxed), 1);
 
         crate::core::set_test_promise(

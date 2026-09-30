@@ -14,6 +14,8 @@ use crate::core::{
     trace_compatibility_value_managed_edges,
 };
 use crate::evaluation::EvaluationValueAccess;
+#[cfg(test)]
+use crate::test_support::ResultTestExt as _;
 
 #[cfg(test)]
 use crate::evaluation::EvalContext;
@@ -872,7 +874,7 @@ mod tests {
         ));
 
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
-            .expect_err("object construction must first wait for its spec");
+            .expect_err_without_debug("object construction must first wait for its spec");
         let spec_value = Value::Dict(
             Dict::new_sync()
                 .insert((*keys::NAME).clone(), Value::Promised(name.clone()))
@@ -885,12 +887,12 @@ mod tests {
             .expect("the object spec promise should accept its assignment");
 
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
-            .expect_err("object construction must resume at its name");
+            .expect_err_without_debug("object construction must resume at its name");
         crate::core::set_test_promise(context.values(), &name, Value::binary_from_text("root"))
             .expect("the object name promise should accept its assignment");
 
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
-            .expect_err("object construction must resume at its dependency chunk");
+            .expect_err_without_debug("object construction must resume at its dependency chunk");
         crate::core::set_test_promise(context.values(), &deps, Value::List(List::empty()))
             .expect("the dependency chunk should accept its assignment");
 
@@ -922,7 +924,7 @@ mod tests {
         ));
 
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
-            .expect_err("linearization must wait for the nested dependency spec");
+            .expect_err_without_debug("linearization must wait for the nested dependency spec");
         crate::core::set_test_promise(
             context.values(),
             &dependency,
@@ -966,7 +968,7 @@ mod tests {
         ));
 
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
-            .expect_err("the first definitions application must suspend");
+            .expect_err_without_debug("the first definitions application must suspend");
         let second_stage = closed_function_value_in(
             context.values(),
             1,
@@ -976,7 +978,7 @@ mod tests {
             .expect("the first application should accept its function result");
 
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
-            .expect_err("the second definitions application must suspend");
+            .expect_err_without_debug("the second definitions application must suspend");
         let expected =
             Dict::new_sync().insert(Key::binary_from_text("answer"), Value::Number(42.into()));
         crate::core::set_test_promise(

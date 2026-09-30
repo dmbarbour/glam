@@ -23,6 +23,8 @@ use crate::evaluation::{
 use crate::list::{ListFrontStep, ListItem};
 use crate::number::Number;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
+#[cfg(test)]
+use crate::test_support::ResultTestExt as _;
 
 use super::whnf::{
     RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, WhnfPoll,
@@ -1377,7 +1379,7 @@ mod tests {
 
         let blocked =
             crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
-                .expect_err("the dynamic key must wait on its exact promise");
+                .expect_err_without_debug("the dynamic key must wait on its exact promise");
         assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
         context
             .values()
@@ -1408,7 +1410,7 @@ mod tests {
         let access = access_value(&context, [CoreDataKey::Index], vec![base, dynamic]);
 
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
-            .expect_err("the recursive key member must remain a dependency");
+            .expect_err_without_debug("the recursive key member must remain a dependency");
         crate::core::set_test_promise(context.values(), &promise, Value::Number(7.into()))
             .expect("the recursive key promise should accept its assignment");
         context.values().assert_same_representation_for_test(
@@ -1435,7 +1437,7 @@ mod tests {
         let access = access_value(&context, [CoreDataKey::PathIndex], vec![base, path]);
 
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
-            .expect_err("the computed path must wait at its deferred chunk");
+            .expect_err_without_debug("the computed path must wait at its deferred chunk");
         crate::core::set_test_promise(
             context.values(),
             &promise,
@@ -1477,14 +1479,14 @@ mod tests {
         let access_root = access_lazy.root(context.values());
 
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
-            .expect_err("the first route must suspend at the middle path chunk");
+            .expect_err_without_debug("the first route must suspend at the middle path chunk");
         assert_eq!(prefix_forces.load(Ordering::SeqCst), 1);
         context
             .values()
             .collect_managed_for_test()
             .expect("the edge-owned access state must survive first-route loss");
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
-            .expect_err("a later route must resume the exact middle dependency");
+            .expect_err_without_debug("a later route must resume the exact middle dependency");
         assert_eq!(prefix_forces.load(Ordering::SeqCst), 1);
 
         crate::core::set_test_promise(
@@ -1494,7 +1496,7 @@ mod tests {
         )
         .expect("the middle path promise should accept its assignment");
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
-            .expect_err("the completed path must next demand the selected base");
+            .expect_err_without_debug("the completed path must next demand the selected base");
         context
             .values()
             .collect_managed_for_test()
@@ -1511,7 +1513,7 @@ mod tests {
         )
         .expect("the selected base promise should accept its assignment");
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
-            .expect_err("the selected value must be demanded before completion");
+            .expect_err_without_debug("the selected value must be demanded before completion");
         context
             .values()
             .collect_managed_for_test()
@@ -1545,7 +1547,7 @@ mod tests {
         );
         assert_eq!(
             crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &invalid)
-                .expect_err("a path operand itself must remain a list")
+                .expect_err_without_debug("a path operand itself must remain a list")
                 .to_string(),
             "path-list operand must evaluate to a list value"
         );

@@ -12,6 +12,7 @@ use crate::evaluation::{EvaluationMachinePoll, EvaluationTaskMachine, Reflection
 use crate::number::Number;
 use crate::reflection::{ReflectionEffects, coordinator_task_launcher};
 use crate::source::{SourceArtifact, SourceIdentity};
+use crate::test_support::ResultTestExt as _;
 
 mod diagnostic_tests;
 mod managed_collection_tests;
@@ -1218,7 +1219,7 @@ fn value_evaluator_resumes_a_retained_resolver_promise_subscription() {
     let error = assembler
         .evaluator()
         .eval(&waiting)
-        .expect_err("a resolver-owned promise has no runtime-owned progress source");
+        .expect_err_without_debug("a resolver-owned promise has no runtime-owned progress source");
     assert!(error.to_string().contains("blocked on wait token"));
     assert_eq!(promise_core.exact_subscription_count(&values.core), 1);
     resolver
@@ -1376,14 +1377,14 @@ fn promise_resolver_completion_after_runtime_retirement_is_rejected() {
     assert!(
         resolved
             .resolve(assignment)
-            .expect_err("a retired runtime cannot accept promise assignment")
+            .expect_err_without_debug("a retired runtime cannot accept promise assignment")
             .to_string()
             .contains("no longer available for promise completion")
     );
     assert!(
         failed
             .fail_message("late failure")
-            .expect_err("a retired runtime cannot accept promise failure")
+            .expect_err_without_debug("a retired runtime cannot accept promise failure")
             .to_string()
             .contains("no longer available for promise completion")
     );
@@ -1436,7 +1437,7 @@ fn value_evaluator_caches_lazy_success_and_preserves_structured_failure() {
     let error = assembler
         .evaluator()
         .eval(&failure)
-        .expect_err("error annotation should fail evaluation");
+        .expect_err_without_debug("error annotation should fail evaluation");
     assert_eq!(error.to_string(), "structured");
     assert!(error.structured_diagnostic().is_some());
 }
@@ -1613,7 +1614,9 @@ fn assembler_boundaries_reject_foreign_values_before_evaluation_or_storage() {
     assert!(
         assembler
             .evaluate(&promise)
-            .expect_err("a rejected foreign resolution must leave the promise pending")
+            .expect_err_without_debug(
+                "a rejected foreign resolution must leave the promise pending"
+            )
             .to_string()
             .contains("before initialization")
     );
@@ -1690,7 +1693,7 @@ fn binary_annotation_preserves_a_nested_failure_context() {
         .expect("binary context fixture should compile");
 
     let error = binary_at(&assembler, module.value(), "result")
-        .expect_err("binary observation should demand the failed definition");
+        .expect_err_without_debug("binary observation should demand the failed definition");
 
     assert_eq!(error.to_string(), "original");
     let contexts = diagnostic_contexts(&assembler, &error.diagnostic(&assembler.values()).unwrap());
@@ -1747,7 +1750,7 @@ fn callers_can_attach_path_context_to_semantic_access() {
     let error = assembler
         .evaluator()
         .eval(&candidate)
-        .expect_err("forcing an intermediate path value should fail");
+        .expect_err_without_debug("forcing an intermediate path value should fail");
     assert_eq!(error.to_string(), "path target failed");
     assembler.core_values().assert_same_representation_for_test(
         &diagnostic_contexts(&assembler, &error.diagnostic(&assembler.values()).unwrap()),
@@ -1764,13 +1767,13 @@ fn callers_can_attach_path_context_to_semantic_access() {
 fn semantic_binary_conversion_preserves_structured_failures() {
     let assembler = Assembler::new();
     let missing = binary_at(&assembler, &assembler.values().empty_dict(), "missing")
-        .expect_err("missing binary path should fail");
+        .expect_err_without_debug("missing binary path should fail");
     assert!(missing.to_string().contains("requires a list or binary"));
     assert!(missing.structured_diagnostic().is_some());
 
     let invalid = assembler
         .to_binary(&assembler.values().integer(42))
-        .expect_err("a number is not binary text data");
+        .expect_err_without_debug("a number is not binary text data");
     assert!(invalid.to_string().contains("requires a list or binary"));
     assert!(invalid.structured_diagnostic().is_some());
 
@@ -1781,7 +1784,7 @@ fn semantic_binary_conversion_preserves_structured_failures() {
                 .list([assembler.values().integer(256)])
                 .expect("invalid byte fixture should still be a list"),
         )
-        .expect_err("an out-of-range list member is not binary text data");
+        .expect_err_without_debug("an out-of-range list member is not binary text data");
     assert!(
         invalid_item
             .to_string()
@@ -1853,7 +1856,7 @@ fn origin_inspection_rejects_unrelated_opaque_values() {
     let error = assembler
         .apply(&inspect, [unrelated])
         .and_then(|value| assembler.evaluate(&value))
-        .expect_err("unrelated opaque values must not be disclosed");
+        .expect_err_without_debug("unrelated opaque values must not be disclosed");
     assert!(
         error
             .to_string()
@@ -1888,7 +1891,7 @@ fn source_definitions_add_shallow_opaque_origin_context() {
         &assembler.eval_context(),
         &broken.clone_core_for_test(),
     )
-    .expect_err("the broken definition should fail");
+    .expect_err_without_debug("the broken definition should fail");
     let failure = error.into_permanent_failure();
     let context = failure
         .contexts()
@@ -1921,7 +1924,7 @@ fn source_definitions_add_shallow_opaque_origin_context() {
         &assembler.eval_context(),
         &call.clone_core_for_test(),
     )
-    .expect_err("the function body should fail when called");
+    .expect_err_without_debug("the function body should fail when called");
     let failure = error.into_permanent_failure();
     assert!(
         failure
@@ -1937,7 +1940,7 @@ fn source_definitions_add_shallow_opaque_origin_context() {
         &assembler.eval_context(),
         &object_member.clone_core_for_test(),
     )
-    .expect_err("the nested object member should fail");
+    .expect_err_without_debug("the nested object member should fail");
     let failure = error.into_permanent_failure();
     let context = failure
         .contexts()
@@ -1959,7 +1962,7 @@ fn source_definitions_add_shallow_opaque_origin_context() {
         &assembler.eval_context(),
         &manual.clone_core_for_test(),
     )
-    .expect_err("the manually contextualized expression should fail");
+    .expect_err_without_debug("the manually contextualized expression should fail");
     let failure = error.into_permanent_failure();
     let manual_origin = failure.contexts().iter().find_map(|frame| {
         let CoreValue::Dict(frame) = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
@@ -2061,7 +2064,7 @@ fn dropped_builder_environment_resolver_fails_its_promise() {
     assert!(
         assembler
             .evaluate(&promised)
-            .expect_err("dropped resolver must fail its promise")
+            .expect_err_without_debug("dropped resolver must fail its promise")
             .to_string()
             .contains("was dropped before completion")
     );
@@ -2089,7 +2092,7 @@ fn builder_environment_promise_does_not_complete_through_self_dependency() {
 
     let error = assembler
         .evaluate(&promised)
-        .expect_err("self dependency cannot reach weak head normal form");
+        .expect_err_without_debug("self dependency cannot reach weak head normal form");
     assert!(
         error.to_string().contains("blocked on wait token"),
         "{error}"
@@ -2191,7 +2194,7 @@ fn attached_runtime_default_reflection_profile_cannot_be_replaced() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let error = runtime
         .new_evaluation_session()
-        .expect_err("an unsealed runtime must not expose a runnable session");
+        .expect_err_without_debug("an unsealed runtime must not expose a runnable session");
     assert!(error.to_string().contains("must be sealed"));
     let assembler = Assembler::builder()
         .evaluation_runtime(runtime.clone())
@@ -2215,7 +2218,7 @@ fn attached_runtime_default_reflection_profile_cannot_be_replaced() {
 
     let error = runtime
         .seal_default_reflection_profile(coordinator_task_launcher(ReflectionEffects, replacement))
-        .expect_err("a sealed runtime profile must reject replacement");
+        .expect_err_without_debug("a sealed runtime profile must reject replacement");
     assert!(error.to_string().contains("already sealed"));
 
     let runtime_state = Arc::downgrade(&runtime.state);
@@ -2435,7 +2438,7 @@ fn reflection_annotations_require_their_tasks_to_return_unit() {
     assert!(
         assembler
             .to_binary(&result)
-            .unwrap_err()
+            .unwrap_err_without_debug()
             .to_string()
             .contains("reflection annotation result: unit expected, received Binary")
     );

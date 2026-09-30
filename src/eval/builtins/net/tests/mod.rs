@@ -8,6 +8,7 @@ use crate::core::{
     Builtin, BuiltinCall, Dict, LazyValue, List, PromisedValue, RuntimeValueAccess, Value,
 };
 use crate::evaluation::EvalContext;
+use crate::test_support::ResultTestExt as _;
 
 use super::identity::{ConstructionBrand, ConstructionPortId, decode_construction_brand};
 use super::netlist::{
@@ -198,7 +199,7 @@ fn builder_state_has_fixed_arity_and_terminal_replay_requires_an_empty_sequence(
             port(1),
         );
         let error = interaction_net_from_netlist_in(access, &selected)
-            .expect_err("terminal replay must reject the old five-field shape");
+            .expect_err_without_debug("terminal replay must reject the old five-field shape");
         assert!(
             error
                 .to_string()
@@ -215,7 +216,7 @@ fn builder_state_has_fixed_arity_and_terminal_replay_requires_an_empty_sequence(
             port(1),
         );
         let error = interaction_net_from_netlist_in(access, &selected)
-            .expect_err("terminal replay must reject unfinished builder control");
+            .expect_err_without_debug("terminal replay must reject unfinished builder control");
         assert!(
             error
                 .to_string()
@@ -354,7 +355,7 @@ fn replay_rejects_malformed_compact_records() {
 
         for (record, expected) in cases {
             let error = interaction_net_from_netlist_in(access, &record)
-                .expect_err("malformed netlist must fail");
+                .expect_err_without_debug("malformed netlist must fail");
             assert!(
                 error.to_string().contains(expected),
                 "expected `{expected}` in `{error}`"
@@ -497,7 +498,7 @@ fn assert_one_net_construction_context(context: &EvalContext, effect: Value) {
     let construction = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);
     let failure =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(context, &construction)
-            .expect_err("the construction fixture must fail")
+            .expect_err_without_debug("the construction fixture must fail")
             .into_permanent_failure();
     let frame = crate::diagnostic::evaluation_context_frame("net_construction");
     assert_eq!(
@@ -597,7 +598,7 @@ fn public_construction_selects_only_the_first_two_results() {
     let construction = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);
     let error =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &construction)
-            .expect_err("two construction results must be ambiguous");
+            .expect_err_without_debug("two construction results must be ambiguous");
     assert!(
         error.to_string().contains("produced multiple results"),
         "{error}"
@@ -626,7 +627,7 @@ fn public_construction_does_not_demand_its_effect_until_observed() {
     assert_eq!(effect_demands.load(std::sync::atomic::Ordering::SeqCst), 0);
     let error =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &construction)
-            .expect_err("empty construction must fail");
+            .expect_err_without_debug("empty construction must fail");
     assert!(
         error.to_string().contains("produced no successful result"),
         "{error}"
@@ -634,7 +635,7 @@ fn public_construction_does_not_demand_its_effect_until_observed() {
     assert_eq!(effect_demands.load(std::sync::atomic::Ordering::SeqCst), 1);
     let repeated =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &construction)
-            .expect_err("failed construction remains memoized");
+            .expect_err_without_debug("failed construction remains memoized");
     assert!(
         repeated
             .to_string()
@@ -1113,7 +1114,7 @@ fn hidden_builder_construction_rejects_invalid_counts_tokens_and_port_exhaustion
             partial_builder(access, Builtin::InteractionNetBuilderCopy, vec![count])
         });
         let error = builder_result_at(&context, copy, duplicate(&context, &initial), 0)
-            .expect_err("invalid copy counts must fail before state publication");
+            .expect_err_without_debug("invalid copy counts must fail before state publication");
         assert!(error.to_string().contains(expected), "{error}");
     }
 
@@ -1121,7 +1122,7 @@ fn hidden_builder_construction_rejects_invalid_counts_tokens_and_port_exhaustion
         builder_effect(access, Value::Builtin(Builtin::InteractionNetBuilderBind))
     });
     let error = builder_result_at(&context, bind, exhausted, 0)
-        .expect_err("port allocation must reject cursor exhaustion");
+        .expect_err_without_debug("port allocation must reject cursor exhaustion");
     assert!(error.to_string().contains("port IDs exhausted"), "{error}");
 
     for (left, expected) in [
@@ -1136,7 +1137,7 @@ fn hidden_builder_construction_rejects_invalid_counts_tokens_and_port_exhaustion
             )
         });
         let error = builder_result_at(&context, wire, duplicate(&context, &initial), 0)
-            .expect_err("invalid wire tokens must fail before journal insertion");
+            .expect_err_without_debug("invalid wire tokens must fail before journal insertion");
         assert!(error.to_string().contains(expected), "{error}");
     }
 }
@@ -1351,7 +1352,7 @@ fn hidden_builder_state_paths_preserve_control_and_whole_state_semantics() {
     );
 
     let invalid = builder_result_at(&context, invalid_set, initial.clone(), 0)
-        .expect_err("whole-state replacement must remain a dictionary");
+        .expect_err_without_debug("whole-state replacement must remain a dictionary");
     assert!(invalid.to_string().contains("must be a dictionary"));
 
     let [_unit, replaced_state] = run_builder_at(&context, set_all, initial, 0);
@@ -1431,7 +1432,7 @@ fn hidden_builder_get_resumes_lazy_paths_and_intermediates_and_rejects_invalid_o
         (state, get)
     });
     let error = builder_result_at(&context, invalid_get, invalid_state, 0)
-        .expect_err("a non-dictionary path intermediate must fail");
+        .expect_err_without_debug("a non-dictionary path intermediate must fail");
     assert!(error.to_string().contains("not a dictionary"), "{error}");
 }
 
@@ -1516,8 +1517,8 @@ fn hidden_builder_reset_shift_handles_nested_keys_cut_and_missing_scope() {
         &run_builder_at(&context, cut_then_shift, state.clone(), 0)[0],
         &Value::binary_from_text("after cut"),
     );
-    let error =
-        builder_result_at(&context, missing, state, 0).expect_err("shift outside reset must fail");
+    let error = builder_result_at(&context, missing, state, 0)
+        .expect_err_without_debug("shift outside reset must fail");
     assert!(error.to_string().contains("not in reset scope"), "{error}");
 }
 
@@ -1640,7 +1641,7 @@ fn hidden_builder_captured_continuation_is_reusable_only_with_its_invocation() {
         Arc::from([Value::binary_from_text("foreign")]),
     ));
     let error = builder_result_at(&context, foreign, second_state, 0)
-        .expect_err("captured continuation must reject another builder invocation");
+        .expect_err_without_debug("captured continuation must reject another builder invocation");
     assert!(
         error.to_string().contains("belongs to another invocation"),
         "{error}"
@@ -1734,8 +1735,9 @@ fn hidden_builder_whole_state_clear_does_not_erase_the_active_sequence() {
         );
         (state, operation)
     });
-    let error = builder_result_at(&context, operation, state, 0)
-        .expect_err("clearing whole state must clear reset scope but retain sequence execution");
+    let error = builder_result_at(&context, operation, state, 0).expect_err_without_debug(
+        "clearing whole state must clear reset scope but retain sequence execution",
+    );
     assert!(error.to_string().contains("not in reset scope"), "{error}");
 }
 
@@ -1936,7 +1938,9 @@ fn hidden_builder_rejects_malformed_control_records() {
         ),
     ] {
         let error = builder_result_at(&context, returned.clone(), state, 0)
-            .expect_err("malformed hidden control state must fail at the evaluator boundary");
+            .expect_err_without_debug(
+                "malformed hidden control state must fail at the evaluator boundary",
+            );
         assert!(error.to_string().contains(expected), "{error}");
     }
 }
@@ -2046,7 +2050,7 @@ fn hidden_builder_fix_uses_independent_alternatives_and_restores_control() {
         &Value::binary_from_text("restored"),
     );
     let error = builder_result_at(&context, hidden, state, 0)
-        .expect_err("a builder fix body must not inherit its caller's reset scope");
+        .expect_err_without_debug("a builder fix body must not inherit its caller's reset scope");
     assert!(error.to_string().contains("not in reset scope"), "{error}");
 }
 
@@ -2069,6 +2073,6 @@ fn hidden_builder_fix_reports_recursive_future_observation() {
 
     let [future, _state] = run_builder_at(&context, fixed, state, 0);
     let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &future)
-        .expect_err("strictly observing a fixpoint's own value must report a cycle");
+        .expect_err_without_debug("strictly observing a fixpoint's own value must report a cycle");
     assert!(error.to_string().contains("cycle"), "{error}");
 }

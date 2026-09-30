@@ -25,6 +25,7 @@ use crate::reflection::{
     ReflectionStore, ReflectionTransaction, StandardEffects, StoreCommitResult, TaskEnvironment,
     TaskValidation, ValidationResult, reflection_request_specs,
 };
+use crate::test_support::ResultTestExt as _;
 
 fn public_record<I, S>(assembler: &Assembler, entries: I) -> PublicValue
 where
@@ -4002,7 +4003,7 @@ fn task_state_paths_preserve_empty_missing_and_non_dictionary_semantics() {
 
     let (assembler, effect) = compile_effect(".set [] { outer:42 } =>> .get ['outer, 'inner]");
     let error = run_standard_test(&assembler, &effect)
-        .expect_err("a non-dictionary intermediate must fail");
+        .expect_err_without_debug("a non-dictionary intermediate must fail");
     assert!(
         error
             .to_string()
@@ -5346,7 +5347,9 @@ fn scheduled_effect_root_publishes_failure_and_cancellation() {
     )
     .schedule(&failure_lifecycle)
     .expect("failed root should first be admitted");
-    let failed = failed.run().expect_err("the scheduled root should fail");
+    let failed = failed
+        .run()
+        .expect_err_without_debug("the scheduled root should fail");
     let EffectLifecycleStatus::Failed(published) = failure_lifecycle.status() else {
         panic!("the lifecycle should publish the failed root")
     };
@@ -5615,9 +5618,9 @@ fn coordinator_terminal_policy_preserves_a_descendant_failure_before_root_return
             "release logger root",
         ));
 
-        let failure = task
-            .run()
-            .expect_err("a child failure which precedes root return remains authoritative");
+        let failure = task.run().expect_err_without_debug(
+            "a child failure which precedes root return remains authoritative",
+        );
         assert!(
             failure
                 .to_string()
@@ -5755,7 +5758,7 @@ fn effect_run_separates_provider_assertions_from_its_generic_unit_policy() {
     )
     .requiring_unit_result()
     .run()
-    .expect_err("the generic endpoint must reject non-unit results");
+    .expect_err_without_debug("the generic endpoint must reject non-unit results");
     assert_eq!(
         generic.to_string(),
         "effect task returned Number; expected unit"
@@ -5770,7 +5773,7 @@ fn effect_run_separates_provider_assertions_from_its_generic_unit_policy() {
     .asserting_unit_result("test task result")
     .requiring_unit_result()
     .run()
-    .expect_err("the provider assertion must reject non-unit results first");
+    .expect_err_without_debug("the provider assertion must reject non-unit results first");
     assert_eq!(
         contextual.to_string(),
         "test task result: unit expected, received Number"
@@ -5872,7 +5875,7 @@ fn metadata_inspection_returns_hidden_values_without_forcing_them() {
     assert!(matches!(metadata.clone_core_for_test(), Value::Lazy(_)));
     let error = assembler
         .evaluate(&PublicValue::from_runtime_root(*metadata))
-        .expect_err("the returned hidden failure should remain demandable");
+        .expect_err_without_debug("the returned hidden failure should remain demandable");
     assert_eq!(error.to_string(), "latent metadata failure");
 }
 
@@ -6256,7 +6259,7 @@ fn suspended_request_failure_preserves_context_without_replay() {
             .expect("uninterrupted failure fixture should build")
             .forcing_unfused()
             .run()
-            .expect_err("uninterrupted message construction should fail");
+            .expect_err_without_debug("uninterrupted message construction should fail");
     let uninterrupted_contexts = uninterrupted_error.into_failure().contexts().to_vec();
     assert!(
         assembler
@@ -7512,7 +7515,8 @@ fn task_halt_conversions_preserve_evaluation_and_public_error_structure() {
 #[test]
 fn direct_effect_run_roots_a_failure_before_returning_to_its_caller() {
     let (assembler, effect) = compile_effect(".fail");
-    let error = run_standard_test(&assembler, &effect).expect_err("the effect should fail");
+    let error =
+        run_standard_test(&assembler, &effect).expect_err_without_debug("the effect should fail");
     assert_eq!(
         error
             .failure_root()
@@ -7528,7 +7532,8 @@ fn effect_dispatch_preserves_structured_failure_and_adds_stage_context() {
         "{eff:anno context:\"effect function\" (anno 'error {msg:{text:\"dispatch failed\"}, detail:7})}",
     );
 
-    let halt = run_standard_test(&assembler, &effect).expect_err("the effect function should fail");
+    let halt = run_standard_test(&assembler, &effect)
+        .expect_err_without_debug("the effect function should fail");
     let diagnostic = halt.diagnostic(&assembler.values());
     assert_eq!(diagnostic.message(), "dispatch failed");
     assert_eq!(
@@ -7573,7 +7578,7 @@ fn effect_dispatch_preserves_application_and_request_stage_contexts() {
     ] {
         let (assembler, effect) = compile_effect(source);
         let halt = run_standard_test(&assembler, &effect)
-            .expect_err("the selected effect-dispatch phase should fail");
+            .expect_err_without_debug("the selected effect-dispatch phase should fail");
         let diagnostic = halt.diagnostic(&assembler.values());
         assert!(
             diagnostic.message().contains(message),
@@ -7721,8 +7726,8 @@ fn synchronous_error_recovery_waits_for_observed_state_change() {
 #[test]
 fn unobserved_evaluation_error_remains_terminal_inside_cut() {
     let (assembler, effect) = compile_effect(".cut (.alt (1 2) (.r \"fallback\"))");
-    let error =
-        run_standard_test(&assembler, &effect).expect_err("unobserved error should be terminal");
+    let error = run_standard_test(&assembler, &effect)
+        .expect_err_without_debug("unobserved error should be terminal");
     assert!(error.to_string().contains("requires a function value"));
 }
 
@@ -8272,7 +8277,7 @@ fn unobserved_failure_is_permanent_with_or_without_cut() {
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
         assert!(
             run_log_test(&assembler, &effect, host.clone())
-                .unwrap_err()
+                .unwrap_err_without_debug()
                 .to_string()
                 .contains("failed permanently")
         );
@@ -8385,7 +8390,7 @@ fn committed_log_read_clears_its_retry_checkpoint() {
     ));
     assert!(
         run_log_test(&assembler, &effect, host.clone())
-            .unwrap_err()
+            .unwrap_err_without_debug()
             .to_string()
             .contains("failed permanently")
     );
@@ -8466,7 +8471,7 @@ fn reusable_reflection_log_emits_raw_diagnostics_transactionally() {
     );
     assert!(
         run_reflection_test(&assembler, &invalid, host)
-            .unwrap_err()
+            .unwrap_err_without_debug()
             .to_string()
             .contains("severity must be")
     );
@@ -8481,7 +8486,7 @@ fn reflection_log_contextualizes_nested_message_and_severity_failures() {
         &message_effect,
         Arc::new(TestHost::with_values(message_assembler.core_values())),
     )
-    .unwrap_err();
+    .unwrap_err_without_debug();
     message_assembler
         .core_values()
         .assert_same_representation_for_test(
@@ -8497,7 +8502,7 @@ fn reflection_log_contextualizes_nested_message_and_severity_failures() {
         &severity_effect,
         Arc::new(TestHost::with_values(severity_assembler.core_values())),
     )
-    .unwrap_err();
+    .unwrap_err_without_debug();
     severity_assembler
         .core_values()
         .assert_same_representation_for_test(
@@ -8531,7 +8536,7 @@ fn fixpoint_alternatives_receive_independent_futures() {
 #[test]
 fn reflection_fixpoint_reports_recursive_self_observation() {
     let (assembler, effect) = compile_effect(".fix (\\recur -> recur)");
-    let error = run_standard_test(&assembler, &effect).unwrap_err();
+    let error = run_standard_test(&assembler, &effect).unwrap_err_without_debug();
     assert!(
         error.to_string().contains("recursively observed itself"),
         "{error}"
@@ -8596,7 +8601,7 @@ fn task_failure_propagates_one_structured_failure_to_owned_promises() {
             &owner,
             &Value::Promised(promise),
         )
-        .expect_err("unresolved owned promise should inherit producer failure")
+        .expect_err_without_debug("unresolved owned promise should inherit producer failure")
         .into_permanent_failure();
         assert!(Arc::ptr_eq(&failure, &observed));
         owner
@@ -8664,7 +8669,7 @@ fn task_completion_and_cancellation_fail_unresolved_owned_promises() {
             &owner,
             &Value::Promised(promise),
         )
-        .expect_err("terminal task should fail its unfinished promise")
+        .expect_err_without_debug("terminal task should fail its unfinished promise")
         .into_permanent_failure();
         assert_eq!(observed.to_string(), expected);
         let EvaluationWaitPoll::Failed(wait_failure) = owner.poll_wait(&wait) else {
@@ -8685,7 +8690,7 @@ fn fixpoint_hides_then_restores_the_reset_stack() {
     );
     assert!(
         run_standard_test(&assembler, &hidden)
-            .unwrap_err()
+            .unwrap_err_without_debug()
             .to_string()
             .contains("not in reset scope")
     );
@@ -8734,7 +8739,7 @@ fn continuation_task_identity_prevents_cross_task_aliasing() {
 
     assert!(
         run_standard_test(&assembler, &cross_task_invocation)
-            .unwrap_err()
+            .unwrap_err_without_debug()
             .to_string()
             .contains("belongs to another reflection task")
     );
@@ -8747,7 +8752,7 @@ fn replacing_root_state_replaces_the_active_reset_stack() {
     );
     assert!(
         run_standard_test(&assembler, &effect)
-            .unwrap_err()
+            .unwrap_err_without_debug()
             .to_string()
             .contains("not in reset scope")
     );
@@ -8768,7 +8773,7 @@ fn reading_all_local_state_does_not_observe_shared_heap() {
         assembler.core_values(),
         public_record(&assembler, [("changed", assembler.values().text("later"))]),
     ));
-    let error = run_standard_on(&assembler, &effect, host.clone()).unwrap_err();
+    let error = run_standard_on(&assembler, &effect, host.clone()).unwrap_err_without_debug();
     assert!(error.to_string().contains("failed permanently"));
     assert_eq!(host.wait_count(), 0);
 }
@@ -8953,7 +8958,7 @@ fn failed_alternative_rolls_back_local_and_heap_changes() {
 fn blind_heap_write_does_not_make_failure_retryable() {
     let (assembler, effect) = compile_effect(".cut ((.heap.set ['discarded] \"value\") =>> .fail)");
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let error = run_standard_on(&assembler, &effect, host.clone()).unwrap_err();
+    let error = run_standard_on(&assembler, &effect, host.clone()).unwrap_err_without_debug();
     assert!(error.to_string().contains("failed permanently"));
     assert_eq!(host.wait_count(), 0);
     assert_same_value!(assembler, host.heap(), assembler.values().empty_dict());
@@ -8968,7 +8973,7 @@ fn reading_a_covering_own_write_does_not_make_failure_retryable() {
         assembler.core_values(),
         public_record(&assembler, [("changed", assembler.values().text("later"))]),
     ));
-    let error = run_standard_on(&assembler, &effect, host.clone()).unwrap_err();
+    let error = run_standard_on(&assembler, &effect, host.clone()).unwrap_err_without_debug();
 
     assert!(error.to_string().contains("failed permanently"));
     assert_eq!(host.wait_count(), 0);
@@ -9003,7 +9008,7 @@ fn blind_heap_rewrite_does_not_make_failure_retryable() {
     let (assembler, effect) =
         compile_effect(".cut (.heap.rewrite ['counter] (\\value -> value + 1) =>> .fail)");
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let error = run_standard_on(&assembler, &effect, host.clone()).unwrap_err();
+    let error = run_standard_on(&assembler, &effect, host.clone()).unwrap_err_without_debug();
 
     assert!(error.to_string().contains("failed permanently"));
     assert_eq!(host.wait_count(), 0);
@@ -9040,7 +9045,7 @@ fn heap_root_replacement_and_path_errors_remain_lazy() {
     assert!(
         assembler
             .evaluate(&value)
-            .unwrap_err()
+            .unwrap_err_without_debug()
             .to_string()
             .contains("not a dictionary")
     );
@@ -9106,7 +9111,8 @@ fn standalone_heap_reads_do_not_make_later_failure_retryable() {
         assembler.core_values(),
         ready_heap,
     ));
-    let error = run_standard_on(&assembler, &heap_effect, heap_host.clone()).unwrap_err();
+    let error =
+        run_standard_on(&assembler, &heap_effect, heap_host.clone()).unwrap_err_without_debug();
     assert!(error.to_string().contains("failed permanently"));
     assert_eq!(heap_host.wait_count(), 0);
 
@@ -9119,7 +9125,8 @@ fn standalone_heap_reads_do_not_make_later_failure_retryable() {
             [("answer", local_assembler.values().text("ready"))],
         ),
     ));
-    let error = run_standard_on(&local_assembler, &local_effect, local_host.clone()).unwrap_err();
+    let error = run_standard_on(&local_assembler, &local_effect, local_host.clone())
+        .unwrap_err_without_debug();
     assert!(error.to_string().contains("failed permanently"));
     assert_eq!(local_host.wait_count(), 0);
 }
@@ -9129,7 +9136,7 @@ fn top_level_alternative_and_unmatched_shift_are_rejected() {
     let (alternative_assembler, alternative) = compile_effect(".alt (.r 1) (.r 2)");
     assert!(
         run_standard_test(&alternative_assembler, &alternative)
-            .unwrap_err()
+            .unwrap_err_without_debug()
             .to_string()
             .contains("requires an enclosing `.cut`")
     );
@@ -9138,7 +9145,7 @@ fn top_level_alternative_and_unmatched_shift_are_rejected() {
         compile_effect(".fix (\\_loop -> .alt (.r 1) (.r 2))");
     assert!(
         run_standard_test(&fixpoint_assembler, &fixpoint_alternative)
-            .unwrap_err()
+            .unwrap_err_without_debug()
             .to_string()
             .contains("requires an enclosing `.cut`")
     );
@@ -9147,7 +9154,7 @@ fn top_level_alternative_and_unmatched_shift_are_rejected() {
         compile_effect(".shift \"missing\" (\\continuation -> .r continuation)");
     assert!(
         run_standard_test(&shift_assembler, &shift)
-            .unwrap_err()
+            .unwrap_err_without_debug()
             .to_string()
             .contains("not in reset scope")
     );

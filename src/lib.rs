@@ -13,6 +13,8 @@ mod number;
 pub mod reflection;
 mod runtime;
 mod source;
+#[cfg(test)]
+mod test_support;
 mod text_pattern;
 
 pub use api::{

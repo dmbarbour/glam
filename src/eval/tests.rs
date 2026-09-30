@@ -14,6 +14,7 @@ use crate::evaluation::{
 };
 use crate::number::Number;
 use crate::runtime::RuntimeValueRoot;
+use crate::test_support::ResultTestExt as _;
 
 use super::*;
 
@@ -330,7 +331,7 @@ fn object_local_name_resumes_a_lazy_parts_tail_without_replaying_its_name() {
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the lazy parts tail should suspend local-name construction");
+            .expect_err_without_debug("the lazy parts tail should suspend local-name construction");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(name_demands.load(Ordering::SeqCst), 1);
     observer
@@ -338,7 +339,7 @@ fn object_local_name_resumes_a_lazy_parts_tail_without_replaying_its_name() {
         .collect_managed_for_test()
         .expect("the object local-name checkpoint must retain its completed prefix");
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-        .expect_err("a later route must resume the exact lazy parts tail");
+        .expect_err_without_debug("a later route must resume the exact lazy parts tail");
     assert_eq!(name_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &tail, Value::List(List::from_values(vec![n(2)])))
         .expect("the parts tail should accept its assignment");
@@ -397,7 +398,7 @@ fn object_with_defs_resumes_a_promised_spec_without_replaying_its_object() {
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the promised specification should suspend object extension");
+            .expect_err_without_debug("the promised specification should suspend object extension");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(object_demands.load(Ordering::SeqCst), 1);
     observer
@@ -405,7 +406,7 @@ fn object_with_defs_resumes_a_promised_spec_without_replaying_its_object() {
         .collect_managed_for_test()
         .expect("the object-extension checkpoint must retain its completed object demand");
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-        .expect_err("a later route must resume the exact specification demand");
+        .expect_err_without_debug("a later route must resume the exact specification demand");
     assert_eq!(object_demands.load(Ordering::SeqCst), 1);
     let resolved_spec = Value::Dict(
         Dict::new_sync()
@@ -477,7 +478,7 @@ fn composed_object_defs_resume_the_extension_without_replaying_prior_defs() {
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the promised extension should suspend composition");
+            .expect_err_without_debug("the promised extension should suspend composition");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(prior_demands.load(Ordering::SeqCst), 1);
     observer
@@ -485,7 +486,7 @@ fn composed_object_defs_resume_the_extension_without_replaying_prior_defs() {
         .collect_managed_for_test()
         .expect("the composed-definitions checkpoint must retain its completed prior stage");
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-        .expect_err("a later route must resume the exact extension stage");
+        .expect_err_without_debug("a later route must resume the exact extension stage");
     assert_eq!(prior_demands.load(Ordering::SeqCst), 1);
     let extension_defs = closed_function_value_in(
         owner.values(),
@@ -573,7 +574,7 @@ fn object_override_resumes_a_nested_prior_without_replaying_completed_prefix() {
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the nested promised prior should suspend object override");
+            .expect_err_without_debug("the nested promised prior should suspend object override");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(update_demands.load(Ordering::SeqCst), 1);
     assert_eq!(base_demands.load(Ordering::SeqCst), 1);
@@ -582,7 +583,7 @@ fn object_override_resumes_a_nested_prior_without_replaying_completed_prefix() {
         .collect_managed_for_test()
         .expect("the override checkpoint must retain its completed outer prefix and stack");
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-        .expect_err("a later route must resume the exact nested prior demand");
+        .expect_err_without_debug("a later route must resume the exact nested prior demand");
     assert_eq!(update_demands.load(Ordering::SeqCst), 1);
     assert_eq!(base_demands.load(Ordering::SeqCst), 1);
     set_promise(
@@ -684,7 +685,9 @@ fn object_dict_defs_resume_the_dict_without_replaying_the_base() {
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("dictionary definitions should wait after demanding their base");
+            .expect_err_without_debug(
+                "dictionary definitions should wait after demanding their base",
+            );
     assert!(blocked.blocked_on().is_some());
     assert_eq!(base_demands.load(Ordering::SeqCst), 1);
     observer
@@ -692,7 +695,7 @@ fn object_dict_defs_resume_the_dict_without_replaying_the_base() {
         .collect_managed_for_test()
         .expect("the dictionary-definitions checkpoint must retain its completed base");
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-        .expect_err("a later route must resume the exact definitions dictionary");
+        .expect_err_without_debug("a later route must resume the exact definitions dictionary");
     assert_eq!(base_demands.load(Ordering::SeqCst), 1);
     set_promise(
         &owner,
@@ -760,7 +763,9 @@ fn object_from_dict_resumes_a_promised_spec_without_replaying_its_dictionary() {
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the promised specification should suspend plain-dictionary conversion");
+            .expect_err_without_debug(
+                "the promised specification should suspend plain-dictionary conversion",
+            );
     assert!(blocked.blocked_on().is_some());
     assert_eq!(dictionary_demands.load(Ordering::SeqCst), 1);
     observer
@@ -768,7 +773,7 @@ fn object_from_dict_resumes_a_promised_spec_without_replaying_its_dictionary() {
         .collect_managed_for_test()
         .expect("the object-from-dictionary checkpoint must retain the dictionary");
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-        .expect_err("a later route must resume the exact dictionary specification");
+        .expect_err_without_debug("a later route must resume the exact dictionary specification");
     assert_eq!(dictionary_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &spec, Value::Dict(Dict::new_sync()))
         .expect("the specification should accept its undefined assignment");
@@ -957,7 +962,7 @@ fn terminal_lazy_evaluation_releases_successful_and_failed_sources() {
 
     let error = context
         .evaluate_compatibility_whnf(&Value::Lazy(failure.clone()))
-        .expect_err("lazy source should fail");
+        .expect_err_without_debug("lazy source should fail");
     assert_eq!(error.to_string(), "expected lazy failure");
     assert!(failure.source_snapshot(context.values()).is_none());
     assert!(
@@ -1113,7 +1118,7 @@ fn net_arity_contextualizes_failure_while_demanding_its_arity() {
     .expect("net-arity application construction should remain lazy");
     let error =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &application)
-            .expect_err("failure while evaluating net arity must propagate");
+            .expect_err_without_debug("failure while evaluating net arity must propagate");
     crate::core::test_value_factory().assert_same_representation_for_test(
         &failure_context_items(&error),
         &[evaluation_context_frame("net_arity")],
@@ -1139,7 +1144,7 @@ fn net_arity_does_not_demand_the_net_before_its_arity() {
     .expect("net-arity application should build");
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &application)
-            .expect_err("net arity must suspend at its first operand");
+            .expect_err_without_debug("net arity must suspend at its first operand");
     assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
     assert_eq!(net_demands.load(Ordering::SeqCst), 0);
 
@@ -1177,7 +1182,7 @@ fn net_arity_resumes_its_net_without_replaying_the_completed_arity() {
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &application)
-            .expect_err("net arity must suspend at its unresolved net");
+            .expect_err_without_debug("net arity must suspend at its unresolved net");
     assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
     assert_eq!(arity_demands.load(Ordering::SeqCst), 1);
     context
@@ -1185,7 +1190,7 @@ fn net_arity_resumes_its_net_without_replaying_the_completed_arity() {
         .collect_managed_for_test()
         .expect("the net checkpoint must retain its completed arity and pending net demand");
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &application)
-        .expect_err("a later route must resume the same net dependency");
+        .expect_err_without_debug("a later route must resume the same net dependency");
     assert_eq!(arity_demands.load(Ordering::SeqCst), 1);
 
     let identity = closed_net_in(context.values(), |builder| {
@@ -1243,7 +1248,7 @@ fn net_backed_lazy_values_require_an_exposed_data_node() {
 
     let error =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &value)
-            .expect_err("a net computation must expose data rather than a bind");
+            .expect_err_without_debug("a net computation must expose data rather than a bind");
     assert_eq!(
         error.to_string(),
         "lazy net computation exposed a bind instead of data"
@@ -1264,7 +1269,7 @@ fn net_backed_lazy_values_reject_non_data_normal_forms() {
 
     let error =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &value)
-            .expect_err("an inert net computation must not produce a value");
+            .expect_err_without_debug("an inert net computation must not produce a value");
     assert_eq!(
         error.to_string(),
         "lazy net computation reached a non-data normal form"
@@ -1301,7 +1306,7 @@ fn early_function_data_is_left_to_ordinary_stuck_net_semantics() {
             &test_context(),
             &apply_function_values(&test_context(), partial, vec![n(1)]).unwrap(),
         )
-        .unwrap_err()
+        .unwrap_err_without_debug()
         .to_string(),
         "application requires a function value, received Number"
     );
@@ -1361,7 +1366,7 @@ fn saturated_function_calls_reject_a_remaining_bind() {
 
     assert_eq!(
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &result)
-            .unwrap_err()
+            .unwrap_err_without_debug()
             .to_string(),
         "function call exposed a bind instead of data"
     );
@@ -1553,7 +1558,7 @@ fn promised_values_fail_fast_without_poisoning_later_assignment() {
 
     assert_eq!(
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
-            .unwrap_err()
+            .unwrap_err_without_debug()
             .to_string(),
         "promised value was observed before initialization"
     );
@@ -1588,7 +1593,7 @@ fn deferred_computation_blockage_does_not_poison_its_lazy_cache() {
     let value = Value::Lazy(lazy.clone());
 
     let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value)
-        .expect_err("the unresolved input promise should block");
+        .expect_err_without_debug("the unresolved input promise should block");
     assert!(blocked.blocked_on().is_some());
     assert!(
         lazy.cached(session.values()).is_none(),
@@ -1658,12 +1663,12 @@ fn deferred_computation_caches_one_structured_failure() {
     let value = Value::Lazy(lazy.clone());
 
     let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
-        .expect_err("the deferred computation should fail permanently");
+        .expect_err_without_debug("the deferred computation should fail permanently");
     let observed_failure = error.into_permanent_failure();
     let cached_failure = lazy
         .cached(context.values())
         .expect("a permanent deferred failure should be cached")
-        .expect_err("the cached result should be the failure");
+        .expect_err_without_debug("the cached result should be the failure");
 
     assert!(Arc::ptr_eq(&observed_failure, &cached_failure));
     context
@@ -1680,7 +1685,7 @@ fn deferred_computation_caches_one_structured_failure() {
         .assert_same_representation_for_test(&diagnostic.get(&detail), &Some(&n(7)));
 
     let repeated = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
-        .expect_err("the cached value should remain failed")
+        .expect_err_without_debug("the cached value should remain failed")
         .into_permanent_failure();
     assert!(Arc::ptr_eq(&repeated, &cached_failure));
     assert_eq!(
@@ -1709,7 +1714,7 @@ fn deferred_list_effect_work_blocks_and_resumes() {
     };
 
     let blocked = list_to_value_items(&observer, &results)
-        .expect_err("observing the list should block on its unresolved effect");
+        .expect_err_without_debug("observing the list should block on its unresolved effect");
     assert!(blocked.blocked_on().is_some());
 
     let return_effect = list_return_effect(n(42));
@@ -1743,7 +1748,7 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
     };
     assert!(
         list_to_value_items(&session, &sequence)
-            .expect_err("sequence must wait at its continuation application")
+            .expect_err_without_debug("sequence must wait at its continuation application")
             .blocked_on()
             .is_some()
     );
@@ -1772,7 +1777,7 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
     };
     assert!(
         list_to_value_items(&session, &cut)
-            .expect_err("cut must wait for its operation")
+            .expect_err_without_debug("cut must wait for its operation")
             .blocked_on()
             .is_some()
     );
@@ -1799,7 +1804,7 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
     };
     assert!(
         list_to_value_items(&session, &fixed)
-            .expect_err("fix must wait for its operation")
+            .expect_err_without_debug("fix must wait for its operation")
             .blocked_on()
             .is_some()
     );
@@ -1841,7 +1846,7 @@ fn list_effect_fix_defers_function_demand_and_resumes_without_replay() {
     assert_eq!(demands.load(Ordering::SeqCst), 0);
 
     let blocked = list_to_value_items(&session, &fixed)
-        .expect_err("observing fix results should wait for its function");
+        .expect_err_without_debug("observing fix results should wait for its function");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(demands.load(Ordering::SeqCst), 1);
 
@@ -1876,7 +1881,7 @@ fn interaction_net_builtin_dispatches_into_the_construction_owner() {
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &construction)
-            .expect_err("builtin dispatch should reach the net-construction demand");
+            .expect_err_without_debug("builtin dispatch should reach the net-construction demand");
     assert!(blocked.blocked_on().is_some());
     let Value::Lazy(lazy) = construction else {
         panic!("interaction-net construction must remain memoized as a lazy value")
@@ -1903,16 +1908,16 @@ fn deferred_computation_caches_one_text_failure() {
     let value = Value::Lazy(lazy.clone());
 
     let first = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
-        .expect_err("the deferred computation should fail")
+        .expect_err_without_debug("the deferred computation should fail")
         .into_permanent_failure();
     let cached = lazy
         .cached(context.values())
         .expect("the deferred failure should be cached")
-        .expect_err("the terminal cache should contain a failure");
+        .expect_err_without_debug("the terminal cache should contain a failure");
     assert!(Arc::ptr_eq(&first, &cached));
 
     let second = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
-        .expect_err("the cached deferred computation should remain failed")
+        .expect_err_without_debug("the cached deferred computation should remain failed")
         .into_permanent_failure();
     assert!(Arc::ptr_eq(&cached, &second));
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
@@ -1946,7 +1951,7 @@ fn deferred_computation_preserves_context_annotation_frames() {
 
     let failure =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &Value::Lazy(lazy))
-            .expect_err("the annotated deferred computation should fail")
+            .expect_err_without_debug("the annotated deferred computation should fail")
             .into_permanent_failure();
     context
         .values()
@@ -1965,7 +1970,7 @@ fn computed_lazy_waits_on_an_empty_promise_without_caching_its_error() {
     let value = Value::Lazy(lazy.clone());
 
     let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
-        .expect_err("empty promise should block its lazy");
+        .expect_err_without_debug("empty promise should block its lazy");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(promise.exact_subscription_count(context.values()), 1);
     assert!(lazy.cached(context.values()).is_none());
@@ -1995,7 +2000,7 @@ fn resolver_failure_exactly_wakes_its_deferred_follower() {
     let value = Value::Lazy(lazy);
 
     let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
-        .expect_err("an unresolved resolver promise should block its follower");
+        .expect_err_without_debug("an unresolved resolver promise should block its follower");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(promise.exact_subscription_count(context.values()), 1);
 
@@ -2004,7 +2009,7 @@ fn resolver_failure_exactly_wakes_its_deferred_follower() {
     assert_eq!(promise.exact_subscription_count(context.values()), 0);
     assert_eq!(
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
-            .expect_err("the woken follower should expose the resolver failure")
+            .expect_err_without_debug("the woken follower should expose the resolver failure")
             .to_string(),
         "resolver failed deliberately"
     );
@@ -2117,7 +2122,7 @@ fn promised_failure_preserves_structured_diagnostic_and_identity() {
         &observer,
         &Value::Promised(promise),
     )
-    .expect_err("failed promise should expose its permanent failure")
+    .expect_err_without_debug("failed promise should expose its permanent failure")
     .into_permanent_failure();
     assert!(Arc::ptr_eq(&failure, &observed));
     observer
@@ -2151,7 +2156,7 @@ fn promise_only_cycle_remains_blocked_without_poisoning_its_assignment() {
         &context,
         &Value::Promised(promise.clone()),
     )
-    .expect_err("strict promise recursion should remain blocked");
+    .expect_err_without_debug("strict promise recursion should remain blocked");
     assert!(error.blocked_on().is_some());
     assert!(context.promise_failure(&promise).is_none());
     let Some(Ok(Value::Promised(assigned))) = promise.assignment(context.values()) else {
@@ -2179,7 +2184,7 @@ fn mixed_promise_lazy_cycle_remains_retryable_without_poisoning_the_lazy() {
         &context,
         &Value::Promised(promise.clone()),
     )
-    .expect_err("strict mixed recursion should remain blocked");
+    .expect_err_without_debug("strict mixed recursion should remain blocked");
     assert!(error.blocked_on().is_some());
     assert!(context.promise_failure(&promise).is_none());
     assert!(context.lazy_failure(&lazy).is_none());
@@ -2208,8 +2213,8 @@ fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
         .clone();
     let value = Value::Promised(fixpoint.clone());
 
-    let recursive =
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&owner, &value).unwrap_err();
+    let recursive = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&owner, &value)
+        .unwrap_err_without_debug();
     assert!(
         recursive
             .to_string()
@@ -2217,7 +2222,9 @@ fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
     );
 
     let mut observer_demand = ResumableTestValueDemand::new(&observer, &value);
-    let blocked = observer_demand.advance(&observer).unwrap_err();
+    let blocked = observer_demand
+        .advance(&observer)
+        .unwrap_err_without_debug();
     assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
     assert_eq!(fixpoint.exact_subscription_count(session.values()), 1);
     let counts = session.task_registry_counts();
@@ -2262,7 +2269,7 @@ fn failed_task_fails_its_unresolved_fixpoint_promises() {
 
     assert!(
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value)
-            .unwrap_err()
+            .unwrap_err_without_debug()
             .unassigned_promise_root()
             .is_some(),
         "the resumable client owner should expose the unassigned promise rather than an adapter wait"
@@ -2276,7 +2283,7 @@ fn failed_task_fails_its_unresolved_fixpoint_promises() {
     assert_eq!(fixpoint.exact_subscription_count(session.values()), 0);
     assert_eq!(
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value)
-            .unwrap_err()
+            .unwrap_err_without_debug()
             .to_string(),
         "producer failed deliberately"
     );
@@ -2390,7 +2397,7 @@ fn value_fixpoint_reports_its_strict_lazy_dependency_cycle() {
     ));
 
     let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &fixpoint)
-        .unwrap_err();
+        .unwrap_err_without_debug();
     assert!(
         error.to_string().contains("lazy dependency cycle"),
         "{error}"
@@ -2416,7 +2423,7 @@ fn value_fixpoint_reports_its_strict_lazy_dependency_cycle() {
     let observer = context.with_new_task().unwrap();
     assert_eq!(
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &fixpoint)
-            .unwrap_err()
+            .unwrap_err_without_debug()
             .to_string(),
         error.to_string()
     );
@@ -2426,7 +2433,7 @@ fn value_fixpoint_reports_its_strict_lazy_dependency_cycle() {
 fn fixpoint_builtin_reports_a_strict_lazy_dependency_cycle() {
     let expression = builtin1_expr(Builtin::Fixpoint, function_expr(1, TestExpr::Local(0)));
 
-    let error = eval_closed_expr(&expression).unwrap_err();
+    let error = eval_closed_expr(&expression).unwrap_err_without_debug();
     assert!(
         error.to_string().contains("lazy dependency cycle"),
         "{error}"
@@ -2448,7 +2455,7 @@ fn fixpoint_builtin_resumes_from_its_exact_function_operand() {
     .expect("fixpoint application should build");
 
     let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &fixpoint)
-        .expect_err("the unresolved function should suspend fixpoint construction");
+        .expect_err_without_debug("the unresolved function should suspend fixpoint construction");
     assert!(blocked.blocked_on().is_some());
 
     set_promise(
@@ -2478,11 +2485,13 @@ fn suspended_value_fixpoint_keeps_one_knot_for_concurrent_observers() {
     ));
 
     let mut producer_demand = ResumableTestValueDemand::new(&owner, &fixpoint);
-    let producer_block = producer_demand.advance(&owner).unwrap_err();
+    let producer_block = producer_demand.advance(&owner).unwrap_err_without_debug();
     let producer_wait = retryable_halt_wait(&producer_block)
         .expect("producer should suspend on its reflection gate");
     let mut observer_demand = ResumableTestValueDemand::new(&observer, &fixpoint);
-    let observer_block = observer_demand.advance(&observer).unwrap_err();
+    let observer_block = observer_demand
+        .advance(&observer)
+        .unwrap_err_without_debug();
     let fixpoint_wait =
         retryable_halt_wait(&observer_block).expect("observer should wait on the fixpoint itself");
     assert_eq!(
@@ -2517,10 +2526,10 @@ fn computed_fixpoint_uses_session_local_waits_while_sharing_its_result() {
 
     let first_block =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&first, &fixpoint)
-            .expect_err("the first session should wait for the promise");
+            .expect_err_without_debug("the first session should wait for the promise");
     let second_block =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&second, &fixpoint)
-            .expect_err("the second session should own an independent wait");
+            .expect_err_without_debug("the second session should own an independent wait");
     assert!(first_block.blocked_on().is_some());
     assert!(second_block.blocked_on().is_some());
     assert!(lazy.cached(first.values()).is_none());
@@ -2554,11 +2563,17 @@ fn computed_fixpoint_preserves_a_forwarded_structured_failure() {
         &context,
         &Value::Lazy(fixpoint.clone()),
     )
-    .expect_err("the source failure should fail the fixpoint");
+    .expect_err_without_debug("the source failure should fail the fixpoint");
     assert_eq!(error.to_string(), "fixpoint source failed");
 
-    let source_failure = source.cached(context.values()).unwrap().unwrap_err();
-    let fixpoint_failure = fixpoint.cached(context.values()).unwrap().unwrap_err();
+    let source_failure = source
+        .cached(context.values())
+        .unwrap()
+        .unwrap_err_without_debug();
+    let fixpoint_failure = fixpoint
+        .cached(context.values())
+        .unwrap()
+        .unwrap_err_without_debug();
     assert!(Arc::ptr_eq(&source_failure, &fixpoint_failure));
 }
 
@@ -2827,11 +2842,17 @@ fn forwarding_chain_preserves_one_structured_failure() {
         &context,
         &Value::Lazy(root.clone()),
     )
-    .expect_err("forwarding into an error should fail");
+    .expect_err_without_debug("forwarding into an error should fail");
     assert_eq!(error.to_string(), "shared failure");
 
-    let leaf_failure = leaf.cached(context.values()).unwrap().unwrap_err();
-    let root_failure = root.cached(context.values()).unwrap().unwrap_err();
+    let leaf_failure = leaf
+        .cached(context.values())
+        .unwrap()
+        .unwrap_err_without_debug();
+    let root_failure = root
+        .cached(context.values())
+        .unwrap()
+        .unwrap_err_without_debug();
     assert!(Arc::ptr_eq(&leaf_failure, &root_failure));
 }
 
@@ -2925,7 +2946,7 @@ fn host_call_rejects_a_foreign_runtime_root() {
 
     let error =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &Value::Lazy(lazy))
-            .expect_err("a host call cannot publish another runtime's value");
+            .expect_err_without_debug("a host call cannot publish another runtime's value");
     assert!(error.to_string().contains("host call returned a value"));
 }
 
@@ -2935,7 +2956,7 @@ fn ready_lazy_errors_fail_when_observed() {
 
     assert_eq!(
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &value)
-            .unwrap_err()
+            .unwrap_err_without_debug()
             .to_string(),
         "deliberate failure"
     );
@@ -3254,7 +3275,7 @@ fn binary_output_does_not_flatten_nested_binary_values() {
     ]);
 
     let error = list_output_bytes(&test_context(), &list)
-        .expect_err("nested binary values must not be flattened during extraction");
+        .expect_err_without_debug("nested binary values must not be flattened during extraction");
     assert!(error.to_string().contains("byte integers"));
     crate::core::test_value_factory()
         .assert_same_representation_for_test(failure_context_items(&error), &[]);
@@ -3268,7 +3289,7 @@ fn binary_output_contextualizes_only_nested_evaluation_failures() {
     )]);
 
     let error = list_output_bytes(&test_context(), &list)
-        .expect_err("a failed byte computation must propagate");
+        .expect_err_without_debug("a failed byte computation must propagate");
 
     crate::core::test_value_factory().assert_same_representation_for_test(
         failure_context_items(&error),
@@ -3384,7 +3405,7 @@ fn list_concat_resumes_after_its_source_becomes_available() {
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the unresolved source should suspend list concat");
+            .expect_err_without_debug("the unresolved source should suspend list concat");
     assert!(blocked.blocked_on().is_some());
 
     set_promise(
@@ -3427,8 +3448,8 @@ fn lazy_list_chunks_error_when_they_do_not_evaluate_to_lists() {
         panic!("append should produce a list");
     };
 
-    let err =
-        list_output_bytes(&context, &list).expect_err("bad lazy chunk should fail when observed");
+    let err = list_output_bytes(&context, &list)
+        .expect_err_without_debug("bad lazy chunk should fail when observed");
     assert!(
         err.to_string()
             .contains("lazy list chunk must evaluate to a list or binary value")
@@ -3447,7 +3468,7 @@ fn promised_list_chunks_remain_assignable_after_early_observation() {
 
     assert!(
         list_output_bytes(&context, &list)
-            .expect_err("an empty list promise should fail fast")
+            .expect_err_without_debug("an empty list promise should fail fast")
             .to_string()
             .contains("promised value was observed before initialization")
     );
@@ -3568,7 +3589,7 @@ fn equality_errors_when_dictionary_comparison_reaches_functions() {
         TestExpr::Value(left),
         TestExpr::Value(right),
     ))
-    .expect_err("function-valued fields should not be equatable");
+    .expect_err_without_debug("function-valued fields should not be equatable");
 
     assert!(err.to_string().contains("cannot compare function values"));
 }
@@ -3610,7 +3631,7 @@ fn ordinary_observers_do_not_unseal_metadata_carriers() {
             TestExpr::Value(carrier.clone()),
             TestExpr::Value(carrier.clone()),
         ))
-        .expect_err("comparison must not expose sealed carrier identity");
+        .expect_err_without_debug("comparison must not expose sealed carrier identity");
         assert!(
             error.to_string().contains("cannot compare sealed values"),
             "{error}"
@@ -3636,7 +3657,7 @@ fn ordinary_observers_do_not_unseal_metadata_carriers() {
         TestExpr::Value(carrier.clone()),
         TestExpr::Value(n(42)),
     ))
-    .expect_err("a sealed unit carrier must not satisfy a unit assertion");
+    .expect_err_without_debug("a sealed unit carrier must not satisfy a unit assertion");
     assert_eq!(
         unit_error.to_string(),
         "sealed result: unit expected, received Sealed"
@@ -3646,7 +3667,7 @@ fn ordinary_observers_do_not_unseal_metadata_carriers() {
         .expect("application construction should remain lazy");
     let application_error =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &application)
-            .expect_err("a sealed unit carrier must not be callable");
+            .expect_err_without_debug("a sealed unit carrier must not be callable");
     assert_eq!(
         application_error.to_string(),
         "application requires a function value, received Sealed"
@@ -3659,8 +3680,8 @@ fn ordinary_observers_do_not_unseal_metadata_carriers() {
         "application requires a function value, received Sealed"
     );
 
-    let key_error =
-        eval_key(&carrier).expect_err("a sealed unit carrier must not become a dictionary key");
+    let key_error = eval_key(&carrier)
+        .expect_err_without_debug("a sealed unit carrier must not become a dictionary key");
     assert_eq!(
         key_error.to_string(),
         "dictionary keys must evaluate to keyable values"
@@ -3673,8 +3694,8 @@ fn binary_validation_does_not_disclose_sealed_metadata() {
     let hidden = Value::metadata_carrier(Value::binary_from_text("private trace"));
     let list = List::from_values(vec![hidden]);
 
-    let error =
-        list_output_bytes(&test_context(), &list).expect_err("sealed values are not binary bytes");
+    let error = list_output_bytes(&test_context(), &list)
+        .expect_err_without_debug("sealed values are not binary bytes");
     assert!(error.to_string().contains("got Sealed(..)"), "{error}");
     assert!(!error.to_string().contains("private trace"), "{error}");
 }
@@ -3824,7 +3845,7 @@ fn map_delays_a_non_callable_failure_until_an_item_is_observed() {
         panic!("map should produce a list")
     };
     let error = list_output_bytes(&context, &mapped)
-        .expect_err("observing the mapped item should reject the non-callable value");
+        .expect_err_without_debug("observing the mapped item should reject the non-callable value");
     assert!(
         error
             .to_string()
@@ -3854,7 +3875,7 @@ fn map_resumes_after_its_source_becomes_available_without_forcing_the_callable()
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the unresolved source should suspend map");
+            .expect_err_without_debug("the unresolved source should suspend map");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(callable_demands.load(Ordering::SeqCst), 0);
 
@@ -3902,7 +3923,7 @@ fn evaluates_zero_based_list_at_for_lists_and_compact_binaries() {
         TestExpr::Value(n(3)),
         TestExpr::Value(Value::binary_from_text("ABC")),
     ))
-    .expect_err("list at should reject an index at the list length");
+    .expect_err_without_debug("list at should reject an index at the list length");
     assert_eq!(
         out_of_bounds.to_string(),
         "list at builtin index is out of bounds"
@@ -3913,7 +3934,7 @@ fn evaluates_zero_based_list_at_for_lists_and_compact_binaries() {
         TestExpr::Value(n(-1)),
         TestExpr::Value(Value::binary_from_text("ABC")),
     ))
-    .expect_err("list at should reject negative indices");
+    .expect_err_without_debug("list at should reject negative indices");
     assert_eq!(
         negative.to_string(),
         "list at builtin requires non-negative integer indices"
@@ -4004,7 +4025,7 @@ fn compiler_pattern_equality_mismatches_incompatible_values() {
             n(1),
             Value::error(&crate::core::test_value_factory(), "literal input failed")
         )
-        .expect_err("forcing failures must propagate")
+        .expect_err_without_debug("forcing failures must propagate")
         .to_string(),
         "literal input failed"
     );
@@ -4042,7 +4063,7 @@ fn compiler_pattern_binary_list_equality_resumes_without_replaying_the_literal()
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the unresolved list item should suspend pattern equality");
+            .expect_err_without_debug("the unresolved list item should suspend pattern equality");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(literal_demands.load(Ordering::SeqCst), 1);
     observer
@@ -4050,7 +4071,7 @@ fn compiler_pattern_binary_list_equality_resumes_without_replaying_the_literal()
         .collect_managed_for_test()
         .expect("the pattern-equality checkpoint must trace its literal and list state");
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-        .expect_err("a later route must resume the exact promised list item");
+        .expect_err_without_debug("a later route must resume the exact promised list item");
     assert_eq!(literal_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &item, n(i64::from(b'A')))
         .expect("the owner should resolve the promised list item");
@@ -4108,7 +4129,7 @@ fn compiler_pattern_path_equality_matches_keyable_lists_directionally() {
             Value::List(List::from_values(vec![Value::Builtin(Builtin::Add)])),
             Value::List(List::empty()),
         )
-        .expect_err("an invalid computed expected path should remain an error")
+        .expect_err_without_debug("an invalid computed expected path should remain an error")
         .to_string(),
         "dictionary keys must evaluate to keyable values"
     );
@@ -4121,7 +4142,7 @@ fn compiler_pattern_path_equality_matches_keyable_lists_directionally() {
                 "quoted path value failed"
             )])),
         )
-        .expect_err("forcing failures in the subject path must propagate")
+        .expect_err_without_debug("forcing failures in the subject path must propagate")
         .to_string(),
         "quoted path value failed"
     );
@@ -4161,7 +4182,7 @@ fn compiler_pattern_path_equality_resumes_without_replaying_the_expected_path() 
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the unresolved subject item should suspend path equality");
+            .expect_err_without_debug("the unresolved subject item should suspend path equality");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(expected_demands.load(Ordering::SeqCst), 1);
     observer
@@ -4169,7 +4190,7 @@ fn compiler_pattern_path_equality_resumes_without_replaying_the_expected_path() 
         .collect_managed_for_test()
         .expect("the path-pattern checkpoint must trace its completed expected path");
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-        .expect_err("a later route must resume the exact promised subject item");
+        .expect_err_without_debug("a later route must resume the exact promised subject item");
     assert_eq!(expected_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &actual_item, n(42))
         .expect("the owner should resolve the promised subject item");
@@ -4272,7 +4293,7 @@ fn compiler_pattern_dictionary_take_resumes_without_replaying_a_completed_prefix
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the unresolved leaf should suspend dictionary extraction");
+            .expect_err_without_debug("the unresolved leaf should suspend dictionary extraction");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
     observer
@@ -4280,7 +4301,7 @@ fn compiler_pattern_dictionary_take_resumes_without_replaying_a_completed_prefix
         .collect_managed_for_test()
         .expect("dictionary extraction must trace its completed path prefix and frames");
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-        .expect_err("a later route must resume the exact promised dictionary leaf");
+        .expect_err_without_debug("a later route must resume the exact promised dictionary leaf");
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &promised_leaf, n(7)).expect("the owner should resolve the leaf");
     observer
@@ -4369,7 +4390,7 @@ fn compiler_pattern_dictionary_mismatches_are_pass_fail() {
                 Value::error(&crate::core::test_value_factory(), "dict value failed")
             ),),
         )
-        .expect_err("forcing failures while establishing emptiness must propagate")
+        .expect_err_without_debug("forcing failures while establishing emptiness must propagate")
         .to_string(),
         "dict value failed"
     );
@@ -4409,7 +4430,9 @@ fn compiler_pattern_dictionary_emptiness_resumes_without_replaying_prior_members
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the unresolved second member should suspend emptiness traversal");
+            .expect_err_without_debug(
+                "the unresolved second member should suspend emptiness traversal",
+            );
     assert!(blocked.blocked_on().is_some());
     assert_eq!(first_demands.load(Ordering::SeqCst), 1);
     observer
@@ -4417,7 +4440,7 @@ fn compiler_pattern_dictionary_emptiness_resumes_without_replaying_prior_members
         .collect_managed_for_test()
         .expect("the dictionary-emptiness checkpoint must trace completed members");
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-        .expect_err("a later route must resume the exact promised member");
+        .expect_err_without_debug("a later route must resume the exact promised member");
     assert_eq!(first_demands.load(Ordering::SeqCst), 1);
     set_promise(&owner, &second, Value::Dict(Dict::new_sync()))
         .expect("the owner should resolve the second dictionary member");
@@ -4516,7 +4539,7 @@ fn compiler_pattern_optional_dictionary_operations_preserve_absence_and_errors()
     ));
     assert_eq!(
         run_pattern_builtin2(Builtin::PatternDictTryTakeOptional, path, failed)
-            .expect_err("forcing failures along an optional path must propagate")
+            .expect_err_without_debug("forcing failures along an optional path must propagate")
             .to_string(),
         "optional dict path failed"
     );
@@ -4530,7 +4553,7 @@ fn compiler_pattern_dictionary_take_rejects_an_empty_compiler_path() {
             Value::List(List::empty()),
             Value::Dict(Dict::new_sync()),
         )
-        .expect_err("an empty compiler path must remain an evaluation error")
+        .expect_err_without_debug("an empty compiler path must remain an evaluation error")
         .to_string(),
         "pattern-dict-try-take received an empty compiler path"
     );
@@ -4610,7 +4633,7 @@ fn compiler_pattern_list_decomposition_mismatches_without_masking_failures() {
                 builtin,
                 Value::error(&crate::core::test_value_factory(), "pattern input failed")
             )
-            .expect_err("forcing failures must propagate")
+            .expect_err_without_debug("forcing failures must propagate")
             .to_string(),
             "pattern input failed"
         );
@@ -4658,7 +4681,7 @@ fn compiler_pattern_unsnoc_resumes_a_promised_suffix_without_forcing_its_prefix(
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the unresolved suffix should suspend pattern unsnoc");
+            .expect_err_without_debug("the unresolved suffix should suspend pattern unsnoc");
     assert!(blocked.blocked_on().is_some());
     set_promise(&owner, &tail, Value::List(List::from_values(vec![n(9)])))
         .expect("the owner should resolve the promised suffix");
@@ -4731,7 +4754,7 @@ fn text_lines_resumes_a_promised_item_without_replaying_its_prefix() {
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the unresolved byte should suspend text lines");
+            .expect_err_without_debug("the unresolved byte should suspend text lines");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
 
@@ -4768,7 +4791,7 @@ fn text_lines_resumes_a_promised_list_chunk() {
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the unresolved list chunk should suspend text lines");
+            .expect_err_without_debug("the unresolved list chunk should suspend text lines");
     assert!(blocked.blocked_on().is_some());
     set_promise(
         &owner,
@@ -5099,7 +5122,7 @@ fn effect_apply_resumes_from_its_exact_function_operand() {
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the unresolved function should suspend effect application");
+            .expect_err_without_debug("the unresolved function should suspend effect application");
     assert!(blocked.blocked_on().is_some());
 
     set_promise(&owner, &function, Value::Builtin(Builtin::Add))
@@ -5152,7 +5175,7 @@ fn effect_call_finishes_its_argument_spine_before_observing_the_api() {
     let call_root = call_lazy.root(observer.values());
 
     let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &call)
-        .expect_err("the unresolved argument tail should suspend effect dispatch");
+        .expect_err_without_debug("the unresolved argument tail should suspend effect dispatch");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(method_demands.load(Ordering::SeqCst), 0);
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
@@ -5161,7 +5184,7 @@ fn effect_call_finishes_its_argument_spine_before_observing_the_api() {
         .collect_managed_for_test()
         .expect("the effect-call checkpoint must trace its completed prefix");
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &call)
-        .expect_err("a later route must resume the exact argument tail");
+        .expect_err_without_debug("a later route must resume the exact argument tail");
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
 
     set_promise(&owner, &tail, Value::List(List::from_values(vec![n(23)])))
@@ -5212,7 +5235,7 @@ fn effect_map_finishes_its_list_front_before_observing_the_api() {
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &operation)
-            .expect_err("the unresolved list tail should suspend effect map");
+            .expect_err_without_debug("the unresolved list tail should suspend effect map");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(method_demands.load(Ordering::SeqCst), 0);
     observer
@@ -5220,7 +5243,7 @@ fn effect_map_finishes_its_list_front_before_observing_the_api() {
         .collect_managed_for_test()
         .expect("the effect-map checkpoint must trace its suspended list front");
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &operation)
-        .expect_err("a later route must resume the exact effect-map list front");
+        .expect_err_without_debug("a later route must resume the exact effect-map list front");
     assert_eq!(method_demands.load(Ordering::SeqCst), 0);
 
     set_promise(&owner, &tail, Value::List(List::empty()))
@@ -5252,7 +5275,7 @@ fn effect_application_requires_singleton_eff_tag() {
         Arc::new(TestExpr::Value(not_singleton)),
         Arc::new(TestExpr::Value(n(42))),
     ))
-    .unwrap_err();
+    .unwrap_err_without_debug();
 
     assert_eq!(
         err.to_string(),
@@ -5282,7 +5305,7 @@ fn non_callable_application_reports_semantic_value_kinds() {
             &test_context(),
             &application,
         )
-        .expect_err("applying a non-callable value should fail");
+        .expect_err_without_debug("applying a non-callable value should fail");
         assert_eq!(error.to_string(), expected);
     }
 }
@@ -5307,7 +5330,7 @@ fn tuple_ordering_requires_a_singleton_tuple_tag() {
         TestExpr::Value(left),
         TestExpr::Value(right),
     ))
-    .unwrap_err();
+    .unwrap_err_without_debug();
 
     assert_eq!(
         err.to_string(),
@@ -5345,7 +5368,7 @@ fn divide_builtin_rejects_zero() {
         TestExpr::Value(n(1)),
         TestExpr::Value(n(0)),
     );
-    let err = eval_closed_expr(&expr).expect_err("division by zero should fail");
+    let err = eval_closed_expr(&expr).expect_err_without_debug("division by zero should fail");
     assert_eq!(err.to_string(), "divide builtin cannot divide by zero");
 }
 
@@ -5556,7 +5579,9 @@ fn dictionary_union_resumes_without_replaying_a_completed_operand() {
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the unresolved right operand should suspend dictionary union");
+            .expect_err_without_debug(
+                "the unresolved right operand should suspend dictionary union",
+            );
     assert!(blocked.blocked_on().is_some());
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
 
@@ -5605,7 +5630,9 @@ fn dictionary_duplicate_merge_resumes_its_second_operand() {
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the unresolved right operand should suspend duplicate merge");
+            .expect_err_without_debug(
+                "the unresolved right operand should suspend duplicate merge",
+            );
     assert!(blocked.blocked_on().is_some());
 
     let right_key = Key::atom_from_text("right");
@@ -5655,7 +5682,7 @@ fn list_at_resumes_without_replaying_a_completed_lazy_chunk() {
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the unresolved tail should suspend list-at");
+            .expect_err_without_debug("the unresolved tail should suspend list-at");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
 
@@ -5696,7 +5723,7 @@ fn split_end_resumes_from_the_back_without_forcing_an_unrelated_prefix() {
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the unresolved tail should suspend split-end");
+            .expect_err_without_debug("the unresolved tail should suspend split-end");
     assert!(blocked.blocked_on().is_some());
     set_promise(&owner, &tail, Value::List(List::from_values(vec![n(42)])))
         .expect("the owner should resolve the list tail");
@@ -5743,7 +5770,7 @@ fn dictionary_unions_defer_ambiguous_keys_until_observed() {
         &test_context(),
         &Value::Lazy(ambiguous.clone()),
     )
-    .expect_err("ambiguous key should fail only when demanded");
+    .expect_err_without_debug("ambiguous key should fail only when demanded");
 
     assert_eq!(
         err.to_string(),
@@ -6003,7 +6030,7 @@ fn anno_builtin_reports_failed_assertions_during_demand() {
             ),
         ),
     )
-    .expect_err("failed anno should raise during demand");
+    .expect_err_without_debug("failed anno should raise during demand");
     assert_eq!(
         error.to_string(),
         "cannot override `foo` because it is not defined"
@@ -6028,7 +6055,7 @@ fn assert_unit_builtin_uses_its_diagnostic_context() {
         TestExpr::Value(Value::Dict(Dict::new_sync())),
         TestExpr::Value(n(42)),
     ))
-    .expect_err("non-unit assertion value should fail");
+    .expect_err_without_debug("non-unit assertion value should fail");
     assert_eq!(
         error.to_string(),
         "test operation result: unit expected, received Undefined"
@@ -6057,7 +6084,7 @@ fn assert_unit_annotation_has_optional_diagnostic_context() {
         annotation(value_payload()),
         TestExpr::Value(n(42)),
     ))
-    .expect_err("context-free unit annotation should fail generically");
+    .expect_err_without_debug("context-free unit annotation should fail generically");
     assert_eq!(generic_error.to_string(), "unit expected, received Number");
 
     let contextual_payload = dict_union_expr(
@@ -6074,7 +6101,7 @@ fn assert_unit_annotation_has_optional_diagnostic_context() {
         annotation(contextual_payload),
         TestExpr::Value(n(42)),
     ))
-    .expect_err("contextual unit annotation should fail");
+    .expect_err_without_debug("contextual unit annotation should fail");
     assert_eq!(
         contextual_error.to_string(),
         "annotated operation result: unit expected, received Number"
@@ -6123,7 +6150,9 @@ fn assert_unit_annotation_resumes_diagnostic_context_after_collection_without_re
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the unresolved diagnostic context should suspend the assertion");
+            .expect_err_without_debug(
+                "the unresolved diagnostic context should suspend the assertion",
+            );
     assert!(blocked.blocked_on().is_some());
     assert_eq!(value_demands.load(Ordering::SeqCst), 1);
     observer
@@ -6131,7 +6160,7 @@ fn assert_unit_annotation_resumes_diagnostic_context_after_collection_without_re
         .collect_managed_for_test()
         .expect("the annotation checkpoint must trace completed assertion work");
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-        .expect_err("a later route must resume the exact diagnostic-context promise");
+        .expect_err_without_debug("a later route must resume the exact diagnostic-context promise");
     assert_eq!(value_demands.load(Ordering::SeqCst), 1);
 
     set_promise(
@@ -6146,7 +6175,7 @@ fn assert_unit_annotation_resumes_diagnostic_context_after_collection_without_re
         .expect("the assigned annotation checkpoint must remain live");
     let failure =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the resumed non-unit assertion should fail");
+            .expect_err_without_debug("the resumed non-unit assertion should fail");
     assert_eq!(
         failure.to_string(),
         "assertion result: unit expected, received Number"
@@ -6199,7 +6228,8 @@ fn error_annotations_carry_diagnostic_values_and_ordered_contexts() {
         inner,
     );
 
-    let error = eval_closed_expr(&outer).expect_err("error annotation must fail when demanded");
+    let error = eval_closed_expr(&outer)
+        .expect_err_without_debug("error annotation must fail when demanded");
     assert_eq!(error.to_string(), "handler failed");
     let diagnostic =
         halt_diagnostic_value(&error).expect("permanent errors must project to diagnostics");
@@ -6260,7 +6290,7 @@ fn error_annotations_contextualize_failure_while_evaluating_their_message() {
             "message construction failed",
         )),
     ))
-    .expect_err("failure while constructing an error message must propagate");
+    .expect_err_without_debug("failure while constructing an error message must propagate");
     assert_eq!(error.to_string(), "message construction failed");
 
     let diagnostic =
@@ -6307,7 +6337,7 @@ fn annotation_selection_contextualizes_only_nested_evaluation_failures() {
         )),
         TestExpr::Value(n(42)),
     ))
-    .expect_err("failure while selecting an annotation must propagate");
+    .expect_err_without_debug("failure while selecting an annotation must propagate");
     crate::core::test_value_factory().assert_same_representation_for_test(
         &failure_context_items(&error),
         &[evaluation_context_frame("annotation")],
@@ -6325,7 +6355,7 @@ fn index_builtins_contextualize_demand_without_decorating_validation_errors() {
         )),
         TestExpr::Value(values.clone()),
     ))
-    .expect_err("failure while evaluating the index must propagate");
+    .expect_err_without_debug("failure while evaluating the index must propagate");
     crate::core::test_value_factory().assert_same_representation_for_test(
         &failure_context_items(&nested),
         &[evaluation_context_frame("list_index")],
@@ -6336,7 +6366,7 @@ fn index_builtins_contextualize_demand_without_decorating_validation_errors() {
         TestExpr::Value(Value::binary_from_text("not an index")),
         TestExpr::Value(values),
     ))
-    .expect_err("a nonnumeric index must fail validation");
+    .expect_err_without_debug("a nonnumeric index must fail validation");
     crate::core::test_value_factory()
         .assert_same_representation_for_test(&failure_context_items(&validation), &[]);
 }
@@ -6483,7 +6513,7 @@ fn metadata_annotation_rejects_non_unit_and_existing_carriers() {
         )
         .expect("annotation application should remain lazy");
         let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &result)
-            .expect_err("metadata initialization must require canonical unit");
+            .expect_err_without_debug("metadata initialization must require canonical unit");
         assert_eq!(
             error.to_string(),
             format!("unit expected, received {expected_kind}")
@@ -6700,7 +6730,7 @@ fn metadata_update_resumes_without_replaying_a_completed_carrier() {
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the unresolved carrier should suspend metadata extraction");
+            .expect_err_without_debug("the unresolved carrier should suspend metadata extraction");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(first_demands.load(Ordering::SeqCst), 1);
     observer
@@ -6708,7 +6738,7 @@ fn metadata_update_resumes_without_replaying_a_completed_carrier() {
         .collect_managed_for_test()
         .expect("the metadata checkpoint must trace its completed carrier prefix");
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-        .expect_err("a later route must resume the exact promised carrier");
+        .expect_err_without_debug("a later route must resume the exact promised carrier");
     assert_eq!(first_demands.load(Ordering::SeqCst), 1);
 
     set_promise(&owner, &second, Value::metadata_carrier(n(2)))
@@ -6762,7 +6792,7 @@ fn metadata_update_preserves_input_arity_without_validating_output_length() {
     .expect("a short update list should remain latent inside output carriers");
     assert_eq!(too_short.len(), 2);
     let missing_error = evaluated_metadata(&context, &too_short[1])
-        .expect_err("only the missing projection should fail");
+        .expect_err_without_debug("only the missing projection should fail");
     assert_eq!(
         missing_error.to_string(),
         "list at builtin index is out of bounds"
@@ -6854,7 +6884,7 @@ fn metadata_update_validates_inputs_strictly_but_not_hidden_metadata() {
         ),
         vec![n(1)],
     )
-    .expect_err("ordinary input values must be rejected before update evaluation");
+    .expect_err_without_debug("ordinary input values must be rejected before update evaluation");
     assert_eq!(
         error.to_string(),
         "`meta_pure` annotation item 0 must be a sealed metadata carrier, received Number"
@@ -6873,7 +6903,7 @@ fn metadata_update_validates_inputs_strictly_but_not_hidden_metadata() {
         vec![annotation, n(1)],
     )
     .and_then(|value| crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value))
-    .expect_err("metadata update target must be a list");
+    .expect_err_without_debug("metadata update target must be a list");
     assert_eq!(
         error.to_string(),
         "`meta_pure` annotation requires a list of sealed metadata carriers"
@@ -6902,8 +6932,8 @@ fn metadata_update_shares_update_failures_between_projections() {
     assert_eq!(update_forces.load(Ordering::SeqCst), 0);
 
     for carrier in &result {
-        let error =
-            evaluated_metadata(&context, carrier).expect_err("every shared projection must fail");
+        let error = evaluated_metadata(&context, carrier)
+            .expect_err_without_debug("every shared projection must fail");
         assert_eq!(error.to_string(), "shared metadata update failed");
     }
     assert_eq!(
@@ -6933,8 +6963,8 @@ fn metadata_update_delegates_output_interpretation_to_list_at() {
         vec![initial_metadata()],
     )
     .expect("an unindexable update result should remain latent");
-    let error =
-        evaluated_metadata(&context, &number[0]).expect_err("the indexed projection must fail");
+    let error = evaluated_metadata(&context, &number[0])
+        .expect_err_without_debug("the indexed projection must fail");
     assert_eq!(
         error.to_string(),
         "list at builtin requires a list or binary value"
@@ -7018,7 +7048,7 @@ fn metadata_reflection_update_blocks_and_resumes_on_its_shared_task() {
     let mut demand = ResumableTestValueDemand::new(&context, &metadata);
     let blocked = demand
         .advance(&context)
-        .expect_err("an unlaunched metadata task should block");
+        .expect_err_without_debug("an unlaunched metadata task should block");
     let wait = blocked
         .blocked_on()
         .expect("the metadata projection should expose its task wait");
@@ -7045,7 +7075,7 @@ fn metadata_reflection_update_propagates_task_failure_and_cancellation() {
     let failed = run_metadata_reflection_update(&failed_context, n(0), vec![initial_metadata()])
         .expect("task failure should remain latent in its output carrier");
     let error = evaluated_metadata(&failed_context, &failed[0])
-        .expect_err("demanding failed effectful metadata must propagate its failure");
+        .expect_err_without_debug("demanding failed effectful metadata must propagate its failure");
     assert_eq!(error.to_string(), "metadata reflection task failed");
     assert_eq!(
         failed_context
@@ -7067,7 +7097,7 @@ fn metadata_reflection_update_propagates_task_failure_and_cancellation() {
         run_metadata_reflection_update(&cancelled_context, n(0), vec![initial_metadata()])
             .expect("task cancellation should remain latent in its output carrier");
     let error = evaluated_metadata(&cancelled_context, &cancelled[0])
-        .expect_err("demanding cancelled effectful metadata must fail");
+        .expect_err_without_debug("demanding cancelled effectful metadata must fail");
     assert_eq!(error.to_string(), "reflection result task was cancelled");
 }
 
@@ -7093,7 +7123,7 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
     );
     assert_eq!(
         evaluated_metadata(&short_context, &short[1])
-            .expect_err("the missing projection should fail")
+            .expect_err_without_debug("the missing projection should fail")
             .to_string(),
         "list at builtin index is out of bounds"
     );
@@ -7134,7 +7164,7 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
             .expect("an unindexable result should remain latent");
     assert_eq!(
         evaluated_metadata(&non_list_context, &non_list[0])
-            .expect_err("the projection should delegate its error to list.at")
+            .expect_err_without_debug("the projection should delegate its error to list.at")
             .to_string(),
         "list at builtin requires a list or binary value"
     );
@@ -7161,7 +7191,7 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
     .expect("individual failed results should remain latent");
     assert_eq!(
         evaluated_metadata(&partial_context, &partial[0])
-            .expect_err("the first metadata result should fail")
+            .expect_err_without_debug("the first metadata result should fail")
             .to_string(),
         "one metadata projection failed"
     );
@@ -7174,7 +7204,7 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
 
     let invalid_context = annotation_test_context();
     let error = run_metadata_reflection_update(&invalid_context, n(0), vec![n(1)])
-        .expect_err("ordinary values must be rejected before task launch");
+        .expect_err_without_debug("ordinary values must be rejected before task launch");
     assert_eq!(
         error.to_string(),
         "`meta_refl` annotation item 0 must be a sealed metadata carrier, received Number"
@@ -7193,7 +7223,7 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
     .and_then(|value| {
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&invalid_context, &value)
     })
-    .expect_err("effectful metadata target must be a list");
+    .expect_err_without_debug("effectful metadata target must be a list");
     assert_eq!(
         error.to_string(),
         "`meta_refl` annotation requires a list of sealed metadata carriers"
@@ -7348,7 +7378,7 @@ fn binary_annotation_resumes_without_replaying_a_completed_prefix() {
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err("the unresolved byte should suspend binary extraction");
+            .expect_err_without_debug("the unresolved byte should suspend binary extraction");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
     observer
@@ -7356,7 +7386,7 @@ fn binary_annotation_resumes_without_replaying_a_completed_prefix() {
         .collect_managed_for_test()
         .expect("the binary checkpoint must trace its completed byte prefix");
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-        .expect_err("a later route must resume the exact promised byte");
+        .expect_err_without_debug("a later route must resume the exact promised byte");
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
 
     set_promise(&owner, &item, n(i64::from(b'b')))
@@ -7387,7 +7417,7 @@ fn list_annotations_report_errors_for_wrong_targets() {
         ))),
         TestExpr::Value(Value::List(List::from_values(vec![n(300)]))),
     ))
-    .expect_err("invalid binary annotation should fail during demand");
+    .expect_err_without_debug("invalid binary annotation should fail during demand");
 
     assert_eq!(
         error.to_string(),
@@ -7401,7 +7431,7 @@ fn list_annotations_report_errors_for_wrong_targets() {
         ))),
         TestExpr::Value(n(1)),
     ))
-    .expect_err("invalid deque annotation should fail during demand");
+    .expect_err_without_debug("invalid deque annotation should fail during demand");
 
     assert!(
         error
@@ -7500,7 +7530,7 @@ fn dropped_reflection_completion_activation_permit_terminalizes_managed_promise(
     let failure = promise
         .assignment(context.values())
         .expect("dropping the permit must settle the promise")
-        .expect_err("an unactivated task must fail its promise");
+        .expect_err_without_debug("an unactivated task must fail its promise");
     assert_eq!(failure.to_string(), "reflection result task was cancelled");
     assert_eq!(builds.load(Ordering::SeqCst), 0);
     assert_eq!(background.task_registry_counts().reflection_active, 0);
@@ -7589,7 +7619,7 @@ fn reflection_task_result_survives_first_session_close_and_returns_completion_va
     let mut owner_demand = ResumableTestValueDemand::new(&owner, &computation);
     let blocked = owner_demand
         .advance(&owner)
-        .expect_err("an unlaunched reflection result task should block");
+        .expect_err_without_debug("an unlaunched reflection result task should block");
     let owner_wait = blocked
         .blocked_on()
         .expect("the result computation should expose its stable wait");
@@ -7597,7 +7627,7 @@ fn reflection_task_result_survives_first_session_close_and_returns_completion_va
     let mut observer_demand = ResumableTestValueDemand::new(&observer, &computation);
     let cross_session = observer_demand
         .advance(&observer)
-        .expect_err("a cross-session observer should follow the owner task");
+        .expect_err_without_debug("a cross-session observer should follow the owner task");
     assert!(cross_session.blocked_on().is_some());
     assert_eq!(
         observer
@@ -7610,9 +7640,9 @@ fn reflection_task_result_survives_first_session_close_and_returns_completion_va
     );
 
     drop(owner);
-    let resumed = observer_demand
-        .advance(&observer)
-        .expect_err("the later session should resume the lazy-owned promise checkpoint");
+    let resumed = observer_demand.advance(&observer).expect_err_without_debug(
+        "the later session should resume the lazy-owned promise checkpoint",
+    );
     let resumed_wait = resumed
         .blocked_on()
         .expect("the resumed checkpoint should expose its autonomous task dependency");
@@ -7766,7 +7796,7 @@ fn unobserved_reflection_failure_remains_reportable_until_promise_propagation() 
         &observer,
         &Value::Promised(promise),
     )
-    .expect_err("observing the completion promise should propagate the task failure");
+    .expect_err_without_debug("observing the completion promise should propagate the task failure");
     assert_eq!(
         propagated.to_string(),
         "unobserved autonomous reflection failure"
@@ -7797,7 +7827,7 @@ fn reflection_task_result_preserves_failure_and_transfers_reporting_responsibili
         &context,
         &Value::reflection_task_result(&crate::core::test_value_factory(), n(0)),
     )
-    .expect_err("a failed result task must fail its lazy consumer");
+    .expect_err_without_debug("a failed result task must fail its lazy consumer");
     assert_eq!(error.to_string(), "reflection result failed");
     context.values().assert_same_representation_for_test(
         &failure_context_items(&error),
@@ -7825,7 +7855,7 @@ fn reflection_task_result_propagates_cancellation() {
         &context,
         &Value::reflection_task_result(&crate::core::test_value_factory(), n(0)),
     )
-    .expect_err("a cancelled result task must fail its lazy consumer");
+    .expect_err_without_debug("a cancelled result task must fail its lazy consumer");
     assert_eq!(error.to_string(), "reflection result task was cancelled");
 }
 
@@ -7856,14 +7886,14 @@ fn reflection_gate_waits_before_continuing_target_demand() {
     let mut first_demand = ResumableTestValueDemand::new(&context, &gate);
     let first = first_demand
         .advance(&context)
-        .expect_err("new reflection task should block");
+        .expect_err_without_debug("new reflection task should block");
     let wait = first
         .blocked_on()
         .expect("gate should report its task wait");
     let mut second_demand = ResumableTestValueDemand::new(&context, &gate);
     let second = second_demand
         .advance(&context)
-        .expect_err("queued reflection task should block");
+        .expect_err_without_debug("queued reflection task should block");
 
     assert_eq!(second.blocked_on(), Some(wait.clone()));
     assert_eq!(
@@ -7899,12 +7929,12 @@ fn running_reflection_gate_blocks_an_observer_session_without_poisoning_its_cach
     let mut owner_demand = ResumableTestValueDemand::new(&owner, &gate);
     let blocked = owner_demand
         .advance(&owner)
-        .expect_err("new reflection task should block");
+        .expect_err_without_debug("new reflection task should block");
 
     let mut observer_demand = ResumableTestValueDemand::new(&observer, &gate);
     let cross_session = observer_demand
         .advance(&observer)
-        .expect_err("cross-session gate task should block");
+        .expect_err_without_debug("cross-session gate task should block");
     assert!(cross_session.blocked_on().is_some());
     assert!(gate_lazy.cached(owner.values()).is_none());
 
@@ -7921,21 +7951,21 @@ fn reflection_gate_memoizes_task_failure() {
     let mut demand = ResumableTestValueDemand::new(&context, &gate);
     let blocked = demand
         .advance(&context)
-        .expect_err("new reflection task should block");
+        .expect_err_without_debug("new reflection task should block");
     let wait = blocked
         .blocked_on()
         .expect("gate should report its task wait");
 
     context.fail_wait(&wait.0, "reflection task failed deliberately");
 
-    let first = demand.advance(&context).unwrap_err();
+    let first = demand.advance(&context).unwrap_err_without_debug();
     assert_eq!(first.to_string(), "reflection task failed deliberately");
     context.values().assert_same_representation_for_test(
         &failure_context_items(&first),
         &[evaluation_context_frame("reflection_annotation")],
     );
-    let second =
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &gate).unwrap_err();
+    let second = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &gate)
+        .unwrap_err_without_debug();
     assert_eq!(second.to_string(), "reflection task failed deliberately");
     context.values().assert_same_representation_for_test(
         &failure_context_items(&second),
@@ -7982,7 +8012,7 @@ fn assert_structured_reflection_gate_failure(stage: GateFailureStage) {
         .expect("the rooted reflection gate must survive collection before launch");
 
     let first = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &gate)
-        .expect_err("the reflection gate should retain its structured task failure")
+        .expect_err_without_debug("the reflection gate should retain its structured task failure")
         .into_permanent_failure();
     context
         .values()
@@ -8001,11 +8031,11 @@ fn assert_structured_reflection_gate_failure(stage: GateFailureStage) {
     let cached = gate_lazy
         .cached(context.values())
         .expect("the failed gate should have a terminal lazy cache")
-        .expect_err("the terminal gate cache should contain its failure");
+        .expect_err_without_debug("the terminal gate cache should contain its failure");
     assert!(Arc::ptr_eq(&first, &cached));
 
     let second = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &gate)
-        .expect_err("the reflection gate should reuse its cached failure")
+        .expect_err_without_debug("the reflection gate should reuse its cached failure")
         .into_permanent_failure();
     assert!(Arc::ptr_eq(&cached, &second));
     assert_eq!(builds.load(Ordering::SeqCst), 1);
@@ -8059,7 +8089,7 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_call() {
     let mut demand = ResumableTestValueDemand::new(&context, &computation);
     let blocked = demand
         .advance(&context)
-        .expect_err("call should wait for its reflection gate");
+        .expect_err_without_debug("call should wait for its reflection gate");
     let wait = retryable_halt_wait(&blocked)
         .expect("call should retain a route to the reflection task wait");
     assert_eq!(
@@ -8098,9 +8128,9 @@ fn reflection_gate_blocks_and_resumes_an_exact_net_function_call() {
     let computation = Value::Lazy(LazyValue::from_net_computation(context.values(), applied));
 
     let mut demand = ResumableTestValueDemand::new(&context, &computation);
-    let blocked = demand
-        .advance(&context)
-        .expect_err("call should wait while its function remains behind a reflection gate");
+    let blocked = demand.advance(&context).expect_err_without_debug(
+        "call should wait while its function remains behind a reflection gate",
+    );
     let wait = retryable_halt_wait(&blocked)
         .expect("function call should retain a route to the gate's exact task wait");
     assert_eq!(
@@ -8153,7 +8183,7 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_operator_call() {
     let mut demand = ResumableTestValueDemand::new(&context, &computation);
     let blocked = demand
         .advance(&context)
-        .expect_err("operator should wait for its reflection gate");
+        .expect_err_without_debug("operator should wait for its reflection gate");
     let wait = blocked
         .blocked_on()
         .expect("operator should report its exact task wait");
@@ -8228,7 +8258,7 @@ fn seq_forces_its_first_argument_before_continuing_target_demand() {
         Value::error(&crate::core::test_value_factory(), "seq forced this error"),
         n(42),
     )
-    .unwrap_err();
+    .unwrap_err_without_debug();
     assert_eq!(error.to_string(), "seq forced this error");
 
     let target_forces = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -8431,7 +8461,7 @@ fn metadata_strategy_failures_are_cached_and_seq_propagates_them() {
     );
 
     let error = evaluate_strategy(&context, Builtin::Seq, carrier, n(43))
-        .expect_err("seq must propagate the cached hidden failure");
+        .expect_err_without_debug("seq must propagate the cached hidden failure");
     assert_eq!(error.to_string(), "metadata strategy failed");
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
 }
@@ -8618,7 +8648,7 @@ fn metadata_seq_preserves_retryable_promise_blockage() {
     )
     .expect("strategy application should remain lazy");
     let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &applied)
-        .expect_err("seq should block on unresolved hidden metadata");
+        .expect_err_without_debug("seq should block on unresolved hidden metadata");
     assert!(blocked.blocked_on().is_some());
 
     set_promise(&observer, &promise, n(7)).unwrap();
@@ -8693,7 +8723,7 @@ fn strategy_annotations_share_builtin_semantics() {
         )
         .expect("annotation application should remain lazy"),
     )
-    .unwrap_err();
+    .unwrap_err_without_debug();
     assert_eq!(error.to_string(), "annotation forced");
 
     let spark_annotation = Value::Dict(Dict::new_sync().insert(

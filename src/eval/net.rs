@@ -10,6 +10,8 @@ use crate::interaction_net::{
     BlockedCall, BlockedOperatorCall, CursorDependencyDisposition, CursorDependencyResolution,
     DemandEndpoint, InterfaceDemand, RuntimeNet,
 };
+#[cfg(test)]
+use crate::test_support::ResultTestExt as _;
 
 pub(super) fn attach_net_many_in(
     access: &RuntimeValueAccess<'_>,
@@ -2999,7 +3001,7 @@ mod driver_tests {
 
         let parked = normalization_request(&runtime, interface)
             .drive(&context)
-            .expect_err("an unresolved callable promise must park the driver");
+            .expect_err_without_debug("an unresolved callable promise must park the driver");
         let wait = parked
             .blocked_on()
             .expect("the parked driver must retain its semantic wait");
@@ -3642,7 +3644,7 @@ mod driver_tests {
 
         let (failed_runtime, failed_call) = claimed_core_call(context.values().unit());
         let failure = progress_exact_core_call(&context, &failed_runtime, failed_call)
-            .expect_err("unit is permanently non-callable");
+            .expect_err_without_debug("unit is permanently non-callable");
         assert!(
             failure
                 .to_string()
@@ -3829,7 +3831,7 @@ mod driver_tests {
                 || {},
             )
         })
-        .expect_err("unsupported external boundary must fail the exact checkpoint");
+        .expect_err_without_debug("unsupported external boundary must fail the exact checkpoint");
         assert!(
             failure
                 .to_string()
@@ -4247,7 +4249,7 @@ mod driver_tests {
         ));
         let blocked =
             crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &blocked)
-                .expect_err("the emitted application must retain its promise wait");
+                .expect_err_without_debug("the emitted application must retain its promise wait");
         assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
 
         let failed_operator = context.values().with_runtime_value_access(|access| {
@@ -4262,7 +4264,7 @@ mod driver_tests {
         ));
         let failure =
             crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &failed)
-                .expect_err("unit is permanently non-callable");
+                .expect_err_without_debug("unit is permanently non-callable");
         assert!(
             failure
                 .to_string()
@@ -4352,7 +4354,7 @@ mod driver_tests {
         ));
         let failure = normalization_request(&target, interface)
             .drive(&test_context())
-            .expect_err("nested terminal failure must propagate through the driver");
+            .expect_err_without_debug("nested terminal failure must propagate through the driver");
         assert!(failure.to_string().contains("nested driver failure"));
     }
 

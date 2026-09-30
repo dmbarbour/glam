@@ -6,6 +6,7 @@ use std::sync::{Arc, Barrier, Mutex, OnceLock};
 use std::thread;
 
 use super::*;
+use crate::test_support::ResultTestExt as _;
 
 /// Real external ownership beside the machine-facing demand record.
 ///
@@ -179,7 +180,9 @@ fn reflection_promise_terminal_mapper_covers_every_terminal_disposition() {
         for (terminal, expected) in cases {
             let error = TaskPromiseTerminalMapper::ReflectionReturnValue
                 .assignment(&access, &terminal, &unresolved)
-                .expect_err("every non-success terminal must fail the completion promise");
+                .expect_err_without_debug(
+                    "every non-success terminal must fail the completion promise",
+                );
             assert_eq!(error.to_string(), expected);
         }
 
@@ -190,7 +193,9 @@ fn reflection_promise_terminal_mapper_covers_every_terminal_disposition() {
                     &EvaluationWaitTerminal::Complete(completed),
                     &unresolved,
                 )
-                .expect_err("the generic unresolved mapper never synthesizes success"),
+                .expect_err_without_debug(
+                    "the generic unresolved mapper never synthesizes success"
+                ),
             &unresolved,
         ));
     });

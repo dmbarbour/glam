@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 use crate::core::{Builtin, BuiltinCall, ListEffectComputation};
 use crate::eval::list_machine::{ListFrontMachine, ListFrontPoll};
+use crate::test_support::ResultTestExt as _;
 
 fn isolated_context() -> crate::evaluation::OwnedEvalContext {
     EvalContext::isolated(crate::core::CoreValueFactory::new(
@@ -487,7 +488,7 @@ fn w6g1f3i_function_fixpoint_checkpoint_survives_promise_and_route_loss() {
         .values()
         .with_runtime_value_access(|access| Value::Lazy(LazyValue::from_root(&retained, &access)));
     let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
-        .expect_err("the result promise is unresolved");
+        .expect_err_without_debug("the result promise is unresolved");
     assert!(blocked.blocked_on().is_some());
 
     crate::core::set_test_promise(context.values(), &result, number(17))
@@ -1401,14 +1402,14 @@ fn object_checkpoint_does_not_replay_mixin_stages_after_route_loss() {
     let profile_before = context.values().interaction_net_profile_snapshot();
 
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
-        .expect_err("the base application must suspend");
+        .expect_err_without_debug("the base application must suspend");
     collect_between_handoffs(&context);
     assert_eq!(defs_demands.load(Ordering::SeqCst), 1);
     crate::core::set_test_promise(context.values(), &base_result, self_function)
         .expect("the retained base application should accept its function result");
 
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
-        .expect_err("the self application must suspend");
+        .expect_err_without_debug("the self application must suspend");
     collect_between_handoffs(&context);
     assert_eq!(defs_demands.load(Ordering::SeqCst), 1);
     crate::core::set_test_promise(

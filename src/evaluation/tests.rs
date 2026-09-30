@@ -10,6 +10,7 @@ use crate::core::{
     EvaluationHalt, LazyCycle, LazyValue, ManagedLazyRoot, ManagedPromiseRoot, PromisedValue,
 };
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
+use crate::test_support::ResultTestExt as _;
 
 use super::coordinator::{
     ClaimedTaskWork, ClientDemandHandle, ClientDemandPoll, ClientDemandResult,
@@ -877,7 +878,9 @@ fn client_demand_observes_one_canonical_pure_lazy_cycle_failure() {
 
     let failure = context
         .drive_client_demand_for_test(handle)
-        .expect_err("pure lazy cycle must become the client demand's terminal failure")
+        .expect_err_without_debug(
+            "pure lazy cycle must become the client demand's terminal failure",
+        )
         .into_permanent_failure();
     assert!(failure.to_string().contains("lazy dependency cycle"));
     let cached = context
@@ -1239,7 +1242,7 @@ fn synchronous_whnf_facade_preserves_retryable_promise_behavior() {
 
     let halt = context
         .evaluate_compatibility_whnf(&promised)
-        .expect_err("an unassigned host promise must remain retryable");
+        .expect_err_without_debug("an unassigned host promise must remain retryable");
     assert_eq!(
         halt.unassigned_promise_root().map(ManagedPromiseRoot::id),
         Some(promise.id(context.values()))
@@ -1272,7 +1275,7 @@ fn synchronous_client_demand_does_not_pump_unrelated_reflection_work() {
 
     let halt = context
         .evaluate_compatibility_whnf(&Value::Promised(promise.clone()))
-        .expect_err("unassigned promise has no causal producer");
+        .expect_err_without_debug("unassigned promise has no causal producer");
     assert_eq!(
         halt.unassigned_promise_root().map(ManagedPromiseRoot::id),
         Some(promise.id(context.values()))
@@ -1337,7 +1340,7 @@ fn synchronous_client_demand_does_not_wait_for_unrelated_worker_progress() {
     first_event.expect("the client must finish or enter the forbidden wait path");
     let halt = early
         .expect("the client's first event must be completion, not an unrelated-work wait")
-        .expect_err("the promise has no exact producer edge");
+        .expect_err_without_debug("the promise has no exact producer edge");
     assert_eq!(
         halt.unassigned_promise_root().map(ManagedPromiseRoot::id),
         Some(promise.id(producer.values()))
@@ -1721,7 +1724,7 @@ fn escaped_context_retains_demand_resources_without_retaining_owner_or_coordinat
 
     let closed_context = context.clone().for_effect_task();
     let error = PromisedValue::fixpoint(&closed_context, "closed demand promise")
-        .expect_err("closed demand state must reject new promise admission");
+        .expect_err_without_debug("closed demand state must reject new promise admission");
     assert!(error.contains("closed"));
 
     drop(closed_context);
@@ -1759,7 +1762,7 @@ fn guarded_work_admission_rejects_a_closed_demand_without_an_owner_lease() {
     let wait = allocate_wait_token(&demand, task).expect("test wait identity should allocate");
     let error = coordinator
         .reserve_reflection(&demand, task, wait)
-        .expect_err("guarded admission must reject an already-closed demand");
+        .expect_err_without_debug("guarded admission must reject an already-closed demand");
     assert!(error.contains("closed"));
 }
 
@@ -2000,7 +2003,7 @@ fn running_machine_finishes_its_quantum_after_owner_drop_without_retaining_the_o
     assert!(
         context
             .schedule_task(|_| Ok(Box::new(Complete)))
-            .expect_err("closed demand must reject later task admission")
+            .expect_err_without_debug("closed demand must reject later task admission")
             .contains("closed")
     );
     assert!(matches!(
@@ -5334,7 +5337,7 @@ fn owner_session_drop_fails_task_promises_but_not_host_promises() {
     let error = task_promise
         .assignment(observer.values())
         .expect("session closure must assign the task promise")
-        .expect_err("an abandoned task promise must fail");
+        .expect_err_without_debug("an abandoned task promise must fail");
     assert!(error.to_string().contains("was abandoned"));
     assert_eq!(task_wait.exact_subscription_count(), 0);
     assert!(matches!(
@@ -5458,7 +5461,7 @@ fn owner_session_drop_exactly_wakes_a_task_promise_follower() {
             &observer,
             &Value::Lazy(lazy.clone()),
         )
-        .expect_err("the unresolved task promise should block its follower");
+        .expect_err_without_debug("the unresolved task promise should block its follower");
         assert!(blocked.blocked_on().is_some());
         assert_eq!(promise.exact_subscription_count(observer.values()), 1);
         (promise, lazy)
@@ -5472,7 +5475,7 @@ fn owner_session_drop_exactly_wakes_a_task_promise_follower() {
     );
     assert!(
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &Value::Lazy(lazy))
-            .expect_err("owner abandonment should fail the exact follower")
+            .expect_err_without_debug("owner abandonment should fail the exact follower")
             .to_string()
             .contains("was abandoned")
     );
@@ -5496,14 +5499,14 @@ fn task_cancellation_exactly_wakes_its_promise_follower() {
         &observer,
         &Value::Lazy(lazy.clone()),
     )
-    .expect_err("the unresolved task promise should block its follower");
+    .expect_err_without_debug("the unresolved task promise should block its follower");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(promise.exact_subscription_count(observer.values()), 1);
     assert_eq!(owner_task.cancel(), EvaluationTaskCancellation::Requested);
     assert_eq!(promise.exact_subscription_count(observer.values()), 0);
     assert!(
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &Value::Lazy(lazy))
-            .expect_err("producer cancellation should fail the exact follower")
+            .expect_err_without_debug("producer cancellation should fail the exact follower")
             .to_string()
             .contains("was cancelled")
     );
@@ -6751,7 +6754,7 @@ fn running_cancellation_waits_for_release_then_wins_over_the_poll_result() {
     let promise_failure = promise
         .assignment(context.values())
         .expect("owner-thread terminalization must settle its unresolved promise")
-        .expect_err("cancellation must fail the unresolved task-owned promise");
+        .expect_err_without_debug("cancellation must fail the unresolved task-owned promise");
     assert!(promise_failure.to_string().contains("was cancelled"));
     assert!(matches!(
         context.poll_wait(&promise_wait),
@@ -6849,7 +6852,7 @@ fn executor_shutdown_preserves_worker_owned_cancellation_and_task_promise() {
     let promise_failure = promise
         .assignment(context.values())
         .expect("returning worker must settle its task-owned promise")
-        .expect_err("cancellation must fail the unresolved promise");
+        .expect_err_without_debug("cancellation must fail the unresolved promise");
     assert!(promise_failure.to_string().contains("was cancelled"));
     assert!(matches!(
         context.poll_wait(&promise_wait),
@@ -8314,7 +8317,7 @@ fn forced_kill_publishes_task_status_and_fails_owned_promises() {
     let promise_failure = promise
         .assignment(context.values())
         .expect("owned promise should receive a terminal assignment")
-        .expect_err("owned promise should fail when its producer is killed");
+        .expect_err_without_debug("owned promise should fail when its producer is killed");
     assert_eq!(promise_failure, *task_failure.as_failure());
     assert!(matches!(
         statuses
@@ -8427,7 +8430,7 @@ fn exit_settlement_fails_owned_promises_and_drops_reusable_machine_after_unlock(
     let promise_failure = promise
         .assignment(context.values())
         .expect("settlement should terminalize the owned promise")
-        .expect_err("an unfulfilled exit-owned promise must fail");
+        .expect_err_without_debug("an unfulfilled exit-owned promise must fail");
     assert!(
         promise_failure
             .to_string()
@@ -9317,7 +9320,7 @@ fn park_next_spark(coordinator: &EvaluationWorkCoordinator) {
         &context,
         &claimed.value().clone_core_for_test(),
     )
-    .expect_err("the unresolved promise should park its spark follower");
+    .expect_err_without_debug("the unresolved promise should park its spark follower");
     let dependency = if let Some(wait) = halt.blocked_on() {
         coordinator::WorkDependency::Wait(wait.0)
     } else if let Some(promise) = halt.unassigned_promise_root() {
@@ -9435,7 +9438,7 @@ fn promise_completion_between_demand_and_subscription_requeues_the_spark() {
         &spark_context,
         &claimed.value().clone_core_for_test(),
     )
-    .expect_err("the unresolved promise should halt the spark");
+    .expect_err_without_debug("the unresolved promise should halt the spark");
     let dependency = coordinator::WorkDependency::Promise(
         halt.unassigned_promise_root()
             .expect("the halt should preserve the promise")
