@@ -22,6 +22,8 @@ impl<S: NetSpecialization> SourceFrontierShape<S> {
 impl<S> SharedRuntimeNet<S>
 where
     S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
+    S::Data: Clone,
+    S::Operator: Clone,
 {
     /// Captures the immutable source endpoint needed to start a logical copy.
     ///

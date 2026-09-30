@@ -1411,7 +1411,9 @@ fn cursor_dependency_resolution_updates_both_owner_forms() {
         );
         assert_eq!(runtime.revisions(), (revisions.0 + 1, revisions.1 + 1));
         assert!(matches!(
-            runtime.with(|net| net.inspect_cursor_step(cursor)),
+            runtime.with(|net| {
+                net.inspect_cursor_step(cursor, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY)
+            }),
             CursorStepInspection::Claimable(_)
         ));
 
@@ -1427,7 +1429,9 @@ fn cursor_dependency_resolution_updates_both_owner_forms() {
         );
         assert_eq!(runtime.revisions(), (revisions.0 + 1, revisions.1 + 1));
         assert!(matches!(
-            runtime.with(|net| net.inspect_cursor_step(cursor)),
+            runtime.with(|net| {
+                net.inspect_cursor_step(cursor, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY)
+            }),
             CursorStepInspection::Stable
         ));
     }
@@ -1854,7 +1858,7 @@ fn cursor_claim_release_restores_both_owner_forms_to_ready() {
         before_pairless.disturbance_epoch() + 1
     );
     assert!(pairless.with(|runtime| matches!(
-        runtime.inspect_cursor_step(pairless_cursor),
+        runtime.inspect_cursor_step(pairless_cursor, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY),
         CursorStepInspection::Claimable(None)
     )));
 
@@ -1874,7 +1878,7 @@ fn cursor_claim_release_restores_both_owner_forms_to_ready() {
         before_pair_owned.disturbance_epoch() + 1
     );
     assert!(pair_owned.with(|runtime| matches!(
-        runtime.inspect_cursor_step(pair_owned_cursor),
+        runtime.inspect_cursor_step(pair_owned_cursor, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY),
         CursorStepInspection::Claimable(Some(actual)) if actual == pair
     )));
 }
@@ -1900,7 +1904,7 @@ fn cursor_claim_unwind_restores_both_owner_forms_to_ready() {
         before_pairless.disturbance_epoch() + 1
     );
     assert!(pairless.with(|runtime| matches!(
-        runtime.inspect_cursor_step(pairless_cursor),
+        runtime.inspect_cursor_step(pairless_cursor, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY),
         CursorStepInspection::Claimable(None)
     )));
 
@@ -1923,7 +1927,7 @@ fn cursor_claim_unwind_restores_both_owner_forms_to_ready() {
         before_pair_owned.disturbance_epoch() + 1
     );
     assert!(pair_owned.with(|runtime| matches!(
-        runtime.inspect_cursor_step(pair_owned_cursor),
+        runtime.inspect_cursor_step(pair_owned_cursor, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY),
         CursorStepInspection::Claimable(Some(actual)) if actual == pair
     )));
 }
@@ -2078,7 +2082,10 @@ fn blocked_call_requires_its_current_wait_token_to_be_reclaimed() {
     assert!(!net.retry_blocked_call(call, &16));
     assert_eq!(net.blocked_call(pair).unwrap().wait, 17);
     assert!(net.retry_blocked_call(call, &17));
-    assert_eq!(net.claim_call(call), Some(()));
+    assert_eq!(
+        net.claim_call(call, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY),
+        Some(())
+    );
     assert!(net.principals_connect(pair));
 
     assert!(net.restore_blocked_call(call, 17));
@@ -2144,7 +2151,10 @@ fn claimed_call_reads_are_quiet_while_block_and_failure_publish() {
 
     let (blocked, blocked_call) = claim(7);
     let before_read = blocked.with_revisions(|_| ()).1;
-    assert_eq!(blocked.with(|net| net.claim_call(blocked_call)), Some(7));
+    assert_eq!(
+        blocked.with(|net| net.claim_call(blocked_call, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY)),
+        Some(7)
+    );
     assert_eq!(blocked.with_revisions(|_| ()).1, before_read);
     blocked.with_mut(|net| net.block_claimed_call(blocked_call, 17));
     let after_block = blocked.with_revisions(|_| ()).1;
@@ -2159,7 +2169,10 @@ fn claimed_call_reads_are_quiet_while_block_and_failure_publish() {
 
     let (failed, failed_call) = claim(11);
     let before_failure = failed.with_revisions(|_| ()).1;
-    assert_eq!(failed.with(|net| net.claim_call(failed_call)), Some(11));
+    assert_eq!(
+        failed.with(|net| net.claim_call(failed_call, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY)),
+        Some(11)
+    );
     assert_eq!(failed.with_revisions(|_| ()).1, before_failure);
     failed.with_mut(|net| net.fail_claimed_call(failed_call, Arc::from("not callable")));
     let after_failure = failed.with_revisions(|_| ()).1;
@@ -2326,7 +2339,10 @@ fn claimed_callable_data_splices_directly_to_its_operator() {
         bind,
         data,
     };
-    assert_eq!(net.claim_call(call), Some(0));
+    assert_eq!(
+        net.claim_call(call, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY),
+        Some(0)
+    );
     assert!(matches!(
         net.active.get(&call.pair),
         Some(ActivePairState::Claimed)
@@ -2378,7 +2394,10 @@ fn claimed_callable_splice_preserves_non_data_neighbors() {
         bind,
         data,
     };
-    assert_eq!(net.claim_call(call), Some(0));
+    assert_eq!(
+        net.claim_call(call, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY),
+        Some(0)
+    );
 
     net.resume_claimed_call_with_operator(
         call,

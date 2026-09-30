@@ -22,7 +22,6 @@ impl<S: NetSpecialization> InteractionNet<S> {
         S::Data: Clone,
         S::Operator: Clone,
         S::RuntimeSource: Clone + PartialEq,
-        S::Operator: Clone,
     {
         RuntimeNet::new(self, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY)
     }
@@ -38,6 +37,8 @@ impl<S: NetSpecialization> InteractionNet<S> {
     pub fn instantiate_shared(&self) -> SharedRuntimeNet<S>
     where
         S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
+        S::Data: Clone,
+        S::Operator: Clone,
     {
         SharedRuntimeNet::new(self.instantiate())
     }
@@ -267,6 +268,8 @@ impl<S: NetSpecialization> FrontierObservation<S> {
 impl<S> FrontierObservation<S>
 where
     S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
+    S::Data: Clone,
+    S::Operator: Clone,
 {
     /// Takes one non-blocking step at the observed pair. Unlike `reduce_pair`,
     /// this reports claimed, blocked, stuck, gone, and disturbed states
@@ -1250,7 +1253,12 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
     pub(crate) fn with_optional_mut<R>(
         &self,
         update: impl FnOnce(&mut RuntimeNet<S>) -> Option<R>,
-    ) -> Option<R> {
+    ) -> Option<R>
+    where
+        S::Data: Clone,
+        S::Operator: Clone,
+        S::RuntimeSource: Clone + PartialEq,
+    {
         self.with_optional_mut_via(&DIRECT_RUNTIME_NET_MUTATION_GATEWAY, update)
     }
 
@@ -2989,18 +2997,34 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     }
 
     #[cfg(test)]
-    pub fn cursor_dependency(&self, cursor: NodeId) -> Option<CursorDependency<S>> {
+    pub fn cursor_dependency(&self, cursor: NodeId) -> Option<CursorDependency<S>>
+    where
+        S::Data: Clone,
+        S::Operator: Clone,
+        S::RuntimeSource: Clone + PartialEq,
+    {
+        self.cursor_dependency_with(cursor, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY)
+    }
+
+    #[cfg(test)]
+    fn cursor_dependency_with(
+        &self,
+        cursor: NodeId,
+        gateway: &impl RuntimeNetMutationGateway<S>,
+    ) -> Option<CursorDependency<S>> {
         match self.cursor_claim_owner(cursor) {
             Some(CursorClaimOwner::ActivePair(pair)) => match self.active.get(&pair) {
                 Some(ActivePairState::BlockedCursor {
                     cursor: blocked,
                     blockage: CursorBlockage::Dependency(dependency),
-                }) if *blocked == cursor => Some(dependency.clone()),
+                }) if *blocked == cursor => Some(dependency.duplicate_with(gateway)),
                 _ => None,
             },
             Some(CursorClaimOwner::Obligation) => {
                 match &self.cursor_obligations.get(&cursor)?.state {
-                    PairlessCursorState::Blocked(dependency) => Some(dependency.clone()),
+                    PairlessCursorState::Blocked(dependency) => {
+                        Some(dependency.duplicate_with(gateway))
+                    }
                     PairlessCursorState::Ready
                     | PairlessCursorState::Claimed
                     | PairlessCursorState::Stable => None,
@@ -3162,7 +3186,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     /// Clones a pending operator transition after asserting that it remains
     /// claimed. This compatibility helper does not acquire ownership.
     #[cfg(test)]
-    pub fn operator_call_parts(&self, call: OperatorCall) -> (S::Operator, S::Data) {
+    pub fn operator_call_parts(&self, call: OperatorCall) -> (S::Operator, S::Data)
+    where
+        S::Data: Clone,
+        S::Operator: Clone,
+    {
         self.claim_operator_call(call, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY)
             .expect("pending operator call must remain claimed")
     }

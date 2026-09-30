@@ -2327,11 +2327,20 @@ inventory relatch:
            The affected evaluator, API, reflection, syntax, and coordinator
            fixtures use it for `expect_err`/`unwrap_err` control flow; actual
            failure diagnostics remain access-qualified and no production
-           result API changes. This removes 246 formatting-bound compiler
-           failures, reducing the all-target error inventory from 1,003 to
-           757. Expected-success extraction, explicit managed-edge
-           duplication, and genuine diagnostic formatting remain separate
-           work below.
+         result API changes. This removes 246 formatting-bound compiler
+         failures, reducing the all-target error inventory from 1,003 to
+         757. Expected-success extraction, explicit managed-edge
+         duplication, and genuine diagnostic formatting remain separate
+         work below.
+         - **D.2h.2p — generic runtime-net direct gateway closure complete
+           2026-09-30.** The non-core test specialization now names the
+           direct mutation gateway whenever it duplicates call payloads,
+           cursor dependencies, or source-frontier state. Generic shared-net
+           helpers state the exact `Data`/`Operator` duplication bounds they
+           exercise; core evaluation remains on its managed gateway. This
+           removes the remaining implicit generic runtime-source operations
+           and reduces the all-target compiler inventory from 757 to 732
+           without restoring ambient traits to runtime-net carriers.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived
