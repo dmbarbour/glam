@@ -636,6 +636,8 @@ fn ownership_neutral_runtime_cell_preserves_mutation_publication() {
 fn finish_claimed_cursor<S>(target: &mut RuntimeNet<S>, cursor: NodeId) -> CursorProgress
 where
     S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
+    S::Data: Clone,
+    S::Operator: Clone,
 {
     let claim = target
         .cursor_claim(cursor, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY)
@@ -647,6 +649,8 @@ where
 fn reduce_next_cursor<S>(target: &mut RuntimeNet<S>) -> (NodeId, CursorProgress)
 where
     S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
+    S::Data: Clone,
+    S::Operator: Clone,
 {
     let Some(Reduction {
         kind:
@@ -733,6 +737,8 @@ fn claimed_pair_owned_cursor_fixture() -> (SharedRuntimeNet<&'static str>, NodeI
 fn remove_unwired_test_copy<S>(target: &SharedRuntimeNet<S>, cursor: NodeId)
 where
     S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
+    S::Data: Clone,
+    S::Operator: Clone,
 {
     target.with_mut(|runtime| {
         let copy = match runtime.node(cursor) {
@@ -757,7 +763,9 @@ fn pairless_cursor_dependency_fixture() -> (SharedRuntimeNet<()>, NodeId, Cursor
     assert!(target.ensure_pairless_cursor_obligation(cursor));
     assert!(target.claim_pairless_cursor_obligation(cursor));
     let expected = CursorDependency::LocalCursor(dependency);
-    assert!(target.block_pairless_cursor_obligation(cursor, expected.clone()));
+    assert!(
+        target.block_pairless_cursor_obligation(cursor, CursorDependency::LocalCursor(dependency),)
+    );
     (SharedRuntimeNet::new(target), cursor, expected)
 }
 
@@ -776,7 +784,7 @@ fn pair_owned_cursor_dependency_fixture() -> (SharedRuntimeNet<()>, NodeId, Curs
         pair,
         ActivePairState::BlockedCursor {
             cursor,
-            blockage: CursorBlockage::Dependency(expected.clone()),
+            blockage: CursorBlockage::Dependency(CursorDependency::LocalCursor(dependency)),
         },
     );
     (SharedRuntimeNet::new(target), cursor, expected)
@@ -788,6 +796,8 @@ fn reduce_pair_cursor<S>(
 ) -> (NodeId, CursorProgress)
 where
     S: NetSpecialization<RuntimeSource = SharedRuntimeNet<S>>,
+    S::Data: Clone,
+    S::Operator: Clone,
 {
     let Some(Reduction {
         kind:

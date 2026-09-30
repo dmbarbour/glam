@@ -2398,6 +2398,15 @@ inventory relatch:
            cloning a bare value. These fixtures reduce the all-target compiler
            inventory from 428 to 407 without changing scheduling, yield, or
            ownership semantics.
+         - **D.2h.2v — generic cursor-runtime ownership slice complete
+           2026-09-30.** Generic remote-cursor reduction helpers now state the
+           exact data/operator duplication bounds required by the direct
+           mutation gateway. Local cursor dependencies are reconstructed from
+           their copyable `NodeId` payload when a fixture needs both an
+           installed and expected value; `CursorDependency` remains
+           non-`Clone`. The generic runtime-net fixture family now compiles and
+           reduces the all-target inventory from 407 to 396 without widening
+           the production specialization or carrier trait surface.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived
