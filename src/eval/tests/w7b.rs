@@ -55,10 +55,10 @@ fn context() -> OwnedEvalContext {
 }
 
 fn return_first_capture(
-    _context: &EvaluatorStepContext<'_>,
+    context: &EvaluatorStepContext<'_>,
     captures: &[Value],
 ) -> Result<Value, EvaluationHalt> {
-    Ok(captures[0].clone())
+    Ok(context.with_value_access(|access| access.values().duplicate_value(&captures[0])))
 }
 
 fn lazy_alias_root(context: &EvalContext, leaf: Value) -> RuntimeValueRoot {
@@ -223,7 +223,10 @@ fn assert_producer_chain(
     let (context, promise, handle, first_owner) = on_small_stack(suspension_thread, move || {
         let context = context();
         let promise = PromisedValue::new(context.values(), "W7B producer-chain suspension");
-        let root = build(&context, Value::Promised(promise.clone()));
+        let root = build(
+            &context,
+            Value::Promised(promise.duplicate_for_test(context.values())),
+        );
         let handle = context
             .demand_whnf(root)
             .expect("the forced producer-chain demand should be admitted");
@@ -238,7 +241,7 @@ fn assert_producer_chain(
         Value::Number(Number::from_usize(PRODUCER_DEPTH)),
     )
     .expect_without_debug("the forced producer-chain suspension should resolve once");
-    let (second_owner, result, _context) = on_small_stack(resumption_thread, move || {
+    let (second_owner, result, context) = on_small_stack(resumption_thread, move || {
         let owner = thread::current().id();
         let result = context
             .drive_client_demand_value_for_test(handle)
@@ -387,7 +390,10 @@ fn deep_lazy_aliases_complete_and_resume_on_a_forced_owner() {
         on_small_stack("w7b-lazy-alias-suspend-owner", || {
             let context = context();
             let promise = PromisedValue::new(context.values(), "W7B lazy alias suspension");
-            let root = lazy_alias_root(&context, Value::Promised(promise.clone()));
+            let root = lazy_alias_root(
+                &context,
+                Value::Promised(promise.duplicate_for_test(context.values())),
+            );
             let handle = context
                 .demand_whnf(root)
                 .expect("the forced lazy-alias demand should be admitted");
@@ -402,7 +408,7 @@ fn deep_lazy_aliases_complete_and_resume_on_a_forced_owner() {
         Value::Number(Number::from_usize(SEMANTIC_DEPTH)),
     )
     .expect_without_debug("the forced lazy-alias suspension should resolve once");
-    let (second_owner, result, _context) =
+    let (second_owner, result, context) =
         on_small_stack("w7b-lazy-alias-resume-owner", move || {
             let owner = thread::current().id();
             let result = context
@@ -433,8 +439,11 @@ fn deep_promise_aliases_complete_and_resume_on_a_forced_owner() {
         on_small_stack("w7b-promise-alias-suspend-owner", || {
             let context = context();
             let promise = PromisedValue::new(context.values(), "W7B promise alias suspension");
-            let root =
-                promised_alias_root(&context, Value::Promised(promise.clone()), SEMANTIC_DEPTH);
+            let root = promised_alias_root(
+                &context,
+                Value::Promised(promise.duplicate_for_test(context.values())),
+                SEMANTIC_DEPTH,
+            );
             let handle = context
                 .demand_whnf(root)
                 .expect("the forced promise-alias demand should be admitted");
@@ -449,7 +458,7 @@ fn deep_promise_aliases_complete_and_resume_on_a_forced_owner() {
         Value::Number(Number::from_usize(SEMANTIC_DEPTH)),
     )
     .expect_without_debug("the forced promise-alias suspension should resolve once");
-    let (second_owner, result, _context) =
+    let (second_owner, result, context) =
         on_small_stack("w7b-promise-alias-resume-owner", move || {
             let owner = thread::current().id();
             let result = context
@@ -578,8 +587,12 @@ fn deep_aliases_preserve_one_structured_failure_on_the_small_stack() {
             Key::atom_from_text("eval"),
             Value::binary_from_text("small_stack"),
         ));
-        let failure =
-            Arc::new(EvaluationFailure::emission(emission.clone()).with_context(frame.clone()));
+        let failure = context.values().with_runtime_value_access(|access| {
+            Arc::new(
+                EvaluationFailure::emission(access.duplicate_value(&emission))
+                    .with_context_in(&access, access.duplicate_value(&frame)),
+            )
+        });
         let promise = PromisedValue::new(context.values(), "W7B structured failure");
         crate::core::fail_test_promise(context.values(), &promise, failure.clone())
             .expect_without_debug("the fresh terminal promise should accept one failure");
@@ -607,7 +620,7 @@ fn lazy_route_checkpoint_resumes_on_another_small_stack_poller() {
             let promise = PromisedValue::new(context.values(), "W7B lazy-route suspension");
             let root = application_chain_root_with_depth(
                 &context,
-                Value::Promised(promise.clone()),
+                Value::Promised(promise.duplicate_for_test(context.values())),
                 OWNER_DEPTH,
             );
             let Value::Lazy(lazy) = root.clone_core_for_test() else {
@@ -637,7 +650,7 @@ fn lazy_route_checkpoint_resumes_on_another_small_stack_poller() {
         Value::Number(Number::from_usize(OWNER_DEPTH)),
     )
     .expect_without_debug("the lazy-route suspension should resolve once");
-    let (second_owner, result, _context) =
+    let (second_owner, result, context) =
         on_small_stack("w7b-lazy-route-second-owner", move || {
             let owner = thread::current().id();
             loop {
@@ -664,8 +677,11 @@ fn reflection_hosted_checkpoint_resumes_on_another_small_stack_poller() {
         on_small_stack("w7b-reflection-first-owner", || {
             let context = context();
             let promise = PromisedValue::new(context.values(), "W7B reflection suspension");
-            let root =
-                promised_alias_root(&context, Value::Promised(promise.clone()), SEMANTIC_DEPTH);
+            let root = promised_alias_root(
+                &context,
+                Value::Promised(promise.duplicate_for_test(context.values())),
+                SEMANTIC_DEPTH,
+            );
             let computation = WhnfComputation::from_root(root);
             let task = context
                 .schedule_task(move |task_context| {
@@ -689,7 +705,7 @@ fn reflection_hosted_checkpoint_resumes_on_another_small_stack_poller() {
         Value::Number(Number::from_usize(SEMANTIC_DEPTH)),
     )
     .expect_without_debug("the reflection-hosted suspension should resolve once");
-    let (second_owner, result, _context) =
+    let (second_owner, result, context) =
         on_small_stack("w7b-reflection-second-owner", move || {
             let owner = thread::current().id();
             for _ in 0..SEMANTIC_DEPTH + 32 {
@@ -718,7 +734,7 @@ fn spark_checkpoint_resumes_on_another_small_stack_poller() {
             let promise = PromisedValue::new(context.values(), "W7B spark suspension");
             let root = application_chain_root_with_depth(
                 &context,
-                Value::Promised(promise.clone()),
+                Value::Promised(promise.duplicate_for_test(context.values())),
                 OWNER_DEPTH,
             );
             let Value::Lazy(lazy) = root.clone_core_for_test() else {
@@ -735,7 +751,7 @@ fn spark_checkpoint_resumes_on_another_small_stack_poller() {
         Value::Number(Number::from_usize(OWNER_DEPTH)),
     )
     .expect_without_debug("the spark suspension should resolve once");
-    let (second_owner, result, _context, _root) =
+    let (second_owner, result, context, _root) =
         on_small_stack("w7b-spark-second-owner", move || {
             let owner = thread::current().id();
             let result = loop {

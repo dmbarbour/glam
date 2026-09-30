@@ -2407,6 +2407,17 @@ inventory relatch:
            non-`Clone`. The generic runtime-net fixture family now compiles and
            reduces the all-target inventory from 407 to 396 without widening
            the production specialization or carrier trait surface.
+         - **D.2h.2w — W7B small-stack ownership slice complete 2026-09-30.**
+           Deep lazy, promise, reflection, spark, and structured-failure
+           fixtures now duplicate semantic edges through their isolated
+           context. Structured context construction uses `with_context_in`,
+           and the evaluator capture callback duplicates under its admitted
+           step access. Cross-thread resumption fixtures retain the
+           `OwnedEvalContext` returned by the second owner instead of
+           discarding it and then borrowing the moved first-owner binding.
+           This clears the W7B fixture family and reduces the all-target
+           inventory from 396 to 386 without changing the forced scheduling
+           or small-stack witnesses.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived
