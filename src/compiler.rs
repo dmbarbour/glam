@@ -648,7 +648,11 @@ mod tests {
                     request.get(&*keys::FILE)
                 })
                 .expect("invalid request should retain its source spelling");
-            assert_eq!(request, &Value::binary_from_text("../outside.g"));
+            crate::core::assert_same_representation_for_test(
+                eval_context.values(),
+                request,
+                &Value::binary_from_text("../outside.g"),
+            );
         }
     }
 
@@ -792,20 +796,26 @@ mod tests {
             ))
             .expect("the rooted compiler suspension should resume");
 
-        assert_eq!(loaded, Value::Number(1.into()));
+        crate::core::assert_same_representation_for_test(
+            eval_context.values(),
+            &loaded,
+            &Value::Number(1.into()),
+        );
     }
 
     #[test]
     fn abstract_global_path_qualifies_without_exposing_the_namespace() {
         let context = CompileContext::from_module_path(["root", "module"]);
 
-        assert_eq!(
-            context.values().with_runtime_value_access(|access| {
-                context.abstract_global_path(&access, "nested.Name")
-            }),
-            Value::Atom(Atom::from_key(&Key::abstract_global_path([
-                "root", "module", "nested", "Name"
-            ])))
+        let path = context.values().with_runtime_value_access(|access| {
+            context.abstract_global_path(&access, "nested.Name")
+        });
+        crate::core::assert_same_representation_for_test(
+            context.values(),
+            &path,
+            &Value::Atom(Atom::from_key(&Key::abstract_global_path([
+                "root", "module", "nested", "Name",
+            ]))),
         );
     }
 
@@ -813,7 +823,11 @@ mod tests {
     fn compile_context_defaults_prior_to_empty_dict() {
         let context = CompileContext::default();
 
-        assert_eq!(context.prior_defs(), Value::Dict(Dict::new_sync()));
+        crate::core::assert_same_representation_for_test(
+            context.values(),
+            &context.prior_defs(),
+            &Value::Dict(Dict::new_sync()),
+        );
     }
 
     #[test]
@@ -827,12 +841,13 @@ mod tests {
             Key::binary_from_text("unit"),
         ]))));
 
-        assert_eq!(
-            unit,
-            Value::Atom(Atom::from_key(&Key::abstract_global_path([
-                "builtin", "unit"
-            ])))
+        crate::core::assert_same_representation_for_test(
+            context.values(),
+            &unit,
+            &Value::Atom(Atom::from_key(&Key::abstract_global_path([
+                "builtin", "unit",
+            ]))),
         );
-        assert_ne!(unit, forged);
+        assert!(!unit.same_representation_for_test(&forged, context.values()));
     }
 }

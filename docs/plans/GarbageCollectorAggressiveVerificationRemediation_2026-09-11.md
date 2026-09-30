@@ -2078,6 +2078,12 @@ inventory relatch:
       compared only inside matching access. Schedule diagnostics retain stable
       scalar IDs without requiring recursive `Debug` on value-bearing step
       results.
+    - **Compiler/runtime support fixtures: complete 2026-09-30.** Compiler
+      context and runtime-failure-root fixtures compare semantic values through
+      their owning factory; test diagnostic conversion delegates to the same
+      access-qualified implementation as production; and list extraction
+      duplicates strict segments and formats type failures only under the
+      evaluator step's bounded value access.
   - **D.2h.2c — managed facade and collector cutover:** remove the thirteen
     managed-facade traits/identity shims and the five `Gc<T>` traits, add the
     negative compile/source gates, and make the full workspace compile.

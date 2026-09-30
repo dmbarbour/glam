@@ -27,7 +27,13 @@ pub(crate) fn list_to_value_items_in(
             Ok::<_, EvaluationHalt>(())
         },
         &mut |values| {
-            items.borrow_mut().extend(values.iter().cloned());
+            context.with_value_access(|access| {
+                items.borrow_mut().extend(
+                    values
+                        .iter()
+                        .map(|value| access.values().duplicate_value(value)),
+                );
+            });
             Ok(())
         },
         &mut |thunk| force_list_thunk_in(context, thunk),
@@ -78,8 +84,11 @@ pub(super) fn list_to_binary_bytes_in(
                         bytes.borrow_mut().push(byte);
                     }
                     other => {
+                        let other = context.with_value_access(|access| {
+                            format!("{:?}", access.values().diagnostic_debug(&other))
+                        });
                         return Err(EvaluationHalt::new(format!(
-                            "{subject} requires list items to be byte integers, got {other:?}"
+                            "{subject} requires list items to be byte integers, got {other}"
                         )));
                     }
                 }

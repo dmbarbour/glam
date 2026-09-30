@@ -527,11 +527,11 @@ mod tests {
     fn runtime_failure_root_preserves_identity_and_direct_value_occurrences() {
         let values = test_value_factory();
         let repeated = Value::binary_from_text("failure root sentinel");
-        let failure = Arc::new(
-            EvaluationFailure::emission(repeated.clone())
-                .with_context(repeated.clone())
-                .with_context(repeated.clone()),
-        );
+        let failure = Arc::new(values.with_runtime_value_access(|access| {
+            EvaluationFailure::emission(access.duplicate_value(&repeated))
+                .with_context_in(&access, access.duplicate_value(&repeated))
+                .with_context_in(&access, access.duplicate_value(&repeated))
+        }));
 
         let root = RuntimeFailureRoot::new(&values, failure.clone());
 
@@ -543,11 +543,11 @@ mod tests {
                 .iter()
                 .all(|value| value.runtime_id() == values.runtime_id())
         );
-        assert!(
-            root.direct_value_roots()
-                .iter()
-                .all(|value| value.clone_core_for_test() == repeated)
-        );
+        assert!(root.direct_value_roots().iter().all(|value| {
+            value
+                .clone_core_for_test()
+                .same_representation_for_test(&repeated, &values)
+        }));
         assert!(Arc::ptr_eq(&root.clone().into_failure(), &failure));
         assert_eq!(
             std::mem::size_of::<RuntimeFailureRoot>(),
@@ -585,12 +585,18 @@ mod tests {
                 panic!("failure-root construction must not evaluate a direct value")
             },
         ));
-        let failure = Arc::new(EvaluationFailure::emission(lazy.clone()));
+        let failure = Arc::new(EvaluationFailure::emission(
+            lazy.duplicate_for_test(&values),
+        ));
 
         let root = RuntimeFailureRoot::new(&values, failure);
 
         assert_eq!(root.direct_value_roots().len(), 1);
-        assert_eq!(root.direct_value_roots()[0].clone_core_for_test(), lazy);
+        crate::core::assert_same_representation_for_test(
+            &values,
+            &root.direct_value_roots()[0].clone_core_for_test(),
+            &lazy,
+        );
         assert!(!forced.load(Ordering::Acquire));
     }
 

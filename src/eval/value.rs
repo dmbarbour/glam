@@ -66,31 +66,8 @@ pub(crate) fn failure_diagnostic_value_in(
 
 #[cfg(test)]
 pub(crate) fn failure_diagnostic_value(failure: &EvaluationFailure) -> Value {
-    let emission = match failure.emission_value() {
-        Some(Value::Binary(text)) => {
-            crate::diagnostic::text_message(None, String::from_utf8_lossy(text))
-        }
-        Some(Value::Dict(_)) => failure
-            .emission_value()
-            .expect("matched failure emission")
-            .clone(),
-        Some(other) => {
-            return fallback_failure_diagnostic_for_test(
-                failure,
-                Some(other.clone()),
-                Value::List(List::from_values(failure.contexts().to_vec())),
-            );
-        }
-        None => crate::diagnostic::text_message(None, failure.to_string()),
-    };
-
-    crate::diagnostic::prepend_contexts(emission.clone(), failure.contexts()).unwrap_or_else(|_| {
-        fallback_failure_diagnostic_for_test(
-            failure,
-            Some(emission),
-            Value::List(List::from_values(failure.contexts().to_vec())),
-        )
-    })
+    let values = crate::core::test_value_factory();
+    values.with_runtime_value_access(|access| failure_diagnostic_value_in(&access, failure))
 }
 
 #[cfg(test)]
