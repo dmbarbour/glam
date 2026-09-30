@@ -2590,7 +2590,7 @@ inventory relatch:
   typed-edge defects, no pending production root/admission disposition, and no
   unreviewed fixture exception. Update exact counts and fingerprints only from
   the resulting source.
-  - **Pre-closure core-boundary audit, 2026-09-30 — decision required before
+  - **Pre-closure core-boundary audit, 2026-09-30 — decisions settled before
     migration.** The completed all-target trait cutover leaves exactly 26 raw
     API violations, all in `src/core.rs`: nine `CoreValueFactory` scalar/root
     projections, three `EvaluatedValue` conversions, two failure operations,
@@ -2604,19 +2604,32 @@ inventory relatch:
       is to retain a root only for initial metadata, construct canonical atoms
       through caller-held `RuntimeValueAccess`, and then migrate the factory
       call sites. Confirm this representation decision before changing the
-      roughly 150 unit/scalar call sites.
+      roughly 150 unit/scalar call sites. **Decision:** remove those six roots,
+      retain the initial-metadata root, and require caller-held access for the
+      canonical-atom construction path.
     - `EvaluationFailure::Display` reaches into its structured emission to
       recover a compatibility string/kind without value access. A Rust
-      formatter cannot accept a mutator. Prefer an edge-free display summary
-      captured when the structured failure is constructed; confirm the small
-      duplicated summary field rather than silently weakening the raw-value
-      boundary or degrading compatibility messages.
-    - collector traversal of failure and host-call captures intentionally runs
-      with mutators stopped. These operations must become private tracing
-      implementation details (or explicitly recognized collector primitives),
-      not acquire fake runtime access. This is a correction to the former
-      blanket “remove, not reclassify” wording for the two genuine tracing
-      operations only.
+      formatter cannot accept a mutator. **Decision:** do not cache a second
+      eager display summary in the failure. Preserve a rooted structured
+      failure at the public boundary; let explicit diagnostic projection
+      perform any evaluation and later rendering policy. Plain host errors may
+      continue to display their already-existing Rust text, while an
+      evaluation-backed `api::Error` uses an edge-free constant classification
+      for `Display`/`std::error::Error`. Audit and migrate callers which flatten
+      an evaluation failure merely for convenience. The broader transitional
+      `Diagnostic` message/line projection cleanup is deferred in
+      `docs/plans/README.md` unless it blocks GC.
+    - failure and host-call capture traversal currently serves three distinct
+      roles: collector tracing, mutator-qualified rooting/observation, and
+      structural tests. **Decision:** do not encode “no active mutators” at
+      the fixture or payload API boundary. Collector traversal receives only a
+      collector-created visitor and delegates to the existing private
+      `trace_managed_edges` operations; ordinary rooting and observation use
+      `RuntimeValueAccess`; tests verify the applicable access contract or
+      liveness/reclamation outcome. The current visitor happens to carry STW
+      mutation exclusion. A future concurrent or moving collector may define
+      different marking or relocation visitors without changing this
+      separation.
     The equality/source gate is already closed; these decisions concern raw
     transport and observation, not restoration of any ambient trait.
 - **D.2h.4 — dynamic closure:** run focused ordinary/aggressive ownership

@@ -59,3 +59,11 @@ when their historical value no longer justifies keeping them.
 - [`GarbageCollectorScopedPointerSafety_2026-09-09.md`](GarbageCollectorScopedPointerSafety_2026-09-09.md)
   retains the deferred lifetime-branded `ScopedGc` experiment after the active
   persistent-edge trait migration establishes move-only stored edges.
+- **Public diagnostic projection cleanup (deferred).** Review the transitional
+  `Diagnostic::from_parts` policy which eagerly caches shallow conventional
+  `message` and `line` views beside the authoritative structured emission.
+  Decide which embedding conveniences remain explicit projections, and keep
+  enrichment, viewer selection, viewport data, and final rendering in the
+  configured logger or other last-moment policy boundary. This is not a
+  prerequisite for collector integration; pull it forward only if the cached
+  projections obstruct a GC ownership or access boundary.
