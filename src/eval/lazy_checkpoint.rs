@@ -570,9 +570,7 @@ fn trace_host_call_result(
 ) {
     match result {
         Ok(value) => trace_compatibility_value_managed_edges(value, visitor),
-        Err(failure) => failure.visit_direct_values(&mut |value| {
-            trace_compatibility_value_managed_edges(value, visitor);
-        }),
+        Err(failure) => failure.trace_managed_edges(visitor),
     }
 }
 

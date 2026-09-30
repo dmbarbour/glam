@@ -381,9 +381,15 @@ impl RuntimeFailureRoot {
         failure: &EvaluationFailure,
     ) -> Box<[RuntimeValueRoot]> {
         let mut value_roots = Vec::new();
-        failure.visit_direct_values(&mut |value| {
+        if let Some(value) = failure.emission_value_in(access) {
             value_roots.push(access.root_runtime_value(access.duplicate_value(value)));
-        });
+        }
+        value_roots.extend(
+            failure
+                .contexts_in(access)
+                .iter()
+                .map(|value| access.root_runtime_value(access.duplicate_value(value))),
+        );
         value_roots.into_boxed_slice()
     }
 

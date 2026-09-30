@@ -275,21 +275,6 @@ impl EvaluationFailure {
         &self.contexts
     }
 
-    /// Reports every direct semantic value retained by this failure without
-    /// evaluating, formatting, comparing, or recursively visiting it.
-    ///
-    /// Runtime failure roots use this as their complete compatibility edge
-    /// boundary. I6C retained it as the final bootstrap failure-shell shape.
-    pub(crate) fn visit_direct_values(&self, visit: &mut dyn FnMut(&Value)) {
-        match &self.kind {
-            EvaluationFailureKind::Emission(emission) => visit(emission),
-            EvaluationFailureKind::DependencyCycle(_) => {}
-        }
-        for context in self.contexts.iter() {
-            visit(context);
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn dependency_cycle_value(&self) -> Option<&Arc<LazyCycle>> {
         match &self.kind {
@@ -1710,9 +1695,10 @@ pub(crate) struct HostCallRootBundle {
 }
 
 impl HostCallRootBundle {
-    fn from_captures(values: &CoreValueFactory, captures: &[Value]) -> Self {
+    fn from_producer(values: &CoreValueFactory, producer: &HostCallProducer) -> Self {
         let roots = values.with_runtime_value_access(|access| {
-            captures
+            producer
+                .captures
                 .iter()
                 .map(|capture| access.root_runtime_value(access.duplicate_value(capture)))
                 .collect::<Vec<_>>()
@@ -1831,17 +1817,13 @@ impl HostCallProducer {
             .domain
             .external_owners
             .get::<HostCallOwner>(&self.handle);
-        let captures = HostCallRootBundle::from_captures(values, &self.captures);
+        let captures = HostCallRootBundle::from_producer(values, self);
         (owner.operation)(captures)
     }
 
     #[cfg(test)]
     pub(crate) fn record(&self) -> HostCallRecord {
         self.record
-    }
-
-    pub(crate) fn captures(&self) -> &[Value] {
-        &self.captures
     }
 
     /// Reports the producer's declared semantic captures while its opaque

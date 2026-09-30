@@ -39,8 +39,8 @@ pub(super) use managed::{
     visit_compatibility_managed_edges, visit_compatibility_payload_managed_edges,
 };
 pub(super) use runtime_net::{
-    trace_core_operator_managed_net_edges, trace_lazy_source_managed_net_edges,
-    visit_halt_value_edges,
+    trace_core_operator_managed_net_edges, trace_halt_managed_edges,
+    trace_lazy_source_managed_net_edges,
 };
 
 fn visit_values(values: &[Value], visit: &mut dyn FnMut(&Value)) {
@@ -90,12 +90,6 @@ impl CompatibilityValueEdges for Value {
 impl CompatibilityValueEdges for EvaluatedValue {
     fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value)) {
         visit(&self.0);
-    }
-}
-
-impl CompatibilityValueEdges for EvaluationFailure {
-    fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value)) {
-        self.visit_direct_values(visit);
     }
 }
 
@@ -182,9 +176,7 @@ impl CompatibilityValueEdges for LazySource {
     fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value)) {
         match self {
             Self::Error => {}
-            Self::HostCall(producer) => {
-                visit_values(producer.captures(), visit);
-            }
+            Self::HostCall(_) => {}
             Self::NetComputation(_) => {}
             Self::ComputedFixpoint(computation) => {
                 computation.visit_compatibility_value_edges(visit);
@@ -222,6 +214,7 @@ impl CompatibilityValueEdges for LazySource {
 
     fn trace_direct_compatibility_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
         match self {
+            Self::HostCall(producer) => producer.trace_managed_edges(visitor),
             Self::ReflectionTask(computation) => {
                 computation.trace_direct_compatibility_managed_edges(visitor);
             }
@@ -229,7 +222,6 @@ impl CompatibilityValueEdges for LazySource {
                 computation.trace_direct_compatibility_managed_edges(visitor);
             }
             Self::Error
-            | Self::HostCall(_)
             | Self::NetComputation(_)
             | Self::ComputedFixpoint(_)
             | Self::Access { .. }
@@ -261,9 +253,10 @@ mod tests {
     };
     use crate::core_net::{CoreDataKey, CoreSpecialization};
     use crate::interaction_net::NetBuilder;
+    use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
     fn values() -> CoreValueFactory {
-        crate::core::test_value_factory()
+        CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new())
     }
 
     fn number(value: i64) -> Value {
@@ -525,11 +518,7 @@ mod tests {
                 .with_context_in(&access, second)
         });
 
-        assert_edges(
-            &values,
-            &failure,
-            &[shared.duplicate_for_test(&values), shared],
-        );
+        assert_eq!(failure.contexts().len(), 2);
         assert_eq!(
             failure
                 .dependency_cycle_value()
@@ -542,49 +531,76 @@ mod tests {
     #[test]
     fn failure_trace_invokes_no_semantic_service() {
         let values = values();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("the failure-trace fixture should start collectible");
         let forced = Arc::new(AtomicBool::new(false));
         let forced_by_thunk = forced.clone();
-        let sentinel = Value::Lazy(LazyValue::semantic_thunk(
-            &values,
-            "failure visitor sentinel",
-            move |_| {
-                forced_by_thunk.store(true, Ordering::Release);
-                panic!("failure edge visitation must not evaluate its values")
-            },
-        ));
-        assert!(!forced.load(Ordering::Acquire));
-
-        let failure = values.with_runtime_value_access(|access| {
-            EvaluationFailure::emission(access.duplicate_value(&sentinel))
-                .with_context_in(&access, access.duplicate_value(&sentinel))
+        let root = values.construct_runtime_value_root(|access| {
+            let sentinel = LazyValue::external_host_call_in(
+                access,
+                "failure visitor sentinel",
+                HostCallRecord::external_without_semantic_values(
+                    "failure visitor sentinel",
+                    "src/core/managed/payload_edges.rs",
+                    "no semantic captures",
+                ),
+                [],
+                move |_| {
+                    forced_by_thunk.store(true, Ordering::Release);
+                    panic!("failure edge visitation must not evaluate its values")
+                },
+            );
+            let sentinel = Value::Lazy(sentinel);
+            let failure = Arc::new(
+                EvaluationFailure::emission(access.duplicate_value(&sentinel))
+                    .with_context_in(access, sentinel),
+            );
+            Value::Lazy(
+                access
+                    .construct_failed_managed_lazy("failure trace owner", failure)
+                    .expect("the failed lazy should fit one collector run"),
+            )
         });
-
-        assert_edges(
-            &values,
-            &failure,
-            &[sentinel.duplicate_for_test(&values), sentinel],
-        );
         assert!(!forced.load(Ordering::Acquire));
+
+        let live = values
+            .collect_managed_for_test()
+            .expect("collector tracing must retain the failure's lazy value");
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 3);
+        assert!(!forced.load(Ordering::Acquire));
+        drop(root);
     }
 
     #[test]
     fn external_host_call_reports_its_explicit_semantic_edges() {
         let values = values();
-        let capture = number(42);
-        let source = LazyValue::external_host_call(
-            &values,
-            "compatibility visitor host call",
-            HostCallRecord::external_with_semantic_values(
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("the host-call fixture should start collectible");
+        let root = values.construct_runtime_value_root(|access| {
+            let promise = access
+                .construct_managed_promise("host-call capture")
+                .expect("the capture promise should fit one collector run");
+            Value::Lazy(LazyValue::external_host_call_in(
+                access,
                 "compatibility visitor host call",
-                "src/core/managed/payload_edges.rs",
-                "one explicit semantic capture",
-            ),
-            [capture.duplicate_for_test(&values)],
-            |_| Err(Arc::new(EvaluationFailure::message("not invoked"))),
-        )
-        .source_snapshot(&values)
-        .expect("the host call should remain pending");
+                HostCallRecord::external_with_semantic_values(
+                    "compatibility visitor host call",
+                    "src/core/managed/payload_edges.rs",
+                    "one explicit semantic capture",
+                ),
+                [Value::Promised(promise)],
+                |_| Err(Arc::new(EvaluationFailure::message("not invoked"))),
+            ))
+        });
 
-        assert_edges(&values, &source, &[capture]);
+        let live = values
+            .collect_managed_for_test()
+            .expect("collector tracing must retain the host-call capture");
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 3);
+        drop(root);
     }
 }

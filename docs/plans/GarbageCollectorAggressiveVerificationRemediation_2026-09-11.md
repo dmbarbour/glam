@@ -2650,6 +2650,18 @@ inventory relatch:
     root or nested admission. Temporary `#[cfg(test)]` factory projections
     keep the fixture corpus compilable while D.2h.3b.2 migrates it by
     subsystem; they are explicitly not part of the accepted final surface.
+  - **D.2h.3c — failure and host-call traversal split complete 2026-09-30.**
+    Managed failure emissions, contexts, and host-call captures now reach the
+    collector only through its `Visitor`; the raw `visit_direct_values` and
+    `captures` projections are removed. `RuntimeFailureRoot` separately roots
+    the same direct failure values under caller-held `RuntimeValueAccess`, and
+    host-call invocation roots captures without first exposing a borrowed raw
+    slice. Structural compatibility tests no longer pretend these
+    collector-only edges are ordinary raw-value projections: focused
+    collection fixtures prove failure and host-call captures stay live, are
+    reclaimed with their owner, and are never evaluated merely by tracing.
+    The raw ledger falls from sixteen to thirteen violations; exact global
+    counts and fingerprints remain intentionally stale until final closure.
 - **D.2h.4 — dynamic closure:** run focused ordinary/aggressive ownership
   checks followed by the routine workspace gates and the complete aggressive
   workspace suite.

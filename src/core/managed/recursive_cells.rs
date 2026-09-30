@@ -31,9 +31,9 @@ use crate::interaction_net::{
 use crate::runtime::RuntimeMutationAuthority;
 
 use super::payload_edges::{
-    trace_core_operator_managed_net_edges, trace_lazy_source_managed_net_edges,
-    visit_compatibility_managed_edges, visit_compatibility_payload_managed_edges,
-    visit_halt_value_edges,
+    trace_core_operator_managed_net_edges, trace_halt_managed_edges,
+    trace_lazy_source_managed_net_edges, visit_compatibility_managed_edges,
+    visit_compatibility_payload_managed_edges,
 };
 use super::{ManagedDropRecord, ManagedFamily};
 
@@ -1161,7 +1161,7 @@ impl RuntimeNetMutationGateway<CoreSpecialization> for ManagedCoreNetAccess<'_, 
 fn trace_lazy_result(result: &LazyResult, visitor: &mut Visitor<'_>) {
     match result {
         Ok(value) => visit_compatibility_payload_managed_edges(value, visitor),
-        Err(failure) => visit_compatibility_payload_managed_edges(failure.as_ref(), visitor),
+        Err(failure) => failure.trace_managed_edges(visitor),
     }
 }
 
@@ -1190,7 +1190,7 @@ fn trace_lazy_producer_cell(cell: &ManagedLazyCell, visitor: &mut Visitor<'_>) {
 fn trace_promise_assignment(assignment: &ManagedPromiseAssignment, visitor: &mut Visitor<'_>) {
     match assignment {
         Ok(value) => visit_compatibility_managed_edges(value, visitor),
-        Err(failure) => visit_compatibility_payload_managed_edges(failure.as_ref(), visitor),
+        Err(failure) => failure.trace_managed_edges(visitor),
     }
 }
 
@@ -1252,9 +1252,7 @@ fn trace_core_runtime_payload(
         RuntimeNetPayload::CallableCheckpoint(checkpoint) => checkpoint.trace(visitor),
         RuntimeNetPayload::Source(source) => source.trace_managed_edge(visitor),
         RuntimeNetPayload::StuckReason(reason) => {
-            visit_halt_value_edges(reason, &mut |value| {
-                visit_compatibility_managed_edges(value, visitor);
-            });
+            trace_halt_managed_edges(reason, visitor);
         }
     }
 }

@@ -21,10 +21,10 @@ impl CompatibilityValueEdges for CoreOperator {
     }
 }
 
-pub(crate) fn visit_halt_value_edges(halt: &EvaluationHalt, visit: &mut dyn FnMut(&Value)) {
+pub(crate) fn trace_halt_managed_edges(halt: &EvaluationHalt, visitor: &mut Visitor<'_>) {
     match halt.payload() {
         EvaluationHaltPayload::Failure(failure) => {
-            failure.visit_compatibility_value_edges(visit);
+            failure.trace_managed_edges(visitor);
         }
         EvaluationHaltPayload::Blocked => {}
         // The registered root is already an independent collector root. It
