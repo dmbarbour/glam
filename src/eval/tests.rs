@@ -3120,9 +3120,9 @@ fn evaluates_recursive_dictionary_net() {
     };
 
     assert!(matches!(value, Value::Dict(_)));
-    assert_eq!(
-        asm.get(&crate::core::Key::atom_from_text("result")),
-        Some(&Value::binary_from_text("Hello, World!"))
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &asm.get(&crate::core::Key::atom_from_text("result")),
+        &Some(&Value::binary_from_text("Hello, World!")),
     );
 }
 
@@ -3131,7 +3131,8 @@ fn evaluates_binary_literals() {
     let value = eval_closed_expr(&TestExpr::Value(Value::binary_from_text("oops")))
         .expect("binary literal should evaluate");
 
-    assert_eq!(value, Value::binary_from_text("oops"));
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&value, &Value::binary_from_text("oops"));
 }
 
 #[test]
@@ -3158,7 +3159,8 @@ fn appends_lists() {
         Ok(())
     })
     .expect("should walk list");
-    assert_eq!(values, vec![n(1), n(2), n(3)]);
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&values, &vec![n(1), n(2), n(3)]);
 }
 
 #[test]
@@ -3189,14 +3191,14 @@ fn evaluates_mixed_list_segments() {
     )
     .expect("should walk list");
 
-    assert_eq!(
-        saw_values,
-        vec![
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &saw_values,
+        &vec![
             vec![n(1)],
             vec![Value::binary_from_text("Hi")],
             vec![n(2)],
-            vec![Value::binary_from_text("!")]
-        ]
+            vec![Value::binary_from_text("!")],
+        ],
     );
     assert!(saw_bytes.is_empty());
 }
@@ -3254,7 +3256,8 @@ fn binary_output_does_not_flatten_nested_binary_values() {
     let error = list_output_bytes(&test_context(), &list)
         .expect_err("nested binary values must not be flattened during extraction");
     assert!(error.to_string().contains("byte integers"));
-    assert_eq!(failure_context_items(&error), []);
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(failure_context_items(&error), &[]);
 }
 
 #[test]
@@ -3267,9 +3270,9 @@ fn binary_output_contextualizes_only_nested_evaluation_failures() {
     let error = list_output_bytes(&test_context(), &list)
         .expect_err("a failed byte computation must propagate");
 
-    assert_eq!(
+    crate::core::test_value_factory().assert_same_representation_for_test(
         failure_context_items(&error),
-        [evaluation_context_frame("binary_extraction")]
+        &[evaluation_context_frame("binary_extraction")],
     );
 }
 
@@ -3510,7 +3513,10 @@ fn evaluates_arithmetic_builtins() {
 
     let value = eval_closed_expr(&expr).expect("arithmetic should evaluate");
 
-    assert_eq!(value, Value::Number(Number::parse("31/5").unwrap()));
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &value,
+        &Value::Number(Number::parse("31/5").unwrap()),
+    );
 }
 
 #[test]
@@ -3546,7 +3552,9 @@ fn lazy_arguments_share_forced_values() {
     let value = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &computation)
         .expect("lambda body should evaluate");
 
-    assert_eq!(value, n(4));
+    context
+        .values()
+        .assert_same_representation_for_test(&value, &n(4));
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
@@ -3573,7 +3581,8 @@ fn interaction_net_classifies_ordinary_functions_as_applicable_operators() {
 
     match callable {
         CoreCallable::Operator(CoreOperator::Applicable(actual)) => {
-            assert_eq!(actual, function);
+            crate::core::test_value_factory()
+                .assert_same_representation_for_test(&actual, &function);
         }
         CoreCallable::Operator(other) => {
             panic!("ordinary function lowered to the wrong operator: {other:?}");
@@ -3684,8 +3693,12 @@ fn evaluates_extended_math_builtins() {
     ))
     .expect("mod should evaluate");
 
-    assert_eq!(floor, Value::Number((-4).into()));
-    assert_eq!(modulus, Value::Number(Number::parse("2/5").unwrap()));
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&floor, &Value::Number((-4).into()));
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &modulus,
+        &Value::Number(Number::parse("2/5").unwrap()),
+    );
 }
 
 #[test]
@@ -3726,7 +3739,8 @@ fn evaluates_slice_and_map_builtins() {
     ))
     .expect("list len should evaluate");
 
-    assert_eq!(slice, Value::binary_from_text("orl"));
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&slice, &Value::binary_from_text("orl"));
     let Value::List(mapped) = mapped else {
         panic!("map should produce a list");
     };
@@ -3738,9 +3752,10 @@ fn evaluates_slice_and_map_builtins() {
         })
         .collect::<Result<Vec<_>, _>>()
         .expect("mapped values should evaluate");
-    assert_eq!(items, vec![n(2), n(3), n(4)]);
-    assert_eq!(binary_len, n(6));
-    assert_eq!(list_len, n(4));
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&items, &vec![n(2), n(3), n(4)]);
+    crate::core::test_value_factory().assert_same_representation_for_test(&binary_len, &n(6));
+    crate::core::test_value_factory().assert_same_representation_for_test(&list_len, &n(4));
 }
 
 #[test]

@@ -2193,6 +2193,15 @@ inventory relatch:
            regions. Scalar wait tokens and exact shared-failure identities
            retain their existing ordinary Rust comparisons. This slice
            reduces the all-target equality-error inventory from 452 to 432.
+         - **D.2h.2d — central list/container fixture slice complete
+           2026-09-30.** Recursive dictionaries, mixed list segments, nested
+           value vectors, failure-context lists, arithmetic results, mapped
+           list items, and callable classification now use the same explicit
+           value-domain relation. Byte buffers, list-shape statistics, and
+           demand counters remain ordinary Rust comparisons. Nested
+           `Vec<Vec<Value>>` exercises the structural assertion adapters
+           without reintroducing semantic-value equality. This slice reduces
+           the all-target equality-error inventory from 432 to 417.
       3. Add owner-local recursive test relations for `g_syntax` carriers and
          migrate compiler/front-end fixtures without giving semantic values
          syntax-layer equality traits.
