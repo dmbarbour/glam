@@ -579,6 +579,12 @@ impl CoreRuntimeNetAccess<'_, '_> {
             })
     }
 
+    #[cfg(test)]
+    pub(crate) fn reduce_next_for_test(&self) -> Option<Reduction> {
+        let pair = self.runtime.with(|runtime| runtime.active_pairs().next())?;
+        self.reduce_pair_for_test(pair)
+    }
+
     pub(crate) fn poll_interface_demand(&self, interface: Port) -> InterfaceDemand {
         self.runtime
             .cell()
@@ -1672,7 +1678,7 @@ mod tests {
             ..
         }) = reduction
         else {
-            panic!("callable data should claim a Bind/Data call, got {reduction:?}")
+            panic!("callable data should claim a Bind/Data call")
         };
         (runtime, crate::interaction_net::Call { pair, bind, data })
     }
@@ -1699,7 +1705,7 @@ mod tests {
             ..
         }) = reduction
         else {
-            panic!("operator data should claim an Operator/Data call, got {reduction:?}")
+            panic!("operator data should claim an Operator/Data call")
         };
         (
             runtime,
@@ -1739,7 +1745,11 @@ mod tests {
     fn exact_duplication_deltas_report_one_replaced_and_two_installed_payloads() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
         let (payload_root, payload) = values.rooted_error_lazy_for_test("duplicated payload");
-        let data = duplicating_runtime(&values, Value::Lazy(payload.clone()), false);
+        let data = duplicating_runtime(
+            &values,
+            Value::Lazy(payload.duplicate_for_test(&values)),
+            false,
+        );
         let operator = duplicating_runtime(&values, Value::Lazy(payload), true);
         let data_pair = data.test_with(&values, |runtime| {
             runtime
@@ -1789,7 +1799,7 @@ mod tests {
 
         let source = values.instantiate_core_net(&closed_unit_template(&values));
         let prepared = source.test_prepare_copy_source(&values);
-        let (copy_call, call) = claimed_call(&values, old.clone());
+        let (copy_call, call) = claimed_call(&values, old.duplicate_for_test(&values));
         let (operator_call, operator_call_claim) = claimed_call(&values, old);
         let copy_probe =
             values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
@@ -2054,7 +2064,10 @@ mod tests {
         let completion_probe =
             values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
         operator.with_test_access(&values, |runtime| {
-            runtime.complete_claimed_operator_call(call, OperatorYield::Data(third.clone()));
+            runtime.complete_claimed_operator_call(
+                call,
+                OperatorYield::Data(third.duplicate_for_test(&values)),
+            );
         });
         let records = completion_probe.records();
         assert_eq!(records.len(), 1);
@@ -2089,7 +2102,7 @@ mod tests {
                 .expect("copy cursor pair should be active")
         });
         assert!(matches!(
-            target.test_with_optional_mut(&values, |runtime| runtime.reduce_pair(pair)),
+            target.with_test_access(&values, |runtime| runtime.reduce_pair_for_test(pair)),
             Some(Reduction {
                 kind: crate::interaction_net::ReductionKind::RemoteCursor {
                     progress: CursorProgress::Claimed,
@@ -2123,7 +2136,7 @@ mod tests {
         };
         let dependency = match target.test_step_cursor(&values, cursor) {
             CoreCursorStep::Dependency(dependency) => dependency,
-            step => panic!("nested copy should block on its source, got {step:?}"),
+            _ => panic!("nested copy should block on its source"),
         };
         let before = target.test_with_revisions(&values, |_| ()).1;
         let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
@@ -2195,14 +2208,14 @@ mod tests {
                     bind,
                     data,
                 },
-                step => panic!("target should claim its callable data, got {step:?}"),
+                _ => panic!("target should claim its callable data"),
             };
         target.with_test_access(&values, |runtime| {
             runtime.resume_claimed_call_with_copy(call, prepared);
         });
 
         let first_cursor = target
-            .test_with_optional_mut(&values, RuntimeNet::reduce_next)
+            .with_test_access(&values, |access| access.reduce_next_for_test())
             .and_then(|reduction| match reduction.kind {
                 crate::interaction_net::ReductionKind::RemoteCursor {
                     cursor,
@@ -2216,7 +2229,7 @@ mod tests {
             Some(CursorProgress::Materialized { .. })
         ));
         assert!(matches!(
-            target.test_with_optional_mut(&values, RuntimeNet::reduce_next),
+            target.with_test_access(&values, |access| access.reduce_next_for_test()),
             Some(Reduction {
                 kind: crate::interaction_net::ReductionKind::BindJoin,
                 ..
@@ -2226,14 +2239,14 @@ mod tests {
         let mut claims = Vec::new();
         for _ in 0..2 {
             let reduction = target
-                .test_with_optional_mut(&values, RuntimeNet::reduce_next)
+                .with_test_access(&values, |access| access.reduce_next_for_test())
                 .expect("each converging cursor should be claimable");
             let crate::interaction_net::ReductionKind::RemoteCursor {
                 cursor,
                 progress: CursorProgress::Claimed,
             } = reduction.kind
             else {
-                panic!("converging cursor should claim, got {reduction:?}")
+                panic!("converging cursor should claim")
             };
             claims.push(cursor);
         }
@@ -2289,12 +2302,17 @@ mod tests {
         let retained_code = retained
             .upgrade()
             .expect("the managed net owner must retain its operator payload");
-        assert_eq!(
-            retained_code.runtime().test_with(&values, |runtime| {
-                runtime.interface_data(runtime.exposed()).cloned()
-            }),
-            Some(values.unit()),
-            "an operator's nested function net must be traced through the managed owner"
+        let retained_data = retained_code.runtime().with_test_access(&values, |access| {
+            access.with(|runtime| {
+                runtime
+                    .interface_data(runtime.exposed())
+                    .map(|value| access.values().duplicate_value(value))
+            })
+        });
+        crate::core::assert_same_representation_for_test(
+            &values,
+            &retained_data,
+            &Some(values.unit()),
         );
         drop(retained_code);
         drop(owner);
@@ -2339,7 +2357,9 @@ mod tests {
             .expect("the frontier-observation fixture should start collectible");
         let source = values.instantiate_core_net(&closed_unit_template(&values));
         let exposed = source.test_with(&values, RuntimeNet::exposed);
-        let owner = public_values.wrap(Value::Net(crate::core::NetValue::new(source.clone())));
+        let owner = public_values.wrap(Value::Net(crate::core::NetValue::new(
+            source.duplicate_for_test(&values),
+        )));
         let _observation = values.with_runtime_value_access(|access| CoreFrontierObservation {
             source: source.duplicate_in(&access),
             observed_topology: 0,
@@ -2381,7 +2401,7 @@ mod tests {
         let (target, _, _) = CoreRuntimeNet::test_pair_owned_copy_layer(&values, source);
         let pair = target.test_with(&values, |runtime| runtime.active_pairs().next().unwrap());
         let reduction = target
-            .test_with_optional_mut(&values, |runtime| runtime.reduce_pair(pair))
+            .with_test_access(&values, |access| access.reduce_pair_for_test(pair))
             .expect("ready cursor pair must be reducible");
         assert!(matches!(
             reduction.kind,
@@ -2402,10 +2422,12 @@ mod tests {
 
         first.with_runtime_value_access(|access| {
             let net = net.access(&access);
-            assert_eq!(
-                net.with(|runtime| runtime.interface_data(runtime.exposed()).cloned()),
-                Some(first.unit())
-            );
+            let data = net.with(|runtime| {
+                runtime
+                    .interface_data(runtime.exposed())
+                    .map(|value| access.duplicate_value(value))
+            });
+            crate::core::assert_same_representation_for_test(&first, &data, &Some(first.unit()));
         });
     }
 
@@ -2592,7 +2614,7 @@ mod tests {
             | CoreCursorStep::Dependency(CoreCursorDependency::SourceFrontier(observation)) => {
                 observation
             }
-            step => panic!("nested copy should expose its source frontier, got {step:?}"),
+            _ => panic!("nested copy should expose its source frontier"),
         };
 
         target.with_test_access(&values, |wrong_access| match observation.endpoint() {

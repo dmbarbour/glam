@@ -2072,6 +2072,12 @@ inventory relatch:
       assertions no longer require `Debug` on rejected semantic payloads, and
       managed self-cycle construction uses explicit persistent-edge duplicates
       for every independently stored edge.
+    - **Core-net fixture seam: complete 2026-09-30.** Direct fixture reductions
+      now enter the core specialization gateway, payloads are duplicated under
+      the fixture's value factory, and managed interface data is projected and
+      compared only inside matching access. Schedule diagnostics retain stable
+      scalar IDs without requiring recursive `Debug` on value-bearing step
+      results.
   - **D.2h.2c — managed facade and collector cutover:** remove the thirteen
     managed-facade traits/identity shims and the five `Gc<T>` traits, add the
     negative compile/source gates, and make the full workspace compile.
