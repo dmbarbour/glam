@@ -811,14 +811,14 @@ fn builder_reports_wiring_errors_without_panicking() {
     let unwired = net.data(());
     net.try_wire(argument, result).unwrap();
 
-    assert_eq!(
+    assert!(matches!(
         net.try_wire(argument, exposed),
-        Err(NetBuildError::PortAlreadyWired(argument))
-    );
-    assert_eq!(
+        Err(NetBuildError::PortAlreadyWired(port)) if port == argument
+    ));
+    assert!(matches!(
         net.try_finish(exposed),
-        Err(NetBuildError::PortUnwired(unwired))
-    );
+        Err(NetBuildError::PortUnwired(port)) if port == unwired
+    ));
 }
 
 #[test]
@@ -850,10 +850,10 @@ fn builder_rejects_a_wired_exposed_port() {
     let right = net.data(());
     net.try_wire(left, right).unwrap();
 
-    assert_eq!(
+    assert!(matches!(
         net.try_finish(left),
-        Err(NetBuildError::ExposedPortWired(left))
-    );
+        Err(NetBuildError::ExposedPortWired(port)) if port == left
+    ));
 }
 
 #[test]
@@ -1055,10 +1055,10 @@ fn claimed_and_stuck_pairs_remain_in_the_active_tree() {
         })
     );
     assert!(calls.ready_pairs().is_empty());
-    assert_eq!(
+    assert!(matches!(
         calls.active.get(&call_pair),
-        Some(&ActivePairState::Claimed)
-    );
+        Some(ActivePairState::Claimed)
+    ));
     assert_eq!(calls.reduce_next(), None);
 
     let mut stuck = RuntimeNet::<()>::empty();
@@ -1440,17 +1440,20 @@ fn cursor_dependency_resolution_rejects_stale_or_missing_parents_without_mutatio
         unreachable!()
     };
     let stale = CursorDependency::LocalCursor(cursor);
-    assert_ne!(stale, CursorDependency::LocalCursor(dependency));
+    assert!(matches!(
+        &stale,
+        CursorDependency::LocalCursor(stale) if *stale != dependency
+    ));
     let revisions = runtime.revisions();
     assert_eq!(
         runtime.resolve_cursor_dependency(cursor, &stale, CursorDependencyDisposition::Progressed,),
         CursorDependencyResolution::Disturbed
     );
     assert_eq!(runtime.revisions(), revisions);
-    assert_eq!(
+    assert!(matches!(
         runtime.with(|net| net.cursor_dependency(cursor)),
-        Some(CursorDependency::LocalCursor(dependency))
-    );
+        Some(CursorDependency::LocalCursor(found)) if found == dependency
+    ));
 
     let missing = NodeId::from_zero_based(1_000_000);
     assert_eq!(
@@ -2324,13 +2327,19 @@ fn claimed_callable_data_splices_directly_to_its_operator() {
         data,
     };
     assert_eq!(net.claim_call(call), Some(0));
-    assert_eq!(net.active.get(&call.pair), Some(&ActivePairState::Claimed));
+    assert!(matches!(
+        net.active.get(&call.pair),
+        Some(ActivePairState::Claimed)
+    ));
 
     net.resume_claimed_call_with_operator(
         call,
         TestOperator::new("increment", |value| Ok(OperatorYield::Data(value + 1))),
     );
-    assert_ne!(net.active.get(&call.pair), Some(&ActivePairState::Claimed));
+    assert!(!matches!(
+        net.active.get(&call.pair),
+        Some(ActivePairState::Claimed)
+    ));
     let operator_call = match net.reduce_next() {
         Some(Reduction {
             kind: ReductionKind::OperatorCall { operator, data },
@@ -2803,7 +2812,10 @@ fn active_source_call_is_a_dependency_and_is_never_copied() {
     assert!(observation.source().ptr_eq(&source));
     assert_eq!(observation.endpoint(), DemandEndpoint::ActivePair(pair));
     source.with(|source| {
-        assert_eq!(source.active.get(&pair), Some(&ActivePairState::Claimed));
+        assert!(matches!(
+            source.active.get(&pair),
+            Some(ActivePairState::Claimed)
+        ));
     });
     let revisions = source.with_revisions(|_| ()).1;
     assert!(matches!(
@@ -2898,7 +2910,10 @@ fn callable_checkpoint_has_one_linear_interaction() {
             kind: ReductionKind::CallableCheckpoint { bind, checkpoint },
         })
     );
-    assert_eq!(callable.active.get(&pair), Some(&ActivePairState::Claimed));
+    assert!(matches!(
+        callable.active.get(&pair),
+        Some(ActivePairState::Claimed)
+    ));
 
     for partner in [
         RuntimeNode::Fan {
@@ -2964,10 +2979,10 @@ fn callable_checkpoint_mutations_are_exact_and_move_payloads() {
         .install_claimed_call_checkpoint(call, ())
         .expect("the exact claimed call accepts one checkpoint");
     assert_eq!(checkpoint.checkpoint, call.data);
-    assert_eq!(
+    assert!(matches!(
         runtime.active.get(&call.pair),
-        Some(&ActivePairState::Ready)
-    );
+        Some(ActivePairState::Ready)
+    ));
     assert_eq!(runtime.neighbor(Port::auxiliary(call.bind, 1)), argument);
     assert_eq!(runtime.neighbor(Port::auxiliary(call.bind, 2)), result);
     assert!(runtime.install_claimed_call_checkpoint(call, ()).is_err());
@@ -2993,10 +3008,10 @@ fn callable_checkpoint_mutations_are_exact_and_move_payloads() {
     runtime
         .restore_claimed_callable_checkpoint(checkpoint, ())
         .expect("unwind restores the exact payload and ready state");
-    assert_eq!(
+    assert!(matches!(
         runtime.active.get(&call.pair),
-        Some(&ActivePairState::Ready)
-    );
+        Some(ActivePairState::Ready)
+    ));
 
     runtime.reduce_pair(call.pair).unwrap();
     runtime
@@ -3011,10 +3026,10 @@ fn callable_checkpoint_mutations_are_exact_and_move_payloads() {
         CheckpointBlockResult::Disturbed,
         "a successor publication makes the prior generation stale"
     );
-    assert_eq!(
+    assert!(matches!(
         runtime.active.get(&call.pair),
-        Some(&ActivePairState::Ready)
-    );
+        Some(ActivePairState::Ready)
+    ));
 
     assert_eq!(
         runtime.block_callable_checkpoint(successor, 17),
@@ -3030,10 +3045,10 @@ fn callable_checkpoint_mutations_are_exact_and_move_payloads() {
         wait: 17,
     };
     assert!(runtime.retry_blocked_callable_checkpoint(&blocked));
-    assert_eq!(
+    assert!(matches!(
         runtime.active.get(&call.pair),
-        Some(&ActivePairState::Ready)
-    );
+        Some(ActivePairState::Ready)
+    ));
     assert!(!runtime.retry_blocked_callable_checkpoint(&blocked));
 
     runtime.reduce_pair(call.pair).unwrap();
@@ -3078,10 +3093,10 @@ fn callable_checkpoint_terminalizes_directly_to_a_copy() {
         runtime.neighbor(Port::principal(call.bind)),
         Some(Port::principal(cursor))
     );
-    assert_eq!(
+    assert!(matches!(
         runtime.active.get(&call.pair),
-        Some(&ActivePairState::Ready)
-    );
+        Some(ActivePairState::Ready)
+    ));
 }
 
 #[test]
@@ -3328,7 +3343,7 @@ fn pair_owned_cursor_retains_stable_blockage_without_a_dependency() {
             blockage: CursorBlockage::Stable,
         }) if *blocked == cursor
     ));
-    assert_eq!(target.cursor_dependency(cursor), None);
+    assert!(target.cursor_dependency(cursor).is_none());
     assert!(!target.retry_blocked_cursor(cursor));
 }
 
@@ -3918,7 +3933,7 @@ fn converging_frontier_waits_for_a_claimed_peer() {
         caller
             .active
             .values()
-            .all(|state| state != &ActivePairState::Claimed)
+            .all(|state| !matches!(state, ActivePairState::Claimed))
     );
 }
 

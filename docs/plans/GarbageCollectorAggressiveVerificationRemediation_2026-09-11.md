@@ -2308,9 +2308,18 @@ inventory relatch:
            Public handles are never unwrapped merely to recover ambient raw
            equality; recursive diagnostic payloads remain within their value
            domain. The API fixture family now contributes no equality errors
-           and reduces the all-target inventory from 35 to 16. Its remaining
-           raw-value duplication failures stay assigned to the separate
-           ownership migration.
+         and reduces the all-target inventory from 35 to 16. Its remaining
+         raw-value duplication failures stay assigned to the separate
+         ownership migration.
+         - **D.2h.2n — generic interaction-net equality complete
+           2026-09-30.** Builder failures are destructured to their scalar
+           port contracts; active-pair scheduling states are asserted by
+           variant; and cursor dependencies are checked through their local
+           topology identity. Generic nets gain no semantic payload equality
+           and core gains no dependency on the test specialization. The
+           all-target equality-error inventory is now zero. The remaining
+           generic-net duplication and mutation-gateway errors stay visible
+           for the subsequent ownership migration.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived
