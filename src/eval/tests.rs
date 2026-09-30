@@ -1557,11 +1557,11 @@ fn promised_values_fail_fast_without_poisoning_later_assignment() {
             .to_string(),
         "promised value was observed before initialization"
     );
-    assert_eq!(promised.assignment(context.values()), None);
+    assert!(promised.assignment(context.values()).is_none());
     set_promise(&context, &promised, n(42)).unwrap();
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
-        n(42)
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
+        &n(42),
     );
 }
 
@@ -1600,9 +1600,9 @@ fn deferred_computation_blockage_does_not_poison_its_lazy_cache() {
     );
 
     set_promise(&session, &promise, n(42)).unwrap();
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value).unwrap(),
-        n(42)
+    observer.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value).unwrap(),
+        &n(42),
     );
     assert!(
         attempts.load(Ordering::SeqCst) >= 2,
@@ -1610,9 +1610,9 @@ fn deferred_computation_blockage_does_not_poison_its_lazy_cache() {
     );
 
     let completed_attempts = attempts.load(Ordering::SeqCst);
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value).unwrap(),
-        n(42)
+    observer.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value).unwrap(),
+        &n(42),
     );
     assert_eq!(
         attempts.load(Ordering::SeqCst),
@@ -1666,19 +1666,23 @@ fn deferred_computation_caches_one_structured_failure() {
         .expect_err("the cached result should be the failure");
 
     assert!(Arc::ptr_eq(&observed_failure, &cached_failure));
-    assert_eq!(cached_failure.emission_value(), Some(&emission));
-    assert_eq!(cached_failure.contexts(), [frame]);
+    context
+        .values()
+        .assert_same_representation_for_test(&cached_failure.emission_value(), &Some(&emission));
+    context
+        .values()
+        .assert_same_representation_for_test(cached_failure.contexts(), &[frame]);
     let Value::Dict(diagnostic) = failure_diagnostic_value(&cached_failure) else {
         panic!("a structured failure should project to a diagnostic dictionary")
     };
-    assert_eq!(diagnostic.get(&detail), Some(&n(7)));
+    context
+        .values()
+        .assert_same_representation_for_test(&diagnostic.get(&detail), &Some(&n(7)));
 
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
-            .expect_err("the cached value should remain failed")
-            .into_permanent_failure(),
-        cached_failure
-    );
+    let repeated = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
+        .expect_err("the cached value should remain failed")
+        .into_permanent_failure();
+    assert!(Arc::ptr_eq(&repeated, &cached_failure));
     assert_eq!(
         attempts.load(Ordering::SeqCst),
         1,
@@ -1711,10 +1715,10 @@ fn deferred_list_effect_work_blocks_and_resumes() {
     let return_effect = list_return_effect(n(42));
     set_promise(&session, &promise, return_effect).unwrap();
 
-    assert_eq!(
-        list_to_value_items(&observer, &results)
+    observer.values().assert_same_representation_for_test(
+        &list_to_value_items(&observer, &results)
             .expect("the list effect should resume after its operation is assigned"),
-        vec![n(42)]
+        &vec![n(42)],
     );
 }
 
@@ -1749,7 +1753,10 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
         closed_function_value(1, TestExpr::Value(list_return_effect(n(42)))),
     )
     .expect("the sequence continuation should accept its assignment");
-    assert_eq!(list_to_value_items(&session, &sequence).unwrap(), [n(42)]);
+    session.values().assert_same_representation_for_test(
+        &list_to_value_items(&session, &sequence).unwrap(),
+        &[n(42)],
+    );
 
     let (cut_operation, _cut_task, _cut_owner) = session
         .task_owned_promise(Arc::from("list effect cut operation"))
@@ -1771,7 +1778,10 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
     );
     set_promise(&session, &cut_operation, list_return_effect(n(43)))
         .expect("the cut operation should accept its assignment");
-    assert_eq!(list_to_value_items(&session, &cut).unwrap(), [n(43)]);
+    session.values().assert_same_representation_for_test(
+        &list_to_value_items(&session, &cut).unwrap(),
+        &[n(43)],
+    );
 
     let (fix_operation, _fix_task, _fix_owner) = session
         .task_owned_promise(Arc::from("list effect fix operation"))
@@ -1795,7 +1805,10 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
     );
     set_promise(&session, &fix_operation, list_return_effect(n(44)))
         .expect("the fix operation should accept its assignment");
-    assert_eq!(list_to_value_items(&session, &fixed).unwrap(), [n(44)]);
+    session.values().assert_same_representation_for_test(
+        &list_to_value_items(&session, &fixed).unwrap(),
+        &[n(44)],
+    );
 }
 
 #[test]
@@ -1838,9 +1851,9 @@ fn list_effect_fix_defers_function_demand_and_resumes_without_replay() {
         closed_function_value(1, TestExpr::Value(list_return_effect(n(45)))),
     )
     .expect("the fix function should accept its assignment");
-    assert_eq!(
-        list_to_value_items(&session, &fixed).expect("fix should resume at its function"),
-        [n(45)]
+    session.values().assert_same_representation_for_test(
+        &list_to_value_items(&session, &fixed).expect("fix should resume at its function"),
+        &[n(45)],
     );
     assert_eq!(demands.load(Ordering::SeqCst), 1);
 }
@@ -1935,7 +1948,9 @@ fn deferred_computation_preserves_context_annotation_frames() {
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &Value::Lazy(lazy))
             .expect_err("the annotated deferred computation should fail")
             .into_permanent_failure();
-    assert_eq!(failure.contexts(), [frame]);
+    context
+        .values()
+        .assert_same_representation_for_test(failure.contexts(), &[frame]);
 }
 
 #[test]
@@ -1954,17 +1969,17 @@ fn computed_lazy_waits_on_an_empty_promise_without_caching_its_error() {
     assert!(blocked.blocked_on().is_some());
     assert_eq!(promise.exact_subscription_count(context.values()), 1);
     assert!(lazy.cached(context.values()).is_none());
-    assert_eq!(promise.assignment(context.values()), None);
+    assert!(promise.assignment(context.values()).is_none());
 
     set_promise(&context, &promise, n(42)).unwrap();
     assert_eq!(promise.exact_subscription_count(context.values()), 0);
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
-        n(42)
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
+        &n(42),
     );
-    assert_eq!(
-        lazy.cached(context.values()),
-        Some(Ok(EvaluatedValue::from_whnf(n(42)).unwrap()))
+    context.values().assert_same_representation_for_test(
+        &lazy.cached(context.values()),
+        &Some(Ok(EvaluatedValue::from_whnf(n(42)).unwrap())),
     );
 }
 
@@ -2022,16 +2037,16 @@ fn resolver_completion_wakes_only_its_cross_session_deferred_follower() {
     set_promise(&owner, &promise_a, n(41)).expect("promise A should accept its assignment");
     assert_eq!(promise_a.exact_subscription_count(owner.values()), 0);
     assert_eq!(promise_b.exact_subscription_count(owner.values()), 1);
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &lazy_a).unwrap(),
-        n(41)
+    observer.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &lazy_a).unwrap(),
+        &n(41),
     );
 
     set_promise(&owner, &promise_b, n(42)).expect("promise B should accept its assignment");
     assert_eq!(promise_b.exact_subscription_count(owner.values()), 0);
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &lazy_b).unwrap(),
-        n(42)
+    observer.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &lazy_b).unwrap(),
+        &n(42),
     );
 }
 
@@ -2045,21 +2060,25 @@ fn promised_assignment_follows_a_lazy_without_resolving_the_raw_assignment() {
     let promise = PromisedValue::new(&crate::core::test_value_factory(), "forwarding promise");
     set_promise(&context, &promise, Value::Lazy(target.clone())).unwrap();
 
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &context,
-            &Value::Promised(promise.clone())
+            &Value::Promised(promise.clone()),
         )
         .unwrap(),
-        n(42)
+        &n(42),
     );
-    assert_eq!(
-        promise.assignment(context.values()),
-        Some(Ok(Value::Lazy(target.clone())))
+    let Some(Ok(Value::Lazy(assigned))) = promise.assignment(context.values()) else {
+        panic!("the promise should retain its unresolved lazy assignment")
+    };
+    assert!(
+        context
+            .values()
+            .same_representation_for_test(&assigned, &target)
     );
-    assert_eq!(
-        target.cached(context.values()),
-        Some(Ok(EvaluatedValue::from_whnf(n(42)).unwrap()))
+    context.values().assert_same_representation_for_test(
+        &target.cached(context.values()),
+        &Some(Ok(EvaluatedValue::from_whnf(n(42)).unwrap())),
     );
 }
 
@@ -2101,8 +2120,12 @@ fn promised_failure_preserves_structured_diagnostic_and_identity() {
     .expect_err("failed promise should expose its permanent failure")
     .into_permanent_failure();
     assert!(Arc::ptr_eq(&failure, &observed));
-    assert_eq!(observed.emission_value(), Some(&emission));
-    assert_eq!(observed.contexts(), [frame]);
+    observer
+        .values()
+        .assert_same_representation_for_test(&observed.emission_value(), &Some(&emission));
+    observer
+        .values()
+        .assert_same_representation_for_test(observed.contexts(), &[frame]);
 
     let EvaluationWaitPoll::Failed(wait_failure) = session.poll_wait(&wait) else {
         panic!("the promise wait should publish the same permanent failure")
@@ -2112,7 +2135,9 @@ fn promised_failure_preserves_structured_diagnostic_and_identity() {
     let Value::Dict(diagnostic) = failure_diagnostic_value(&observed) else {
         panic!("a structured promise failure should project to a diagnostic dictionary")
     };
-    assert_eq!(diagnostic.get(&detail), Some(&n(7)));
+    observer
+        .values()
+        .assert_same_representation_for_test(&diagnostic.get(&detail), &Some(&n(7)));
 }
 
 #[test]
@@ -2129,10 +2154,14 @@ fn promise_only_cycle_remains_blocked_without_poisoning_its_assignment() {
     .expect_err("strict promise recursion should remain blocked");
     assert!(error.blocked_on().is_some());
     assert!(context.promise_failure(&promise).is_none());
-    assert!(matches!(
-        promise.assignment(context.values()),
-        Some(Ok(Value::Promised(assigned))) if assigned == promise
-    ));
+    let Some(Ok(Value::Promised(assigned))) = promise.assignment(context.values()) else {
+        panic!("the promise should retain its recursive assignment")
+    };
+    assert!(
+        context
+            .values()
+            .same_representation_for_test(&assigned, &promise)
+    );
 }
 
 #[test]
@@ -2155,10 +2184,14 @@ fn mixed_promise_lazy_cycle_remains_retryable_without_poisoning_the_lazy() {
     assert!(context.promise_failure(&promise).is_none());
     assert!(context.lazy_failure(&lazy).is_none());
     assert!(lazy.cached(context.values()).is_none());
-    assert!(matches!(
-        promise.assignment(context.values()),
-        Some(Ok(Value::Lazy(assigned))) if assigned == lazy
-    ));
+    let Some(Ok(Value::Lazy(assigned))) = promise.assignment(context.values()) else {
+        panic!("the promise should retain its recursive lazy assignment")
+    };
+    assert!(
+        context
+            .values()
+            .same_representation_for_test(&assigned, &lazy)
+    );
 }
 
 #[test]

@@ -3070,6 +3070,20 @@ impl SameRepresentationForTest for EvaluatedValue {
 }
 
 #[cfg(test)]
+impl SameRepresentationForTest for LazyValue {
+    fn same_representation_for_test(&self, other: &Self, access: &RuntimeValueAccess<'_>) -> bool {
+        self.edge.same_allocation_in(&other.edge, access)
+    }
+}
+
+#[cfg(test)]
+impl SameRepresentationForTest for PromisedValue {
+    fn same_representation_for_test(&self, other: &Self, access: &RuntimeValueAccess<'_>) -> bool {
+        self.edge.same_allocation_in(&other.edge, access)
+    }
+}
+
+#[cfg(test)]
 impl SameRepresentationForTest for EvaluationFailure {
     fn same_representation_for_test(&self, other: &Self, access: &RuntimeValueAccess<'_>) -> bool {
         let same_kind = match (&self.kind, &other.kind) {
@@ -3504,6 +3518,21 @@ mod tests {
             &nested_left,
             &Ok::<Option<Value>, Value>(Some(Value::Number(4.into())))
         ));
+
+        let lazy =
+            LazyValue::semantic_thunk(&factory, "assertion lazy", |_| Ok(Value::Number(5.into())));
+        let lazy_alias = lazy.duplicate_for_test(&factory);
+        let other_lazy = LazyValue::semantic_thunk(&factory, "other assertion lazy", |_| {
+            Ok(Value::Number(5.into()))
+        });
+        factory.assert_same_representation_for_test(&lazy, &lazy_alias);
+        assert!(!factory.same_representation_for_test(&lazy, &other_lazy));
+
+        let promise = PromisedValue::new(&factory, "assertion promise");
+        let promise_alias = promise.duplicate_for_test(&factory);
+        let other_promise = PromisedValue::new(&factory, "other assertion promise");
+        factory.assert_same_representation_for_test(&promise, &promise_alias);
+        assert!(!factory.same_representation_for_test(&promise, &other_promise));
 
         assert_eq!(max_runtime_value_access_depth_for_test(), 1);
         reset_runtime_value_access_depth_for_test();

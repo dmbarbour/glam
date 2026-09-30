@@ -2171,6 +2171,17 @@ inventory relatch:
            `Debug` migrations. The remainder of the central `eval` fixture
            and the `evaluation` lifecycle/coordinator fixtures stay in this
            checkpoint family.
+         - **D.2h.2b — promise and deferred-work fixture slice complete
+           2026-09-30.** Promise assignments, lazy caches, structured
+           failures, list-effect resumptions, and cross-session wake fixtures
+           now use the same scoped representation vocabulary. Test-only
+           relations for bare `LazyValue` and `PromisedValue` facades compare
+           their managed allocations under runtime access; recursive-cycle
+           guards no longer depend on ambient facade equality. Assertions
+           whose contract is exact cached-failure reuse remain explicit
+           `Arc::ptr_eq` identity checks rather than being weakened to
+           representation equality. This slice reduces the all-target
+           equality-error inventory from 479 to 452.
       3. Add owner-local recursive test relations for `g_syntax` carriers and
          migrate compiler/front-end fixtures without giving semantic values
          syntax-layer equality traits.
