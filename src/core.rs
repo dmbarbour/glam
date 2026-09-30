@@ -406,9 +406,8 @@ struct CoreValues {
 impl CoreValues {
     fn new(values: &CoreValueFactory) -> Self {
         values.with_runtime_value_access(|access| Self {
-            initial_metadata: access.root_runtime_value(Value::Metadata(MetadataCarrier::new(
-                Value::Dict(Dict::new_sync()),
-            ))),
+            initial_metadata: access
+                .root_runtime_value(access.metadata_carrier(Value::Dict(Dict::new_sync()))),
         })
     }
 }
@@ -1296,12 +1295,6 @@ pub struct MetadataCarrier {
 }
 
 impl MetadataCarrier {
-    fn new(metadata: Value) -> Self {
-        Self {
-            metadata: Arc::new(metadata),
-        }
-    }
-
     fn associated_metadata(&self, access: &RuntimeValueAccess<'_>) -> Value {
         access.duplicate_value(self.metadata.as_ref())
     }
@@ -2448,11 +2441,6 @@ impl Value {
         ))
     }
 
-    /// Constructs a sealed unit carrier with reflection-only metadata.
-    pub(crate) fn metadata_carrier(metadata: Value) -> Self {
-        Self::Metadata(MetadataCarrier::new(metadata))
-    }
-
     /// Returns the canonical carrier whose associated metadata is `{}`.
     #[cfg(test)]
     pub(crate) fn initial_metadata_carrier(values: &CoreValueFactory) -> Self {
@@ -2654,6 +2642,13 @@ impl RuntimeValueAccess<'_> {
             .core_values()
             .initial_metadata
             .clone_core_with(self)
+    }
+
+    /// Seals one owned metadata value inside this access region.
+    pub(crate) fn metadata_carrier(&self, metadata: Value) -> Value {
+        Value::Metadata(MetadataCarrier {
+            metadata: Arc::new(metadata),
+        })
     }
 
     /// Duplicates one raw value shell while this value domain keeps every
@@ -3338,6 +3333,10 @@ mod tests {
 
     fn values() -> CoreValueFactory {
         test_value_factory()
+    }
+
+    fn metadata_carrier(values: &CoreValueFactory, metadata: Value) -> Value {
+        values.with_runtime_value_access(|access| access.metadata_carrier(metadata))
     }
 
     struct DropSignal(Arc<AtomicBool>);
@@ -4069,7 +4068,7 @@ mod tests {
             };
             assert!(Arc::ptr_eq(&arguments, &duplicate_partial.arguments));
 
-            let metadata = Value::metadata_carrier(Value::binary_from_text("private"));
+            let metadata = access.metadata_carrier(Value::binary_from_text("private"));
             let Value::Metadata(duplicate_metadata) = access.duplicate_value(&metadata) else {
                 panic!("duplicating metadata preserves its sealed outer variant");
             };
@@ -4251,9 +4250,9 @@ mod tests {
             let function_alias = access.duplicate_value(&function);
             assert!(access.same_representation(&function, &function_alias));
 
-            let metadata = Value::metadata_carrier(Value::binary_from_text("hidden"));
+            let metadata = access.metadata_carrier(Value::binary_from_text("hidden"));
             let metadata_alias = access.duplicate_value(&metadata);
-            let distinct_metadata = Value::metadata_carrier(Value::binary_from_text("hidden"));
+            let distinct_metadata = access.metadata_carrier(Value::binary_from_text("hidden"));
             assert!(access.same_representation(&metadata, &metadata_alias));
             assert!(!access.same_representation(&metadata, &distinct_metadata));
         });
@@ -4295,7 +4294,7 @@ mod tests {
                 },
                 1,
             ));
-            let metadata = Value::metadata_carrier(Value::binary_from_text("hidden metadata"));
+            let metadata = access.metadata_carrier(Value::binary_from_text("hidden metadata"));
             let opaque = Value::Opaque(OpaqueValue::new(&values, Arc::new(0xfeed_u64)));
             let partial = Value::PartialBuiltin(BuiltinCall {
                 builtin: Builtin::Add,
@@ -4386,7 +4385,7 @@ mod tests {
             assert_eq!(access.key_from_value(&first), None);
             assert_eq!(access.diagnostic_kind_name(&first), "Sealed");
 
-            let private = Value::metadata_carrier(Value::binary_from_text("hidden metadata"));
+            let private = access.metadata_carrier(Value::binary_from_text("hidden metadata"));
             let rendered = format!("{:?}", access.diagnostic_debug(&private));
             assert_eq!(rendered, "Sealed(..)");
             assert!(!rendered.contains("hidden metadata"));
@@ -4419,10 +4418,12 @@ mod tests {
         // persistent-container fixtures in the GC integration suite.
         let values = values();
         let promise = PromisedValue::new(&values, "metadata collection cycle");
-        let metadata =
-            Value::metadata_carrier(Value::List(List::from_values(vec![Value::Promised(
+        let metadata = metadata_carrier(
+            &values,
+            Value::List(List::from_values(vec![Value::Promised(
                 promise.duplicate_for_test(&values),
-            )])));
+            )])),
+        );
         let cycle = Value::Dict(Dict::new_sync().insert(Key::atom_from_text("metadata"), metadata));
 
         assert!(

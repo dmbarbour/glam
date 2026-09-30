@@ -53,6 +53,12 @@ fn initial_metadata() -> Value {
     Value::initial_metadata_carrier(&crate::core::test_value_factory())
 }
 
+fn metadata_carrier(context: &EvalContext, metadata: Value) -> Value {
+    context
+        .values()
+        .with_runtime_value_access(|access| access.metadata_carrier(metadata))
+}
+
 fn closed_net(build: impl FnOnce(&mut NetBuilder<CoreSpecialization>) -> Port) -> NetValue {
     closed_net_in(&crate::core::test_value_factory(), build)
 }
@@ -3793,10 +3799,11 @@ fn ordinary_observers_do_not_unseal_metadata_carriers() {
 
 #[test]
 fn binary_validation_does_not_disclose_sealed_metadata() {
-    let hidden = Value::metadata_carrier(Value::binary_from_text("private trace"));
+    let context = test_context();
+    let hidden = metadata_carrier(&context, Value::binary_from_text("private trace"));
     let list = List::from_values(vec![hidden]);
 
-    let error = list_output_bytes(&test_context(), &list)
+    let error = list_output_bytes(&context, &list)
         .expect_err_without_debug("sealed values are not binary bytes");
     assert!(error.to_string().contains("got Sealed(..)"), "{error}");
     assert!(!error.to_string().contains("private trace"), "{error}");
@@ -6681,7 +6688,7 @@ fn old_metadata_annotation_spellings_are_unrecognized() {
         &n(42),
     );
 
-    let carrier = Value::metadata_carrier(n(7));
+    let carrier = metadata_carrier(&context, n(7));
     let old_update = Value::Dict(Dict::new_sync().insert(
         Key::atom_from_text("meta_upd"),
         Value::error(
@@ -6780,8 +6787,8 @@ fn metadata_update_reorders_copies_and_clears_hidden_values() {
     // The fixture carries raw managed function values between calls, so it
     // must not share a heap with parallel tests which explicitly collect.
     let context = isolated_test_context();
-    let left = Value::metadata_carrier(n(1));
-    let right = Value::metadata_carrier(n(2));
+    let left = metadata_carrier(&context, n(1));
+    let right = metadata_carrier(&context, n(2));
 
     let swapped = run_metadata_update(
         &context,
@@ -6830,7 +6837,10 @@ fn metadata_update_reorders_copies_and_clears_hidden_values() {
                 Arc::new(TestExpr::Value(Value::Dict(Dict::new_sync()))),
             ])),
         ),
-        vec![Value::metadata_carrier(n(1)), Value::metadata_carrier(n(2))],
+        vec![
+            metadata_carrier(&context, n(1)),
+            metadata_carrier(&context, n(2)),
+        ],
     )
     .expect("metadata update should permit merging and clearing");
     context.values().assert_same_representation_for_test(
@@ -6851,9 +6861,9 @@ fn metadata_update_resumes_without_replaying_a_completed_carrier() {
         .expect("the owner should allocate a promised carrier");
     let first_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&first_demands);
-    let first = Value::semantic_thunk(observer.values(), "metadata carrier prefix", move |_| {
+    let first = Value::semantic_thunk(observer.values(), "metadata carrier prefix", move |step| {
         observed.fetch_add(1, Ordering::SeqCst);
-        Ok(Value::metadata_carrier(n(1)))
+        Ok(step.with_value_access(|access| access.values().metadata_carrier(n(1))))
     });
     let annotation = Value::Dict(Dict::new_sync().insert(
         Key::atom_from_text("meta_pure"),
@@ -6889,7 +6899,7 @@ fn metadata_update_resumes_without_replaying_a_completed_carrier() {
         .expect_err_without_debug("a later route must resume the exact promised carrier");
     assert_eq!(first_demands.load(Ordering::SeqCst), 1);
 
-    set_promise(&owner, &second, Value::metadata_carrier(n(2)))
+    set_promise(&owner, &second, metadata_carrier(&owner, n(2)))
         .expect_without_debug("the owner should resolve the promised carrier");
     observer
         .values()
@@ -6996,7 +7006,7 @@ fn metadata_update_validates_inputs_strictly_but_not_hidden_metadata() {
             Ok(n(11))
         },
     );
-    let carrier = Value::metadata_carrier(hidden);
+    let carrier = metadata_carrier(&context, hidden);
     let values = context.values().clone();
     let lazy_carrier = Value::semantic_thunk(
         &crate::core::test_value_factory(),
@@ -7146,7 +7156,10 @@ fn metadata_reflection_update_is_inert_until_demand_and_shares_one_task() {
             &crate::core::test_value_factory(),
             "the fixture launcher must not evaluate the effect",
         ),
-        vec![Value::metadata_carrier(n(1)), Value::metadata_carrier(n(2))],
+        vec![
+            metadata_carrier(&context, n(1)),
+            metadata_carrier(&context, n(2)),
+        ],
     )
     .expect("effectful metadata update should construct its output carriers");
     let copied_first = outputs[0].duplicate_for_test(context.values());
@@ -8470,7 +8483,7 @@ fn strategies_demand_hidden_metadata_without_exposing_the_carrier() {
         counted_metadata_forces.fetch_add(1, Ordering::SeqCst);
         Ok(n(7))
     });
-    let carrier = Value::metadata_carrier(metadata);
+    let carrier = metadata_carrier(&context, metadata);
     let target_forces = Arc::new(AtomicUsize::new(0));
     let counted_target_forces = target_forces.clone();
     let target = Value::semantic_thunk(
@@ -8499,7 +8512,7 @@ fn zero_worker_spark_discards_hidden_metadata_demand() {
         "discarded metadata spark",
         |_| panic!("zero-worker spark must not demand hidden metadata"),
     );
-    let carrier = Value::metadata_carrier(metadata);
+    let carrier = metadata_carrier(&context, metadata);
     let result = apply_values(
         &context,
         Value::Builtin(Builtin::Spark),
@@ -8561,7 +8574,7 @@ fn worker_spark_demands_metadata_behind_a_lazy_carrier_shell() {
             .expect("metadata receiver should remain open");
         Ok(n(7))
     });
-    let carrier = Value::metadata_carrier(metadata);
+    let carrier = metadata_carrier(&context, metadata);
     let values = context.values().clone();
     let lazy_carrier = Value::semantic_thunk(
         context.values(),
@@ -8604,8 +8617,10 @@ fn metadata_strategy_failures_are_cached_and_seq_propagates_them() {
                 .expect("attempt receiver should remain open");
             Err(EvaluationHalt::new("metadata strategy failed"))
         });
-    let carrier =
-        Value::metadata_carrier(Value::Lazy(metadata.duplicate_for_test(context.values())));
+    let carrier = metadata_carrier(
+        &context,
+        Value::Lazy(metadata.duplicate_for_test(context.values())),
+    );
 
     let result = evaluate_strategy(
         &context,
@@ -8644,7 +8659,8 @@ fn strategies_stop_at_nested_metadata_carriers() {
         counted_hidden_forces.fetch_add(1, Ordering::SeqCst);
         Ok(n(7))
     });
-    let outer = Value::metadata_carrier(Value::metadata_carrier(hidden));
+    let inner = metadata_carrier(&context, hidden);
+    let outer = metadata_carrier(&context, inner);
 
     context.values().assert_same_representation_for_test(
         &evaluate_strategy(
@@ -8820,9 +8836,10 @@ fn metadata_seq_preserves_retryable_promise_blockage() {
         .task_owned_promise(Arc::from("blocked metadata"))
         .unwrap();
     let observer = context.with_new_task().unwrap();
-    let carrier = Value::metadata_carrier(Value::Promised(
-        promise.duplicate_for_test(observer.values()),
-    ));
+    let carrier = metadata_carrier(
+        &observer,
+        Value::Promised(promise.duplicate_for_test(observer.values())),
+    );
 
     let applied = apply_values(
         &observer,
@@ -8862,7 +8879,7 @@ fn completed_metadata_updates_release_sources_and_task_records() {
             1,
             TestExpr::Value(Value::List(List::from_values(vec![n(7)]))),
         ),
-        vec![Value::metadata_carrier(prior)],
+        vec![metadata_carrier(&context, prior)],
     )
     .expect("metadata update should remain lazy");
     assert!(

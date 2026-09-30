@@ -1414,7 +1414,10 @@ mod tests {
         }
     }
 
-    fn assert_single_promise_cycle_through(label: &str, wrap: impl FnOnce(Value) -> Value) {
+    fn assert_single_promise_cycle_through(
+        label: &str,
+        wrap: impl FnOnce(&RuntimeValueAccess<'_>, Value) -> Value,
+    ) {
         let values = new_values();
         let baseline = values.collect_managed_for_test().unwrap_or_else(|failure| {
             panic!("the {label} fixture should start collectible: {failure}")
@@ -1427,7 +1430,7 @@ mod tests {
             assert!(
                 root.access(&access)
                     .expect("the rooted promise should be accessible")
-                    .publish(Ok(wrap(Value::Promised(promise))))
+                    .publish(Ok(wrap(&access, Value::Promised(promise))))
                     .is_ok()
             );
             root
@@ -3068,14 +3071,14 @@ mod tests {
 
     #[test]
     fn managed_promise_cycle_through_list_is_traced_and_reclaimed() {
-        assert_single_promise_cycle_through("list compatibility", |backedge| {
+        assert_single_promise_cycle_through("list compatibility", |_, backedge| {
             Value::List(List::from_values(vec![backedge]))
         });
     }
 
     #[test]
     fn managed_promise_cycle_through_list_thunk_is_traced_and_reclaimed() {
-        assert_single_promise_cycle_through("list thunk compatibility", |backedge| {
+        assert_single_promise_cycle_through("list thunk compatibility", |_, backedge| {
             let Value::Promised(promise) = backedge else {
                 unreachable!("the cycle helper always supplies its promise backedge")
             };
@@ -3085,14 +3088,14 @@ mod tests {
 
     #[test]
     fn managed_promise_cycle_through_dict_is_traced_and_reclaimed() {
-        assert_single_promise_cycle_through("dict compatibility", |backedge| {
+        assert_single_promise_cycle_through("dict compatibility", |_, backedge| {
             Value::Dict(Dict::new_sync().insert(Key::binary_from_text("backedge"), backedge))
         });
     }
 
     #[test]
     fn managed_promise_cycle_through_partial_builtin_is_traced_and_reclaimed() {
-        assert_single_promise_cycle_through("partial builtin compatibility", |backedge| {
+        assert_single_promise_cycle_through("partial builtin compatibility", |_, backedge| {
             Value::PartialBuiltin(BuiltinCall {
                 builtin: Builtin::Append,
                 arguments: Arc::from([backedge]),
@@ -3102,12 +3105,14 @@ mod tests {
 
     #[test]
     fn managed_promise_cycle_through_metadata_is_traced_and_reclaimed() {
-        assert_single_promise_cycle_through("metadata compatibility", Value::metadata_carrier);
+        assert_single_promise_cycle_through("metadata compatibility", |access, backedge| {
+            access.metadata_carrier(backedge)
+        });
     }
 
     #[test]
     fn managed_promise_cycle_through_shared_list_spine_is_traced_and_reclaimed() {
-        assert_single_promise_cycle_through("shared list compatibility", |backedge| {
+        assert_single_promise_cycle_through("shared list compatibility", |_, backedge| {
             let shared = List::from_values(vec![backedge]);
             Value::List(List::concat(shared.clone(), shared))
         });
@@ -3115,7 +3120,7 @@ mod tests {
 
     #[test]
     fn managed_promise_cycle_through_shared_dict_version_is_traced_and_reclaimed() {
-        assert_single_promise_cycle_through("shared dict compatibility", |backedge| {
+        assert_single_promise_cycle_through("shared dict compatibility", |_, backedge| {
             let base = Dict::new_sync().insert(Key::binary_from_text("backedge"), backedge);
             Value::Dict(base.insert(Key::binary_from_text("version"), Value::Number(1.into())))
         });

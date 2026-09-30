@@ -5856,13 +5856,11 @@ fn metadata_inspection_returns_hidden_values_without_forcing_them() {
     assert!(metadata.is_empty());
 
     let (assembler, inspect) = compile_effect("\\value -> .meta.inspect value");
-    let carrier = public_value(
-        &assembler.core_values(),
-        Value::metadata_carrier(Value::error(
-            &assembler.core_values(),
-            "latent metadata failure",
-        )),
-    );
+    let metadata = Value::error(&assembler.core_values(), "latent metadata failure");
+    let carrier = assembler
+        .core_values()
+        .with_runtime_value_access(|access| access.metadata_carrier(metadata));
+    let carrier = public_value(&assembler.core_values(), carrier);
     let effect = assembler
         .apply(&inspect, [carrier])
         .expect("metadata inspection function should accept its carrier");

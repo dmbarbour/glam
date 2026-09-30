@@ -917,7 +917,7 @@ fn finish_metadata_update_in(
                     access.values().duplicate_value(&updates),
                 ],
             );
-            Value::metadata_carrier(builtin_value_in(
+            access.values().metadata_carrier(builtin_value_in(
                 access,
                 Builtin::Anno,
                 [

@@ -5,12 +5,12 @@
 //! compose into those exact managed leaves. I6-I8 may retire an adapter only
 //! when an audited managed replacement reports the same edges.
 
-#[cfg(test)]
-use super::super::{EvaluationFailure, SemanticComputation};
 use super::super::{
     BuiltinCall, EvaluatedValue, FixpointComputation, LazyApplication, LazySource,
     ListEffectComputation, MetadataCarrier, ReflectionComputation, Value,
 };
+#[cfg(test)]
+use super::super::{EvaluationFailure, SemanticComputation};
 
 /// Reports every direct semantic `Value` edge held by one compatibility
 /// payload, in stable source order.
@@ -398,11 +398,14 @@ mod tests {
             &FixpointComputation::ObjectInstance(first.duplicate_for_test(&values)),
             &[first.duplicate_for_test(&values)],
         );
-        assert_edges(
-            &values,
-            &MetadataCarrier::new(second.duplicate_for_test(&values)),
-            &[second.duplicate_for_test(&values)],
-        );
+        values.with_runtime_value_access(|access| {
+            let Value::Metadata(metadata) =
+                access.metadata_carrier(access.duplicate_value(&second))
+            else {
+                unreachable!("metadata construction must produce a carrier")
+            };
+            assert_edges(&values, &metadata, &[second.duplicate_for_test(&values)]);
+        });
 
         let reflection_value = Value::reflection_gate(
             &values,

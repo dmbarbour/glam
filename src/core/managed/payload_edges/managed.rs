@@ -70,7 +70,7 @@ mod tests {
     use super::*;
     use crate::core::{
         Builtin, BuiltinCall, CoreValueFactory, Dict, FunctionValue, LazyValue, List,
-        ManagedDropRecord, ManagedFamily, MetadataCarrier, PromisedValue,
+        ManagedDropRecord, ManagedFamily, PromisedValue,
     };
     use crate::core_net::CoreSpecialization;
     use crate::interaction_net::NetBuilder;
@@ -201,11 +201,11 @@ mod tests {
         let owner_drops = Arc::new(AtomicUsize::new(0));
         let marker_visits = Arc::new(AtomicUsize::new(0));
         let identity_visits = Arc::new(AtomicUsize::new(0));
-        let root = values.with_managed_values(|scope| {
-            let leaf_allocator = scope
+        let root = values.with_runtime_value_access(|access| {
+            let leaf_allocator = access
                 .allocator::<SyntheticManagedLeaf>()
                 .expect("the synthetic leaf should fit a managed slot");
-            let owner_allocator = scope
+            let owner_allocator = access
                 .allocator::<SyntheticCompatibilityOwner>()
                 .expect("the synthetic owner should fit a managed slot");
             let leaf = leaf_allocator.alloc(SyntheticManagedLeaf {
@@ -235,7 +235,7 @@ mod tests {
                     )
                     .insert(
                         crate::core::Key::binary_from_text("metadata"),
-                        Value::Metadata(MetadataCarrier::new(marker())),
+                        access.metadata_carrier(marker()),
                     ),
             );
             let node = owner_allocator.alloc(owner(
@@ -245,7 +245,7 @@ mod tests {
                 &identity_visits,
                 &owner_drops,
             ));
-            scope.root(node)
+            access.root(node)
         });
 
         let live = values

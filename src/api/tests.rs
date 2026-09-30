@@ -1835,10 +1835,10 @@ fn opaque_compilation_origin_round_trips_only_through_its_reflection_cap() {
 #[test]
 fn public_values_describe_metadata_carriers_only_as_sealed() {
     let assembler = Assembler::new();
-    let value = public_value(
-        &assembler.core_values(),
-        CoreValue::metadata_carrier(CoreValue::binary_from_text("private trace")),
-    );
+    let carrier = assembler.core_values().with_runtime_value_access(|access| {
+        access.metadata_carrier(CoreValue::binary_from_text("private trace"))
+    });
+    let value = public_value(&assembler.core_values(), carrier);
 
     assert_eq!(
         assembler.reflection().kind(&value).unwrap(),

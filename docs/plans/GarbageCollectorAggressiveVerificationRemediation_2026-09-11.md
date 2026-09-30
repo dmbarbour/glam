@@ -2672,6 +2672,15 @@ inventory relatch:
     Focused key/deferred-value and builder-reset fixtures pass. This removes
     five more raw violations, leaving eight before evaluated-value, metadata,
     and diagnostic/failure closure.
+  - **D.2h.3e — metadata construction access complete 2026-09-30.** The two
+    raw metadata constructors collapse into
+    `RuntimeValueAccess::metadata_carrier`; canonical-cache initialization,
+    annotation execution, compatibility tracing fixtures, and evaluator/API
+    tests all construct the sealed carrier inside an admitted value region.
+    The managed-cycle fixture now threads the same access through its wrapper
+    callback rather than relying on an authority-free function pointer.
+    Focused carrier, update, and strategy suites pass, leaving six raw
+    violations in evaluated-value conversion and failure diagnostics.
 - **D.2h.4 — dynamic closure:** run focused ordinary/aggressive ownership
   checks followed by the routine workspace gates and the complete aggressive
   workspace suite.
