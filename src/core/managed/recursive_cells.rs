@@ -2273,9 +2273,10 @@ mod tests {
                     },
                 )
                 .expect("the managed lazy cell should fit a run");
-            let failure = Arc::new(EvaluationFailure::emission(Value::List(List::from_values(
-                vec![Value::Promised(emitted)],
-            ))));
+            let failure = Arc::new(EvaluationFailure::emission_in(
+                &access,
+                Value::List(List::from_values(vec![Value::Promised(emitted)])),
+            ));
             let cached = root.cache(&access, Err(Arc::clone(&failure)));
             access.assert_same_representation_for_test(&cached, &Err(failure));
             assert!(root.access(&access).unwrap().source_snapshot().is_none());
@@ -2325,7 +2326,8 @@ mod tests {
                 .publish_guarded(
                     &coordinator,
                     &mutation,
-                    Err(Arc::new(EvaluationFailure::emission(
+                    Err(Arc::new(EvaluationFailure::emission_in(
+                        &access,
                         access.duplicate_value(&target),
                     ))),
                     |assignment| duplicate_promise_assignment(&access, assignment),
@@ -2333,7 +2335,8 @@ mod tests {
                 .unwrap_or_else(|_| panic!("the first guarded publication should win"));
             access.assert_same_representation_for_test(
                 &observed,
-                &Err(Arc::new(EvaluationFailure::emission(
+                &Err(Arc::new(EvaluationFailure::emission_in(
+                    &access,
                     access.duplicate_value(&target),
                 ))),
             );
@@ -3176,7 +3179,7 @@ mod tests {
     fn managed_promise_cycle_through_failure_emission_is_traced_and_reclaimed() {
         assert_single_promise_failure_cycle_through(
             "failure emission compatibility",
-            |_, backedge| EvaluationFailure::emission(backedge),
+            |access, backedge| EvaluationFailure::emission_in(access, backedge),
         );
     }
 

@@ -638,7 +638,7 @@ impl RegionalAssertionMachine {
                     );
                 }
                 self.phase = RegionalAssertionPhase::DiagnosticContext {
-                    received: value.diagnostic_kind_name(),
+                    received: access.values().diagnostic_kind_name(&value),
                 };
                 RegionalBuiltinPoll::Yielded
             }

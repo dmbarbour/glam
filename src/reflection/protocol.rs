@@ -693,14 +693,16 @@ impl From<ApiError> for TaskHalt {
                 let values = observer
                     .upgrade()
                     .expect("a structured API error retains a live diagnostic value");
-                let emission = values.with_runtime_value_access(|access| {
-                    diagnostic
+                let failure = values.with_runtime_value_access(|access| {
+                    let emission = diagnostic
                         .emission()
                         .clone_core_with(&access)
-                        .expect("a structured API error retains a live diagnostic value")
+                        .expect("a structured API error retains a live diagnostic value");
+                    access.root_runtime_failure(Arc::new(EvaluationFailure::emission_in(
+                        &access, emission,
+                    )))
                 });
-                let failure = Arc::new(EvaluationFailure::emission(emission));
-                Self::rooted_failure(RuntimeFailureRoot::new(&values, failure))
+                Self::rooted_failure(failure)
             }
             None => Self::new(error.to_string()),
         }

@@ -296,7 +296,7 @@ fn public_evaluation_errors_preserve_their_structured_diagnostic() {
     let error = binary_at(&assembler, module.value(), "asm.result")
         .expect_err("observing asm.result should raise its structured failure");
 
-    assert_eq!(error.to_string(), "structured failure");
+    assert_eq!(error.to_string(), "glam evaluation failed");
     assert!(error.diagnostics().is_empty());
     let diagnostic = error
         .diagnostic(&values)
@@ -396,19 +396,22 @@ fn public_promise_resolver_can_fail_or_be_abandoned() {
     resolver
         .fail_message("host operation failed")
         .expect("the unique resolver should fail its promise");
-    assert!(
-        evaluate(&assembler, &failed)
-            .expect_err("a failed promise should expose its producer error")
-            .to_string()
-            .contains("host operation failed")
+    let error = evaluate(&assembler, &failed)
+        .expect_err("a failed promise should expose its producer error");
+    assert_eq!(error.to_string(), "glam evaluation failed");
+    assert_eq!(
+        error.diagnostic(&assembler.values()).unwrap().message(),
+        "host operation failed"
     );
 
     let (abandoned, resolver) = assembler.promise("abandoned input");
     drop(resolver);
     let error = evaluate(&assembler, &abandoned)
         .expect_err("dropping a resolver should permanently fail its promise");
-    assert!(error.to_string().contains("abandoned input"));
-    assert!(error.to_string().contains("dropped before completion"));
+    assert_eq!(error.to_string(), "glam evaluation failed");
+    let message = error.diagnostic(&assembler.values()).unwrap();
+    assert!(message.message().contains("abandoned input"));
+    assert!(message.message().contains("dropped before completion"));
 }
 
 #[test]
@@ -446,7 +449,7 @@ fn public_promise_resolver_preserves_structured_failures() {
     let error = evaluate(&assembler, &failed)
         .expect_err("a failed promise should expose its structured producer error");
 
-    assert_eq!(error.to_string(), "host operation failed structurally");
+    assert_eq!(error.to_string(), "glam evaluation failed");
     let diagnostic = error
         .diagnostic(&values)
         .expect("promise failure should belong to the assembler runtime");

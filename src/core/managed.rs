@@ -619,27 +619,34 @@ impl RuntimeValueObserver {
 
 impl RuntimeValueAccess<'_> {
     pub(crate) fn unit(&self) -> super::Value {
-        self.atom(super::Atom::from_key(&super::keys::UNIT))
+        self.atom_for_key(&super::keys::UNIT)
     }
 
     pub(crate) fn object_reflection_guard(&self) -> super::Value {
-        self.atom(super::Atom::from_key(&super::keys::OBJECT_REFLECTION_GUARD))
+        self.atom_for_key(&super::keys::OBJECT_REFLECTION_GUARD)
     }
 
     pub(crate) fn tuple(&self) -> super::Value {
-        self.atom(super::Atom::from_key(&super::keys::TUPLE))
+        self.atom_for_key(&super::keys::TUPLE)
     }
 
     pub(crate) fn info(&self) -> super::Value {
-        self.atom(super::Atom::from_key(&super::keys::INFO))
+        self.atom_for_key(&super::keys::INFO)
     }
 
     pub(crate) fn warn(&self) -> super::Value {
-        self.atom(super::Atom::from_key(&super::keys::WARN))
+        self.atom_for_key(&super::keys::WARN)
     }
 
     pub(crate) fn error(&self) -> super::Value {
-        self.atom(super::Atom::from_key(&super::keys::ERROR))
+        self.atom_for_key(&super::keys::ERROR)
+    }
+
+    fn atom_for_key(&self, key: &super::Key) -> super::Value {
+        match key {
+            super::Key::Atom(atom) => self.atom(*atom),
+            _ => self.atom(super::Atom::from_key(key)),
+        }
     }
 
     pub(crate) fn atom(&self, atom: super::Atom) -> super::Value {

@@ -327,7 +327,7 @@ impl RegionalAnnotationMachine {
                         &value,
                         Value::Atom(atom) if *atom == crate::core::Atom::from_key(&keys::UNIT)
                     );
-                    let received = value.diagnostic_kind_name();
+                    let received = access.values().diagnostic_kind_name(&value);
                     if is_unit {
                         return RegionalBuiltinPoll::Ready(success);
                     }
@@ -603,7 +603,7 @@ impl RegionalAnnotationMachine {
                                 return poll;
                             }
                         };
-                        let received = carrier.diagnostic_kind_name();
+                        let received = access.values().diagnostic_kind_name(&carrier);
                         let extracted =
                             carrier.associated_metadata(access.values()).ok_or(received);
                         let extracted = match extracted {
@@ -682,7 +682,8 @@ impl RegionalAnnotationMachine {
                             return contextualize_poll_in(access, poll, "error_message");
                         }
                     };
-                    return RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::emission(
+                    return RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::emission_in(
+                        access.values(),
                         target,
                     )));
                 }

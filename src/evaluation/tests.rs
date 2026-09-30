@@ -1182,7 +1182,7 @@ fn client_failure_root_survives_work_and_owner_session_retirement() {
     ));
     let frame = crate::diagnostic::evaluation_context_frame("client_demand_retention");
     let failure = Arc::new(context.values().with_runtime_value_access(|access| {
-        EvaluationFailure::emission(emission).with_context_in(&access, frame)
+        EvaluationFailure::emission_in(&access, emission).with_context_in(&access, frame)
     }));
     let promise = PromisedValue::new(context.values(), "failed client demand");
     let handle = context
@@ -1923,9 +1923,7 @@ fn failure_ledger_root_survives_collection_after_report_and_handle_drop() {
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
     let owner = context.session_id();
-    let failure = Arc::new(EvaluationFailure::emission(Value::binary_from_text(
-        "ledger-owned failure",
-    )));
+    let failure = Arc::new(EvaluationFailure::message("ledger-owned failure"));
     let task = context
         .schedule_task({
             let failure = failure.clone();
@@ -1960,9 +1958,7 @@ fn failure_ledger_root_survives_collection_after_report_and_handle_drop() {
 fn evaluation_session_report_root_survives_after_ledger_acknowledgement() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
-    let failure = Arc::new(EvaluationFailure::emission(Value::binary_from_text(
-        "session-report failure",
-    )));
+    let failure = Arc::new(EvaluationFailure::message("session-report failure"));
     let task = context
         .schedule_task({
             let failure = failure.clone();
@@ -3437,9 +3433,7 @@ fn terminal_wait_dispositions_retain_only_their_documented_runtime_roots() {
     exercise(
         EvaluationWaitTerminal::Failed(RuntimeFailureRoot::new(
             context.values(),
-            Arc::new(EvaluationFailure::emission(Value::binary_from_text(
-                "failed reflection result",
-            ))),
+            Arc::new(EvaluationFailure::message("failed reflection result")),
         )),
         true,
     );
@@ -3449,9 +3443,7 @@ fn terminal_wait_dispositions_retain_only_their_documented_runtime_roots() {
     exercise(
         EvaluationWaitTerminal::Killed(RuntimeFailureRoot::new(
             context.values(),
-            Arc::new(EvaluationFailure::emission(Value::binary_from_text(
-                "killed reflection result",
-            ))),
+            Arc::new(EvaluationFailure::message("killed reflection result")),
         )),
         true,
     );
@@ -3465,8 +3457,7 @@ fn blocked_task_record_root_survives_collection_until_cancellation() {
         .values()
         .collect_managed_for_test()
         .expect("the isolated blocked-task fixture should collect before admission");
-    let emission = Value::binary_from_text("blocked task root");
-    let failure = Arc::new(EvaluationFailure::emission(emission));
+    let failure = Arc::new(EvaluationFailure::message("blocked task root"));
     let task = context
         .schedule_task({
             let failure = failure.clone();
@@ -7120,7 +7111,9 @@ fn runtime_failure_ledger_preserves_owner_buckets_and_persistent_snapshots() {
         crate::core::Key::atom_from_text("owner"),
         Value::Number(1.into()),
     ));
-    let first_failure = Arc::new(EvaluationFailure::emission(first_emission));
+    let first_failure = Arc::new(first_context.values().with_runtime_value_access(|access| {
+        EvaluationFailure::emission_in(&access, first_emission)
+    }));
     let first_task = first_context
         .schedule_task({
             let first_failure = first_failure.clone();
@@ -7723,7 +7716,7 @@ fn settled_deadlock_report_retains_one_failure_root_after_origin_retirement() {
     ));
     let frame = crate::diagnostic::evaluation_context_frame("readiness_retention");
     let failure = Arc::new(context.values().with_runtime_value_access(|access| {
-        EvaluationFailure::emission(emission).with_context_in(&access, frame)
+        EvaluationFailure::emission_in(&access, emission).with_context_in(&access, frame)
     }));
     let weak_failure = Arc::downgrade(&failure);
     let task_failure = failure.clone();
@@ -7771,9 +7764,7 @@ fn deadlock_snapshot_root_survives_after_coordinator_record_retirement() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let values = context.values().clone();
-    let failure = Arc::new(EvaluationFailure::emission(Value::binary_from_text(
-        "deadlock snapshot root",
-    )));
+    let failure = Arc::new(EvaluationFailure::message("deadlock snapshot root"));
     let weak_failure = Arc::downgrade(&failure);
     let task = context
         .schedule_task({
@@ -7816,9 +7807,7 @@ fn killed_work_report_root_survives_after_settlement_owners_retire() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let values = context.values().clone();
-    let failure = Arc::new(EvaluationFailure::emission(Value::binary_from_text(
-        "killed work report root",
-    )));
+    let failure = Arc::new(EvaluationFailure::message("killed work report root"));
     let weak_failure = Arc::downgrade(&failure);
     let task = context
         .schedule_task({

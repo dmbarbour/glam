@@ -1281,7 +1281,7 @@ fn apply_whnf_callable(
         Value::Dict(dict) => DirectApplicationStep::Dictionary(dict),
         value => DirectApplicationStep::Failed(Arc::new(EvaluationFailure::message(format!(
             "application requires a function value, received {}",
-            value.diagnostic_kind_name()
+            access.values().diagnostic_kind_name(&value)
         )))),
     }
 }

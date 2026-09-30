@@ -25,6 +25,11 @@ fn same_value_representation(left: &Value, right: &Value) -> bool {
     crate::compiler::test_value_factory().same_representation_for_test(left, right)
 }
 
+fn diagnostic_kind_name(value: &Value) -> &'static str {
+    crate::compiler::test_value_factory()
+        .with_runtime_value_access(|access| access.diagnostic_kind_name(value))
+}
+
 #[track_caller]
 fn assert_same_value_representation(left: &Value, right: &Value) {
     crate::compiler::test_value_factory().assert_same_representation_for_test(left, right);
@@ -174,7 +179,7 @@ fn fully_evaluated_error(mut value: Value) -> crate::core::EvaluationHalt {
             Ok(next @ (Value::Lazy(_) | Value::Promised(_))) => value = next,
             Ok(other) => panic!(
                 "value should fail instead of evaluating to {}",
-                other.diagnostic_kind_name()
+                diagnostic_kind_name(&other)
             ),
             Err(error) => return error,
         }
@@ -188,7 +193,7 @@ fn output_bytes(value: &Value) -> Vec<u8> {
             .expect("output list should render as bytes"),
         other => panic!(
             "expected binary output value, got {}",
-            other.diagnostic_kind_name()
+            diagnostic_kind_name(other)
         ),
     }
 }
@@ -197,7 +202,7 @@ fn output_binary_result_list(value: &Value) -> Vec<u8> {
     let Value::List(list) = value else {
         panic!(
             "expected list output value, got {}",
-            value.diagnostic_kind_name()
+            diagnostic_kind_name(value)
         );
     };
     let bytes = std::cell::RefCell::new(Vec::new());
@@ -236,7 +241,7 @@ fn output_binary_result_list(value: &Value) -> Vec<u8> {
             Value::List(list) => Ok(list),
             other => Err(format!(
                 "lazy output chunk was not a list or binary: {}",
-                other.diagnostic_kind_name()
+                diagnostic_kind_name(&other)
             )),
         },
     )
@@ -2432,7 +2437,7 @@ fn recursive_do_strict_forward_observation_reports_the_fixpoint_cycle() {
             Ok(next @ (Value::Lazy(_) | Value::Promised(_))) => probe = next,
             Ok(other) => panic!(
                 "strict recursive observation produced {}",
-                other.diagnostic_kind_name()
+                diagnostic_kind_name(&other)
             ),
             Err(error) => break error.to_string(),
         }
@@ -5360,7 +5365,7 @@ fn effect_then_requires_unit_result_when_observed() {
             Ok(next @ (Value::Lazy(_) | Value::Promised(_))) => result = next,
             Ok(other) => panic!(
                 "non-unit result should not evaluate to {}",
-                other.diagnostic_kind_name()
+                diagnostic_kind_name(&other)
             ),
             Err(err) => break err,
         }

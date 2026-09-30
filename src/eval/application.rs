@@ -41,13 +41,10 @@ pub(super) fn apply_function_values(
     apply_values(context, Value::Function(function), arguments)
 }
 
-pub(super) fn non_callable_error(
-    _access: &RuntimeValueAccess<'_>,
-    value: &Value,
-) -> EvaluationHalt {
+pub(super) fn non_callable_error(access: &RuntimeValueAccess<'_>, value: &Value) -> EvaluationHalt {
     EvaluationHalt::new(format!(
         "application requires a function value, received {}",
-        value.diagnostic_kind_name()
+        access.diagnostic_kind_name(value)
     ))
 }
 

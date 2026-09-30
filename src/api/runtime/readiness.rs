@@ -601,11 +601,14 @@ pub(super) fn runtime_killed_failure(
                 CoreValue::binary_from_text("runtime killed work in a deadlocked settlement"),
             )
             .insert((*crate::core::keys::SEVERITY).clone(), access.error());
-        access.root_runtime_failure(Arc::new(EvaluationFailure::emission(CoreValue::Dict(
-            Dict::new_sync()
-                .insert((*crate::core::keys::MSG).clone(), CoreValue::Dict(message))
-                .insert(Key::atom_from_text("runtime"), CoreValue::Dict(detail)),
-        ))))
+        access.root_runtime_failure(Arc::new(EvaluationFailure::emission_in(
+            &access,
+            CoreValue::Dict(
+                Dict::new_sync()
+                    .insert((*crate::core::keys::MSG).clone(), CoreValue::Dict(message))
+                    .insert(Key::atom_from_text("runtime"), CoreValue::Dict(detail)),
+            ),
+        )))
     })
 }
 

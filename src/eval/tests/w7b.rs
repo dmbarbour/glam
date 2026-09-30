@@ -589,7 +589,7 @@ fn deep_aliases_preserve_one_structured_failure_on_the_small_stack() {
         ));
         let failure = context.values().with_runtime_value_access(|access| {
             Arc::new(
-                EvaluationFailure::emission(access.duplicate_value(&emission))
+                EvaluationFailure::emission_in(&access, access.duplicate_value(&emission))
                     .with_context_in(&access, access.duplicate_value(&frame)),
             )
         });

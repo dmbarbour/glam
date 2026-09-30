@@ -1124,7 +1124,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         {
                             return Err(TaskHalt::new(format!(
                                 "effect task returned {}; expected unit",
-                                value.diagnostic_kind_name()
+                                access.values().diagnostic_kind_name(&value)
                             )));
                         }
                         Ok(())
@@ -3612,7 +3612,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
                             access
                                 .values()
                                 .same_representation(&value, &access.values().unit()),
-                            value.diagnostic_kind_name(),
+                            access.values().diagnostic_kind_name(&value),
                         )
                     })
                 });

@@ -2692,6 +2692,29 @@ inventory relatch:
     compile, and focused outer-WHNF, bounded-lazy publication, and cached-net
     failure fixtures pass. The raw ledger now contains only the three settled
     failure-diagnostic exceptions owned by the next closure slice.
+  - **D.2h.3g — failure-diagnostic access migration complete 2026-09-30.**
+    Structured failure construction and semantic-kind inspection now require
+    the matching `RuntimeValueAccess`; the authority-free emission constructor,
+    immediate-message projection, and raw diagnostic-kind helper are removed.
+    A plain Rust message is represented once as `Arc<str>`, while a structured
+    Glam emission remains a semantic `Value`: core `Display` classifies the
+    latter as `evaluation failed`, public evaluation-backed `api::Error`
+    classifies it as `glam evaluation failed`, and explicit
+    `Error::diagnostic(Values)` retains the structured message and rendering
+    policy. This avoids both unadmitted inspection and a duplicate eager
+    summary cache. Focused binary, origin, reflection-annotation, failure-root,
+    and public resolver/diagnostic fixtures pass.
+
+    Full-suite verification also exposed an older D.2h.3a identity defect:
+    the new canonical accessors applied `Atom::from_key` even when the key was
+    already `Key::Atom`, unlike the removed cache initializer. That silently
+    changed tuple, severity, and other canonical atom identities. The shared
+    access path now preserves an existing atom key and interns only non-atom
+    keys; independently failing tuple-lowering and diagnostic-ingress witnesses
+    pass after the correction. The raw API ledger reports no remaining
+    violation entry. Exact fixture migration, count/fingerprint updates, and
+    full dynamic closure remain D.2h.3b.2 and D.2h.4 work rather than being
+    hidden in this checkpoint.
 - **D.2h.4 — dynamic closure:** run focused ordinary/aggressive ownership
   checks followed by the routine workspace gates and the complete aggressive
   workspace suite.

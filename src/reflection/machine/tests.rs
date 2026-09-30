@@ -3581,9 +3581,11 @@ fn terminal_failure_poll_preserves_its_root_until_the_poll_is_retired() {
         Arc::new(TestHost::with_values(assembler.core_values())),
     )
     .expect("terminal-root fixture should construct");
-    let error = TaskHalt::failure(Arc::new(EvaluationFailure::emission(emission)));
-    assert!(error.failure_root().is_none());
-    task.finish(TaskTerminal::Failed(error));
+    assembler.core_values().with_runtime_value_access(|access| {
+        let error = TaskHalt::failure(Arc::new(EvaluationFailure::emission_in(&access, emission)));
+        assert!(error.failure_root().is_none());
+        task.finish(TaskTerminal::Failed(error));
+    });
     let poll = task
         .terminal
         .as_ref()
@@ -3615,16 +3617,18 @@ fn blocked_failure_poll_preserves_its_root_after_the_block_is_retired() {
     let values = Values::from_core_factory(core.clone());
     let domain = EffectTokenDomain::new(&values);
     let (emission, retained) = retained_machine_value(&values, &domain);
-    let error = TaskHalt::failure(Arc::new(EvaluationFailure::emission(emission)));
-    let blocked = BlockedExecution::<TestEffects>::evaluation_error(
-        error,
-        RetryWake {
-            observed_generation: 1,
-            validation: None,
-            action: WakeAction::RestartSearch,
-        },
-        &core,
-    );
+    let blocked = core.with_runtime_value_access(|access| {
+        let error = TaskHalt::failure(Arc::new(EvaluationFailure::emission_in(&access, emission)));
+        BlockedExecution::<TestEffects>::evaluation_error(
+            error,
+            RetryWake {
+                observed_generation: 1,
+                validation: None,
+                action: WakeAction::RestartSearch,
+            },
+            &core,
+        )
+    });
     let projected = blocked
         .error()
         .expect("blocked evaluation error should publish its retained root");
@@ -5876,7 +5880,11 @@ fn metadata_inspection_returns_hidden_values_without_forcing_them() {
     let error = assembler
         .evaluate(&PublicValue::from_runtime_root(*metadata))
         .expect_err_without_debug("the returned hidden failure should remain demandable");
-    assert_eq!(error.to_string(), "latent metadata failure");
+    assert_eq!(error.to_string(), "glam evaluation failed");
+    assert_eq!(
+        error.diagnostic(&assembler.values()).unwrap().message(),
+        "latent metadata failure"
+    );
 }
 
 #[test]
@@ -7482,7 +7490,7 @@ fn task_halt_conversions_preserve_evaluation_and_public_error_structure() {
     );
     let failure = assembler.core_values().with_runtime_value_access(|access| {
         Arc::new(
-            EvaluationFailure::emission(emission)
+            EvaluationFailure::emission_in(&access, emission)
                 .with_context_in(&access, access.duplicate_value(&frame)),
         )
     });
@@ -8614,7 +8622,7 @@ fn task_failure_propagates_one_structured_failure_to_owned_promises() {
     let frame = crate::diagnostic::evaluation_context_frame("producer_test");
     let failure = context.values().with_runtime_value_access(|access| {
         Arc::new(
-            EvaluationFailure::emission(access.duplicate_value(&emission))
+            EvaluationFailure::emission_in(&access, access.duplicate_value(&emission))
                 .with_context_in(&access, access.duplicate_value(&frame)),
         )
     });
@@ -9066,11 +9074,13 @@ fn heap_root_replacement_and_path_errors_remain_lazy() {
     };
     assert!(matches!(value.clone_core_for_test(), Value::Lazy(_)));
     assert_same_value!(assembler, host.heap(), assembler.values().integer(42));
+    let error = assembler.evaluate(&value).unwrap_err_without_debug();
+    assert_eq!(error.to_string(), "glam evaluation failed");
     assert!(
-        assembler
-            .evaluate(&value)
-            .unwrap_err_without_debug()
-            .to_string()
+        error
+            .diagnostic(&assembler.values())
+            .unwrap()
+            .message()
             .contains("not a dictionary")
     );
 

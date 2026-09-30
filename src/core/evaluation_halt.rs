@@ -52,8 +52,8 @@ impl EvaluationHalt {
     }
 
     #[cfg(test)]
-    pub(crate) fn from_value(_access: &RuntimeValueAccess<'_>, value: Value) -> Self {
-        Self::failure(Arc::new(EvaluationFailure::emission(value)))
+    pub(crate) fn from_value(access: &RuntimeValueAccess<'_>, value: Value) -> Self {
+        Self::failure(Arc::new(EvaluationFailure::emission_in(access, value)))
     }
 
     pub(crate) fn failure(failure: Arc<EvaluationFailure>) -> Self {

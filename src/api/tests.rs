@@ -95,10 +95,9 @@ fn assert_unclaimed_lazy(assembler: &Assembler, value: &Value) {
     let values = assembler.core_values();
     let core = value.clone_core_for_test();
     let CoreValue::Lazy(lazy) = &core else {
-        panic!(
-            "expected a lazy value, received {}",
-            core.diagnostic_kind_name()
-        );
+        let received =
+            values.with_runtime_value_access(|access| access.diagnostic_kind_name(&core));
+        panic!("expected a lazy value, received {}", received);
     };
     assert!(
         lazy.cached(&values).is_none(),
@@ -114,10 +113,9 @@ fn assert_unobserved_promise(assembler: &Assembler, value: &Value) {
     let values = assembler.core_values();
     let core = value.clone_core_for_test();
     let CoreValue::Promised(promise) = &core else {
-        panic!(
-            "expected a promised value, received {}",
-            core.diagnostic_kind_name()
-        );
+        let received =
+            values.with_runtime_value_access(|access| access.diagnostic_kind_name(&core));
+        panic!("expected a promised value, received {}", received);
     };
     assert!(
         promise.assignment(&values).is_none(),
@@ -1225,7 +1223,7 @@ fn value_evaluator_resumes_a_retained_resolver_promise_subscription() {
         .evaluator()
         .eval(&waiting)
         .expect_err_without_debug("a resolver-owned promise has no runtime-owned progress source");
-    assert!(error.to_string().contains("blocked on wait token"));
+    assert_eq!(error.to_string(), "glam evaluation failed");
     assert_eq!(promise_core.exact_subscription_count(&values.core), 1);
     resolver
         .resolve(values.text("resolved"))
@@ -1443,7 +1441,7 @@ fn value_evaluator_caches_lazy_success_and_preserves_structured_failure() {
         .evaluator()
         .eval(&failure)
         .expect_err_without_debug("error annotation should fail evaluation");
-    assert_eq!(error.to_string(), "structured");
+    assert_eq!(error.to_string(), "glam evaluation failed");
     assert!(error.structured_diagnostic().is_some());
 }
 
@@ -1616,15 +1614,10 @@ fn assembler_boundaries_reject_foreign_values_before_evaluation_or_storage() {
         unassigned.assignment(&assembler.core_values()).is_none(),
         "rejecting a foreign value must not terminalize the promise"
     );
-    assert!(
-        assembler
-            .evaluate(&promise)
-            .expect_err_without_debug(
-                "a rejected foreign resolution must leave the promise pending"
-            )
-            .to_string()
-            .contains("before initialization")
-    );
+    let error = assembler
+        .evaluate(&promise)
+        .expect_err_without_debug("a rejected foreign resolution must leave the promise pending");
+    assert_eq!(error.to_string(), "glam evaluation failed");
     let (failed, resolver) = assembler.promise("foreign failure");
     assert!(resolver.fail(foreign_value).is_err());
     let CoreValue::Promised(unassigned) = failed.clone_core_for_test() else {
@@ -1700,7 +1693,7 @@ fn binary_annotation_preserves_a_nested_failure_context() {
     let error = binary_at(&assembler, module.value(), "result")
         .expect_err_without_debug("binary observation should demand the failed definition");
 
-    assert_eq!(error.to_string(), "original");
+    assert_eq!(error.to_string(), "glam evaluation failed");
     let contexts = diagnostic_contexts(&assembler, &error.diagnostic(&assembler.values()).unwrap());
     assert!(
         contexts.first().and_then(definition_context).is_some(),
@@ -1756,7 +1749,7 @@ fn callers_can_attach_path_context_to_semantic_access() {
         .evaluator()
         .eval(&candidate)
         .expect_err_without_debug("forcing an intermediate path value should fail");
-    assert_eq!(error.to_string(), "path target failed");
+    assert_eq!(error.to_string(), "glam evaluation failed");
     assembler.core_values().assert_same_representation_for_test(
         &diagnostic_contexts(&assembler, &error.diagnostic(&assembler.values()).unwrap()),
         &[values.clone_core(&frame).unwrap()],
@@ -1773,13 +1766,27 @@ fn semantic_binary_conversion_preserves_structured_failures() {
     let assembler = Assembler::new();
     let missing = binary_at(&assembler, &assembler.values().empty_dict(), "missing")
         .expect_err_without_debug("missing binary path should fail");
-    assert!(missing.to_string().contains("requires a list or binary"));
+    assert_eq!(missing.to_string(), "glam evaluation failed");
+    assert!(
+        missing
+            .diagnostic(&assembler.values())
+            .unwrap()
+            .message()
+            .contains("requires a list or binary")
+    );
     assert!(missing.structured_diagnostic().is_some());
 
     let invalid = assembler
         .to_binary(&assembler.values().integer(42))
         .expect_err_without_debug("a number is not binary text data");
-    assert!(invalid.to_string().contains("requires a list or binary"));
+    assert_eq!(invalid.to_string(), "glam evaluation failed");
+    assert!(
+        invalid
+            .diagnostic(&assembler.values())
+            .unwrap()
+            .message()
+            .contains("requires a list or binary")
+    );
     assert!(invalid.structured_diagnostic().is_some());
 
     let invalid_item = assembler
@@ -1790,9 +1797,12 @@ fn semantic_binary_conversion_preserves_structured_failures() {
                 .expect("invalid byte fixture should still be a list"),
         )
         .expect_err_without_debug("an out-of-range list member is not binary text data");
+    assert_eq!(invalid_item.to_string(), "glam evaluation failed");
     assert!(
         invalid_item
-            .to_string()
+            .diagnostic(&assembler.values())
+            .unwrap()
+            .message()
             .contains("cannot encode number `256`")
     );
     assert!(invalid_item.structured_diagnostic().is_some());
@@ -1862,11 +1872,13 @@ fn origin_inspection_rejects_unrelated_opaque_values() {
         .apply(&inspect, [unrelated])
         .and_then(|value| assembler.evaluate(&value))
         .expect_err_without_debug("unrelated opaque values must not be disclosed");
+    assert_eq!(error.to_string(), "glam evaluation failed");
     assert!(
         error
-            .to_string()
-            .contains("origin inspection requires an opaque compilation origin"),
-        "{error}"
+            .diagnostic(&assembler.values())
+            .unwrap()
+            .message()
+            .contains("origin inspection requires an opaque compilation origin")
     );
 }
 
@@ -2067,11 +2079,15 @@ fn dropped_builder_environment_resolver_fails_its_promise() {
     let promised = access_path(&assembler, &assembler.reflection_environment(), "abandoned")
         .expect("promise should be present");
 
+    let error = assembler
+        .evaluate(&promised)
+        .expect_err_without_debug("dropped resolver must fail its promise");
+    assert_eq!(error.to_string(), "glam evaluation failed");
     assert!(
-        assembler
-            .evaluate(&promised)
-            .expect_err_without_debug("dropped resolver must fail its promise")
-            .to_string()
+        error
+            .diagnostic(&assembler.values())
+            .unwrap()
+            .message()
             .contains("was dropped before completion")
     );
 }
@@ -2099,10 +2115,7 @@ fn builder_environment_promise_does_not_complete_through_self_dependency() {
     let error = assembler
         .evaluate(&promised)
         .expect_err_without_debug("self dependency cannot reach weak head normal form");
-    assert!(
-        error.to_string().contains("blocked on wait token"),
-        "{error}"
-    );
+    assert_eq!(error.to_string(), "glam evaluation failed");
 }
 
 #[test]
@@ -2441,11 +2454,13 @@ fn reflection_annotations_require_their_tasks_to_return_unit() {
     let result =
         access_path(&assembler, module.value(), "result").expect("fixture should define result");
 
+    let error = assembler.to_binary(&result).unwrap_err_without_debug();
+    assert_eq!(error.to_string(), "glam evaluation failed");
     assert!(
-        assembler
-            .to_binary(&result)
-            .unwrap_err_without_debug()
-            .to_string()
+        error
+            .diagnostic(&assembler.values())
+            .unwrap()
+            .message()
             .contains("reflection annotation result: unit expected, received Binary")
     );
 }

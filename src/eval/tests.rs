@@ -1046,9 +1046,11 @@ fn immediate_diagnostic_shell_operations_share_one_root_neutral_access_region() 
 
     values.with_runtime_value_access(|access| {
         let frame = evaluation_context_frame_in(&access, "regional_diagnostic");
-        let failure =
-            EvaluationFailure::emission(Value::Dict(Dict::new_sync().insert(detail.clone(), n(7))))
-                .with_context_in(&access, frame);
+        let failure = EvaluationFailure::emission_in(
+            &access,
+            Value::Dict(Dict::new_sync().insert(detail.clone(), n(7))),
+        )
+        .with_context_in(&access, frame);
         let Value::Dict(diagnostic) = failure_diagnostic_value_in(&access, &failure) else {
             panic!("a dictionary emission should remain a diagnostic dictionary")
         };
@@ -2176,7 +2178,7 @@ fn promised_failure_preserves_structured_diagnostic_and_identity() {
     );
     let frame = evaluation_context_frame("promise_test");
     let failure = Arc::new(session.values().with_runtime_value_access(|access| {
-        EvaluationFailure::emission(access.duplicate_value(&emission))
+        EvaluationFailure::emission_in(&access, access.duplicate_value(&emission))
             .with_context_in(&access, access.duplicate_value(&frame))
     }));
 
@@ -8165,7 +8167,7 @@ fn assert_structured_reflection_gate_failure(stage: GateFailureStage) {
     );
     let producer_frame = evaluation_context_frame("gate_producer");
     let failure = Arc::new(context.values().with_runtime_value_access(|access| {
-        EvaluationFailure::emission(access.duplicate_value(&emission))
+        EvaluationFailure::emission_in(&access, access.duplicate_value(&emission))
             .with_context_in(&access, access.duplicate_value(&producer_frame))
     }));
     let builds = Arc::new(AtomicUsize::new(0));

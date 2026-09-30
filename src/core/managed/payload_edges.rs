@@ -445,8 +445,11 @@ mod tests {
                 &values,
                 &failed_promise,
                 Arc::new(values.with_runtime_value_access(|access| {
-                    EvaluationFailure::emission(access.duplicate_value(&failure_emission))
-                        .with_context_in(&access, access.duplicate_value(&failure_context))
+                    EvaluationFailure::emission_in(
+                        &access,
+                        access.duplicate_value(&failure_emission),
+                    )
+                    .with_context_in(&access, access.duplicate_value(&failure_context))
                 })),
             )
             .is_ok()
@@ -560,7 +563,7 @@ mod tests {
             );
             let sentinel = Value::Lazy(sentinel);
             let failure = Arc::new(
-                EvaluationFailure::emission(access.duplicate_value(&sentinel))
+                EvaluationFailure::emission_in(&access, access.duplicate_value(&sentinel))
                     .with_context_in(access, sentinel),
             );
             Value::Lazy(

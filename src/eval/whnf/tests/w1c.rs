@@ -114,7 +114,7 @@ fn permanent_failure_is_rooted_inside_the_regional_poll() {
     let mut budget = WhnfStepBudget::new(1);
     let failed = poll.with_value_access(&context, |access| {
         let failed = computation.poll_in(&access, &mut budget, |access, _work| {
-            let failure = EvaluationFailure::emission(text("failure"))
+            let failure = EvaluationFailure::emission_in(access.values(), text("failure"))
                 .with_context_in(access.values(), text("context"));
             RegionalWhnfStep::Failed(Arc::new(failure))
         });

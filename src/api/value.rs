@@ -1109,7 +1109,8 @@ impl PromiseResolver {
         let published = values.with_runtime_value_access(|access| {
             promise.publish(
                 &access,
-                Err(Arc::new(EvaluationFailure::emission(
+                Err(Arc::new(EvaluationFailure::emission_in(
+                    &access,
                     failure.0.clone_core_with(&access),
                 ))),
             )

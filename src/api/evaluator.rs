@@ -103,7 +103,7 @@ impl ReflectionInspector<'_> {
                     let CoreValue::Dict(dict) = value else {
                         return Err(Error::new(format!(
                             "reflection dictionary inspection requires a dictionary, received {}",
-                            value.diagnostic_kind_name()
+                            access.runtime_access().diagnostic_kind_name(value)
                         )));
                     };
                     Ok(dict
@@ -130,7 +130,7 @@ impl ReflectionInspector<'_> {
                     let CoreValue::Atom(atom) = value else {
                         return Err(Error::new(format!(
                             "reflection atom inspection requires an atom, received {}",
-                            value.diagnostic_kind_name()
+                            access.runtime_access().diagnostic_kind_name(value)
                         )));
                     };
                     Ok(access.wrap(atom.key().to_value_in(access.runtime_access())))

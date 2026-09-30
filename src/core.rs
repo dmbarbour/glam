@@ -143,16 +143,20 @@ pub(crate) struct EvaluationFailure {
 }
 
 enum EvaluationFailureKind {
+    Message(Arc<str>),
     Emission(Value),
     DependencyCycle(Arc<LazyCycle>),
 }
 
 impl EvaluationFailure {
     pub(crate) fn message(message: impl AsRef<str>) -> Self {
-        Self::emission(Value::binary_from_text(message.as_ref()))
+        Self {
+            kind: EvaluationFailureKind::Message(Arc::from(message.as_ref())),
+            contexts: Arc::from([]),
+        }
     }
 
-    pub(crate) fn emission(emission: Value) -> Self {
+    pub(crate) fn emission_in(_access: &RuntimeValueAccess<'_>, emission: Value) -> Self {
         Self {
             kind: EvaluationFailureKind::Emission(emission),
             contexts: Arc::from([]),
@@ -169,6 +173,7 @@ impl EvaluationFailure {
     #[cfg(test)]
     pub(crate) fn emission_value(&self) -> Option<&Value> {
         match &self.kind {
+            EvaluationFailureKind::Message(_) => None,
             EvaluationFailureKind::Emission(emission) => Some(emission),
             EvaluationFailureKind::DependencyCycle(_) => None,
         }
@@ -204,6 +209,9 @@ impl EvaluationFailure {
                 .map(|context| access.duplicate_value(context)),
         );
         let kind = match &self.kind {
+            EvaluationFailureKind::Message(message) => {
+                EvaluationFailureKind::Message(Arc::clone(message))
+            }
             EvaluationFailureKind::Emission(emission) => {
                 EvaluationFailureKind::Emission(access.duplicate_value(emission))
             }
@@ -219,6 +227,9 @@ impl EvaluationFailure {
 
     pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
         let kind = match &self.kind {
+            EvaluationFailureKind::Message(message) => {
+                EvaluationFailureKind::Message(Arc::clone(message))
+            }
             EvaluationFailureKind::Emission(emission) => {
                 EvaluationFailureKind::Emission(access.duplicate_value(emission))
             }
@@ -249,6 +260,7 @@ impl EvaluationFailure {
         _access: &'access RuntimeValueAccess<'_>,
     ) -> Option<&'access Value> {
         match &self.kind {
+            EvaluationFailureKind::Message(_) => None,
             EvaluationFailureKind::Emission(emission) => Some(emission),
             EvaluationFailureKind::DependencyCycle(_) => None,
         }
@@ -266,6 +278,7 @@ impl EvaluationFailure {
     #[cfg(test)]
     pub(crate) fn dependency_cycle_value(&self) -> Option<&Arc<LazyCycle>> {
         match &self.kind {
+            EvaluationFailureKind::Message(_) => None,
             EvaluationFailureKind::DependencyCycle(cycle) => Some(cycle),
             EvaluationFailureKind::Emission(_) => None,
         }
@@ -275,17 +288,8 @@ impl EvaluationFailure {
 impl fmt::Display for EvaluationFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.kind {
-            EvaluationFailureKind::Emission(emission) => {
-                if let Some(message) = immediate_failure_text(emission) {
-                    formatter.write_str(&message)
-                } else {
-                    write!(
-                        formatter,
-                        "evaluation failed with {}",
-                        emission.diagnostic_kind_name()
-                    )
-                }
-            }
+            EvaluationFailureKind::Message(message) => formatter.write_str(message),
+            EvaluationFailureKind::Emission(_) => formatter.write_str("evaluation failed"),
             EvaluationFailureKind::DependencyCycle(cycle) => {
                 formatter.write_str("lazy dependency cycle")?;
                 for member in cycle.members.iter() {
@@ -297,25 +301,6 @@ impl fmt::Display for EvaluationFailure {
                 Ok(())
             }
         }
-    }
-}
-
-fn immediate_failure_text(emission: &Value) -> Option<Arc<str>> {
-    match emission {
-        Value::Binary(text) => Some(Arc::from(String::from_utf8_lossy(text).as_ref())),
-        Value::Dict(emission) => {
-            let text = emission
-                .get(&*keys::MSG)
-                .and_then(|message| match message {
-                    Value::Dict(message) => message.get(&*keys::TEXT),
-                    _ => None,
-                })?;
-            match text {
-                Value::Binary(text) => Some(Arc::from(String::from_utf8_lossy(text).as_ref())),
-                _ => None,
-            }
-        }
-        _ => None,
     }
 }
 
@@ -2350,25 +2335,6 @@ impl From<PromisedValue> for ListThunk {
 pub type List = crate::list::List<Value, ListThunk>;
 
 impl Value {
-    /// Names the most useful semantic category for diagnostics without
-    /// changing the representation-oriented public value kind.
-    pub(crate) fn diagnostic_kind_name(&self) -> &'static str {
-        match self {
-            Self::Atom(atom) if atom.key() == &*keys::UNIT => "Unit",
-            Self::Atom(_) => "Atom",
-            Self::Number(_) => "Number",
-            Self::Binary(_) => "Binary",
-            Self::List(_) => "List",
-            Self::Dict(dict) if dict.is_empty() => "Undefined",
-            Self::Dict(_) => "Dict",
-            Self::Builtin(_) | Self::PartialBuiltin(_) | Self::Function(_) => "Function",
-            Self::Net(_) => "Net",
-            Self::Lazy(_) | Self::Promised(_) => "Lazy",
-            Self::Metadata(_) => "Sealed",
-            Self::Opaque(_) => "Opaque",
-        }
-    }
-
     pub fn binary_from_text(text: &str) -> Self {
         Self::Binary(Bytes::copy_from_slice(text.as_bytes()))
     }
@@ -2967,6 +2933,9 @@ impl SameRepresentationForTest for PromisedValue {
 impl SameRepresentationForTest for EvaluationFailure {
     fn same_representation_for_test(&self, other: &Self, access: &RuntimeValueAccess<'_>) -> bool {
         let same_kind = match (&self.kind, &other.kind) {
+            (EvaluationFailureKind::Message(left), EvaluationFailureKind::Message(right)) => {
+                left == right
+            }
             (EvaluationFailureKind::Emission(left), EvaluationFailureKind::Emission(right)) => {
                 access.same_representation(left, right)
             }
@@ -2974,10 +2943,7 @@ impl SameRepresentationForTest for EvaluationFailure {
                 EvaluationFailureKind::DependencyCycle(left),
                 EvaluationFailureKind::DependencyCycle(right),
             ) => left == right,
-            (EvaluationFailureKind::Emission(_), EvaluationFailureKind::DependencyCycle(_))
-            | (EvaluationFailureKind::DependencyCycle(_), EvaluationFailureKind::Emission(_)) => {
-                false
-            }
+            _ => false,
         };
         same_kind
             && self.contexts.len() == other.contexts.len()
@@ -3363,6 +3329,9 @@ mod tests {
     fn assert_evaluation_failure_boundary_inventory(failure: &EvaluationFailure) {
         let EvaluationFailure { kind, contexts } = failure;
         match kind {
+            EvaluationFailureKind::Message(message) => {
+                let _: &Arc<str> = message;
+            }
             EvaluationFailureKind::Emission(value) => {
                 let _: &Value = value;
             }
@@ -3376,13 +3345,14 @@ mod tests {
     #[test]
     fn evaluation_failure_boundary_inventory_is_complete() {
         const CHECKPOINTS: &[(&str, &str)] = &[
+            ("EvaluationFailureKind::Message(Arc<str>)", "D.2h.3g"),
             ("EvaluationFailureKind::Emission(Value)", "I6C"),
             ("EvaluationFailure.contexts: Arc<[Value]>", "I6C"),
             ("EvaluationFailureKind::DependencyCycle", "I5B/I6C"),
         ];
 
         let _: fn(&EvaluationFailure) = assert_evaluation_failure_boundary_inventory;
-        assert_eq!(CHECKPOINTS.len(), 3);
+        assert_eq!(CHECKPOINTS.len(), 4);
     }
 
     // SAFETY: this layout-policy probe contains no managed edges.
@@ -3505,27 +3475,27 @@ mod tests {
         factory.with_runtime_value_access(|access| {
             access.assert_same_representation_for_test(
                 &access.unit(),
-                &access.atom(Atom::from_key(&keys::UNIT)),
+                &access.key_value(&keys::UNIT),
             );
             access.assert_same_representation_for_test(
                 &access.object_reflection_guard(),
-                &access.atom(Atom::from_key(&keys::OBJECT_REFLECTION_GUARD)),
+                &access.key_value(&keys::OBJECT_REFLECTION_GUARD),
             );
             access.assert_same_representation_for_test(
                 &access.tuple(),
-                &access.atom(Atom::from_key(&keys::TUPLE)),
+                &access.key_value(&keys::TUPLE),
             );
             access.assert_same_representation_for_test(
                 &access.info(),
-                &access.atom(Atom::from_key(&keys::INFO)),
+                &access.key_value(&keys::INFO),
             );
             access.assert_same_representation_for_test(
                 &access.warn(),
-                &access.atom(Atom::from_key(&keys::WARN)),
+                &access.key_value(&keys::WARN),
             );
             access.assert_same_representation_for_test(
                 &access.error(),
-                &access.atom(Atom::from_key(&keys::ERROR)),
+                &access.key_value(&keys::ERROR),
             );
         });
     }

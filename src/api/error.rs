@@ -27,41 +27,29 @@ impl Error {
     }
 
     pub(crate) fn from_eval(values: &CoreValueFactory, error: EvaluationHalt) -> Self {
-        let message: Arc<str> = Arc::from(error.to_string());
         Self::from_eval_parts(
             values,
             crate::diagnostic::halt_diagnostic_root_with(values, &error),
-            message,
         )
     }
 
     fn from_eval_parts(
         values: &CoreValueFactory,
         emission: Option<crate::runtime::RuntimeValueRoot>,
-        message: Arc<str>,
     ) -> Self {
-        let (message, diagnostic) = match emission {
+        let message: Arc<str> = Arc::from("glam evaluation failed");
+        let diagnostic = match emission {
             Some(emission) => {
-                let message =
-                    crate::diagnostic::conventional_summary_root(values, emission.clone())
-                        .1
-                        .unwrap_or(message);
                 let public_values = Values::from_core_factory(values.clone());
-                (
-                    message,
-                    Diagnostic::from_parts(
-                        &public_values,
-                        None,
-                        Severity::Error,
-                        Value::from_runtime_root(emission),
-                        None,
-                    ),
+                Diagnostic::from_parts(
+                    &public_values,
+                    None,
+                    Severity::Error,
+                    Value::from_runtime_root(emission),
+                    None,
                 )
             }
-            None => (
-                message.clone(),
-                Diagnostic::new_with_factory(values, Severity::Error, message),
-            ),
+            None => Diagnostic::new_with_factory(values, Severity::Error, Arc::clone(&message)),
         };
         Self {
             message,

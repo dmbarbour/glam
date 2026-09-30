@@ -563,7 +563,7 @@ mod tests {
         let values = test_value_factory();
         let repeated = Value::binary_from_text("failure root sentinel");
         let failure = Arc::new(values.with_runtime_value_access(|access| {
-            EvaluationFailure::emission(access.duplicate_value(&repeated))
+            EvaluationFailure::emission_in(&access, access.duplicate_value(&repeated))
                 .with_context_in(&access, access.duplicate_value(&repeated))
                 .with_context_in(&access, access.duplicate_value(&repeated))
         }));
@@ -598,11 +598,7 @@ mod tests {
 
         assert_eq!(root.runtime_id(), values.runtime_id());
         assert!(Arc::ptr_eq(root.as_failure(), &failure));
-        assert_eq!(root.direct_value_roots().len(), 1);
-        assert_eq!(
-            root.direct_value_roots()[0].runtime_id(),
-            values.runtime_id()
-        );
+        assert_eq!(root.direct_value_roots().len(), 0);
     }
 
     #[test]
@@ -618,9 +614,9 @@ mod tests {
                 panic!("failure-root construction must not evaluate a direct value")
             },
         ));
-        let failure = Arc::new(EvaluationFailure::emission(
-            lazy.duplicate_for_test(&values),
-        ));
+        let failure = Arc::new(values.with_runtime_value_access(|access| {
+            EvaluationFailure::emission_in(&access, access.duplicate_value(&lazy))
+        }));
 
         let root = RuntimeFailureRoot::new(&values, failure);
 
@@ -645,7 +641,10 @@ mod tests {
             let promise = PromisedValue::from_root(&promise_root, &access);
             (
                 promise_root,
-                Arc::new(EvaluationFailure::emission(Value::Promised(promise))),
+                Arc::new(EvaluationFailure::emission_in(
+                    &access,
+                    Value::Promised(promise),
+                )),
             )
         });
         let failure_root = RuntimeFailureRoot::new(&values, failure);
