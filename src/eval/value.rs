@@ -1591,9 +1591,14 @@ pub(super) fn force_list_thunk_in(
     match context.context().evaluate_compatibility_whnf(&thunk)? {
         Value::Binary(bytes) => Ok(List::from_bytes(bytes)),
         Value::List(list) => Ok(list),
-        other => Err(EvaluationHalt::new(format!(
-            "lazy list chunk must evaluate to a list or binary value, got {other:?}"
-        ))),
+        other => {
+            let other = context.with_value_access(|access| {
+                format!("{:?}", access.values().diagnostic_debug(&other))
+            });
+            Err(EvaluationHalt::new(format!(
+                "lazy list chunk must evaluate to a list or binary value, got {other}"
+            )))
+        }
     }
 }
 
@@ -1755,8 +1760,10 @@ mod ownership_tests {
         assert_eq!(dependency.runtime_id(), promise_root.runtime_id());
         assert_eq!(dependency.id(), promise_root.id());
 
-        crate::core::set_test_promise(context.values(), &promise, Value::Number(73.into()))
-            .expect("the follower promise should accept one assignment");
+        assert!(
+            crate::core::set_test_promise(context.values(), &promise, Value::Number(73.into()),)
+                .is_ok()
+        );
         assert!(matches!(
             follower.poll(
                 &poll_context,
@@ -1770,7 +1777,11 @@ mod ownership_tests {
         ) else {
             panic!("the yielded follower must resume from the assigned value")
         };
-        assert_eq!(value.clone_core_for_test(), Value::Number(73.into()));
+        crate::core::assert_same_representation_for_test(
+            context.values(),
+            &value.clone_core_for_test(),
+            &Value::Number(73.into()),
+        );
     }
 
     #[test]
@@ -1781,9 +1792,10 @@ mod ownership_tests {
             context.values(),
             Arc::from([CoreDataKey::Index]),
             Arc::from([
-                Value::Dict(
-                    Dict::new_sync().insert(Key::Number(1.into()), Value::Promised(result.clone())),
-                ),
+                Value::Dict(Dict::new_sync().insert(
+                    Key::Number(1.into()),
+                    Value::Promised(result.duplicate_for_test(context.values())),
+                )),
                 Value::Number(1.into()),
             ]),
         );
@@ -1822,8 +1834,10 @@ mod ownership_tests {
             .collect_managed_for_test()
             .expect("the exact WHNF replacement must survive both route markers");
 
-        crate::core::set_test_promise(context.values(), &result, Value::Number(91.into()))
-            .expect("the selected result promise should accept one assignment");
+        assert!(
+            crate::core::set_test_promise(context.values(), &result, Value::Number(91.into()),)
+                .is_ok()
+        );
         let completed = loop {
             match step(&mut stale) {
                 EvaluationMachinePoll::Yielded => {}
@@ -1839,7 +1853,11 @@ mod ownership_tests {
                 }
             }
         };
-        assert_eq!(completed.clone_core_for_test(), Value::Number(91.into()));
+        crate::core::assert_same_representation_for_test(
+            context.values(),
+            &completed.clone_core_for_test(),
+            &Value::Number(91.into()),
+        );
     }
 
     #[test]
@@ -1880,7 +1898,11 @@ mod ownership_tests {
             ) else {
                 panic!("the stale net route must observe the winning terminal cache")
             };
-            assert_eq!(value.clone_core_for_test(), Value::Number(97.into()));
+            crate::core::assert_same_representation_for_test(
+                context.values(),
+                &value.clone_core_for_test(),
+                &Value::Number(97.into()),
+            );
         });
     }
 }

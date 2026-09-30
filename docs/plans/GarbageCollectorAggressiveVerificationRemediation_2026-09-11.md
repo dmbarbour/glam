@@ -2084,6 +2084,11 @@ inventory relatch:
       access-qualified implementation as production; and list extraction
       duplicates strict segments and formats type failures only under the
       evaluator step's bounded value access.
+    - **Evaluator/compiler-value fixture seam: complete 2026-09-30.** Lazy
+      route, promise follower, compiler-cache, and macro-environment fixtures
+      now duplicate and compare their semantic payloads through their owning
+      evaluation context or compiler value factory. Cross-thread compiler
+      helper tests explicitly duplicate the function edge before transfer.
   - **D.2h.2c — managed facade and collector cutover:** remove the thirteen
     managed-facade traits/identity shims and the five `Gc<T>` traits, add the
     negative compile/source gates, and make the full workspace compile.

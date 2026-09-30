@@ -1132,13 +1132,21 @@ mod tests {
         let values = crate::compiler::test_value_factory();
         let first_effect = effect_test_value(&values, "compiler_cache_test");
         let second_effect = effect_test_value(&values, "compiler_cache_test");
-        assert_eq!(first_effect, second_effect);
+        crate::core::assert_same_representation_for_test(&values, &first_effect, &second_effect);
         assert!(matches!(first_effect, Value::Dict(_)));
 
         let first_std = builtin_test_module(&values, "std").expect("std should be built in");
         let second_std = builtin_test_module(&values, "std").expect("std should remain built in");
-        assert_eq!(first_std.value, second_std.value);
-        assert_eq!(first_std.definitions, second_std.definitions);
+        crate::core::assert_same_representation_for_test(
+            &values,
+            &first_std.value,
+            &second_std.value,
+        );
+        crate::core::assert_same_representation_for_test(
+            &values,
+            &first_std.definitions,
+            &second_std.definitions,
+        );
         assert!(matches!(first_std.definitions, Value::Function(_)));
         with_values(&values, |compiler| {
             assert!(matches!(
@@ -1265,9 +1273,10 @@ mod tests {
         values
             .collect_managed_for_test()
             .expect("publishing an immediate result should remain traceable");
-        assert_eq!(
-            project_test_value(&values, &immediate),
-            Value::Number(Number::integer(42))
+        crate::core::assert_same_representation_for_test(
+            &values,
+            &project_test_value(&values, &immediate),
+            &Value::Number(Number::integer(42)),
         );
 
         let mut locals = ResolverContext::default();
@@ -1356,7 +1365,7 @@ mod tests {
         let evaluators = (0..THREADS)
             .map(|index| {
                 let values = values.clone();
-                let function = function.clone();
+                let function = function.duplicate_for_test(&values);
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     let base = Value::Dict(Dict::new_sync().insert(
@@ -1382,9 +1391,10 @@ mod tests {
             let result = evaluator
                 .join()
                 .expect("cached compiler helper evaluation should not panic");
-            assert_eq!(
-                project_test_value(&values, &result),
-                Value::binary_from_text("g0")
+            crate::core::assert_same_representation_for_test(
+                &values,
+                &project_test_value(&values, &result),
+                &Value::binary_from_text("g0"),
             );
         }
     }
@@ -1401,7 +1411,9 @@ mod tests {
         let existing = evaluate_test_expression(
             &values,
             ResolvedExpr::Access {
-                base: Box::new(ResolvedExpr::Provided(environment_value.clone())),
+                base: Box::new(ResolvedExpr::Provided(
+                    environment_value.duplicate_for_test(&values),
+                )),
                 path: vec![ResolvedPathPart::Key(name_as_key("existing"))],
             },
         );
@@ -1412,13 +1424,15 @@ mod tests {
                 path: vec![ResolvedPathPart::Key(name_as_key("language"))],
             },
         );
-        assert_eq!(
-            project_test_value(&values, &existing),
-            Value::Number(Number::integer(1))
+        crate::core::assert_same_representation_for_test(
+            &values,
+            &project_test_value(&values, &existing),
+            &Value::Number(Number::integer(1)),
         );
-        assert_eq!(
-            project_test_value(&values, &language),
-            Value::binary_from_text("g0")
+        crate::core::assert_same_representation_for_test(
+            &values,
+            &project_test_value(&values, &language),
+            &Value::binary_from_text("g0"),
         );
     }
 
@@ -1467,9 +1481,10 @@ mod tests {
                 path: vec![ResolvedPathPart::Key(name_as_key("adapted"))],
             },
         );
-        assert_eq!(
-            project_test_value(&values, &adapted),
-            Value::binary_from_text("g0")
+        crate::core::assert_same_representation_for_test(
+            &values,
+            &project_test_value(&values, &adapted),
+            &Value::binary_from_text("g0"),
         );
     }
 }
