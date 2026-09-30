@@ -6427,12 +6427,18 @@ fn metadata_annotation_initializes_the_canonical_sealed_carrier() {
         .expect("metadata initialization should evaluate");
 
     assert_eq!(target_forces.load(Ordering::SeqCst), 1);
-    assert_eq!(first, initial_metadata());
-    assert_eq!(second, initial_metadata());
-    assert_eq!(first, second);
-    assert_eq!(
-        first.associated_metadata(),
-        Some(Value::Dict(Dict::new_sync()))
+    context
+        .values()
+        .assert_same_representation_for_test(&first, &initial_metadata());
+    context
+        .values()
+        .assert_same_representation_for_test(&second, &initial_metadata());
+    context
+        .values()
+        .assert_same_representation_for_test(&first, &second);
+    context.values().assert_same_representation_for_test(
+        &first.associated_metadata(),
+        &Some(Value::Dict(Dict::new_sync())),
     );
 
     let seq_result = apply_values(
@@ -6441,17 +6447,18 @@ fn metadata_annotation_initializes_the_canonical_sealed_carrier() {
         vec![first.clone(), n(42)],
     )
     .expect("initial metadata should already satisfy shallow sequencing");
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &seq_result).unwrap(),
-        n(42)
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &seq_result)
+            .unwrap(),
+        &n(42),
     );
 
     let spark_result = apply_values(&context, Value::Builtin(Builtin::Spark), vec![first, n(43)])
         .expect("initial metadata should be safe to spark");
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &spark_result)
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &spark_result)
             .unwrap(),
-        n(43)
+        &n(43),
     );
 }
 
@@ -6494,11 +6501,10 @@ fn old_metadata_annotation_spellings_are_unrecognized() {
         vec![old_initial, n(42)],
     )
     .expect("an unrecognized annotation should apply lazily");
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &old_initial)
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &old_initial)
             .expect("an unrecognized annotation should preserve its target"),
-        n(42),
-        "the old initializer must not create a sealed carrier"
+        &n(42),
     );
 
     let carrier = Value::metadata_carrier(n(7));
@@ -6518,14 +6524,15 @@ fn old_metadata_annotation_spellings_are_unrecognized() {
     .expect("an unrecognized annotation should preserve its target");
     let result = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &result)
         .expect("the unrecognized annotation should evaluate to its target");
-    assert_eq!(result, target);
+    context
+        .values()
+        .assert_same_representation_for_test(&result, &target);
     let Value::List(result) = result else {
         panic!("the preserved target must remain a list");
     };
-    assert_eq!(
-        list_to_value_items(&context, &result).unwrap(),
-        vec![carrier],
-        "the old updater must not derive another carrier"
+    context.values().assert_same_representation_for_test(
+        &list_to_value_items(&context, &result).unwrap(),
+        &vec![carrier],
     );
 }
 
@@ -6607,13 +6614,13 @@ fn metadata_update_reorders_copies_and_clears_hidden_values() {
         vec![left.clone(), right.clone()],
     )
     .expect("metadata update should support permutation");
-    assert_eq!(
-        swapped
+    context.values().assert_same_representation_for_test(
+        &swapped
             .iter()
             .map(|carrier| evaluated_metadata(&context, carrier))
             .collect::<Result<Vec<_>, _>>()
             .unwrap(),
-        vec![n(2), n(1)]
+        &vec![n(2), n(1)],
     );
 
     let copied = run_metadata_update(
@@ -6622,13 +6629,13 @@ fn metadata_update_reorders_copies_and_clears_hidden_values() {
         vec![left, right],
     )
     .expect("metadata update should support copying");
-    assert_eq!(
-        copied
+    context.values().assert_same_representation_for_test(
+        &copied
             .iter()
             .map(|carrier| evaluated_metadata(&context, carrier))
             .collect::<Result<Vec<_>, _>>()
             .unwrap(),
-        vec![n(1), n(1)]
+        &vec![n(1), n(1)],
     );
 
     let cleared = run_metadata_update(
@@ -6648,13 +6655,13 @@ fn metadata_update_reorders_copies_and_clears_hidden_values() {
         vec![Value::metadata_carrier(n(1)), Value::metadata_carrier(n(2))],
     )
     .expect("metadata update should permit merging and clearing");
-    assert_eq!(
-        cleared
+    context.values().assert_same_representation_for_test(
+        &cleared
             .iter()
             .map(|carrier| evaluated_metadata(&context, carrier))
             .collect::<Result<Vec<_>, _>>()
             .unwrap(),
-        vec![n(3), Value::Dict(Dict::new_sync())]
+        &vec![n(3), Value::Dict(Dict::new_sync())],
     );
 }
 
@@ -6717,13 +6724,13 @@ fn metadata_update_resumes_without_replaying_a_completed_carrier() {
         panic!("metadata update should produce carrier outputs")
     };
     let carriers = list_to_value_items(&observer, &carriers).unwrap();
-    assert_eq!(
-        carriers
+    observer.values().assert_same_representation_for_test(
+        &carriers
             .iter()
             .map(|carrier| evaluated_metadata(&observer, carrier))
             .collect::<Result<Vec<_>, _>>()
             .unwrap(),
-        [n(1), n(2)]
+        &[n(1), n(2)],
     );
     assert_eq!(
         first_demands.load(Ordering::SeqCst),
@@ -6760,10 +6767,9 @@ fn metadata_update_preserves_input_arity_without_validating_output_length() {
         missing_error.to_string(),
         "list at builtin index is out of bounds"
     );
-    assert_eq!(
-        evaluated_metadata(&context, &too_short[0]).unwrap(),
-        n(7),
-        "a failed later projection must not poison an earlier valid one"
+    context.values().assert_same_representation_for_test(
+        &evaluated_metadata(&context, &too_short[0]).unwrap(),
+        &n(7),
     );
 
     let extra_forces = Arc::new(AtomicUsize::new(0));
@@ -6786,7 +6792,10 @@ fn metadata_update_preserves_input_arity_without_validating_output_length() {
     )
     .expect("extra update values should be ignored");
     assert_eq!(too_long.len(), 1);
-    assert_eq!(evaluated_metadata(&context, &too_long[0]).unwrap(), n(8));
+    context.values().assert_same_representation_for_test(
+        &evaluated_metadata(&context, &too_long[0]).unwrap(),
+        &n(8),
+    );
     assert_eq!(
         extra_forces.load(Ordering::SeqCst),
         0,
@@ -6831,7 +6840,10 @@ fn metadata_update_validates_inputs_strictly_but_not_hidden_metadata() {
         0,
         "input validation must not demand associated metadata"
     );
-    assert_eq!(evaluated_metadata(&context, &result[0]).unwrap(), n(11));
+    context.values().assert_same_representation_for_test(
+        &evaluated_metadata(&context, &result[0]).unwrap(),
+        &n(11),
+    );
     assert_eq!(hidden_forces.load(Ordering::SeqCst), 1);
 
     let error = run_metadata_update(
@@ -6910,9 +6922,9 @@ fn metadata_update_delegates_output_interpretation_to_list_at() {
         vec![initial_metadata()],
     )
     .expect("binary update output should remain indexable");
-    assert_eq!(
-        evaluated_metadata(&context, &binary[0]).unwrap(),
-        n(i64::from(b'x'))
+    context.values().assert_same_representation_for_test(
+        &evaluated_metadata(&context, &binary[0]).unwrap(),
+        &n(i64::from(b'x')),
     );
 
     let number = run_metadata_update(
@@ -6927,9 +6939,9 @@ fn metadata_update_delegates_output_interpretation_to_list_at() {
         error.to_string(),
         "list at builtin requires a list or binary value"
     );
-    assert_eq!(
+    context.values().assert_same_representation_for_test(
         error.into_permanent_failure().contexts(),
-        [evaluation_context_frame("wrap_metadata")]
+        &[evaluation_context_frame("wrap_metadata")],
     );
 }
 
@@ -6965,9 +6977,18 @@ fn metadata_reflection_update_is_inert_until_demand_and_shares_one_task() {
         "constructing, copying, and transporting carriers must not launch their task"
     );
 
-    assert_eq!(evaluated_metadata(&context, &outputs[1]).unwrap(), n(1));
-    assert_eq!(evaluated_metadata(&context, &outputs[0]).unwrap(), n(2));
-    assert_eq!(evaluated_metadata(&context, &copied_first).unwrap(), n(2));
+    context.values().assert_same_representation_for_test(
+        &evaluated_metadata(&context, &outputs[1]).unwrap(),
+        &n(1),
+    );
+    context.values().assert_same_representation_for_test(
+        &evaluated_metadata(&context, &outputs[0]).unwrap(),
+        &n(2),
+    );
+    context.values().assert_same_representation_for_test(
+        &evaluated_metadata(&context, &copied_first).unwrap(),
+        &n(2),
+    );
     assert_eq!(
         builds.load(Ordering::SeqCst),
         1,
@@ -7002,7 +7023,9 @@ fn metadata_reflection_update_blocks_and_resumes_on_its_shared_task() {
         .blocked_on()
         .expect("the metadata projection should expose its task wait");
     context.complete_wait_with_value(&wait.0, Value::List(List::from_values(vec![n(42)])));
-    assert_eq!(demand.advance(&context).unwrap(), n(42));
+    context
+        .values()
+        .assert_same_representation_for_test(&demand.advance(&context).unwrap(), &n(42));
 }
 
 #[test]
@@ -7064,7 +7087,10 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
         vec![initial_metadata(), initial_metadata()],
     )
     .expect("a short result should remain latent");
-    assert_eq!(evaluated_metadata(&short_context, &short[0]).unwrap(), n(7));
+    short_context.values().assert_same_representation_for_test(
+        &evaluated_metadata(&short_context, &short[0]).unwrap(),
+        &n(7),
+    );
     assert_eq!(
         evaluated_metadata(&short_context, &short[1])
             .expect_err("the missing projection should fail")
@@ -7090,7 +7116,10 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
         .expect("fresh test session should accept its reflection launcher");
     let long = run_metadata_reflection_update(&long_context, n(0), vec![initial_metadata()])
         .expect("an extra result should be ignored");
-    assert_eq!(evaluated_metadata(&long_context, &long[0]).unwrap(), n(8));
+    long_context.values().assert_same_representation_for_test(
+        &evaluated_metadata(&long_context, &long[0]).unwrap(),
+        &n(8),
+    );
 
     let non_list_context = annotation_test_context();
     non_list_context
@@ -7136,11 +7165,12 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
             .to_string(),
         "one metadata projection failed"
     );
-    assert_eq!(
-        evaluated_metadata(&partial_context, &partial[1]).unwrap(),
-        n(9),
-        "one failed result must not poison a sibling projection"
-    );
+    partial_context
+        .values()
+        .assert_same_representation_for_test(
+            &evaluated_metadata(&partial_context, &partial[1]).unwrap(),
+            &n(9),
+        );
 
     let invalid_context = annotation_test_context();
     let error = run_metadata_reflection_update(&invalid_context, n(0), vec![n(1)])
@@ -7183,9 +7213,9 @@ fn metadata_reflection_update_is_demanded_by_seq_and_worker_spark() {
         .expect("fresh test session should accept its reflection launcher");
     let seq_outputs =
         run_metadata_reflection_update(&seq_context, n(0), vec![initial_metadata()]).unwrap();
-    assert_eq!(
-        evaluate_strategy(&seq_context, Builtin::Seq, seq_outputs[0].clone(), n(42)).unwrap(),
-        n(42)
+    seq_context.values().assert_same_representation_for_test(
+        &evaluate_strategy(&seq_context, Builtin::Seq, seq_outputs[0].clone(), n(42)).unwrap(),
+        &n(42),
     );
     assert_eq!(seq_builds.load(Ordering::SeqCst), 1);
 
@@ -7210,7 +7240,9 @@ fn metadata_reflection_update_is_demanded_by_seq_and_worker_spark() {
         n(43),
     )
     .expect("spark should immediately return its target");
-    assert_eq!(result, n(43));
+    spark_context
+        .values()
+        .assert_same_representation_for_test(&result, &n(43));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while spark_builds.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
         std::thread::yield_now();
@@ -7261,7 +7293,9 @@ fn list_annotations_rebalance_and_flatten_lists() {
         ))),
     ))
     .expect("binary annotation should evaluate");
-    assert_eq!(binary, Value::binary_from_text("Hi!"));
+    context
+        .values()
+        .assert_same_representation_for_test(&binary, &Value::binary_from_text("Hi!"));
 
     let array = eval(builtin2_expr(
         Builtin::Anno,
@@ -7274,9 +7308,9 @@ fn list_annotations_rebalance_and_flatten_lists() {
     let Value::List(array) = array else {
         panic!("array annotation should produce a list");
     };
-    assert_eq!(
-        list_to_value_items(&context, &array).unwrap(),
-        vec![n(72), n(105)]
+    context.values().assert_same_representation_for_test(
+        &list_to_value_items(&context, &array).unwrap(),
+        &vec![n(72), n(105)],
     );
 }
 
@@ -7331,10 +7365,10 @@ fn binary_annotation_resumes_without_replaying_a_completed_prefix() {
         .values()
         .collect_managed_for_test()
         .expect("the assigned binary checkpoint must remain live");
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+    observer.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
             .expect("binary extraction should resume"),
-        Value::binary_from_text("ab")
+        &Value::binary_from_text("ab"),
     );
     assert_eq!(
         prefix_demands.load(Ordering::SeqCst),
@@ -7392,7 +7426,9 @@ fn unknown_annotations_pass_through_targets() {
     ))
     .expect("unknown annotations should pass through");
 
-    assert_eq!(value, n(42));
+    context
+        .values()
+        .assert_same_representation_for_test(&value, &n(42));
 }
 
 fn reflection_annotation(context: &EvalContext, effect: Value, target: Value) -> Value {
@@ -7416,10 +7452,10 @@ fn reflection_source_reserves_inside_and_activates_after_evaluator_access_closes
         .expect("fresh test runtime should accept its reflection launcher");
 
     let value = Value::reflection_task_result(context.values(), n(0));
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
             .expect("reflection result should complete"),
-        unit_value()
+        &unit_value(),
     );
     assert_eq!(
         builds.load(Ordering::SeqCst),
@@ -7487,9 +7523,9 @@ fn completed_reflection_source_retains_no_external_owner_or_value_domain_cycle()
             }))
             .expect("fresh retirement fixture should accept its reflection launcher");
         let value = Value::reflection_task_result(&values, n(0));
-        assert_eq!(
-            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
-            n(42)
+        context.values().assert_same_representation_for_test(
+            &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
+            &n(42),
         );
         assert_eq!(
             values.external_owner_count_for_test(),
@@ -7527,14 +7563,14 @@ fn reflection_task_result_returns_arbitrary_lazy_value_once() {
 
     let computation = Value::reflection_task_result(context.values(), n(0));
     let copy = computation.clone();
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &computation)
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &computation)
             .unwrap(),
-        n(42)
+        &n(42),
     );
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &copy).unwrap(),
-        n(42)
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &copy).unwrap(),
+        &n(42),
     );
     assert_eq!(builds.load(Ordering::SeqCst), 1);
     assert_eq!(result_forces.load(Ordering::SeqCst), 1);
@@ -7585,7 +7621,9 @@ fn reflection_task_result_survives_first_session_close_and_returns_completion_va
         "closing the first demand session must not retire the runtime-owned lazy route"
     );
     observer.complete_wait_with_value(&resumed_wait.0, n(43));
-    assert_eq!(observer_demand.advance(&observer).unwrap(), n(43));
+    observer
+        .values()
+        .assert_same_representation_for_test(&observer_demand.advance(&observer).unwrap(), &n(43));
 }
 
 #[test]
@@ -7647,10 +7685,9 @@ fn reflection_completion_activation_and_first_session_close_have_both_orders() {
             crate::evaluation::EvaluationSessionRun::Complete(_)
         ));
         assert_eq!(background.task_registry_counts().reflection_active, 0);
-        assert_eq!(
-            promise.assignment(observer.values()),
-            Some(Ok(n(43))),
-            "terminal publication should assign the completion promise exactly once"
+        observer.values().assert_same_representation_for_test(
+            &promise.assignment(observer.values()),
+            &Some(Ok(n(43))),
         );
         let lifecycle_after = observer
             .values()
@@ -7762,9 +7799,9 @@ fn reflection_task_result_preserves_failure_and_transfers_reporting_responsibili
     )
     .expect_err("a failed result task must fail its lazy consumer");
     assert_eq!(error.to_string(), "reflection result failed");
-    assert_eq!(
-        failure_context_items(&error),
-        [evaluation_context_frame("reflection_task"), producer_frame,]
+    context.values().assert_same_representation_for_test(
+        &failure_context_items(&error),
+        &[evaluation_context_frame("reflection_task"), producer_frame],
     );
     assert_eq!(
         context.task_registry_counts().unacknowledged_failures,
@@ -7837,16 +7874,16 @@ fn reflection_gate_waits_before_continuing_target_demand() {
     assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 0);
 
     context.complete_wait(&wait.0);
-    assert_eq!(
-        first_demand
+    context.values().assert_same_representation_for_test(
+        &first_demand
             .advance(&context)
             .expect("completed gate should continue target demand"),
-        n(42)
+        &n(42),
     );
     assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &gate).unwrap(),
-        n(42)
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &gate).unwrap(),
+        &n(42),
     );
     assert_eq!(forced.load(std::sync::atomic::Ordering::SeqCst), 1);
     drop(gate_root);
@@ -7869,14 +7906,12 @@ fn running_reflection_gate_blocks_an_observer_session_without_poisoning_its_cach
         .advance(&observer)
         .expect_err("cross-session gate task should block");
     assert!(cross_session.blocked_on().is_some());
-    assert_eq!(
-        gate_lazy.cached(owner.values()),
-        None,
-        "a live cross-session dependency must not become a permanent lazy failure"
-    );
+    assert!(gate_lazy.cached(owner.values()).is_none());
 
     owner.complete_wait(&blocked.blocked_on().unwrap().0);
-    assert_eq!(observer_demand.advance(&observer).unwrap(), n(42));
+    observer
+        .values()
+        .assert_same_representation_for_test(&observer_demand.advance(&observer).unwrap(), &n(42));
 }
 
 #[test]
@@ -7895,16 +7930,16 @@ fn reflection_gate_memoizes_task_failure() {
 
     let first = demand.advance(&context).unwrap_err();
     assert_eq!(first.to_string(), "reflection task failed deliberately");
-    assert_eq!(
-        failure_context_items(&first),
-        [evaluation_context_frame("reflection_annotation")]
+    context.values().assert_same_representation_for_test(
+        &failure_context_items(&first),
+        &[evaluation_context_frame("reflection_annotation")],
     );
     let second =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &gate).unwrap_err();
     assert_eq!(second.to_string(), "reflection task failed deliberately");
-    assert_eq!(
-        failure_context_items(&second),
-        [evaluation_context_frame("reflection_annotation")]
+    context.values().assert_same_representation_for_test(
+        &failure_context_items(&second),
+        &[evaluation_context_frame("reflection_annotation")],
     );
 }
 
@@ -7953,13 +7988,15 @@ fn assert_structured_reflection_gate_failure(stage: GateFailureStage) {
         .values()
         .collect_managed_for_test()
         .expect("the terminal gate cache must survive collection after launch");
-    assert_eq!(first.emission_value(), Some(&emission));
-    assert_eq!(
+    context
+        .values()
+        .assert_same_representation_for_test(&first.emission_value(), &Some(&emission));
+    context.values().assert_same_representation_for_test(
         first.contexts(),
-        [
+        &[
             evaluation_context_frame("reflection_annotation"),
             producer_frame,
-        ]
+        ],
     );
     let cached = gate_lazy
         .cached(context.values())
@@ -7975,7 +8012,9 @@ fn assert_structured_reflection_gate_failure(stage: GateFailureStage) {
     let Value::Dict(diagnostic) = failure_diagnostic_value(&second) else {
         panic!("structured gate failure should project to a diagnostic dictionary")
     };
-    assert_eq!(diagnostic.get(&detail), Some(&n(7)));
+    context
+        .values()
+        .assert_same_representation_for_test(&diagnostic.get(&detail), &Some(&n(7)));
     assert_eq!(
         context.task_registry_counts().unacknowledged_failures,
         0,
@@ -8037,7 +8076,9 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_call() {
     );
 
     context.complete_wait(&wait);
-    assert_eq!(demand.advance(&context).unwrap(), n(42));
+    context
+        .values()
+        .assert_same_representation_for_test(&demand.advance(&context).unwrap(), &n(42));
 }
 
 #[test]
@@ -8079,10 +8120,10 @@ fn reflection_gate_blocks_and_resumes_an_exact_net_function_call() {
     let application = demand
         .advance(&context)
         .expect("completed gate should expose the function application");
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &application)
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &application)
             .unwrap(),
-        n(42)
+        &n(42),
     );
 }
 
@@ -8134,7 +8175,9 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_operator_call() {
     ));
 
     context.complete_wait(&wait.0);
-    assert_eq!(demand.advance(&context).unwrap(), n(42));
+    context
+        .values()
+        .assert_same_representation_for_test(&demand.advance(&context).unwrap(), &n(42));
 }
 
 #[test]
@@ -8201,9 +8244,9 @@ fn seq_forces_its_first_argument_before_continuing_target_demand() {
     let result = apply_values(&context, Value::Builtin(Builtin::Seq), vec![n(0), target]).unwrap();
 
     assert_eq!(target_forces.load(std::sync::atomic::Ordering::SeqCst), 0);
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &result).unwrap(),
-        n(42)
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &result).unwrap(),
+        &n(42),
     );
     assert_eq!(target_forces.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
@@ -8223,9 +8266,9 @@ fn zero_worker_spark_returns_target_without_forcing_work() {
     )
     .unwrap();
 
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &result).unwrap(),
-        n(42)
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &result).unwrap(),
+        &n(42),
     );
 }
 
@@ -8253,7 +8296,9 @@ fn strategies_demand_hidden_metadata_without_exposing_the_carrier() {
     let result = evaluate_strategy(&context, Builtin::Seq, carrier, target)
         .expect("seq should successfully demand hidden metadata");
     assert_eq!(metadata_forces.load(Ordering::SeqCst), 1);
-    assert_eq!(result, n(42));
+    context
+        .values()
+        .assert_same_representation_for_test(&result, &n(42));
     assert_eq!(target_forces.load(Ordering::SeqCst), 1);
 }
 
@@ -8273,9 +8318,9 @@ fn zero_worker_spark_discards_hidden_metadata_demand() {
     )
     .expect("spark should return its target with no workers");
 
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &result).unwrap(),
-        n(42)
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &result).unwrap(),
+        &n(42),
     );
 }
 
@@ -8341,7 +8386,9 @@ fn worker_spark_demands_metadata_behind_a_lazy_carrier_shell() {
 
     let result = evaluate_strategy(&context, Builtin::Spark, lazy_carrier, n(42))
         .expect("spark should immediately return its target");
-    assert_eq!(result, n(42));
+    context
+        .values()
+        .assert_same_representation_for_test(&result, &n(42));
     shell_receiver
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("worker should demand the carrier shell");
@@ -8371,7 +8418,9 @@ fn metadata_strategy_failures_are_cached_and_seq_propagates_them() {
 
     let result = evaluate_strategy(&context, Builtin::Spark, carrier.clone(), n(42))
         .expect("detached metadata failure must not replace the spark target");
-    assert_eq!(result, n(42));
+    context
+        .values()
+        .assert_same_representation_for_test(&result, &n(42));
     attempt_receiver
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("worker should demand the failing metadata");
@@ -8401,10 +8450,10 @@ fn strategies_stop_at_nested_metadata_carriers() {
     });
     let outer = Value::metadata_carrier(Value::metadata_carrier(hidden));
 
-    assert_eq!(
-        evaluate_strategy(&context, Builtin::Seq, outer.clone(), n(42))
+    context.values().assert_same_representation_for_test(
+        &evaluate_strategy(&context, Builtin::Seq, outer.clone(), n(42))
             .expect("seq should stop after demanding one hidden metadata value"),
-        n(42)
+        &n(42),
     );
     assert_eq!(hidden_forces.load(Ordering::SeqCst), 0);
 
@@ -8573,10 +8622,10 @@ fn metadata_seq_preserves_retryable_promise_blockage() {
     assert!(blocked.blocked_on().is_some());
 
     set_promise(&observer, &promise, n(7)).unwrap();
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &applied)
+    observer.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &applied)
             .expect("seq should resume after hidden metadata completes"),
-        n(42)
+        &n(42),
     );
 }
 
@@ -8610,7 +8659,9 @@ fn completed_metadata_updates_release_sources_and_task_records() {
 
     let result = evaluate_strategy(&context, Builtin::Seq, outputs[0].clone(), n(42))
         .expect("seq should complete the derived metadata");
-    assert_eq!(result, n(42));
+    context
+        .values()
+        .assert_same_representation_for_test(&result, &n(42));
     context
         .values()
         .collect_managed_for_test()
@@ -8659,8 +8710,8 @@ fn strategy_annotations_share_builtin_semantics() {
         vec![spark_annotation, n(42)],
     )
     .unwrap();
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &result).unwrap(),
-        n(42)
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &result).unwrap(),
+        &n(42),
     );
 }

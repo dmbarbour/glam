@@ -2219,6 +2219,16 @@ inventory relatch:
            relation, while message strings remain ordinary comparisons. This
            slice reduces the central evaluator equality inventory from 86 to
            60 and the all-target inventory from 371 to 345.
+         - **D.2h.2g — central evaluator fixture migration complete
+           2026-09-30.** Associated-metadata projection, reflection-task
+           results and gates, list annotations, and `seq`/`spark` strategies
+           now compare semantic values through their live evaluator context.
+           Sealed carriers required no new observation surface: the existing
+           representation relation already preserves their opaque identity.
+           Empty caches use presence predicates, while exact shared task and
+           failure identities retain their narrower identity assertions.
+           `src/eval/tests.rs` now contributes no equality errors; this slice
+           reduces the all-target inventory from 345 to 285.
       3. Add owner-local recursive test relations for `g_syntax` carriers and
          migrate compiler/front-end fixtures without giving semantic values
          syntax-layer equality traits.
