@@ -2467,6 +2467,15 @@ inventory relatch:
            `src/evaluation/tests.rs` fixture failures and reduces the
            all-target compiler inventory from 219 to 188 without changing
            demand, wake, abandonment, or retry semantics.
+         - **D.2h.2ac — evaluation-machine publication ownership slice
+           complete 2026-09-30.** Managed lazy-root construction, worker
+           promise publication, terminal task results, redundant deferred
+           registration, nested scheduled evaluation, and patient-wait
+           fixtures now duplicate semantic edges only under their owning
+           access or context. This clears six more
+           `src/evaluation/tests.rs` fixture failures and reduces the
+           all-target compiler inventory from 188 to 182 without changing
+           publication, collection, or scheduling behavior.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived

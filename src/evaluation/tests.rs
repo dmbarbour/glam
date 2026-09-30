@@ -2647,7 +2647,7 @@ fn rooted_semantic_lazy_value(
     values.with_runtime_value_access(|access| {
         let lazy = LazyValue::semantic_thunk_in(&access, label, thunk);
         let _lazy_root = lazy.root_in(&access);
-        let value = access.root_runtime_value(Value::Lazy(lazy.clone()));
+        let value = access.root_runtime_value(Value::Lazy(lazy.duplicate_in(&access)));
         (lazy, value)
     })
 }
@@ -3100,7 +3100,8 @@ impl EvaluationTaskMachine for AssignPromiseAfterRelease {
             .recv_timeout(Duration::from_secs(2))
             .expect("test should release the promise producer");
         let published = self.values.with_runtime_value_access(|access| {
-            self.promise.publish(&access, Ok(self.value.clone()))
+            self.promise
+                .publish(&access, Ok(access.duplicate_value(&self.value)))
         });
         let published =
             published.expect_without_debug("worker should resolve the host promise once");
@@ -3364,7 +3365,7 @@ fn terminal_task_wait_root_survives_collection_until_handle_drop() {
     let expected = Value::binary_from_text("terminal task root");
     let task = context
         .schedule_task({
-            let expected = expected.clone();
+            let expected = expected.duplicate_for_test(context.values());
             move |_| Ok(Box::new(CompleteWithValue(Some(expected))))
         })
         .expect("the value-returning task should schedule");
@@ -4101,7 +4102,7 @@ fn redundant_deferred_registration_observes_the_canonical_lazy_cache() {
 
     let redundant_registration = {
         let context = context.clone();
-        let lazy = lazy.clone();
+        let lazy = lazy.duplicate_for_test(context.values());
         let failure = failure.clone();
         std::thread::spawn(move || {
             context
@@ -4412,11 +4413,13 @@ fn scheduled_nested_dependency_runs_without_mutator() {
         }
     });
 
-    let nested_for_outer = nested.clone();
+    let nested_for_outer = nested.duplicate_for_test(context.values());
+    let nested_values = context.values().clone();
     let outer =
         LazyValue::semantic_thunk(context.values(), "outer scheduled dependency", move |ctx| {
-            ctx.context()
-                .evaluate_compatibility_whnf(&Value::Lazy(nested_for_outer.clone()))
+            ctx.context().evaluate_compatibility_whnf(&Value::Lazy(
+                nested_for_outer.duplicate_for_test(&nested_values),
+            ))
         });
 
     let actual =
@@ -4610,7 +4613,7 @@ fn patient_deferred_demand_retries_when_disturbance_races_no_progress() {
 
     let (result_sender, result_receiver) = mpsc::channel();
     let evaluation_context = context.clone();
-    let evaluated_lazy = lazy.clone();
+    let evaluated_lazy = lazy.duplicate_for_test(context.values());
     let evaluation = std::thread::spawn(move || {
         result_sender
             .send(crate::evaluation::EvalContext::evaluate_compatibility_whnf(
