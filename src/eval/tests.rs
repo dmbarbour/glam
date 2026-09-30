@@ -3892,8 +3892,10 @@ fn evaluates_zero_based_list_at_for_lists_and_compact_binaries() {
     ))
     .expect("list at should index mixed list segments");
 
-    assert_eq!(binary_item, n(i64::from(b'B')));
-    assert_eq!(mixed_item, n(i64::from(b'B')));
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&binary_item, &n(i64::from(b'B')));
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&mixed_item, &n(i64::from(b'B')));
 
     let out_of_bounds = eval_closed_expr(&builtin2_expr(
         Builtin::ListAt,
@@ -3933,10 +3935,10 @@ fn compiler_pattern_list_predicates_return_pass_fail_effects() {
             .into(),
         )),
     ] {
-        assert_eq!(
-            run_pattern_builtin(Builtin::PatternIsList, value)
+        crate::core::test_value_factory().assert_same_representation_for_test(
+            &run_pattern_builtin(Builtin::PatternIsList, value)
                 .expect("logical list values should match"),
-            [unit_value()]
+            &[unit_value()],
         );
     }
     assert!(
@@ -3946,10 +3948,10 @@ fn compiler_pattern_list_predicates_return_pass_fail_effects() {
     );
 
     for value in [Value::binary_from_text(""), Value::List(List::empty())] {
-        assert_eq!(
-            run_pattern_builtin(Builtin::PatternListIsEmpty, value)
+        crate::core::test_value_factory().assert_same_representation_for_test(
+            &run_pattern_builtin(Builtin::PatternListIsEmpty, value)
                 .expect("empty logical lists should match"),
-            [unit_value()]
+            &[unit_value()],
         );
     }
     for value in [
@@ -3977,9 +3979,9 @@ fn compiler_pattern_equality_mismatches_incompatible_values() {
             Value::List(List::from_values(vec![n(65), n(66)])),
         ),
     ] {
-        assert_eq!(
-            run_pattern_equal(expected, actual).expect("matching literals should succeed"),
-            [unit_value()]
+        crate::core::test_value_factory().assert_same_representation_for_test(
+            &run_pattern_equal(expected, actual).expect("matching literals should succeed"),
+            &[unit_value()],
         );
     }
 
@@ -4068,9 +4070,9 @@ fn compiler_pattern_binary_list_equality_resumes_without_replaying_the_literal()
     let Value::List(results) = handled else {
         panic!("the list effect handler should return a list")
     };
-    assert_eq!(
-        list_to_value_items(&observer, &results).expect("the pattern result should be readable"),
-        [unit_value()]
+    observer.values().assert_same_representation_for_test(
+        &list_to_value_items(&observer, &results).expect("the pattern result should be readable"),
+        &[unit_value()],
     );
     assert_eq!(literal_demands.load(Ordering::SeqCst), 1);
     drop(application_root);
@@ -4080,14 +4082,14 @@ fn compiler_pattern_binary_list_equality_resumes_without_replaying_the_literal()
 fn compiler_pattern_path_equality_matches_keyable_lists_directionally() {
     let foo = key_value(&Key::atom_from_text("foo"));
     let expected = Value::List(List::from_values(vec![foo.clone(), n(42)]));
-    assert_eq!(
-        run_pattern_builtin2(
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &run_pattern_builtin2(
             Builtin::PatternPathEqual,
             expected.clone(),
             Value::List(List::from_values(vec![foo.clone(), n(42)])),
         )
         .expect("equal computed paths should match"),
-        [unit_value()]
+        &[unit_value()],
     );
     for actual in [
         Value::List(List::from_values(vec![foo, n(43)])),
@@ -4187,9 +4189,9 @@ fn compiler_pattern_path_equality_resumes_without_replaying_the_expected_path() 
     let Value::List(results) = handled else {
         panic!("the list effect handler should return a list")
     };
-    assert_eq!(
-        list_to_value_items(&observer, &results).expect("the pattern result should be readable"),
-        [unit_value()]
+    observer.values().assert_same_representation_for_test(
+        &list_to_value_items(&observer, &results).expect("the pattern result should be readable"),
+        &[unit_value()],
     );
     assert_eq!(expected_demands.load(Ordering::SeqCst), 1);
     drop(application_root);
@@ -4217,15 +4219,18 @@ fn compiler_pattern_dictionary_operations_preserve_remainders() {
     let Value::Dict(parts) = parts else {
         panic!("dictionary extraction should return a parts dictionary");
     };
-    assert_eq!(parts.get(&*keys::VALUE), Some(&n(7)));
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&parts.get(&*keys::VALUE), &Some(&n(7)));
     let Some(Value::Dict(rest)) = parts.get(&*keys::REST) else {
         panic!("dictionary extraction should retain a dictionary remainder");
     };
-    assert_eq!(rest.get(&other), Some(&n(9)));
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&rest.get(&other), &Some(&n(9)));
     let Some(Value::Dict(child)) = rest.get(&foo) else {
         panic!("the nonempty nested remainder should retain its parent path");
     };
-    assert_eq!(child.get(&keep), Some(&n(8)));
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&child.get(&keep), &Some(&n(8)));
     assert!(!child.contains_key(&bar));
 }
 
@@ -4301,7 +4306,9 @@ fn compiler_pattern_dictionary_take_resumes_without_replaying_a_completed_prefix
     let Value::Dict(parts) = parts else {
         panic!("dictionary extraction should return a parts dictionary")
     };
-    assert_eq!(parts.get(&*keys::VALUE), Some(&n(7)));
+    observer
+        .values()
+        .assert_same_representation_for_test(&parts.get(&*keys::VALUE), &Some(&n(7)));
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
     drop(application_root);
 }
@@ -4322,10 +4329,10 @@ fn compiler_pattern_dictionary_mismatches_are_pass_fail() {
         );
     }
 
-    assert_eq!(
-        run_pattern_builtin(Builtin::PatternIsDict, Value::Dict(Dict::new_sync()))
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &run_pattern_builtin(Builtin::PatternIsDict, Value::Dict(Dict::new_sync()))
             .expect("dictionary values should pass the kind check"),
-        [unit_value()]
+        &[unit_value()],
     );
     assert!(
         run_pattern_builtin(Builtin::PatternIsDict, n(1))
@@ -4341,10 +4348,10 @@ fn compiler_pattern_dictionary_mismatches_are_pass_fail() {
             |_| Ok(Value::Dict(Dict::new_sync())),
         )),
     );
-    assert_eq!(
-        run_pattern_builtin(Builtin::PatternDictIsEmpty, Value::Dict(logically_empty))
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &run_pattern_builtin(Builtin::PatternDictIsEmpty, Value::Dict(logically_empty))
             .expect("nested and deferred undefined values should be logically empty"),
-        [unit_value()]
+        &[unit_value()],
     );
     assert!(
         run_pattern_builtin(
@@ -4430,9 +4437,9 @@ fn compiler_pattern_dictionary_emptiness_resumes_without_replaying_prior_members
     let Value::List(results) = handled else {
         panic!("the list effect handler should return a list")
     };
-    assert_eq!(
-        list_to_value_items(&observer, &results).expect("the pattern result should be readable"),
-        [unit_value()]
+    observer.values().assert_same_representation_for_test(
+        &list_to_value_items(&observer, &results).expect("the pattern result should be readable"),
+        &[unit_value()],
     );
     assert_eq!(first_demands.load(Ordering::SeqCst), 1);
     drop(application_root);
@@ -4460,11 +4467,12 @@ fn compiler_pattern_optional_dictionary_operations_preserve_absence_and_errors()
     let Value::Dict(parts) = parts else {
         panic!("optional dictionary extraction should return a parts dictionary");
     };
-    assert_eq!(
-        parts.get(&*keys::VALUE),
-        Some(&Value::Dict(Dict::new_sync()))
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &parts.get(&*keys::VALUE),
+        &Some(&Value::Dict(Dict::new_sync())),
     );
-    assert_eq!(parts.get(&*keys::REST), Some(&Value::Dict(absent)));
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&parts.get(&*keys::REST), &Some(&Value::Dict(absent)));
 
     let present = Dict::new_sync().insert(
         foo.clone(),
@@ -4485,7 +4493,8 @@ fn compiler_pattern_optional_dictionary_operations_preserve_absence_and_errors()
     let Value::Dict(parts) = parts else {
         panic!("optional dictionary extraction should return a parts dictionary");
     };
-    assert_eq!(parts.get(&*keys::VALUE), Some(&n(7)));
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&parts.get(&*keys::VALUE), &Some(&n(7)));
 
     let wrong_intermediate = Value::Dict(Dict::new_sync().insert(foo.clone(), n(1)));
     assert!(
@@ -4537,10 +4546,11 @@ fn compiler_pattern_list_decomposition_preserves_compact_remainders() {
     let Value::Dict(uncons) = uncons else {
         panic!("uncons should return a parts dictionary");
     };
-    assert_eq!(uncons.get(&*keys::HEAD), Some(&n(i64::from(b'A'))));
-    assert_eq!(
-        uncons.get(&*keys::TAIL),
-        Some(&Value::binary_from_text("B"))
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&uncons.get(&*keys::HEAD), &Some(&n(i64::from(b'A'))));
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &uncons.get(&*keys::TAIL),
+        &Some(&Value::binary_from_text("B")),
     );
 
     let [uncons]: [Value; 1] = run_pattern_builtin(
@@ -4553,15 +4563,16 @@ fn compiler_pattern_list_decomposition_preserves_compact_remainders() {
     let Value::Dict(uncons) = uncons else {
         panic!("uncons should return a parts dictionary");
     };
-    assert_eq!(uncons.get(&*keys::HEAD), Some(&n(1)));
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&uncons.get(&*keys::HEAD), &Some(&n(1)));
     let Some(Value::List(tail)) = uncons.get(&*keys::TAIL) else {
         panic!("a value-list remainder should stay a list");
     };
-    assert_eq!(
-        pop_list_front(&test_context(), tail)
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &pop_list_front(&test_context(), tail)
             .expect("flat tail should be readable")
             .map(|(head, _)| head),
-        Some(n(2))
+        &Some(n(2)),
     );
 
     let [unsnoc]: [Value; 1] =
@@ -4572,11 +4583,12 @@ fn compiler_pattern_list_decomposition_preserves_compact_remainders() {
     let Value::Dict(unsnoc) = unsnoc else {
         panic!("unsnoc should return a parts dictionary");
     };
-    assert_eq!(
-        unsnoc.get(&*keys::INIT),
-        Some(&Value::binary_from_text("A"))
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &unsnoc.get(&*keys::INIT),
+        &Some(&Value::binary_from_text("A")),
     );
-    assert_eq!(unsnoc.get(&*keys::LAST), Some(&n(i64::from(b'B'))));
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&unsnoc.get(&*keys::LAST), &Some(&n(i64::from(b'B'))));
 }
 
 #[test]
@@ -4620,7 +4632,8 @@ fn compiler_pattern_unsnoc_does_not_force_an_unrelated_prefix_hole() {
     let Value::Dict(parts) = parts else {
         panic!("unsnoc should return a parts dictionary");
     };
-    assert_eq!(parts.get(&*keys::LAST), Some(&n(9)));
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&parts.get(&*keys::LAST), &Some(&n(9)));
     assert!(matches!(parts.get(&*keys::INIT), Some(Value::List(_))));
 }
 
@@ -4668,7 +4681,9 @@ fn compiler_pattern_unsnoc_resumes_a_promised_suffix_without_forcing_its_prefix(
     let Value::Dict(parts) = parts else {
         panic!("unsnoc should return a parts dictionary")
     };
-    assert_eq!(parts.get(&*keys::LAST), Some(&n(9)));
+    observer
+        .values()
+        .assert_same_representation_for_test(&parts.get(&*keys::LAST), &Some(&n(9)));
 }
 
 #[test]
@@ -4682,14 +4697,14 @@ fn text_lines_preserves_empty_and_trailing_lines() {
         panic!("text lines should produce a list");
     };
 
-    assert_eq!(
-        list_to_value_items(&test_context(), &lines).expect("line list should be readable"),
-        vec![
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &list_to_value_items(&test_context(), &lines).expect("line list should be readable"),
+        &vec![
             Value::binary_from_text("first"),
             Value::binary_from_text(""),
             Value::binary_from_text("third"),
             Value::binary_from_text(""),
-        ]
+        ],
     );
 }
 
@@ -4727,9 +4742,9 @@ fn text_lines_resumes_a_promised_item_without_replaying_its_prefix() {
     else {
         panic!("text lines should produce a list")
     };
-    assert_eq!(
-        list_to_value_items(&observer, &lines).expect("line list should be readable"),
-        vec![Value::binary_from_text("ab"), Value::binary_from_text("c")]
+    observer.values().assert_same_representation_for_test(
+        &list_to_value_items(&observer, &lines).expect("line list should be readable"),
+        &vec![Value::binary_from_text("ab"), Value::binary_from_text("c")],
     );
     assert_eq!(
         prefix_demands.load(Ordering::SeqCst),
@@ -4768,9 +4783,9 @@ fn text_lines_resumes_a_promised_list_chunk() {
     else {
         panic!("text lines should produce a list")
     };
-    assert_eq!(
-        list_to_value_items(&observer, &lines).expect("line list should be readable"),
-        vec![Value::binary_from_text("ab"), Value::binary_from_text("c")]
+    observer.values().assert_same_representation_for_test(
+        &list_to_value_items(&observer, &lines).expect("line list should be readable"),
+        &vec![Value::binary_from_text("ab"), Value::binary_from_text("c")],
     );
 }
 
@@ -4795,13 +4810,13 @@ fn evaluates_split_and_split_end_builtins() {
     let Value::Dict(split) = split else {
         panic!("split should return a dictionary");
     };
-    assert_eq!(
-        split.get(&Key::atom_from_text("left")),
-        Some(&Value::binary_from_text("He"))
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &split.get(&Key::atom_from_text("left")),
+        &Some(&Value::binary_from_text("He")),
     );
-    assert_eq!(
-        split.get(&Key::atom_from_text("right")),
-        Some(&Value::binary_from_text("llo"))
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &split.get(&Key::atom_from_text("right")),
+        &Some(&Value::binary_from_text("llo")),
     );
 
     let Value::Dict(split_end) = split_end else {
@@ -4820,16 +4835,16 @@ fn evaluates_split_and_split_end_builtins() {
         panic!("split_end right should be a list");
     };
 
-    assert_eq!(
-        list_to_value_items(&test_context(), prefix).expect("prefix should be readable"),
-        vec![n(1), n(2), Value::Number(Number::from_u8(b'a'))]
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &list_to_value_items(&test_context(), prefix).expect("prefix should be readable"),
+        &vec![n(1), n(2), Value::Number(Number::from_u8(b'a'))],
     );
-    assert_eq!(
-        list_to_value_items(&test_context(), suffix).expect("suffix should be readable"),
-        vec![
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &list_to_value_items(&test_context(), suffix).expect("suffix should be readable"),
+        &vec![
             Value::Number(Number::from_u8(b'b')),
-            Value::Number(Number::from_u8(b'c'))
-        ]
+            Value::Number(Number::from_u8(b'c')),
+        ],
     );
 }
 
@@ -4864,7 +4879,7 @@ fn evaluates_function_net_application_lazily() {
 
     let value = eval_closed_expr(&expr).expect("lambda application should evaluate");
 
-    assert_eq!(value, n(3));
+    crate::core::test_value_factory().assert_same_representation_for_test(&value, &n(3));
 }
 
 #[test]
@@ -4887,7 +4902,7 @@ fn function_nets_capture_outer_values() {
     ))
     .expect("nested functions should evaluate");
 
-    assert_eq!(value, n(42));
+    crate::core::test_value_factory().assert_same_representation_for_test(&value, &n(42));
 }
 
 #[test]
@@ -4919,21 +4934,21 @@ fn partial_builtins_share_lazy_arguments() {
 
     assert!(matches!(partial, Value::PartialBuiltin(_)));
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 0);
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &context,
             &apply_value(&context, partial.clone(), n(2)).unwrap(),
         )
         .unwrap(),
-        n(42)
+        &n(42),
     );
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &context,
             &apply_value(&context, partial, n(3)).unwrap(),
         )
         .unwrap(),
-        n(43)
+        &n(43),
     );
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
@@ -4972,10 +4987,10 @@ fn net_list_literals_store_lazy_values_without_exporting_list_holes() {
     };
     assert!(matches!(item, Value::Lazy(_)));
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 0);
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &item)
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &item)
             .unwrap(),
-        n(42)
+        &n(42),
     );
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert!(pop_list_front(&test_context(), &tail).unwrap().is_none());
@@ -4993,7 +5008,7 @@ fn closed_semantic_list_holes_remain_host_observable() {
     let list = List::from_thunk(hole.into());
 
     let (value, tail) = pop_list_front(&test_context(), &list).unwrap().unwrap();
-    assert_eq!(value, n(42));
+    crate::core::test_value_factory().assert_same_representation_for_test(&value, &n(42));
     assert!(pop_list_front(&test_context(), &tail).unwrap().is_none());
 }
 
@@ -5006,7 +5021,7 @@ fn dropped_arguments_do_not_prevent_later_bindings_from_resolving() {
     )
     .expect("function with dropped argument should evaluate");
 
-    assert_eq!(value, n(42));
+    crate::core::test_value_factory().assert_same_representation_for_test(&value, &n(42));
 }
 
 #[test]
@@ -5024,7 +5039,7 @@ fn method_objects_apply_via_apply_member() {
     ))
     .expect("method object application should evaluate");
 
-    assert_eq!(value, n(42));
+    crate::core::test_value_factory().assert_same_representation_for_test(&value, &n(42));
 }
 
 #[test]
@@ -5066,7 +5081,7 @@ fn effect_values_apply_by_extending_the_effect_function() {
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &value)
     })
     .expect("extended effect function should evaluate with an API");
-    assert_eq!(value, n(42));
+    crate::core::test_value_factory().assert_same_representation_for_test(&value, &n(42));
 }
 
 #[test]
@@ -5089,10 +5104,10 @@ fn effect_apply_resumes_from_its_exact_function_operand() {
 
     set_promise(&owner, &function, Value::Builtin(Builtin::Add))
         .expect("the owner should resolve the promised function");
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+    observer.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
             .expect("effect application should resume"),
-        n(42)
+        &n(42),
     );
 }
 
@@ -5155,10 +5170,10 @@ fn effect_call_finishes_its_argument_spine_before_observing_the_api() {
         .values()
         .collect_managed_for_test()
         .expect("the assigned effect-call checkpoint must remain live");
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &call)
+    observer.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &call)
             .expect("effect dispatch should resume"),
-        n(42)
+        &n(42),
     );
     assert_eq!(method_demands.load(Ordering::SeqCst), 1);
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
@@ -5214,10 +5229,10 @@ fn effect_map_finishes_its_list_front_before_observing_the_api() {
         .values()
         .collect_managed_for_test()
         .expect("the assigned effect-map checkpoint must remain live");
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &operation)
+    observer.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &operation)
             .expect("effect map should resume"),
-        Value::List(List::empty())
+        &Value::List(List::empty()),
     );
     assert_eq!(method_demands.load(Ordering::SeqCst), 1);
     drop(operation_root);
@@ -5934,7 +5949,7 @@ fn anno_builtin_continues_demand_after_assertions_pass() {
     )
     .expect("anno should pass through successful assertions");
 
-    assert_eq!(value, n(42));
+    crate::core::test_value_factory().assert_same_representation_for_test(&value, &n(42));
 }
 
 #[test]

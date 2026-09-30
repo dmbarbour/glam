@@ -2202,6 +2202,15 @@ inventory relatch:
            `Vec<Vec<Value>>` exercises the structural assertion adapters
            without reintroducing semantic-value equality. This slice reduces
            the all-target equality-error inventory from 432 to 417.
+         - **D.2h.2e — pattern and effect fixture slice complete
+           2026-09-30.** Pattern pass/fail lists, dictionary decomposition,
+           list front/back decomposition, text-line and split results,
+           function application, partial builtins, and resumable effect
+           dispatch now assert semantic payloads through their owning test
+           factory or evaluator context. Counters, byte buffers, and textual
+           failures remain ordinary Rust assertions. This slice reduces the
+           central evaluator equality inventory from 132 to 86 and the
+           all-target inventory from 417 to 371.
       3. Add owner-local recursive test relations for `g_syntax` carriers and
          migrate compiler/front-end fixtures without giving semantic values
          syntax-layer equality traits.
