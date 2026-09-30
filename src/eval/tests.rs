@@ -158,7 +158,7 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
     let context = isolated_test_context();
     let computation_lazy = wrapper_returning_function_computation(&context);
     let computation_runtime = net_computation_runtime(&computation_lazy, &context);
-    let computation = Value::Lazy(computation_lazy.clone());
+    let computation = Value::Lazy(computation_lazy.duplicate_for_test(context.values()));
 
     #[cfg(feature = "interaction-net-profiling")]
     context.values().set_net_driver_work_item_limit(128);
@@ -166,7 +166,7 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
     let demand = context
         .demand_whnf(crate::runtime::RuntimeValueRoot::new(
             context.values(),
-            computation.clone(),
+            computation.duplicate_for_test(context.values()),
         ))
         .expect("bounded wrapper demand should be admitted");
     let mut machine_polls = 0;
@@ -251,7 +251,7 @@ fn wrapper_application_budget_probe_yields_without_publishing_a_cache() {
     let context = isolated_test_context();
     let computation_lazy = wrapper_returning_function_computation(&context);
     let computation_runtime = net_computation_runtime(&computation_lazy, &context);
-    let computation = Value::Lazy(computation_lazy.clone());
+    let computation = Value::Lazy(computation_lazy.duplicate_for_test(context.values()));
     context.values().set_net_driver_work_item_limit(16);
 
     let demand = context
@@ -316,7 +316,7 @@ fn object_local_name_resumes_a_lazy_parts_tail_without_replaying_its_name() {
     ));
     let parts = Value::List(List::concat(
         List::from_values(vec![n(1)]),
-        List::from_thunk(tail.clone().into()),
+        List::from_thunk(tail.duplicate_for_test(observer.values()).into()),
     ));
     let application = apply_values(
         &observer,
@@ -370,12 +370,13 @@ fn object_with_defs_resumes_a_promised_spec_without_replaying_its_object() {
         .expect("the owner should allocate a promised object specification");
     let object_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&object_demands);
-    let object_spec = spec.clone();
+    let values = observer.values().clone();
+    let object_spec = spec.duplicate_for_test(&values);
     let object = Value::semantic_thunk(observer.values(), "instrumented object", move |_| {
         observed.fetch_add(1, Ordering::SeqCst);
         Ok(Value::Dict(Dict::new_sync().insert(
             (*keys::SPEC).clone(),
-            Value::Promised(object_spec.clone()),
+            Value::Promised(object_spec.duplicate_for_test(&values)),
         )))
     });
     let extension = closed_function_value_in(
@@ -465,7 +466,7 @@ fn composed_object_defs_resume_the_extension_without_replaying_prior_defs() {
         Value::Builtin(Builtin::ObjectComposedDefs),
         vec![
             prior,
-            Value::Promised(extension.clone()),
+            Value::Promised(extension.duplicate_for_test(observer.values())),
             Value::Dict(Dict::new_sync()),
             Value::Dict(Dict::new_sync()),
         ],
@@ -545,7 +546,8 @@ fn object_override_resumes_a_nested_prior_without_replaying_completed_prefix() {
         );
     let base_demands = Arc::new(AtomicUsize::new(0));
     let observed_base = Arc::clone(&base_demands);
-    let nested_prior_value = nested_prior.clone();
+    let values = observer.values().clone();
+    let nested_prior_value = nested_prior.duplicate_for_test(&values);
     let base = Value::semantic_thunk(
         observer.values(),
         "instrumented object override base",
@@ -556,7 +558,7 @@ fn object_override_resumes_a_nested_prior_without_replaying_completed_prefix() {
                     .insert(Key::binary_from_text("a_early"), n(19))
                     .insert(
                         Key::binary_from_text("z_nested"),
-                        Value::Promised(nested_prior_value.clone()),
+                        Value::Promised(nested_prior_value.duplicate_for_test(&values)),
                     ),
             ))
         },
@@ -675,7 +677,11 @@ fn object_dict_defs_resume_the_dict_without_replaying_the_base() {
     let application = apply_values(
         &observer,
         Value::Builtin(Builtin::ObjectDictDefs),
-        vec![Value::Promised(dict.clone()), base, unit_value()],
+        vec![
+            Value::Promised(dict.duplicate_for_test(observer.values())),
+            base,
+            unit_value(),
+        ],
     )
     .expect("dictionary object definitions should build");
     let Value::Lazy(application_lazy) = &application else {
@@ -734,7 +740,8 @@ fn object_from_dict_resumes_a_promised_spec_without_replaying_its_dictionary() {
         .expect("the owner should allocate a promised specification");
     let dictionary_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&dictionary_demands);
-    let promised_spec = spec.clone();
+    let values = observer.values().clone();
+    let promised_spec = spec.duplicate_for_test(&values);
     let dictionary = Value::semantic_thunk(
         observer.values(),
         "instrumented plain dictionary",
@@ -744,7 +751,7 @@ fn object_from_dict_resumes_a_promised_spec_without_replaying_its_dictionary() {
                 Dict::new_sync()
                     .insert(
                         (*keys::SPEC).clone(),
-                        Value::Promised(promised_spec.clone()),
+                        Value::Promised(promised_spec.duplicate_for_test(&values)),
                     )
                     .insert(Key::binary_from_text("answer"), n(42)),
             ))
@@ -844,11 +851,20 @@ impl EvaluationTaskMachine for GateFailureMachine {
     }
 }
 
-#[derive(Clone)]
 enum FixtureTaskTerminal {
     Complete(Value),
     Failed(Arc<EvaluationFailure>),
     Cancelled,
+}
+
+impl FixtureTaskTerminal {
+    fn duplicate_for_test(&self, values: &CoreValueFactory) -> Self {
+        match self {
+            Self::Complete(value) => Self::Complete(value.duplicate_for_test(values)),
+            Self::Failed(failure) => Self::Failed(Arc::clone(failure)),
+            Self::Cancelled => Self::Cancelled,
+        }
+    }
 }
 
 struct FixtureTaskLauncher {
@@ -882,7 +898,7 @@ impl ReflectionTaskLauncher for ScopedReflectionLauncher {
 impl ReflectionTaskLauncher for FixtureTaskLauncher {
     fn build(
         &self,
-        _context: EvalContext,
+        context: EvalContext,
         _effect: RuntimeValueRoot,
         result_policy: ReflectionTaskResultPolicy,
     ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
@@ -892,7 +908,7 @@ impl ReflectionTaskLauncher for FixtureTaskLauncher {
             .expect("fixture result policies were poisoned")
             .push(result_policy);
         Ok(Box::new(FixtureTaskMachine {
-            terminal: Some(self.terminal.clone()),
+            terminal: Some(self.terminal.duplicate_for_test(context.values())),
         }))
     }
 }
@@ -939,7 +955,7 @@ fn terminal_lazy_evaluation_releases_successful_and_failed_sources() {
 
     context.values().assert_same_representation_for_test(
         &context
-            .evaluate_compatibility_whnf(&Value::Lazy(success.clone()))
+            .evaluate_compatibility_whnf(&Value::Lazy(success.duplicate_for_test(context.values())))
             .expect("lazy source should succeed"),
         &unit_value(),
     );
@@ -961,7 +977,7 @@ fn terminal_lazy_evaluation_releases_successful_and_failed_sources() {
     );
 
     let error = context
-        .evaluate_compatibility_whnf(&Value::Lazy(failure.clone()))
+        .evaluate_compatibility_whnf(&Value::Lazy(failure.duplicate_for_test(context.values())))
         .expect_err_without_debug("lazy source should fail");
     assert_eq!(error.to_string(), "expected lazy failure");
     assert!(failure.source_snapshot(context.values()).is_none());
@@ -1057,8 +1073,9 @@ fn immediate_diagnostic_shell_operations_share_one_root_neutral_access_region() 
 
 #[test]
 fn raw_net_values_are_opaque_while_net_computations_expose_data() {
+    let values = crate::core::test_value_factory();
     let net = closed_net(|builder| builder.data(n(42)));
-    let raw = Value::Net(net.clone());
+    let raw = Value::Net(net.duplicate_for_test(&values));
 
     crate::core::test_value_factory().assert_same_representation_for_test(
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &raw)
@@ -1132,14 +1149,18 @@ fn net_arity_does_not_demand_the_net_before_its_arity() {
     let net_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&net_demands);
     let net = closed_net(|builder| builder.data(n(42)));
+    let values = context.values().clone();
     let net = Value::semantic_thunk(context.values(), "instrumented net", move |_| {
         observed.fetch_add(1, Ordering::SeqCst);
-        Ok(Value::Net(net.clone()))
+        Ok(Value::Net(net.duplicate_for_test(&values)))
     });
     let application = apply_values(
         &context,
         Value::Builtin(Builtin::NetArity),
-        vec![Value::Promised(arity.clone()), net],
+        vec![
+            Value::Promised(arity.duplicate_for_test(context.values())),
+            net,
+        ],
     )
     .expect("net-arity application should build");
     let blocked =
@@ -1173,7 +1194,10 @@ fn net_arity_resumes_its_net_without_replaying_the_completed_arity() {
     let application = apply_values(
         &context,
         Value::Builtin(Builtin::NetArity),
-        vec![arity, Value::Promised(net.clone())],
+        vec![
+            arity,
+            Value::Promised(net.duplicate_for_test(context.values())),
+        ],
     )
     .expect("net-arity application should build");
     let Value::Lazy(application_lazy) = &application else {
@@ -1218,12 +1242,13 @@ fn net_arity_resumes_its_net_without_replaying_the_completed_arity() {
 
 #[test]
 fn observing_a_function_net_preserves_the_net_value() {
+    let values = crate::core::test_value_factory();
     let identity = closed_net(|builder| {
         let [application, argument, result] = builder.bind();
         builder.wire(argument, result);
         application
     });
-    let expected = identity.clone();
+    let expected = identity.duplicate_for_test(&values);
 
     crate::core::test_value_factory().assert_same_representation_for_test(
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(

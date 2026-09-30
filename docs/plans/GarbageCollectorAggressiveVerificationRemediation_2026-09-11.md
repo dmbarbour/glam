@@ -2496,6 +2496,15 @@ inventory relatch:
            relation. This clears the final ten `src/evaluation/tests.rs`
            failures and reduces the all-target compiler inventory from 166 to
            156 without changing settlement or wake ordering.
+         - **D.2h.2af — early evaluator object/net ownership slice complete
+           2026-09-30.** Wrapper applications, object construction and
+           extension, lazy source retirement, raw/computed nets, net arity,
+           and function-net observation fixtures now duplicate semantic
+           edges through their owning context. The reusable reflection-task
+           launcher explicitly duplicates its terminal fixture per build
+           instead of deriving `Clone` across `Value`. This clears 17
+           `src/eval/tests.rs` failures and reduces the all-target compiler
+           inventory from 156 to 139 without changing evaluator semantics.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived
