@@ -2363,8 +2363,19 @@ inventory relatch:
            counts rather than demanding raw semantic `Debug`. These fixture
            families now compile under the negative trait contracts and reduce
            the all-target compiler inventory from 504 to 484. The remaining
-           failures are concentrated in evaluator, net, and syntax fixture
-           ownership rather than requiring a new public duplication API.
+         failures are concentrated in evaluator, net, and syntax fixture
+         ownership rather than requiring a new public duplication API.
+         - **D.2h.2s — syntax fixture ownership slice complete 2026-09-30.**
+           Embedded semantic data, lowered module dictionaries, final-module
+           promises, path traversal, lazy output fragments, and imported
+           builtin members now cross fixture ownership boundaries only by
+           duplicating through the relevant compiler or evaluation value
+           domain. Syntax diagnostics name semantic kinds instead of requiring
+           raw-value `Debug`, and memoized interaction nets compare exact
+           managed identity under compiler value access. The `g_syntax`
+           fixture family now compiles under the negative carrier traits and
+           reduces the all-target compiler inventory from 484 to 457. No
+           syntax or lowering semantics changed.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived

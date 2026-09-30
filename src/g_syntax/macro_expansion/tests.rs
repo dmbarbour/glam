@@ -363,7 +363,12 @@ fn committed_reflection_heap_and_children_outlive_macro_alternatives() {
             .values()
             .access_names(&effects, [name])
             .expect("effect fixture member should exist");
-        run(&execution, &effect, empty.clone()).expect("macro effect should select its fallback");
+        run(
+            &execution,
+            &effect,
+            empty.duplicate_for_test(&assembler.core_values()),
+        )
+        .expect("macro effect should select its fallback");
     }
     assert!(!execution.drain_for_test());
     let counts = execution.macro_diagnostic_counts();

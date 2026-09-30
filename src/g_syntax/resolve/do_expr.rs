@@ -529,7 +529,8 @@ mod tests {
     fn embedded_semantic_data_lowers_without_reconstruction() {
         let value = Value::Number(Number::from(42_i64));
         let values = crate::compiler::test_value_factory();
-        let rooted = crate::runtime::RuntimeValueRoot::new(&values, value.clone());
+        let rooted =
+            crate::runtime::RuntimeValueRoot::new(&values, value.duplicate_for_test(&values));
         let resolved = resolve(&SyntaxExpr::Embedded(rooted));
 
         assert_same_resolved(&resolved, &ResolvedExpr::Embedded(value));

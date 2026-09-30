@@ -56,8 +56,12 @@ fn evaluated_module_value(context: &CompileContext, lowered: &LoweredSource) -> 
     let Value::Promised(final_defs) = context_final_defs(context) else {
         panic!("final module binding should be a promised value");
     };
-    crate::core::set_test_promise(context.values(), &final_defs, lowered.definitions.clone())
-        .expect_without_debug("future should not be set yet");
+    crate::core::set_test_promise(
+        context.values(),
+        &final_defs,
+        lowered.definitions.duplicate_for_test(context.values()),
+    )
+    .expect_without_debug("future should not be set yet");
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_eval_context(),
         &lowered.definitions,
@@ -82,7 +86,8 @@ fn assert_reserved_keyword_diagnostic(source: &str, keyword: &str) {
 
 fn value_at_atom_path(definitions: &Value, path: &[&str]) -> Option<Value> {
     let context = test_eval_context();
-    let mut current = definitions.clone();
+    let values = crate::compiler::test_value_factory();
+    let mut current = definitions.duplicate_for_test(&values);
     for part in path {
         let current_value =
             crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &current).ok()?;
@@ -90,8 +95,8 @@ fn value_at_atom_path(definitions: &Value, path: &[&str]) -> Option<Value> {
             return None;
         };
         current = dict
-            .get(&Key::Atom(Atom::from_key(&Key::binary_from_text(*part))))
-            .cloned()?;
+            .get(&Key::Atom(Atom::from_key(&Key::binary_from_text(*part))))?
+            .duplicate_for_test(&values);
     }
     Some(current)
 }
@@ -107,7 +112,7 @@ fn resolved_value_at_path_with_context(
     definitions: &Value,
     path: &[&str],
 ) -> Value {
-    let mut current = definitions.clone();
+    let mut current = definitions.duplicate_for_test(context.values());
     for part in path {
         let current_value = fully_evaluated_value_with_context(context, current);
         let Value::Dict(dict) = current_value else {
@@ -115,8 +120,8 @@ fn resolved_value_at_path_with_context(
         };
         current = dict
             .get(&Key::atom_from_text(part))
-            .cloned()
-            .expect("reflection-enabled binding should exist");
+            .expect("reflection-enabled binding should exist")
+            .duplicate_for_test(context.values());
     }
     fully_evaluated_value_with_context(context, current)
 }
@@ -167,7 +172,10 @@ fn fully_evaluated_error(mut value: Value) -> crate::core::EvaluationHalt {
     loop {
         match crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value) {
             Ok(next @ (Value::Lazy(_) | Value::Promised(_))) => value = next,
-            Ok(other) => panic!("value should fail instead of evaluating to {other:?}"),
+            Ok(other) => panic!(
+                "value should fail instead of evaluating to {}",
+                other.diagnostic_kind_name()
+            ),
             Err(error) => return error,
         }
     }
@@ -178,13 +186,19 @@ fn output_bytes(value: &Value) -> Vec<u8> {
         Value::Binary(bytes) => bytes.to_vec(),
         Value::List(list) => crate::eval::list_output_bytes(&test_eval_context(), list)
             .expect("output list should render as bytes"),
-        other => panic!("expected binary output value, got {other:?}"),
+        other => panic!(
+            "expected binary output value, got {}",
+            other.diagnostic_kind_name()
+        ),
     }
 }
 
 fn output_binary_result_list(value: &Value) -> Vec<u8> {
     let Value::List(list) = value else {
-        panic!("expected list output value, got {value:?}");
+        panic!(
+            "expected list output value, got {}",
+            value.diagnostic_kind_name()
+        );
     };
     let bytes = std::cell::RefCell::new(Vec::new());
     list.try_for_each_segment(
@@ -208,8 +222,12 @@ fn output_binary_result_list(value: &Value) -> Vec<u8> {
         &mut |thunk| match crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &test_eval_context(),
             &match thunk {
-                crate::core::ListThunk::Lazy(lazy) => Value::Lazy(lazy.clone()),
-                crate::core::ListThunk::Promised(promise) => Value::Promised(promise.clone()),
+                crate::core::ListThunk::Lazy(lazy) => {
+                    Value::Lazy(lazy.duplicate_for_test(&crate::compiler::test_value_factory()))
+                }
+                crate::core::ListThunk::Promised(promise) => Value::Promised(
+                    promise.duplicate_for_test(&crate::compiler::test_value_factory()),
+                ),
             },
         )
         .map_err(|err| err.to_string())?
@@ -217,7 +235,8 @@ fn output_binary_result_list(value: &Value) -> Vec<u8> {
             Value::Binary(bytes) => Ok(crate::core::List::from_bytes(bytes)),
             Value::List(list) => Ok(list),
             other => Err(format!(
-                "lazy output chunk was not a list or binary: {other:?}"
+                "lazy output chunk was not a list or binary: {}",
+                other.diagnostic_kind_name()
             )),
         },
     )
@@ -300,8 +319,12 @@ fn reflection_test_module(
     let Value::Promised(final_defs) = context_final_defs(&context) else {
         panic!("final module binding should be promised");
     };
-    crate::core::set_test_promise(context.values(), &final_defs, lowered.definitions.clone())
-        .expect_without_debug("final module binding should be unset");
+    crate::core::set_test_promise(
+        context.values(),
+        &final_defs,
+        lowered.definitions.duplicate_for_test(context.values()),
+    )
+    .expect_without_debug("final module binding should be unset");
 
     let eval_context = assembler.eval_context();
     let definitions = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
@@ -311,7 +334,7 @@ fn reflection_test_module(
     .expect("reflection-enabled module should expose its dictionary");
     let definitions_root = context
         .values()
-        .construct_runtime_value_root(|_| definitions.clone());
+        .construct_runtime_value_root(|access| access.duplicate_value(&definitions));
     (
         assembler,
         eval_context,
@@ -360,8 +383,12 @@ fn latent_source_meta_refl_cycle_reclaims_with_its_module() {
         let Value::Promised(final_defs) = context_final_defs(&context) else {
             panic!("final module binding should be promised");
         };
-        crate::core::set_test_promise(context.values(), &final_defs, lowered.definitions.clone())
-            .expect_without_debug("final module binding should start unassigned");
+        crate::core::set_test_promise(
+            context.values(),
+            &final_defs,
+            lowered.definitions.duplicate_for_test(context.values()),
+        )
+        .expect_without_debug("final module binding should start unassigned");
 
         let eval_context = assembler.eval_context();
         let module = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
@@ -2403,7 +2430,10 @@ fn recursive_do_strict_forward_observation_reports_the_fixpoint_cycle() {
     let error = loop {
         match crate::evaluation::EvalContext::evaluate_compatibility_whnf(&eval_context, &probe) {
             Ok(next @ (Value::Lazy(_) | Value::Promised(_))) => probe = next,
-            Ok(other) => panic!("strict recursive observation produced {other:?}"),
+            Ok(other) => panic!(
+                "strict recursive observation produced {}",
+                other.diagnostic_kind_name()
+            ),
             Err(error) => break error.to_string(),
         }
     };
@@ -4159,7 +4189,10 @@ fn abstract_objects_retain_specs_without_instantiating_members() {
     let Value::Dict(expression) = resolved_value_at_path(&value, &["expression"]) else {
         panic!("abstract expression should evaluate to a dictionary");
     };
-    let Some(expression_spec) = expression.get(&*keys::SPEC).cloned() else {
+    let Some(expression_spec) = expression
+        .get(&*keys::SPEC)
+        .map(|value| value.duplicate_for_test(&crate::compiler::test_value_factory()))
+    else {
         panic!("abstract expression should retain its specification");
     };
     let Value::Dict(expression_spec) = fully_evaluated_value(expression_spec) else {
@@ -5325,7 +5358,10 @@ fn effect_then_requires_unit_result_when_observed() {
             &result,
         ) {
             Ok(next @ (Value::Lazy(_) | Value::Promised(_))) => result = next,
-            Ok(other) => panic!("non-unit result should not evaluate to {other:?}"),
+            Ok(other) => panic!(
+                "non-unit result should not evaluate to {}",
+                other.diagnostic_kind_name()
+            ),
             Err(err) => break err,
         }
     };
@@ -5790,16 +5826,17 @@ fn lowers_builtin_imports_to_module_dictionaries() {
             let pure = std_list
                 .get(&Key::atom_from_text("pure"))
                 .expect("std.list should expose pure");
+            let values = context.values();
             (
-                anno,
-                not.clone(),
-                could.clone(),
-                len.clone(),
-                split.clone(),
-                split_end.clone(),
-                head.clone(),
-                tail.clone(),
-                pure.clone(),
+                anno.duplicate_for_test(values),
+                not.duplicate_for_test(values),
+                could.duplicate_for_test(values),
+                len.duplicate_for_test(values),
+                split.duplicate_for_test(values),
+                split_end.duplicate_for_test(values),
+                head.duplicate_for_test(values),
+                tail.duplicate_for_test(values),
+                pure.duplicate_for_test(values),
             )
         }
         _ => unreachable!(),
@@ -6111,7 +6148,9 @@ fn interaction_net_construction_is_memoized_and_preserves_initial_active_pairs()
     let (Value::Net(first), Value::Net(second)) = (first, second) else {
         panic!("interaction_net should produce a net")
     };
-    assert!(first.runtime().ptr_eq(second.runtime()));
+    assert!(context.values().with_runtime_value_access(|access| {
+        first.runtime().same_net_in(second.runtime(), &access)
+    }));
     assert_eq!(
         first
             .runtime()
@@ -6598,7 +6637,7 @@ fn introduce_and_override_checks_are_deferred_until_observed() {
     let foo = value
         .get_atom_path(&[Atom::from_key(&Key::binary_from_text("foo"))])
         .expect("foo binding should exist lazily");
-    let err = fully_evaluated_error(foo.clone());
+    let err = fully_evaluated_error(foo.duplicate_for_test(&crate::compiler::test_value_factory()));
     assert_eq!(
         err.to_string(),
         "cannot override `foo` because it is not defined"
@@ -6621,7 +6660,7 @@ fn duplicate_introductions_fail_lazily_against_prior_module_updates() {
     let foo = value
         .get_atom_path(&[Atom::from_key(&Key::binary_from_text("foo"))])
         .expect("duplicate foo binding should exist lazily");
-    let err = fully_evaluated_error(foo.clone());
+    let err = fully_evaluated_error(foo.duplicate_for_test(&crate::compiler::test_value_factory()));
     assert_eq!(
         err.to_string(),
         "cannot introduce `foo` because it is already defined"
