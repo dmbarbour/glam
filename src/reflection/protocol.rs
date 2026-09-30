@@ -461,10 +461,10 @@ pub enum TaskOutcome {
     Cancelled,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TaskHalt(TaskHaltKind);
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum TaskHaltKind {
     Failure(TaskFailure),
     Blocked(EvaluationWaitToken),
@@ -477,7 +477,7 @@ enum TaskHaltKind {
 /// by a lifecycle, search result, or other host-visible protocol surface is
 /// converted to `Rooted` first. W8 revisits whether the edge-free evaluator
 /// carrier remains necessary after recursive-halt compatibility retires.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum TaskFailure {
     EdgeFree(Arc<EvaluationFailure>),
     Rooted(RuntimeFailureRoot),
@@ -668,6 +668,12 @@ impl fmt::Display for TaskHalt {
                 )
             }
         }
+    }
+}
+
+impl fmt::Debug for TaskHalt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
     }
 }
 

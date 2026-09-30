@@ -1156,7 +1156,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             .same_representation(&value, &self.eval_context.values().unit())
                         {
                             return Err(TaskHalt::new(format!(
-                                "scoped effect close must return unit, got {value:?}"
+                                "scoped effect close must return unit, got {:?}",
+                                access.values().diagnostic_debug(&value)
                             )));
                         }
                         Ok(())
@@ -2142,7 +2143,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     evaluator.project_root(&value, |access, effect| {
                         let Value::Dict(effect) = effect else {
                             return Err(TaskHalt::new(format!(
-                                "reflection task requires an effect object, got {effect:?}"
+                                "reflection task requires an effect object, got {:?}",
+                                access.values().diagnostic_debug(&effect)
                             )));
                         };
                         effect

@@ -81,7 +81,7 @@ impl RegionalTextLinesMachine {
                         ));
                     }
                 };
-            let item = EvaluatedValue::try_from(item)
+            let item = EvaluatedValue::from_whnf(item)
                 .expect("text-lines item demand must reach WHNF")
                 .into_value();
             let byte = match item {
@@ -95,7 +95,8 @@ impl RegionalTextLinesMachine {
                 },
                 other => {
                     return failure_in(format!(
-                        "text lines builtin requires list items to be byte integers, got {other:?}"
+                        "text lines builtin requires list items to be byte integers, got {:?}",
+                        access.values().diagnostic_debug(&other)
                     ));
                 }
             };
@@ -348,7 +349,7 @@ fn poll_regional_source(
         RegionalWhnfStatus::Ready(source) => {
             *demand = None;
             RegionalSourcePoll::Ready(
-                EvaluatedValue::try_from(source)
+                EvaluatedValue::from_whnf(source)
                     .expect("regional list-transform source demand must reach WHNF")
                     .into_value(),
             )

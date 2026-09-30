@@ -9,7 +9,7 @@ use super::{EvaluationFailure, ManagedPromiseRoot, RuntimeValueAccess, Value};
 ///
 /// A permanent failure may enter a terminal cache. Blocked waits and
 /// unassigned promises are retryable scheduler state and must not.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EvaluationHalt {
     kind: EvaluationHaltKind,
 }
@@ -19,7 +19,7 @@ pub struct EvaluationHalt {
 // silently consume the evaluator's ordinary stack budget.
 const _: () = assert!(std::mem::size_of::<EvaluationHalt>() <= 64);
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum EvaluationHaltKind {
     Failure(Arc<EvaluationFailure>),
     Blocked(CoreWaitToken),
@@ -150,6 +150,12 @@ impl fmt::Display for EvaluationHalt {
                 formatter.write_str("promised value was observed before initialization")
             }
         }
+    }
+}
+
+impl fmt::Debug for EvaluationHalt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
     }
 }
 

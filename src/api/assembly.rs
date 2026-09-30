@@ -1506,7 +1506,10 @@ impl Assembler {
             let final_defs = final_defs.root_in(&access);
             final_defs.publish(&access, Ok(definitions.clone_core_with(&access)))
         });
-        let published = published.expect("CompileContext.final_defs future must be unassigned");
+        let published = match published {
+            Ok(published) => published,
+            Err(_) => panic!("CompileContext.final_defs future must be unassigned"),
+        };
         published.notify();
         self.eval_context()
             .evaluate_root_whnf(definitions.clone())

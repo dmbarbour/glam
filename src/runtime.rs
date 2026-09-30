@@ -305,7 +305,7 @@ impl fmt::Debug for RuntimeValueRoot {
 /// owned by the root for each direct emission or context value. I6C retained
 /// this compatibility shell after proving that its external owner is not
 /// managed-reachable and retires with its report/coordinator owner.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct RuntimeFailureRoot(Arc<RuntimeFailureRootInner>);
 
 impl PartialEq for RuntimeFailureRoot {
@@ -316,7 +316,6 @@ impl PartialEq for RuntimeFailureRoot {
 
 impl Eq for RuntimeFailureRoot {}
 
-#[derive(Debug)]
 struct RuntimeFailureRootInner {
     values: crate::core::RuntimeValueObserver,
     failure: Arc<EvaluationFailure>,
@@ -325,6 +324,12 @@ struct RuntimeFailureRootInner {
         reason = "the I6C-audited compatibility root retains direct failure values for its external owner"
     )]
     value_roots: Box<[RuntimeValueRoot]>,
+}
+
+impl std::fmt::Debug for RuntimeFailureRoot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("RuntimeFailureRoot(..)")
+    }
 }
 
 impl RuntimeFailureRoot {

@@ -108,7 +108,6 @@ impl Ord for DeferredValueId {
 ///
 /// Containers may still contain lazy fields. The wrapper prevents a computed
 /// lazy result cache from storing another deferred outer shell.
-#[derive(Debug)]
 pub(crate) struct EvaluatedValue(Value);
 
 impl EvaluatedValue {
@@ -118,6 +117,14 @@ impl EvaluatedValue {
 
     pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
         Self(access.duplicate_value(&self.0))
+    }
+
+    pub(crate) fn from_whnf(value: Value) -> Result<Self, ()> {
+        if matches!(value, Value::Lazy(_) | Value::Promised(_)) {
+            Err(())
+        } else {
+            Ok(Self(value))
+        }
     }
 }
 
@@ -135,13 +142,11 @@ impl TryFrom<Value> for EvaluatedValue {
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct EvaluationFailure {
     kind: EvaluationFailureKind,
     contexts: Arc<[Value]>,
 }
 
-#[derive(Debug)]
 enum EvaluationFailureKind {
     Emission(Value),
     DependencyCycle(Arc<LazyCycle>),
@@ -307,8 +312,6 @@ impl fmt::Display for EvaluationFailure {
         }
     }
 }
-
-impl std::error::Error for EvaluationFailure {}
 
 fn immediate_failure_text(emission: &Value) -> Option<Arc<str>> {
     match emission {
@@ -1388,7 +1391,6 @@ impl PartialEq for OpaqueValue {
 
 impl Eq for OpaqueValue {}
 
-#[derive(Debug, PartialEq, Eq)]
 pub struct NetValue {
     runtime: CoreRuntimeNet,
 }
@@ -1423,7 +1425,6 @@ impl NetValue {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
 pub struct FunctionCode {
     runtime: CoreRuntimeNet,
     arity: usize,
@@ -1472,7 +1473,6 @@ impl FunctionCode {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
 pub struct FunctionValue {
     stage: NetValue,
     remaining_arity: usize,
@@ -1522,7 +1522,6 @@ impl FunctionValue {
     }
 }
 
-#[derive(Debug)]
 pub struct BuiltinCall {
     pub builtin: Builtin,
     pub arguments: Arc<[Value]>,
@@ -2352,7 +2351,6 @@ pub type Dict = RedBlackTreeMapSync<Key, Value>;
 /// Lists preserve the distinction between computed lazy chunks and named
 /// assignment holes without depending on evaluator state. Only evaluator-owned
 /// list operations decide when to force either kind.
-#[derive(Debug)]
 pub enum ListThunk {
     Lazy(LazyValue),
     Promised(PromisedValue),
@@ -3498,7 +3496,7 @@ mod tests {
             .source_snapshot(&values)
             .expect("an unresolved lazy should expose a source snapshot");
 
-        let result = EvaluatedValue::try_from(values.unit()).expect("unit is already evaluated");
+        let result = EvaluatedValue::from_whnf(values.unit()).expect("unit is already evaluated");
         assert!(cache_test_lazy(&values, &observer, Ok(result)).is_ok());
         assert!(
             lazy.source_snapshot(&values).is_none(),
@@ -4089,11 +4087,11 @@ mod tests {
             Value::Dict(Dict::new_sync().insert(Key::atom_from_text("field"), field.clone()));
         let sealed = Value::initial_metadata_carrier(&values());
 
-        let evaluated = EvaluatedValue::try_from(container.clone())
+        let evaluated = EvaluatedValue::from_whnf(container.clone())
             .expect("a container with a lazy field is in outer WHNF");
         assert_eq!(evaluated.into_value(), container);
         assert_eq!(
-            EvaluatedValue::try_from(sealed.clone())
+            EvaluatedValue::from_whnf(sealed.clone())
                 .expect("a sealed carrier is already in outer WHNF")
                 .into_value(),
             sealed
@@ -4364,67 +4362,3 @@ mod tests {
         assert_eq!(bytes.into_inner(), b"c");
     }
 }
-impl PartialEq for LazyValue {
-    fn eq(&self, other: &Self) -> bool {
-        self.edge == other.edge
-    }
-}
-
-impl Eq for LazyValue {}
-
-impl fmt::Debug for LazyValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("LazyValue(..)")
-    }
-}
-
-impl PartialEq for PromisedValue {
-    fn eq(&self, other: &Self) -> bool {
-        self.edge == other.edge
-    }
-}
-
-impl Eq for PromisedValue {}
-
-impl fmt::Debug for PromisedValue {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("PromisedValue(..)")
-    }
-}
-
-impl fmt::Debug for Value {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Atom(value) => formatter.debug_tuple("Atom").field(value).finish(),
-            Self::Number(value) => formatter.debug_tuple("Number").field(value).finish(),
-            Self::Binary(value) => formatter.debug_tuple("Binary").field(value).finish(),
-            Self::List(value) => formatter.debug_tuple("List").field(value).finish(),
-            Self::Dict(value) => formatter.debug_tuple("Dict").field(value).finish(),
-            Self::Builtin(value) => formatter.debug_tuple("Builtin").field(value).finish(),
-            Self::PartialBuiltin(value) => formatter
-                .debug_tuple("PartialBuiltin")
-                .field(value)
-                .finish(),
-            Self::Function(value) => formatter.debug_tuple("Function").field(value).finish(),
-            Self::Net(value) => formatter.debug_tuple("Net").field(value).finish(),
-            Self::Lazy(value) => formatter.debug_tuple("Lazy").field(value).finish(),
-            Self::Promised(value) => formatter.debug_tuple("Promised").field(value).finish(),
-            Self::Metadata(_) => formatter.write_str("Sealed(..)"),
-            Self::Opaque(value) => formatter.debug_tuple("Opaque").field(value).finish(),
-        }
-    }
-}
-
-impl fmt::Debug for MetadataCarrier {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("MetadataCarrier(..)")
-    }
-}
-
-impl PartialEq for MetadataCarrier {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.metadata, &other.metadata)
-    }
-}
-
-impl Eq for MetadataCarrier {}

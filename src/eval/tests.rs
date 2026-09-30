@@ -1935,7 +1935,7 @@ fn computed_lazy_waits_on_an_empty_promise_without_caching_its_error() {
     );
     assert_eq!(
         lazy.cached(context.values()),
-        Some(Ok(EvaluatedValue::try_from(n(42)).unwrap()))
+        Some(Ok(EvaluatedValue::from_whnf(n(42)).unwrap()))
     );
 }
 
@@ -2030,7 +2030,7 @@ fn promised_assignment_follows_a_lazy_without_resolving_the_raw_assignment() {
     );
     assert_eq!(
         target.cached(context.values()),
-        Some(Ok(EvaluatedValue::try_from(n(42)).unwrap()))
+        Some(Ok(EvaluatedValue::from_whnf(n(42)).unwrap()))
     );
 }
 

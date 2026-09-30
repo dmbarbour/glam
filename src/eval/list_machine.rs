@@ -393,7 +393,7 @@ fn interpret_durable_list_front(
 }
 
 fn combine_regional_chunk_and_suffix(
-    _access: &EvaluationValueAccess<'_>,
+    access: &EvaluationValueAccess<'_>,
     chunk: Value,
     suffix: Value,
 ) -> Result<Value, Arc<EvaluationFailure>> {
@@ -402,7 +402,8 @@ fn combine_regional_chunk_and_suffix(
         Value::List(list) => list,
         other => {
             return Err(EvaluationHalt::new(format!(
-                "lazy list chunk must evaluate to a list or binary value, got {other:?}"
+                "lazy list chunk must evaluate to a list or binary value, got {:?}",
+                access.values().diagnostic_debug(&other)
             ))
             .into_permanent_failure());
         }
@@ -414,7 +415,7 @@ fn combine_regional_chunk_and_suffix(
 }
 
 fn combine_regional_prefix_and_chunk(
-    _access: &EvaluationValueAccess<'_>,
+    access: &EvaluationValueAccess<'_>,
     prefix: Value,
     chunk: Value,
 ) -> Result<Value, Arc<EvaluationFailure>> {
@@ -426,7 +427,8 @@ fn combine_regional_prefix_and_chunk(
         Value::List(list) => list,
         other => {
             return Err(EvaluationHalt::new(format!(
-                "lazy list chunk must evaluate to a list or binary value, got {other:?}"
+                "lazy list chunk must evaluate to a list or binary value, got {:?}",
+                access.values().diagnostic_debug(&other)
             ))
             .into_permanent_failure());
         }

@@ -303,7 +303,7 @@ impl ValueComparisonFrame {
         });
         let value =
             match drive_regional_in_place(access, demand, step_budget, reduce_semantic_shell) {
-                RegionalWhnfStatus::Ready(value) => EvaluatedValue::try_from(value)
+                RegionalWhnfStatus::Ready(value) => EvaluatedValue::from_whnf(value)
                     .expect("comparison operand must reach WHNF")
                     .into_value(),
                 RegionalWhnfStatus::Boundary(request) => {
@@ -350,9 +350,9 @@ fn classify_values(
     let right = right
         .as_ref()
         .expect("right comparison operand must be ready");
-    let left_value = EvaluatedValue::try_from(access.values().duplicate_value(left))
+    let left_value = EvaluatedValue::from_whnf(access.values().duplicate_value(left))
         .expect("comparison operand must be in WHNF");
-    let right_value = EvaluatedValue::try_from(access.values().duplicate_value(right))
+    let right_value = EvaluatedValue::from_whnf(access.values().duplicate_value(right))
         .expect("comparison operand must be in WHNF");
     match mode {
         ComparisonMode::Ordering => classify_ordering(
@@ -443,7 +443,9 @@ fn classify_ordering(
             failure_message(format!("{name} builtin cannot compare sealed values"))
         }
         (left, right) => failure_message(format!(
-            "{name} builtin cannot order values {left:?} and {right:?}"
+            "{name} builtin cannot order values {:?} and {:?}",
+            access.values().diagnostic_debug(&left),
+            access.values().diagnostic_debug(&right)
         )),
     }
 }
@@ -855,7 +857,7 @@ fn demand_tuple_payload(
     });
     let value =
         match drive_regional_in_place(access, computation, step_budget, reduce_semantic_shell) {
-            RegionalWhnfStatus::Ready(value) => EvaluatedValue::try_from(value)
+            RegionalWhnfStatus::Ready(value) => EvaluatedValue::from_whnf(value)
                 .expect("tuple payload must reach WHNF")
                 .into_value(),
             RegionalWhnfStatus::Boundary(request) => {
@@ -869,7 +871,8 @@ fn demand_tuple_payload(
         Value::Binary(bytes) => TuplePayloadPoll::Ready(Value::List(List::from_bytes(bytes))),
         Value::List(_) => TuplePayloadPoll::Ready(value),
         other => TuplePayloadPoll::Failed(Arc::new(EvaluationFailure::message(format!(
-            "{name} builtin requires tuple payloads to be lists or binaries, got {other:?}"
+            "{name} builtin requires tuple payloads to be lists or binaries, got {:?}",
+            access.values().diagnostic_debug(&other)
         )))),
     }
 }

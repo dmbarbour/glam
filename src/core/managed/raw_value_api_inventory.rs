@@ -1178,7 +1178,7 @@ fn d2b_core_compatibility_declarations_are_exact() {
         "src/core.rs::CoreValueFactory::unit",
         "src/core.rs::CoreValueFactory::warn",
         "src/core.rs::EvaluatedValue::into_value",
-        "src/core.rs::EvaluatedValue::try_from",
+        "src/core.rs::EvaluatedValue::from_whnf",
         "src/core.rs::EvaluationFailure::emission",
         "src/core.rs::EvaluationFailure::visit_direct_values",
         "src/core.rs::EvaluationFailure::with_context",

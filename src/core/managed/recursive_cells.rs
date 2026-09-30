@@ -2106,8 +2106,8 @@ mod tests {
                 .construct_rooted_managed_lazy("prepared lazy", LazySource::Error)
                 .expect("the managed lazy cell should fit a run")
         });
-        let winner = EvaluatedValue::try_from(Value::Number(42.into())).unwrap();
-        let loser = EvaluatedValue::try_from(Value::Number(73.into())).unwrap();
+        let winner = EvaluatedValue::from_whnf(Value::Number(42.into())).unwrap();
+        let loser = EvaluatedValue::from_whnf(Value::Number(73.into())).unwrap();
 
         values.with_runtime_value_access(|access| {
             let lazy = root
@@ -2187,7 +2187,7 @@ mod tests {
                 )
                 .expect("the managed lazy cell should fit a run");
             let result =
-                EvaluatedValue::try_from(Value::List(List::from_values(vec![Value::Lazy(
+                EvaluatedValue::from_whnf(Value::List(List::from_values(vec![Value::Lazy(
                     sentinel.clone(),
                 )])))
                 .expect("a list is already in weak-head normal form");

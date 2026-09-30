@@ -192,7 +192,8 @@ impl RegionalListEffect {
                         } else {
                             RegionalListEffectPoll::Failed(Arc::new(EvaluationFailure::message(
                                 format!(
-                                    "list effect handler expected a standard effect result list, got {value:?}"
+                                    "list effect handler expected a standard effect result list, got {:?}",
+                                    access.values().diagnostic_debug(&value)
                                 ),
                             )))
                         }

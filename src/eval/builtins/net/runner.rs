@@ -104,7 +104,8 @@ impl RegionalBuilderEffectRunner {
                     }
                     Drive::Ready(value) => RegionalBuilderEffectPoll::Failed(Arc::new(
                         EvaluationFailure::message(format!(
-                            "interaction-net builder effect expected a result list, got {value:?}"
+                            "interaction-net builder effect expected a result list, got {:?}",
+                            access.values().diagnostic_debug(&value)
                         )),
                     )),
                     Drive::Boundary(request) => RegionalBuilderEffectPoll::Boundary(request),

@@ -278,7 +278,7 @@ impl LazyTaskMachine {
         self.complete(
             context,
             context
-                .project_root(value, |_, value| EvaluatedValue::try_from(value))
+                .project_root(value, |_, value| EvaluatedValue::from_whnf(value))
                 .expect("WHNF owner completion must eliminate the outer deferred variant"),
         )
     }
@@ -416,7 +416,7 @@ impl LazyTaskMachine {
                 .with_access_transition_in(&access, |machine| machine.poll_in(&access, step_budget))
             {
                 AccessRegionalPoll::Ready(value) => {
-                    let evaluated = EvaluatedValue::try_from(value)
+                    let evaluated = EvaluatedValue::from_whnf(value)
                         .expect("computed access must demand its final selected value to WHNF");
                     match self.lazy.cache(access.values(), Ok(evaluated)) {
                         Ok(value) => Transition::Complete(
@@ -530,7 +530,7 @@ impl LazyTaskMachine {
             }
             match checkpoint.with_object_fixpoint_transition_in(&access, step_budget) {
                 RegionalObjectFixpointPoll::Ready(value) => {
-                    let evaluated = EvaluatedValue::try_from(value)
+                    let evaluated = EvaluatedValue::from_whnf(value)
                         .expect("object construction must produce a WHNF object value");
                     match self.lazy.cache(access.values(), Ok(evaluated)) {
                         Ok(value) => Transition::Complete(
@@ -652,7 +652,7 @@ impl LazyTaskMachine {
                     };
                 }
             };
-            let evaluated = EvaluatedValue::try_from(value)
+            let evaluated = EvaluatedValue::from_whnf(value)
                 .expect("list-effect construction must produce a WHNF list value");
             match self.lazy.cache(access.values(), Ok(evaluated)) {
                 Ok(value) => Transition::Complete(
@@ -1887,7 +1887,7 @@ mod ownership_tests {
         let result = crate::core::cache_test_lazy(
             context.values(),
             &source,
-            Ok(EvaluatedValue::try_from(Value::Number(97.into()))
+            Ok(EvaluatedValue::from_whnf(Value::Number(97.into()))
                 .expect("a number is already in WHNF")),
         );
         assert!(result.is_ok(), "the fixture lazy should cache a number");

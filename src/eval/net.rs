@@ -2318,7 +2318,7 @@ mod driver_tests {
             context.values(),
             &lazy,
             Ok(
-                crate::core::EvaluatedValue::try_from(Value::Builtin(Builtin::Add))
+                crate::core::EvaluatedValue::from_whnf(Value::Builtin(Builtin::Add))
                     .expect("a builtin is already in WHNF"),
             ),
         )
@@ -3594,7 +3594,7 @@ mod driver_tests {
             crate::core::cache_test_lazy(
                 context.values(),
                 &lazy,
-                Ok(crate::core::EvaluatedValue::try_from(lazy_result)
+                Ok(crate::core::EvaluatedValue::from_whnf(lazy_result)
                     .expect("callable families are already in WHNF")),
             )
             .expect("fresh callable lazy must accept its cached result");

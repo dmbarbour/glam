@@ -4503,7 +4503,7 @@ fn patient_deferred_demand_retries_when_disturbance_races_no_progress() {
                     error: None,
                 })
             } else {
-                let value = crate::core::EvaluatedValue::try_from(crate::core::keys::unit_value())
+                let value = crate::core::EvaluatedValue::from_whnf(crate::core::keys::unit_value())
                     .expect("unit is already in WHNF");
                 let published = self
                     .context

@@ -183,7 +183,7 @@ impl RegionalSemanticUndefined {
             step_budget,
             reduce_semantic_shell,
         ) {
-            RegionalWhnfStatus::Ready(value) => EvaluatedValue::try_from(value)
+            RegionalWhnfStatus::Ready(value) => EvaluatedValue::from_whnf(value)
                 .expect("semantic-undefined demand must reach WHNF")
                 .into_value(),
             RegionalWhnfStatus::Boundary(request) => {

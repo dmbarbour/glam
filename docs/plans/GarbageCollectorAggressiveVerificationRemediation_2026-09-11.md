@@ -2041,6 +2041,13 @@ inventory relatch:
       operations; the core driver and its worklist duplicate source-bearing
       descriptors only through matching runtime access. Fixture migration and
       removal of the remaining core diagnostic facades remain open here.
+    - **Production observation seam: complete 2026-09-30.** Raw values,
+      evaluation failures, function/net/list shells, and core cursor facades no
+      longer expose ambient `Debug` or representation equality. Detailed
+      messages use `RuntimeValueAccess::diagnostic_debug`; public halt/root
+      handles retain only opaque or display-derived Rust formatting. WHNF
+      assertions use an edge-free result so panic formatting cannot restore a
+      hidden raw-value observation dependency.
   - **D.2h.2c — managed facade and collector cutover:** remove the thirteen
     managed-facade traits/identity shims and the five `Gc<T>` traits, add the
     negative compile/source gates, and make the full workspace compile.

@@ -179,7 +179,7 @@ impl RegionalDictBuiltinMachine {
                 let dict =
                     match drive_regional_in_place(access, dict, step_budget, reduce_semantic_shell)
                     {
-                        RegionalWhnfStatus::Ready(value) => EvaluatedValue::try_from(value)
+                        RegionalWhnfStatus::Ready(value) => EvaluatedValue::from_whnf(value)
                             .expect("dictionary demand must reach WHNF")
                             .into_value(),
                         RegionalWhnfStatus::Boundary(request) => {
@@ -273,7 +273,7 @@ impl RegionalSequentialDemands {
         ) {
             RegionalWhnfStatus::Ready(value) => {
                 self.ready.push(
-                    EvaluatedValue::try_from(value)
+                    EvaluatedValue::from_whnf(value)
                         .expect("sequential demand must reach WHNF")
                         .into_value(),
                 );
@@ -362,7 +362,7 @@ fn finish_merge_duplicate_in(
     RegionalBuiltinPoll::Ready(result)
 }
 
-fn render_name(_access: &crate::core::RuntimeValueAccess<'_>, value: &Value) -> String {
+fn render_name(access: &crate::core::RuntimeValueAccess<'_>, value: &Value) -> String {
     match value {
         Value::Binary(bytes) => String::from_utf8_lossy(bytes).into_owned(),
         Value::Atom(atom) => match atom.key() {
@@ -371,7 +371,7 @@ fn render_name(_access: &crate::core::RuntimeValueAccess<'_>, value: &Value) -> 
                 .unwrap_or_else(|_| format!("{atom:?}")),
             _ => format!("{atom:?}"),
         },
-        other => format!("{other:?}"),
+        other => format!("{:?}", access.diagnostic_debug(other)),
     }
 }
 

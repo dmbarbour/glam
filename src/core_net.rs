@@ -245,10 +245,6 @@ impl CoreRuntimeNet {
         Self::from_managed_edge(self.edge.duplicate_in(access))
     }
 
-    pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
-        self.edge == other.edge
-    }
-
     /// Compares exact managed-net identity under matching value access.
     pub(crate) fn same_net_in(&self, other: &Self, access: &RuntimeValueAccess<'_>) -> bool {
         self.edge.same_allocation_in(&other.edge, access)
@@ -1336,24 +1332,6 @@ pub(crate) enum CoreCursorDependency {
     SourceFrontier(CoreFrontierObservation),
 }
 
-impl std::fmt::Debug for CoreCursorDependency {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::LocalCursor(cursor) => {
-                formatter.debug_tuple("LocalCursor").field(cursor).finish()
-            }
-            Self::SourceCursor(observation) => formatter
-                .debug_tuple("SourceCursor")
-                .field(&observation.endpoint())
-                .finish(),
-            Self::SourceFrontier(observation) => formatter
-                .debug_tuple("SourceFrontier")
-                .field(&observation.endpoint())
-                .finish(),
-        }
-    }
-}
-
 impl CoreCursorDependency {
     pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
         match self {
@@ -1402,7 +1380,6 @@ impl CoreCursorDependency {
     }
 }
 
-#[derive(Debug)]
 pub(crate) enum CoreCursorStep {
     Progressed(CursorProgress),
     Dependency(CoreCursorDependency),
@@ -1432,7 +1409,6 @@ impl CoreCursorStep {
     }
 }
 
-#[derive(Debug)]
 pub(crate) enum CoreActivePairStep {
     Reduction(Reduction),
     Cursor(NodeId),
@@ -2841,19 +2817,3 @@ mod tests {
         );
     }
 }
-impl std::fmt::Debug for CoreRuntimeNet {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_tuple("CoreRuntimeNet")
-            .field(&self.edge)
-            .finish()
-    }
-}
-
-impl PartialEq for CoreRuntimeNet {
-    fn eq(&self, other: &Self) -> bool {
-        self.ptr_eq(other)
-    }
-}
-
-impl Eq for CoreRuntimeNet {}

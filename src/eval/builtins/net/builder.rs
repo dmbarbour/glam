@@ -693,7 +693,7 @@ impl RegionalBuilderBuiltinMachine {
                 }
             };
             self.evaluated_operands.push(
-                EvaluatedValue::try_from(operand)
+                EvaluatedValue::from_whnf(operand)
                     .expect("builder operand demand must reach WHNF")
                     .into_value(),
             );
@@ -722,7 +722,7 @@ impl RegionalBuilderBuiltinMachine {
                         return RegionalBuiltinPoll::Failed(failure);
                     }
                 };
-            let state = EvaluatedValue::try_from(state)
+            let state = EvaluatedValue::from_whnf(state)
                 .expect("builder state demand must reach WHNF")
                 .into_value();
             self.decoded = match decode_builder_state(access.values(), &state) {
@@ -780,7 +780,7 @@ impl RegionalBuilderBuiltinMachine {
                         return RegionalBuiltinPoll::Failed(failure);
                     }
                 };
-            let value = EvaluatedValue::try_from(value)
+            let value = EvaluatedValue::from_whnf(value)
                 .expect("builder state read must reach WHNF")
                 .into_value();
             return self.finish_in(access, value, None);
@@ -891,7 +891,7 @@ impl RegionalBuilderBuiltinMachine {
                 return RegionalBuiltinPoll::Failed(failure);
             }
         };
-        let state = EvaluatedValue::try_from(state)
+        let state = EvaluatedValue::from_whnf(state)
             .expect("builder state update must reach WHNF")
             .into_value();
         if !matches!(state, Value::Dict(_)) {

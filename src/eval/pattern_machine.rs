@@ -530,7 +530,10 @@ impl RegionalPatternEqualMachine {
                 Value::Atom(atom) => PatternLiteral::Atom(atom),
                 Value::Number(number) => PatternLiteral::Number(number),
                 Value::Binary(bytes) => PatternLiteral::Binary(bytes),
-                other => PatternLiteral::Unsupported(format!("{other:?}")),
+                other => PatternLiteral::Unsupported(format!(
+                    "{:?}",
+                    access.values().diagnostic_debug(&other)
+                )),
             });
             return RegionalBuiltinPoll::Yielded;
         }

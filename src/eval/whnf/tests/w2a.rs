@@ -38,7 +38,8 @@ fn cached_lazy_success_delegates_to_its_value_without_a_boundary() {
         let root = lazy.root_in(access.values());
         let cached = root.cache(
             access.values(),
-            Ok(EvaluatedValue::try_from(Value::Number(41.into())).expect("number is already WHNF")),
+            Ok(EvaluatedValue::from_whnf(Value::Number(41.into()))
+                .expect("number is already WHNF")),
         );
         assert!(cached.is_ok());
     });
@@ -97,7 +98,8 @@ fn uncached_lazy_leaves_as_its_exact_root_and_resumes_from_that_identity() {
     poll.with_value_access(&context, |access| {
         let cached = root.cache(
             access.values(),
-            Ok(EvaluatedValue::try_from(Value::Number(43.into())).expect("number is already WHNF")),
+            Ok(EvaluatedValue::from_whnf(Value::Number(43.into()))
+                .expect("number is already WHNF")),
         );
         assert!(cached.is_ok());
     });

@@ -375,7 +375,10 @@ impl RegionalAnnotationMachine {
                     let shape = match &target {
                         Value::Binary(bytes) => CollectionShape::Binary(bytes.clone()),
                         Value::List(_) => CollectionShape::List,
-                        other => CollectionShape::Other(format!("{other:?}")),
+                        other => CollectionShape::Other(format!(
+                            "{:?}",
+                            access.values().diagnostic_debug(other)
+                        )),
                     };
                     match (kind, shape) {
                         (CollectionKind::Array, CollectionShape::Binary(bytes)) => {
@@ -404,7 +407,10 @@ impl RegionalAnnotationMachine {
                             };
                         }
                         (CollectionKind::Deque, CollectionShape::Binary(bytes)) => {
-                            let rendered = format!("{:?}", Value::Binary(bytes));
+                            let rendered = format!(
+                                "{:?}",
+                                access.values().diagnostic_debug(&Value::Binary(bytes)),
+                            );
                             let expected = match kind {
                                 CollectionKind::Array | CollectionKind::Binary => "list or binary",
                                 CollectionKind::Deque => "list",
@@ -455,7 +461,8 @@ impl RegionalAnnotationMachine {
                         };
                         let Value::Number(number) = value else {
                             return permanent_failure_in(format!(
-                                "`binary` annotation requires list items to be byte integers, got {value:?}"
+                                "`binary` annotation requires list items to be byte integers, got {:?}",
+                                access.values().diagnostic_debug(&value)
                             ));
                         };
                         let Some(byte) = number.to_u8_if_integer() else {
@@ -793,19 +800,20 @@ fn recognize_annotation(
     access: &EvaluationValueAccess<'_>,
     annotation: Value,
 ) -> RecognizedAnnotation {
+    let rendered = format!("{:?}", access.values().diagnostic_debug(&annotation));
     if let Value::Atom(atom) = &annotation {
         return recognize_simple_annotation(atom)
-            .unwrap_or_else(|| RecognizedAnnotation::Unknown(format!("{annotation:?}")));
+            .unwrap_or_else(|| RecognizedAnnotation::Unknown(rendered));
     }
 
     let Value::Dict(annotation_dict) = &annotation else {
-        return RecognizedAnnotation::Unknown(format!("{annotation:?}"));
+        return RecognizedAnnotation::Unknown(rendered);
     };
     let Some((tag, payload)) = annotation_dict.iter().next() else {
-        return RecognizedAnnotation::Unknown(format!("{annotation:?}"));
+        return RecognizedAnnotation::Unknown(rendered);
     };
     if annotation_dict.iter().nth(1).is_some() {
-        return RecognizedAnnotation::Unknown(format!("{annotation:?}"));
+        return RecognizedAnnotation::Unknown(rendered);
     }
     let payload_value = || access.values().duplicate_value(payload);
     match key_atom_name(tag) {
@@ -827,12 +835,12 @@ fn recognize_annotation(
         _ if matches!(payload, Value::Dict(dict) if dict.is_empty()) => {
             if let Key::Atom(atom) = tag {
                 recognize_simple_annotation(atom)
-                    .unwrap_or_else(|| RecognizedAnnotation::Unknown(format!("{annotation:?}")))
+                    .unwrap_or_else(|| RecognizedAnnotation::Unknown(rendered.clone()))
             } else {
-                RecognizedAnnotation::Unknown(format!("{annotation:?}"))
+                RecognizedAnnotation::Unknown(rendered)
             }
         }
-        _ => RecognizedAnnotation::Unknown(format!("{annotation:?}")),
+        _ => RecognizedAnnotation::Unknown(rendered),
     }
 }
 
@@ -861,14 +869,14 @@ fn atom_name(atom: &crate::core::Atom) -> Option<&str> {
     }
 }
 
-fn annotation_name(_access: &EvaluationValueAccess<'_>, value: Value) -> String {
+fn annotation_name(access: &EvaluationValueAccess<'_>, value: Value) -> String {
     match value {
         Value::Binary(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Value::Atom(atom) => atom_name(&atom)
             .map(str::to_owned)
             .unwrap_or_else(|| format!("{atom:?}")),
         Value::Number(number) => number.to_string(),
-        other => format!("{other:?}"),
+        other => format!("{:?}", access.values().diagnostic_debug(&other)),
     }
 }
 

@@ -1039,7 +1039,7 @@ fn classify_regional_key_value(
 }
 
 fn value_as_regional_list(
-    _access: &EvaluationValueAccess<'_>,
+    access: &EvaluationValueAccess<'_>,
     value: Value,
     subject: &str,
     allow_binary: bool,
@@ -1051,7 +1051,8 @@ fn value_as_regional_list(
             "path-list operand must evaluate to a list value",
         )),
         other => Err(EvaluationHalt::new(format!(
-            "lazy list chunk must evaluate to a list or binary value, got {other:?}"
+            "lazy list chunk must evaluate to a list or binary value, got {:?}",
+            access.values().diagnostic_debug(&other)
         ))),
     }
 }

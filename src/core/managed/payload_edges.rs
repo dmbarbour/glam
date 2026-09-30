@@ -404,7 +404,7 @@ mod tests {
             [second],
             return_first_capture,
         );
-        let evaluated = EvaluatedValue::try_from(first.clone())
+        let evaluated = EvaluatedValue::from_whnf(first.clone())
             .expect("a number is already in weak-head normal form");
         assert_eq!(
             crate::core::cache_test_lazy(&values, &complete, Ok(evaluated)),

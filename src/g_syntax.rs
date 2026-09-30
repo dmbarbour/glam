@@ -36,7 +36,6 @@ pub(crate) use parser::inspect_source;
 pub use parser::parse_source;
 use resolved::{BindingId, ResolvedExpr, ResolvedPathPart};
 
-#[derive(Debug)]
 pub struct LoweredSource {
     pub definitions: Value, // open fixpoint, i.e. \ self -> Dict
     pub diagnostics: Vec<Diagnostic>,

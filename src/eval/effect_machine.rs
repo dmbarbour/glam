@@ -35,7 +35,8 @@ pub(in crate::eval) fn effect_function_in(
 ) -> Result<Value, EvaluationHalt> {
     let Value::Dict(dict) = effect else {
         return Err(EvaluationHalt::new(format!(
-            "{purpose} requires an effect dictionary, got {effect:?}"
+            "{purpose} requires an effect dictionary, got {:?}",
+            access.values().diagnostic_debug(effect)
         )));
     };
     let Some(function) = dict.get(&*keys::EFF) else {

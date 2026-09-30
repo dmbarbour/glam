@@ -146,7 +146,7 @@ impl RegionalListObservationMachine {
                     }
                 };
             self.index_demand = None;
-            let value = EvaluatedValue::try_from(value)
+            let value = EvaluatedValue::from_whnf(value)
                 .expect("list observation index demand must reach WHNF");
             let index = match index_from_evaluated(value, self.index_builtin_name()) {
                 Ok(index) => index,
@@ -181,7 +181,7 @@ impl RegionalListObservationMachine {
                 step_budget,
                 reduce_semantic_shell,
             ) {
-                RegionalWhnfStatus::Ready(value) => EvaluatedValue::try_from(value)
+                RegionalWhnfStatus::Ready(value) => EvaluatedValue::from_whnf(value)
                     .expect("list observation source demand must reach WHNF")
                     .into_value(),
                 RegionalWhnfStatus::Boundary(request) => {
