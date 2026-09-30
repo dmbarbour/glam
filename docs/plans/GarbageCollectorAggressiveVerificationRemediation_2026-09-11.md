@@ -2448,6 +2448,15 @@ inventory relatch:
            clears all 43 pure-builder fixture failures and reduces the
            all-target compiler inventory from 327 to 284 without changing the
            builder state machine.
+         - **D.2h.2aa — evaluator net-driver fixture ownership slice complete
+           2026-09-30.** Net-driver, cursor-dependency, callable-checkpoint,
+           and nested-net fixtures now construct and restart retained driver
+           work under matching value access, duplicate deliberately repeated
+           semantic edges through their owning value domain, and route
+           test-only reductions through the explicit runtime-net gateway.
+           This clears all 65 `src/eval/net.rs` fixture failures and reduces
+           the all-target compiler inventory from 284 to 219 without changing
+           net scheduling, checkpoint, or reduction semantics.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived

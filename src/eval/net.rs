@@ -2117,7 +2117,9 @@ mod driver_tests {
             builder.finish(exposed)
         });
         let exposed = runtime.test_with(&values, RuntimeNet::exposed);
-        let owner = public_values.wrap(Value::Net(crate::core::NetValue::new(runtime.clone())));
+        let owner = public_values.wrap(Value::Net(crate::core::NetValue::new(
+            runtime.duplicate_for_test(&values),
+        )));
         let _request = crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             NormalizationRequest::cursor_whnf(&runtime, exposed, evaluator)
         });
@@ -2146,7 +2148,7 @@ mod driver_tests {
         let runtime = values.instantiate_core_net(&net.finish(Port::auxiliary(bind, 1)));
         let pair = runtime.test_with(values, |net| net.active_pairs().next().unwrap());
         let reduction = runtime
-            .test_with_optional_mut(values, |net| net.reduce_pair(pair))
+            .test_reduce_pair(values, pair)
             .expect("call fixture must be claimable");
         let ReductionKind::Call { bind, data } = reduction.kind else {
             panic!("bind-data fixture must produce a call")
@@ -2364,7 +2366,7 @@ mod driver_tests {
 
         for budget in [2, 1] {
             runtime
-                .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
+                .test_reduce_pair(context.values(), call.pair)
                 .expect("published checkpoint remains runnable");
             crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
                 let mut budget = crate::evaluation::EvaluationStepBudget::new(budget);
@@ -2400,7 +2402,7 @@ mod driver_tests {
             }));
         });
         runtime
-            .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
+            .test_reduce_pair(context.values(), call.pair)
             .expect("retried checkpoint is claimable");
         crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             let mut budget = crate::evaluation::EvaluationStepBudget::new(1);
@@ -2443,7 +2445,7 @@ mod driver_tests {
             net.active_pairs().next().unwrap()
         });
         let reduction = runtime
-            .test_with_optional_mut(&test_value_factory(), |net| net.reduce_pair(pair))
+            .test_reduce_pair(&test_value_factory(), pair)
             .expect("operator fixture must be claimable");
         let ReductionKind::OperatorCall { operator, data } = reduction.kind else {
             panic!("operator-data fixture must produce an operator call")
@@ -2471,9 +2473,19 @@ mod driver_tests {
         });
 
         let mut worklist = NetDriverWorklist::default();
-        let root = values.with_runtime_value_access(|access| runtime.duplicate_in(&access));
-        let expected_root = root.clone();
-        worklist.follow_cursor_dependency(root, cursor, CursorDependency::LocalCursor(cursor));
+        let (root, expected_root) = values.with_runtime_value_access(|access| {
+            let root = runtime.duplicate_in(&access);
+            let expected_root = root.duplicate_in(&access);
+            (root, expected_root)
+        });
+        values.with_runtime_value_access(|access| {
+            worklist.follow_cursor_dependency(
+                &access,
+                root,
+                cursor,
+                CursorDependency::LocalCursor(cursor),
+            );
+        });
 
         values.with_runtime_value_access(|access| {
             match worklist.pop().expect("child work must be present") {
@@ -2598,9 +2610,10 @@ mod driver_tests {
     }
 
     fn assert_productive_cursor_chain_alternates_pairless_and_pair_owned_layers(layers: usize) {
-        let expected = test_value_factory().unit();
+        let values = test_value_factory();
+        let expected = values.unit();
         let mut leaf = NetBuilder::<CoreSpecialization>::new();
-        let data = leaf.data(expected.clone());
+        let data = leaf.data(expected.duplicate_for_test(&values));
         let mut source = instantiate(leaf.finish(data));
         let mut root_interface = source.test_with(&test_value_factory(), |net| net.exposed());
 
@@ -2705,8 +2718,9 @@ mod driver_tests {
         let mut net = NetBuilder::<CoreSpecialization>::new();
         let left = net.push(crate::interaction_net::Node::Bind);
         let right = net.push(crate::interaction_net::Node::Bind);
-        let left_result = net.data(value.clone());
-        let exposed_result = net.data(value.clone());
+        let values = test_value_factory();
+        let left_result = net.data(value.duplicate_for_test(&values));
+        let exposed_result = net.data(value.duplicate_for_test(&values));
         let right_result = net.data(value);
         net.wire(Port::principal(left), Port::principal(right));
         net.wire(Port::auxiliary(left, 2), left_result);
@@ -2748,7 +2762,7 @@ mod driver_tests {
             net.active_pairs().next().unwrap()
         });
         assert!(matches!(
-            claimed.test_with_optional_mut(&test_value_factory(), |net| net.reduce_pair(pair)),
+            claimed.test_reduce_pair(&test_value_factory(), pair),
             Some(Reduction {
                 kind: ReductionKind::Call { .. },
                 ..
@@ -2793,7 +2807,7 @@ mod driver_tests {
             net.active_pairs().next().unwrap()
         });
         assert!(matches!(
-            stuck.test_with_optional_mut(&test_value_factory(), |net| net.reduce_pair(pair)),
+            stuck.test_reduce_pair(&test_value_factory(), pair),
             Some(Reduction {
                 kind: ReductionKind::Stuck,
                 ..
@@ -2824,7 +2838,9 @@ mod driver_tests {
         };
         assert!(target.test_claim_pairless_cursor_obligation(&test_value_factory(), cursor));
         let request = normalization_request(&target, interface);
-        let mut driver = NetDriver::new(&request);
+        let mut driver = context
+            .values()
+            .with_runtime_value_access(|access| NetDriver::new(&request, &access));
         let contention =
             match crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
                 drive_net_driver_work_in(evaluator, &mut driver)
@@ -2842,7 +2858,9 @@ mod driver_tests {
         let outcome = crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             loop {
                 match drive_net_driver_work_in(evaluator, &mut driver)? {
-                    NetDriverOutcome::Progressed => driver.restart_from_request_root(),
+                    NetDriverOutcome::Progressed => evaluator.with_value_access(|access| {
+                        driver.restart_from_request_root(access.values());
+                    }),
                     outcome => return Ok::<_, EvaluationHalt>(outcome),
                 }
             }
@@ -2958,7 +2976,9 @@ mod driver_tests {
             .expect("the normalization owner must publish acquisition");
 
         let request = normalization_request(&runtime, interface);
-        let mut driver = NetDriver::new(&request);
+        let mut driver = context
+            .values()
+            .with_runtime_value_access(|access| NetDriver::new(&request, &access));
         let contention =
             crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
                 match drive_net_driver_work_in(evaluator, &mut driver)? {
@@ -3030,14 +3050,18 @@ mod driver_tests {
         let promise = PromisedValue::new(context.values(), "persistent semantic net wait");
         let mut builder = NetBuilder::<CoreSpecialization>::new();
         let [application, argument, result] = builder.bind();
-        let function = builder.data(Value::Promised(promise.clone()));
+        let function = builder.data(Value::Promised(
+            promise.duplicate_for_test(context.values()),
+        ));
         let value = builder.data(context.values().unit());
         builder.wire(application, function);
         builder.wire(argument, value);
         let runtime = instantiate(builder.finish(result));
         let interface = runtime.test_with(context.values(), |net| net.exposed());
         let request = normalization_request(&runtime, interface);
-        let mut driver = NetDriver::new(&request);
+        let mut driver = context
+            .values()
+            .with_runtime_value_access(|access| NetDriver::new(&request, &access));
 
         let parked =
             match crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
@@ -3070,7 +3094,9 @@ mod driver_tests {
         let outcome = crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             loop {
                 match drive_net_driver_work_in(evaluator, &mut driver)? {
-                    NetDriverOutcome::Progressed => driver.restart_from_request_root(),
+                    NetDriverOutcome::Progressed => evaluator.with_value_access(|access| {
+                        driver.restart_from_request_root(access.values());
+                    }),
                     outcome => return Ok::<_, EvaluationHalt>(outcome),
                 }
             }
@@ -3109,7 +3135,9 @@ mod driver_tests {
         let promise = PromisedValue::new(context.values(), "net WHNF semantic wait");
         let mut builder = NetBuilder::<CoreSpecialization>::new();
         let [application, argument, result] = builder.bind();
-        let function = builder.data(Value::Promised(promise.clone()));
+        let function = builder.data(Value::Promised(
+            promise.duplicate_for_test(context.values()),
+        ));
         let value = builder.data(context.values().unit());
         builder.wire(application, function);
         builder.wire(argument, value);
@@ -3118,7 +3146,12 @@ mod driver_tests {
         let _runtime_root = context.values().root_core_net(&runtime);
         let mut machine =
             crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
-                NetWhnfMachine::new(evaluator, runtime.clone(), interface, "test net")
+                NetWhnfMachine::new(
+                    evaluator,
+                    runtime.duplicate_for_test(context.values()),
+                    interface,
+                    "test net",
+                )
             });
         context.values().with_runtime_value_access(|access| {
             assert!(machine.retained_runtime().same_net_in(&runtime, &access));
@@ -3284,7 +3317,7 @@ mod driver_tests {
             net.active_pairs().next().unwrap()
         });
         let reduction = runtime
-            .test_with_optional_mut(&test_value_factory(), |net| net.reduce_pair(pair))
+            .test_reduce_pair(&test_value_factory(), pair)
             .expect("demanded call should be claimable");
         let ReductionKind::Call { bind, data } = reduction.kind else {
             panic!("bind-data demand should be a call")
@@ -3319,7 +3352,7 @@ mod driver_tests {
             net.active_pairs().next().unwrap()
         });
         let reduction = runtime
-            .test_with_optional_mut(&test_value_factory(), |net| net.reduce_pair(pair))
+            .test_reduce_pair(&test_value_factory(), pair)
             .expect("builtin call should be claimable");
         let ReductionKind::Call { bind, data } = reduction.kind else {
             panic!("bind-data demand should be a call")
@@ -3361,7 +3394,7 @@ mod driver_tests {
         assert_eq!(after.topology_revision(), before.topology_revision() + 1);
         assert_eq!(after.disturbance_epoch(), before.disturbance_epoch() + 1);
         assert!(matches!(
-            runtime.test_with_optional_mut(&test_value_factory(), |net| net.reduce_pair(call.pair)),
+            runtime.test_reduce_pair(&test_value_factory(), call.pair),
             Some(Reduction {
                 kind: ReductionKind::Call { .. },
                 ..
@@ -3390,7 +3423,7 @@ mod driver_tests {
         assert_eq!(after.topology_revision(), before.topology_revision() + 1);
         assert_eq!(after.disturbance_epoch(), before.disturbance_epoch() + 1);
         assert!(matches!(
-            runtime.test_with_optional_mut(&test_value_factory(), |net| net.reduce_pair(call.pair)),
+            runtime.test_reduce_pair(&test_value_factory(), call.pair),
             Some(Reduction {
                 kind: ReductionKind::Call { .. },
                 ..
@@ -3437,7 +3470,7 @@ mod driver_tests {
             }));
         });
         runtime
-            .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
+            .test_reduce_pair(context.values(), call.pair)
             .expect("ready checkpoint must be claimable");
         crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             evaluator.with_value_access(|access| {
@@ -3476,7 +3509,7 @@ mod driver_tests {
             }));
         });
         runtime
-            .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
+            .test_reduce_pair(context.values(), call.pair)
             .expect("ready checkpoint must be claimable");
 
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -3577,8 +3610,9 @@ mod driver_tests {
         ];
 
         for (name, callable, expected) in callable_families {
-            let direct = callable.clone();
-            let lazy_result = callable.clone();
+            let values = test_value_factory();
+            let direct = callable.duplicate_for_test(&values);
+            let lazy_result = callable.duplicate_for_test(&values);
             let promise_result = callable;
 
             let (runtime, call) = claimed_core_call(direct);
@@ -3705,7 +3739,7 @@ mod driver_tests {
 
         for (budget, expected_generation) in [(2, Some(1)), (1, None)] {
             let reduction = runtime
-                .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
+                .test_reduce_pair(context.values(), call.pair)
                 .expect("published checkpoint must remain runnable");
             assert!(matches!(
                 reduction.kind,
@@ -3783,7 +3817,7 @@ mod driver_tests {
                 runtime.retry_blocked_callable_checkpoint(&blocked)
             }));
             runtime
-                .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
+                .test_reduce_pair(context.values(), call.pair)
                 .expect("completed dependency makes the checkpoint runnable");
             let mut budget = crate::evaluation::EvaluationStepBudget::new(usize::MAX);
             progress_callable_checkpoint(evaluator, &runtime, call.pair, &mut budget)
@@ -3894,7 +3928,7 @@ mod driver_tests {
         );
 
         runtime
-            .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
+            .test_reduce_pair(context.values(), call.pair)
             .expect("initial checkpoint is runnable");
         crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             let mut budget = crate::evaluation::EvaluationStepBudget::new(1);
@@ -3907,7 +3941,7 @@ mod driver_tests {
         assert_eq!(yielded_identity, expected);
 
         runtime
-            .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
+            .test_reduce_pair(context.values(), call.pair)
             .expect("yielded checkpoint is runnable");
         crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             let mut budget = crate::evaluation::EvaluationStepBudget::new(usize::MAX);
@@ -3936,7 +3970,7 @@ mod driver_tests {
         });
 
         runtime
-            .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
+            .test_reduce_pair(context.values(), call.pair)
             .expect("completed dependency makes the checkpoint runnable");
         crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             evaluator.with_value_access(|access| {
@@ -3959,7 +3993,7 @@ mod driver_tests {
         assert_eq!(restored_identity, expected);
 
         runtime
-            .test_with_optional_mut(context.values(), |net| net.reduce_pair(call.pair))
+            .test_reduce_pair(context.values(), call.pair)
             .expect("restored checkpoint is runnable");
         crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             let mut budget = crate::evaluation::EvaluationStepBudget::new(usize::MAX);
@@ -3993,7 +4027,7 @@ mod driver_tests {
         assert_eq!(after.topology_revision(), before.topology_revision() + 1);
         assert_eq!(after.disturbance_epoch(), before.disturbance_epoch() + 1);
         assert!(matches!(
-            runtime.test_with_optional_mut(&test_value_factory(), |net| net.reduce_pair(call.pair)),
+            runtime.test_reduce_pair(&test_value_factory(), call.pair),
             Some(Reduction {
                 kind: ReductionKind::OperatorCall { .. },
                 ..
@@ -4025,7 +4059,7 @@ mod driver_tests {
         assert_eq!(after.topology_revision(), before.topology_revision() + 1);
         assert_eq!(after.disturbance_epoch(), before.disturbance_epoch() + 1);
         assert!(matches!(
-            runtime.test_with_optional_mut(&test_value_factory(), |net| net.reduce_pair(call.pair)),
+            runtime.test_reduce_pair(&test_value_factory(), call.pair),
             Some(Reduction {
                 kind: ReductionKind::OperatorCall { .. },
                 ..
@@ -4274,11 +4308,12 @@ mod driver_tests {
 
     #[test]
     fn nested_terminal_failure_propagates_through_the_complete_driver() {
-        let value = test_value_factory().unit();
+        let values = test_value_factory();
+        let value = values.unit();
         let mut source = NetBuilder::<CoreSpecialization>::new();
         let failed_bind = source.push(crate::interaction_net::Node::Bind);
-        let failed_data = source.data(value.clone());
-        let failed_result = source.data(value.clone());
+        let failed_data = source.data(value.duplicate_for_test(&values));
+        let failed_result = source.data(value.duplicate_for_test(&values));
         source.wire(Port::principal(failed_bind), failed_data);
         source.wire(Port::auxiliary(failed_bind, 2), failed_result);
 
@@ -4289,8 +4324,8 @@ mod driver_tests {
             Port::principal(unrelated_right),
         );
         for auxiliary in 1..=2 {
-            let left_data = source.data(value.clone());
-            let right_data = source.data(value.clone());
+            let left_data = source.data(value.duplicate_for_test(&values));
+            let right_data = source.data(value.duplicate_for_test(&values));
             source.wire(Port::auxiliary(unrelated_left, auxiliary), left_data);
             source.wire(Port::auxiliary(unrelated_right, auxiliary), right_data);
         }
@@ -4310,7 +4345,7 @@ mod driver_tests {
         });
 
         let reduction = source
-            .test_with_optional_mut(&test_value_factory(), |net| net.reduce_pair(failed_pair))
+            .test_reduce_pair(&test_value_factory(), failed_pair)
             .expect("nested source call should be claimable");
         let ReductionKind::Call { bind, data } = reduction.kind else {
             panic!("nested source failure should originate in a call");
@@ -4345,8 +4380,7 @@ mod driver_tests {
         );
 
         assert!(matches!(
-            source.test_with_optional_mut(&test_value_factory(), |net| net
-                .reduce_pair(unrelated_pair)),
+            source.test_reduce_pair(&test_value_factory(), unrelated_pair),
             Some(Reduction {
                 kind: ReductionKind::BindJoin,
                 ..
@@ -4359,9 +4393,10 @@ mod driver_tests {
     }
 
     fn assert_iterative_cursor_driver_handles_productive_layers(layers: usize) {
-        let expected = test_value_factory().unit();
+        let values = test_value_factory();
+        let expected = values.unit();
         let mut leaf = NetBuilder::<CoreSpecialization>::new();
-        let data = leaf.data(expected.clone());
+        let data = leaf.data(expected.duplicate_for_test(&values));
         let leaf = instantiate(leaf.finish(data));
         let mut source = leaf;
         let mut root_interface = source.test_with(&test_value_factory(), |net| net.exposed());
