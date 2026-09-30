@@ -5212,8 +5212,7 @@ fn effect_values_apply_by_extending_the_effect_function() {
     };
     let function = effect
         .get(&Key::atom_from_text("eff"))
-        .expect("effect should contain an eff function")
-        .clone();
+        .expect("effect should contain an eff function");
     let api = Value::Dict(Dict::new_sync().insert(
         Key::atom_from_text("op"),
         closed_function_value(
@@ -5224,7 +5223,7 @@ fn effect_values_apply_by_extending_the_effect_function() {
 
     let value = apply_value(
         &test_context(),
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &function)
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), function)
             .unwrap(),
         api,
     )
@@ -7394,7 +7393,13 @@ fn metadata_reflection_update_is_demanded_by_seq_and_worker_spark() {
     let seq_outputs =
         run_metadata_reflection_update(&seq_context, n(0), vec![initial_metadata()]).unwrap();
     seq_context.values().assert_same_representation_for_test(
-        &evaluate_strategy(&seq_context, Builtin::Seq, seq_outputs[0].clone(), n(42)).unwrap(),
+        &evaluate_strategy(
+            &seq_context,
+            Builtin::Seq,
+            seq_outputs[0].duplicate_for_test(seq_context.values()),
+            n(42),
+        )
+        .unwrap(),
         &n(42),
     );
     assert_eq!(seq_builds.load(Ordering::SeqCst), 1);
@@ -7416,7 +7421,7 @@ fn metadata_reflection_update_is_demanded_by_seq_and_worker_spark() {
     let result = evaluate_strategy(
         &spark_context,
         Builtin::Spark,
-        spark_outputs[0].clone(),
+        spark_outputs[0].duplicate_for_test(spark_context.values()),
         n(43),
     )
     .expect("spark should immediately return its target");
@@ -7516,7 +7521,7 @@ fn binary_annotation_resumes_without_replaying_a_completed_prefix() {
             annotation,
             Value::List(List::from_values(vec![
                 prefix,
-                Value::Promised(item.clone()),
+                Value::Promised(item.duplicate_for_test(observer.values())),
             ])),
         ],
     )
@@ -7606,9 +7611,7 @@ fn unknown_annotations_pass_through_targets() {
     ))
     .expect("unknown annotations should pass through");
 
-    context
-        .values()
-        .assert_same_representation_for_test(&value, &n(42));
+    crate::core::test_value_factory().assert_same_representation_for_test(&value, &n(42));
 }
 
 fn reflection_annotation(context: &EvalContext, effect: Value, target: Value) -> Value {
@@ -7742,7 +7745,7 @@ fn reflection_task_result_returns_arbitrary_lazy_value_once() {
         .expect("fresh test session should accept its reflection launcher");
 
     let computation = Value::reflection_task_result(context.values(), n(0));
-    let copy = computation.clone();
+    let copy = computation.duplicate_for_test(context.values());
     context.values().assert_same_representation_for_test(
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &computation)
             .unwrap(),
@@ -7962,9 +7965,10 @@ fn unobserved_reflection_failure_remains_reportable_until_promise_propagation() 
 fn reflection_task_result_preserves_failure_and_transfers_reporting_responsibility() {
     let context = annotation_test_context();
     let producer_frame = evaluation_context_frame("reflection_result_producer");
-    let failure = Arc::new(
-        EvaluationFailure::message("reflection result failed").with_context(producer_frame.clone()),
-    );
+    let failure = Arc::new(context.values().with_runtime_value_access(|access| {
+        EvaluationFailure::message("reflection result failed")
+            .with_context_in(&access, access.duplicate_value(&producer_frame))
+    }));
     context
         .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
             terminal: FixtureTaskTerminal::Failed(failure),
@@ -8020,7 +8024,7 @@ fn reflection_gate_waits_before_continuing_target_demand() {
         forced_by_target.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(n(42))
     });
-    let gate = reflection_annotation(&context, n(0), target.clone());
+    let gate = reflection_annotation(&context, n(0), target.duplicate_for_test(context.values()));
     let Value::Lazy(gate_lazy) = &gate else {
         panic!("a reflection annotation should construct a lazy gate")
     };
@@ -8140,9 +8144,10 @@ fn assert_structured_reflection_gate_failure(stage: GateFailureStage) {
             .insert(detail.clone(), n(7)),
     );
     let producer_frame = evaluation_context_frame("gate_producer");
-    let failure = Arc::new(
-        EvaluationFailure::emission(emission.clone()).with_context(producer_frame.clone()),
-    );
+    let failure = Arc::new(context.values().with_runtime_value_access(|access| {
+        EvaluationFailure::emission(access.duplicate_value(&emission))
+            .with_context_in(&access, access.duplicate_value(&producer_frame))
+    }));
     let builds = Arc::new(AtomicUsize::new(0));
     context
         .install_reflection_launcher(Arc::new(GateFailureLauncher {
@@ -8383,7 +8388,10 @@ fn builtins_are_curried_and_do_not_force_arguments_early() {
             assert_eq!(call.arguments.len(), 1);
             assert!(matches!(&call.arguments[0], Value::Lazy(_)));
         }
-        other => panic!("expected partial builtin, got {other:?}"),
+        other => panic!(
+            "expected partial builtin, got {}",
+            other.diagnostic_debug_for_test(&crate::core::test_value_factory())
+        ),
     }
 }
 
@@ -8553,6 +8561,7 @@ fn worker_spark_demands_metadata_behind_a_lazy_carrier_shell() {
         Ok(n(7))
     });
     let carrier = Value::metadata_carrier(metadata);
+    let values = context.values().clone();
     let lazy_carrier = Value::semantic_thunk(
         context.values(),
         "lazy worker metadata carrier",
@@ -8560,7 +8569,7 @@ fn worker_spark_demands_metadata_behind_a_lazy_carrier_shell() {
             shell_sender
                 .send(())
                 .expect("carrier receiver should remain open");
-            Ok(carrier.clone())
+            Ok(carrier.duplicate_for_test(&values))
         },
     );
 
@@ -8594,10 +8603,16 @@ fn metadata_strategy_failures_are_cached_and_seq_propagates_them() {
                 .expect("attempt receiver should remain open");
             Err(EvaluationHalt::new("metadata strategy failed"))
         });
-    let carrier = Value::metadata_carrier(Value::Lazy(metadata.clone()));
+    let carrier =
+        Value::metadata_carrier(Value::Lazy(metadata.duplicate_for_test(context.values())));
 
-    let result = evaluate_strategy(&context, Builtin::Spark, carrier.clone(), n(42))
-        .expect("detached metadata failure must not replace the spark target");
+    let result = evaluate_strategy(
+        &context,
+        Builtin::Spark,
+        carrier.duplicate_for_test(context.values()),
+        n(42),
+    )
+    .expect("detached metadata failure must not replace the spark target");
     context
         .values()
         .assert_same_representation_for_test(&result, &n(42));
@@ -8631,8 +8646,13 @@ fn strategies_stop_at_nested_metadata_carriers() {
     let outer = Value::metadata_carrier(Value::metadata_carrier(hidden));
 
     context.values().assert_same_representation_for_test(
-        &evaluate_strategy(&context, Builtin::Seq, outer.clone(), n(42))
-            .expect("seq should stop after demanding one hidden metadata value"),
+        &evaluate_strategy(
+            &context,
+            Builtin::Seq,
+            outer.duplicate_for_test(context.values()),
+            n(42),
+        )
+        .expect("seq should stop after demanding one hidden metadata value"),
         &n(42),
     );
     assert_eq!(hidden_forces.load(Ordering::SeqCst), 0);
@@ -8649,7 +8669,7 @@ fn strategies_stop_at_nested_metadata_carriers() {
             Ok(unit_value())
         },
     );
-    context.spark(Value::Lazy(sentinel.clone()));
+    context.spark(Value::Lazy(sentinel.duplicate_for_test(context.values())));
     finished_receiver
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("worker should finish the preceding metadata spark");
@@ -8681,8 +8701,12 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
             Ok(n(7))
         });
     let promise = PromisedValue::new(context.values(), "resolved spark input");
-    set_promise(&context, &promise, Value::Lazy(promised_work.clone()))
-        .expect_without_debug("test promise should accept its one assignment");
+    set_promise(
+        &context,
+        &promise,
+        Value::Lazy(promised_work.duplicate_for_test(context.values())),
+    )
+    .expect_without_debug("test promise should accept its one assignment");
     context.spark(Value::Promised(promise));
 
     let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
@@ -8693,7 +8717,7 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
                 .expect("sentinel receiver should remain open");
             Ok(unit_value())
         });
-    context.spark(Value::Lazy(sentinel.clone()));
+    context.spark(Value::Lazy(sentinel.duplicate_for_test(context.values())));
     finished_receiver
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("worker should process the earlier spark jobs first");
@@ -8726,7 +8750,9 @@ fn spark_resumes_after_a_resolver_owned_promise_completes() {
     let session = crate::evaluation::EvaluationSession::shared(&coordinator);
     let context = EvalContext::new(&session);
     let promise = PromisedValue::new(context.values(), "later spark input");
-    context.spark(Value::Promised(promise.clone()));
+    context.spark(Value::Promised(
+        promise.duplicate_for_test(context.values()),
+    ));
     wait_for_blocked_sparks(
         &coordinator,
         1,
@@ -8740,8 +8766,12 @@ fn spark_resumes_after_a_resolver_owned_promise_completes() {
             .expect("spark result receiver should remain open");
         Ok(n(7))
     });
-    set_promise(&context, &promise, Value::Lazy(assigned.clone()))
-        .expect_without_debug("promise should accept its one assignment");
+    set_promise(
+        &context,
+        &promise,
+        Value::Lazy(assigned.duplicate_for_test(context.values())),
+    )
+    .expect_without_debug("promise should accept its one assignment");
 
     forced_receiver
         .recv_timeout(std::time::Duration::from_secs(2))
@@ -8789,12 +8819,14 @@ fn metadata_seq_preserves_retryable_promise_blockage() {
         .task_owned_promise(Arc::from("blocked metadata"))
         .unwrap();
     let observer = context.with_new_task().unwrap();
-    let carrier = Value::metadata_carrier(Value::Promised(promise.clone()));
+    let carrier = Value::metadata_carrier(Value::Promised(
+        promise.duplicate_for_test(observer.values()),
+    ));
 
     let applied = apply_values(
         &observer,
         Value::Builtin(Builtin::Seq),
-        vec![carrier.clone(), n(42)],
+        vec![carrier, n(42)],
     )
     .expect("strategy application should remain lazy");
     let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &applied)
@@ -8837,8 +8869,13 @@ fn completed_metadata_updates_release_sources_and_task_records() {
         "the unresolved update must retain its prior metadata input"
     );
 
-    let result = evaluate_strategy(&context, Builtin::Seq, outputs[0].clone(), n(42))
-        .expect("seq should complete the derived metadata");
+    let result = evaluate_strategy(
+        &context,
+        Builtin::Seq,
+        outputs[0].duplicate_for_test(context.values()),
+        n(42),
+    )
+    .expect("seq should complete the derived metadata");
     context
         .values()
         .assert_same_representation_for_test(&result, &n(42));

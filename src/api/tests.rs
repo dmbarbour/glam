@@ -1913,10 +1913,9 @@ fn source_definitions_add_shallow_opaque_origin_context() {
     );
     let automatic_origin = context
         .get(&*keys::ORIGIN)
-        .expect("source context should contain an origin")
-        .clone();
+        .expect("source context should contain an origin");
     assert!(
-        matches!(&automatic_origin, CoreValue::Opaque(_)),
+        matches!(automatic_origin, CoreValue::Opaque(_)),
         "source origins should remain opaque until a reflection capability inspects them"
     );
 

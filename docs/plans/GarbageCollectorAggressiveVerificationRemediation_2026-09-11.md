@@ -2545,6 +2545,18 @@ inventory relatch:
            `src/eval/tests.rs` failures and reduces the all-target compiler
            inventory from 45 to 24 without changing metadata sealing or
            reflection-task sharing.
+         - **D.2h.2ak — final evaluator-fixture ownership slice complete
+           2026-09-30.** Strategy, annotation, reflection-result, structured
+           gate-failure, partial-builtin diagnostic, metadata-carrier, spark,
+           and completed-update fixtures now make every retained semantic
+           edge explicit through the matching value domain. Reusable thunk
+           callbacks duplicate their result under captured runtime access,
+           while one-shot inputs are moved rather than copied. Two
+           reference-level `.clone()` calls which had silently copied
+           `&Value` rather than `Value` were removed. This clears the final 24
+           fixture failures: `cargo check --all-targets --all-features` now
+           reaches zero errors without restoring any ambient semantic-value
+           trait.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived
