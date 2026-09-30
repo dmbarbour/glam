@@ -5334,7 +5334,8 @@ fn local_dictionary_paths_resolve_without_a_global_root() {
 
     let value = eval_closed_expr(&expr).expect("local dictionary path should evaluate");
 
-    assert_eq!(value, Value::binary_from_text("World"));
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&value, &Value::binary_from_text("World"));
 }
 
 #[test]
@@ -5385,7 +5386,7 @@ fn dictionaries_remain_lazy_under_eval_value() {
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &value)
             .expect("dict should stay lazy");
 
-    assert_eq!(evaluated, value);
+    crate::core::test_value_factory().assert_same_representation_for_test(&evaluated, &value);
 }
 
 #[test]
@@ -5446,7 +5447,8 @@ fn singleton_dict_filters_empty_dictionary_values() {
     ))
     .expect("singleton dict should evaluate");
 
-    assert_eq!(value, Value::Dict(crate::core::Dict::new_sync()));
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&value, &Value::Dict(crate::core::Dict::new_sync()));
 }
 
 #[test]
@@ -5490,13 +5492,13 @@ fn dictionary_unions_merge_nested_dictionaries_transitively() {
         panic!("greeting should evaluate to a merged dictionary");
     };
 
-    assert_eq!(
-        greeting.get(&hello),
-        Some(&Value::binary_from_text("Hello"))
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &greeting.get(&hello),
+        &Some(&Value::binary_from_text("Hello")),
     );
-    assert_eq!(
-        greeting.get(&world),
-        Some(&Value::binary_from_text("World"))
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &greeting.get(&world),
+        &Some(&Value::binary_from_text("World")),
     );
 }
 
@@ -5519,9 +5521,9 @@ fn dictionary_unions_treat_empty_dictionary_values_as_undefined() {
     );
 
     let value = eval_closed_expr(&expr).expect("dict union should evaluate");
-    assert_eq!(
-        value.get_key_path(&[key]),
-        Some(&Value::binary_from_text("Hello"))
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &value.get_key_path(&[key]),
+        &Some(&Value::binary_from_text("Hello")),
     );
 }
 
@@ -5571,8 +5573,12 @@ fn dictionary_union_resumes_without_replaying_a_completed_operand() {
     let Value::Dict(dict) = value else {
         panic!("dictionary union should produce a dictionary");
     };
-    assert_eq!(dict.get(&left_key), Some(&n(41)));
-    assert_eq!(dict.get(&right_key), Some(&n(42)));
+    observer
+        .values()
+        .assert_same_representation_for_test(&dict.get(&left_key), &Some(&n(41)));
+    observer
+        .values()
+        .assert_same_representation_for_test(&dict.get(&right_key), &Some(&n(42)));
     assert_eq!(
         attempts.load(Ordering::SeqCst),
         1,
@@ -5615,8 +5621,13 @@ fn dictionary_duplicate_merge_resumes_its_second_operand() {
     let Value::Dict(dict) = value else {
         panic!("duplicate merge should produce a dictionary");
     };
-    assert_eq!(dict.get(&Key::atom_from_text("left")), Some(&n(41)));
-    assert_eq!(dict.get(&right_key), Some(&n(42)));
+    observer.values().assert_same_representation_for_test(
+        &dict.get(&Key::atom_from_text("left")),
+        &Some(&n(41)),
+    );
+    observer
+        .values()
+        .assert_same_representation_for_test(&dict.get(&right_key), &Some(&n(42)));
 }
 
 #[test]
@@ -5650,10 +5661,10 @@ fn list_at_resumes_without_replaying_a_completed_lazy_chunk() {
 
     set_promise(&owner, &tail, Value::List(List::from_values(vec![n(42)])))
         .expect("the owner should resolve the list tail");
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+    observer.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
             .expect("list-at should resume"),
-        n(42)
+        &n(42),
     );
     assert_eq!(
         attempts.load(Ordering::SeqCst),
@@ -5753,9 +5764,9 @@ fn dictionary_updates_overwrite_duplicate_values() {
 
     let value = eval_closed_expr(&expr).expect("dict update should evaluate");
 
-    assert_eq!(
-        value.get_key_path(&[key]),
-        Some(&Value::binary_from_text("World"))
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &value.get_key_path(&[key]),
+        &Some(&Value::binary_from_text("World")),
     );
 }
 
@@ -5785,13 +5796,13 @@ fn dictionary_updates_merge_nested_dictionaries_transitively() {
         panic!("greeting should resolve directly to a dictionary");
     };
 
-    assert_eq!(
-        greeting.get(&hello),
-        Some(&Value::binary_from_text("Hello"))
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &greeting.get(&hello),
+        &Some(&Value::binary_from_text("Hello")),
     );
-    assert_eq!(
-        greeting.get(&world),
-        Some(&Value::binary_from_text("World"))
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &greeting.get(&world),
+        &Some(&Value::binary_from_text("World")),
     );
 }
 
@@ -5807,7 +5818,7 @@ fn dictionary_updates_treat_empty_dictionary_values_as_undefined() {
     );
 
     let value = eval_closed_expr(&expr).expect("dict update should evaluate");
-    assert_eq!(value.get_key_path(&[key]), None);
+    assert!(value.get_key_path(&[key]).is_none());
 }
 
 #[test]
@@ -5836,7 +5847,8 @@ fn names_can_traverse_dictionary_union_bindings() {
     )
     .expect("dotted name should force intermediate dict unions");
 
-    assert_eq!(resolved, Value::binary_from_text("Hello"));
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&resolved, &Value::binary_from_text("Hello"));
 }
 
 #[test]
@@ -5884,7 +5896,8 @@ fn names_can_expand_list_valued_path_segments() {
     )
     .expect("list-valued path segment should expand into multiple lookups");
 
-    assert_eq!(resolved, Value::binary_from_text("World"));
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&resolved, &Value::binary_from_text("World"));
 }
 
 #[test]
@@ -5905,7 +5918,10 @@ fn missing_dictionary_members_resolve_to_empty_dictionary() {
     )
     .expect("missing member access should stay evaluable");
 
-    assert_eq!(resolved, Value::Dict(crate::core::Dict::new_sync()));
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &resolved,
+        &Value::Dict(crate::core::Dict::new_sync()),
+    );
 }
 
 #[test]
@@ -6004,7 +6020,7 @@ fn assert_unit_builtin_uses_its_diagnostic_context() {
         TestExpr::Value(target.clone()),
     ))
     .expect("unit assertion should return its target");
-    assert_eq!(value, target);
+    crate::core::test_value_factory().assert_same_representation_for_test(&value, &target);
 
     let error = eval_closed_expr(&builtin3_expr(
         Builtin::AssertUnit,
@@ -6200,7 +6216,8 @@ fn error_annotations_carry_diagnostic_values_and_ordered_contexts() {
             .expect("diagnostic should retain ad hoc fields"),
     )
     .unwrap();
-    assert_eq!(operation, atom("emit"));
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&operation, &atom("emit"));
     let message = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_context(),
         diagnostic
@@ -6221,13 +6238,13 @@ fn error_annotations_carry_diagnostic_values_and_ordered_contexts() {
     let Value::List(contexts) = contexts else {
         panic!("msg.context must be a list");
     };
-    assert_eq!(
-        list_to_value_items(&test_context(), &contexts).unwrap(),
-        [
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &list_to_value_items(&test_context(), &contexts).unwrap(),
+        &[
             Value::binary_from_text("outer"),
             Value::binary_from_text("inner"),
-            Value::binary_from_text("emitted")
-        ]
+            Value::binary_from_text("emitted"),
+        ],
     );
 }
 
@@ -6274,9 +6291,9 @@ fn error_annotations_contextualize_failure_while_evaluating_their_message() {
     let Value::List(contexts) = contexts else {
         panic!("msg.context must be a list");
     };
-    assert_eq!(
-        list_to_value_items(&test_context(), &contexts).unwrap(),
-        [evaluation_context_frame("error_message")]
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &list_to_value_items(&test_context(), &contexts).unwrap(),
+        &[evaluation_context_frame("error_message")],
     );
 }
 
@@ -6291,9 +6308,9 @@ fn annotation_selection_contextualizes_only_nested_evaluation_failures() {
         TestExpr::Value(n(42)),
     ))
     .expect_err("failure while selecting an annotation must propagate");
-    assert_eq!(
-        failure_context_items(&error),
-        [evaluation_context_frame("annotation")]
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &failure_context_items(&error),
+        &[evaluation_context_frame("annotation")],
     );
 }
 
@@ -6309,9 +6326,9 @@ fn index_builtins_contextualize_demand_without_decorating_validation_errors() {
         TestExpr::Value(values.clone()),
     ))
     .expect_err("failure while evaluating the index must propagate");
-    assert_eq!(
-        failure_context_items(&nested),
-        [evaluation_context_frame("list_index")]
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &failure_context_items(&nested),
+        &[evaluation_context_frame("list_index")],
     );
 
     let validation = eval_closed_expr(&builtin2_expr(
@@ -6320,7 +6337,8 @@ fn index_builtins_contextualize_demand_without_decorating_validation_errors() {
         TestExpr::Value(values),
     ))
     .expect_err("a nonnumeric index must fail validation");
-    assert_eq!(failure_context_items(&validation), []);
+    crate::core::test_value_factory()
+        .assert_same_representation_for_test(&failure_context_items(&validation), &[]);
 }
 
 fn failure_context_items(error: &EvaluationHalt) -> Vec<Value> {
@@ -6369,7 +6387,7 @@ fn context_annotations_are_transparent_and_do_not_demand_context_on_success() {
         TestExpr::Value(n(42)),
     ))
     .expect("successful context annotation should return its target");
-    assert_eq!(value, n(42));
+    crate::core::test_value_factory().assert_same_representation_for_test(&value, &n(42));
 }
 
 #[test]

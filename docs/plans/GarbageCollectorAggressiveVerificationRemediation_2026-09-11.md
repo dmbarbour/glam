@@ -2211,6 +2211,14 @@ inventory relatch:
            failures remain ordinary Rust assertions. This slice reduces the
            central evaluator equality inventory from 132 to 86 and the
            all-target inventory from 417 to 371.
+         - **D.2h.2f — dictionary and diagnostic-context fixture slice
+           complete 2026-09-30.** Dictionary lookup, union, update and name
+           resolution results now use runtime-scoped representation checks;
+           missing paths use direct presence predicates. Annotation results
+           and recursive diagnostic-context collections use the same test
+           relation, while message strings remain ordinary comparisons. This
+           slice reduces the central evaluator equality inventory from 86 to
+           60 and the all-target inventory from 371 to 345.
       3. Add owner-local recursive test relations for `g_syntax` carriers and
          migrate compiler/front-end fixtures without giving semantic values
          syntax-layer equality traits.
