@@ -2035,6 +2035,13 @@ inventory relatch:
     ambient raw-value traits, then remove the cursor/frontier/runtime-source
     compatibility traits through access-qualified duplication, comparison,
     and diagnostics.
+    - **Fixture access vocabulary and core fixtures: complete 2026-09-30.**
+      Test-only helpers now require an explicit `CoreValueFactory` and open
+      bounded matching access for value, evaluated-value, failure, lazy,
+      promise, net, and operator duplication or recursive representation
+      comparison. They do not implement any removed standard trait. Core value
+      fixtures use that vocabulary, access-qualified diagnostics/key/metadata
+      observations, and `instantiate_with` for core payloads.
     - **Runtime-source production seam: complete 2026-09-29.** Generic runtime
       sources no longer carry ambient `Clone`, `Debug`, or equality bounds.
       Cursor dependency duplication and exact comparison are gateway

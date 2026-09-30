@@ -126,6 +126,23 @@ impl EvaluatedValue {
             Ok(Self(value))
         }
     }
+
+    /// Test-only convenience for an explicitly value-domain-qualified shell
+    /// duplicate. This deliberately does not restore `Clone`.
+    #[cfg(test)]
+    pub(crate) fn duplicate_for_test(&self, values: &CoreValueFactory) -> Self {
+        values.with_runtime_value_access(|access| self.duplicate_in(&access))
+    }
+
+    /// Test-only representation comparison under the named value domain.
+    #[cfg(test)]
+    pub(crate) fn same_representation_for_test(
+        &self,
+        other: &Self,
+        values: &CoreValueFactory,
+    ) -> bool {
+        values.with_runtime_value_access(|access| access.same_representation(&self.0, &other.0))
+    }
 }
 
 pub(crate) type LazyResult = Result<EvaluatedValue, Arc<EvaluationFailure>>;
@@ -238,6 +255,48 @@ impl EvaluationFailure {
             .collect::<Vec<_>>()
             .into();
         Self { kind, contexts }
+    }
+
+    /// Test-only convenience for an explicitly value-domain-qualified
+    /// failure duplicate. This deliberately does not restore `Clone`.
+    #[cfg(test)]
+    pub(crate) fn duplicate_for_test(&self, values: &CoreValueFactory) -> Self {
+        values.with_runtime_value_access(|access| self.duplicate_in(&access))
+    }
+
+    /// Test-only comparison of failure representations under the named value
+    /// domain. Dependency-cycle reports retain their ordinary structural
+    /// relation; semantic values use the same regional comparison as `Value`.
+    #[cfg(test)]
+    pub(crate) fn same_representation_for_test(
+        &self,
+        other: &Self,
+        values: &CoreValueFactory,
+    ) -> bool {
+        values.with_runtime_value_access(|access| {
+            let same_kind = match (&self.kind, &other.kind) {
+                (
+                    EvaluationFailureKind::Emission(left),
+                    EvaluationFailureKind::Emission(right),
+                ) => access.same_representation(left, right),
+                (
+                    EvaluationFailureKind::DependencyCycle(left),
+                    EvaluationFailureKind::DependencyCycle(right),
+                ) => left == right,
+                (EvaluationFailureKind::Emission(_), EvaluationFailureKind::DependencyCycle(_))
+                | (
+                    EvaluationFailureKind::DependencyCycle(_),
+                    EvaluationFailureKind::Emission(_),
+                ) => false,
+            };
+            same_kind
+                && self.contexts.len() == other.contexts.len()
+                && self
+                    .contexts
+                    .iter()
+                    .zip(other.contexts.iter())
+                    .all(|(left, right)| access.same_representation(left, right))
+        })
     }
 
     /// Borrows the immediate emission only while matching value access is
@@ -792,8 +851,9 @@ pub(crate) fn set_test_promise(
     promise: &PromisedValue,
     value: Value,
 ) -> Result<(), Value> {
-    publish_test_promise(values, promise, Ok(value)).map_err(|assignment| {
-        assignment.expect("setting a promised value always supplies a successful value")
+    publish_test_promise(values, promise, Ok(value)).map_err(|assignment| match assignment {
+        Ok(value) => value,
+        Err(_) => unreachable!("setting a promised value always supplies a successful value"),
     })
 }
 
@@ -803,8 +863,9 @@ pub(crate) fn fail_test_promise(
     promise: &PromisedValue,
     failure: Arc<EvaluationFailure>,
 ) -> Result<(), Arc<EvaluationFailure>> {
-    publish_test_promise(values, promise, Err(failure)).map_err(|assignment| {
-        assignment.expect_err("failing a promised value always supplies an error")
+    publish_test_promise(values, promise, Err(failure)).map_err(|assignment| match assignment {
+        Err(failure) => failure,
+        Ok(_) => unreachable!("failing a promised value always supplies an error"),
     })
 }
 
@@ -845,6 +906,20 @@ impl LazyValue {
 
     pub(crate) fn trace_managed_edge(&self, visitor: &mut glam_gc::Visitor<'_>) {
         self.edge.trace(visitor);
+    }
+
+    #[inline(always)]
+    pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
+        Self {
+            edge: self.edge.duplicate_in(access),
+        }
+    }
+
+    /// Test-only convenience for an explicitly value-domain-qualified edge
+    /// duplicate. This deliberately does not restore `Clone`.
+    #[cfg(test)]
+    pub(crate) fn duplicate_for_test(&self, values: &CoreValueFactory) -> Self {
+        values.with_runtime_value_access(|access| self.duplicate_in(&access))
     }
 
     fn with_source_in(
@@ -1096,6 +1171,13 @@ impl PromisedValue {
         Self {
             edge: self.edge.duplicate_in(access),
         }
+    }
+
+    /// Test-only convenience for an explicitly value-domain-qualified edge
+    /// duplicate. This deliberately does not restore `Clone`.
+    #[cfg(test)]
+    pub(crate) fn duplicate_for_test(&self, values: &CoreValueFactory) -> Self {
+        values.with_runtime_value_access(|access| self.duplicate_in(&access))
     }
 
     #[cfg(test)]
@@ -1408,6 +1490,13 @@ impl NetValue {
     #[inline(always)]
     pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
         Self::new(self.runtime.duplicate_in(access))
+    }
+
+    /// Test-only convenience for an explicitly value-domain-qualified edge
+    /// duplicate. This deliberately does not restore `Clone`.
+    #[cfg(test)]
+    pub(crate) fn duplicate_for_test(&self, values: &CoreValueFactory) -> Self {
+        values.with_runtime_value_access(|access| self.duplicate_in(&access))
     }
 
     /// Compares exact managed-net identity inside matching value access.
@@ -2999,7 +3088,129 @@ impl RuntimeValueAccess<'_> {
     }
 }
 
+/// Explicit representation relation used by unit fixtures after the P4
+/// standard-trait cutover.
+///
+/// The relation always names the value domain whose mutator authorizes any
+/// managed-edge observation. Recursive container implementations make it
+/// possible to compare results and fixture collections without restoring
+/// `PartialEq` on semantic values.
+#[cfg(test)]
+pub(crate) trait SameRepresentationForTest<Rhs: ?Sized = Self> {
+    fn same_representation_for_test(&self, other: &Rhs, values: &CoreValueFactory) -> bool;
+}
+
+#[cfg(test)]
+impl SameRepresentationForTest for Value {
+    fn same_representation_for_test(&self, other: &Self, values: &CoreValueFactory) -> bool {
+        Value::same_representation_for_test(self, other, values)
+    }
+}
+
+#[cfg(test)]
+impl SameRepresentationForTest for EvaluatedValue {
+    fn same_representation_for_test(&self, other: &Self, values: &CoreValueFactory) -> bool {
+        EvaluatedValue::same_representation_for_test(self, other, values)
+    }
+}
+
+#[cfg(test)]
+impl SameRepresentationForTest for EvaluationFailure {
+    fn same_representation_for_test(&self, other: &Self, values: &CoreValueFactory) -> bool {
+        EvaluationFailure::same_representation_for_test(self, other, values)
+    }
+}
+
+#[cfg(test)]
+impl<T: SameRepresentationForTest + ?Sized> SameRepresentationForTest for Arc<T> {
+    fn same_representation_for_test(&self, other: &Self, values: &CoreValueFactory) -> bool {
+        self.as_ref()
+            .same_representation_for_test(other.as_ref(), values)
+    }
+}
+
+#[cfg(test)]
+impl<T: SameRepresentationForTest> SameRepresentationForTest for Option<T> {
+    fn same_representation_for_test(&self, other: &Self, values: &CoreValueFactory) -> bool {
+        match (self, other) {
+            (Some(left), Some(right)) => left.same_representation_for_test(right, values),
+            (None, None) => true,
+            (Some(_), None) | (None, Some(_)) => false,
+        }
+    }
+}
+
+#[cfg(test)]
+impl<T, E> SameRepresentationForTest for Result<T, E>
+where
+    T: SameRepresentationForTest,
+    E: SameRepresentationForTest,
+{
+    fn same_representation_for_test(&self, other: &Self, values: &CoreValueFactory) -> bool {
+        match (self, other) {
+            (Ok(left), Ok(right)) => left.same_representation_for_test(right, values),
+            (Err(left), Err(right)) => left.same_representation_for_test(right, values),
+            (Ok(_), Err(_)) | (Err(_), Ok(_)) => false,
+        }
+    }
+}
+
+#[cfg(test)]
+impl<T: SameRepresentationForTest> SameRepresentationForTest for [T] {
+    fn same_representation_for_test(&self, other: &Self, values: &CoreValueFactory) -> bool {
+        self.len() == other.len()
+            && self
+                .iter()
+                .zip(other.iter())
+                .all(|(left, right)| left.same_representation_for_test(right, values))
+    }
+}
+
+#[cfg(test)]
+impl<T: SameRepresentationForTest> SameRepresentationForTest for Vec<T> {
+    fn same_representation_for_test(&self, other: &Self, values: &CoreValueFactory) -> bool {
+        self.as_slice()
+            .same_representation_for_test(other.as_slice(), values)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn assert_same_representation_for_test<T>(values: &CoreValueFactory, left: &T, right: &T)
+where
+    T: SameRepresentationForTest + ?Sized,
+{
+    assert!(
+        left.same_representation_for_test(right, values),
+        "{} representations differ under runtime {}",
+        std::any::type_name::<T>(),
+        values.runtime_id().get()
+    );
+}
+
 impl Value {
+    /// Test-only convenience for an explicitly value-domain-qualified shell
+    /// duplicate. This deliberately does not restore `Clone`.
+    #[cfg(test)]
+    pub(crate) fn duplicate_for_test(&self, values: &CoreValueFactory) -> Self {
+        values.with_runtime_value_access(|access| access.duplicate_value(self))
+    }
+
+    /// Test-only representation comparison under the named value domain.
+    #[cfg(test)]
+    pub(crate) fn same_representation_for_test(
+        &self,
+        other: &Self,
+        values: &CoreValueFactory,
+    ) -> bool {
+        values.with_runtime_value_access(|access| access.same_representation(self, other))
+    }
+
+    /// Test-only owned diagnostic text produced under the named value domain.
+    #[cfg(test)]
+    pub(crate) fn diagnostic_debug_for_test(&self, values: &CoreValueFactory) -> String {
+        values.with_runtime_value_access(|access| format!("{:?}", access.diagnostic_debug(self)))
+    }
+
     #[cfg(test)]
     pub fn get_key_path(&self, path: &[Key]) -> Option<&Value> {
         match path {
@@ -3149,30 +3360,60 @@ mod tests {
         ];
 
         assert!(roots.iter().all(|root| root.runtime_id() == runtime));
-        assert_eq!(factory.unit(), core.unit.clone_core_for_test());
-        assert_eq!(
-            factory.object_reflection_guard(),
-            core.object_reflection_guard.clone_core_for_test()
+        assert_same_representation_for_test(
+            &factory,
+            &factory.unit(),
+            &core.unit.clone_core_for_test(),
         );
-        assert_eq!(factory.tuple(), core.tuple.clone_core_for_test());
-        assert_eq!(factory.info(), core.info.clone_core_for_test());
-        assert_eq!(factory.warn(), core.warn.clone_core_for_test());
-        assert_eq!(factory.error(), core.error.clone_core_for_test());
-        assert_eq!(
-            factory.initial_metadata(),
-            core.initial_metadata.clone_core_for_test()
+        assert_same_representation_for_test(
+            &factory,
+            &factory.object_reflection_guard(),
+            &core.object_reflection_guard.clone_core_for_test(),
+        );
+        assert_same_representation_for_test(
+            &factory,
+            &factory.tuple(),
+            &core.tuple.clone_core_for_test(),
+        );
+        assert_same_representation_for_test(
+            &factory,
+            &factory.info(),
+            &core.info.clone_core_for_test(),
+        );
+        assert_same_representation_for_test(
+            &factory,
+            &factory.warn(),
+            &core.warn.clone_core_for_test(),
+        );
+        assert_same_representation_for_test(
+            &factory,
+            &factory.error(),
+            &core.error.clone_core_for_test(),
+        );
+        assert_same_representation_for_test(
+            &factory,
+            &factory.initial_metadata(),
+            &core.initial_metadata.clone_core_for_test(),
         );
 
         let scoped = factory.scoped();
-        assert_eq!(scoped.initial_metadata(), factory.initial_metadata());
-        assert_eq!(scoped.unit(), factory.unit());
+        assert_same_representation_for_test(
+            &factory,
+            &scoped.initial_metadata(),
+            &factory.initial_metadata(),
+        );
+        assert_same_representation_for_test(&factory, &scoped.unit(), &factory.unit());
 
         let live = factory
             .collect_managed_for_test()
             .expect("the canonical bundle should survive collection");
         assert_eq!(live.root_entries(), roots.len());
         assert_eq!(live.marked_slots(), roots.len());
-        assert_eq!(factory.unit(), core.unit.clone_core_for_test());
+        assert_same_representation_for_test(
+            &factory,
+            &factory.unit(),
+            &core.unit.clone_core_for_test(),
+        );
     }
 
     #[test]
@@ -3464,9 +3705,10 @@ mod tests {
             .collect_managed_for_test()
             .expect("the runtime cache should retain its registered root");
         assert_eq!(live.root_entries(), baseline.root_entries() + 1);
-        assert_eq!(
-            owner.root.clone_core_for_test(),
-            Value::binary_from_text("cached root")
+        assert_same_representation_for_test(
+            &factory,
+            &owner.root.clone_core_for_test(),
+            &Value::binary_from_text("cached root"),
         );
         drop(owner);
         let still_cached = factory
@@ -3491,7 +3733,7 @@ mod tests {
             let _keep_signal_captured = &signal;
             Ok(thunk_values.unit())
         });
-        let observer = lazy.clone();
+        let observer = lazy.duplicate_for_test(&values);
         let active_snapshot = lazy
             .source_snapshot(&values)
             .expect("an unresolved lazy should expose a source snapshot");
@@ -3557,10 +3799,10 @@ mod tests {
             );
         let value = Value::Dict(dict);
 
-        assert_eq!(
-            value.get_atom_path(&[asm]),
-            Some(&Value::binary_from_text("atom"))
-        );
+        let actual = value
+            .get_atom_path(&[asm])
+            .expect("the atom path should select its value");
+        assert_same_representation_for_test(&values(), actual, &Value::binary_from_text("atom"));
     }
 
     #[test]
@@ -3624,7 +3866,7 @@ mod tests {
             );
             let net = Value::Net(NetValue::new(
                 access
-                    .construct_managed_core_net(template.instantiate())
+                    .construct_managed_core_net(template.instantiate_with(&access))
                     .expect("the managed net fixture should fit one slot"),
             ));
             let function = Value::Function(FunctionValue::new(
@@ -3737,10 +3979,10 @@ mod tests {
                 original_list_thunk.access(&access).id(),
                 duplicate_list_thunk.access(&access).id()
             );
-            assert_eq!(
-                access.duplicate_value(&Value::Number(42.into())),
-                Value::Number(42.into())
-            );
+            assert!(access.same_representation(
+                &access.duplicate_value(&Value::Number(42.into())),
+                &Value::Number(42.into())
+            ));
         });
 
         let after = values
@@ -3867,7 +4109,7 @@ mod tests {
 
             let net = Value::Net(NetValue::new(
                 access
-                    .construct_managed_core_net(template.instantiate())
+                    .construct_managed_core_net(template.instantiate_with(&access))
                     .expect("the comparison net fixture should fit one managed slot"),
             ));
             let net_alias = access.duplicate_value(&net);
@@ -3917,7 +4159,7 @@ mod tests {
             );
             let net = Value::Net(NetValue::new(
                 access
-                    .construct_managed_core_net(template.instantiate())
+                    .construct_managed_core_net(template.instantiate_with(&access))
                     .expect("the diagnostic net fixture should fit one managed slot"),
             ));
             let function = Value::Function(FunctionValue::new(
@@ -3995,8 +4237,9 @@ mod tests {
 
     #[test]
     fn metadata_carriers_hide_unit_and_associated_metadata() {
-        let first = Value::initial_metadata_carrier(&values());
-        let second = Value::initial_metadata_carrier(&values());
+        let values = values();
+        let first = Value::initial_metadata_carrier(&values);
+        let second = Value::initial_metadata_carrier(&values);
         let Value::Metadata(first_carrier) = &first else {
             panic!("initial metadata value should be a sealed carrier");
         };
@@ -4008,31 +4251,41 @@ mod tests {
             Arc::ptr_eq(&first_carrier.metadata, &second_carrier.metadata),
             "initial metadata carriers should share one allocation"
         );
-        assert_ne!(first, values().unit());
-        assert_eq!(
-            first.associated_metadata(),
-            Some(Value::Dict(Dict::new_sync()))
-        );
-        assert_eq!(Key::from_value(&first), None);
-        assert_eq!(first.diagnostic_kind_name(), "Sealed");
+        values.with_runtime_value_access(|access| {
+            assert!(!access.same_representation(&first, &values.unit()));
+            let associated = first
+                .associated_metadata(&access)
+                .expect("a metadata carrier should expose reflection metadata");
+            assert!(access.same_representation(&associated, &Value::Dict(Dict::new_sync())));
+            assert_eq!(access.key_from_value(&first), None);
+            assert_eq!(access.diagnostic_kind_name(&first), "Sealed");
 
-        let private = Value::metadata_carrier(Value::binary_from_text("hidden metadata"));
-        assert_eq!(format!("{private:?}"), "Sealed(..)");
-        assert!(!format!("{private:?}").contains("hidden metadata"));
+            let private = Value::metadata_carrier(Value::binary_from_text("hidden metadata"));
+            let rendered = format!("{:?}", access.diagnostic_debug(&private));
+            assert_eq!(rendered, "Sealed(..)");
+            assert!(!rendered.contains("hidden metadata"));
+        });
     }
 
     #[test]
     fn metadata_carriers_transport_through_ordinary_containers() {
-        let carrier = Value::initial_metadata_carrier(&values());
-        let list = Value::List(List::from_values(vec![carrier.clone()]));
-        let dict =
-            Value::Dict(Dict::new_sync().insert(Key::atom_from_text("trace"), carrier.clone()));
+        let values = values();
+        let carrier = Value::initial_metadata_carrier(&values);
+        let list = Value::List(List::from_values(vec![carrier.duplicate_for_test(&values)]));
+        let dict = Value::Dict(Dict::new_sync().insert(
+            Key::atom_from_text("trace"),
+            carrier.duplicate_for_test(&values),
+        ));
 
-        assert_eq!(list, Value::List(List::from_values(vec![carrier.clone()])));
-        assert_eq!(
-            dict.get_key_path(&[Key::atom_from_text("trace")]),
-            Some(&carrier)
+        assert_same_representation_for_test(
+            &values,
+            &list,
+            &Value::List(List::from_values(vec![carrier.duplicate_for_test(&values)])),
         );
+        let actual = dict
+            .get_key_path(&[Key::atom_from_text("trace")])
+            .expect("the metadata carrier should remain in the dictionary");
+        assert_same_representation_for_test(&values, actual, &carrier);
     }
 
     #[test]
@@ -4043,12 +4296,14 @@ mod tests {
         let promise = PromisedValue::new(&values, "metadata collection cycle");
         let metadata =
             Value::metadata_carrier(Value::List(List::from_values(vec![Value::Promised(
-                promise.clone(),
+                promise.duplicate_for_test(&values),
             )])));
         let cycle = Value::Dict(Dict::new_sync().insert(Key::atom_from_text("metadata"), metadata));
 
-        set_test_promise(&values, &promise, cycle)
-            .expect("an unresolved promise should accept a recursive value graph");
+        assert!(
+            set_test_promise(&values, &promise, cycle).is_ok(),
+            "an unresolved promise should accept a recursive value graph"
+        );
         assert!(matches!(
             promise.assignment(&values),
             Some(Ok(Value::Dict(_)))
@@ -4081,20 +4336,24 @@ mod tests {
 
     #[test]
     fn evaluated_values_reject_deferred_outer_shells_only() {
-        let field = Value::semantic_thunk(&values(), "lazy field", |_| Ok(Value::Number(1.into())));
-        let promise = PromisedValue::new(&values(), "promised field");
-        let container =
-            Value::Dict(Dict::new_sync().insert(Key::atom_from_text("field"), field.clone()));
-        let sealed = Value::initial_metadata_carrier(&values());
+        let values = values();
+        let field = Value::semantic_thunk(&values, "lazy field", |_| Ok(Value::Number(1.into())));
+        let promise = PromisedValue::new(&values, "promised field");
+        let container = Value::Dict(Dict::new_sync().insert(
+            Key::atom_from_text("field"),
+            field.duplicate_for_test(&values),
+        ));
+        let sealed = Value::initial_metadata_carrier(&values);
 
-        let evaluated = EvaluatedValue::from_whnf(container.clone())
+        let evaluated = EvaluatedValue::from_whnf(container.duplicate_for_test(&values))
             .expect("a container with a lazy field is in outer WHNF");
-        assert_eq!(evaluated.into_value(), container);
-        assert_eq!(
-            EvaluatedValue::from_whnf(sealed.clone())
+        assert_same_representation_for_test(&values, &evaluated.into_value(), &container);
+        assert_same_representation_for_test(
+            &values,
+            &EvaluatedValue::from_whnf(sealed.duplicate_for_test(&values))
                 .expect("a sealed carrier is already in outer WHNF")
                 .into_value(),
-            sealed
+            &sealed,
         );
         assert!(matches!(
             EvaluatedValue::try_from(field),
@@ -4111,8 +4370,10 @@ mod tests {
         let values = values();
         let target = PromisedValue::new(&values, "target");
         let forwarding = PromisedValue::new(&values, "forwarding");
-        set_test_promise(&values, &forwarding, Value::Promised(target))
-            .expect("new promise should accept its target");
+        assert!(
+            set_test_promise(&values, &forwarding, Value::Promised(target)).is_ok(),
+            "new promise should accept its target"
+        );
 
         assert!(matches!(
             forwarding.assignment(&values),
@@ -4120,12 +4381,16 @@ mod tests {
         ));
 
         let ready = PromisedValue::new(&values, "ready");
-        set_test_promise(&values, &ready, Value::Number(42.into()))
-            .expect("new promise should accept its value");
-        assert_eq!(
-            ready.assignment(&values),
-            Some(Ok(Value::Number(42.into())))
+        assert!(
+            set_test_promise(&values, &ready, Value::Number(42.into())).is_ok(),
+            "new promise should accept its value"
         );
+        let assignment = match ready.assignment(&values) {
+            Some(Ok(value)) => value,
+            Some(Err(_)) => panic!("the ready promise should succeed"),
+            None => panic!("the ready promise should have an assignment"),
+        };
+        assert_same_representation_for_test(&values, &assignment, &Value::Number(42.into()));
     }
 
     #[test]
@@ -4226,10 +4491,10 @@ mod tests {
         let dict = Dict::new_sync().insert(list_key.clone(), Value::Number(7.into()));
         let value = Value::Dict(dict);
 
-        assert_eq!(
-            value.get_key_path(&[list_key]),
-            Some(&Value::Number(7.into()))
-        );
+        let actual = value
+            .get_key_path(&[list_key])
+            .expect("the list key should select its value");
+        assert_same_representation_for_test(&values(), actual, &Value::Number(7.into()));
     }
 
     #[test]
@@ -4243,6 +4508,7 @@ mod tests {
 
     #[test]
     fn balanced_lists_use_finger_tree_and_preserve_segments() {
+        let factory = values();
         let list = List::concat(
             List::concat(
                 List::from_bytes(Bytes::from_static(b"He")),
@@ -4255,7 +4521,7 @@ mod tests {
 
         assert_eq!(balanced.len(), 6);
         let bytes = std::cell::RefCell::new(Vec::new());
-        let values = std::cell::RefCell::new(Vec::new());
+        let collected_values = std::cell::RefCell::new(Vec::new());
         balanced
             .for_each_segment(
                 &mut |segment| {
@@ -4263,20 +4529,26 @@ mod tests {
                     Ok::<_, ()>(())
                 },
                 &mut |segment| {
-                    values.borrow_mut().extend(segment.iter().cloned());
+                    collected_values.borrow_mut().extend(
+                        segment
+                            .iter()
+                            .map(|value| value.duplicate_for_test(&factory)),
+                    );
                     Ok(())
                 },
             )
             .expect("balanced list should walk");
         assert_eq!(bytes.into_inner(), b"Hell");
-        assert_eq!(
-            values.into_inner(),
-            vec![Value::Number(111.into()), Value::Number(33.into())]
+        assert_same_representation_for_test(
+            &factory,
+            &collected_values.into_inner(),
+            &vec![Value::Number(111.into()), Value::Number(33.into())],
         );
     }
 
     #[test]
     fn list_slice_uses_rope_segments() {
+        let factory = values();
         let list = List::concat(
             List::from_bytes(Bytes::from_static(b"Hello")),
             List::from_values(vec![Value::Number(44.into()), Value::Number(32.into())]),
@@ -4286,7 +4558,7 @@ mod tests {
         let sliced = list.slice(1, 6);
 
         let bytes = std::cell::RefCell::new(Vec::new());
-        let values = std::cell::RefCell::new(Vec::new());
+        let collected_values = std::cell::RefCell::new(Vec::new());
         sliced
             .for_each_segment(
                 &mut |segment| {
@@ -4294,13 +4566,21 @@ mod tests {
                     Ok::<_, ()>(())
                 },
                 &mut |segment| {
-                    values.borrow_mut().extend(segment.iter().cloned());
+                    collected_values.borrow_mut().extend(
+                        segment
+                            .iter()
+                            .map(|value| value.duplicate_for_test(&factory)),
+                    );
                     Ok(())
                 },
             )
             .expect("sliced list should walk");
         assert_eq!(bytes.into_inner(), b"ello");
-        assert_eq!(values.into_inner(), vec![Value::Number(44.into())]);
+        assert_same_representation_for_test(
+            &factory,
+            &collected_values.into_inner(),
+            &vec![Value::Number(44.into())],
+        );
     }
 
     #[test]

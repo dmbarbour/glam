@@ -108,6 +108,13 @@ impl CoreOperator {
             },
         }
     }
+
+    /// Test-only convenience for an explicitly value-domain-qualified payload
+    /// duplicate. This deliberately does not restore `Clone`.
+    #[cfg(test)]
+    pub(crate) fn duplicate_for_test(&self, values: &CoreValueFactory) -> Self {
+        values.with_runtime_value_access(|access| self.duplicate_in(&access))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
