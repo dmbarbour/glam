@@ -415,34 +415,15 @@ pub(crate) struct RuntimeValueDomain {
 
 /// Small canonical value set owned directly by one runtime.
 struct CoreValues {
-    unit: RuntimeValueRoot,
-    object_reflection_guard: RuntimeValueRoot,
-    tuple: RuntimeValueRoot,
-    info: RuntimeValueRoot,
-    warn: RuntimeValueRoot,
-    error: RuntimeValueRoot,
     initial_metadata: RuntimeValueRoot,
 }
 
 impl CoreValues {
     fn new(values: &CoreValueFactory) -> Self {
-        values.with_runtime_value_access(|access| {
-            let atom = |key: &Key| match key {
-                Key::Atom(atom) => Value::Atom(*atom),
-                _ => Value::Atom(Atom::from_key(key)),
-            };
-            let root = |value| access.root_runtime_value(value);
-            Self {
-                unit: root(atom(&keys::UNIT)),
-                object_reflection_guard: root(atom(&keys::OBJECT_REFLECTION_GUARD)),
-                tuple: root(atom(&keys::TUPLE)),
-                info: root(atom(&keys::INFO)),
-                warn: root(atom(&keys::WARN)),
-                error: root(atom(&keys::ERROR)),
-                initial_metadata: root(Value::Metadata(MetadataCarrier::new(Value::Dict(
-                    Dict::new_sync(),
-                )))),
-            }
+        values.with_runtime_value_access(|access| Self {
+            initial_metadata: access.root_runtime_value(Value::Metadata(MetadataCarrier::new(
+                Value::Dict(Dict::new_sync()),
+            ))),
         })
     }
 }
@@ -623,12 +604,6 @@ impl CoreValueFactory {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Clones one runtime-owned compatibility root through this factory's
-    /// matching managed-access gateway.
-    fn clone_cached_root(&self, root: &RuntimeValueRoot) -> Value {
-        self.with_runtime_value_access(|access| root.clone_core_with(&access))
-    }
-
     fn core_values(&self) -> &CoreValues {
         self.domain
             .cache
@@ -638,54 +613,40 @@ impl CoreValueFactory {
     }
 
     pub(crate) fn unit(&self) -> Value {
-        self.clone_cached_root(&self.core_values().unit)
+        self.with_runtime_value_access(|access| access.unit())
     }
 
     pub(crate) fn object_reflection_guard(&self) -> Value {
-        self.clone_cached_root(&self.core_values().object_reflection_guard)
+        self.with_runtime_value_access(|access| access.object_reflection_guard())
     }
 
     pub(crate) fn tuple(&self) -> Value {
-        self.clone_cached_root(&self.core_values().tuple)
+        self.with_runtime_value_access(|access| access.tuple())
     }
 
     pub(crate) fn info(&self) -> Value {
-        self.clone_cached_root(&self.core_values().info)
+        self.with_runtime_value_access(|access| access.info())
     }
 
     pub(crate) fn warn(&self) -> Value {
-        self.clone_cached_root(&self.core_values().warn)
+        self.with_runtime_value_access(|access| access.warn())
     }
 
     pub(crate) fn error(&self) -> Value {
-        self.clone_cached_root(&self.core_values().error)
+        self.with_runtime_value_access(|access| access.error())
     }
 
     #[cfg(test)]
     pub(crate) fn initial_metadata(&self) -> Value {
-        self.clone_cached_root(&self.core_values().initial_metadata)
+        self.with_runtime_value_access(|access| access.initial_metadata())
     }
 
     fn atom(&self, atom: Atom) -> Value {
-        if atom == Atom::from_key(&keys::UNIT) {
-            self.unit()
-        } else if atom == Atom::from_key(&keys::OBJECT_REFLECTION_GUARD) {
-            self.object_reflection_guard()
-        } else if atom == Atom::from_key(&keys::TUPLE) {
-            self.tuple()
-        } else if atom == Atom::from_key(&keys::INFO) {
-            self.info()
-        } else if atom == Atom::from_key(&keys::WARN) {
-            self.warn()
-        } else if atom == Atom::from_key(&keys::ERROR) {
-            self.error()
-        } else {
-            Value::Atom(atom)
-        }
+        self.with_runtime_value_access(|access| access.atom(atom))
     }
 
     pub(crate) fn key_value(&self, key: &Key) -> Value {
-        key.to_value_with(self)
+        self.with_runtime_value_access(|access| access.key_value(key))
     }
 
     /// Returns one runtime-local cache entry, allowing harmless duplicate
@@ -1306,26 +1267,29 @@ impl Key {
         }
     }
 
-    pub(crate) fn to_value_with(&self, values: &CoreValueFactory) -> Value {
+    pub(crate) fn to_value_in(&self, access: &RuntimeValueAccess<'_>) -> Value {
         match self {
-            Self::Atom(atom) => values.atom(*atom),
+            Self::Atom(atom) => access.atom(*atom),
             Self::Number(number) => Value::Number(number.clone()),
             Self::Binary(bytes) => Value::Binary(bytes.clone()),
             Self::AbstractGlobalPath(parts) => {
-                values.atom(Atom::from_key(&Self::AbstractGlobalPath(parts.clone())))
+                access.atom(Atom::from_key(&Self::AbstractGlobalPath(parts.clone())))
             }
             Self::List(items) => Value::List(List::from_values(
-                items
-                    .iter()
-                    .map(|item| item.to_value_with(values))
-                    .collect(),
+                items.iter().map(|item| item.to_value_in(access)).collect(),
             )),
             Self::Dict(entries) => {
                 Value::Dict(entries.iter().fold(Dict::new_sync(), |dict, (key, value)| {
-                    dict.insert(key.clone(), value.to_value_with(values))
+                    dict.insert(key.clone(), value.to_value_in(access))
                 }))
             }
         }
+    }
+
+    /// Transitional factory-qualified projection retained only while D.2h.3
+    /// migrates callers to their already-open value-access region.
+    pub(crate) fn to_value_with(&self, values: &CoreValueFactory) -> Value {
+        values.with_runtime_value_access(|access| self.to_value_in(&access))
     }
 }
 
@@ -3594,39 +3558,13 @@ mod tests {
     }
 
     #[test]
-    fn canonical_cache_publishes_one_complete_root_bundle() {
+    fn canonical_cache_roots_only_managed_initial_metadata() {
         let runtime = crate::runtime::allocate_evaluation_runtime_id();
         let factory = CoreValueFactory::new(runtime, RuntimeIds::new());
         let core = factory.core_values();
-        let roots = [
-            &core.unit,
-            &core.object_reflection_guard,
-            &core.tuple,
-            &core.info,
-            &core.warn,
-            &core.error,
-            &core.initial_metadata,
-        ];
+        let roots = [&core.initial_metadata];
 
         assert!(roots.iter().all(|root| root.runtime_id() == runtime));
-        factory
-            .assert_same_representation_for_test(&factory.unit(), &core.unit.clone_core_for_test());
-        factory.assert_same_representation_for_test(
-            &factory.object_reflection_guard(),
-            &core.object_reflection_guard.clone_core_for_test(),
-        );
-        factory.assert_same_representation_for_test(
-            &factory.tuple(),
-            &core.tuple.clone_core_for_test(),
-        );
-        factory
-            .assert_same_representation_for_test(&factory.info(), &core.info.clone_core_for_test());
-        factory
-            .assert_same_representation_for_test(&factory.warn(), &core.warn.clone_core_for_test());
-        factory.assert_same_representation_for_test(
-            &factory.error(),
-            &core.error.clone_core_for_test(),
-        );
         factory.assert_same_representation_for_test(
             &factory.initial_metadata(),
             &core.initial_metadata.clone_core_for_test(),
@@ -3644,8 +3582,32 @@ mod tests {
             .expect("the canonical bundle should survive collection");
         assert_eq!(live.root_entries(), roots.len());
         assert_eq!(live.marked_slots(), roots.len());
-        factory
-            .assert_same_representation_for_test(&factory.unit(), &core.unit.clone_core_for_test());
+        factory.with_runtime_value_access(|access| {
+            access.assert_same_representation_for_test(
+                &access.unit(),
+                &access.atom(Atom::from_key(&keys::UNIT)),
+            );
+            access.assert_same_representation_for_test(
+                &access.object_reflection_guard(),
+                &access.atom(Atom::from_key(&keys::OBJECT_REFLECTION_GUARD)),
+            );
+            access.assert_same_representation_for_test(
+                &access.tuple(),
+                &access.atom(Atom::from_key(&keys::TUPLE)),
+            );
+            access.assert_same_representation_for_test(
+                &access.info(),
+                &access.atom(Atom::from_key(&keys::INFO)),
+            );
+            access.assert_same_representation_for_test(
+                &access.warn(),
+                &access.atom(Atom::from_key(&keys::WARN)),
+            );
+            access.assert_same_representation_for_test(
+                &access.error(),
+                &access.atom(Atom::from_key(&keys::ERROR)),
+            );
+        });
     }
 
     #[test]

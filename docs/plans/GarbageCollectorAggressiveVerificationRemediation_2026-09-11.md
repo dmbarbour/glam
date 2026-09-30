@@ -2632,6 +2632,15 @@ inventory relatch:
       separation.
     The equality/source gate is already closed; these decisions concern raw
     transport and observation, not restoration of any ambient trait.
+  - **D.2h.3a — canonical root reduction complete 2026-09-30.** `CoreValues`
+    now retains only the managed initial-metadata root. Unit, object-reflection
+    guard, tuple, and severity atoms are constructed as edge-free immediates
+    by `RuntimeValueAccess`; their transitional factory methods delegate to a
+    bounded access region until D.2h.3b migrates callers. The focused
+    collection fixture now pins one root and one marked slot instead of seven,
+    and verifies every named access constructor against its canonical atom.
+    This slice deliberately leaves the raw factory declarations visible to the
+    ledger rather than disguising the pending call-site migration.
 - **D.2h.4 — dynamic closure:** run focused ordinary/aggressive ownership
   checks followed by the routine workspace gates and the complete aggressive
   workspace suite.

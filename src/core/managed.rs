@@ -619,7 +619,35 @@ impl RuntimeValueObserver {
 
 impl RuntimeValueAccess<'_> {
     pub(crate) fn unit(&self) -> super::Value {
-        self.values.core_values().unit.clone_core_with(self)
+        self.atom(super::Atom::from_key(&super::keys::UNIT))
+    }
+
+    pub(crate) fn object_reflection_guard(&self) -> super::Value {
+        self.atom(super::Atom::from_key(&super::keys::OBJECT_REFLECTION_GUARD))
+    }
+
+    pub(crate) fn tuple(&self) -> super::Value {
+        self.atom(super::Atom::from_key(&super::keys::TUPLE))
+    }
+
+    pub(crate) fn info(&self) -> super::Value {
+        self.atom(super::Atom::from_key(&super::keys::INFO))
+    }
+
+    pub(crate) fn warn(&self) -> super::Value {
+        self.atom(super::Atom::from_key(&super::keys::WARN))
+    }
+
+    pub(crate) fn error(&self) -> super::Value {
+        self.atom(super::Atom::from_key(&super::keys::ERROR))
+    }
+
+    pub(crate) fn atom(&self, atom: super::Atom) -> super::Value {
+        super::Value::Atom(atom)
+    }
+
+    pub(crate) fn key_value(&self, key: &super::Key) -> super::Value {
+        key.to_value_in(self)
     }
 
     /// Returns the exact factory view which admitted this region.
