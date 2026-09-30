@@ -475,7 +475,7 @@ impl Values {
             let mut dict = Dict::new_sync();
             for (key, value) in entries {
                 let key = values
-                    .with_core(&key, Key::from_value)?
+                    .with_core(&key, |key| values.runtime_access().key_from_value(key))?
                     .ok_or_else(|| Error::new("dictionary key is not immediately keyable"))?;
                 dict = dict.insert(key, values.clone_core(&value)?);
             }

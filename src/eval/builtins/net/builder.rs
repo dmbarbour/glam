@@ -1562,7 +1562,8 @@ fn decode_reset_stack_value(
                 let [key, sequence]: [Value; 2] = fields.try_into().map_err(|_| {
                     EvaluationHalt::new("builder reset frame has the wrong number of fields")
                 })?;
-                let key = Key::from_value(&key)
+                let key = access
+                    .key_from_value(&key)
                     .ok_or_else(|| EvaluationHalt::new("builder reset frame key must be a key"))?;
                 decode_sequence_stack(access, &sequence)?;
                 Ok(BuilderResetFrame::Reset { key, sequence })

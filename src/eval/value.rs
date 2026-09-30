@@ -1106,8 +1106,10 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                             let installed = context.with_value_access(|access| {
                                 let work = super::whnf::RegionalWhnfWork::from_application_checkpoint_in(
                                     &access,
-                                    access.values().duplicate_value(application.function()),
-                                    application.arguments(),
+                                    access
+                                        .values()
+                                        .duplicate_value(application.function_in(access.values())),
+                                    application.arguments_in(access.values()),
                                     None,
                                 );
                                 self.install_regional_whnf_in(&access, work)

@@ -275,7 +275,9 @@ impl Diagnostic {
                 let emission = field("emission")
                     .map(|value| access.runtime_access().duplicate_value(value))
                     .ok_or_else(|| Error::new("diagnostic transport is missing `emission`"))?;
-                let severity = match field("severity").and_then(Key::from_value) {
+                let severity = match field("severity")
+                    .and_then(|value| access.runtime_access().key_from_value(value))
+                {
                     Some(value) if value == *crate::core::keys::INFO => Severity::Info,
                     Some(value) if value == *crate::core::keys::WARN => Severity::Warning,
                     Some(value) if value == *crate::core::keys::ERROR => Severity::Error,

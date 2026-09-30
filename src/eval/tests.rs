@@ -5561,10 +5561,11 @@ fn missing_access_can_evaluate_to_an_undefined_key() {
 
 #[test]
 fn raw_value_to_key_rejects_lazy_values() {
-    assert_eq!(
-        Key::from_value(&fixture_computation(TestExpr::Value(n(1)))),
-        None
-    );
+    let values = crate::core::test_value_factory();
+    let value = fixture_computation(TestExpr::Value(n(1)));
+    values.with_runtime_value_access(|access| {
+        assert_eq!(access.key_from_value(&value), None);
+    });
 }
 
 #[test]

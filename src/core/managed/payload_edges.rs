@@ -6,10 +6,10 @@
 //! when an audited managed replacement reports the same edges.
 
 #[cfg(test)]
-use super::super::SemanticComputation;
+use super::super::{EvaluationFailure, SemanticComputation};
 use super::super::{
-    BuiltinCall, EvaluatedValue, EvaluationFailure, FixpointComputation, LazyApplication,
-    LazySource, ListEffectComputation, MetadataCarrier, ReflectionComputation, Value,
+    BuiltinCall, EvaluatedValue, FixpointComputation, LazyApplication, LazySource,
+    ListEffectComputation, MetadataCarrier, ReflectionComputation, Value,
 };
 
 /// Reports every direct semantic `Value` edge held by one compatibility

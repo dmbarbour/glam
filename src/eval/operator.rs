@@ -246,7 +246,7 @@ pub(super) fn apply_core_operator(
                 )));
             }
             let list = arguments.into_iter().fold(List::empty(), |list, value| {
-                List::concat(list, Value::singleton_list(value))
+                List::concat(list, List::from_values(vec![value]))
             });
             Ok(OperatorYield::Data(Value::List(list)))
         }

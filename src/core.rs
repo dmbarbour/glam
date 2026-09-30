@@ -1222,37 +1222,6 @@ impl Key {
         ))
     }
 
-    pub fn from_value(value: &Value) -> Option<Self> {
-        match value {
-            Value::Atom(atom) => Some(Self::Atom(*atom)),
-            Value::Number(number) => Some(Self::Number(number.clone())),
-            Value::Binary(bytes) => Some(Self::Binary(bytes.clone())),
-            Value::List(list) => Some(Self::List(list_to_key_items(list)?)),
-            Value::Dict(dict) => Some(Self::Dict(Arc::from(
-                dict.iter()
-                    .map(|(key, value)| {
-                        let value = Self::from_value(value)?;
-                        if matches!(&value, Key::Dict(entries) if entries.is_empty()) {
-                            return Some(None);
-                        }
-                        Some(Some((key.clone(), value)))
-                    })
-                    .collect::<Option<Vec<_>>>()?
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>(),
-            ))),
-            Value::Builtin(_)
-            | Value::PartialBuiltin(_)
-            | Value::Function(_)
-            | Value::Net(_)
-            | Value::Lazy(_)
-            | Value::Promised(_)
-            | Value::Metadata(_)
-            | Value::Opaque(_) => None,
-        }
-    }
-
     pub(crate) fn to_value_in(&self, access: &RuntimeValueAccess<'_>) -> Value {
         match self {
             Self::Atom(atom) => access.atom(*atom),
@@ -1611,11 +1580,17 @@ pub(crate) struct LazyApplication {
 }
 
 impl LazyApplication {
-    pub(crate) fn function(&self) -> &Value {
+    pub(crate) fn function_in<'access>(
+        &'access self,
+        _access: &'access RuntimeValueAccess<'_>,
+    ) -> &'access Value {
         &self.function
     }
 
-    pub(crate) fn arguments(&self) -> &[Value] {
+    pub(crate) fn arguments_in<'access>(
+        &'access self,
+        _access: &'access RuntimeValueAccess<'_>,
+    ) -> &'access [Value] {
         &self.arguments
     }
 }
@@ -2393,26 +2368,6 @@ impl From<PromisedValue> for ListThunk {
 
 pub type List = crate::list::List<Value, ListThunk>;
 
-fn list_to_key_items(list: &List) -> Option<Arc<[Key]>> {
-    let items = std::cell::RefCell::new(Vec::new());
-    list.for_each_segment(
-        &mut |bytes| {
-            items
-                .borrow_mut()
-                .extend(bytes.iter().map(|byte| Key::Number(Number::from_u8(*byte))));
-            Ok::<_, ()>(())
-        },
-        &mut |values| {
-            for value in values {
-                items.borrow_mut().push(Key::from_value(value).ok_or(())?);
-            }
-            Ok(())
-        },
-    )
-    .ok()?;
-    Some(Arc::from(items.into_inner()))
-}
-
 impl Value {
     /// Names the most useful semantic category for diagnostics without
     /// changing the representation-oriented public value kind.
@@ -2547,10 +2502,6 @@ impl Value {
                 },
             )),
         }
-    }
-
-    pub fn singleton_list(value: Value) -> List {
-        List::from_values(vec![value])
     }
 }
 
@@ -4598,6 +4549,7 @@ mod tests {
 
     #[test]
     fn keys_can_represent_nested_value_data() {
+        let values = values();
         let value = Value::Dict(Dict::new_sync().insert(
             Key::atom_from_text("payload"),
             Value::List(List::concat(
@@ -4606,45 +4558,58 @@ mod tests {
             )),
         ));
 
-        assert_eq!(
-            Key::from_value(&value),
-            Some(Key::Dict(Arc::from([(
-                Key::atom_from_text("payload"),
-                Key::List(Arc::from([
-                    Key::Number(1.into()),
-                    Key::Number(Number::from_u8(b'H')),
-                    Key::Number(Number::from_u8(b'i')),
-                ])),
-            )])))
-        );
+        values.with_runtime_value_access(|access| {
+            assert_eq!(
+                access.key_from_value(&value),
+                Some(Key::Dict(Arc::from([(
+                    Key::atom_from_text("payload"),
+                    Key::List(Arc::from([
+                        Key::Number(1.into()),
+                        Key::Number(Number::from_u8(b'H')),
+                        Key::Number(Number::from_u8(b'i')),
+                    ])),
+                )])))
+            );
+        });
     }
 
     #[test]
     fn empty_dict_values_are_elided_from_dict_keys() {
+        let values = values();
         let empty = Value::Dict(Dict::new_sync());
         let with_empty_field = Value::Dict(
             Dict::new_sync().insert(Key::atom_from_text("key"), Value::Dict(Dict::new_sync())),
         );
 
-        assert_eq!(Key::from_value(&empty), Some(Key::Dict(Arc::from([]))));
-        assert_eq!(
-            Key::from_value(&with_empty_field),
-            Some(Key::Dict(Arc::from([])))
-        );
+        values.with_runtime_value_access(|access| {
+            assert_eq!(
+                access.key_from_value(&empty),
+                Some(Key::Dict(Arc::from([])))
+            );
+            assert_eq!(
+                access.key_from_value(&with_empty_field),
+                Some(Key::Dict(Arc::from([])))
+            );
+        });
     }
 
     #[test]
     fn keys_reject_deferred_values() {
-        assert_eq!(
-            Key::from_value(&Value::semantic_thunk(&values(), "number", |_| {
-                Ok(Value::Number(1.into()))
-            })),
-            None
-        );
-        assert_eq!(
-            Key::from_value(&Value::Promised(PromisedValue::new(&values(), "number"))),
-            None
-        );
+        let values = values();
+        values.with_runtime_value_access(|access| {
+            let lazy = Value::Lazy(
+                access
+                    .construct_managed_lazy("number", LazySource::Error)
+                    .expect("the lazy fixture should fit one collector run"),
+            );
+            let promise = Value::Promised(
+                access
+                    .construct_managed_promise("number")
+                    .expect("the promise fixture should fit one collector run"),
+            );
+            assert_eq!(access.key_from_value(&lazy), None);
+            assert_eq!(access.key_from_value(&promise), None);
+        });
     }
 
     #[test]

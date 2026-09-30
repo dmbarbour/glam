@@ -2662,6 +2662,16 @@ inventory relatch:
     reclaimed with their owner, and are never evaluated merely by tracing.
     The raw ledger falls from sixteen to thirteen violations; exact global
     counts and fingerprints remain intentionally stale until final closure.
+  - **D.2h.3d — structural access helpers complete 2026-09-30.** The redundant
+    authority-free key traversal and list recursion are removed in favor of
+    `RuntimeValueAccess::key_from_value`; API transport, public value
+    construction, net-builder decoding, and fixtures all use their existing
+    access regions. Lazy-application function/argument borrows now carry the
+    matching access lifetime, and the one singleton-list caller constructs
+    its owned list directly instead of crossing a generic raw-value helper.
+    Focused key/deferred-value and builder-reset fixtures pass. This removes
+    five more raw violations, leaving eight before evaluated-value, metadata,
+    and diagnostic/failure closure.
 - **D.2h.4 — dynamic closure:** run focused ordinary/aggressive ownership
   checks followed by the routine workspace gates and the complete aggressive
   workspace suite.
