@@ -2563,6 +2563,18 @@ inventory relatch:
          equality whose operand transitively includes raw semantic values.
          Only then resume the distinct duplication, formatting, and ownership
          parts of workspace compile closure.
+         - **D.2h.2b.5 — semantic-relation gate complete 2026-09-30.** The
+           zero-error all-target compile proves every former equality use has
+           selected an explicit relation. Compile-time negative contracts now
+           pin `Value`, `EvaluatedValue`, `LazyValue`, `PromisedValue`, and
+           `EvaluationFailure` as neither `PartialEq` nor `Eq`. This is the
+           exact compiler-backed gate for `assert_eq!`, `assert_ne!`, direct
+           equality operators, `contains`, and equality derived by a carrier:
+           all require one of those forbidden leaf traits. The existing
+           syntax-backed persistent-edge inventory separately rejects a
+           handwritten or derived equality implementation on a managed
+           carrier, without banning ordinary equality for keys and other
+           genuinely comparable data.
   - **D.2h.2c — managed facade and collector cutover:** remove the thirteen
     managed-facade traits/identity shims and the five `Gc<T>` traits, add the
     negative compile/source gates, and make the full workspace compile.

@@ -3397,6 +3397,48 @@ mod tests {
     use std::sync::Barrier;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
+    // D.2h's semantic-relation gate is compiler-backed rather than a token
+    // search: the standard equality macros, operators, `contains`, and
+    // transitive equality derives all require these traits. Keeping the raw
+    // semantic leaves traitless therefore rejects every such spelling while
+    // leaving keys, atoms, numbers, and other genuinely comparable data
+    // alone.
+    macro_rules! assert_does_not_implement {
+        ($module:ident, $type:ty, $trait:path) => {
+            mod $module {
+                use super::*;
+
+                trait AmbiguousIfImplemented<Discriminator> {
+                    fn verify() {}
+                }
+
+                struct Implemented;
+
+                impl<T: ?Sized> AmbiguousIfImplemented<()> for T {}
+                impl<T: ?Sized + $trait> AmbiguousIfImplemented<Implemented> for T {}
+
+                const _: fn() = || {
+                    <$type as AmbiguousIfImplemented<_>>::verify();
+                };
+            }
+        };
+    }
+
+    assert_does_not_implement!(value_is_not_partial_eq, Value, PartialEq);
+    assert_does_not_implement!(value_is_not_eq, Value, Eq);
+    assert_does_not_implement!(evaluated_value_is_not_partial_eq, EvaluatedValue, PartialEq);
+    assert_does_not_implement!(evaluated_value_is_not_eq, EvaluatedValue, Eq);
+    assert_does_not_implement!(lazy_value_is_not_partial_eq, LazyValue, PartialEq);
+    assert_does_not_implement!(lazy_value_is_not_eq, LazyValue, Eq);
+    assert_does_not_implement!(promised_value_is_not_partial_eq, PromisedValue, PartialEq);
+    assert_does_not_implement!(promised_value_is_not_eq, PromisedValue, Eq);
+    assert_does_not_implement!(
+        evaluation_failure_is_not_partial_eq,
+        EvaluationFailure,
+        PartialEq
+    );
+    assert_does_not_implement!(evaluation_failure_is_not_eq, EvaluationFailure, Eq);
+
     fn values() -> CoreValueFactory {
         test_value_factory()
     }
