@@ -1893,7 +1893,7 @@ mod tests {
             _context: &crate::evaluation::EvaluationPollContext,
             _step_budget: &mut crate::evaluation::EvaluationStepBudget,
         ) -> EvaluationMachinePoll {
-            EvaluationMachinePoll::Complete(_context.root_value(self.0.clone()))
+            EvaluationMachinePoll::Complete(_context.duplicate_and_root_value(&self.0))
         }
     }
 
@@ -1924,9 +1924,10 @@ mod tests {
         let values = Values::from_core_factory(core);
         let encoded = task_status_public_value(&values, EvaluationTaskStatus::Abandoned);
 
-        assert_eq!(
-            values.clone_core(&encoded).unwrap(),
-            values.core().key_value(&keys::ABANDONED)
+        crate::core::assert_same_representation_for_test(
+            values.core(),
+            &values.clone_core(&encoded).unwrap(),
+            &values.core().key_value(&keys::ABANDONED),
         );
         assert!(matches!(
             tagged_task_state(&values, &encoded).expect("abandoned status should decode"),
@@ -1939,9 +1940,10 @@ mod tests {
         let core = crate::core::test_value_factory();
         let values = Values::from_core_factory(core.clone());
         let exited = task_status_public_value(&values, EvaluationTaskStatus::Exited);
-        assert_eq!(
-            values.clone_core(&exited).unwrap(),
-            values.core().key_value(&keys::EXITED)
+        crate::core::assert_same_representation_for_test(
+            values.core(),
+            &values.clone_core(&exited).unwrap(),
+            &values.core().key_value(&keys::EXITED),
         );
         assert!(matches!(
             tagged_task_state(&values, &exited).expect("exited status should decode"),
@@ -1955,9 +1957,10 @@ mod tests {
                 Arc::new(crate::core::EvaluationFailure::message("killed fixture")),
             )),
         );
-        assert_eq!(
-            values.clone_core(&killed).unwrap(),
-            values.core().key_value(&keys::KILLED)
+        crate::core::assert_same_representation_for_test(
+            values.core(),
+            &values.clone_core(&killed).unwrap(),
+            &values.core().key_value(&keys::KILLED),
         );
         assert!(matches!(
             tagged_task_state(&values, &killed).expect("killed status should decode"),
@@ -2020,9 +2023,10 @@ mod tests {
         };
         let updates = updates.lock().expect("test query updates were poisoned");
         assert_eq!(updates.len(), 1);
-        assert_eq!(
-            public_values.clone_core(&updates[0]).unwrap(),
-            values.key_value(&keys::BLOCKED)
+        crate::core::assert_same_representation_for_test(
+            &values,
+            &public_values.clone_core(&updates[0]).unwrap(),
+            &values.key_value(&keys::BLOCKED),
         );
     }
 

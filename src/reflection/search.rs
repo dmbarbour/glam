@@ -595,13 +595,14 @@ mod tests {
 
         assert_eq!(snapshot.generation(), 1);
         assert_eq!(snapshot.extra(), &());
-        assert_eq!(
-            public_values
+        crate::core::assert_same_representation_for_test(
+            public_values.core(),
+            &public_values
                 .clone_core(&host.reflection_environment())
                 .expect("host environment belongs to the search runtime"),
-            public_values
+            &public_values
                 .clone_core(&environment)
-                .expect("test environment belongs to the search runtime")
+                .expect("test environment belongs to the search runtime"),
         );
         assert!(!<IsolatedTaskHost<()> as TaskHost<StandardEffects>>::wait_for_change(&host, 1));
 

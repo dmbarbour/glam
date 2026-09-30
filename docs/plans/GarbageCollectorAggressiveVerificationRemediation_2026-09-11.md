@@ -2094,6 +2094,11 @@ inventory relatch:
       transformation, while source-origin/import-chain fixtures copy list
       segments and compare nested diagnostic fields through the compiler value
       factory.
+    - **Reflection fixture seam: complete 2026-09-30.** Reflection task/query
+      fixtures now root borrowed core results through their poll context and
+      compare decoded status/store payloads under the owning runtime. Public
+      rooted values retain ordinary handle cloning; the change does not
+      confuse that durable operation with raw core-value duplication.
   - **D.2h.2c — managed facade and collector cutover:** remove the thirteen
     managed-facade traits/identity shims and the five `Gc<T>` traits, add the
     negative compile/source gates, and make the full workspace compile.

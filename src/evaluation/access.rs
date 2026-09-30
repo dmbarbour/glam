@@ -359,6 +359,13 @@ impl EvaluationPollContext {
         self.demand.values.construct_runtime_value_root(|_| value)
     }
 
+    #[cfg(test)]
+    pub(crate) fn duplicate_and_root_value(&self, value: &Value) -> RuntimeValueRoot {
+        self.demand
+            .values
+            .construct_runtime_value_root(|access| access.duplicate_value(value))
+    }
+
     /// Roots a machine failure before it crosses the poll boundary.
     pub(crate) fn root_failure(&self, failure: Arc<EvaluationFailure>) -> RuntimeFailureRoot {
         RuntimeFailureRoot::new(&self.demand.values, failure)
@@ -505,7 +512,10 @@ mod tests {
             let promise = evaluator.construct_promise("guarded evaluator promise");
             let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
             let exposed = builder.data(Value::Number(31.into()));
-            let net = evaluator.construct_core_net(builder.finish(exposed).instantiate());
+            let template = builder.finish(exposed);
+            let runtime =
+                evaluator.with_value_access(|access| template.instantiate_with(access.values()));
+            let net = evaluator.construct_core_net(runtime);
 
             let intervening = values
                 .collect_managed_for_test()

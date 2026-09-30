@@ -3,7 +3,11 @@ use crate::api::{Assembler, TestValueFacade};
 
 fn same_representation(store: &ReflectionStore, left: &PublicValue, right: &PublicValue) -> bool {
     let values = crate::api::Values::from_core_factory(store.values.clone());
-    values.clone_core(left).unwrap() == values.clone_core(right).unwrap()
+    let left = values.clone_core(left).unwrap();
+    let right = values.clone_core(right).unwrap();
+    store
+        .values
+        .with_runtime_value_access(|access| access.same_representation(&left, &right))
 }
 
 fn path(parts: &[&str]) -> Vec<Key> {
@@ -47,9 +51,10 @@ fn assert_list_values(assembler: &Assembler, actual: &PublicValue, expected: &Pu
     let Value::List(expected) = &expected else {
         panic!("expected value should be a list")
     };
-    assert_eq!(
-        crate::eval::list_to_value_items(&assembler.eval_context(), actual).unwrap(),
-        crate::eval::list_to_value_items(&assembler.eval_context(), expected).unwrap(),
+    crate::core::assert_same_representation_for_test(
+        &assembler.core_values(),
+        &crate::eval::list_to_value_items(&assembler.eval_context(), actual).unwrap(),
+        &crate::eval::list_to_value_items(&assembler.eval_context(), expected).unwrap(),
     );
 }
 
