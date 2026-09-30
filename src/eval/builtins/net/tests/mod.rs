@@ -24,6 +24,17 @@ fn with_access<R>(
         .with_runtime_value_access(|access| body(&access))
 }
 
+#[track_caller]
+fn assert_same_representation<L, R>(context: &EvalContext, left: &L, right: &R)
+where
+    L: crate::core::SameRepresentationForTest<R> + ?Sized,
+    R: ?Sized,
+{
+    context
+        .values()
+        .assert_same_representation_for_test(left, right);
+}
+
 fn port(id: u64) -> ConstructionPortId {
     ConstructionPortId::new(id).expect("fixture port IDs are positive")
 }
@@ -493,7 +504,11 @@ fn assert_one_net_construction_context(context: &EvalContext, effect: Value) {
         failure
             .contexts()
             .iter()
-            .filter(|context| *context == &frame)
+            .filter(|candidate| {
+                context
+                    .values()
+                    .same_representation_for_test(*candidate, &frame)
+            })
             .count(),
         1,
         "public construction must add exactly one outer frame: {failure}"
@@ -917,7 +932,7 @@ fn hidden_builder_composition_threads_branch_local_state_through_list_search() {
         )
     });
     let [selected, selected_state] = run_builder_at(&context, cut, initial, 0);
-    assert_eq!(selected, Value::binary_from_text("selected"));
+    assert_same_representation(&context, &selected, &Value::binary_from_text("selected"));
     let get_visible = with_access(&context, |access| {
         partial_builder(
             access,
@@ -925,10 +940,10 @@ fn hidden_builder_composition_threads_branch_local_state_through_list_search() {
             vec![path(access.values(), [visible])],
         )
     });
-    assert_eq!(
-        run_builder_at(&context, get_visible, selected_state, 0)[0],
-        Value::Number(20.into()),
-        "cut must retain the selected alternative's state"
+    assert_same_representation(
+        &context,
+        &run_builder_at(&context, get_visible, selected_state, 0)[0],
+        &Value::Number(20.into()),
     );
 }
 
@@ -1031,7 +1046,11 @@ fn hidden_builder_copy_and_wire_complete_one_replayable_compact_netlist() {
             )
         });
         let [unit, next_state] = run_builder_at(&context, wire, state, 0);
-        assert_eq!(unit, with_access(&context, |access| access.values().unit()));
+        assert_same_representation(
+            &context,
+            &unit,
+            &with_access(&context, |access| access.values().unit()),
+        );
         state = next_state;
     }
 
@@ -1229,7 +1248,7 @@ fn hidden_builder_alternatives_roll_back_both_journals_and_fix_preserves_them() 
     });
 
     let [value, rolled_back] = run_builder_at(&context, choice, duplicate(&context, &initial), 0);
-    assert_eq!(value, Value::binary_from_text("right"));
+    assert_same_representation(&context, &value, &Value::binary_from_text("right"));
     with_access(&context, |access| {
         assert_eq!(
             super::builder::construction_journal_lengths_for_test(access, &rolled_back)
@@ -1256,7 +1275,7 @@ fn hidden_builder_alternatives_roll_back_both_journals_and_fix_preserves_them() 
     });
     let [_unit, after_wire] = run_builder_at(&context, wire, after_bind, 0);
     let [value, after_fix] = run_builder_at(&context, fixed, after_wire, 0);
-    assert_eq!(value, Value::binary_from_text("fixed"));
+    assert_same_representation(&context, &value, &Value::binary_from_text("fixed"));
     with_access(&context, |access| {
         assert_eq!(
             super::builder::construction_journal_lengths_for_test(access, &after_fix)
@@ -1312,16 +1331,17 @@ fn hidden_builder_state_paths_preserve_control_and_whole_state_semantics() {
         panic!("whole-state get must return the user dictionary")
     };
     assert!(whole.get(&super::builder::control_key_for_test()).is_some());
-    assert_eq!(unchanged, initial);
+    assert_same_representation(&context, &unchanged, &initial);
 
     let [_unit, nested_state] = run_builder_at(&context, set_visible, initial.clone(), 0);
     let [nested_whole, _] = run_builder_at(&context, get_all.clone(), nested_state, 0);
     let Value::Dict(nested_whole) = nested_whole else {
         panic!("nested state update must retain a dictionary")
     };
-    assert_eq!(
-        nested_whole.get(&visible),
-        Some(&Value::binary_from_text("kept"))
+    assert_same_representation(
+        &context,
+        &nested_whole.get(&visible),
+        &Some(&Value::binary_from_text("kept")),
     );
     assert!(
         nested_whole
@@ -1336,7 +1356,7 @@ fn hidden_builder_state_paths_preserve_control_and_whole_state_semantics() {
 
     let [_unit, replaced_state] = run_builder_at(&context, set_all, initial, 0);
     let [replacement, _] = run_builder_at(&context, get_all, replaced_state, 0);
-    assert_eq!(replacement, Value::Dict(Dict::new_sync()));
+    assert_same_representation(&context, &replacement, &Value::Dict(Dict::new_sync()));
 }
 
 #[test]
@@ -1380,13 +1400,15 @@ fn hidden_builder_get_resumes_lazy_paths_and_intermediates_and_rejects_invalid_o
         );
         (state, get, get_missing)
     });
-    assert_eq!(
-        run_builder_at(&context, get, state.clone(), 0)[0],
-        Value::binary_from_text("ready")
+    assert_same_representation(
+        &context,
+        &run_builder_at(&context, get, state.clone(), 0)[0],
+        &Value::binary_from_text("ready"),
     );
-    assert_eq!(
-        run_builder_at(&context, get_missing, state, 0)[0],
-        Value::Dict(Dict::new_sync())
+    assert_same_representation(
+        &context,
+        &run_builder_at(&context, get_missing, state, 0)[0],
+        &Value::Dict(Dict::new_sync()),
     );
 
     let (invalid_state, invalid_get) = with_access(&context, |access| {
@@ -1484,13 +1506,15 @@ fn hidden_builder_reset_shift_handles_nested_keys_cut_and_missing_scope() {
         (state, nested, cut_then_shift, missing)
     });
 
-    assert_eq!(
-        run_builder_at(&context, nested, state.clone(), 0)[0],
-        Value::binary_from_text("nested resumed")
+    assert_same_representation(
+        &context,
+        &run_builder_at(&context, nested, state.clone(), 0)[0],
+        &Value::binary_from_text("nested resumed"),
     );
-    assert_eq!(
-        run_builder_at(&context, cut_then_shift, state.clone(), 0)[0],
-        Value::binary_from_text("after cut")
+    assert_same_representation(
+        &context,
+        &run_builder_at(&context, cut_then_shift, state.clone(), 0)[0],
+        &Value::binary_from_text("after cut"),
     );
     let error =
         builder_result_at(&context, missing, state, 0).expect_err("shift outside reset must fail");
@@ -1546,9 +1570,10 @@ fn hidden_builder_reset_shift_resumes_lazy_keys_and_captured_cut() {
         continuation,
         Arc::from([Value::binary_from_text("captured cut resumed")]),
     ));
-    assert_eq!(
-        run_builder_at(&context, resumed, state, 0)[0],
-        Value::binary_from_text("captured cut resumed")
+    assert_same_representation(
+        &context,
+        &run_builder_at(&context, resumed, state, 0)[0],
+        &Value::binary_from_text("captured cut resumed"),
     );
 }
 
@@ -1592,9 +1617,10 @@ fn hidden_builder_captured_continuation_is_reusable_only_with_its_invocation() {
         continuation.clone(),
         Arc::from([Value::binary_from_text("same invocation")]),
     ));
-    assert_eq!(
-        run_builder_at(&context, resumed, first_state.clone(), 0)[0],
-        Value::binary_from_text("same invocation")
+    assert_same_representation(
+        &context,
+        &run_builder_at(&context, resumed, first_state.clone(), 0)[0],
+        &Value::binary_from_text("same invocation"),
     );
 
     let resumed_again = Value::Lazy(LazyValue::from_application(
@@ -1602,10 +1628,10 @@ fn hidden_builder_captured_continuation_is_reusable_only_with_its_invocation() {
         continuation.clone(),
         Arc::from([Value::binary_from_text("same invocation again")]),
     ));
-    assert_eq!(
-        run_builder_at(&context, resumed_again, first_state, 0)[0],
-        Value::binary_from_text("same invocation again"),
-        "captured builder continuations are deliberately non-affine"
+    assert_same_representation(
+        &context,
+        &run_builder_at(&context, resumed_again, first_state, 0)[0],
+        &Value::binary_from_text("same invocation again"),
     );
 
     let foreign = Value::Lazy(LazyValue::from_application(
@@ -1663,10 +1689,10 @@ fn hidden_builder_reset_scope_is_branch_local_across_alternatives() {
         (state, operation)
     });
 
-    assert_eq!(
-        run_builder_at(&context, operation, state, 0)[0],
-        Value::binary_from_text("right retained reset"),
-        "a failed alternative must not leak its consumed reset frame into its sibling"
+    assert_same_representation(
+        &context,
+        &run_builder_at(&context, operation, state, 0)[0],
+        &Value::binary_from_text("right retained reset"),
     );
 }
 
@@ -1818,7 +1844,10 @@ fn hidden_builder_whole_state_checkpoint_restores_reset_scope() {
         let outcome = restored.clone_core_with(access);
         let [result, _] = super::builder::decode_outcome(access, &outcome)
             .expect("builder outcome should use the strict record schema");
-        assert_eq!(result, Value::binary_from_text("restored checkpoint"));
+        access.assert_same_representation_for_test(
+            &result,
+            &Value::binary_from_text("restored checkpoint"),
+        );
     });
 }
 
@@ -1872,11 +1901,10 @@ fn hidden_builder_rejects_malformed_control_records() {
             let sequence = fields
                 .pop()
                 .expect("fixed builder state must retain its sequence stack");
-            assert_eq!(
-                super::netlist::strict_record(access, &sequence, "fixture sequence")
+            access.assert_same_representation_for_test(
+                &super::netlist::strict_record(access, &sequence, "fixture sequence")
                     .expect("initial sequence stack must be strict"),
-                Vec::<Value>::new(),
-                "initial sequence stack must be represented explicitly"
+                &Vec::<Value>::new(),
             );
             let missing_sequence = Value::List(List::from_values(fields.clone()));
             fields.push(Value::Number(2.into()));
@@ -2002,17 +2030,20 @@ fn hidden_builder_fix_uses_independent_alternatives_and_restores_control() {
         (state, alternatives, restored, hidden)
     });
 
-    assert_eq!(
-        run_builder_at(&context, alternatives.clone(), state.clone(), 0)[0],
-        Value::Number(61.into())
+    assert_same_representation(
+        &context,
+        &run_builder_at(&context, alternatives.clone(), state.clone(), 0)[0],
+        &Value::Number(61.into()),
     );
-    assert_eq!(
-        run_builder_at(&context, alternatives, state.clone(), 1)[0],
-        Value::Number(62.into())
+    assert_same_representation(
+        &context,
+        &run_builder_at(&context, alternatives, state.clone(), 1)[0],
+        &Value::Number(62.into()),
     );
-    assert_eq!(
-        run_builder_at(&context, restored, state.clone(), 0)[0],
-        Value::binary_from_text("restored")
+    assert_same_representation(
+        &context,
+        &run_builder_at(&context, restored, state.clone(), 0)[0],
+        &Value::binary_from_text("restored"),
     );
     let error = builder_result_at(&context, hidden, state, 0)
         .expect_err("a builder fix body must not inherit its caller's reset scope");

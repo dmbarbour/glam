@@ -24,6 +24,13 @@ fn number(value: i64) -> Value {
     Value::Number(value.into())
 }
 
+#[track_caller]
+fn assert_same_value(context: &EvalContext, actual: &Value, expected: &Value) {
+    context
+        .values()
+        .assert_same_representation_for_test(actual, expected);
+}
+
 #[test]
 fn stale_route_cannot_replace_a_newer_lazy_checkpoint() {
     let context = isolated_context();
@@ -442,9 +449,10 @@ fn w6g1f3i_application_checkpoint_survives_promise_and_route_loss() {
     crate::core::set_test_promise(context.values(), &function, Value::Builtin(Builtin::Add))
         .expect("the function promise should accept its assignment");
     let machine = resume_after_lazy_route_loss(&context, &retained, machine);
-    assert_eq!(
-        drive_after_route_loss(&context, &retained, machine, &mut route_losses),
-        number(5),
+    assert_same_value(
+        &context,
+        &drive_after_route_loss(&context, &retained, machine, &mut route_losses),
+        &number(5),
     );
     assert!(route_losses > 0);
 }
@@ -484,10 +492,11 @@ fn w6g1f3i_function_fixpoint_checkpoint_survives_promise_and_route_loss() {
 
     crate::core::set_test_promise(context.values(), &result, number(17))
         .expect("the fixpoint result promise should accept its assignment");
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
+    assert_same_value(
+        &context,
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
             .expect("the resumed fixpoint"),
-        number(17)
+        &number(17),
     );
 }
 
@@ -514,9 +523,10 @@ fn w6g1f3i_static_access_checkpoint_survives_promise_and_route_loss() {
     crate::core::set_test_promise(context.values(), &result, number(23))
         .expect("the static access result promise should accept its assignment");
     let machine = resume_after_lazy_route_loss(&context, &retained, machine);
-    assert_eq!(
-        drive_after_route_loss(&context, &retained, machine, &mut route_losses),
-        number(23),
+    assert_same_value(
+        &context,
+        &drive_after_route_loss(&context, &retained, machine, &mut route_losses),
+        &number(23),
     );
     assert!(route_losses > 0);
 }
@@ -545,9 +555,10 @@ fn w6g1f3i_immediate_builtin_result_is_installed_before_route_loss() {
     assert_lazy_checkpoint_kind(&context, &machine, ManagedLazyCheckpointKindTag::Whnf);
     let machine = resume_after_lazy_route_loss(&context, &retained, machine);
     let mut route_losses = 1;
-    assert_eq!(
-        drive_after_route_loss(&context, &retained, machine, &mut route_losses),
-        Value::List(List::from_values(vec![number(3), number(5)])),
+    assert_same_value(
+        &context,
+        &drive_after_route_loss(&context, &retained, machine, &mut route_losses),
+        &Value::List(List::from_values(vec![number(3), number(5)])),
     );
 }
 
@@ -575,9 +586,10 @@ fn w6g1f3i_semantic_thunk_result_survives_route_loss_without_callback_replay() {
     crate::core::set_test_promise(context.values(), &result, number(31))
         .expect("the semantic thunk result promise should accept assignment");
     let machine = resume_after_lazy_route_loss(&context, &retained, machine);
-    assert_eq!(
-        drive_after_route_loss(&context, &retained, machine, &mut route_losses),
-        number(31),
+    assert_same_value(
+        &context,
+        &drive_after_route_loss(&context, &retained, machine, &mut route_losses),
+        &number(31),
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
@@ -611,9 +623,10 @@ fn w6g1f3i_semantic_computation_result_survives_route_loss() {
     crate::core::set_test_promise(context.values(), &result, number(37))
         .expect("the semantic computation result promise should accept assignment");
     let machine = resume_after_lazy_route_loss(&context, &retained, machine);
-    assert_eq!(
-        drive_after_route_loss(&context, &retained, machine, &mut route_losses),
-        number(37),
+    assert_same_value(
+        &context,
+        &drive_after_route_loss(&context, &retained, machine, &mut route_losses),
+        &number(37),
     );
 }
 
@@ -1001,7 +1014,7 @@ fn host_call_yields_on_both_sides_and_consumes_its_result_once() {
     else {
         panic!("the rooted callback result must complete on a later poll")
     };
-    assert_eq!(value.clone_core_for_test(), number(42));
+    value.assert_same_representation_for_test(context.values(), &number(42));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     let EvaluationMachinePoll::Complete(value) =
@@ -1009,7 +1022,7 @@ fn host_call_yields_on_both_sides_and_consumes_its_result_once() {
     else {
         panic!("a repeated poll must use the lazy cache")
     };
-    assert_eq!(value.clone_core_for_test(), number(42));
+    value.assert_same_representation_for_test(context.values(), &number(42));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
@@ -1094,7 +1107,7 @@ fn completed_host_call_checkpoint_survives_route_loss_and_collection() {
             _ => panic!("unexpected retained host-call poll"),
         }
     };
-    assert_eq!(value.clone_core_for_test(), number(45));
+    value.assert_same_representation_for_test(context.values(), &number(45));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
@@ -1206,7 +1219,7 @@ fn net_whnf_checkpoint_survives_route_loss_and_collection() {
         }
         unreachable!("bounded resume loop must complete or panic")
     };
-    assert_eq!(value.clone_core_for_test(), context.values().unit());
+    value.assert_same_representation_for_test(context.values(), &context.values().unit());
 }
 
 #[test]
@@ -1411,9 +1424,9 @@ fn object_checkpoint_does_not_replay_mixin_stages_after_route_loss() {
     else {
         panic!("the counted mixin must produce an object dictionary")
     };
-    assert_eq!(
-        value.get(&Key::binary_from_text("answer")),
-        Some(&number(42))
+    context.values().assert_same_representation_for_test(
+        &value.get(&Key::binary_from_text("answer")),
+        &Some(&number(42)),
     );
     assert_eq!(defs_demands.load(Ordering::SeqCst), 1);
     #[cfg(feature = "interaction-net-profiling")]
@@ -1464,16 +1477,21 @@ fn list_effect_run_checkpoint_does_not_replay_effect_or_handler_demand() {
     );
 
     let value = drive_list_effect_after_route_loss(&context, &retained, machine);
-    assert_eq!(value, Value::List(List::from_values(vec![number(42)])));
+    assert_same_value(
+        &context,
+        &value,
+        &Value::List(List::from_values(vec![number(42)])),
+    );
     assert_eq!(effect_demands.load(Ordering::SeqCst), 1);
     assert_eq!(handler_demands.load(Ordering::SeqCst), 1);
 
     let cached = context.values().with_runtime_value_access(|access| {
         lazy_machine(&context, LazyValue::from_root(&retained, &access))
     });
-    assert_eq!(
-        drive_list_effect_after_route_loss(&context, &retained, cached),
-        Value::List(List::from_values(vec![number(42)]))
+    assert_same_value(
+        &context,
+        &drive_list_effect_after_route_loss(&context, &retained, cached),
+        &Value::List(List::from_values(vec![number(42)])),
     );
     assert_eq!(effect_demands.load(Ordering::SeqCst), 1);
     assert_eq!(handler_demands.load(Ordering::SeqCst), 1);
@@ -1530,9 +1548,10 @@ fn list_effect_sequence_and_cut_checkpoints_survive_deferred_chunks_and_route_lo
     if let WorkDependency::Wait(wait) = cut_dependency {
         pump_to_ready(&context, &wait);
     }
-    assert_eq!(
-        drive_list_effect_after_route_loss(&context, &cut_retained, cut_machine),
-        Value::List(List::from_values(vec![number(43)]))
+    assert_same_value(
+        &context,
+        &drive_list_effect_after_route_loss(&context, &cut_retained, cut_machine),
+        &Value::List(List::from_values(vec![number(43)])),
     );
 }
 
@@ -1577,10 +1596,11 @@ fn direct_result_list_effect_recipes_preserve_order_and_route_loss_progress() {
             Builtin::ListAt,
             vec![number(index as i64), mapped.clone()],
         );
-        assert_eq!(
-            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &selected)
+        assert_same_value(
+            &context,
+            &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &selected)
                 .expect("direct-result item should evaluate"),
-            expected
+            &expected,
         );
     }
 
@@ -1591,9 +1611,10 @@ fn direct_result_list_effect_recipes_preserve_order_and_route_loss_progress() {
             results: List::from_values(vec![number(3), number(4)]),
         },
     );
-    assert_eq!(
-        drive_list_effect_after_route_loss(&context, &retained, machine),
-        Value::List(List::from_values(vec![number(3)]))
+    assert_same_value(
+        &context,
+        &drive_list_effect_after_route_loss(&context, &retained, machine),
+        &Value::List(List::from_values(vec![number(3)])),
     );
 }
 
@@ -1639,10 +1660,11 @@ fn list_effect_fix_checkpoint_constructs_and_assigns_one_promise() {
 
     let fixed = drive_list_effect_after_route_loss(&context, &retained, machine);
     let first = Value::builtin_call(context.values(), Builtin::ListAt, vec![number(0), fixed]);
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &first)
+    assert_same_value(
+        &context,
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &first)
             .expect("the first fixed alternative should evaluate"),
-        number(44)
+        &number(44),
     );
     assert_eq!(function_demands.load(Ordering::SeqCst), 1);
     assert_eq!(operation_demands.load(Ordering::SeqCst), 1);
@@ -1655,10 +1677,11 @@ fn list_effect_fix_checkpoint_constructs_and_assigns_one_promise() {
     });
     let fixed = drive_list_effect_after_route_loss(&context, &retained, cached);
     let first = Value::builtin_call(context.values(), Builtin::ListAt, vec![number(0), fixed]);
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &first)
+    assert_same_value(
+        &context,
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &first)
             .expect("the cached fixed alternative should evaluate"),
-        number(44)
+        &number(44),
     );
     assert_eq!(
         context.values().managed_promise_lifecycle_counts_for_test(),
@@ -1800,7 +1823,7 @@ fn builder_checkpoint_survives_path_and_state_dependencies_without_replay() {
         crate::eval::builtins::decode_outcome_for_test(&access, &outcome)
             .expect("builder get must retain the strict outcome schema")
     });
-    assert_eq!(value, number(73));
+    assert_same_value(&context, &value, &number(73));
     assert!(
         route_losses >= 3,
         "the fixture must lose routes before and after exact dependency publication"
@@ -1870,7 +1893,7 @@ fn builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencie
         crate::eval::builtins::decode_outcome_for_test(&access, &outcome)
             .expect("builder wire must retain the strict outcome schema")
     });
-    assert_eq!(unit, context.values().unit());
+    assert_same_value(&context, &unit, &context.values().unit());
     context.values().with_runtime_value_access(|access| {
         assert_eq!(
             crate::eval::builtins::construction_journal_lengths_for_test(&access, &state)
@@ -2124,7 +2147,7 @@ fn builder_checkpoint_observes_a_lazy_reset_key_once_across_route_loss() {
         crate::eval::builtins::decode_outcome_for_test(&access, &outcome)
             .expect("builder reset must retain the strict outcome schema")
     });
-    assert_eq!(value, number(74));
+    assert_same_value(&context, &value, &number(74));
     assert_eq!(key_demands.load(Ordering::SeqCst), 1);
     assert!(
         route_losses > 0,
@@ -2234,7 +2257,7 @@ fn later_builder_fix_alternative_survives_route_loss_without_replay() {
     });
     let value = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
         .expect("the selected builder continuation value should evaluate");
-    assert_eq!(value, number(82));
+    assert_same_value(&context, &value, &number(82));
     assert_eq!(function_demands.load(Ordering::SeqCst), 1);
     assert_eq!(continuation_demands.load(Ordering::SeqCst), 1);
     let lifecycle_after = context.values().managed_promise_lifecycle_counts_for_test();
@@ -2354,7 +2377,11 @@ fn public_pure_construction_retains_both_selector_observations_across_route_loss
         failure
             .contexts()
             .iter()
-            .filter(|context| *context == &frame)
+            .filter(|candidate| {
+                context
+                    .values()
+                    .same_representation_for_test(*candidate, &frame)
+            })
             .count(),
         1
     );
@@ -2390,7 +2417,11 @@ fn public_pure_construction_retains_exposed_port_demand_across_route_loss() {
         failure
             .contexts()
             .iter()
-            .filter(|context| *context == &frame)
+            .filter(|candidate| {
+                context
+                    .values()
+                    .same_representation_for_test(*candidate, &frame)
+            })
             .count(),
         1
     );
@@ -2524,7 +2555,11 @@ fn public_construction_exposed_port_promise_retains_one_context_after_route_loss
         failure
             .contexts()
             .iter()
-            .filter(|context| *context == &frame)
+            .filter(|candidate| {
+                context
+                    .values()
+                    .same_representation_for_test(*candidate, &frame)
+            })
             .count(),
         1
     );
@@ -2689,9 +2724,10 @@ fn host_call_follows_a_lazy_result_without_reinvocation() {
     let result = context
         .values()
         .with_runtime_value_access(|access| result_root.clone_core_with(&access));
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &result).unwrap(),
-        number(44)
+    assert_same_value(
+        &context,
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &result).unwrap(),
+        &number(44),
     );
     let observed_calls = Arc::clone(&calls);
     let lazy_root = context.values().with_runtime_value_access(|access| {
@@ -2736,14 +2772,14 @@ fn host_call_follows_a_lazy_result_without_reinvocation() {
             }
         }
     };
-    assert_eq!(value.clone_core_for_test(), number(44));
+    value.assert_same_representation_for_test(context.values(), &number(44));
 
     let EvaluationMachinePoll::Complete(value) =
         machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
     else {
         panic!("a repeated poll must use the lazy cache")
     };
-    assert_eq!(value.clone_core_for_test(), number(44));
+    value.assert_same_representation_for_test(context.values(), &number(44));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(result_forces.load(Ordering::SeqCst), 1);
 }
@@ -2805,5 +2841,5 @@ fn reflection_source_hands_off_to_an_ordinary_promised_whnf_checkpoint() {
     else {
         panic!("the completed reflection result must resume ordinary WHNF work")
     };
-    assert_eq!(value.clone_core_for_test(), number(43));
+    value.assert_same_representation_for_test(context.values(), &number(43));
 }
