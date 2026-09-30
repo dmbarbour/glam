@@ -2259,6 +2259,20 @@ inventory relatch:
       4. Migrate reflection, API, builtin-net, and generic interaction-net
          fixtures. Use public observers for public values and explicit local
          payload/topology relations for generic nets.
+         - **D.2h.2j — evaluator-adjacent machine fixtures complete
+           2026-09-30.** Access, builtin, resumable-WHNF, net-checkpoint, and
+           small-stack W7B fixtures now compare values and value-bearing
+           containers through their current `EvalContext`,
+           `EvaluationValueAccess`, or core-net access. Core-net interface
+           data is duplicated while the existing net/value access is open,
+           avoiding a nested test mutator. The callable-checkpoint failure
+           assertion preserves its stronger contract by comparing the exact
+           shared permanent-failure allocation rather than replacing it with
+           structural value equality. These five fixture families now
+           contribute no equality errors and reduce the all-target inventory
+           from 156 to 125. High-density value and builtin-net fixtures remain
+           in this checkpoint family; unrelated duplication failures stay
+           visible.
       5. Re-run the all-target compile, inventory every remaining equality
          error by intended relation, and add a source gate rejecting
          `assert_eq!`, `assert_ne!`, direct `==`/`!=`, `contains`, or derived

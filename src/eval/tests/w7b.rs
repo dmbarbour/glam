@@ -179,10 +179,10 @@ fn fixpoint_chain_root(context: &EvalContext, leaf: Value) -> RuntimeValueRoot {
     })
 }
 
-fn assert_ready_number(result: RuntimeValueRoot, expected: usize) {
-    assert_eq!(
-        result.clone_core_for_test(),
-        Value::Number(Number::from_usize(expected))
+fn assert_ready_number(context: &EvalContext, result: RuntimeValueRoot, expected: usize) {
+    result.assert_same_representation_for_test(
+        context.values(),
+        &Value::Number(Number::from_usize(expected)),
     );
 }
 
@@ -216,7 +216,7 @@ fn assert_producer_chain(
         let result = context
             .evaluate_root_whnf(root)
             .expect("the uninterrupted producer chain should reach WHNF");
-        assert_ready_number(result, PRODUCER_DEPTH);
+        assert_ready_number(&context, result, PRODUCER_DEPTH);
     });
 
     let (context, promise, handle, first_owner) = on_small_stack(suspension_thread, move || {
@@ -245,7 +245,7 @@ fn assert_producer_chain(
         (owner, result, context)
     });
     assert_ne!(first_owner, second_owner);
-    assert_ready_number(result, PRODUCER_DEPTH);
+    assert_ready_number(&context, result, PRODUCER_DEPTH);
 }
 
 fn promised_dictionary_chain(context: &EvalContext, depth: usize, key: &Key, leaf: Value) -> Value {
@@ -362,7 +362,9 @@ fn explicit_whnf_worklist_completes_at_the_recursive_control_depth() {
             let RegionalWhnfDrive::Ready(actual) = outcome else {
                 panic!("the bounded explicit worklist should complete")
             };
-            assert_eq!(actual, expected);
+            access
+                .values()
+                .assert_same_representation_for_test(&actual, &expected);
             assert_eq!(transitions, SEMANTIC_DEPTH);
             assert_eq!(budget.remaining(), 0);
         });
@@ -377,7 +379,7 @@ fn deep_lazy_aliases_complete_and_resume_on_a_forced_owner() {
         let result = context
             .evaluate_root_whnf(root)
             .expect("the uninterrupted lazy aliases should reach WHNF");
-        assert_ready_number(result, SEMANTIC_DEPTH);
+        assert_ready_number(&context, result, SEMANTIC_DEPTH);
     });
 
     let (context, promise, handle, first_owner) =
@@ -408,7 +410,7 @@ fn deep_lazy_aliases_complete_and_resume_on_a_forced_owner() {
             (owner, result, context)
         });
     assert_ne!(first_owner, second_owner);
-    assert_ready_number(result, SEMANTIC_DEPTH);
+    assert_ready_number(&context, result, SEMANTIC_DEPTH);
 }
 
 #[test]
@@ -423,7 +425,7 @@ fn deep_promise_aliases_complete_and_resume_on_a_forced_owner() {
         let result = context
             .evaluate_root_whnf(root)
             .expect("the uninterrupted promise aliases should reach WHNF");
-        assert_ready_number(result, SEMANTIC_DEPTH);
+        assert_ready_number(&context, result, SEMANTIC_DEPTH);
     });
 
     let (context, promise, handle, first_owner) =
@@ -455,7 +457,7 @@ fn deep_promise_aliases_complete_and_resume_on_a_forced_owner() {
             (owner, result, context)
         });
     assert_ne!(first_owner, second_owner);
-    assert_ready_number(result, SEMANTIC_DEPTH);
+    assert_ready_number(&context, result, SEMANTIC_DEPTH);
 }
 
 #[test]
@@ -480,7 +482,7 @@ fn deep_fixpoint_chain_completes_and_resumes_on_a_forced_owner() {
 
 #[test]
 fn deep_static_access_path_completes_on_the_small_stack() {
-    let (_context, result) = on_small_stack("w7b-static-access", || {
+    let (context, result) = on_small_stack("w7b-static-access", || {
         let context = context();
         let key = Key::atom_from_text("next");
         let path: Arc<[CoreDataKey]> = (0..SEMANTIC_DEPTH)
@@ -499,10 +501,10 @@ fn deep_static_access_path_completes_on_the_small_stack() {
         let result = context
             .evaluate_root_whnf(root)
             .expect("the deep static path should reach its leaf");
-        assert_ready_number(result.clone(), SEMANTIC_DEPTH);
+        assert_ready_number(&context, result.clone(), SEMANTIC_DEPTH);
         (context, result)
     });
-    assert_ready_number(result, SEMANTIC_DEPTH);
+    assert_ready_number(&context, result, SEMANTIC_DEPTH);
 }
 
 #[test]
@@ -586,8 +588,12 @@ fn deep_aliases_preserve_one_structured_failure_on_the_small_stack() {
             .expect_err("the deep aliases must preserve their terminal failure")
             .into_permanent_failure();
         assert!(Arc::ptr_eq(&failure, &observed));
-        assert_eq!(observed.emission_value(), Some(&emission));
-        assert_eq!(observed.contexts(), [frame]);
+        context
+            .values()
+            .assert_same_representation_for_test(&observed.emission_value(), &Some(&emission));
+        context
+            .values()
+            .assert_same_representation_for_test(observed.contexts(), &[frame]);
         context
     });
 }
@@ -648,7 +654,7 @@ fn lazy_route_checkpoint_resumes_on_another_small_stack_poller() {
             (owner, *value, context)
         });
     assert_ne!(first_owner, second_owner);
-    assert_ready_number(result, OWNER_DEPTH);
+    assert_ready_number(&context, result, OWNER_DEPTH);
 }
 
 #[test]
@@ -699,7 +705,7 @@ fn reflection_hosted_checkpoint_resumes_on_another_small_stack_poller() {
             panic!("the reflection-hosted checkpoint exhausted its work bound")
         });
     assert_ne!(first_owner, second_owner);
-    assert_ready_number(result, SEMANTIC_DEPTH);
+    assert_ready_number(&context, result, SEMANTIC_DEPTH);
 }
 
 #[test]
@@ -746,5 +752,8 @@ fn spark_checkpoint_resumes_on_another_small_stack_poller() {
             (owner, result, context, root)
         });
     assert_ne!(first_owner, second_owner);
-    assert_eq!(result, Value::Number(Number::from_usize(OWNER_DEPTH)));
+    context.values().assert_same_representation_for_test(
+        &result,
+        &Value::Number(Number::from_usize(OWNER_DEPTH)),
+    );
 }

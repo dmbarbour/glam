@@ -2621,12 +2621,13 @@ mod driver_tests {
                 .unwrap(),
             NetInterfaceOutcome::Data
         );
-        assert_eq!(
-            source.test_with(&test_value_factory(), |net| net
-                .interface_data(root_interface)
-                .cloned()),
-            Some(expected)
-        );
+        let actual = source.with_test_access(&test_value_factory(), |access| {
+            access.with(|net| {
+                net.interface_data(root_interface)
+                    .map(|value| access.values().duplicate_value(value))
+            })
+        });
+        test_value_factory().assert_same_representation_for_test(&actual, &Some(expected));
         assert_eq!(
             source.active_normalization_batch(&test_value_factory()),
             None
@@ -3161,10 +3162,10 @@ mod driver_tests {
         })
         .expect("the owner must resume through the same managed net");
         assert!(matches!(value, Value::Lazy(_)));
-        assert_eq!(
-            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
+        context.values().assert_same_representation_for_test(
+            &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
                 .expect("the returned net payload must retain ordinary lazy demand"),
-            context.values().unit()
+            &context.values().unit(),
         );
     }
 
@@ -3647,9 +3648,19 @@ mod driver_tests {
                 .to_string()
                 .contains("application requires a function value")
         );
-        assert!(matches!(
-            failed_runtime.test_with(&test_value_factory(), |net| net.stuck_reason(failed_call.pair).cloned()),
-            Some(StuckReason::Specialization(error)) if error == failure
+        let stored = failed_runtime.test_with(&test_value_factory(), |net| {
+            net.stuck_reason(failed_call.pair).cloned()
+        });
+        let Some(StuckReason::Specialization(stored)) = stored else {
+            panic!("the failed call should retain its specialization failure")
+        };
+        assert!(Arc::ptr_eq(
+            stored
+                .permanent_failure()
+                .expect("the stored specialization halt should be permanent"),
+            failure
+                .permanent_failure()
+                .expect("the observed specialization halt should be permanent"),
         ));
         assert_eq!(
             observe_current_callable_path(&failed_runtime, failed_call),
@@ -4363,12 +4374,13 @@ mod driver_tests {
             request.drive(&test_context()).unwrap(),
             NetInterfaceOutcome::Data
         );
-        assert_eq!(
-            source.test_with(&test_value_factory(), |net| net
-                .interface_data(root_interface)
-                .cloned()),
-            Some(expected)
-        );
+        let actual = source.with_test_access(&test_value_factory(), |access| {
+            access.with(|net| {
+                net.interface_data(root_interface)
+                    .map(|value| access.values().duplicate_value(value))
+            })
+        });
+        test_value_factory().assert_same_representation_for_test(&actual, &Some(expected));
         assert_eq!(
             source.active_normalization_batch(&test_value_factory()),
             None

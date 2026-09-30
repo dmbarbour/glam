@@ -1386,10 +1386,10 @@ mod tests {
         crate::core::set_test_promise(context.values(), &promise, Value::Number(42.into()))
             .expect("the dynamic key promise should accept its assignment");
 
-        assert_eq!(
-            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
+        context.values().assert_same_representation_for_test(
+            &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
                 .expect("computed access should resume"),
-            Value::binary_from_text("found")
+            &Value::binary_from_text("found"),
         );
         drop(access_root);
     }
@@ -1411,10 +1411,10 @@ mod tests {
             .expect_err("the recursive key member must remain a dependency");
         crate::core::set_test_promise(context.values(), &promise, Value::Number(7.into()))
             .expect("the recursive key promise should accept its assignment");
-        assert_eq!(
-            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
+        context.values().assert_same_representation_for_test(
+            &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
                 .expect("recursive key should resume"),
-            Value::binary_from_text("recursive")
+            &Value::binary_from_text("recursive"),
         );
     }
 
@@ -1442,10 +1442,10 @@ mod tests {
             Value::List(List::from_values(vec![Value::Number(2.into())])),
         )
         .expect("the path chunk promise should accept its assignment");
-        assert_eq!(
-            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
+        context.values().assert_same_representation_for_test(
+            &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
                 .expect("computed path should resume"),
-            Value::binary_from_text("path")
+            &Value::binary_from_text("path"),
         );
     }
 
@@ -1518,16 +1518,16 @@ mod tests {
             .expect("the WHNF handoff must survive while its result is pending");
         crate::core::set_test_promise(context.values(), &result, Value::binary_from_text("done"))
             .expect("the selected result promise should accept its assignment");
-        assert_eq!(
-            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
+        context.values().assert_same_representation_for_test(
+            &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
                 .expect("the resumed route should demand the selected result"),
-            Value::binary_from_text("done")
+            &Value::binary_from_text("done"),
         );
         assert_eq!(prefix_forces.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
+        context.values().assert_same_representation_for_test(
+            &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
                 .expect("a terminal route must use the access cache"),
-            Value::binary_from_text("done")
+            &Value::binary_from_text("done"),
         );
         assert_eq!(prefix_forces.load(Ordering::SeqCst), 1);
         drop(access_root);
@@ -1558,10 +1558,10 @@ mod tests {
             });
         let path = Value::List(List::from_thunk(ListThunk::Lazy(chunk)));
         let access = access_value(&context, [CoreDataKey::PathIndex], vec![base, path]);
-        assert_eq!(
-            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
+        context.values().assert_same_representation_for_test(
+            &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &access)
                 .expect("a deferred binary chunk remains a logical list segment"),
-            Value::binary_from_text("byte")
+            &Value::binary_from_text("byte"),
         );
     }
 }

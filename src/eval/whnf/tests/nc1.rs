@@ -69,7 +69,9 @@ fn net_state_round_trip_preserves_empty_frames_and_scalar_identity() {
         let state = NetWhnfState::from_regional(&access, regional);
         let projected = state.into_regional(&access);
 
-        assert_eq!(projected.focus, Value::Number(17.into()));
+        access
+            .values()
+            .assert_same_representation_for_test(&projected.focus, &Value::Number(17.into()));
         assert!(projected.frames.is_empty());
         assert!(projected.followed.is_empty());
         assert_eq!(projected.source_owner, None);
@@ -374,12 +376,18 @@ fn shell_work(access: &EvaluationValueAccess<'_>) -> NetWhnfState {
 }
 
 fn reduce_shell(
-    _access: &EvaluationValueAccess<'_>,
+    access: &EvaluationValueAccess<'_>,
     work: &mut RegionalWhnfState<'_>,
 ) -> RegionalWhnfStep {
-    if work.focus == Value::Number(0.into()) {
+    if access
+        .values()
+        .same_representation_for_test(&work.focus, &Value::Number(0.into()))
+    {
         RegionalWhnfStep::Delegate(Value::Number(1.into()))
-    } else if work.focus == Value::Number(1.into()) {
+    } else if access
+        .values()
+        .same_representation_for_test(&work.focus, &Value::Number(1.into()))
+    {
         RegionalWhnfStep::Delegate(Value::Number(2.into()))
     } else {
         RegionalWhnfStep::Ready(Value::Number(3.into()))
@@ -399,7 +407,9 @@ fn net_state_and_durable_work_share_exact_budget_split_semantics() {
         else {
             panic!("uninterrupted shell chain must complete")
         };
-        assert_eq!(uninterrupted, Value::Number(3.into()));
+        access
+            .values()
+            .assert_same_representation_for_test(&uninterrupted, &Value::Number(3.into()));
         assert_eq!(uninterrupted_budget.spent(), 3);
         assert_eq!(uninterrupted_budget.remaining(), 1);
 
@@ -412,7 +422,9 @@ fn net_state_and_durable_work_share_exact_budget_split_semantics() {
                 let NetWhnfDrive::Ready(value) = first else {
                     panic!("three transitions must complete the shell chain")
                 };
-                assert_eq!(value, uninterrupted);
+                access
+                    .values()
+                    .assert_same_representation_for_test(&value, &uninterrupted);
                 continue;
             }
             let NetWhnfDrive::Yielded(next) = first else {
@@ -425,7 +437,9 @@ fn net_state_and_durable_work_share_exact_budget_split_semantics() {
             else {
                 panic!("the remaining exact allowance must complete the shell chain")
             };
-            assert_eq!(value, uninterrupted);
+            access
+                .values()
+                .assert_same_representation_for_test(&value, &uninterrupted);
             assert_eq!(rest_budget.spent(), 3 - first_quantum);
             assert_eq!(rest_budget.remaining(), 0);
         }
@@ -475,9 +489,9 @@ fn net_driver_retains_frame_state_on_yield_boundary_and_failure() {
             unreachable!()
         };
         assert_eq!(*next, 0);
-        assert_eq!(
+        access.values().assert_same_representation_for_test(
             arguments,
-            &[Value::Number(10.into()), Value::Number(11.into())]
+            &[Value::Number(10.into()), Value::Number(11.into())],
         );
 
         let mut one = WhnfStepBudget::new(1);
@@ -487,14 +501,16 @@ fn net_driver_retains_frame_state_on_yield_boundary_and_failure() {
             panic!("one completed transition must yield its complete successor")
         };
         let advanced = advanced.into_regional(&access);
-        assert_eq!(advanced.focus, Value::Number(1.into()));
+        access
+            .values()
+            .assert_same_representation_for_test(&advanced.focus, &Value::Number(1.into()));
         let WhnfContinuation::Application { arguments, next } = &advanced.frames[0] else {
             unreachable!()
         };
         assert_eq!(*next, 1);
-        assert_eq!(
+        access.values().assert_same_representation_for_test(
             arguments,
-            &[Value::Number(10.into()), Value::Number(11.into())]
+            &[Value::Number(10.into()), Value::Number(11.into())],
         );
 
         let boundary_reducer = |_access: &EvaluationValueAccess<'_>,
@@ -519,14 +535,16 @@ fn net_driver_retains_frame_state_on_yield_boundary_and_failure() {
             RegionalBoundaryRequest::External(WhnfExternalBoundary::Reflection)
         ));
         let state = state.into_regional(&access);
-        assert_eq!(state.focus, Value::Number(1.into()));
+        access
+            .values()
+            .assert_same_representation_for_test(&state.focus, &Value::Number(1.into()));
         let WhnfContinuation::Application { arguments, next } = &state.frames[0] else {
             unreachable!()
         };
         assert_eq!(*next, 1);
-        assert_eq!(
+        access.values().assert_same_representation_for_test(
             arguments,
-            &[Value::Number(10.into()), Value::Number(11.into())]
+            &[Value::Number(10.into()), Value::Number(11.into())],
         );
 
         let expected = Arc::new(crate::core::EvaluationFailure::message("NC1B failure"));

@@ -1062,10 +1062,10 @@ mod tests {
             .values()
             .collect_managed_for_test()
             .expect("the assigned numeric checkpoint must retain its completed prefix");
-        assert_eq!(
-            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &sum)
+        context.values().assert_same_representation_for_test(
+            &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &sum)
                 .expect("numeric work must resume"),
-            Value::Number(3.into())
+            &Value::Number(3.into()),
         );
         assert_eq!(first_demands.load(Ordering::Relaxed), 1);
         drop(sum_root);
@@ -1169,10 +1169,10 @@ mod tests {
                     Value::Number(2.into()),
                 ]))],
             );
-            assert_eq!(
-                crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &selection)
+            context.values().assert_same_representation_for_test(
+                &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &selection)
                     .expect("a non-empty search should select its first result"),
-                Value::Number(1.into())
+                &Value::Number(1.into()),
             );
         }
 
@@ -1245,10 +1245,10 @@ mod tests {
             .values()
             .collect_managed_for_test()
             .expect("the assigned front must remain live beneath the checkpoint");
-        assert_eq!(
-            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &selection)
+        context.values().assert_same_representation_for_test(
+            &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &selection)
                 .expect("conditional selection must resume"),
-            Value::Number(42.into())
+            &Value::Number(42.into()),
         );
         assert_eq!(result_demands.load(Ordering::Relaxed), 1);
         drop(selection_root);
@@ -1345,11 +1345,11 @@ mod tests {
                 .expect_err("origin demand failure must propagate")
                 .into_permanent_failure();
         assert_eq!(failure.to_string(), "origin production failed");
-        assert_eq!(
+        context.values().assert_same_representation_for_test(
             failure.contexts(),
-            [super::super::value::evaluation_context_frame(
-                "compilation_origin"
-            )]
+            &[super::super::value::evaluation_context_frame(
+                "compilation_origin",
+            )],
         );
         drop(inspection_root);
     }
@@ -1502,10 +1502,10 @@ mod tests {
             .values()
             .collect_managed_for_test()
             .expect("the assigned front checkpoint must remain live");
-        assert_eq!(
-            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &observation)
+        context.values().assert_same_representation_for_test(
+            &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &observation)
                 .expect("list observation must resume"),
-            Value::Number(42.into())
+            &Value::Number(42.into()),
         );
         assert_eq!(prefix_demands.load(Ordering::Relaxed), 1);
         drop(observation_root);
