@@ -2182,6 +2182,17 @@ inventory relatch:
            `Arc::ptr_eq` identity checks rather than being weakened to
            representation equality. This slice reduces the all-target
            equality-error inventory from 479 to 452.
+         - **D.2h.2c — client-demand and lazy-fixpoint fixture slice complete
+           2026-09-30.** Client-demand results, task-owned promise completion,
+           computed fixpoints, lazy forwarding chains, and contended host-call
+           fixtures now compare their semantic payloads under the owning
+           value domain. `EvaluationWaitPoll::Complete` and
+           `RuntimeValueRoot` are deliberately destructured and observed
+           inside one matching runtime-access region rather than receiving
+           broad test equality or projecting an unrooted value between access
+           regions. Scalar wait tokens and exact shared-failure identities
+           retain their existing ordinary Rust comparisons. This slice
+           reduces the all-target equality-error inventory from 452 to 432.
       3. Add owner-local recursive test relations for `g_syntax` carriers and
          migrate compiler/front-end fixtures without giving semantic values
          syntax-layer equality traits.

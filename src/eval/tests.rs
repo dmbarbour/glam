@@ -2227,15 +2227,19 @@ fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
 
     set_promise(&session, &fixpoint, n(42)).unwrap();
     assert_eq!(fixpoint.exact_subscription_count(session.values()), 0);
-    assert_eq!(observer_demand.advance(&observer).unwrap(), n(42));
-    assert_eq!(
-        session.poll_wait(&wait),
-        EvaluationWaitPoll::Complete(Box::new(crate::runtime::RuntimeValueRoot::new(
-            session.values(),
-            n(42),
-        ))),
-        "the retired promise wait must preserve late terminal observation"
-    );
+    observer
+        .values()
+        .assert_same_representation_for_test(&observer_demand.advance(&observer).unwrap(), &n(42));
+    let EvaluationWaitPoll::Complete(completed) = session.poll_wait(&wait) else {
+        panic!("the retired promise wait must preserve late terminal observation")
+    };
+    session.values().with_runtime_value_access(|access| {
+        completed
+            .with_core(&access, |actual| {
+                access.assert_same_representation_for_test(actual, &n(42));
+            })
+            .expect("the completed wait and session must share one value domain");
+    });
     let counts = session.task_registry_counts();
     assert_eq!(counts.promises_active, 0);
     assert_eq!(counts.promises_terminal, 0);
@@ -2453,10 +2457,10 @@ fn fixpoint_builtin_resumes_from_its_exact_function_operand() {
         closed_function_value_in(observer.values(), 1, TestExpr::Value(n(42))),
     )
     .expect("the owner should resolve the promised function");
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &fixpoint)
+    observer.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &fixpoint)
             .expect("fixpoint construction should resume"),
-        n(42)
+        &n(42),
     );
 }
 
@@ -2487,8 +2491,12 @@ fn suspended_value_fixpoint_keeps_one_knot_for_concurrent_observers() {
     );
 
     owner.complete_wait(&producer_wait);
-    assert_eq!(producer_demand.advance(&owner).unwrap(), n(42));
-    assert_eq!(observer_demand.advance(&observer).unwrap(), n(42));
+    owner
+        .values()
+        .assert_same_representation_for_test(&producer_demand.advance(&owner).unwrap(), &n(42));
+    observer
+        .values()
+        .assert_same_representation_for_test(&observer_demand.advance(&observer).unwrap(), &n(42));
 }
 
 #[test]
@@ -2518,15 +2526,17 @@ fn computed_fixpoint_uses_session_local_waits_while_sharing_its_result() {
     assert!(lazy.cached(first.values()).is_none());
 
     set_promise(&first, &promise, n(42)).unwrap();
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&first, &fixpoint).unwrap(),
-        n(42)
+    first.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&first, &fixpoint).unwrap(),
+        &n(42),
     );
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&second, &fixpoint).unwrap(),
-        n(42)
+    second.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&second, &fixpoint).unwrap(),
+        &n(42),
     );
-    assert_eq!(cached_value(&lazy), n(42));
+    first
+        .values()
+        .assert_same_representation_for_test(&cached_value(&lazy), &n(42));
 }
 
 #[test]
@@ -2574,9 +2584,9 @@ fn deferred_values_use_the_runtime_default_context() {
         },
     );
 
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
-        n(42)
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
+        &n(42),
     );
 }
 
@@ -2614,9 +2624,9 @@ fn forcing_a_lazy_value_reaches_outer_whnf_without_forcing_lazy_fields() {
     let Value::Dict(dict) = forced else {
         panic!("forcing should expose the outer dictionary")
     };
-    assert_eq!(
-        dict.get(&Key::atom_from_text("field")),
-        Some(&expected_field)
+    context.values().assert_same_representation_for_test(
+        &dict.get(&Key::atom_from_text("field")),
+        &Some(&expected_field),
     );
     assert_eq!(field_forces.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
@@ -2655,9 +2665,9 @@ fn guarded_lazy_self_reference_reaches_dictionary_whnf() {
     let Value::Dict(dict) = forced else {
         panic!("guarded recursive value should expose a dictionary")
     };
-    assert_eq!(
-        dict.get(&Key::atom_from_text("tail")),
-        Some(&Value::Lazy(lazy))
+    context.values().assert_same_representation_for_test(
+        &dict.get(&Key::atom_from_text("tail")),
+        &Some(&Value::Lazy(lazy)),
     );
 }
 
@@ -2679,20 +2689,24 @@ fn lazy_aliases_share_and_cache_their_final_whnf() {
     let value = Value::Lazy(root.clone());
 
     assert_eq!(context.deferred_task_count(), 0);
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
-        n(42)
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
+        &n(42),
     );
     assert_eq!(
         context.deferred_task_count(),
         0,
         "completed alias producers should retire from the session"
     );
-    assert_eq!(cached_value(&target_lazy), n(42));
-    assert_eq!(cached_value(&root), n(42));
-    assert_eq!(
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
-        n(42)
+    context
+        .values()
+        .assert_same_representation_for_test(&cached_value(&target_lazy), &n(42));
+    context
+        .values()
+        .assert_same_representation_for_test(&cached_value(&root), &n(42));
+    context.values().assert_same_representation_for_test(
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
+        &n(42),
     );
     assert_eq!(
         context.deferred_task_count(),
@@ -2722,16 +2736,23 @@ fn demanded_forwarding_chain_caches_whnf_in_every_lazy_member() {
         (leaf, middle, root, root_owner)
     });
 
-    assert_eq!(
-        context
-            .evaluate_root_whnf(root_owner)
-            .unwrap()
-            .clone_core_for_test(),
-        n(42)
-    );
-    assert_eq!(cached_value(&leaf), n(42));
-    assert_eq!(cached_value(&middle), n(42));
-    assert_eq!(cached_value(&root), n(42));
+    let completed = context.evaluate_root_whnf(root_owner).unwrap();
+    context.values().with_runtime_value_access(|access| {
+        completed
+            .with_core(&access, |actual| {
+                access.assert_same_representation_for_test(actual, &n(42));
+            })
+            .expect("the completed root and context must share one value domain");
+    });
+    context
+        .values()
+        .assert_same_representation_for_test(&cached_value(&leaf), &n(42));
+    context
+        .values()
+        .assert_same_representation_for_test(&cached_value(&middle), &n(42));
+    context
+        .values()
+        .assert_same_representation_for_test(&cached_value(&root), &n(42));
 }
 
 #[test]
@@ -2780,7 +2801,9 @@ fn lazy_whnf_checkpoint_survives_yield_and_dependency_until_terminal_cache() {
         context.poll_wait(&wait),
         EvaluationWaitPoll::Complete(_)
     ));
-    assert_eq!(cached_value(&lazy), n(42));
+    context
+        .values()
+        .assert_same_representation_for_test(&cached_value(&lazy), &n(42));
     assert!(context.values().with_runtime_value_access(|access| {
         root.access(&access)
             .expect("lazy root and access should share one runtime")
@@ -2875,16 +2898,16 @@ fn concurrent_host_calls_share_one_rooted_producer_across_patient_client_demands
     let (lock, changed) = &*release;
     *lock.lock().expect("test release lock was poisoned") = true;
     changed.notify_all();
-    assert_eq!(
-        observer
+    values.assert_same_representation_for_test(
+        &observer
             .join()
             .expect("observer should finish")
             .expect("observer should share the producer result"),
-        n(42)
+        &n(42),
     );
-    assert_eq!(
-        producer.join().expect("producer should finish").unwrap(),
-        n(42)
+    values.assert_same_representation_for_test(
+        &producer.join().expect("producer should finish").unwrap(),
+        &n(42),
     );
     assert_eq!(producer_runs.load(Ordering::SeqCst), 1);
 }
