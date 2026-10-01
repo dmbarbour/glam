@@ -23,6 +23,18 @@ fn set_promise(context: &EvalContext, promise: &PromisedValue, value: Value) -> 
     crate::core::set_test_promise(context.values(), promise, value)
 }
 
+fn unit(context: &EvalContext) -> Value {
+    context
+        .values()
+        .with_runtime_value_access(|access| access.unit())
+}
+
+fn rooted_unit(context: &EvalContext) -> RuntimeValueRoot {
+    context
+        .values()
+        .with_runtime_value_access(|access| access.root_runtime_value(access.unit()))
+}
+
 fn fail_promise(
     context: &EvalContext,
     promise: &PromisedValue,
@@ -407,20 +419,14 @@ fn client_demand_retirement_publishes_after_runtime_unlock() {
     let coordinator = context.coordinator().expect("coordinator should be live");
 
     let completed = context
-        .demand_whnf(RuntimeValueRoot::new(
-            context.values(),
-            context.values().unit(),
-        ))
+        .demand_whnf(RuntimeValueRoot::new(context.values(), unit(&context)))
         .expect("unit demand should be admitted");
     let completed_probe = client_demand_publish_lock_probe(&coordinator, &completed);
     assert!(poll_one_runtime_work(&coordinator));
     assert_client_demand_published_after_unlock(&completed_probe);
 
     let abandoned = context
-        .demand_whnf(RuntimeValueRoot::new(
-            context.values(),
-            context.values().unit(),
-        ))
+        .demand_whnf(RuntimeValueRoot::new(context.values(), unit(&context)))
         .expect("abandoned demand should be admitted");
     let abandoned_probe = client_demand_publish_lock_probe(&coordinator, &abandoned);
     abandoned.abandon();
@@ -471,7 +477,7 @@ fn foreground_client_demand_closes_the_retirement_publication_handoff() {
     let (coordinator, _executor) = test_execution_resources(0).expect("test runtime should start");
     let session = EvaluationSession::shared(&coordinator);
     let context = EvalContext::new(&session);
-    let expected = context.values().unit();
+    let expected = unit(&context);
     let handle = context
         .demand_whnf(RuntimeValueRoot::new(
             context.values(),
@@ -1100,10 +1106,7 @@ fn client_demand_result_cell_releases_after_terminal_handle_drop() {
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
     let handle = context
-        .demand_whnf(RuntimeValueRoot::new(
-            context.values(),
-            context.values().unit(),
-        ))
+        .demand_whnf(RuntimeValueRoot::new(context.values(), unit(&context)))
         .expect("unit demand should be admitted");
     let result_cell = handle.result_cell();
 
@@ -1447,16 +1450,13 @@ fn retained_client_handle_waits_across_external_disturbance_without_a_lost_wake(
     assert_eq!(coordinator.client_demand_count(), 0);
 
     let already_complete = context
-        .demand_whnf(RuntimeValueRoot::new(
-            context.values(),
-            context.values().unit(),
-        ))
+        .demand_whnf(RuntimeValueRoot::new(context.values(), unit(&context)))
         .expect("unit demand should be admitted");
     assert!(poll_one_runtime_work(&coordinator));
     let ClientDemandResult::Complete(value) = already_complete.wait() else {
         panic!("the already-complete demand should return its value")
     };
-    value.assert_same_representation_for_test(context.values(), &context.values().unit());
+    value.assert_same_representation_for_test(context.values(), &unit(&context));
 }
 
 #[test]
@@ -1769,10 +1769,10 @@ fn escaped_context_retains_demand_resources_without_retaining_owner_or_coordinat
     drop(executor);
     drop(coordinator);
     assert!(context.coordinator().is_none());
-    context.values().assert_same_representation_for_test(
-        &context.values().unit(),
-        &crate::core::keys::unit_value(),
-    );
+    let actual = unit(&context);
+    context.values().with_runtime_value_access(|access| {
+        access.assert_same_representation_for_test(&actual, &access.unit());
+    });
 
     let closed_context = context.clone().for_effect_task();
     let error = PromisedValue::fixpoint(&closed_context, "closed demand promise")
@@ -2208,7 +2208,7 @@ impl EvaluationTaskMachine for Complete {
         _context: &crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
-        EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
+        EvaluationMachinePoll::Complete(_context.root_unit())
     }
 }
 
@@ -2255,9 +2255,7 @@ impl EvaluationTaskMachine for ProbePollOutcomeMachine {
                 observed_epoch: Some(RuntimeObservationEpoch::from_raw(7)),
                 error: None,
             }),
-            ProbePollOutcome::Complete => {
-                EvaluationMachinePoll::Complete(context.root_value(crate::core::keys::unit_value()))
-            }
+            ProbePollOutcome::Complete => EvaluationMachinePoll::Complete(context.root_unit()),
             ProbePollOutcome::Failed => EvaluationMachinePoll::Failed(
                 context.root_failure(evaluation_failure("probe failure")),
             ),
@@ -2301,7 +2299,7 @@ impl EvaluationTaskMachine for ExitUntilObservation {
                 observed_epoch: Some(self.observed),
             })
         } else {
-            EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
+            EvaluationMachinePoll::Complete(_context.root_unit())
         }
     }
 }
@@ -2332,7 +2330,7 @@ fn exit_wait_does_not_publish_task_status_or_failure() {
     let coordinator = context
         .coordinator()
         .expect("test task must retain its coordinator");
-    let message = RuntimeValueRoot::new(context.values(), crate::core::keys::unit_value());
+    let message = rooted_unit(&context);
     let task = context
         .schedule_task(move |_| {
             Ok(Box::new(ExitVote(EvaluationExitBlock {
@@ -2797,7 +2795,7 @@ impl EvaluationTaskMachine for ScopedCompleteWithDropCheck {
                 Err(CollectionError::ActiveMutator)
             ));
         });
-        EvaluationMachinePoll::Complete(poll_context.root_value(crate::core::keys::unit_value()))
+        EvaluationMachinePoll::Complete(poll_context.root_unit())
     }
 }
 
@@ -2860,7 +2858,7 @@ impl EvaluationTaskMachine for YieldThenComplete {
             self.yields -= 1;
             EvaluationMachinePoll::Yielded
         } else {
-            EvaluationMachinePoll::Complete(context.root_value(crate::core::keys::unit_value()))
+            EvaluationMachinePoll::Complete(context.root_unit())
         }
     }
 }
@@ -2884,7 +2882,7 @@ impl EvaluationTaskMachine for RecordPollOrder {
         if std::mem::take(&mut self.yield_once) {
             EvaluationMachinePoll::Yielded
         } else {
-            EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
+            EvaluationMachinePoll::Complete(_context.root_unit())
         }
     }
 }
@@ -2924,7 +2922,7 @@ impl EvaluationTaskMachine for Signal {
         if let Some(signal) = self.0.take() {
             signal.send(()).expect("test receiver should remain open");
         }
-        EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
+        EvaluationMachinePoll::Complete(_context.root_unit())
     }
 }
 
@@ -2951,9 +2949,7 @@ impl EvaluationTaskMachine for SpawnThenYield {
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let Some(signal) = self.signal.take() else {
-            return EvaluationMachinePoll::Complete(
-                context.root_value(crate::core::keys::unit_value()),
-            );
+            return EvaluationMachinePoll::Complete(context.root_unit());
         };
         self.target
             .schedule_task(move |_| Ok(Box::new(Signal(Some(signal)))))
@@ -2969,9 +2965,7 @@ impl EvaluationTaskMachine for SpawnThenYieldAfterRelease {
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let Some(started) = self.started.take() else {
-            return EvaluationMachinePoll::Complete(
-                context.root_value(crate::core::keys::unit_value()),
-            );
+            return EvaluationMachinePoll::Complete(context.root_unit());
         };
         self.target
             .schedule_task(|_| Ok(Box::new(AlwaysYields)))
@@ -2999,7 +2993,7 @@ impl EvaluationTaskMachine for SpawnSignal {
         self.target
             .schedule_task(move |_| Ok(Box::new(Signal(Some(signal)))))
             .expect("runtime pump should permit cross-session task admission");
-        EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
+        EvaluationMachinePoll::Complete(_context.root_unit())
     }
 }
 
@@ -3020,9 +3014,7 @@ impl EvaluationTaskMachine for YieldAfterRelease {
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let Some(started) = self.started.take() else {
-            return EvaluationMachinePoll::Complete(
-                context.root_value(crate::core::keys::unit_value()),
-            );
+            return EvaluationMachinePoll::Complete(context.root_unit());
         };
         started
             .send(())
@@ -3048,9 +3040,7 @@ impl EvaluationTaskMachine for BlockOnceOnWait {
                 observed_epoch: None,
                 error: None,
             }),
-            None => {
-                EvaluationMachinePoll::Complete(context.root_value(crate::core::keys::unit_value()))
-            }
+            None => EvaluationMachinePoll::Complete(context.root_unit()),
         }
     }
 }
@@ -3069,7 +3059,7 @@ impl EvaluationTaskMachine for CompleteAfterRelease {
         self.release
             .recv_timeout(Duration::from_secs(2))
             .expect("test should release the task");
-        EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
+        EvaluationMachinePoll::Complete(_context.root_unit())
     }
 }
 
@@ -3102,7 +3092,7 @@ impl EvaluationTaskMachine for AssignPromiseAfterRelease {
         let published =
             published.expect_without_debug("worker should resolve the host promise once");
         published.notify();
-        EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
+        EvaluationMachinePoll::Complete(_context.root_unit())
     }
 }
 
@@ -3177,9 +3167,9 @@ impl EvaluationTaskMachine for AssignPromiseThenYield {
             .promise
             .take()
             .expect("assignment fixture should publish exactly once");
-        let published = self.values.with_runtime_value_access(|access| {
-            promise.publish(&access, Ok(crate::core::keys::unit_value()))
-        });
+        let published = self
+            .values
+            .with_runtime_value_access(|access| promise.publish(&access, Ok(access.unit())));
         let published =
             published.expect_without_debug("the owning machine should assign its promise once");
         published.notify();
@@ -3202,7 +3192,7 @@ impl EvaluationTaskMachine for CompleteAndSignalDrop {
         _context: &crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
-        EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
+        EvaluationMachinePoll::Complete(_context.root_unit())
     }
 }
 
@@ -3229,7 +3219,7 @@ impl EvaluationTaskMachine for CompleteAndCheckTerminalPublication {
         _context: &crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
-        EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
+        EvaluationMachinePoll::Complete(_context.root_unit())
     }
 }
 
@@ -3249,7 +3239,7 @@ impl EvaluationTaskMachine for CompleteAndCheckReflectionDrop {
         _context: &crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
-        EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
+        EvaluationMachinePoll::Complete(_context.root_unit())
     }
 }
 
@@ -3305,7 +3295,7 @@ impl EvaluationTaskMachine for SpawnOnce {
                 .schedule_task(|_| Ok(Box::new(Complete)))
                 .expect("child should schedule while its parent is polled");
         }
-        EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
+        EvaluationMachinePoll::Complete(_context.root_unit())
     }
 }
 
@@ -3503,11 +3493,12 @@ fn wait_completion_projection_requires_scoped_access() {
     };
     assert_eq!(root.runtime_id(), context.values().runtime_id());
 
+    let expected = unit(&context);
     let poll = EvaluationPollContext::for_context(&context);
     let evaluator = poll.evaluator(&context);
     context.values().assert_same_representation_for_test(
         &evaluator.project_root(&root, |_, value| value),
-        &crate::core::keys::unit_value(),
+        &expected,
     );
     context
         .values()
@@ -3669,7 +3660,7 @@ fn causal_child_runs_before_unrelated_same_session_task_without_exact_wait() {
         EvaluationWaitPoll::Pending(_)
     ));
 
-    set_promise(&context, &promise, context.values().unit())
+    set_promise(&context, &promise, unit(&context))
         .expect_without_debug("the parent should resume after its separate promise resolves");
     assert_eq!(
         context.pump_wait_on_route(parent.wait(), 1, &mut route),
@@ -3755,7 +3746,7 @@ fn claimed_cross_session_child_keeps_parent_wait_busy_until_release() {
         EvaluationPumpOutcome::NoProgress,
         "the remaining external promise is genuinely unresolved"
     );
-    set_promise(&parent_context, &promise, parent_context.values().unit())
+    set_promise(&parent_context, &promise, unit(&parent_context))
         .expect_without_debug("external promise should resolve");
     assert_eq!(
         parent_context.pump_wait(parent.wait(), 1),
@@ -3901,22 +3892,14 @@ fn causal_pump_reaches_grandchild_of_blocked_child() {
         EvaluationPumpOutcome::NoProgress,
         "completed side work does not implicitly resolve either promise"
     );
-    set_promise(
-        &child_context,
-        &child_promise,
-        child_context.values().unit(),
-    )
-    .expect_without_debug("child promise should resolve");
+    set_promise(&child_context, &child_promise, unit(&child_context))
+        .expect_without_debug("child promise should resolve");
     assert_eq!(
         child_context.pump_wait(child.wait(), 1),
         EvaluationPumpOutcome::TargetReady
     );
-    set_promise(
-        &parent_context,
-        &parent_promise,
-        parent_context.values().unit(),
-    )
-    .expect_without_debug("parent promise should resolve");
+    set_promise(&parent_context, &parent_promise, unit(&parent_context))
+        .expect_without_debug("parent promise should resolve");
     assert_eq!(
         parent_context.pump_wait(parent.wait(), 1),
         EvaluationPumpOutcome::TargetReady
@@ -4399,10 +4382,10 @@ fn scheduled_nested_dependency_runs_without_mutator() {
     let nested = LazyValue::semantic_thunk(context.values(), "nested scheduled dependency", {
         let values = context.values().clone();
         let nested_had_no_mutator = nested_had_no_mutator.clone();
-        move |_| {
+        move |evaluator| {
             nested_had_no_mutator
                 .store(values.collect_managed_for_test().is_ok(), Ordering::Release);
-            Ok(crate::core::keys::unit_value())
+            Ok(evaluator.with_value_access(|access| access.values().unit()))
         }
     });
 
@@ -4420,7 +4403,7 @@ fn scheduled_nested_dependency_runs_without_mutator() {
             .expect("the outer scheduled dependency should complete");
     context
         .values()
-        .assert_same_representation_for_test(&actual, &context.values().unit());
+        .assert_same_representation_for_test(&actual, &unit(&context));
     assert!(
         nested_had_no_mutator.load(Ordering::Acquire),
         "cooperative nested pumping must not inherit an outer managed-access region"
@@ -4460,10 +4443,8 @@ fn patient_claimed_task_wait_releases_mutator() {
                 .expect("patient producer release receiver should remain usable")
                 .recv_timeout(Duration::from_secs(2))
                 .expect("test should release the patient producer");
-            Ok(RuntimeValueRoot::new(
-                &producer_values,
-                producer_values.unit(),
-            ))
+            Ok(producer_values
+                .with_runtime_value_access(|access| access.root_runtime_value(access.unit())))
         },
     );
     let coordinator = context.coordinator().expect("coordinator should be live");
@@ -4531,7 +4512,7 @@ fn patient_claimed_task_wait_releases_mutator() {
     let ClientDemandResult::Complete(value) = result else {
         panic!("patient evaluation should complete");
     };
-    value.assert_same_representation_for_test(context.values(), &context.values().unit());
+    value.assert_same_representation_for_test(context.values(), &unit(&context));
     producer.join().expect("patient producer should not panic");
     evaluation
         .join()
@@ -4629,7 +4610,7 @@ fn patient_deferred_demand_retries_when_disturbance_races_no_progress() {
         .expect("the patient evaluation should complete");
     context
         .values()
-        .assert_same_representation_for_test(&actual, &context.values().unit());
+        .assert_same_representation_for_test(&actual, &unit(&context));
     evaluation
         .join()
         .expect("patient evaluator should not panic");
@@ -4944,7 +4925,7 @@ fn abandoned_lazy_claim_can_be_reclaimed_without_poisoning_the_lazy() {
     let forced = Arc::new(AtomicBool::new(false));
     let (lazy, abandoned_wait, expected) = {
         let owner = fixture.context();
-        let expected = owner.values().unit();
+        let expected = unit(&owner);
         let lazy = LazyValue::semantic_thunk(owner.values(), "reclaimable lazy", {
             let forced = forced.clone();
             let values = owner.values().clone();
@@ -5408,7 +5389,7 @@ fn owner_session_drop_fails_task_promises_but_not_host_promises() {
         host_promise.assignment(observer.values()).is_none(),
         "dropping an unrelated observer session must not poison a host promise"
     );
-    set_promise(&observer, &host_promise, observer.values().unit())
+    set_promise(&observer, &host_promise, unit(&observer))
         .expect_without_debug("the host promise should remain assignable");
     assert!(
         host_promise
@@ -5686,7 +5667,7 @@ fn assigned_task_promise_is_removed_before_later_task_terminalization() {
     let EvaluationWaitPoll::Complete(value) = context.poll_wait(&promise_wait) else {
         panic!("the assigned promise should be complete");
     };
-    value.assert_same_representation_for_test(context.values(), &context.values().unit());
+    value.assert_same_representation_for_test(context.values(), &unit(&context));
 
     assert_eq!(task.cancel(), EvaluationTaskCancellation::Requested);
     assert_eq!(
@@ -5696,7 +5677,7 @@ fn assigned_task_promise_is_removed_before_later_task_terminalization() {
     let EvaluationWaitPoll::Complete(value) = context.poll_wait(&promise_wait) else {
         panic!("the assigned promise should remain complete after cancellation");
     };
-    value.assert_same_representation_for_test(context.values(), &context.values().unit());
+    value.assert_same_representation_for_test(context.values(), &unit(&context));
     assert_eq!(context.task_registry_counts().promises_active, 0);
 }
 
@@ -5738,16 +5719,16 @@ fn long_lived_session_retains_only_unacknowledged_terminal_failures() {
         let lazy = LazyValue::semantic_thunk(
             &crate::core::test_value_factory(),
             format!("successful lazy {index}"),
-            |_| Ok(crate::core::keys::unit_value()),
+            |evaluator| Ok(evaluator.with_value_access(|access| access.values().unit())),
         );
         let actual = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &context,
             &Value::Lazy(lazy),
         )
         .expect("successful lazy should evaluate");
-        context
-            .values()
-            .assert_same_representation_for_test(&actual, &crate::core::keys::unit_value());
+        context.values().with_runtime_value_access(|access| {
+            access.assert_same_representation_for_test(&actual, &access.unit());
+        });
 
         let lazy = LazyValue::semantic_thunk(
             &crate::core::test_value_factory(),
@@ -5772,7 +5753,7 @@ fn long_lived_session_retains_only_unacknowledged_terminal_failures() {
             .wait()
             .clone();
         if index % 2 == 0 {
-            set_promise(&context, &promise, crate::core::keys::unit_value())
+            set_promise(&context, &promise, unit(&context))
                 .expect_without_debug("successful promise should complete once");
         } else {
             fail_promise_message(&context, &promise, "long-lived promise failure")
@@ -6950,7 +6931,7 @@ fn session_drain_completes_owned_roots_without_promising_fifo_order() {
     let _second = schedule(&first, 2, false);
     let _third = schedule(&first, 3, false);
     coordinator.executor_started(1);
-    first.spark(first.values().unit());
+    first.spark(unit(&first));
 
     let EvaluationSessionRun::Complete(report) = first.run_until_quiescent() else {
         panic!("the first session's owned roots should complete")
@@ -7331,7 +7312,7 @@ fn logger_shaped_session_drain_leaves_independent_producer_client_and_spark_for_
         ))
         .expect("independent foreground demand should schedule");
     let (spark_value, spark_evaluations) =
-        counted_client_lazy(&logger, "logger-session spark", logger.values().unit());
+        counted_client_lazy(&logger, "logger-session spark", unit(&logger));
     logger.spark_root(spark_value);
 
     let EvaluationSessionRun::Deadlocked(report) = logger.run_until_quiescent() else {
@@ -7360,7 +7341,7 @@ fn logger_shaped_session_drain_leaves_independent_producer_client_and_spark_for_
     assert!(foreground.poll().is_none());
     assert_eq!(spark_evaluations.load(Ordering::Relaxed), 0);
 
-    set_promise(&logger, &input, logger.values().unit())
+    set_promise(&logger, &input, unit(&logger))
         .expect_without_debug("the independent producer's host input should arrive");
     let EvaluationSessionRun::Complete(report) = logger.run_until_quiescent() else {
         panic!("the logger-shaped consumer should finish after host-input admission")
@@ -7407,7 +7388,7 @@ fn task_owned_promise_dependency_reports_its_cross_session_producer() {
     );
     assert_eq!(promise.exact_subscription_count(observer.values()), 1);
 
-    set_promise(&observer, &promise, observer.values().unit())
+    set_promise(&observer, &promise, unit(&observer))
         .expect_without_debug("the task-owned promise should resolve once");
     assert_eq!(promise.exact_subscription_count(observer.values()), 0);
     let EvaluationSessionRun::Complete(report) = observer.run_until_quiescent() else {
@@ -8264,7 +8245,7 @@ fn forced_deadlock_settlement_preserves_exits_and_kills_other_participants() {
 fn forced_kill_abandons_a_deferred_lazy_claim_without_poisoning_the_lazy() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
-    let expected = context.values().unit();
+    let expected = unit(&context);
     let lazy = LazyValue::semantic_thunk(context.values(), "reclaim after forced kill", {
         let values = context.values().clone();
         let expected = expected.duplicate_for_test(&values);
@@ -8540,7 +8521,7 @@ fn parked_client_is_external_activity_while_task_deadlocks_remain_typed() {
         fixture.runtime.readiness(),
         crate::api::RuntimeReadiness::Busy
     ));
-    set_promise(&context, &promise, context.values().unit())
+    set_promise(&context, &promise, unit(&context))
         .expect_without_debug("host promise should resolve once");
     assert!(matches!(
         context
@@ -8683,10 +8664,7 @@ fn readiness_reports_terminalizing_work_as_busy_without_mutating_it() {
 
     coordinator.settle_terminal_work(
         work,
-        EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
-            context.values(),
-            crate::core::keys::unit_value(),
-        )),
+        EvaluationWaitTerminal::Complete(rooted_unit(&context)),
         evaluation_failure("terminalizing fixture completed without a fixpoint"),
     );
     let retired = coordinator.retire_reflection(work);
@@ -8763,7 +8741,7 @@ fn runtime_pump_abandons_queued_and_blocked_sparks() {
     assert_eq!(coordinator.spark_work_counts(), (0, 0, 1));
     fixture.runtime.pump_until_stable();
     assert_eq!(coordinator.spark_work_counts(), (0, 0, 0));
-    set_promise(&context, &promise, context.values().unit())
+    set_promise(&context, &promise, unit(&context))
         .expect_without_debug("retired spark dependency may complete harmlessly");
     assert_eq!(coordinator.retained_spark_count(), 0);
 }
@@ -9217,10 +9195,7 @@ fn bounded_background_pump_excludes_foreground_clients_and_sparks() {
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
     let client = context
-        .demand_whnf(RuntimeValueRoot::new(
-            context.values(),
-            crate::core::keys::unit_value(),
-        ))
+        .demand_whnf(rooted_unit(&context))
         .expect("foreground client should admit");
     coordinator.executor_started(1);
     let (_lazy, value) = rooted_inert_lazy_value(context.values(), "bounded-pump excluded spark");
@@ -9438,7 +9413,7 @@ fn one_promise_completion_wakes_exact_sparks_in_multiple_sessions() {
 
     assert_eq!(promise.exact_subscription_count(left.values()), 2);
     assert_eq!(coordinator.spark_work_counts(), (0, 0, 2));
-    set_promise(&left, &promise, left.values().unit())
+    set_promise(&left, &promise, unit(&left))
         .expect_without_debug("the shared host promise should resolve once");
     assert_eq!(
         coordinator.spark_work_counts(),
@@ -9471,7 +9446,7 @@ fn promise_completion_wakes_only_sparks_parked_on_that_promise() {
     park_next_spark(&coordinator);
     assert_eq!(coordinator.spark_work_counts(), (0, 0, 2));
 
-    set_promise(&context, &promise_a, context.values().unit())
+    set_promise(&context, &promise_a, unit(&context))
         .expect_without_debug("promise A should resolve once");
     assert_eq!(coordinator.spark_work_counts(), (1, 0, 1));
     assert_eq!(promise_b.exact_subscription_count(context.values()), 1);
@@ -9482,7 +9457,7 @@ fn promise_completion_wakes_only_sparks_parked_on_that_promise() {
     coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
     assert_eq!(coordinator.spark_work_counts(), (0, 0, 1));
 
-    set_promise(&context, &promise_b, context.values().unit())
+    set_promise(&context, &promise_b, unit(&context))
         .expect_without_debug("promise B should resolve once");
     assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
     let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select_worker() else {
@@ -9515,7 +9490,7 @@ fn promise_completion_between_demand_and_subscription_requeues_the_spark() {
             .expect("the halt should preserve the promise")
             .clone(),
     );
-    set_promise(&context, &promise, context.values().unit())
+    set_promise(&context, &promise, unit(&context))
         .expect_without_debug("the promise should resolve before subscription");
 
     coordinator.release_spark(claimed, coordinator::SparkWorkPoll::Blocked(dependency));
@@ -9671,7 +9646,7 @@ fn closing_a_session_abandons_a_blocked_spark_and_releases_its_lazy_claim() {
     );
     assert!(lazy.cached(context.values()).is_none());
 
-    set_promise(&context, &promise, context.values().unit())
+    set_promise(&context, &promise, unit(&context))
         .expect_without_debug("host promise should accept its assignment");
     let observer_session = EvaluationSession::shared(&coordinator);
     let observer = EvalContext::patient_with_task_profile(
@@ -9683,7 +9658,7 @@ fn closing_a_session_abandons_a_blocked_spark_and_releases_its_lazy_claim() {
             .expect("a later demand must be able to reclaim the abandoned lazy");
     observer
         .values()
-        .assert_same_representation_for_test(&actual, &context.values().unit());
+        .assert_same_representation_for_test(&actual, &unit(&context));
 }
 
 #[test]
@@ -9771,10 +9746,7 @@ fn all_poll_routes_use_scheduler_context() {
 
     let client_before = context.poll_context_count();
     let demand = context
-        .demand_whnf(RuntimeValueRoot::new(
-            context.values(),
-            context.values().unit(),
-        ))
+        .demand_whnf(RuntimeValueRoot::new(context.values(), unit(&context)))
         .expect("client demand should be admitted");
     assert!(poll_one_runtime_work(&coordinator));
     assert!(matches!(
@@ -9785,7 +9757,7 @@ fn all_poll_routes_use_scheduler_context() {
 
     coordinator.executor_started(1);
     let promise = PromisedValue::new(context.values(), "poll route spark");
-    set_promise(&context, &promise, context.values().unit())
+    set_promise(&context, &promise, unit(&context))
         .expect_without_debug("test promise should accept its assignment");
     let spark_before = context.poll_context_count();
     context.spark(Value::Promised(promise));
@@ -9804,13 +9776,16 @@ fn workers_force_sparks_and_poll_ready_reflection_tasks() {
     let context = EvalContext::new(&session);
     let spark_before = context.poll_context_count();
     let (spark_sender, spark_receiver) = mpsc::channel();
-    let lazy =
-        crate::core::LazyValue::semantic_thunk(context.values(), "worker spark", move |_| {
+    let lazy = crate::core::LazyValue::semantic_thunk(
+        context.values(),
+        "worker spark",
+        move |evaluator| {
             spark_sender
                 .send(())
                 .expect("spark receiver should remain open");
-            Ok(crate::core::keys::unit_value())
-        });
+            Ok(evaluator.with_value_access(|access| access.values().unit()))
+        },
+    );
     context.spark(Value::Lazy(lazy));
     spark_receiver
         .recv_timeout(Duration::from_secs(2))

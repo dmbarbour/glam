@@ -182,7 +182,7 @@ impl EvaluationTaskMachine for RecordPollOrder {
         if std::mem::take(&mut self.yield_once) {
             EvaluationMachinePoll::Yielded
         } else {
-            EvaluationMachinePoll::Complete(context.root_value(crate::core::keys::unit_value()))
+            EvaluationMachinePoll::Complete(context.root_unit())
         }
     }
 }

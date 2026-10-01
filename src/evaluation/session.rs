@@ -2121,7 +2121,10 @@ impl EvalContext {
 
     #[cfg(test)]
     pub(crate) fn complete_wait(&self, wait: &EvaluationWaitToken) {
-        self.complete_wait_with_value(wait, crate::core::keys::unit_value());
+        let unit = self
+            .values()
+            .with_runtime_value_access(|access| access.unit());
+        self.complete_wait_with_value(wait, unit);
     }
 
     #[cfg(test)]

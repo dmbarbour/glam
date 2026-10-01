@@ -2684,7 +2684,15 @@ inventory relatch:
        factory bridge. All targets compile; focused builder-composition,
        callable-family checkpoint, retained net-WHNF, and profiled callable
        rewrite witnesses pass.
-    3. migrate coordinator, session, and cross-layer evaluation fixtures;
+    3. **Coordinator/session fixture family complete 2026-10-01:** poll
+       machines publish canonical completion through `root_unit`; coordinator
+       fixtures use bounded unit/rooted-unit constructors; session wait
+       completion constructs unit before entering orchestration. Cross-layer
+       evaluator fixtures reuse evaluator access inside lazy callbacks and
+       construct values before scheduling, waiting, or synchronized work.
+       All targets compile; focused escaped-context ownership, nested
+       dependency, bounded background pump, worker spark/reflection, and FIFO
+       reflection-budget witnesses pass.
     4. migrate reflection and syntax fixtures, then delete both
        `CoreValueFactory::unit` and `keys::unit_value`.
     At each boundary, reuse an already-open `RuntimeValueAccess` where one is

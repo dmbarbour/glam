@@ -8,6 +8,14 @@ use std::thread;
 use super::*;
 use crate::test_support::ResultTestExt as _;
 
+fn unit(values: &crate::core::CoreValueFactory) -> crate::core::Value {
+    values.with_runtime_value_access(|access| access.unit())
+}
+
+fn rooted_unit(values: &crate::core::CoreValueFactory) -> RuntimeValueRoot {
+    values.with_runtime_value_access(|access| access.root_runtime_value(access.unit()))
+}
+
 /// Real external ownership beside the machine-facing demand record.
 ///
 /// Coordinator tests intentionally bypass `EvalContext`, but should still
@@ -527,7 +535,7 @@ fn claimed_test_spark() -> (
         super::super::test_execution_resources(0).expect("test execution resources should build");
     let session = TestDemand::new(&coordinator);
     coordinator.executor_started(1);
-    coordinator.submit_spark(session.demand.clone(), crate::core::keys::unit_value());
+    coordinator.submit_spark(session.demand.clone(), unit(&session.demand.values));
     let CoordinatorSelection::Spark(claimed) = coordinator.select_worker() else {
         panic!("test spark should be claimable")
     };
@@ -2358,15 +2366,13 @@ fn exact_wait_completion_requeues_only_its_cross_session_task() {
     assert_eq!(dependency.exact_subscription_count(), 1);
     assert_eq!(coordinator.ready_task_count(), 0);
 
-    unrelated.publish_terminal(EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
+    unrelated.publish_terminal(EvaluationWaitTerminal::Complete(rooted_unit(
         &producer.demand.values,
-        crate::core::keys::unit_value(),
     )));
     unrelated.notify_terminal();
     assert_eq!(coordinator.ready_task_count(), 0);
-    dependency.publish_terminal(EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
+    dependency.publish_terminal(EvaluationWaitTerminal::Complete(rooted_unit(
         &producer.demand.values,
-        crate::core::keys::unit_value(),
     )));
     dependency.notify_terminal();
     assert_eq!(dependency.exact_subscription_count(), 0);
@@ -2410,9 +2416,8 @@ fn a_task_reblocked_on_another_wait_ignores_its_prior_terminal_source() {
             .remains_blocked
     );
     assert_eq!(wait_a.exact_subscription_count(), 1);
-    wait_a.publish_terminal(EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
+    wait_a.publish_terminal(EvaluationWaitTerminal::Complete(rooted_unit(
         &session.demand.values,
-        crate::core::keys::unit_value(),
     )));
     wait_a.notify_terminal();
     assert_eq!(wait_a.exact_subscription_count(), 0);
@@ -2438,9 +2443,8 @@ fn a_task_reblocked_on_another_wait_ignores_its_prior_terminal_source() {
     // subscription epoch now names wait B.
     wait_a.notify_terminal();
     assert_eq!(coordinator.ready_task_count(), 0);
-    wait_b.publish_terminal(EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
+    wait_b.publish_terminal(EvaluationWaitTerminal::Complete(rooted_unit(
         &session.demand.values,
-        crate::core::keys::unit_value(),
     )));
     wait_b.notify_terminal();
     assert_eq!(coordinator.ready_task_count(), 1);
@@ -2483,9 +2487,8 @@ fn exact_and_broad_task_wakes_share_one_block_epoch() {
         assert_eq!(dependency.exact_subscription_count(), 1);
 
         let complete = || {
-            dependency.publish_terminal(EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
+            dependency.publish_terminal(EvaluationWaitTerminal::Complete(rooted_unit(
                 &session.demand.values,
-                crate::core::keys::unit_value(),
             )));
             dependency.notify_terminal();
         };
@@ -2540,9 +2543,8 @@ fn retired_task_makes_a_late_exact_wait_wake_harmless() {
     settle_test_reflection(&coordinator, work);
     assert_eq!(dependency.exact_subscription_count(), 1);
 
-    dependency.publish_terminal(EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
+    dependency.publish_terminal(EvaluationWaitTerminal::Complete(rooted_unit(
         &session.demand.values,
-        crate::core::keys::unit_value(),
     )));
     dependency.notify_terminal();
     assert_eq!(dependency.exact_subscription_count(), 0);
@@ -2602,7 +2604,7 @@ fn permanent_exit_wait_retains_only_its_summary_and_obligations() {
     let session = TestDemand::new(&coordinator);
     let (task, work) = reserve_ready_test_reflection(&coordinator, &session);
     let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
-    let message = RuntimeValueRoot::new(&session.demand.values, crate::core::keys::unit_value());
+    let message = rooted_unit(&session.demand.values);
 
     let mut release = coordinator.release_reflection(
         claimed,
@@ -2803,7 +2805,7 @@ fn coordinator_fairness_alternates_ready_tasks_and_sparks() {
         super::super::test_execution_resources(0).expect("test execution resources should build");
     let session = TestDemand::new(&coordinator);
     coordinator.executor_started(1);
-    coordinator.submit_spark(session.demand.clone(), crate::core::keys::unit_value());
+    coordinator.submit_spark(session.demand.clone(), unit(&session.demand.values));
     let task = super::super::allocate_task_id(&session.demand.values)
         .expect("reflection task identity should allocate");
     let wait = super::super::allocate_wait_token(&session.demand, task)
@@ -2899,7 +2901,7 @@ fn shared_notification_broadcast_releases_worker_beside_parked_client() {
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("both waiter classes must enter the locked wait predicate");
     }
-    coordinator.submit_spark(session.demand.clone(), crate::core::keys::unit_value());
+    coordinator.submit_spark(session.demand.clone(), unit(&session.demand.values));
     for _ in 0..2 {
         finished_receiver
             .recv_timeout(std::time::Duration::from_secs(2))
@@ -2935,7 +2937,7 @@ fn work_claim_publication_does_not_wake_an_exact_client() {
         super::super::test_execution_resources(0).expect("test execution resources should build");
     let session = TestDemand::new(&coordinator);
     coordinator.executor_started(1);
-    coordinator.submit_spark(session.demand.clone(), crate::core::keys::unit_value());
+    coordinator.submit_spark(session.demand.clone(), unit(&session.demand.values));
     let before = coordinator.coordinator_notification_profile();
     let observed = coordinator.work_generation();
     let (parked_sender, parked_receiver) = mpsc::channel();
@@ -3103,7 +3105,7 @@ fn queued_sparks_are_abandoned_when_their_demand_session_closes() {
         super::super::test_execution_resources(0).expect("test execution resources should build");
     let session = TestDemand::new(&coordinator);
     coordinator.executor_started(1);
-    coordinator.submit_spark(session.demand.clone(), crate::core::keys::unit_value());
+    coordinator.submit_spark(session.demand.clone(), unit(&session.demand.values));
     let demand = Arc::downgrade(&session.demand);
     let [work] = coordinator
         .state
@@ -3205,9 +3207,8 @@ fn deferred_insertion_is_immediately_dormant_and_promotable() {
         .expect("dependency task identity should allocate");
     let dependency = super::super::allocate_wait_token(&session.demand, dependency_task)
         .expect("dependency wait identity should allocate");
-    dependency.publish_terminal(EvaluationWaitTerminal::Complete(RuntimeValueRoot::new(
+    dependency.publish_terminal(EvaluationWaitTerminal::Complete(rooted_unit(
         &session.demand.values,
-        crate::core::keys::unit_value(),
     )));
     let release = coordinator.release_deferred(
         claimed,
@@ -3436,7 +3437,7 @@ fn spark_root_claims_exact_deferred_dependency_after_block() {
         .deferred_work_for_wait(&wait)
         .expect("deferred work should retain its wait index");
 
-    coordinator.submit_spark(observer.demand.clone(), crate::core::keys::unit_value());
+    coordinator.submit_spark(observer.demand.clone(), unit(&observer.demand.values));
     let CoordinatorSelection::Spark(spark) = coordinator.select_worker() else {
         panic!("the background spark root should be claimable")
     };
@@ -3900,7 +3901,7 @@ fn running_deferred_machine_does_not_serialize_same_session_client_admission() {
     };
 
     let context = session.context();
-    let expected = context.values().unit();
+    let expected = unit(context.values());
     let client = context
         .demand_whnf(RuntimeValueRoot::new(
             context.values(),
@@ -3976,7 +3977,7 @@ fn retired_deferred_machine_does_not_delay_same_session_client_admission() {
     coordinator.retire_deferred(work);
 
     let context = session.context();
-    let expected = context.values().unit();
+    let expected = unit(context.values());
     let client = context
         .demand_whnf(RuntimeValueRoot::new(
             context.values(),
@@ -4000,7 +4001,7 @@ fn worker_and_runtime_pump_selectors_reject_foreground_client_demand() {
         super::super::test_execution_resources(0).expect("test execution resources should build");
     let session = TestDemand::new(&coordinator);
     let context = session.context();
-    let expected = context.values().unit();
+    let expected = unit(context.values());
     let client = context
         .demand_whnf(RuntimeValueRoot::new(
             context.values(),
