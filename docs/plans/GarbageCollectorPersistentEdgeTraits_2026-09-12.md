@@ -1,8 +1,7 @@
 # Garbage Collector Persistent Edge Trait Migration Plan — 2026-09-12
 
-Status: P0-P4 and P5C complete. P5A's ordinary/aggressive behavioral matrix is
-complete; its focused Miri portion and P5B's explicit release-cost/codegen
-audit remain open under I11D.2.
+Status: P0-P4, P5A, and P5C complete. P5B's explicit release-cost/codegen
+audit remains open under I11D.2e.
 This is the nested implementation plan
 for the managed-edge part of GCI11R-002D.2a-D.2b in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
@@ -726,12 +725,11 @@ no compatibility trait remains to conceal a missed occurrence.
 
 ### P5A — Focused dynamic verification
 
-Status: ordinary and aggressive repository behavior complete on 2026-10-01;
-focused Miri remains open under I11D.2b. I11D.2a selected the exact collector
-and production-runtime targets. The exact nightly/Miri/rust-src toolchain was
-provisioned and passed readiness checks on 2026-10-01; the focused matrix
-itself remains open. Loom is not required because the trait cutover introduced
-no synchronization primitive or protocol.
+Status: complete 2026-10-01. Ordinary and aggressive repository behavior plus
+the I11D.2b focused Miri collector and production ownership targets pass, with
+the broad end-to-end production fixture recorded as an explicit Miri
+performance exclusion. Loom is not required because the trait cutover
+introduced no synchronization primitive or protocol.
 
 Run:
 

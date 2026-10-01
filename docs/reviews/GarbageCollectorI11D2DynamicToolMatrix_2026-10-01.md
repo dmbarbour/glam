@@ -2,12 +2,12 @@
 
 Baseline: `6e3ffddb`, after GCI11R-002 and its parent plans were reconciled.
 
-Status: I11D.2a complete. The host and target matrix is selected. The exact
-nightly toolchain required by I11D.2b-I11D.2d was provisioned on 2026-10-01;
-strict-provenance Miri executed one real collector smoke test, and both
-AddressSanitizer and ThreadSanitizer produced instrumented collector test
-binaries. These are installation-readiness checks, not the phase result
-records for the selected matrices.
+Status: I11D.2a-I11D.2d complete. The host and target matrix is selected and
+the exact nightly toolchain was provisioned on 2026-10-01. The focused Miri,
+AddressSanitizer, and ThreadSanitizer matrices have now run. All supported
+targets passed; one deliberately broad production Miri target is recorded as
+an explicit performance exclusion after fifteen CPU-minutes rather than being
+silently dropped or misreported as a pass.
 
 ## Environment Snapshot
 
@@ -57,16 +57,16 @@ installed components: cargo, miri, rust-src, rust-std, rustc
 successfully linked the `glam-gc` library test target with
 `-Zsanitizer=address` and `-Zsanitizer=thread`, each using
 `-Zbuild-std --target x86_64-unknown-linux-gnu`. No additional host package is
-currently required. I11D.2b-I11D.2d still own execution and disposition of
-the full selected matrices.
+currently required. The later execution record below supplies the
+I11D.2b-I11D.2d dispositions for the full selected matrices.
 
 ## Selected Target Matrix
 
 | Tool | Collector target | Production-runtime target | Current disposition |
 | --- | --- | --- | --- |
-| Miri with strict provenance | `crates/glam-gc/scripts/check-miri.sh`, which runs the collector library and isolates its one intentional process-lifetime leak fixture | Named serial ownership/root/mutation/collection tests, followed separately by the worker/finalizer deterministic probes and repository-aggressive smoke test listed below | Provisioned and smoke-tested; the I11D.2b matrix remains open. |
-| AddressSanitizer plus LeakSanitizer | `crates/glam-gc/scripts/check-sanitizer.sh address`, including the documented isolated intentional-leak exception | Root projection, mutation gateway, and the complete `managed_collection_tests` module under ASan; no production leak suppression is selected | Provisioned and build-tested; the I11D.2c matrix remains open. |
-| ThreadSanitizer | `crates/glam-gc/scripts/check-sanitizer.sh thread` | Root/mutation paths plus the complete production managed-collection schedule module under TSan | Provisioned and build-tested; the I11D.2d matrix remains open. Ordering contracts still rely on their existing probes and barriers. |
+| Miri with strict provenance | `crates/glam-gc/scripts/check-miri.sh`, which runs the collector library and isolates its one intentional process-lifetime leak fixture | Named serial ownership/root/mutation/collection tests, followed separately by the worker/finalizer deterministic probes and repository-aggressive smoke test listed below | Complete. The collector and eight production targets passed; the broad serial-boundary target is an explicit performance exclusion. |
+| AddressSanitizer plus LeakSanitizer | `crates/glam-gc/scripts/check-sanitizer.sh address`, including the documented isolated intentional-leak exception | Root projection, mutation gateway, and the complete `managed_collection_tests` module under ASan; no production leak suppression is selected | Complete. Every selected collector and production target passed with leak detection retained. |
+| ThreadSanitizer | `crates/glam-gc/scripts/check-sanitizer.sh thread` | Root/mutation paths plus the complete production managed-collection schedule module under TSan | Complete. Every selected collector and production target passed without a race report. Ordering contracts still rely on their existing probes and barriers. |
 | Loom | Existing collector Loom models in `crates/glam-gc/scripts/check.sh` | No production-runtime target selected; I11 added no model-sized synchronization primitive requiring a new Loom abstraction | Available on stable, but outside I11D.2's dynamic unsafe-boundary obligation. |
 
 The sanitizer scripts deliberately exclude the separate Loom scaffold because
@@ -160,11 +160,108 @@ cargo test -q --features aggressive-gc-verification --lib \
 These runs validate target selection only. They are not Miri or sanitizer
 evidence.
 
+## I11D.2b-I11D.2d Execution Record
+
+### I11D.2b — focused Miri
+
+The complete collector script passed under strict provenance:
+
+```text
+complete collector run: 201 passed, 3 ignored, 1 intentional leak fixture filtered
+isolated intentional leak fixture: 1 passed with Miri leak checking disabled
+```
+
+`checked_nonrecursive_marking_handles_wide_shared_spines` originally retained
+its native width of 2,048 under Miri and spent more than seven CPU-minutes in
+construction. The fixture now uses width 64 only under `cfg(miri)`, preserving
+the same shared-spine topology while the unchanged native 2,048-wide proof
+remains active. The focused Miri form passes in about nineteen seconds; the
+native form passes independently.
+
+Eight production targets passed under strict provenance:
+
+- prepared-root projection;
+- borrowed-edge mutation access;
+- recursive identity-family reclamation;
+- runtime retirement and inert public values;
+- passive finalization with no runtime work;
+- worker-quantum/collector interleaving;
+- collection request coalescing during finalization; and
+- feature-enabled aggressive runtime entry.
+
+`production_collection_preserves_each_serial_boundary` remained CPU-active
+inside normal interaction-net reduction after fifteen minutes and about
+1.2 GiB resident memory, without a Miri diagnostic. It is therefore recorded
+as an **unreasonably slow Miri performance exclusion**, as authorized by the
+selected matrix. Its production component paths pass separately under Miri,
+and the complete latched end-to-end fixture remains green natively and under
+both sanitizers. It is not counted as a Miri pass.
+
+The first Miri run of `passive_finalization_produces_no_runtime_work` exposed
+a racy cleanup assertion: after the task result was terminal, an immediate
+`Runtime::readiness()` probe could legitimately observe `Busy` while the live
+executor briefly held mutation admission to park. Readiness is explicitly an
+instantaneous observational probe. The fixture now relies on its fixed
+scheduler inventory during collection and terminal task observation afterward,
+which are the authoritative no-new-work assertions; runtime semantics did not
+change. The repaired test passes natively and under Miri.
+
+### I11D.2c — AddressSanitizer and LeakSanitizer
+
+The collector script passed with leak detection enabled:
+
+```text
+complete collector run: 202 passed, 2 ignored, 1 intentional leak fixture filtered
+isolated intentional leak fixture: 1 passed with leak detection disabled
+```
+
+The production matrix passed with leak detection enabled: five prepared-root
+tests, two mutation-access tests, all nine ordinary managed-collection tests,
+and the feature-only aggressive-entry test. No production leak suppression was
+introduced.
+
+### I11D.2d — ThreadSanitizer
+
+The complete collector run passed 203 tests with two scale fixtures ignored.
+The same five prepared-root tests, two mutation-access tests, nine ordinary
+managed-collection tests, and feature-only aggressive-entry test passed in the
+production crate without a TSan report. These results detect no race in the
+executed schedules; their latches and probes remain the ordering evidence.
+
+All root-crate nightly invocations emitted a future-compatibility warning for
+deep auto-trait recursion and nightly deprecation warnings for the newly
+renamed `Atomic::fetch_update`. Neither warning is a sanitizer/Miri finding or
+specific to the collector transition. They are recorded for later compiler-
+compatibility cleanup rather than mixed into these runtime verification
+phases.
+
+## Repository Verification
+
+The test-only fixture corrections were followed by the repository's ordinary
+verification boundary:
+
+```text
+cargo fmt --check
+    passed
+cargo clippy --all-targets --all-features -- -D warnings
+    passed
+cargo test -q
+    passed; root library 1,882 passed and 2 ignored, with every auxiliary
+    target also passing
+scripts/check-interaction-net-profiling.sh
+    passed
+```
+
+No collector, runtime, unsafe-boundary, or release-path implementation changed
+in I11D.2b-I11D.2d. The existing repository-aggressive closure therefore
+remains valid under Gate G3's explicit test-and-documentation-only exception;
+the feature-specific production smoke test was nevertheless rerun under Miri,
+ASan/LSan, and TSan as part of the selected matrix.
+
 ## Exit and Next Step
 
-I11D.2a is complete because the environment, missing prerequisites, exact
-collector entry points, production-runtime target families, and unsupported-
-versus-unavailable distinction are recorded. I11D.2b begins by provisioning
-and fingerprinting a nightly toolchain, then runs the existing collector Miri
-script and the serial production-runtime matrix before attempting the two
-threaded probe targets.
+I11D.2a-I11D.2d are complete. The exact environment, supported targets,
+results, one Miri performance exclusion, and test-only corrections are
+recorded without substituting repetition for dynamic-tool evidence. I11D.2e is
+next and owns persistent-edge layout, traffic, and release-code-generation
+closure.

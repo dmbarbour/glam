@@ -275,7 +275,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I11D.1 | complete | repository-wide aggressive mode, zero-violation regional ownership, and ordinary/aggressive workspace closure |
 | I11D.2 | pending | focused Miri and sanitizer verification |
 | I11D.2a | complete | dynamic-tool environment and exact collector/production target matrix |
-| I11D.2b-d | pending | focused Miri, AddressSanitizer, and ThreadSanitizer execution |
+| I11D.2b-d | complete | focused Miri, AddressSanitizer, and ThreadSanitizer execution, with one explicit broad-target Miri performance exclusion |
 | I11D.2e | pending | persistent-edge release cost and code-generation closure |
 | I11D.3 | pending | unsafe, trace, mutation, and lock/region closure audit |
 | I11D.4 | pending | dated Gate G3 certification |
@@ -6540,14 +6540,14 @@ gaps block Gate G3. Close them and certify the boundary in these checkpoints:
     each can execute, and every unsupported target/tool combination. Repeated
     ordinary execution is stress evidence and never substitutes for an
     unavailable dynamic tool.
-  - **I11D.2b — focused Miri:** cover allocation and run-owner lookup, root
+  - **I11D.2b — focused Miri: complete 2026-10-01.** Cover allocation and run-owner lookup, root
     publication/projection, explicit persistent-edge duplication and identity,
     tracing and panic restart, mutation transitions, collection/finalization,
     and supported deterministic-probe paths. Include production-runtime
     ownership paths rather than limiting evidence to isolated collector types.
-  - **I11D.2c — AddressSanitizer:** run the supported focused collector and
+  - **I11D.2c — AddressSanitizer: complete 2026-10-01.** Run the supported focused collector and
     production-runtime ownership/reclamation matrix and record exclusions.
-  - **I11D.2d — ThreadSanitizer:** run the supported collector/runtime
+  - **I11D.2d — ThreadSanitizer: complete 2026-10-01.** Run the supported collector/runtime
     synchronization targets. Ordering contracts still require their existing
     latches or model fixtures; a sanitizer pass alone is not concurrency
     evidence.
@@ -6624,19 +6624,20 @@ and the focused implementation-drift review is in
 P5A's focused Miri work and P5B's release-cost audit move forward under
 I11D.2; they do not keep I11D.1 open.
 
-I11D.2a completed on 2026-10-01. The current x86-64 Linux container has stable
-Rust 1.98.1 and stable `rust-src`, but its rebuilt installation has no nightly
-toolchain, Miri component, or nightly `rust-src`. Miri, ASan, and TSan are
-therefore recorded as locally unavailable rather than target-unsupported.
-The existing collector scripts and an exact production-runtime matrix covering
+I11D.2a-I11D.2d completed on 2026-10-01. The current x86-64 Linux container
+retains stable Rust 1.98.1 as its default and has an exact Rust 1.101.0-nightly
+toolchain with Miri and `rust-src` for dynamic verification. The existing
+collector scripts and an exact production-runtime matrix covering
 root projection, mutation, serial collection/reclamation, retirement,
 finalization, deterministic worker/finalizer probes, and repository-aggressive
 enablement are recorded in
 [`GarbageCollectorI11D2DynamicToolMatrix_2026-10-01.md`](../reviews/GarbageCollectorI11D2DynamicToolMatrix_2026-10-01.md).
-All selected target filters pass on stable, which validates their names and
-ordinary baseline only. I11D.2b begins by provisioning and fingerprinting one
-nightly toolchain; stable repetition cannot replace the missing dynamic-tool
-evidence.
+The supported Miri, ASan/LSan, and TSan targets pass. One broad end-to-end
+production target is explicitly excluded from Miri after fifteen CPU-minutes
+without completion or a diagnostic; it remains covered natively and under
+both sanitizers, while its ownership components pass separately under Miri.
+The exact record and test-only corrections are in the linked matrix review.
+I11D.2e persistent-edge cost closure is next.
 
 ## Phase I12 — Explicit Runtime Maintenance and Threshold Collection
 

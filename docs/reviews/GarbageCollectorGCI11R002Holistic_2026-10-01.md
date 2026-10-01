@@ -161,8 +161,9 @@ ordinary repetition is never substituted for Miri or a sanitizer.
 Follow-up: I11D.2a completed on 2026-10-01 in
 [`GarbageCollectorI11D2DynamicToolMatrix_2026-10-01.md`](GarbageCollectorI11D2DynamicToolMatrix_2026-10-01.md).
 The exact nightly/Miri/rust-src toolchain was provisioned later on 2026-10-01.
-Miri execution and ASan/TSan instrumented builds passed readiness checks; the
-exact collector and production-runtime matrices remain I11D.2b-I11D.2d work.
+I11D.2b-I11D.2d subsequently executed the exact collector and production-
+runtime matrices. Supported Miri, ASan/LSan, and TSan targets pass; one broad
+end-to-end Miri target has an explicit unreasonable-runtime exclusion.
 
 The Miri matrix covers both isolated collector operations and production-
 runtime ownership paths. Sanitizers remain defect detectors, not proofs of
@@ -238,8 +239,8 @@ would conflate stronger future protocols with the boundary just certified.
 
 1. **I11D.2a (complete):** inventory installed dynamic tools and select exact
    collector/runtime targets.
-2. **I11D.2b-I11D.2d:** provision and fingerprint one nightly toolchain, then
-   run focused Miri, ASan, and TSan work with explicit
+2. **I11D.2b-I11D.2d (complete):** provision and fingerprint one nightly
+   toolchain, then run focused Miri, ASan, and TSan work with explicit
    unsupported dispositions and repair only demonstrated defects.
 3. **I11D.2e:** close persistent-edge P5B layout/traffic/code-generation cost.
 4. **I11D.3a-I11D.3d:** audit the source delta, rerun and review the exact

@@ -6790,6 +6790,9 @@ mod tests {
 
     #[test]
     fn checked_nonrecursive_marking_handles_wide_shared_spines() {
+        #[cfg(miri)]
+        const WIDTH: usize = 64;
+        #[cfg(not(miri))]
         const WIDTH: usize = 2_048;
         const TAIL_DEPTH: usize = 64;
 

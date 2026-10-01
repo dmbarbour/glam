@@ -19,8 +19,9 @@ when their historical value no longer justifies keeping them.
 - [`GarbageCollectorIntegration_2026-08-19.md`](GarbageCollectorIntegration_2026-08-19.md)
   migrates Glam values, roots, workers, reflection, and interaction nets.
 - [`GarbageCollectorPersistentEdgeTraits_2026-09-12.md`](GarbageCollectorPersistentEdgeTraits_2026-09-12.md)
-  completed its trait and semantic cutover; only focused Miri and release-cost
-  evidence remain active under collector-integration Phase I11D.2.
+  completed its trait, semantic, behavioral, and focused Miri cutover; only
+  release-cost evidence remains active under collector-integration Phase
+  I11D.2e.
 
 ## Recent Completed Plans
 

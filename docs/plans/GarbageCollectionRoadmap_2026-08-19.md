@@ -16,9 +16,10 @@ worker/collector ordering proof, and I11D.1 completed repository-wide ordinary
 and aggressive ownership closure on 2026-10-01. Production remains `NoAuto`
 while I11D.2-I11D.4 own dynamic tools, the final delta audit, and Gate G3
 certification.
-I11D.2a has since recorded the exact dynamic-tool/target matrix; the required
-nightly/Miri/rust-src toolchain was provisioned and passed readiness checks on
-2026-10-01, so actual matrix execution can begin at I11D.2b.
+I11D.2a-I11D.2d have recorded and executed the exact dynamic-tool/target
+matrix. The supported Miri, ASan/LSan, and TSan targets pass, with one broad
+end-to-end Miri target explicitly excluded for unreasonable execution time.
+I11D.2e now owns persistent-edge cost closure.
 The completed remediation and forward-path reconciliation are reviewed in
 [`GarbageCollectorGCI11R002Holistic_2026-10-01.md`](../reviews/GarbageCollectorGCI11R002Holistic_2026-10-01.md).
 
