@@ -274,6 +274,9 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I11D.0 | complete | post-I11 deterministic schedule and passive-finalization remediation |
 | I11D.1 | complete | repository-wide aggressive mode, zero-violation regional ownership, and ordinary/aggressive workspace closure |
 | I11D.2 | pending | focused Miri and sanitizer verification |
+| I11D.2a | complete | dynamic-tool environment and exact collector/production target matrix |
+| I11D.2b-d | pending | focused Miri, AddressSanitizer, and ThreadSanitizer execution |
+| I11D.2e | pending | persistent-edge release cost and code-generation closure |
 | I11D.3 | pending | unsafe, trace, mutation, and lock/region closure audit |
 | I11D.4 | pending | dated Gate G3 certification |
 | I11 | pending | whole-production-graph forced collection |
@@ -6532,7 +6535,7 @@ gaps block Gate G3. Close them and certify the boundary in these checkpoints:
   [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
 - **I11D.2 — Dynamic unsafe-boundary verification.** Execute this as five
   independently recorded checkpoints rather than one open-ended tool run:
-  - **I11D.2a — tool and target matrix:** record the installed Miri and
+  - **I11D.2a — tool and target matrix: complete 2026-10-01.** Record the installed Miri and
     sanitizer toolchains, the named collector and production-runtime targets
     each can execute, and every unsupported target/tool combination. Repeated
     ordinary execution is stress evidence and never substitutes for an
@@ -6620,6 +6623,20 @@ and the focused implementation-drift review is in
 [`GarbageCollectorAggressiveD2h_2026-10-01.md`](../reviews/GarbageCollectorAggressiveD2h_2026-10-01.md).
 P5A's focused Miri work and P5B's release-cost audit move forward under
 I11D.2; they do not keep I11D.1 open.
+
+I11D.2a completed on 2026-10-01. The current x86-64 Linux container has stable
+Rust 1.98.1 and stable `rust-src`, but its rebuilt installation has no nightly
+toolchain, Miri component, or nightly `rust-src`. Miri, ASan, and TSan are
+therefore recorded as locally unavailable rather than target-unsupported.
+The existing collector scripts and an exact production-runtime matrix covering
+root projection, mutation, serial collection/reclamation, retirement,
+finalization, deterministic worker/finalizer probes, and repository-aggressive
+enablement are recorded in
+[`GarbageCollectorI11D2DynamicToolMatrix_2026-10-01.md`](../reviews/GarbageCollectorI11D2DynamicToolMatrix_2026-10-01.md).
+All selected target filters pass on stable, which validates their names and
+ordinary baseline only. I11D.2b begins by provisioning and fingerprinting one
+nightly toolchain; stable repetition cannot replace the missing dynamic-tool
+evidence.
 
 ## Phase I12 — Explicit Runtime Maintenance and Threshold Collection
 

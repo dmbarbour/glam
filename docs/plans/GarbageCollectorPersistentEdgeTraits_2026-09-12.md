@@ -727,8 +727,10 @@ no compatibility trait remains to conceal a missed occurrence.
 ### P5A — Focused dynamic verification
 
 Status: ordinary and aggressive repository behavior complete on 2026-10-01;
-focused Miri remains open under I11D.2. Loom is not required because the trait
-cutover introduced no synchronization primitive or protocol.
+focused Miri remains open under I11D.2b. I11D.2a selected the exact collector
+and production-runtime targets, but the rebuilt container currently lacks a
+nightly/Miri toolchain. Loom is not required because the trait cutover
+introduced no synchronization primitive or protocol.
 
 Run:
 
@@ -747,9 +749,9 @@ model checker. Repetition is stress evidence only.
 
 ### P5B — Cost and layout verification
 
-Status: open. Existing one-pointer layout and root-registration fixtures are
-supporting evidence, but the explicit release-codegen or microbenchmark audit
-has not been performed for closure.
+Status: open under I11D.2e. Existing one-pointer layout and root-registration
+fixtures are supporting evidence, but the explicit release-codegen or
+microbenchmark audit has not been performed for closure.
 
 Recheck one-pointer `Gc<T>` layout, registered-root counts, allocation counts,
 and release-mode code generation or microbenchmarks. Investigate any new lock,

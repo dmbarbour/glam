@@ -8,8 +8,9 @@ Status: complete. GCI2HR-001 through GCI2HR-008 reconcile GCI11R-002 with the
 collector roadmap, integration plan, ownership ledger, persistent-edge and
 scoped-pointer plans, value-representation plan, architecture guide, and
 source map. No new implementation defect was found. Parent-plan drift is
-repaired, and the forward path is now I11D.2a-I11D.2e, I11D.3a-I11D.3d, then
-I11D.4 Gate G3 certification.
+repaired. I11D.2a subsequently recorded the exact tool/target matrix; the
+forward path is now I11D.2b-I11D.2e, I11D.3a-I11D.3d, then I11D.4 Gate G3
+certification.
 
 ## Scope and Review Boundary
 
@@ -152,10 +153,16 @@ Those documents now distinguish:
 
 **Disposition:** resolved by partitioning.
 
-I11D.2 now begins with a tool/target matrix, then separates focused Miri,
+I11D.2 begins with a tool/target matrix, then separates focused Miri,
 AddressSanitizer, ThreadSanitizer, and persistent-edge cost/code-generation
 closure. Unsupported tool/target combinations must be recorded explicitly;
 ordinary repetition is never substituted for Miri or a sanitizer.
+
+Follow-up: I11D.2a completed on 2026-10-01 in
+[`GarbageCollectorI11D2DynamicToolMatrix_2026-10-01.md`](GarbageCollectorI11D2DynamicToolMatrix_2026-10-01.md).
+The rebuilt container has no nightly/Miri installation, so the tools are
+currently unavailable rather than target-unsupported. Exact collector and
+production-runtime targets are selected for execution after provisioning.
 
 The Miri matrix covers both isolated collector operations and production-
 runtime ownership paths. Sanitizers remain defect detectors, not proofs of
@@ -229,9 +236,10 @@ would conflate stronger future protocols with the boundary just certified.
 
 ## Revised Forward Path
 
-1. **I11D.2a:** inventory installed dynamic tools and select exact supported
+1. **I11D.2a (complete):** inventory installed dynamic tools and select exact
    collector/runtime targets.
-2. **I11D.2b-I11D.2d:** run focused Miri, ASan, and TSan work with explicit
+2. **I11D.2b-I11D.2d:** provision and fingerprint one nightly toolchain, then
+   run focused Miri, ASan, and TSan work with explicit
    unsupported dispositions and repair only demonstrated defects.
 3. **I11D.2e:** close persistent-edge P5B layout/traffic/code-generation cost.
 4. **I11D.3a-I11D.3d:** audit the source delta, rerun and review the exact
