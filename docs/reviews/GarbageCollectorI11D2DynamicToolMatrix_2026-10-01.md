@@ -2,12 +2,12 @@
 
 Baseline: `6e3ffddb`, after GCI11R-002 and its parent plans were reconciled.
 
-Status: I11D.2a complete. The host and target matrix is selected, but the
-current rebuilt container has no nightly toolchain. Miri, AddressSanitizer,
-and ThreadSanitizer are therefore **unavailable in this environment**, not
-demonstrated unsupported. I11D.2b-I11D.2d require installation of one exact
-nightly toolchain with Miri and `rust-src` before their result records can be
-produced.
+Status: I11D.2a complete. The host and target matrix is selected. The exact
+nightly toolchain required by I11D.2b-I11D.2d was provisioned on 2026-10-01;
+strict-provenance Miri executed one real collector smoke test, and both
+AddressSanitizer and ThreadSanitizer produced instrumented collector test
+binaries. These are installation-readiness checks, not the phase result
+records for the selected matrices.
 
 ## Environment Snapshot
 
@@ -38,13 +38,35 @@ record its full `rustc -Vv` output. A missing toolchain must not be written up
 as an unsupported Rust target, and repeated stable tests must not substitute
 for a dynamic-tool result.
 
+### Provisioning follow-up
+
+The required toolchain was subsequently installed without changing the
+workspace default from stable:
+
+```text
+toolchain: nightly-x86_64-unknown-linux-gnu
+rustc: 1.101.0-nightly (21b707e3f97e0b522ebd2f277a862339625ad83f 2026-09-30)
+LLVM: 23.1.1
+cargo: 1.101.0-nightly (f3865b2a4 2026-09-29)
+Miri: 0.1.0 (21b707e3f9 2026-09-30)
+installed components: cargo, miri, rust-src, rust-std, rustc
+```
+
+`cargo +nightly miri setup` completed. A strict-provenance run of
+`tests::empty_heap_can_be_entered_and_dropped` passed. Build-only checks also
+successfully linked the `glam-gc` library test target with
+`-Zsanitizer=address` and `-Zsanitizer=thread`, each using
+`-Zbuild-std --target x86_64-unknown-linux-gnu`. No additional host package is
+currently required. I11D.2b-I11D.2d still own execution and disposition of
+the full selected matrices.
+
 ## Selected Target Matrix
 
 | Tool | Collector target | Production-runtime target | Current disposition |
 | --- | --- | --- | --- |
-| Miri with strict provenance | `crates/glam-gc/scripts/check-miri.sh`, which runs the collector library and isolates its one intentional process-lifetime leak fixture | Named serial ownership/root/mutation/collection tests, followed separately by the worker/finalizer deterministic probes and repository-aggressive smoke test listed below | Unavailable: nightly/Miri absent. Target support not yet revalidated on the replacement toolchain. |
-| AddressSanitizer plus LeakSanitizer | `crates/glam-gc/scripts/check-sanitizer.sh address`, including the documented isolated intentional-leak exception | Root projection, mutation gateway, and the complete `managed_collection_tests` module under ASan; no production leak suppression is selected | Unavailable: nightly/rust-src absent. The host/commands previously passed Gate G1, but require a fresh result. |
-| ThreadSanitizer | `crates/glam-gc/scripts/check-sanitizer.sh thread` | Root/mutation paths plus the complete production managed-collection schedule module under TSan | Unavailable: nightly/rust-src absent. Ordering contracts still rely on their existing probes and barriers. |
+| Miri with strict provenance | `crates/glam-gc/scripts/check-miri.sh`, which runs the collector library and isolates its one intentional process-lifetime leak fixture | Named serial ownership/root/mutation/collection tests, followed separately by the worker/finalizer deterministic probes and repository-aggressive smoke test listed below | Provisioned and smoke-tested; the I11D.2b matrix remains open. |
+| AddressSanitizer plus LeakSanitizer | `crates/glam-gc/scripts/check-sanitizer.sh address`, including the documented isolated intentional-leak exception | Root projection, mutation gateway, and the complete `managed_collection_tests` module under ASan; no production leak suppression is selected | Provisioned and build-tested; the I11D.2c matrix remains open. |
+| ThreadSanitizer | `crates/glam-gc/scripts/check-sanitizer.sh thread` | Root/mutation paths plus the complete production managed-collection schedule module under TSan | Provisioned and build-tested; the I11D.2d matrix remains open. Ordering contracts still rely on their existing probes and barriers. |
 | Loom | Existing collector Loom models in `crates/glam-gc/scripts/check.sh` | No production-runtime target selected; I11 added no model-sized synchronization primitive requiring a new Loom abstraction | Available on stable, but outside I11D.2's dynamic unsafe-boundary obligation. |
 
 The sanitizer scripts deliberately exclude the separate Loom scaffold because

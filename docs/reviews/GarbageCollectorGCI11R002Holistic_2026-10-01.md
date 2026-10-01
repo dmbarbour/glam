@@ -160,9 +160,9 @@ ordinary repetition is never substituted for Miri or a sanitizer.
 
 Follow-up: I11D.2a completed on 2026-10-01 in
 [`GarbageCollectorI11D2DynamicToolMatrix_2026-10-01.md`](GarbageCollectorI11D2DynamicToolMatrix_2026-10-01.md).
-The rebuilt container has no nightly/Miri installation, so the tools are
-currently unavailable rather than target-unsupported. Exact collector and
-production-runtime targets are selected for execution after provisioning.
+The exact nightly/Miri/rust-src toolchain was provisioned later on 2026-10-01.
+Miri execution and ASan/TSan instrumented builds passed readiness checks; the
+exact collector and production-runtime matrices remain I11D.2b-I11D.2d work.
 
 The Miri matrix covers both isolated collector operations and production-
 runtime ownership paths. Sanitizers remain defect detectors, not proofs of

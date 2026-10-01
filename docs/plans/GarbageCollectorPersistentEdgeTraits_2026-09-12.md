@@ -728,9 +728,10 @@ no compatibility trait remains to conceal a missed occurrence.
 
 Status: ordinary and aggressive repository behavior complete on 2026-10-01;
 focused Miri remains open under I11D.2b. I11D.2a selected the exact collector
-and production-runtime targets, but the rebuilt container currently lacks a
-nightly/Miri toolchain. Loom is not required because the trait cutover
-introduced no synchronization primitive or protocol.
+and production-runtime targets. The exact nightly/Miri/rust-src toolchain was
+provisioned and passed readiness checks on 2026-10-01; the focused matrix
+itself remains open. Loom is not required because the trait cutover introduced
+no synchronization primitive or protocol.
 
 Run:
 
