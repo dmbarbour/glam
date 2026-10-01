@@ -1,11 +1,12 @@
 # Garbage-Collector Scoped Pointer Safety Plan — 2026-09-09
 
-Status: deferred lifetime-branding safety enhancement. The active
+Status: deferred lifetime-branding safety enhancement. The completed
 [`GarbageCollectorPersistentEdgeTraits_2026-09-12.md`](GarbageCollectorPersistentEdgeTraits_2026-09-12.md)
-plan now owns removal of implicit traits from persistent `Gc<T>` during
-GCI11R-002D. This plan begins only after that transition has settled and a
-fresh review coordinates `ScopedGc` with Value Representation Refinement and
-future moving-collector work.
+plan removed implicit traits from persistent `Gc<T>` during GCI11R-002D. That
+prerequisite has settled. This plan remains deliberately deferred until after
+Gate G3 and a fresh review coordinates `ScopedGc` with Value Representation
+Refinement and future moving-collector work; it is not part of the remaining
+I11 certification path.
 
 ## Purpose
 
@@ -20,7 +21,7 @@ traced edge, a temporary working value, or an accidental escape. This is
 adequate for the initial specialized non-moving collector, but provides little
 structural resistance to stale pointers during later representation changes.
 
-The active persistent-edge plan establishes the first line below. This
+The completed persistent-edge plan established the first line below. This
 deferred plan asks whether cheap working copies should additionally move onto
 a lifetime-branded second form:
 
@@ -29,7 +30,8 @@ Gc<T>                  // persistent stored edge; move-only
 ScopedGc<'mutator, T>  // temporary admitted view; Copy and Clone
 ```
 
-`Gc<T>` remains pointer-sized and non-rooting, but loses `Copy` and `Clone`.
+`Gc<T>` is pointer-sized, non-rooting, and no longer implements `Copy` or
+`Clone`.
 Reading an edge from a managed object or root under a matching mutator produces
 a pointer-sized `ScopedGc<'mutator, T>`. Only that scoped form supports cheap
 working copies, dereference, and ordinary pointer-identity observations.
@@ -41,8 +43,10 @@ roots and exact tracing.
 ## Relationship to Existing Plans
 
 - [GarbageCollectorImplementation_2026-08-19.md](GarbageCollectorImplementation_2026-08-19.md)
-  deliberately makes the initial `Gc<T>` cheap to copy. This plan revisits
-  that decision only after the initial collector is working end to end.
+  established pointer-sized `Gc<T>` storage. The later persistent-edge
+  cutover made durable duplication explicit while retaining the intended
+  pointer-only release cost. This plan revisits only the temporary admitted
+  working view after the initial collector is certified end to end.
 - [GarbageCollectorIntegration_2026-08-19.md](GarbageCollectorIntegration_2026-08-19.md)
   now delegates its Gate G3 persistent-edge trait cutover to
   [GarbageCollectorPersistentEdgeTraits_2026-09-12.md](GarbageCollectorPersistentEdgeTraits_2026-09-12.md).

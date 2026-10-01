@@ -1,20 +1,23 @@
 # Glam-Owned Garbage Collection Roadmap — 2026-08-19
 
 Status: in progress; collector Phases C0 through C6D.3, the C2C.6 verification
-follow-up, and integration Phases I0 through I11C are complete. Gates G0, G1,
-and G2 are established, and all mandatory collector reviews through post-C6
-plus the post-I1 through post-I11 integration reviews and independent Gate G2
-audit have been performed. Collector
+follow-up, integration Phases I0 through I11C, and I11D.0-I11D.1 are complete.
+Gates G0, G1, and G2 are established, and all mandatory collector reviews
+through post-C6 plus the post-I1 through post-I11 integration reviews and
+independent Gate G2 audit have been performed. Collector
 stress, metrics, and tuning continue in C7/C8 while production collection
 remains disabled. The original focused I5-I10 forward review is recorded in
 [`GarbageCollectorIntegrationI5I10_2026-09-03.md`](../reviews/GarbageCollectorIntegrationI5I10_2026-09-03.md);
 its findings have been resolved by the completed phases and remediation
 reviews. I11B completed the first controlled serial whole-production-graph
 collection boundary, and I11C exercised worker, finalizer,
-request-coalescing, and retirement schedules. The post-I11 review found three
-verification gaps, including one missing worker/collector ordering latch.
-Production remains `NoAuto` while I11D owns their remediation and Gate G3
+request-coalescing, and retirement schedules. I11D.0 repaired the missing
+worker/collector ordering proof, and I11D.1 completed repository-wide ordinary
+and aggressive ownership closure on 2026-10-01. Production remains `NoAuto`
+while I11D.2-I11D.4 own dynamic tools, the final delta audit, and Gate G3
 certification.
+The completed remediation and forward-path reconciliation are reviewed in
+[`GarbageCollectorGCI11R002Holistic_2026-10-01.md`](../reviews/GarbageCollectorGCI11R002Holistic_2026-10-01.md).
 
 This roadmap keeps two large transitions aligned:
 
@@ -48,18 +51,20 @@ slot size recorded in canonical object metadata, while preserving run-owner
 lookup independently of either. It does not choose Glam's tag budget, type
 alignment, or node-size policy. Compact representation is not a collector gate.
 
-GCI11R-002D's active nested
+GCI11R-002D's completed nested
 [`GarbageCollectorPersistentEdgeTraits_2026-09-12.md`](GarbageCollectorPersistentEdgeTraits_2026-09-12.md)
-plan removes implicit copying, equality, and formatting from persistent
-`Gc<T>` edges while the raw-value regional migration is already touching their
-current compatibility carriers. It adds explicit mutator-qualified duplication
-and identity without claiming lifetime branding or moving-GC readiness.
+transition removed implicit copying, equality, and formatting from persistent
+`Gc<T>` edges and their managed facades. It added explicit mutator-qualified
+duplication and identity without claiming lifetime branding or moving-GC
+readiness. Focused Miri and release-cost/code-generation evidence remain under
+I11D.2 rather than reopening the cutover.
 
 The later
 [`GarbageCollectorScopedPointerSafety_2026-09-09.md`](GarbageCollectorScopedPointerSafety_2026-09-09.md)
 plan remains a tentative experiment in copyable mutator-branded working views.
-It should be reconsidered against the actual compact value design after the
-active move-only stored-edge boundary has settled.
+The move-only stored-edge boundary has settled; activating the experiment
+still waits for Gate G3 and should be reconsidered against the actual compact
+value design rather than migrating the current representation twice.
 
 ## Purpose
 
@@ -70,10 +75,13 @@ function, collection, or interaction-net cycles with one exact tracing heap per
 The collector is specialized for Glam:
 
 - values never cross evaluation runtimes;
-- managed pointers are initially non-moving, pointer-sized, cheap to copy, and
-  shareable between runtime worker threads;
-- copying an ordinary managed pointer performs no locking, reference-counting,
-  rooting, or collector bookkeeping;
+- managed pointers are initially non-moving, pointer-sized, movable, and
+  shareable between runtime worker threads, but persistent duplication is an
+  explicit mutator-qualified operation rather than ambient `Copy`/`Clone`;
+- an ordinary release-mode managed-edge duplicate is intended to remain a
+  pointer-only operation with no locking, reference-counting, rooting, or
+  collector bookkeeping; I11D.2 performs the remaining code-generation or
+  microbenchmark audit of that cost;
 - ordinary allocation uses worker-local cursors over exclusively leased ranges
   of allocation-bitmap words in homogeneous typed runs; shared synchronization
   is reserved for allocation-class discovery, claiming another range,
@@ -376,6 +384,9 @@ The later post-I11 review in
 found that the worker fixture did not yet observe the collector's authoritative
 admission wait, and also identified missing suite-wide aggressive-mode and
 exact finalizer-allocation evidence. I11D closes those gaps before G3.
+I11D.0 has since closed the deterministic schedule/allocation gap, and I11D.1
+has closed the suite-wide aggressive-mode and regional-ownership gap. The
+remaining Gate G3 work is I11D.2-I11D.4.
 
 Only after G2 may tests force a full collection over the complete production
 graph.

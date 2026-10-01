@@ -9,6 +9,11 @@ without changing production's immutable `CollectionPolicy::NoAuto`. Gate G3
 remains closed: I11D.2 dynamic unsafe-boundary verification, I11D.3 static
 closure audit, and I11D.4 certification are separate work.
 
+Follow-up review separates the focused D.2h implementation accounting in
+[`GarbageCollectorAggressiveD2h_2026-10-01.md`](GarbageCollectorAggressiveD2h_2026-10-01.md)
+from the parent-plan and Gate G3 reconciliation in
+[`GarbageCollectorGCI11R002Holistic_2026-10-01.md`](GarbageCollectorGCI11R002Holistic_2026-10-01.md).
+
 ## Scope and Method
 
 This review closes the regional-value ownership remediation which began when

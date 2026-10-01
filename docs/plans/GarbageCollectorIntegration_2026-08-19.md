@@ -1,15 +1,18 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I11C and their mandatory reviews are
-complete. Gate G2 passed on 2026-09-11. The
+Status: in progress; Phases I0 through I11C and their mandatory reviews,
+I11D.0 deterministic remediation, and I11D.1 repository-wide aggressive
+verification are complete. Gate G2 passed on 2026-09-11. The
 production public-value facade uses an inline-or-registered-root
 representation, every durable owner stores that facade, and lazy, promise,
 and core-net identities are one exact managed graph. Production collection
 remains disabled in ordinary execution; I11B exercised controlled serial
 whole-runtime collection and I11C exercised worker, finalizer,
 request-coalescing, and runtime-retirement schedules through private test and
-maintenance seams. The post-I11 review found three verification gaps which
-I11D must close before Gate G3. Collector Gate G1 passed on 2026-08-25.
+maintenance seams. I11D.1 closed the regional-ownership and repository-mode
+gap on 2026-10-01. I11D.2 dynamic tools, I11D.3 the final delta-oriented
+static audit, and I11D.4 certification remain before Gate G3. Collector Gate
+G1 passed on 2026-08-25.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -269,7 +272,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I11B | complete | private serial production collection, boundary preservation, and ownership-outcome matrix |
 | I11C | complete | worker/finalizer schedule fixtures, request coalescing, and runtime retirement |
 | I11D.0 | complete | post-I11 deterministic schedule and passive-finalization remediation |
-| I11D.1 | in progress | repository-wide aggressive mode implemented; full-suite regional-ownership failures remain |
+| I11D.1 | complete | repository-wide aggressive mode, zero-violation regional ownership, and ordinary/aggressive workspace closure |
 | I11D.2 | pending | focused Miri and sanitizer verification |
 | I11D.3 | pending | unsafe, trace, mutation, and lock/region closure audit |
 | I11D.4 | pending | dated Gate G3 certification |
@@ -6527,23 +6530,53 @@ gaps block Gate G3. Close them and certify the boundary in these checkpoints:
   immediately producing a passing suite; its audit and subordinate repair
   checkpoints are specified in
   [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
-- **I11D.2 — Dynamic unsafe-boundary verification.** Run named focused Miri
-  tests over root publication/access, tracing and panic restart, allocation,
-  mutation transitions, collection, finalization, and the deterministic
-  probes. Run AddressSanitizer and ThreadSanitizer over supported focused
-  collector and production-runtime targets. Record an unsupported target/tool
-  combination explicitly; do not replace it with repeated ordinary runs.
-- **I11D.3 — Static closure audit.** Reconcile every unsafe site, trace edge,
-  mutation gateway, managed entry, lock/wait boundary, passive finalizer, and
-  active external owner against its authoritative inventory and the source
-  delta since Gate G2. Require GCI11R-002D.2's syntax-backed raw-value API
-  inventory to contain zero authority-free violations, including standard
-  trait operations, and reconcile that result with the durable-owner field
-  and capture inventories. Re-run every source latch and focused I11 fixture.
+- **I11D.2 — Dynamic unsafe-boundary verification.** Execute this as five
+  independently recorded checkpoints rather than one open-ended tool run:
+  - **I11D.2a — tool and target matrix:** record the installed Miri and
+    sanitizer toolchains, the named collector and production-runtime targets
+    each can execute, and every unsupported target/tool combination. Repeated
+    ordinary execution is stress evidence and never substitutes for an
+    unavailable dynamic tool.
+  - **I11D.2b — focused Miri:** cover allocation and run-owner lookup, root
+    publication/projection, explicit persistent-edge duplication and identity,
+    tracing and panic restart, mutation transitions, collection/finalization,
+    and supported deterministic-probe paths. Include production-runtime
+    ownership paths rather than limiting evidence to isolated collector types.
+  - **I11D.2c — AddressSanitizer:** run the supported focused collector and
+    production-runtime ownership/reclamation matrix and record exclusions.
+  - **I11D.2d — ThreadSanitizer:** run the supported collector/runtime
+    synchronization targets. Ordering contracts still require their existing
+    latches or model fixtures; a sanitizer pass alone is not concurrency
+    evidence.
+  - **I11D.2e — persistent-edge cost closure:** close P5B by rechecking the
+    one-pointer layout, root/allocation traffic, and release code generation or
+    a focused microbenchmark for `duplicate_in`. Investigate any unexpected
+    lock, root registration, allocation, or reference-count operation before
+    accepting the explicit edge API.
+- **I11D.3 — Static closure audit.** Treat the D.2h accepted surfaces as the
+  starting baseline rather than repeating their migration:
+  - **I11D.3a — source delta:** enumerate unsafe, trace, mutation, managed
+    entry, lock/wait, finalizer, and external-owner changes since Gate G2 and
+    distinguish the already reviewed D.2h interval from any I11D.2 repair.
+  - **I11D.3b — authoritative ledger reconciliation:** rerun the raw-value,
+    persistent-edge, root-publication, mutator-introduction, durable-owner,
+    containment, capture, machine-state, and recursive-identity inventories.
+    Review every changed-file delta; require zero unclassified or pending
+    occurrence rather than mechanically accepting a new fingerprint.
+  - **I11D.3c — protocol boundary audit:** reconcile locks and waits, passive
+    finalizers, active external owners, collector panic/retry, and runtime
+    retirement with their existing deterministic fixtures and current source.
+  - **I11D.3d — focused closure:** rerun every source latch and focused I11
+    production fixture after any repair from the preceding checkpoints.
 - **I11D.4 — Certification.** Publish a dated Gate G3 review accounting for
   every I11 schedule, both collection modes, all dynamic-tool results, and any
-  intentional nondeterministic reflection behavior. Mark I11 complete only
-  when every post-I11 finding is closed.
+  intentional nondeterministic reflection behavior. The complete aggressive
+  workspace result recorded by D.2h remains valid across documentation,
+  tool-orchestration, and unsupported-tool-record changes. Rerun it if I11D.2
+  or I11D.3 changes runtime/collector code, unsafe tracing or mutation, root or
+  admission behavior, finalization, or scheduler semantics. Routine checks and
+  relevant focused aggressive fixtures still run after every implementation
+  change. Mark I11 complete only when every post-I11 finding is closed.
 
 GCI11R-002D.2's zero-violation raw-value closure and durable-owner
 reconciliation are hard prerequisites for I11D.3 and certification; a green
@@ -6570,24 +6603,23 @@ snapshot also proves passive finalization satisfies
 `allocated_after + reclaimed_slots == allocated_before` without adding a
 production allocation counter.
 
-I11D.1 is implemented but not complete. The private
+I11D.1 completed on 2026-10-01. The private
 `aggressive-gc-verification` root feature forwards deterministic collector
 hooks, enables forced pre-entry collection only after a production
 `EvaluationRuntime` has finished construction, skips structurally invalid
 cross-heap nested collection points, and leaves the heap's immutable policy at
-`NoAuto`. It immediately exposed and helped repair one real regional handoff:
-closed runtime-cache candidates are now built under one outer managed-access
-region until their declared roots exist. The complete-workspace aggressive
-command still finds stale managed edges in ordinary compilation/reflection paths,
-as well as test-only fixtures which deliberately return raw managed values
-between access regions. Gate G3 remains closed until those paths are
-classified and repaired; the feature is retained as their deterministic
-reproducer rather than weakened into a passing but uninformative mode.
-The linked remediation's D.2c evaluator partition is complete: W8 retired its
-direct gate and raw evaluator APIs. D.2d-D.2g, the remaining repository
-certification, and the persistent-edge P4/P5 cutover are still open. Complete
-the linked GCI11R-002A-H remediation and repository certification
-before marking this checkpoint complete or beginning I11D.2.
+`NoAuto`. It exposed and repaired regional handoffs, traced-owner omissions,
+invalid fixture publication, and schedule-probe interference rather than being
+weakened into a passing but uninformative mode. The complete ordinary and
+aggressive workspaces now pass. D.2h closes the raw API, persistent-edge,
+root-publication, mutator-introduction, and related ownership inventories at
+zero defect or pending disposition. The accepted surfaces and full
+verification record are in
+[`GarbageCollectorAggressiveVerificationClosure_2026-10-01.md`](../reviews/GarbageCollectorAggressiveVerificationClosure_2026-10-01.md),
+and the focused implementation-drift review is in
+[`GarbageCollectorAggressiveD2h_2026-10-01.md`](../reviews/GarbageCollectorAggressiveD2h_2026-10-01.md).
+P5A's focused Miri work and P5B's release-cost audit move forward under
+I11D.2; they do not keep I11D.1 open.
 
 ## Phase I12 — Explicit Runtime Maintenance and Threshold Collection
 

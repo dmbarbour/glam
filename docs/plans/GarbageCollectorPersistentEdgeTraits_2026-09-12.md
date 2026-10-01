@@ -15,7 +15,8 @@ raw-value migration checkpoints.
 Make every persistent managed-edge duplication and identity observation an
 explicit mutator-qualified operation.
 
-The current `Gc<T>` is a pointer-sized, non-rooting handle which implements
+At the start of this plan, `Gc<T>` was a pointer-sized, non-rooting handle
+which implemented
 `Copy`, `Clone`, `PartialEq`, `Eq`, and `Debug`. Those traits make it easy to
 copy one managed pointer into arbitrary Rust state without recording whether
 the new location is:

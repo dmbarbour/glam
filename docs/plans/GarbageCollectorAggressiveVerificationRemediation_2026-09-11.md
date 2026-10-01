@@ -2990,6 +2990,13 @@ inventory relatch:
   persistent-edge P3-P4 and P5C are complete; P5A's focused Miri portion and
   P5B's explicit release-cost/code-generation audit remain open and align
   with I11D.2 rather than being inferred from the aggressive workspace run.
+  The focused
+  [`D.2h review`](../reviews/GarbageCollectorAggressiveD2h_2026-10-01.md)
+  accepts the phase's representation/API drift and records its proof limits;
+  the subsequent
+  [`GCI11R-002 holistic review`](../reviews/GarbageCollectorGCI11R002Holistic_2026-10-01.md)
+  reconciles this closure with the parent roadmap and partitions the remaining
+  Gate G3 work.
 
 0. Repair the aggressive admission witnesses exposed by closure verification:
    - **List-effect admission: complete 2026-09-29.**

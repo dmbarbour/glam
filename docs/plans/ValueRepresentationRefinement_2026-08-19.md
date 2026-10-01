@@ -50,10 +50,12 @@ collection.
 
 The tentative
 [`GarbageCollectorScopedPointerSafety_2026-09-09.md`](GarbageCollectorScopedPointerSafety_2026-09-09.md)
-plan considers making persistent managed edges move-only while exposing
-copyable mutator-branded working views. Review that model alongside the final
-internal `Value` copy policy before V2-V4; do not migrate today's compatibility
-representation merely to pre-empt that decision.
+plan considers exposing copyable mutator-branded working views. Persistent
+managed edges are already move-only and duplicate explicitly under matching
+access after the completed D.2h/P4 cutover. Review only the additional scoped
+working-view model alongside the final internal `Value` copy policy before
+V2-V4; do not migrate today's compatibility representation merely to pre-empt
+that decision.
 
 ## Current Pressure
 

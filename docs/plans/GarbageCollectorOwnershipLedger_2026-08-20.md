@@ -1,9 +1,11 @@
 # Glam GC Ownership and Mutation Ledger — 2026-08-20
 
 Status: Phases I0 through I11C and their mandatory reviews are complete. Gate
-G2 passed on 2026-09-11. The D.2c evaluator partition closed on 2026-09-27;
-Gate G3 remains blocked by D.2d-D.2g, the persistent-edge cutover, and final
-repository certification. The
+G2 passed on 2026-09-11. GCI11R-002D.2 and the nested persistent-edge cutover
+closed on 2026-10-01 with zero unclassified raw API or persistent-edge
+occurrence and passing ordinary/aggressive workspaces. Gate G3 remains blocked
+by I11D.2 dynamic unsafe-boundary verification, I11D.3 the final delta-oriented
+static audit, and I11D.4 certification. The
 production inline-or-registered-root facade, managed outer value
 node, passive active-owner split, exact durable-owner inventory, and closed
 owner-level collection matrix are current. Lazy, promise, core-net, and

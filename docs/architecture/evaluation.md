@@ -70,7 +70,10 @@ already use registered roots over managed outer value nodes, but collection
 remains `NoAuto`. Private controlled-collection fixtures exercise serial,
 worker, and finalizer schedules without exposing a routine maintenance API or
 changing heap policy. Repository-wide aggressive verification, runtime
-maintenance, and any automatic policy remain later certification gates.
+maintenance, and any automatic policy remain separate gates. The complete
+ordinary/aggressive repository ownership matrix passed on 2026-10-01; dynamic
+unsafe-boundary tools, the final static delta audit, and Gate G3 certification
+remain before runtime maintenance is authorized.
 
 Every production evaluator entry receives an `EvalContext` derived from an
 external `EvaluationSession` owner lease. An `Assembler` and its clones share
@@ -264,14 +267,14 @@ projection always require an explicit matching `RuntimeValueAccess` rather
 than retaining weak value-domain re-entry on either representation.
 
 The underlying collector pointers are likewise non-rooting regional edges.
-Their present ordinary copy/equality traits are a counted compatibility
-surface during the
-[persistent-edge trait migration](../plans/GarbageCollectorPersistentEdgeTraits_2026-09-12.md),
-not an ownership mechanism. The selected boundary makes persistent edge
-duplication and allocation identity explicit matching-access operations while
-retaining ordinary cloning only for registered roots and public rooted value
-handles. Glam's managed facades must not recreate an unqualified pointer-copy
-or address-comparison surface when that collector cutover completes.
+The completed
+[persistent-edge trait migration](../plans/GarbageCollectorPersistentEdgeTraits_2026-09-12.md)
+removed their ordinary copy, equality, and formatting traits. Persistent edge
+duplication and allocation identity are explicit matching-access operations;
+ordinary cloning remains only on registered roots and public rooted value
+handles. Glam's managed facades expose no unqualified pointer-copy or address-
+comparison surface. Lifetime-branded temporary pointer views remain a deferred
+safety enhancement rather than a claim of the current non-moving boundary.
 
 Deferred external host calls separate traceable semantics from opaque host
 behavior. `HostCallProducer` keeps every recursive Glam capture as an ordinary
