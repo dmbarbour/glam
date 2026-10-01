@@ -844,7 +844,7 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
     pub(crate) fn cached(&self) -> Option<LazyResult> {
         self.cell.result.get().map(|result| match result {
             Ok(value) => Ok(value.duplicate_in(self.authority)),
-            Err(failure) => Err(Arc::new(failure.duplicate_in(self.authority))),
+            Err(failure) => Err(Arc::clone(failure)),
         })
     }
 
@@ -881,7 +881,7 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
                         .expect("managed lazy cache must contain a value after set");
                     let result = match result {
                         Ok(value) => Ok(value.duplicate_in(self.authority)),
-                        Err(failure) => Err(Arc::new(failure.duplicate_in(self.authority))),
+                        Err(failure) => Err(Arc::clone(failure)),
                     };
                     let producer = self
                         .cell
@@ -926,7 +926,7 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
             .get()
             .map(|assignment| match assignment {
                 Ok(value) => Ok(self.authority.duplicate_value(value)),
-                Err(failure) => Err(Arc::new(failure.duplicate_in(self.authority))),
+                Err(failure) => Err(Arc::clone(failure)),
             })
     }
 
@@ -1373,7 +1373,7 @@ mod tests {
     ) -> ManagedPromiseAssignment {
         match assignment {
             Ok(value) => Ok(access.duplicate_value(value)),
-            Err(failure) => Err(Arc::new(failure.duplicate_in(access))),
+            Err(failure) => Err(Arc::clone(failure)),
         }
     }
 

@@ -218,27 +218,6 @@ impl EvaluationFailure {
         }
     }
 
-    pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
-        let kind = match &self.kind {
-            EvaluationFailureKind::Message(message) => {
-                EvaluationFailureKind::Message(Arc::clone(message))
-            }
-            EvaluationFailureKind::Emission(emission) => {
-                EvaluationFailureKind::Emission(access.duplicate_value(emission))
-            }
-            EvaluationFailureKind::DependencyCycle(cycle) => {
-                EvaluationFailureKind::DependencyCycle(Arc::clone(cycle))
-            }
-        };
-        let contexts = self
-            .contexts
-            .iter()
-            .map(|context| access.duplicate_value(context))
-            .collect::<Vec<_>>()
-            .into();
-        Self { kind, contexts }
-    }
-
     /// Borrows the immediate emission only while matching value access is
     /// active. Dependency-cycle failures have no semantic emission.
     pub(crate) fn emission_value_in<'access>(

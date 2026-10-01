@@ -51,6 +51,15 @@ fn fail_promise_message(
     crate::core::fail_test_promise_message(context.values(), promise, message)
 }
 
+fn structured_failure(context: &EvalContext, message: &str) -> Arc<EvaluationFailure> {
+    context.values().with_runtime_value_access(|access| {
+        Arc::new(EvaluationFailure::emission_in(
+            &access,
+            Value::binary_from_text(message),
+        ))
+    })
+}
+
 fn isolated_standalone_context() -> OwnedEvalContext {
     EvalContext::isolated(crate::core::CoreValueFactory::new(
         crate::runtime::allocate_evaluation_runtime_id(),
@@ -1162,6 +1171,7 @@ fn client_demand_operation_and_result_roots_follow_owner_lifecycle() {
         panic!("the rooted client result should remain complete")
     };
     value.assert_same_representation_for_test(context.values(), &expected);
+    drop(value);
 
     drop(completed);
     let result_reclaimed = context
@@ -1923,7 +1933,7 @@ fn failure_ledger_root_survives_collection_after_report_and_handle_drop() {
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
     let owner = context.session_id();
-    let failure = Arc::new(EvaluationFailure::message("ledger-owned failure"));
+    let failure = structured_failure(&context, "ledger-owned failure");
     let task = context
         .schedule_task({
             let failure = failure.clone();
@@ -1958,7 +1968,7 @@ fn failure_ledger_root_survives_collection_after_report_and_handle_drop() {
 fn evaluation_session_report_root_survives_after_ledger_acknowledgement() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
-    let failure = Arc::new(EvaluationFailure::message("session-report failure"));
+    let failure = structured_failure(&context, "session-report failure");
     let task = context
         .schedule_task({
             let failure = failure.clone();
@@ -3371,6 +3381,7 @@ fn terminal_task_wait_root_survives_collection_until_handle_drop() {
         panic!("the terminal task should retain its result")
     };
     value.assert_same_representation_for_test(context.values(), &expected);
+    drop(value);
 
     drop(task);
     let reclaimed = context
@@ -3423,7 +3434,14 @@ fn terminal_wait_dispositions_retain_only_their_documented_runtime_roots() {
     exercise(
         EvaluationWaitTerminal::Failed(RuntimeFailureRoot::new(
             context.values(),
-            Arc::new(EvaluationFailure::message("failed reflection result")),
+            Arc::new(EvaluationFailure::message("plain failed reflection result")),
+        )),
+        false,
+    );
+    exercise(
+        EvaluationWaitTerminal::Failed(RuntimeFailureRoot::new(
+            context.values(),
+            structured_failure(&context, "structured failed reflection result"),
         )),
         true,
     );
@@ -3433,7 +3451,14 @@ fn terminal_wait_dispositions_retain_only_their_documented_runtime_roots() {
     exercise(
         EvaluationWaitTerminal::Killed(RuntimeFailureRoot::new(
             context.values(),
-            Arc::new(EvaluationFailure::message("killed reflection result")),
+            Arc::new(EvaluationFailure::message("plain killed reflection result")),
+        )),
+        false,
+    );
+    exercise(
+        EvaluationWaitTerminal::Killed(RuntimeFailureRoot::new(
+            context.values(),
+            structured_failure(&context, "structured killed reflection result"),
         )),
         true,
     );
@@ -3447,7 +3472,7 @@ fn blocked_task_record_root_survives_collection_until_cancellation() {
         .values()
         .collect_managed_for_test()
         .expect("the isolated blocked-task fixture should collect before admission");
-    let failure = Arc::new(EvaluationFailure::message("blocked task root"));
+    let failure = structured_failure(&context, "blocked task root");
     let task = context
         .schedule_task({
             let failure = failure.clone();
@@ -7745,7 +7770,7 @@ fn deadlock_snapshot_root_survives_after_coordinator_record_retirement() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let values = context.values().clone();
-    let failure = Arc::new(EvaluationFailure::message("deadlock snapshot root"));
+    let failure = structured_failure(&context, "deadlock snapshot root");
     let weak_failure = Arc::downgrade(&failure);
     let task = context
         .schedule_task({
@@ -7788,7 +7813,7 @@ fn killed_work_report_root_survives_after_settlement_owners_retire() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let values = context.values().clone();
-    let failure = Arc::new(EvaluationFailure::message("killed work report root"));
+    let failure = structured_failure(&context, "killed work report root");
     let weak_failure = Arc::downgrade(&failure);
     let task = context
         .schedule_task({
@@ -7931,10 +7956,10 @@ fn exit_readiness_snapshot_root_survives_after_settlement_report_drop() {
     drop(report);
     drop(task);
 
+    let expected = fixture.runtime.values().text("snapshot-owned exit");
     let snapshot_live = values
         .collect_managed_for_test()
         .expect("the settled readiness snapshot should retain its exit-message root");
-    let expected = fixture.runtime.values().text("snapshot-owned exit");
     assert!(snapshot.dispositions().iter().any(|disposition| {
         let crate::api::RuntimeDispositionKind::ExitError(value) = disposition.kind() else {
             return false;
@@ -7980,10 +8005,10 @@ fn settled_report_root_survives_after_exit_snapshot_and_task_retire() {
     drop(snapshot);
     drop(task);
 
+    let expected = fixture.runtime.values().text("report-owned exit");
     let report_live = values
         .collect_managed_for_test()
         .expect("the settled report should retain its exit-message root");
-    let expected = fixture.runtime.values().text("report-owned exit");
     assert!(report.dispositions().iter().any(|disposition| {
         let crate::api::RuntimeDispositionKind::ExitError(value) = disposition.kind() else {
             return false;
@@ -8212,10 +8237,22 @@ fn forced_deadlock_settlement_preserves_exits_and_kills_other_participants() {
         parent_failure.as_failure().emission_value(),
         Some(Value::Dict(_))
     ));
-    assert_eq!(
-        parent_failure.to_string(),
-        "runtime killed work in a deadlocked settlement"
-    );
+    assert_eq!(parent_failure.to_string(), "evaluation failed");
+    context.values().with_runtime_value_access(|access| {
+        let Some(Value::Dict(diagnostic)) = parent_failure.as_failure().emission_value_in(&access)
+        else {
+            panic!("the killed terminal should retain a structured diagnostic")
+        };
+        let Some(Value::Dict(message)) = diagnostic.get(&*crate::core::keys::MSG) else {
+            panic!("the killed diagnostic should define msg")
+        };
+        access.assert_same_representation_for_test(
+            message
+                .get(&*crate::core::keys::TEXT)
+                .expect("the killed diagnostic should define msg.text"),
+            &Value::binary_from_text("runtime killed work in a deadlocked settlement"),
+        );
+    });
     assert!(matches!(
         fixture.runtime.readiness(),
         crate::api::RuntimeReadiness::Ready(_)
@@ -8886,8 +8923,8 @@ fn pending_reflection_activation_roots_retire_with_their_reservations() {
         .expect("activation should consume and release its temporary effect root");
     assert_eq!(
         activation_reclaimed.root_entries(),
-        baseline.root_entries() + 1,
-        "only the coordinator-owned terminal task result should remain rooted"
+        baseline.root_entries(),
+        "a completed background activation retains neither its temporary effect nor its retired terminal result"
     );
     assert!(
         activation_reclaimed.finalized_slots() >= 1,

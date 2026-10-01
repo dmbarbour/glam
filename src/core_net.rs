@@ -564,7 +564,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
 
     #[cfg(test)]
     pub(crate) fn reduce_next_for_test(&self) -> Option<Reduction> {
-        let pair = self.runtime.with(|runtime| runtime.active_pairs().next())?;
+        let pair = self.runtime.with(RuntimeNet::next_ready_pair)?;
         self.reduce_pair_for_test(pair)
     }
 

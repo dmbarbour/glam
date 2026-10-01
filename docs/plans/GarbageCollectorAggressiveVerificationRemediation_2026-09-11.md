@@ -1,6 +1,6 @@
 # Aggressive GC Verification Remediation Plan — 2026-09-11
 
-Status: GCI11R-002A-C, D.1a-D.2g, and D.2h.0-D.2h.4b complete; D.2h.4c-D.2h.5 active. This plan expands
+Status: GCI11R-002A-C, D.1a-D.2g, D.2h.0-D.2h.4b, and D.2h.4c.1-.2a complete; D.2h.4c.2b-D.2h.5 active. This plan expands
 GCI11R-002 and Phase I11D.1. The private repository mode exists and is useful,
 but its complete workspace suite does not yet pass. Gate G3 remains closed.
 
@@ -2841,6 +2841,35 @@ inventory relatch:
     - **D.2h.4c.2 — complete-suite closure:** run the complete ordinary suite,
       the interaction-net profiling script, and the complete aggressive suite;
       rerun formatting and clippy after any repair.
+      - **D.2h.4c.2a — ordinary gate repair and closure: complete
+        2026-10-01.** The first complete ordinary run exposed four coherent
+        post-D.2h.3g migration defects rather than collector-policy changes:
+        managed lazy/promise readers rebuilt structured failures and broke
+        their canonical `Arc<EvaluationFailure>` identity; ownership fixtures
+        still expected plain Rust messages to retain semantic roots; several
+        tests retained their own observed/public roots across reclamation
+        assertions; and public tests still flattened structured failures
+        through Rust `Display`. Failures are now cloned by canonical `Arc`,
+        semantic-root fixtures use structured emissions while explicitly
+        proving plain messages retain no root, temporary observer roots are
+        retired before reclamation checks, and public tests inspect
+        `Error::diagnostic(Values)` while `Display` remains the settled generic
+        compatibility classification.
+
+        Three independent defects also received constructive fixes. The core
+        net test helper selects an actually ready pair rather than the first
+        possibly claimed pair. The syntax path helper uses the value's owning
+        evaluation context rather than the process-global compiler test heap.
+        A promise-follower fixture now constructs and roots its managed promise
+        in one access; this closes the deterministic parallel-collection
+        window instead of accepting an isolated rerun. The exact inventories
+        were refreshed only after those classifications, and all 121 inventory
+        tests pass. Formatting and all-target/all-feature clippy pass, as does
+        the complete ordinary workspace suite (1,882 library tests passed, two
+        ignored, followed by every integration and executable fixture).
+      - **D.2h.4c.2b — aggressive and profiling closure:** run the
+        interaction-net profiling script and complete aggressive workspace
+        suite, then repeat formatting/clippy if either requires a repair.
   - **D.2h.4d — closure reconciliation:** rerun the exact inventories after
     dynamic fixes, verify their accepted surfaces did not drift, and record
     the final gate evidence for D.2h.5.

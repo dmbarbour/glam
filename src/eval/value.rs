@@ -1733,10 +1733,13 @@ mod ownership_tests {
     #[test]
     fn promise_follower_yields_from_its_retained_whnf_checkpoint() {
         let context = EvalContext::standalone();
-        let promise = PromisedValue::new(context.values(), "resumable promise follower");
-        let promise_root = context
-            .values()
-            .with_runtime_value_access(|access| promise.root_in(&access));
+        let (promise, promise_root) = context.values().with_runtime_value_access(|access| {
+            let root = access
+                .construct_rooted_managed_promise("resumable promise follower")
+                .expect("the resumable promise should fit its reviewed managed slot");
+            let promise = PromisedValue::from_root(&root, &access);
+            (promise, root)
+        });
         let mut follower = PromiseFollower {
             context: (*context).clone(),
             computation: crate::eval::whnf::WhnfComputation::from_promise_root(

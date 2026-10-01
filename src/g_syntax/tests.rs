@@ -91,17 +91,24 @@ fn assert_reserved_keyword_diagnostic(source: &str, keyword: &str) {
 
 fn value_at_atom_path(definitions: &Value, path: &[&str]) -> Option<Value> {
     let context = test_eval_context();
-    let values = crate::compiler::test_value_factory();
-    let mut current = definitions.duplicate_for_test(&values);
+    value_at_atom_path_with_context(&context, definitions, path)
+}
+
+fn value_at_atom_path_with_context(
+    context: &crate::evaluation::EvalContext,
+    definitions: &Value,
+    path: &[&str],
+) -> Option<Value> {
+    let mut current = definitions.duplicate_for_test(context.values());
     for part in path {
         let current_value =
-            crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &current).ok()?;
+            crate::evaluation::EvalContext::evaluate_compatibility_whnf(context, &current).ok()?;
         let Value::Dict(dict) = current_value else {
             return None;
         };
         current = dict
             .get(&Key::Atom(Atom::from_key(&Key::binary_from_text(*part))))?
-            .duplicate_for_test(&values);
+            .duplicate_for_test(context.values());
     }
     Some(current)
 }
@@ -2440,7 +2447,8 @@ fn recursive_do_strict_forward_observation_reports_the_fixpoint_cycle() {
     );
     let (_assembler, eval_context, definitions, _definitions_root, _diagnostics) =
         reflection_test_module(source, &["recursive_do_cycle"], &[]);
-    let mut probe = value_at_atom_path(&definitions, &["probe"]).expect("probe should exist");
+    let mut probe = value_at_atom_path_with_context(&eval_context, &definitions, &["probe"])
+        .expect("probe should exist");
     let error = loop {
         match crate::evaluation::EvalContext::evaluate_compatibility_whnf(&eval_context, &probe) {
             Ok(next @ (Value::Lazy(_) | Value::Promised(_))) => probe = next,

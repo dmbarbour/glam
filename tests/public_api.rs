@@ -375,7 +375,14 @@ fn public_promise_resolver_completes_a_cloneable_consumer() {
 
     let pending =
         evaluate(&assembler, &promise).expect_err("an unresolved promise should fail fast");
-    assert!(pending.to_string().contains("before initialization"));
+    assert_eq!(pending.to_string(), "glam evaluation failed");
+    assert_eq!(
+        pending
+            .diagnostic(&values)
+            .expect("pending promise failure should belong to the assembler runtime")
+            .message(),
+        "glam evaluation failed"
+    );
 
     resolver
         .resolve(values.integer(42))
@@ -823,9 +830,12 @@ fn revoked_volume_capability_cannot_recreate_its_volume() {
 
     let error =
         binary_value(&assembler, annotated).expect_err("stale blind write must fail at commit");
+    assert_eq!(error.to_string(), "glam evaluation failed");
     assert!(
         error
-            .to_string()
+            .diagnostic(&values)
+            .expect("revoked-volume failure should belong to the assembler runtime")
+            .message()
             .contains("revoked before its edits committed")
     );
 }
@@ -950,10 +960,11 @@ fn diagnostic_value_updates_preserve_structured_evaluation_failures() {
 
     let error = Diagnostic::apply_updates(&assembler.values(), &message, failed_update)
         .expect_err("demanding the viewer update should preserve its failure");
-    assert_eq!(error.to_string(), "viewer update failed");
+    assert_eq!(error.to_string(), "glam evaluation failed");
     let diagnostic = error
         .diagnostic(&values)
         .expect("viewer failure should belong to the assembler runtime");
+    assert_eq!(diagnostic.message(), "viewer update failed");
     assert_eq!(
         evaluate(
             &assembler,
@@ -1831,8 +1842,12 @@ fn checked_net_builder_constructs_an_opaque_identity_net() {
         .expect("application construction should not demand the net");
     let error = evaluate(&assembler, &application)
         .expect_err("raw nets require an explicit lambda-style arity bridge");
+    assert_eq!(error.to_string(), "glam evaluation failed");
     assert_eq!(
-        error.to_string(),
+        error
+            .diagnostic(&values)
+            .expect("application failure should belong to the assembler runtime")
+            .message(),
         "application requires a function value, received Net"
     );
 }

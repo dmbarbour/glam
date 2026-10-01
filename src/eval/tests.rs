@@ -6388,7 +6388,7 @@ fn error_annotations_carry_diagnostic_values_and_ordered_contexts() {
 
     let error = eval_closed_expr(&outer)
         .expect_err_without_debug("error annotation must fail when demanded");
-    assert_eq!(error.to_string(), "handler failed");
+    assert_eq!(error.to_string(), "evaluation failed");
     let diagnostic =
         halt_diagnostic_value(&error).expect("permanent errors must project to diagnostics");
     let Value::Dict(diagnostic) =
@@ -6416,6 +6416,10 @@ fn error_annotations_carry_diagnostic_values_and_ordered_contexts() {
     let Value::Dict(message) = message else {
         panic!("diagnostic msg must be a dictionary");
     };
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &message.get(&*keys::TEXT),
+        &Some(&Value::binary_from_text("handler failed")),
+    );
     let contexts = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_context(),
         message

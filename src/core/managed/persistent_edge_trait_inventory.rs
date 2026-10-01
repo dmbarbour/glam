@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        872,
+        868,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -966,9 +966,14 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // helper behind cfg(test). Its sole Gc projection therefore moves from
     // the production typed partition to the test typed partition; no edge is
     // added or removed, while source-qualified identity changes accordingly.
+    // D.2h.4c.2 preserves canonical failure identity by cloning immutable
+    // Arc<EvaluationFailure> values instead of rebuilding their semantic
+    // values under access. That retires three production typed-edge
+    // duplicates. Its promise-follower race fixture now constructs an already
+    // rooted promise in one access, retiring one redundant test projection.
     assert_eq!(
         occurrence_fingerprint(actual),
-        11_504_173_023_519_742_892,
+        6_846_411_980_049_058_029,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -1013,9 +1018,9 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 151),
+            ((SourceScope::Production, EdgeSurface::Typed), 148),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 671),
+            ((SourceScope::Test, EdgeSurface::Typed), 670),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"

@@ -3495,11 +3495,14 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         S::Data: Clone,
         S::Operator: Clone,
     {
-        let pair = self
-            .active
-            .iter()
-            .find_map(|(pair, state)| matches!(state, ActivePairState::Ready).then_some(*pair))?;
+        let pair = self.next_ready_pair()?;
         self.reduce_pair(pair)
+    }
+
+    pub(crate) fn next_ready_pair(&self) -> Option<ActivePairKey> {
+        self.active
+            .iter()
+            .find_map(|(pair, state)| matches!(state, ActivePairState::Ready).then_some(*pair))
     }
 
     /// Reduces one exact ready pair. Cursor demand uses this to make progress
