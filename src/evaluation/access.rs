@@ -360,6 +360,13 @@ impl EvaluationPollContext {
     }
 
     #[cfg(test)]
+    pub(crate) fn root_unit(&self) -> RuntimeValueRoot {
+        self.demand
+            .values
+            .construct_runtime_value_root(|access| access.unit())
+    }
+
+    #[cfg(test)]
     pub(crate) fn duplicate_and_root_value(&self, value: &Value) -> RuntimeValueRoot {
         self.demand
             .values

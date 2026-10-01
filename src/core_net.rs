@@ -1643,25 +1643,29 @@ mod tests {
     );
 
     fn closed_unit_template(values: &CoreValueFactory) -> CoreInteractionNet {
-        let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
-        let data = builder.data(values.unit());
-        builder.finish(data)
+        values.with_runtime_value_access(|access| {
+            let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
+            let data = builder.data(access.unit());
+            builder.finish(data)
+        })
     }
 
     #[cfg(feature = "interaction-net-profiling")]
     fn two_bind_join_template(values: &CoreValueFactory) -> CoreInteractionNet {
-        let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
-        for _ in 0..2 {
-            let left = builder.bind();
-            let right = builder.bind();
-            builder.wire(left[0], right[0]);
-            for auxiliary in [left[1], left[2], right[1], right[2]] {
-                let data = builder.data(values.unit());
-                builder.wire(auxiliary, data);
+        values.with_runtime_value_access(|access| {
+            let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
+            for _ in 0..2 {
+                let left = builder.bind();
+                let right = builder.bind();
+                builder.wire(left[0], right[0]);
+                for auxiliary in [left[1], left[2], right[1], right[2]] {
+                    let data = builder.data(access.unit());
+                    builder.wire(auxiliary, data);
+                }
             }
-        }
-        let exposed = builder.data(values.unit());
-        builder.finish(exposed)
+            let exposed = builder.data(access.unit());
+            builder.finish(exposed)
+        })
     }
 
     fn claimed_call(
@@ -1746,7 +1750,7 @@ mod tests {
             let discard = builder.copy(0).input;
             builder.wire(output, discard);
         }
-        let exposed = builder.data(values.unit());
+        let exposed = builder.data(values.with_runtime_value_access(|access| access.unit()));
         values.instantiate_core_net(&builder.finish(exposed))
     }
 
@@ -1950,8 +1954,10 @@ mod tests {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
         let source = values.instantiate_core_net(&closed_unit_template(&values));
         let prepared = source.test_prepare_copy_source(&values);
-        let (copy_runtime, copy_call) = claimed_call(&values, values.unit());
-        let (operator_runtime, operator_call) = claimed_call(&values, values.unit());
+        let copy_unit = values.with_runtime_value_access(|access| access.unit());
+        let operator_unit = values.with_runtime_value_access(|access| access.unit());
+        let (copy_runtime, copy_call) = claimed_call(&values, copy_unit);
+        let (operator_runtime, operator_call) = claimed_call(&values, operator_unit);
 
         assert_eq!(
             values.interaction_net_profile_snapshot().reductions.call,
@@ -1987,11 +1993,10 @@ mod tests {
         });
         assert_eq!(values.interaction_net_profile_snapshot().reductions.call, 1);
 
+        let operator =
+            values.with_runtime_value_access(|access| CoreOperator::Applicable(access.unit()));
         operator_runtime.with_test_access(&values, |runtime| {
-            runtime.resume_claimed_call_with_operator(
-                operator_call,
-                CoreOperator::Applicable(values.unit()),
-            );
+            runtime.resume_claimed_call_with_operator(operator_call, operator);
         });
         assert_eq!(values.interaction_net_profile_snapshot().reductions.call, 2);
     }
@@ -2000,11 +2005,10 @@ mod tests {
     #[test]
     fn profiling_counts_operator_calls_only_when_completion_commits() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
-        let (runtime, call) = claimed_operator_call(
-            &values,
-            CoreOperator::Applicable(values.unit()),
-            values.unit(),
-        );
+        let (operator, data) = values.with_runtime_value_access(|access| {
+            (CoreOperator::Applicable(access.unit()), access.unit())
+        });
+        let (runtime, call) = claimed_operator_call(&values, operator, data);
 
         assert_eq!(
             values
@@ -2038,6 +2042,7 @@ mod tests {
         else {
             panic!("released operator pair must be claimable again")
         };
+        let yielded = values.with_runtime_value_access(|access| OperatorYield::Data(access.unit()));
         runtime.with_test_access(&values, |runtime| {
             runtime.complete_claimed_operator_call(
                 crate::interaction_net::OperatorCall {
@@ -2045,7 +2050,7 @@ mod tests {
                     operator,
                     data,
                 },
-                OperatorYield::Data(values.unit()),
+                yielded,
             );
         });
         assert_eq!(
@@ -2193,7 +2198,8 @@ mod tests {
         let mut target_builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
         let [function, argument, result] = target_builder.bind();
         let [continuation, continuation_argument, exposed] = target_builder.bind();
-        let callable = target_builder.data(values.unit());
+        let callable =
+            target_builder.data(values.with_runtime_value_access(|access| access.unit()));
         let supplied = target_builder.data(Value::Number(1.into()));
         let continued = target_builder.data(Value::Number(2.into()));
         target_builder.wire(function, callable);
@@ -2299,7 +2305,7 @@ mod tests {
             code: code.clone(),
             supplied: Arc::from([]),
         });
-        let argument = builder.data(values.unit());
+        let argument = builder.data(values.with_runtime_value_access(|access| access.unit()));
         builder.wire(input, argument);
         let runtime = values.instantiate_core_net(&builder.finish(result));
         drop(code);
@@ -2318,7 +2324,9 @@ mod tests {
                     .map(|value| access.values().duplicate_value(value))
             })
         });
-        values.assert_same_representation_for_test(&retained_data, &Some(values.unit()));
+        values.with_runtime_value_access(|access| {
+            access.assert_same_representation_for_test(&retained_data, &Some(access.unit()));
+        });
         drop(retained_code);
         drop(owner);
         values

@@ -222,13 +222,13 @@ fn runtimes_own_independent_local_identity_domains_and_value_factories() {
     assert_eq!(assembler.values().runtime_id(), first.id());
 
     let first_values = first.values().core;
-    let first_unit = first_values.unit();
+    let first_unit = first_values.with_runtime_value_access(|access| access.unit());
     let first_thunk_values = first_values.clone();
     let first_lazy = LazyValue::semantic_thunk(&first_values, "first runtime", move |_| {
         Ok(first_unit.duplicate_for_test(&first_thunk_values))
     });
     let second_values = second.values().core;
-    let second_unit = second_values.unit();
+    let second_unit = second_values.with_runtime_value_access(|access| access.unit());
     let second_thunk_values = second_values.clone();
     let second_lazy = LazyValue::semantic_thunk(&second_values, "second runtime", move |_| {
         Ok(second_unit.duplicate_for_test(&second_thunk_values))
@@ -451,7 +451,7 @@ fn access_and_annotation_construction_do_not_demand_inputs() {
     let demanded = Arc::new(AtomicBool::new(false));
     let demanded_by_thunk = demanded.clone();
     let core_values = assembler.core_values();
-    let unit = core_values.unit();
+    let unit = core_values.with_runtime_value_access(|access| access.unit());
     let thunk_values = core_values.clone();
     let lazy = public_semantic_thunk(&core_values, "no-demand facade fixture", move |_| {
         demanded_by_thunk.store(true, Ordering::SeqCst);
@@ -2325,7 +2325,9 @@ fn evaluation_context_retains_runtime_cache_and_profile_without_a_cycle() {
         .build()
         .expect("assembler should seal the runtime profile");
     let context = assembler.eval_context();
-    let unit = context.values().unit();
+    let unit = context
+        .values()
+        .with_runtime_value_access(|access| access.unit());
 
     drop(assembler);
     drop(runtime);
@@ -2333,9 +2335,9 @@ fn evaluation_context_retains_runtime_cache_and_profile_without_a_cycle() {
     assert!(resources.upgrade().is_some());
     assert!(profile.upgrade().is_some());
     assert!(value_domain.upgrade().is_some());
-    context
-        .values()
-        .assert_same_representation_for_test(&context.values().unit(), &unit);
+    context.values().with_runtime_value_access(|access| {
+        access.assert_same_representation_for_test(&access.unit(), &unit);
+    });
 
     drop(context);
     assert!(resources.upgrade().is_none());

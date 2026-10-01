@@ -3428,7 +3428,10 @@ mod tests {
                 &core.initial_metadata.clone_core_for_test(),
             );
         });
-        factory.assert_same_representation_for_test(&scoped.unit(), &factory.unit());
+        let scoped_unit = scoped.with_runtime_value_access(|access| access.unit());
+        factory.with_runtime_value_access(|access| {
+            access.assert_same_representation_for_test(&scoped_unit, &access.unit());
+        });
 
         let live = factory
             .collect_managed_for_test()
@@ -3708,7 +3711,8 @@ mod tests {
 
         let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             target.cached(|| RootedCachedProbe {
-                root: RuntimeValueRoot::new(&other, other.unit()),
+                root: other
+                    .with_runtime_value_access(|access| access.root_runtime_value(access.unit())),
                 _dropped: DropSignal(dropped.clone()),
             })
         }));
@@ -3774,10 +3778,9 @@ mod tests {
         let values = values();
         let dropped = Arc::new(AtomicBool::new(false));
         let signal = DropSignal(dropped.clone());
-        let thunk_values = values.clone();
-        let lazy = LazyValue::semantic_thunk(&values, "source release", move |_| {
+        let lazy = LazyValue::semantic_thunk(&values, "source release", move |evaluator| {
             let _keep_signal_captured = &signal;
-            Ok(thunk_values.unit())
+            Ok(evaluator.with_value_access(|access| access.values().unit()))
         });
         let observer = lazy.duplicate_for_test(&values);
         let active_snapshot = lazy
@@ -4301,7 +4304,7 @@ mod tests {
             "initial metadata carriers should share one allocation"
         );
         values.with_runtime_value_access(|access| {
-            assert!(!access.same_representation(&first, &values.unit()));
+            assert!(!access.same_representation(&first, &access.unit()));
             let associated = first
                 .associated_metadata(&access)
                 .expect("a metadata carrier should expose reflection metadata");

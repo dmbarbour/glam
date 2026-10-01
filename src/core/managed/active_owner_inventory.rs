@@ -518,7 +518,7 @@ pub(super) fn closed_compatibility_variants(
     let opaque_probe = Arc::new(ExternalDropProbe(Arc::clone(active_drops)));
 
     vec![
-        values.unit(),
+        values.with_runtime_value_access(|access| access.unit()),
         Value::Number(1.into()),
         Value::Binary(Bytes::from_static(b"closed")),
         Value::List(List::from_values(vec![Value::Number(2.into())])),
@@ -1080,7 +1080,7 @@ fn production_reflection_gate_target_backedge_reclaims_without_an_external_root(
         let reflected = values.with_runtime_value_access(|access| {
             Value::Lazy(LazyValue::from_reflection_gate_in(
                 &access,
-                values.unit(),
+                access.unit(),
                 Value::Promised(promise.duplicate_in(&access)),
             ))
         });

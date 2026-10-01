@@ -224,7 +224,7 @@ fn diagnostic_consumer_activation_hides_route_root_intermediate_state() {
             _context: &crate::evaluation::EvaluationPollContext,
             _step_budget: &mut crate::evaluation::EvaluationStepBudget,
         ) -> EvaluationMachinePoll {
-            EvaluationMachinePoll::Complete(_context.root_value(crate::core::keys::unit_value()))
+            EvaluationMachinePoll::Complete(_context.root_unit())
         }
     }
 

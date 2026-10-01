@@ -90,7 +90,7 @@ impl EvaluationTaskMachine for PausedHostWorker {
         self.release
             .recv()
             .expect("host-worker release should remain live");
-        EvaluationMachinePoll::Complete(poll_context.root_value(crate::core::keys::unit_value()))
+        EvaluationMachinePoll::Complete(poll_context.root_unit())
     }
 }
 
@@ -110,7 +110,7 @@ impl EvaluationTaskMachine for PausedManagedWorker {
                 .recv()
                 .expect("worker release should remain live");
         });
-        EvaluationMachinePoll::Complete(poll_context.root_value(crate::core::keys::unit_value()))
+        EvaluationMachinePoll::Complete(poll_context.root_unit())
     }
 }
 

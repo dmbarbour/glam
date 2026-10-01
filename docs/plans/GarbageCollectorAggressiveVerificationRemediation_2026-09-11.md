@@ -2664,6 +2664,27 @@ inventory relatch:
     diagnostic, builder-checkpoint, task-status, and cross-session observer
     fixtures pass. D.2h.3b.2b owns the remaining high-volume unit projection
     and its helper surfaces.
+  - **D.2h.3b.2b — unit fixture projection migration.** Removing the final
+    bridge exposes roughly 180 call sites, so close it through independently
+    compiling fixture families rather than one mechanical rewrite:
+    1. **Core/API fixture family complete 2026-10-01:** core, core-net,
+       API-machine, and ownership-ledger fixtures construct unit under explicit
+       access; poll machines which only publish unit use a rooted-unit helper
+       rather than materializing a raw value first. Net rewrite fixtures build
+       unit before taking synchronized net access, and evaluator callbacks use
+       their step-qualified access. All targets compile; focused canonical
+       cache, cross-runtime cache rejection, lazy-source release, profiled net
+       rewrite, and diagnostic-consumer activation witnesses pass.
+    2. migrate evaluator net/builder/value fixtures;
+    3. migrate coordinator, session, and cross-layer evaluation fixtures;
+    4. migrate reflection and syntax fixtures, then delete both
+       `CoreValueFactory::unit` and `keys::unit_value`.
+    At each boundary, reuse an already-open `RuntimeValueAccess` where one is
+    present. Where WHNF, scheduling, waiting, or another callback-capable
+    operation is involved, finish that work before opening a short unit
+    construction/comparison region; the D.2h.3b.2a observer failure is the
+    regression witness for this rule. Each family must compile and pass focused
+    tests before the next bridge user is migrated.
   - **D.2h.3c — failure and host-call traversal split complete 2026-09-30.**
     Managed failure emissions, contexts, and host-call captures now reach the
     collector only through its `Visitor`; the raw `visit_direct_values` and
