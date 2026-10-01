@@ -903,6 +903,28 @@ impl LazyValue {
     }
 
     #[cfg(test)]
+    pub(crate) fn host_call_in(
+        access: &RuntimeValueAccess<'_>,
+        label: impl Into<Arc<str>>,
+        producer: impl Fn(HostCallRootBundle) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self::external_host_call_in(
+            access,
+            label,
+            HostCallRecord::external_without_semantic_values(
+                "host-call test fixture",
+                "test source",
+                "test-owned captures",
+            ),
+            [],
+            producer,
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn error(values: &CoreValueFactory, message: impl Into<Arc<str>>) -> Self {
         values.with_runtime_value_access(|access| Self::error_in(&access, message))
     }

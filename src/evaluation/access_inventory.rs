@@ -517,7 +517,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
             });
     assert_eq!(
         gateway_totals,
-        GatewayCounts::new(530, 14),
+        GatewayCounts::new(536, 14),
         "managed gateway occurrence totals drifted",
     );
     assert_eq!(
@@ -561,15 +561,18 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     }
     assert_eq!(
         actual.len(),
-        531,
+        537,
         "managed mutator-introduction count drifted"
     );
     // D.2h.4c.2 adds two test-only bounded accesses: one constructs
     // structured ownership-fixture failures, and one inspects the structured
     // killed-work diagnostic without relying on Rust Display policy.
+    // D.2h.4c.2b.2 adds six more bounded fixture accesses: five retain exact
+    // promise/lazy identities across terminal transitions, while one creates
+    // a host-call lazy and its public value root in the same access region.
     assert_eq!(
         admission_occurrence_fingerprint(&occurrences),
-        3_023_606_534_055_579_672,
+        2_429_477_782_891_172_767,
         "managed mutator-introduction source fingerprint drifted"
     );
 

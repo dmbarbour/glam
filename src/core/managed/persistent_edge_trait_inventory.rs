@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        868,
+        873,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -971,9 +971,13 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // values under access. That retires three production typed-edge
     // duplicates. Its promise-follower race fixture now constructs an already
     // rooted promise in one access, retiring one redundant test projection.
+    // D.2h.4c.2b.2 adds five test-only root operations that retain managed
+    // promise/lazy identities across deliberately forced terminal and
+    // collection transitions. They replace invalid raw-facade handoffs and
+    // do not change production edge ownership.
     assert_eq!(
         occurrence_fingerprint(actual),
-        6_846_411_980_049_058_029,
+        13_687_440_433_971_841_379,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -1020,7 +1024,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 148),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 670),
+            ((SourceScope::Test, EdgeSurface::Typed), 675),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"

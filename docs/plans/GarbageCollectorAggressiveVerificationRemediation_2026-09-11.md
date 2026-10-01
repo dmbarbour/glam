@@ -2893,9 +2893,28 @@ inventory relatch:
           recursive collection and exactly one later explicit pass. All 137
           aggressive `api::tests` pass, including the formerly hanging
           finalization witness, and all 121 source/inventory tests remain green.
-        - **D.2h.4c.2b.2 — evaluator/coordinator fixtures:** replace raw
+        - **D.2h.4c.2b.2 — evaluator/coordinator fixtures: complete
+          2026-10-01.** Replace raw
           inert-lazy and promise constructors with one-region rooted fixtures,
           then require the complete aggressive `evaluation::tests` family.
+
+          The common inert-lazy, semantic-lazy, and promise helpers now return
+          a registered managed or runtime root from the same access that
+          creates the cell. Fixtures that deliberately inspect a promise or
+          lazy after producer cancellation, session abandonment, settlement,
+          or client-result retirement retain that exact identity explicitly
+          until the observation is complete. Access-lazy followers construct
+          their argument and outer lazy beneath one public root, and the
+          patient host-call fixture constructs the host lazy and demand root
+          together. This also removes the trace of a stale raw host-call edge
+          that aggressive admission exposed before its worker was launched.
+          The self-referential promise fixture now distinguishes the semantic
+          invariant (the terminal wait is not retained, and the unrooted cycle
+          is reclaimed) from whether aggressive admission reclaims one of its
+          two slots before the explicit report. All 171 aggressive and all 170
+          ordinary `evaluation::tests` pass. The 121 source/inventory tests
+          pass after classifying six bounded test accesses, five test-only
+          root operations, and one test-only runtime-root publication.
         - **D.2h.4c.2b.3 — reflection fixtures:** apply the same rule to
           resumable control/reset/shift and owned-promise fixtures, then require
           the complete aggressive `reflection::machine::tests` family.

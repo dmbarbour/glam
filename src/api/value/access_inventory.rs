@@ -821,10 +821,12 @@ fn every_runtime_root_publication_has_an_exact_disposition() {
             eprintln!("{occurrence}");
         }
     }
-    assert_eq!(actual.len(), 266, "runtime-root publication count drifted");
+    // D.2h.4c.2b.2 adds one test-only publication that constructs a host-call
+    // lazy and its public value root within the same bounded access region.
+    assert_eq!(actual.len(), 267, "runtime-root publication count drifted");
     assert_eq!(
         root_publication_fingerprint(&occurrences),
-        6_797_765_277_293_480_222,
+        8_082_431_218_437_841_319,
         "runtime-root publication source fingerprint drifted"
     );
 

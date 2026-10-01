@@ -441,7 +441,7 @@ fn client_demand_retirement_publishes_after_runtime_unlock() {
     abandoned.abandon();
     assert_client_demand_published_after_unlock(&abandoned_probe);
 
-    let promise = PromisedValue::new(context.values(), "stably blocked client input");
+    let (promise, _promise_root) = rooted_promise(context.values(), "stably blocked client input");
     let mut blocked = context
         .demand_whnf(RuntimeValueRoot::new(
             context.values(),
@@ -465,7 +465,7 @@ fn client_demand_retirement_publishes_after_runtime_unlock() {
     );
     assert_client_demand_published_after_unlock(&blocked_probe);
 
-    let promise = PromisedValue::new(context.values(), "killable client input");
+    let (promise, _promise_root) = rooted_promise(context.values(), "killable client input");
     let killed = context
         .demand_whnf(RuntimeValueRoot::new(
             context.values(),
@@ -552,7 +552,7 @@ fn client_demand_exactly_restarts_after_promise_assignment() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
-    let promise = PromisedValue::new(context.values(), "client input");
+    let (promise, _promise_root) = rooted_promise(context.values(), "client input");
     let root = RuntimeValueRoot::new(
         context.values(),
         Value::Promised(promise.duplicate_for_test(context.values())),
@@ -844,11 +844,11 @@ fn blocked_client_follows_a_blocked_chain_to_dormant_causal_progress() {
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
 
-    let tail = inert_lazy_for(context.values(), "dormant dependency tail");
+    let (tail, _tail_root) = rooted_inert_lazy(context.values(), "dormant dependency tail");
     let tail_wait = context
         .lazy_task(&tail, |_, _| Box::new(Complete))
         .expect("tail producer should register");
-    let head = inert_lazy_for(context.values(), "blocked dependency head");
+    let (head, _head_root) = rooted_inert_lazy(context.values(), "blocked dependency head");
     let dependency = Arc::new(OnceLock::new());
     dependency
         .set(tail_wait.clone())
@@ -896,7 +896,7 @@ fn blocked_client_follows_a_blocked_chain_to_dormant_causal_progress() {
 fn client_demand_observes_one_canonical_pure_lazy_cycle_failure() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
-    let lazy = inert_lazy_for(context.values(), "client pure lazy cycle");
+    let (lazy, _lazy_root) = rooted_inert_lazy(context.values(), "client pure lazy cycle");
     let dependency = Arc::new(OnceLock::new());
     let wait = register_lazy_await(&context, &lazy, dependency.clone());
     dependency
@@ -929,8 +929,8 @@ fn client_demand_observes_one_canonical_pure_lazy_cycle_failure() {
 fn client_demand_preserves_a_promise_inclusive_retryable_cycle() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
-    let lazy = inert_lazy_for(context.values(), "client retryable lazy");
-    let promise = PromisedValue::new(context.values(), "client retryable promise");
+    let (lazy, _lazy_root) = rooted_inert_lazy(context.values(), "client retryable lazy");
+    let (promise, _promise_root) = rooted_promise(context.values(), "client retryable promise");
     let lazy_dependency = Arc::new(OnceLock::new());
     let promise_dependency = Arc::new(OnceLock::new());
     let lazy_wait = register_lazy_await(&context, &lazy, lazy_dependency.clone());
@@ -1011,7 +1011,7 @@ fn abandoning_one_client_demand_preserves_another_exact_consumer() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
-    let promise = PromisedValue::new(context.values(), "shared client input");
+    let (promise, _promise_root) = rooted_promise(context.values(), "shared client input");
     let root = RuntimeValueRoot::new(
         context.values(),
         Value::Promised(promise.duplicate_for_test(context.values())),
@@ -1050,8 +1050,8 @@ fn client_demand_can_follow_a_lazy_producer_owned_by_another_session() {
     let owner = fixture.context();
     let observer = fixture.context();
     let coordinator = owner.coordinator().expect("coordinator should be live");
-    let promise = PromisedValue::new(owner.values(), "cross-session lazy input");
-    let lazy = LazyValue::semantic_thunk(owner.values(), "cross-session client lazy", {
+    let (promise, _promise_root) = rooted_promise(owner.values(), "cross-session lazy input");
+    let (lazy, root) = rooted_semantic_lazy_value(owner.values(), "cross-session client lazy", {
         let promise = promise.duplicate_for_test(owner.values());
         let values = owner.values().clone();
         move |context| {
@@ -1060,10 +1060,7 @@ fn client_demand_can_follow_a_lazy_producer_owned_by_another_session() {
                 .evaluate_compatibility_whnf(&Value::Promised(promise.duplicate_for_test(&values)))
         }
     });
-    let root = RuntimeValueRoot::new(
-        owner.values(),
-        Value::Lazy(lazy.duplicate_for_test(owner.values())),
-    );
+    let retained_lazy_root = root.clone();
     let owner_demand = owner
         .demand_whnf(root.clone())
         .expect("owner demand should be admitted");
@@ -1107,6 +1104,7 @@ fn client_demand_can_follow_a_lazy_producer_owned_by_another_session() {
         lazy.cached(owner.values())
             .is_some_and(|result| result.is_ok())
     );
+    drop(retained_lazy_root);
 }
 
 #[test]
@@ -1197,7 +1195,7 @@ fn client_failure_root_survives_work_and_owner_session_retirement() {
     let failure = Arc::new(context.values().with_runtime_value_access(|access| {
         EvaluationFailure::emission_in(&access, emission).with_context_in(&access, frame)
     }));
-    let promise = PromisedValue::new(context.values(), "failed client demand");
+    let (promise, _promise_root) = rooted_promise(context.values(), "failed client demand");
     let handle = context
         .demand_whnf(RuntimeValueRoot::new(
             context.values(),
@@ -1244,9 +1242,9 @@ fn client_failure_root_survives_work_and_owner_session_retirement() {
 #[test]
 fn client_demand_owner_close_and_forced_kill_answer_once() {
     let fixture = SameRuntimeFixture::new();
-    let (closed_handle, closed_promise) = {
+    let (closed_handle, closed_promise, _closed_promise_root) = {
         let owner = fixture.context();
-        let promise = PromisedValue::new(owner.values(), "closing client input");
+        let (promise, promise_root) = rooted_promise(owner.values(), "closing client input");
         let handle = owner
             .demand_whnf(RuntimeValueRoot::new(
                 owner.values(),
@@ -1256,7 +1254,7 @@ fn client_demand_owner_close_and_forced_kill_answer_once() {
         let coordinator = owner.coordinator().expect("coordinator should be live");
         assert!(poll_one_runtime_work(&coordinator));
         assert_eq!(promise.exact_subscription_count(owner.values()), 1);
-        (handle, promise)
+        (handle, promise, promise_root)
     };
     let observer = fixture.context();
     assert_eq!(
@@ -1267,7 +1265,7 @@ fn client_demand_owner_close_and_forced_kill_answer_once() {
 
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
-    let promise = PromisedValue::new(context.values(), "killed client input");
+    let (promise, _promise_root) = rooted_promise(context.values(), "killed client input");
     let handle = context
         .demand_whnf(RuntimeValueRoot::new(
             context.values(),
@@ -1426,7 +1424,7 @@ fn retained_client_handle_waits_across_external_disturbance_without_a_lost_wake(
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
-    let promise = PromisedValue::new(context.values(), "parked client input");
+    let (promise, _promise_root) = rooted_promise(context.values(), "parked client input");
     let handle = context
         .demand_whnf(RuntimeValueRoot::new(
             context.values(),
@@ -2156,7 +2154,7 @@ fn running_deferred_machine_is_coordinator_owned_after_owner_drop() {
     let owner = EvaluationSession::shared(&coordinator);
     let owner_weak = Arc::downgrade(&owner);
     let context = EvalContext::new(&owner);
-    let lazy = inert_lazy_for(
+    let (lazy, _lazy_root) = rooted_inert_lazy(
         context.values(),
         "running coordinator-owned deferred machine",
     );
@@ -2624,14 +2622,21 @@ impl EvaluationTaskMachine for AwaitCell {
     }
 }
 
-fn inert_lazy(label: &'static str) -> LazyValue {
-    inert_lazy_for(&crate::core::test_value_factory(), label)
+fn rooted_inert_lazy(
+    values: &CoreValueFactory,
+    label: &'static str,
+) -> (LazyValue, ManagedLazyRoot) {
+    values.with_runtime_value_access(|access| {
+        let lazy = LazyValue::semantic_thunk_in(&access, label, |_| {
+            panic!("scheduler cycle fixtures must use their installed test machine")
+        });
+        let root = lazy.root_in(&access);
+        (lazy, root)
+    })
 }
 
-fn inert_lazy_for(values: &CoreValueFactory, label: &'static str) -> LazyValue {
-    LazyValue::semantic_thunk(values, label, |_| {
-        panic!("scheduler cycle fixtures must use their installed test machine")
-    })
+fn rooted_inert_test_lazy(label: &'static str) -> (LazyValue, ManagedLazyRoot) {
+    rooted_inert_lazy(&crate::core::test_value_factory(), label)
 }
 
 fn rooted_inert_lazy_value(
@@ -2668,6 +2673,23 @@ fn rooted_promise_value(
         let value = access.root_runtime_value(Value::Promised(promise.duplicate_in(&access)));
         (promise, promise_root, value)
     })
+}
+
+fn rooted_promise(
+    values: &CoreValueFactory,
+    label: &'static str,
+) -> (PromisedValue, ManagedPromiseRoot) {
+    values.with_runtime_value_access(|access| {
+        let root = access
+            .construct_rooted_managed_promise(label)
+            .expect("the rooted promise fixture should fit one managed run");
+        let promise = PromisedValue::from_root(&root, &access);
+        (promise, root)
+    })
+}
+
+fn root_promise(values: &CoreValueFactory, promise: &PromisedValue) -> ManagedPromiseRoot {
+    values.with_runtime_value_access(|access| promise.root_in(&access))
 }
 
 fn root_promise_value(values: &CoreValueFactory, promise: &ManagedPromiseRoot) -> RuntimeValueRoot {
@@ -3626,7 +3648,7 @@ fn pump_follows_a_lazy_dependency_to_its_producer() {
 fn causal_child_runs_before_unrelated_same_session_task_without_exact_wait() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
-    let promise = PromisedValue::new(context.values(), "parent before child wait");
+    let (promise, _promise_root) = rooted_promise(context.values(), "parent before child wait");
     let promise_root = promise.root(context.values());
     let parent = context
         .schedule_task(move |task_context| {
@@ -3709,7 +3731,8 @@ fn claimed_cross_session_child_keeps_parent_wait_busy_until_release() {
     let fixture = SameRuntimeFixture::new();
     let parent_context = fixture.context();
     let child_context = fixture.context();
-    let promise = PromisedValue::new(parent_context.values(), "parent awaiting child side work");
+    let (promise, _promise_root) =
+        rooted_promise(parent_context.values(), "parent awaiting child side work");
     let promise_root = promise.root(parent_context.values());
     let parent = parent_context
         .schedule_task(move |task_context| {
@@ -3862,7 +3885,8 @@ fn causal_pump_reaches_grandchild_of_blocked_child() {
     let parent_context = fixture.context();
     let child_context = fixture.context();
     let grandchild_context = fixture.context();
-    let parent_promise = PromisedValue::new(parent_context.values(), "parent causal tree wait");
+    let (parent_promise, _parent_promise_root) =
+        rooted_promise(parent_context.values(), "parent causal tree wait");
     let parent_root = parent_promise.root(parent_context.values());
     let parent = parent_context
         .schedule_task(move |task_context| {
@@ -3872,7 +3896,8 @@ fn causal_pump_reaches_grandchild_of_blocked_child() {
             }))
         })
         .expect("parent should schedule");
-    let child_promise = PromisedValue::new(child_context.values(), "child causal tree wait");
+    let (child_promise, _child_promise_root) =
+        rooted_promise(child_context.values(), "child causal tree wait");
     let child_root = child_promise.root(child_context.values());
     let child = child_context
         .prepare_machine(None, move |task_context| {
@@ -3937,7 +3962,8 @@ fn causal_pump_keeps_grandchild_reachable_after_child_retires() {
     let parent_context = fixture.context();
     let child_context = fixture.context();
     let grandchild_context = fixture.context();
-    let promise = PromisedValue::new(parent_context.values(), "parent after child retirement");
+    let (promise, _promise_root) =
+        rooted_promise(parent_context.values(), "parent after child retirement");
     let promise_root = promise.root(parent_context.values());
     let parent = parent_context
         .schedule_task(move |task_context| {
@@ -4056,7 +4082,7 @@ fn published_child_wait_claims_exact_cross_session_child_before_unrelated_work()
 #[test]
 fn completed_deferred_tasks_release_their_machines() {
     let context = EvalContext::standalone();
-    let lazy = inert_lazy("terminal machine");
+    let (lazy, _lazy_root) = rooted_inert_test_lazy("terminal machine");
     let dropped = Arc::new(AtomicBool::new(false));
     let wait = context
         .lazy_task(&lazy, {
@@ -4096,7 +4122,7 @@ fn completed_deferred_tasks_release_their_machines() {
 #[test]
 fn redundant_deferred_registration_observes_the_canonical_lazy_cache() {
     let context = EvalContext::standalone();
-    let lazy = inert_lazy("redundant registration");
+    let (lazy, _lazy_root) = rooted_inert_test_lazy("redundant registration");
     let failure = evaluation_failure("canonical lazy failure");
     let (build_started_sender, build_started_receiver) = mpsc::channel();
     let (release_build_sender, release_build_receiver) = mpsc::channel();
@@ -4404,20 +4430,21 @@ fn scheduled_nested_dependency_runs_without_mutator() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let nested_had_no_mutator = Arc::new(AtomicBool::new(false));
-    let nested = LazyValue::semantic_thunk(context.values(), "nested scheduled dependency", {
-        let values = context.values().clone();
-        let nested_had_no_mutator = nested_had_no_mutator.clone();
-        move |evaluator| {
-            nested_had_no_mutator
-                .store(values.collect_managed_for_test().is_ok(), Ordering::Release);
-            Ok(evaluator.with_value_access(|access| access.values().unit()))
-        }
-    });
+    let (nested, _nested_root) =
+        rooted_semantic_lazy_value(context.values(), "nested scheduled dependency", {
+            let values = context.values().clone();
+            let nested_had_no_mutator = nested_had_no_mutator.clone();
+            move |evaluator| {
+                nested_had_no_mutator
+                    .store(values.collect_managed_for_test().is_ok(), Ordering::Release);
+                Ok(evaluator.with_value_access(|access| access.values().unit()))
+            }
+        });
 
     let nested_for_outer = nested.duplicate_for_test(context.values());
     let nested_values = context.values().clone();
-    let outer =
-        LazyValue::semantic_thunk(context.values(), "outer scheduled dependency", move |ctx| {
+    let (outer, _outer_root) =
+        rooted_semantic_lazy_value(context.values(), "outer scheduled dependency", move |ctx| {
             ctx.context().evaluate_compatibility_whnf(&Value::Lazy(
                 nested_for_outer.duplicate_for_test(&nested_values),
             ))
@@ -4456,10 +4483,8 @@ fn patient_claimed_task_wait_releases_mutator() {
     let (release_sender, release_receiver) = mpsc::channel();
     let release_receiver = Mutex::new(release_receiver);
     let producer_values = context.values().clone();
-    let lazy = LazyValue::host_call(
-        context.values(),
-        "patient worker-owned dependency",
-        move |_| {
+    let (_lazy, lazy_root) = context.values().with_runtime_value_access(|access| {
+        let lazy = LazyValue::host_call_in(&access, "patient worker-owned dependency", move |_| {
             started_sender
                 .send(())
                 .expect("patient start receiver should remain open");
@@ -4470,11 +4495,13 @@ fn patient_claimed_task_wait_releases_mutator() {
                 .expect("test should release the patient producer");
             Ok(producer_values
                 .with_runtime_value_access(|access| access.root_runtime_value(access.unit())))
-        },
-    );
+        });
+        let root = access.root_runtime_value(Value::Lazy(lazy.duplicate_in(&access)));
+        (lazy, root)
+    });
     let coordinator = context.coordinator().expect("coordinator should be live");
     let mut handle = context
-        .demand_whnf(RuntimeValueRoot::new(context.values(), Value::Lazy(lazy)))
+        .demand_whnf(lazy_root)
         .expect("patient demand should be admitted");
     let mut blocked = None;
     for _ in 0..8 {
@@ -4595,7 +4622,7 @@ fn patient_deferred_demand_retries_when_disturbance_races_no_progress() {
         .coordinator()
         .expect("patient wait should retain its coordinator");
     let observed = context.current_observation_epoch();
-    let lazy = inert_lazy_for(context.values(), "observed patient dependency");
+    let (lazy, _lazy_root) = rooted_inert_lazy(context.values(), "observed patient dependency");
     context
         .lazy_task(&lazy, {
             let context = context.clone();
@@ -4798,9 +4825,7 @@ fn terminal_wait_tokens_outlive_their_owner_session() {
     };
     let deferred_wait = {
         let owner = fixture.context();
-        let lazy = LazyValue::semantic_thunk(owner.values(), "owner lifetime", |_| {
-            panic!("the terminal wait fixture supplies its own task machine")
-        });
+        let (lazy, _lazy_root) = rooted_inert_lazy(owner.values(), "owner lifetime");
         let wait = owner
             .lazy_task(&lazy, |_, _| Box::new(Complete))
             .expect("deferred task should schedule");
@@ -4948,10 +4973,10 @@ fn owner_session_drop_exactly_wakes_a_cross_session_task_waiter() {
 fn abandoned_lazy_claim_can_be_reclaimed_without_poisoning_the_lazy() {
     let fixture = SameRuntimeFixture::new();
     let forced = Arc::new(AtomicBool::new(false));
-    let (lazy, abandoned_wait, expected) = {
+    let (lazy, _lazy_root, abandoned_wait, expected) = {
         let owner = fixture.context();
         let expected = unit(&owner);
-        let lazy = LazyValue::semantic_thunk(owner.values(), "reclaimable lazy", {
+        let (lazy, lazy_root) = rooted_semantic_lazy_value(owner.values(), "reclaimable lazy", {
             let forced = forced.clone();
             let values = owner.values().clone();
             let expected = expected.duplicate_for_test(&values);
@@ -4963,7 +4988,7 @@ fn abandoned_lazy_claim_can_be_reclaimed_without_poisoning_the_lazy() {
         let wait = owner
             .lazy_task(&lazy, |_, _| Box::new(AlwaysBlocked))
             .expect("first lazy claim should register");
-        (lazy, wait, expected)
+        (lazy, lazy_root, wait, expected)
     };
     let observer = fixture.context();
 
@@ -5379,7 +5404,7 @@ fn client_and_background_reflection_share_lazy_progress_after_first_session_clos
 #[test]
 fn owner_session_drop_fails_task_promises_but_not_host_promises() {
     let fixture = SameRuntimeFixture::new();
-    let (task_promise, task_wait) = {
+    let (task_promise, task_wait, _task_promise_root) = {
         let owner = fixture.context();
         let (promise, _owner_task, _owner_context) = owner
             .task_owned_promise(Arc::from("abandoned task promise"))
@@ -5392,7 +5417,8 @@ fn owner_session_drop_fails_task_promises_but_not_host_promises() {
             wait.subscribe_test_work(),
             CompletionSubscriptionOutcome::Pending
         );
-        (promise, wait)
+        let promise_root = root_promise(owner.values(), &promise);
+        (promise, wait, promise_root)
     };
     let observer = fixture.context();
     let error = task_promise
@@ -5406,9 +5432,9 @@ fn owner_session_drop_fails_task_promises_but_not_host_promises() {
         EvaluationWaitPoll::Failed(wait_error) if Arc::ptr_eq(&error, wait_error.as_failure())
     ));
 
-    let host_promise = {
+    let (host_promise, _host_promise_root) = {
         let transient_observer = fixture.context();
-        PromisedValue::new(transient_observer.values(), "host promise")
+        rooted_promise(transient_observer.values(), "host promise")
     };
     assert!(
         host_promise.assignment(observer.values()).is_none(),
@@ -5482,6 +5508,7 @@ fn settled_task_promise_has_no_rooted_wait_backedge() {
     let (promise, task, owner_context) = context
         .task_owned_promise(Arc::from("self-referential task promise"))
         .expect("task-owned promise should register");
+    let promise_root = root_promise(context.values(), &promise);
 
     set_promise(
         &context,
@@ -5497,12 +5524,16 @@ fn settled_task_promise_has_no_rooted_wait_backedge() {
             .is_none(),
         "the managed promise must not keep its terminal wait state alive"
     );
+    drop(promise_root);
     let reclaimed = context
         .values()
         .collect_managed_for_test()
         .expect("the settled promise must not retain itself through its producer wait");
     assert_eq!(reclaimed.root_entries(), baseline.root_entries());
-    assert_eq!(reclaimed.finalized_slots(), 2);
+    assert!(
+        reclaimed.finalized_slots() >= 1,
+        "the unrooted recursive promise allocation must be reclaimed"
+    );
 
     assert_eq!(task.cancel(), EvaluationTaskCancellation::Requested);
     drop(owner_context);
@@ -5512,18 +5543,20 @@ fn settled_task_promise_has_no_rooted_wait_backedge() {
 fn owner_session_drop_exactly_wakes_a_task_promise_follower() {
     let fixture = SameRuntimeFixture::new();
     let observer = fixture.context();
-    let (promise, lazy) = {
+    let (promise, lazy, _lazy_root) = {
         let owner = fixture.context();
         let (promise, _owner_task, _owner_context) = owner
             .task_owned_promise(Arc::from("abandoned exact promise"))
             .expect("task-owned promise should register");
-        let lazy = LazyValue::from_access(
-            observer.values(),
-            Arc::from([]),
-            Arc::from([Value::Promised(
-                promise.duplicate_for_test(observer.values()),
-            )]),
-        );
+        let (lazy, lazy_root) = observer.values().with_runtime_value_access(|access| {
+            let lazy = LazyValue::from_access_in(
+                &access,
+                Arc::from([]),
+                Arc::from([Value::Promised(promise.duplicate_in(&access))]),
+            );
+            let root = access.root_runtime_value(Value::Lazy(lazy.duplicate_in(&access)));
+            (lazy, root)
+        });
         let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &observer,
             &Value::Lazy(lazy.duplicate_for_test(observer.values())),
@@ -5531,7 +5564,7 @@ fn owner_session_drop_exactly_wakes_a_task_promise_follower() {
         .expect_err_without_debug("the unresolved task promise should block its follower");
         assert!(blocked.blocked_on().is_some());
         assert_eq!(promise.exact_subscription_count(observer.values()), 1);
-        (promise, lazy)
+        (promise, lazy, lazy_root)
     };
 
     assert_eq!(promise.exact_subscription_count(observer.values()), 0);
@@ -5556,13 +5589,15 @@ fn task_cancellation_exactly_wakes_its_promise_follower() {
     let (promise, owner_task, _owner_context) = owner
         .task_owned_promise(Arc::from("cancelled exact promise"))
         .expect("task-owned promise should register");
-    let lazy = LazyValue::from_access(
-        observer.values(),
-        Arc::from([]),
-        Arc::from([Value::Promised(
-            promise.duplicate_for_test(observer.values()),
-        )]),
-    );
+    let (lazy, _lazy_root) = observer.values().with_runtime_value_access(|access| {
+        let lazy = LazyValue::from_access_in(
+            &access,
+            Arc::from([]),
+            Arc::from([Value::Promised(promise.duplicate_in(&access))]),
+        );
+        let root = access.root_runtime_value(Value::Lazy(lazy.duplicate_in(&access)));
+        (lazy, root)
+    });
 
     let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &observer,
@@ -5599,6 +5634,7 @@ fn task_terminal_surfaces_publish_under_one_mutation_admission() {
         .wait()
         .clone();
     let promise = promises.pop().expect("live promise should exist");
+    let _promise_root = root_promise(context.values(), &promise);
     let task_wait = owner_task.wait().clone();
     let observed = Arc::new(Mutex::new(None));
     let probe_result = observed.clone();
@@ -5741,9 +5777,9 @@ fn long_lived_session_retains_only_unacknowledged_terminal_failures() {
         assert_eq!(cancellation.cancel(), EvaluationTaskCancellation::Requested);
         cancelled.push(cancellation);
 
-        let lazy = LazyValue::semantic_thunk(
+        let (lazy, _lazy_root) = rooted_semantic_lazy_value(
             &crate::core::test_value_factory(),
-            format!("successful lazy {index}"),
+            "successful long-lived session lazy",
             |evaluator| Ok(evaluator.with_value_access(|access| access.values().unit())),
         );
         let actual = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
@@ -5755,9 +5791,9 @@ fn long_lived_session_retains_only_unacknowledged_terminal_failures() {
             access.assert_same_representation_for_test(&actual, &access.unit());
         });
 
-        let lazy = LazyValue::semantic_thunk(
+        let (lazy, _lazy_root) = rooted_semantic_lazy_value(
             &crate::core::test_value_factory(),
-            format!("failed lazy {index}"),
+            "failed long-lived session lazy",
             |_| Err(crate::core::EvaluationHalt::new("long-lived lazy failure")),
         );
         assert!(
@@ -5897,7 +5933,7 @@ fn concurrent_waiters_observe_terminal_publication() {
 #[test]
 fn a_lazy_task_that_waits_on_itself_is_poisoned_as_a_cycle() {
     let context = EvalContext::standalone();
-    let lazy = inert_lazy("self cycle");
+    let (lazy, _lazy_root) = rooted_inert_test_lazy("self cycle");
     let dependency = Arc::new(OnceLock::new());
     let wait = register_lazy_await(&context, &lazy, dependency.clone());
     dependency
@@ -5927,8 +5963,8 @@ fn a_lazy_task_that_waits_on_itself_is_poisoned_as_a_cycle() {
 #[test]
 fn concurrently_demanded_lazy_tasks_share_one_two_node_cycle_failure() {
     let context = EvalContext::standalone();
-    let left = inert_lazy("left");
-    let right = inert_lazy("right");
+    let (left, _left_root) = rooted_inert_test_lazy("left");
+    let (right, _right_root) = rooted_inert_test_lazy("right");
     let left_dependency = Arc::new(OnceLock::new());
     let right_dependency = Arc::new(OnceLock::new());
     let left_wait = register_lazy_await(&context, &left, left_dependency.clone());
@@ -6008,8 +6044,8 @@ fn two_sessions_share_and_retire_one_pure_lazy_cycle_failure() {
     let fixture = SameRuntimeFixture::new();
     let left_context = fixture.context();
     let right_context = fixture.context();
-    let left = inert_lazy_for(left_context.values(), "cross-session left");
-    let right = inert_lazy_for(right_context.values(), "cross-session right");
+    let (left, _left_root) = rooted_inert_lazy(left_context.values(), "cross-session left");
+    let (right, _right_root) = rooted_inert_lazy(right_context.values(), "cross-session right");
     let left_dependency = Arc::new(OnceLock::new());
     let right_dependency = Arc::new(OnceLock::new());
     let left_wait = register_lazy_await(&left_context, &left, left_dependency.clone());
@@ -6070,8 +6106,9 @@ fn a_cross_session_promise_lazy_cycle_remains_unpoisoned() {
     let fixture = SameRuntimeFixture::new();
     let lazy_context = fixture.context();
     let promise_context = fixture.context();
-    let lazy = inert_lazy_for(lazy_context.values(), "mixed cross-session lazy");
-    let promise = PromisedValue::new(lazy_context.values(), "mixed cross-session promise");
+    let (lazy, _lazy_root) = rooted_inert_lazy(lazy_context.values(), "mixed cross-session lazy");
+    let (promise, _promise_root) =
+        rooted_promise(lazy_context.values(), "mixed cross-session promise");
     let lazy_dependency = Arc::new(OnceLock::new());
     let promise_dependency = Arc::new(OnceLock::new());
     let lazy_wait = register_lazy_await(&lazy_context, &lazy, lazy_dependency.clone());
@@ -6108,10 +6145,10 @@ fn a_cross_session_promise_lazy_cycle_remains_unpoisoned() {
 #[test]
 fn lazy_cycles_are_canonical_and_exclude_upstream_dependents() {
     let context = EvalContext::standalone();
-    let upstream = inert_lazy("upstream");
-    let first = inert_lazy("first");
-    let second = inert_lazy("second");
-    let third = inert_lazy("third");
+    let (upstream, _upstream_root) = rooted_inert_test_lazy("upstream");
+    let (first, _first_root) = rooted_inert_test_lazy("first");
+    let (second, _second_root) = rooted_inert_test_lazy("second");
+    let (third, _third_root) = rooted_inert_test_lazy("third");
 
     let upstream_dependency = Arc::new(OnceLock::new());
     let first_dependency = Arc::new(OnceLock::new());
@@ -6155,7 +6192,7 @@ fn lazy_cycles_are_canonical_and_exclude_upstream_dependents() {
 #[test]
 fn a_mixed_lazy_reflection_cycle_remains_quiescent() {
     let context = isolated_standalone_context();
-    let lazy = inert_lazy_for(context.values(), "mixed lazy");
+    let (lazy, _lazy_root) = rooted_inert_lazy(context.values(), "mixed lazy");
     let lazy_wait_slot = Arc::new(OnceLock::new());
     let reflection = context
         .schedule_task({
@@ -6783,6 +6820,7 @@ fn running_cancellation_waits_for_release_then_wins_over_the_poll_result() {
     let promise = promise_receiver
         .recv()
         .expect("task construction should publish its owned promise");
+    let _promise_root = root_promise(context.values(), &promise);
     let promise_wait = promise
         .task(context.values())
         .expect("task-owned promise should retain producer provenance")
@@ -7425,7 +7463,7 @@ fn task_owned_promise_dependency_reports_its_cross_session_producer() {
 #[test]
 fn resolver_owned_promise_dependency_reports_no_synthetic_producer() {
     let context = isolated_standalone_context();
-    let promise = PromisedValue::new(context.values(), "reported resolver promise");
+    let (promise, _promise_root) = rooted_promise(context.values(), "reported resolver promise");
     let promise_root = promise.root(context.values());
     let follower = context
         .schedule_task(move |task_context| {
@@ -7535,7 +7573,7 @@ fn pending_cross_session_task_promise_does_not_spin_a_deferred_retry() {
     let observer = fixture.context();
     assert_ne!(owner.session_id(), observer.session_id());
 
-    let lazy = inert_lazy_for(observer.values(), "cross-session promise follower");
+    let (lazy, _lazy_root) = rooted_inert_lazy(observer.values(), "cross-session promise follower");
     let wait = observer
         .lazy_task(&lazy, move |task_context, _| {
             Box::new(Await {
@@ -8173,7 +8211,7 @@ fn forced_deadlock_settlement_preserves_exits_and_kills_other_participants() {
             }))
         })
         .expect("strict parent should schedule");
-    let promise = PromisedValue::new(context.values(), "killed client promise");
+    let (promise, _promise_root) = rooted_promise(context.values(), "killed client promise");
     let client = context
         .demand_whnf(RuntimeValueRoot::new(
             context.values(),
@@ -8283,11 +8321,12 @@ fn forced_kill_abandons_a_deferred_lazy_claim_without_poisoning_the_lazy() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let expected = unit(&context);
-    let lazy = LazyValue::semantic_thunk(context.values(), "reclaim after forced kill", {
-        let values = context.values().clone();
-        let expected = expected.duplicate_for_test(&values);
-        move |_| Ok(expected.duplicate_for_test(&values))
-    });
+    let (lazy, _lazy_root) =
+        rooted_semantic_lazy_value(context.values(), "reclaim after forced kill", {
+            let values = context.values().clone();
+            let expected = expected.duplicate_for_test(&values);
+            move |_| Ok(expected.duplicate_for_test(&values))
+        });
     let wait = context
         .lazy_task(&lazy, |_, _| Box::new(AlwaysBlocked))
         .expect("dormant deferred claim should register");
@@ -8381,6 +8420,7 @@ fn forced_kill_publishes_task_status_and_fails_owned_promises() {
         .expect("promise output was poisoned")
         .take()
         .expect("task construction should expose its promise");
+    let _promise_root = root_promise(context.values(), &promise);
     let statuses = Arc::new(RecordedStatuses::default());
     assert!(context.attach_task_status_publisher(&task, RecordedStatuses::publisher(&statuses),));
 
@@ -8501,6 +8541,7 @@ fn exit_settlement_fails_owned_promises_and_drops_reusable_machine_after_unlock(
         .expect("promise output was poisoned")
         .take()
         .expect("task construction should expose its promise");
+    let _promise_root = root_promise(context.values(), &promise);
 
     fixture.runtime.pump_until_stable();
     let crate::api::RuntimeReadiness::Ready(snapshot) = fixture.runtime.readiness() else {
@@ -8540,7 +8581,7 @@ fn parked_client_is_external_activity_while_task_deadlocks_remain_typed() {
             }))
         })
         .expect("strict joining parent should schedule");
-    let promise = PromisedValue::new(context.values(), "deadlocked client promise");
+    let (promise, _promise_root) = rooted_promise(context.values(), "deadlocked client promise");
     let client = context
         .demand_whnf(RuntimeValueRoot::new(
             context.values(),
@@ -8607,7 +8648,7 @@ fn dormant_and_reserved_work_are_reported_as_deadlock_anomalies() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
-    let lazy = inert_lazy_for(context.values(), "dormant readiness producer");
+    let (lazy, _lazy_root) = rooted_inert_lazy(context.values(), "dormant readiness producer");
     let deferred_wait = context
         .lazy_task(&lazy, |_, _| Box::new(Complete))
         .expect("dormant deferred work should register");
@@ -8659,10 +8700,8 @@ fn readiness_reports_runnable_and_unclaimed_spark_work_as_busy() {
 
     let coordinator = context.coordinator().expect("coordinator should be live");
     coordinator.executor_started(1);
-    context.spark(Value::Lazy(inert_lazy_for(
-        context.values(),
-        "readiness spark",
-    )));
+    let (_lazy, root) = rooted_inert_lazy_value(context.values(), "readiness spark");
+    context.spark_root(root);
     assert!(matches!(
         fixture.runtime.readiness(),
         crate::api::RuntimeReadiness::Busy
@@ -9351,10 +9390,9 @@ fn runtime_pump_does_not_abandon_a_worker_owned_spark() {
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
     coordinator.executor_started(1);
-    context.spark(Value::Lazy(inert_lazy_for(
-        context.values(),
-        "worker-owned runtime-pump spark",
-    )));
+    let (_lazy, root) =
+        rooted_inert_lazy_value(context.values(), "worker-owned runtime-pump spark");
+    context.spark_root(root);
     let claimed = claim_next_spark(&coordinator);
     assert_eq!(coordinator.spark_work_counts(), (0, 1, 0));
     assert!(matches!(
@@ -9561,11 +9599,11 @@ fn wait_completion_wakes_only_its_exact_spark_after_unrelated_task_progress() {
     };
     coordinator.requeue_unpolled_task(claimed);
     for wait in [wait_a.wait(), wait_b.wait()] {
-        context.spark(Value::Lazy(LazyValue::semantic_thunk(
-            context.values(),
-            "manually parked wait spark",
-            |_| panic!("the coordinator test parks this demand before evaluation"),
-        )));
+        let (_lazy, root) =
+            rooted_semantic_lazy_value(context.values(), "manually parked wait spark", |_| {
+                panic!("the coordinator test parks this demand before evaluation")
+            });
+        context.spark_root(root);
         let claimed = claim_next_spark(&coordinator);
         coordinator.release_spark(
             claimed,
@@ -9637,18 +9675,18 @@ fn closing_a_session_abandons_a_blocked_spark_and_releases_its_lazy_claim() {
     let (coordinator, _executor) = test_execution_resources(1).unwrap();
     let session = EvaluationSession::shared(&coordinator);
     let context = EvalContext::new(&session);
-    let promise = PromisedValue::new(context.values(), "blocked spark assignment");
+    let (promise, _promise_root) = rooted_promise(context.values(), "blocked spark assignment");
     let values = context.values().clone();
     let followed_promise = promise.duplicate_for_test(&values);
-    let lazy =
-        LazyValue::semantic_thunk(context.values(), "reusable spark claim", move |context| {
+    let (lazy, root) =
+        rooted_semantic_lazy_value(context.values(), "reusable spark claim", move |context| {
             context
                 .context()
                 .evaluate_compatibility_whnf(&Value::Promised(
                     followed_promise.duplicate_for_test(&values),
                 ))
         });
-    context.spark(Value::Lazy(lazy.duplicate_for_test(context.values())));
+    context.spark_root(root);
     wait_for_spark_work_counts(
         &coordinator,
         (0, 0, 1),
@@ -9704,7 +9742,7 @@ fn closing_a_session_keeps_worker_owned_spark_work_busy_until_release() {
     let session = EvaluationSession::shared(&coordinator);
     let context = EvalContext::new(&session);
     coordinator.executor_started(1);
-    let lazy = inert_lazy_for(context.values(), "worker-owned spark");
+    let (lazy, _lazy_root) = rooted_inert_lazy(context.values(), "worker-owned spark");
     context.spark(Value::Lazy(lazy));
     let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select_worker() else {
         panic!("the test worker should claim the spark before session closure")
@@ -9731,10 +9769,9 @@ fn executor_shutdown_explicitly_abandons_dependency_blocked_sparks() {
     let (coordinator, executor) = test_execution_resources(1).unwrap();
     let session = EvaluationSession::shared(&coordinator);
     let context = EvalContext::new(&session);
-    context.spark(Value::Promised(PromisedValue::new(
-        context.values(),
-        "executor shutdown spark",
-    )));
+    let (_promise, _promise_root, promise_value) =
+        rooted_promise_value(context.values(), "executor shutdown spark");
+    context.spark_root(promise_value);
     wait_for_spark_work_counts(
         &coordinator,
         (0, 0, 1),
@@ -9793,7 +9830,7 @@ fn all_poll_routes_use_scheduler_context() {
     assert!(context.poll_context_count() > client_before);
 
     coordinator.executor_started(1);
-    let promise = PromisedValue::new(context.values(), "poll route spark");
+    let (promise, _promise_root) = rooted_promise(context.values(), "poll route spark");
     set_promise(&context, &promise, unit(&context))
         .expect_without_debug("test promise should accept its assignment");
     let spark_before = context.poll_context_count();
@@ -9813,17 +9850,14 @@ fn workers_force_sparks_and_poll_ready_reflection_tasks() {
     let context = EvalContext::new(&session);
     let spark_before = context.poll_context_count();
     let (spark_sender, spark_receiver) = mpsc::channel();
-    let lazy = crate::core::LazyValue::semantic_thunk(
-        context.values(),
-        "worker spark",
-        move |evaluator| {
+    let (_lazy, root) =
+        rooted_semantic_lazy_value(context.values(), "worker spark", move |evaluator| {
             spark_sender
                 .send(())
                 .expect("spark receiver should remain open");
             Ok(evaluator.with_value_access(|access| access.values().unit()))
-        },
-    );
-    context.spark(Value::Lazy(lazy));
+        });
+    context.spark_root(root);
     spark_receiver
         .recv_timeout(Duration::from_secs(2))
         .expect("worker should force queued spark");
