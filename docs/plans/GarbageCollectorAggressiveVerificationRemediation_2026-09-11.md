@@ -1,6 +1,6 @@
 # Aggressive GC Verification Remediation Plan — 2026-09-11
 
-Status: GCI11R-002A-C, D.1a-D.2g, and D.2h.0-D.2h.4a complete; D.2h.4b-D.2h.5 active. This plan expands
+Status: GCI11R-002A-C, D.1a-D.2g, and D.2h.0-D.2h.4b complete; D.2h.4c-D.2h.5 active. This plan expands
 GCI11R-002 and Phase I11D.1. The private repository mode exists and is useful,
 but its complete workspace suite does not yet pass. Gate G3 remains closed.
 
@@ -2802,12 +2802,25 @@ inventory relatch:
     compiler-boundary, recursive-identity, callable-checkpoint, and resolved
     call-graph baselines were reconciled only after their focused closure tests
     passed.
-  - **D.2h.4b — production-shaped dynamic closure:** run the focused ordinary
-    and aggressive ownership/admission fixtures named by those inventories.
-    Force both relevant serial orders for every concurrency repair; a fixture
-    that passes only after repetition remains a failure. Changing only a test
-    constructor cannot close a production-shaped mismatch unless the fixture
-    itself violated the documented handoff contract.
+  - **D.2h.4b — production-shaped dynamic closure: complete 2026-10-01.** Run
+    the focused ordinary and aggressive ownership/admission fixtures named by
+    those inventories. Force both relevant serial orders for every concurrency
+    repair; a fixture that passes only after repetition remains a failure.
+    Changing only a test constructor cannot close a production-shaped mismatch
+    unless the fixture itself violated the documented handoff contract.
+
+    The same 20 named filters pass ordinarily and with
+    `aggressive-gc-verification`; the harness rejects a filter which selects
+    zero tests. The matrix covers the two source-macro layout witnesses, the
+    invalid-import handoff, canonical/cache winner and cross-runtime rejection,
+    lazy-source retirement, diagnostic-ingress retention and fallback racing,
+    forwarding and lazy-checkpoint retention, reflection/session-close and
+    task-promise publication orders, timed work-change ordering, contended and
+    stale callable checkpoints, host-call/net route loss, and source-owned
+    list-effect checkpoint admission. The concurrency witnesses force both
+    relevant serial orders with their existing barriers or explicit order
+    loops; none rely on repetition. No production or fixture repair was needed
+    at this checkpoint.
   - **D.2h.4c — workspace gate closure:** run formatting, all-target/all-feature
     clippy, the complete ordinary workspace suite, the interaction-net
     profiling script, and the complete aggressive workspace suite. Classify
