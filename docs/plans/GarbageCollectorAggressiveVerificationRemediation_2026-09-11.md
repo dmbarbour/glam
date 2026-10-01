@@ -1,6 +1,6 @@
 # Aggressive GC Verification Remediation Plan — 2026-09-11
 
-Status: GCI11R-002A-C, D.1a-D.2g, D.2h.0-D.2h.4b, and D.2h.4c.1-.2a complete; D.2h.4c.2b-D.2h.5 active. This plan expands
+Status: GCI11R-002A-C, D.1a-D.2g, D.2h.0-D.2h.4b, D.2h.4c.1-.2a, and D.2h.4c.2b.1 complete; D.2h.4c.2b.2-D.2h.5 active. This plan expands
 GCI11R-002 and Phase I11D.1. The private repository mode exists and is useful,
 but its complete workspace suite does not yet pass. Gate G3 remains closed.
 
@@ -2869,7 +2869,39 @@ inventory relatch:
         ignored, followed by every integration and executable fixture).
       - **D.2h.4c.2b — aggressive and profiling closure:** run the
         interaction-net profiling script and complete aggressive workspace
-        suite, then repeat formatting/clippy if either requires a repair.
+        suite, then repeat formatting/clippy if either requires a repair. The
+        profiling script passes. The first complete aggressive run exposed a
+        broad fixture-only family that the focused 4b matrix did not cover:
+        older helpers construct raw managed lazies/promises in one access and
+        root or inspect them only after entering another access. Aggressive
+        admission correctly collects that unrooted interval. Partition the
+        remaining migration so one failing shared test heap cannot obscure
+        independent ownership evidence:
+        - **D.2h.4c.2b.1 — public API fixtures: complete 2026-10-01.** Construct semantic thunks,
+          error lazies, and promise probes beneath their public/runtime roots;
+          require the complete aggressive `api::tests` family to pass.
+
+          Public semantic-thunk, binary-tail, path-error, output-journal, and
+          worker-claim fixtures now allocate directly beneath the public value
+          root. Runtime-local identity tests retain managed lazy roots instead
+          of carrying raw facades, and the resolver subscription probe performs
+          each observation inside the public promise's access rather than
+          retaining a raw core promise between regions. The finalization
+          coalescing fixture installs its pause probe only after all setup
+          entries, so aggressive admission cannot pause the setup thread before
+          its explicit collector exists; its epoch checks separately prove no
+          recursive collection and exactly one later explicit pass. All 137
+          aggressive `api::tests` pass, including the formerly hanging
+          finalization witness, and all 121 source/inventory tests remain green.
+        - **D.2h.4c.2b.2 — evaluator/coordinator fixtures:** replace raw
+          inert-lazy and promise constructors with one-region rooted fixtures,
+          then require the complete aggressive `evaluation::tests` family.
+        - **D.2h.4c.2b.3 — reflection fixtures:** apply the same rule to
+          resumable control/reset/shift and owned-promise fixtures, then require
+          the complete aggressive `reflection::machine::tests` family.
+        - **D.2h.4c.2b.4 — complete aggressive gate:** rerun the whole
+          workspace. Investigate the prior final blocked test independently;
+          do not accept the eleven-minute no-progress run as verification.
   - **D.2h.4d — closure reconciliation:** rerun the exact inventories after
     dynamic fixes, verify their accepted surfaces did not drift, and record
     the final gate evidence for D.2h.5.

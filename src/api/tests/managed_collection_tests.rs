@@ -683,13 +683,10 @@ fn external_request_during_finalization_is_coalesced() {
             },
         )
         .expect("requesting output endpoint should register");
-    let baseline = runtime
+    runtime
         .collect_managed_for_maintenance()
         .expect("baseline collection should complete");
 
-    let dead_shell = runtime.values().empty_dict();
-    drop(dead_shell);
-    let probe = runtime.install_finalizing_phase_probe_for_test();
     let (store, mut events) = input_transaction(&runtime);
     events
         .write(&output.writer(), runtime.values().unit())
@@ -699,6 +696,13 @@ fn external_request_during_finalization_is_coalesced() {
         StoreCommitResult::Committed
     );
     drop((store, events));
+    let dead_shell = runtime.values().empty_dict();
+    drop(dead_shell);
+    let epoch_before = runtime
+        .values()
+        .core()
+        .completed_collection_epoch_for_test();
+    let probe = runtime.install_finalizing_phase_probe_for_test();
 
     let collector_runtime = runtime.clone();
     let collector = std::thread::spawn(move || {
@@ -738,7 +742,7 @@ fn external_request_during_finalization_is_coalesced() {
 
     probe.release();
     let completed = collector.join().expect("collector thread should not panic");
-    assert_eq!(completed.epoch(), baseline.epoch() + 1);
+    assert_eq!(completed.epoch(), epoch_before + 1);
     assert_eq!(completed.finalized_slots(), 1);
     assert!(
         !runtime
@@ -748,15 +752,27 @@ fn external_request_during_finalization_is_coalesced() {
             .collection_requested(),
         "successful completion should coalesce a request from its Finalizing window"
     );
+    assert_eq!(
+        runtime
+            .values()
+            .core()
+            .completed_collection_epoch_for_test(),
+        completed.epoch(),
+        "the Finalizing request must not recurse before another managed entry"
+    );
 
     let surviving_entry = runtime.values().empty_dict();
+    let epoch_before_later = runtime
+        .values()
+        .core()
+        .completed_collection_epoch_for_test();
     let later = runtime
         .collect_managed_for_maintenance()
         .expect("one later explicit collection should complete");
     assert_eq!(
         later.epoch(),
-        completed.epoch() + 1,
-        "the Finalizing request must not cause recursion or an intervening pass"
+        epoch_before_later + 1,
+        "the later explicit request should produce exactly one collection"
     );
     drop(surviving_entry);
 }

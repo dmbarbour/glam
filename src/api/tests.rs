@@ -222,21 +222,24 @@ fn runtimes_own_independent_local_identity_domains_and_value_factories() {
     assert_eq!(assembler.values().runtime_id(), first.id());
 
     let first_values = first.values().core;
-    let first_unit = first_values.with_runtime_value_access(|access| access.unit());
     let first_thunk_values = first_values.clone();
-    let first_lazy = LazyValue::semantic_thunk(&first_values, "first runtime", move |_| {
-        Ok(first_unit.duplicate_for_test(&first_thunk_values))
+    let first_lazy = first_values.with_runtime_value_access(|access| {
+        let first_unit = access.unit();
+        let lazy = LazyValue::semantic_thunk_in(&access, "first runtime", move |_| {
+            Ok(first_unit.duplicate_for_test(&first_thunk_values))
+        });
+        lazy.root_in(&access)
     });
     let second_values = second.values().core;
-    let second_unit = second_values.with_runtime_value_access(|access| access.unit());
     let second_thunk_values = second_values.clone();
-    let second_lazy = LazyValue::semantic_thunk(&second_values, "second runtime", move |_| {
-        Ok(second_unit.duplicate_for_test(&second_thunk_values))
+    let second_lazy = second_values.with_runtime_value_access(|access| {
+        let second_unit = access.unit();
+        let lazy = LazyValue::semantic_thunk_in(&access, "second runtime", move |_| {
+            Ok(second_unit.duplicate_for_test(&second_thunk_values))
+        });
+        lazy.root_in(&access)
     });
-    assert_eq!(
-        first_lazy.id(&first_values).get(),
-        second_lazy.id(&second_values).get()
-    );
+    assert_eq!(first_lazy.id().get(), second_lazy.id().get());
 }
 
 #[cfg(feature = "interaction-net-profiling")]
@@ -1212,10 +1215,20 @@ fn value_evaluator_resumes_a_retained_resolver_promise_subscription() {
     let assembler = Assembler::new();
     let values = assembler.values();
     let (promise, resolver) = assembler.promise("public evaluator wait fixture");
-    let CoreValue::Promised(promise_core) = promise.clone_core_for_test() else {
-        unreachable!("public promise must contain a promised core value")
+    let promise_probe = promise.clone();
+    let subscription_count = || {
+        values.with_access(|scoped| {
+            let CoreValue::Promised(promise) = scoped
+                .clone_core(&promise_probe)
+                .expect("promise probe should belong to this runtime")
+            else {
+                unreachable!("public promise must contain a promised core value")
+            };
+            promise
+                .access(scoped.runtime_access())
+                .exact_subscription_count()
+        })
     };
-    let promise_core = promise_core.duplicate_for_test(&assembler.core_values());
     let waiting = values
         .anno_binary(promise)
         .expect("binary annotation should wrap the promise without observing it");
@@ -1224,7 +1237,7 @@ fn value_evaluator_resumes_a_retained_resolver_promise_subscription() {
         .eval(&waiting)
         .expect_err_without_debug("a resolver-owned promise has no runtime-owned progress source");
     assert_eq!(error.to_string(), "glam evaluation failed");
-    assert_eq!(promise_core.exact_subscription_count(&values.core), 1);
+    assert_eq!(subscription_count(), 1);
     resolver
         .resolve(values.text("resolved"))
         .expect("resolver should publish the promised value");
@@ -1236,7 +1249,7 @@ fn value_evaluator_resumes_a_retained_resolver_promise_subscription() {
         evaluated.as_bytes().unwrap().as_deref(),
         Some(b"resolved".as_slice())
     );
-    assert_eq!(promise_core.exact_subscription_count(&values.core), 0);
+    assert_eq!(subscription_count(), 0);
 }
 
 #[test]
@@ -1400,17 +1413,10 @@ fn value_evaluator_caches_lazy_success_and_preserves_structured_failure() {
     let core_values = assembler.core_values();
     let evaluations = Arc::new(AtomicUsize::new(0));
     let evaluations_by_thunk = evaluations.clone();
-    let lazy = public_value(
-        &core_values,
-        CoreValue::Lazy(LazyValue::semantic_thunk(
-            &core_values,
-            "one evaluation",
-            move |_| {
-                evaluations_by_thunk.fetch_add(1, Ordering::SeqCst);
-                Ok(CoreValue::Number(Number::integer(42)))
-            },
-        )),
-    );
+    let lazy = public_semantic_thunk(&core_values, "one evaluation", move |_| {
+        evaluations_by_thunk.fetch_add(1, Ordering::SeqCst);
+        Ok(CoreValue::Number(Number::integer(42)))
+    });
     assert_eq!(
         assembler.evaluator().eval(&lazy).unwrap().as_i64().unwrap(),
         Some(42)
@@ -1450,16 +1456,17 @@ fn semantic_binary_slice_does_not_force_an_unused_poisoned_tail() {
     let assembler = Assembler::new();
     let values = assembler.values();
     let core_values = assembler.core_values();
-    let poison = LazyValue::semantic_thunk(&core_values, "unused binary tail", |_| {
-        Err(EvaluationHalt::new("unused binary tail was forced"))
-    });
-    let source = public_value(
-        &core_values,
-        CoreValue::List(List::concat(
+    let (source, poison) = Values::from_core_factory(core_values.clone()).with_access(|scoped| {
+        let poison =
+            LazyValue::semantic_thunk_in(scoped.runtime_access(), "unused binary tail", |_| {
+                Err(EvaluationHalt::new("unused binary tail was forced"))
+            });
+        let source = scoped.wrap(CoreValue::List(List::concat(
             List::from_bytes(Bytes::from_static(b"ok")),
-            List::from_thunk(poison.duplicate_for_test(&core_values).into()),
-        )),
-    );
+            List::from_thunk(poison.duplicate_in(scoped.runtime_access()).into()),
+        )));
+        (source, poison)
+    });
     let binary = values
         .list_slice(&source, 0..2)
         .and_then(|slice| values.anno_binary(slice))
@@ -1712,13 +1719,15 @@ fn binary_annotation_preserves_a_nested_failure_context() {
 fn callers_can_attach_path_context_to_semantic_access() {
     let assembler = Assembler::new();
     let values = assembler.values();
-    let root = public_value(
-        &assembler.core_values(),
-        CoreValue::Dict(Dict::new_sync().insert(
+    let root = values.with_access(|scoped| {
+        scoped.wrap(CoreValue::Dict(Dict::new_sync().insert(
             Key::atom_from_text("broken"),
-            CoreValue::error(&assembler.core_values(), "path target failed"),
-        )),
-    );
+            CoreValue::Lazy(LazyValue::error_in(
+                scoped.runtime_access(),
+                "path target failed",
+            )),
+        )))
+    });
 
     let frame = values
         .record([(
@@ -2128,7 +2137,7 @@ fn synchronous_assembler_evaluation_waits_for_a_worker_claim() {
     let release = Arc::new((Mutex::new(false), Condvar::new()));
     let producer_release = release.clone();
     let (started_sender, started_receiver) = std::sync::mpsc::channel();
-    let lazy = crate::core::LazyValue::semantic_thunk(
+    let value = public_semantic_thunk(
         &assembler.core_values(),
         "worker-claimed public value",
         move |_| {
@@ -2145,7 +2154,6 @@ fn synchronous_assembler_evaluation_waits_for_a_worker_claim() {
             Ok(CoreValue::Number(42.into()))
         },
     );
-    let value = public_value(&assembler.core_values(), CoreValue::Lazy(lazy));
     assembler.eval_context().spark(value.clone_core_for_test());
     started_receiver
         .recv_timeout(std::time::Duration::from_secs(2))
