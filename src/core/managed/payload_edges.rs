@@ -563,7 +563,7 @@ mod tests {
             );
             let sentinel = Value::Lazy(sentinel);
             let failure = Arc::new(
-                EvaluationFailure::emission_in(&access, access.duplicate_value(&sentinel))
+                EvaluationFailure::emission_in(access, access.duplicate_value(&sentinel))
                     .with_context_in(access, sentinel),
             );
             Value::Lazy(

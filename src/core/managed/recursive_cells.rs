@@ -527,6 +527,7 @@ impl ManagedPromiseRoot {
         ManagedPromiseEdge(authority.project_root(&self.root))
     }
 
+    #[cfg(test)]
     pub(crate) fn same_promise(&self, other: &Self) -> bool {
         self.root.ptr_eq(&other.root)
     }
@@ -1202,7 +1203,7 @@ unsafe impl Trace for ManagedLazyCell {
 
     fn trace(&self, visitor: &mut Visitor<'_>) {
         if let Some(result) = self.result.get() {
-            trace_lazy_result(&result, visitor);
+            trace_lazy_result(result, visitor);
             return;
         }
         let producer = self
@@ -1211,7 +1212,7 @@ unsafe impl Trace for ManagedLazyCell {
             .expect("managed lazy must be quiescent during tracing");
         if let Some(result) = self.result.get() {
             drop(producer);
-            trace_lazy_result(&result, visitor);
+            trace_lazy_result(result, visitor);
             return;
         }
         trace_lazy_producer_state(
@@ -1364,16 +1365,6 @@ mod tests {
         value: i64,
     ) -> RuntimeNet<CoreSpecialization> {
         runtime_with_data(access, Value::Number(value.into()))
-    }
-
-    fn duplicate_lazy_result(
-        access: &RuntimeValueAccess<'_>,
-        result: &crate::core::LazyResult,
-    ) -> crate::core::LazyResult {
-        match result {
-            Ok(value) => Ok(value.duplicate_in(access)),
-            Err(failure) => Err(Arc::new(failure.duplicate_in(access))),
-        }
     }
 
     fn duplicate_promise_assignment(
@@ -2675,7 +2666,7 @@ mod tests {
                 .construct_managed_promise("returned regional promise")
                 .expect("the returned managed promise should fit a run");
             let net = access
-                .construct_managed_core_net(prepared_runtime(&access, 83))
+                .construct_managed_core_net(prepared_runtime(access, 83))
                 .expect("the returned managed core net should fit a run");
             Value::List(List::from_values(vec![
                 Value::Lazy(lazy),
@@ -2750,7 +2741,7 @@ mod tests {
                 .construct_managed_lazy("abandoned partial lazy", LazySource::Error)
                 .expect("the partial managed lazy should fit a run");
             let _net = access
-                .construct_managed_core_net(prepared_runtime(&access, 89))
+                .construct_managed_core_net(prepared_runtime(access, 89))
                 .expect("the partial managed core net should fit a run");
             Err::<Value, &'static str>("construction stopped")
         });
@@ -3179,7 +3170,7 @@ mod tests {
     fn managed_promise_cycle_through_failure_emission_is_traced_and_reclaimed() {
         assert_single_promise_failure_cycle_through(
             "failure emission compatibility",
-            |access, backedge| EvaluationFailure::emission_in(access, backedge),
+            EvaluationFailure::emission_in,
         );
     }
 

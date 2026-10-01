@@ -2825,6 +2825,22 @@ inventory relatch:
     clippy, the complete ordinary workspace suite, the interaction-net
     profiling script, and the complete aggressive workspace suite. Classify
     failures against the exact ledgers before accepting any baseline movement.
+    - **D.2h.4c.1 — lint and compatibility-residue closure: complete
+      2026-10-01.** All-target/all-feature clippy exposed only post-cutover
+      residue. Obsolete evaluated/failure/operator duplication helpers,
+      optional net-mutation wrappers, diagnostic test adapters, and stale test
+      imports are removed. The template-level active-pair cache is also
+      removed: runtime instantiation already derives its authoritative active
+      pairs from wires, so retaining the template copy served one test only.
+      The ordinary interaction-net test now checks the instantiated runtime.
+
+      Clippy passes with warnings denied. The cleanup retires three test-side
+      persistent-edge operations and four access introductions; the exact
+      ledgers were changed only by those reviewed deletions, and all 121
+      inventory tests pass again with zero defect or pending disposition.
+    - **D.2h.4c.2 — complete-suite closure:** run the complete ordinary suite,
+      the interaction-net profiling script, and the complete aggressive suite;
+      rerun formatting and clippy after any repair.
   - **D.2h.4d — closure reconciliation:** rerun the exact inventories after
     dynamic fixes, verify their accepted surfaces did not drift, and record
     the final gate evidence for D.2h.5.

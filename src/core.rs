@@ -126,13 +126,6 @@ impl EvaluatedValue {
             Ok(Self(value))
         }
     }
-
-    /// Test-only convenience for an explicitly value-domain-qualified shell
-    /// duplicate. This deliberately does not restore `Clone`.
-    #[cfg(test)]
-    pub(crate) fn duplicate_for_test(&self, values: &CoreValueFactory) -> Self {
-        values.with_runtime_value_access(|access| self.duplicate_in(&access))
-    }
 }
 
 pub(crate) type LazyResult = Result<EvaluatedValue, Arc<EvaluationFailure>>;
@@ -244,13 +237,6 @@ impl EvaluationFailure {
             .collect::<Vec<_>>()
             .into();
         Self { kind, contexts }
-    }
-
-    /// Test-only convenience for an explicitly value-domain-qualified
-    /// failure duplicate. This deliberately does not restore `Clone`.
-    #[cfg(test)]
-    pub(crate) fn duplicate_for_test(&self, values: &CoreValueFactory) -> Self {
-        values.with_runtime_value_access(|access| self.duplicate_in(&access))
     }
 
     /// Borrows the immediate emission only while matching value access is
@@ -748,6 +734,7 @@ impl LazyValue {
     }
 
     #[inline(always)]
+    #[cfg(test)]
     pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
         Self {
             edge: self.edge.duplicate_in(access),

@@ -191,8 +191,6 @@ where
         other: &ResolvedExpr<W>,
         access: &crate::core::RuntimeValueAccess<'_>,
     ) -> bool {
-        use crate::core::SameRepresentationForTest;
-
         match (self, other) {
             (Self::Embedded(left), ResolvedExpr::Embedded(right))
             | (Self::Provided(left), ResolvedExpr::Provided(right)) => {
@@ -276,8 +274,6 @@ where
         other: &ResolvedPathPart<W>,
         access: &crate::core::RuntimeValueAccess<'_>,
     ) -> bool {
-        use crate::core::SameRepresentationForTest;
-
         match (self, other) {
             (Self::Key(left), ResolvedPathPart::Key(right)) => left == right,
             (Self::Index(left), ResolvedPathPart::Index(right))

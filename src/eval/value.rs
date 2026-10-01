@@ -126,24 +126,6 @@ fn fallback_failure_diagnostic(
     Value::Dict(Dict::new_sync().insert((*keys::MSG).clone(), Value::Dict(message)))
 }
 
-#[cfg(test)]
-fn fallback_failure_diagnostic_for_test(
-    failure: &EvaluationFailure,
-    emission: Option<Value>,
-    contexts: Value,
-) -> Value {
-    let mut message = Dict::new_sync()
-        .insert(
-            (*keys::TEXT).clone(),
-            Value::binary_from_text(&failure.to_string()),
-        )
-        .insert((*keys::CONTEXT).clone(), contexts);
-    if let Some(emission) = emission {
-        message = message.insert((*keys::VALUE).clone(), emission);
-    }
-    Value::Dict(Dict::new_sync().insert((*keys::MSG).clone(), Value::Dict(message)))
-}
-
 fn failure_contexts_value(access: &RuntimeValueAccess<'_>, failure: &EvaluationFailure) -> Value {
     Value::List(List::from_values(
         failure

@@ -462,15 +462,6 @@ pub(crate) fn prepend_contexts_in(
     ))
 }
 
-#[cfg(test)]
-pub(crate) fn prepend_contexts(
-    message: Value,
-    contexts: &[Value],
-) -> Result<Value, crate::core::EvaluationHalt> {
-    let values = crate::compiler::test_value_factory();
-    values.with_runtime_value_access(|access| prepend_contexts_in(&access, message, contexts))
-}
-
 fn apply_updates_root(
     context: &crate::evaluation::EvalContext,
     message: RuntimeValueRoot,

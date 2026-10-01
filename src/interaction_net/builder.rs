@@ -303,16 +303,10 @@ impl<S: NetSpecialization> NetBuilder<S> {
             return Err(NetBuildError::TunnelCycle);
         }
 
-        let active_pairs = runtime_wires
-            .iter()
-            .filter(|wire| wire.left.is_principal() && wire.right.is_principal())
-            .map(|wire| ActivePairKey::new(wire.left.node(), wire.right.node()))
-            .collect::<Vec<_>>();
         Ok(InteractionNet {
             nodes: Arc::from(runtime_nodes),
             wires: Arc::from(runtime_wires),
             exposed: exposed_runtime,
-            active_pairs: Arc::from(active_pairs),
         })
     }
 

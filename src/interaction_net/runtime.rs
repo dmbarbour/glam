@@ -17,6 +17,7 @@ pub(crate) use cursor::PreparedCopySource;
 mod tests;
 
 impl<S: NetSpecialization> InteractionNet<S> {
+    #[cfg(test)]
     pub fn instantiate(&self) -> RuntimeNet<S>
     where
         S::Data: Clone,

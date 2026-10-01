@@ -108,13 +108,6 @@ impl CoreOperator {
             },
         }
     }
-
-    /// Test-only convenience for an explicitly value-domain-qualified payload
-    /// duplicate. This deliberately does not restore `Clone`.
-    #[cfg(test)]
-    pub(crate) fn duplicate_for_test(&self, values: &CoreValueFactory) -> Self {
-        values.with_runtime_value_access(|access| self.duplicate_in(&access))
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -318,15 +311,6 @@ impl CoreRuntimeNet {
         update: impl FnOnce(&mut RuntimeNet<CoreSpecialization>) -> R,
     ) -> R {
         self.with_test_access(values, |access| access.with_mut(update))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_with_optional_mut<R>(
-        &self,
-        values: &CoreValueFactory,
-        update: impl FnOnce(&mut RuntimeNet<CoreSpecialization>) -> Option<R>,
-    ) -> Option<R> {
-        self.with_test_access(values, |access| access.with_optional_mut(update))
     }
 
     #[cfg(test)]
@@ -567,16 +551,6 @@ impl CoreRuntimeNetAccess<'_, '_> {
         inspect: impl FnOnce(&RuntimeNet<CoreSpecialization>) -> R,
     ) -> (R, RuntimeNetRevisions) {
         self.runtime.cell().with_revisions(inspect)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_optional_mut<R>(
-        &self,
-        update: impl FnOnce(&mut RuntimeNet<CoreSpecialization>) -> Option<R>,
-    ) -> Option<R> {
-        self.runtime
-            .cell()
-            .with_optional_mut_via(&self.runtime, update)
     }
 
     #[cfg(test)]

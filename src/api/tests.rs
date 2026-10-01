@@ -1996,7 +1996,7 @@ fn source_definitions_add_shallow_opaque_origin_context() {
     assert!(
         assembler
             .core_values()
-            .same_representation_for_test(&manual_origin.as_ref(), &Some(&automatic_origin),),
+            .same_representation_for_test(&manual_origin.as_ref(), &Some(automatic_origin),),
         "module_origin should expose the same opaque token used by automatic frames; context count: {}",
         failure.contexts().len()
     );

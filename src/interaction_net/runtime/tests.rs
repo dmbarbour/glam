@@ -184,10 +184,8 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
         nodes,
         wires,
         exposed,
-        active_pairs,
     } = template;
-    let _: (&Arc<[Node<S>]>, &Arc<[Wire]>, &Port, &Arc<[ActivePairKey]>) =
-        (nodes, wires, exposed, active_pairs);
+    let _: (&Arc<[Node<S>]>, &Arc<[Wire]>, &Port) = (nodes, wires, exposed);
 
     match node {
         Node::Bind | Node::Erase => {}
@@ -850,7 +848,7 @@ fn bind_spine_builds_one_curried_chain() {
             .count(),
         3
     );
-    assert_eq!(net.active_pairs().len(), 1);
+    assert_eq!(net.instantiate().active_pairs().len(), 1);
 }
 
 #[test]

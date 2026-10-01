@@ -517,7 +517,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
             });
     assert_eq!(
         gateway_totals,
-        GatewayCounts::new(532, 14),
+        GatewayCounts::new(528, 14),
         "managed gateway occurrence totals drifted",
     );
     assert_eq!(
@@ -561,12 +561,12 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     }
     assert_eq!(
         actual.len(),
-        533,
+        529,
         "managed mutator-introduction count drifted"
     );
     assert_eq!(
         admission_occurrence_fingerprint(&occurrences),
-        13_937_618_347_949_002_293,
+        8_937_378_417_445_527_511,
         "managed mutator-introduction source fingerprint drifted"
     );
 

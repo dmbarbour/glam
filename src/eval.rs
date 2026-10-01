@@ -11,6 +11,8 @@ use crate::core::{
     ListEffectComputation, NetValue, Value, keys,
 };
 use crate::core_net::{CoreDataKey, CoreOperator, CoreSpecialization};
+#[cfg(test)]
+use crate::evaluation::OwnedEvalContext;
 use crate::evaluation::{EvalContext, EvaluatorStepContext};
 #[cfg(test)]
 use crate::interaction_net::Reduction;
@@ -20,8 +22,6 @@ use crate::interaction_net::{
 };
 #[cfg(test)]
 use crate::number::Number;
-#[cfg(test)]
-use crate::{evaluation::OwnedEvalContext, list::ListItem};
 
 #[cfg(test)]
 mod access_inventory;

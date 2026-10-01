@@ -334,7 +334,6 @@ pub struct InteractionNet<S: NetSpecialization> {
     pub(super) nodes: Arc<[Node<S>]>, // nodes identified by index
     pub(super) wires: Arc<[Wire]>,    // all wires between ports
     pub(super) exposed: Port,         // closed net has one exposed port
-    pub(super) active_pairs: Arc<[ActivePairKey]>, // principal-principal wires
 }
 
 #[cfg(test)]
@@ -349,9 +348,5 @@ impl<S: NetSpecialization> InteractionNet<S> {
 
     pub fn exposed(&self) -> Port {
         self.exposed
-    }
-
-    pub fn active_pairs(&self) -> &[ActivePairKey] {
-        &self.active_pairs
     }
 }
