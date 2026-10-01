@@ -223,6 +223,28 @@ impl<S: TaskSpecialization> EffectTask<S> {
         let effect = eval_context
             .values()
             .construct_runtime_value_root(|_| effect);
+        Self::new_rooted_with_owner(effect, specialization, host, eval_context, owner)
+    }
+
+    #[cfg(test)]
+    fn new_rooted(
+        values: &CoreValueFactory,
+        effect: RuntimeValueRoot,
+        specialization: S,
+        host: Arc<S::Host>,
+    ) -> Result<Self, TaskHalt> {
+        let (eval_context, owner) = EvalContext::isolated(values.clone()).into_parts();
+        Self::new_rooted_with_owner(effect, specialization, host, eval_context, owner)
+    }
+
+    #[cfg(test)]
+    fn new_rooted_with_owner(
+        effect: RuntimeValueRoot,
+        specialization: S,
+        host: Arc<S::Host>,
+        eval_context: EvalContext,
+        owner: Arc<EvaluationSession>,
+    ) -> Result<Self, TaskHalt> {
         let mut task = Self::new_in_context(effect, specialization, host, eval_context)?;
         task._demand_owner = Some(owner);
         Ok(task)

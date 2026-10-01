@@ -2915,9 +2915,24 @@ inventory relatch:
           ordinary `evaluation::tests` pass. The 121 source/inventory tests
           pass after classifying six bounded test accesses, five test-only
           root operations, and one test-only runtime-root publication.
-        - **D.2h.4c.2b.3 — reflection fixtures:** apply the same rule to
+        - **D.2h.4c.2b.3 — reflection fixtures: complete 2026-10-01.** Apply the same rule to
           resumable control/reset/shift and owned-promise fixtures, then require
           the complete aggressive `reflection::machine::tests` family.
+
+          Reflection reset/shift/control fixtures now construct promises and
+          retain roots in one access. Test effect construction has an explicit
+          rooted path: constant effects, lazy applications, metadata carriers,
+          and reflection gates are built directly beneath a runtime/public
+          root rather than passed as raw managed values to a later self-opening
+          constructor. The affected `EffectTask` fixtures accept that root and
+          preserve their isolated-session owner. Task-owned promise tests also
+          retain exact identities across terminal publication, while the
+          fixpoint-restart fixture retains the public function root until its
+          runtime root exists. All 172 aggressive reflection-machine tests
+          pass, including the 19 original failures; all 15 residual failures
+          after the common promise migration also pass in isolated schedules.
+          The source inventories classify five additional test-only runtime
+          root publications and three fewer self-opening test admissions.
         - **D.2h.4c.2b.4 — complete aggressive gate:** rerun the whole
           workspace. Investigate the prior final blocked test independently;
           do not accept the eleven-minute no-progress run as verification.

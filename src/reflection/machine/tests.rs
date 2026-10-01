@@ -10,6 +10,7 @@ use crate::api::{
     Assembler, Diagnostic, EffectTokenDomain, Error as ApiError, EvaluatedValue, EvaluationRuntime,
     PromiseResolver, TestValueFacade, Values,
 };
+use crate::core::ManagedPromiseRoot;
 use crate::evaluation::{
     EvaluationSessionRun, EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskStatus,
     ReflectionTaskLauncher, ReflectionTaskProfile, ReflectionTaskResultPolicy, TaskStatusPublisher,
@@ -49,6 +50,13 @@ fn public_value(values: &CoreValueFactory, value: Value) -> PublicValue {
     Values::from_core_factory(values.clone()).wrap(value)
 }
 
+fn public_value_with(
+    values: &CoreValueFactory,
+    build: impl FnOnce(&RuntimeValueAccess<'_>) -> Value,
+) -> PublicValue {
+    PublicValue::from_runtime_root(values.construct_runtime_value_root(build))
+}
+
 #[track_caller]
 fn assert_public_core_value(values: &CoreValueFactory, actual: &PublicValue, expected: Value) {
     let public_values = Values::from_core_factory(values.clone());
@@ -64,8 +72,41 @@ fn root_value(context: &EvalContext, value: Value) -> RuntimeValueRoot {
     context.values().construct_runtime_value_root(|_| value)
 }
 
-fn request_value_for_test(values: &CoreValueFactory, tag: &Key, arguments: Vec<Value>) -> Value {
-    values.with_runtime_value_access(|access| request_value(&access, tag, arguments))
+fn rooted_promise(
+    values: &CoreValueFactory,
+    label: &'static str,
+) -> (PromisedValue, ManagedPromiseRoot) {
+    values.with_runtime_value_access(|access| {
+        let root = access
+            .construct_rooted_managed_promise(label)
+            .expect("the rooted reflection promise fixture should fit one managed run");
+        let promise = PromisedValue::from_root(&root, &access);
+        (promise, root)
+    })
+}
+
+fn rooted_constant_effect(
+    values: &CoreValueFactory,
+    result: impl FnOnce(&RuntimeValueAccess<'_>) -> Value,
+) -> RuntimeValueRoot {
+    values.construct_runtime_value_root(|access| {
+        let result = result(access);
+        eval::constant_effect_in(access, result)
+    })
+}
+
+fn rooted_application(
+    context: &EvalContext,
+    function: Value,
+    arguments: Vec<Value>,
+) -> RuntimeValueRoot {
+    context.values().construct_runtime_value_root(|access| {
+        Value::Lazy(LazyValue::from_application_in(
+            access,
+            function,
+            Arc::from(arguments),
+        ))
+    })
 }
 
 fn value_i64(assembler: &Assembler, value: &PublicValue) -> Option<i64> {
@@ -2264,7 +2305,7 @@ fn reset_stack_decoder_resumes_each_lazy_structural_layer_once() {
 fn reset_stack_decoder_resumes_a_promised_numeric_field() {
     let values = Assembler::default().core_values();
     let context = EvalContext::isolated(values.clone());
-    let promised = PromisedValue::new(&values, "reset scope promise");
+    let (promised, _promised_root) = rooted_promise(&values, "reset scope promise");
     let serialized = values.construct_runtime_value_root(|access| {
         Value::List(List::from_values(vec![Value::List(List::from_values(
             vec![
@@ -2398,7 +2439,7 @@ fn dropping_a_blocked_reset_stack_decoder_releases_its_owner_without_consuming_t
     // process-global test value domain with concurrently running tests.
     let values = Assembler::default().core_values();
     let context = EvalContext::isolated(values.clone());
-    let promised = PromisedValue::new(&values, "abandoned reset stack");
+    let (promised, _promised_root) = rooted_promise(&values, "abandoned reset stack");
     let serialized = values
         .construct_runtime_value_root(|access| Value::Promised(promised.duplicate_in(access)));
     let mut decoder = ResetStackMachine::new(serialized);
@@ -2424,32 +2465,40 @@ fn dropping_a_blocked_reset_stack_decoder_releases_its_owner_without_consuming_t
         .expect("retired decoder roots must not obstruct collection");
 }
 
-fn reset_request_effect(values: &CoreValueFactory, tags: &Tags, key: &PromisedValue) -> Value {
-    values.with_runtime_value_access(|access| {
+fn reset_request_effect(
+    values: &CoreValueFactory,
+    tags: &Tags,
+    key: &PromisedValue,
+) -> RuntimeValueRoot {
+    values.construct_runtime_value_root(|access| {
         let operation = eval::constant_effect_in(
-            &access,
-            request_value(&access, &tags.r, vec![Value::binary_from_text("done")]),
+            access,
+            request_value(access, &tags.r, vec![Value::binary_from_text("done")]),
         );
         eval::constant_effect_in(
-            &access,
+            access,
             request_value(
-                &access,
+                access,
                 &tags.reset,
-                vec![Value::Promised(key.duplicate_in(&access)), operation],
+                vec![Value::Promised(key.duplicate_in(access)), operation],
             ),
         )
     })
 }
 
-fn shift_request_effect(values: &CoreValueFactory, tags: &Tags, key: &PromisedValue) -> Value {
-    values.with_runtime_value_access(|access| {
+fn shift_request_effect(
+    values: &CoreValueFactory,
+    tags: &Tags,
+    key: &PromisedValue,
+) -> RuntimeValueRoot {
+    values.construct_runtime_value_root(|access| {
         eval::constant_effect_in(
-            &access,
+            access,
             request_value(
-                &access,
+                access,
                 &tags.shift,
                 vec![
-                    Value::Promised(key.duplicate_in(&access)),
+                    Value::Promised(key.duplicate_in(access)),
                     Value::Builtin(Builtin::ListAt),
                 ],
             ),
@@ -2461,9 +2510,9 @@ fn shift_request_effect(values: &CoreValueFactory, tags: &Tags, key: &PromisedVa
 fn reset_control_work_does_not_publish_before_its_key_resolves() {
     let values = Assembler::default().core_values();
     let tags = Tags::new();
-    let key = PromisedValue::new(&values, "reset request key");
+    let (key, _key_root) = rooted_promise(&values, "reset request key");
     let effect = reset_request_effect(&values, &tags, &key);
-    let mut task = EffectTask::new(
+    let mut task = EffectTask::new_rooted(
         &values,
         effect,
         TestEffects,
@@ -2520,9 +2569,9 @@ fn reset_control_work_does_not_publish_before_its_key_resolves() {
 fn shift_control_work_does_not_capture_before_its_key_resolves() {
     let values = Assembler::default().core_values();
     let tags = Tags::new();
-    let key = PromisedValue::new(&values, "shift request key");
+    let (key, _key_root) = rooted_promise(&values, "shift request key");
     let effect = shift_request_effect(&values, &tags, &key);
-    let mut task = EffectTask::new(
+    let mut task = EffectTask::new_rooted(
         &values,
         effect,
         TestEffects,
@@ -2577,17 +2626,16 @@ fn shift_control_work_does_not_capture_before_its_key_resolves() {
 #[test]
 fn captured_control_installation_waits_before_publishing_its_resume_layer() {
     let values = Assembler::default().core_values();
-    let stack = PromisedValue::new(&values, "captured caller reset stack");
-    let mut task = EffectTask::new(
+    let (stack, _stack_root) = rooted_promise(&values, "captured caller reset stack");
+    let mut task = EffectTask::new_rooted(
         &values,
-        eval::constant_effect(
-            &values,
-            request_value_for_test(
-                &values,
+        rooted_constant_effect(&values, |access| {
+            request_value(
+                access,
                 &Tags::new().r,
                 vec![Value::binary_from_text("unused")],
-            ),
-        ),
+            )
+        }),
         TestEffects,
         Arc::new(TestHost::with_values(values.clone())),
     )
@@ -2658,7 +2706,7 @@ fn captured_control_installation_waits_before_publishing_its_resume_layer() {
 fn initial_fixpoint_waits_for_the_reset_stack_before_allocating_control() {
     let (assembler, effect) = compile_effect(".fix (\\_loop -> .r \"fixed\")");
     let values = assembler.core_values();
-    let stack = PromisedValue::new(&values, "fixpoint reset stack");
+    let (stack, _stack_root) = rooted_promise(&values, "fixpoint reset stack");
     let mut task = EffectTask::new(
         &values,
         effect.clone_core_for_test(),
@@ -2723,10 +2771,9 @@ fn fixpoint_restart_retains_its_selection_while_the_entry_stack_is_blocked() {
         .expect("restart fixture should compile");
     let function = assembler
         .get(module.value(), "refl.function")
-        .expect("restart fixture should define its function")
-        .clone_core_for_test();
+        .expect("restart fixture should define its function");
     let values = assembler.core_values();
-    let stack = PromisedValue::new(&values, "restart entry stack");
+    let (stack, _stack_root) = rooted_promise(&values, "restart entry stack");
     let (effect, state) = values.with_runtime_value_access(|access| (access.unit(), access.unit()));
     let mut entry = Branch::<TestEffects>::new(&values, effect, state);
     entry.state = values.construct_runtime_value_root(|access| {
@@ -2736,7 +2783,7 @@ fn fixpoint_restart_retains_its_selection_while_the_entry_stack_is_blocked() {
         ))
     });
     let root = Arc::new(FixRoot {
-        function: values.construct_runtime_value_root(|_| function),
+        function: values.construct_runtime_value_root(|_| function.clone_core_for_test()),
         entry,
         scope_depth: 0,
     });
@@ -2746,16 +2793,15 @@ fn fixpoint_restart_retains_its_selection_while_the_entry_stack_is_blocked() {
         choices: Vec::new(),
         inherited_restarts: Vec::new(),
     });
-    let mut task = EffectTask::new(
+    let mut task = EffectTask::new_rooted(
         &values,
-        eval::constant_effect(
-            &values,
-            request_value_for_test(
-                &values,
+        rooted_constant_effect(&values, |access| {
+            request_value(
+                access,
                 &Tags::new().r,
                 vec![Value::binary_from_text("unused")],
-            ),
-        ),
+            )
+        }),
         TestEffects,
         Arc::new(TestHost::with_values(values.clone())),
     )
@@ -2809,17 +2855,16 @@ fn fixpoint_restart_retains_its_selection_while_the_entry_stack_is_blocked() {
 fn delivery_selects_reset_or_delimiter_only_after_stack_decoding() {
     for reset_wins in [false, true] {
         let values = Assembler::default().core_values();
-        let stack = PromisedValue::new(&values, "delivery reset stack");
-        let mut task = EffectTask::new(
+        let (stack, _stack_root) = rooted_promise(&values, "delivery reset stack");
+        let mut task = EffectTask::new_rooted(
             &values,
-            eval::constant_effect(
-                &values,
-                request_value_for_test(
-                    &values,
+            rooted_constant_effect(&values, |access| {
+                request_value(
+                    access,
                     &Tags::new().r,
                     vec![Value::binary_from_text("unused")],
-                ),
-            ),
+                )
+            }),
             TestEffects,
             Arc::new(TestHost::with_values(values.clone())),
         )
@@ -2902,17 +2947,16 @@ fn delivery_selects_reset_or_delimiter_only_after_stack_decoding() {
 #[test]
 fn restore_delimiter_waits_for_its_saved_stack_before_replacing_control() {
     let values = Assembler::default().core_values();
-    let saved = PromisedValue::new(&values, "saved restore stack");
-    let mut task = EffectTask::new(
+    let (saved, _saved_root) = rooted_promise(&values, "saved restore stack");
+    let mut task = EffectTask::new_rooted(
         &values,
-        eval::constant_effect(
-            &values,
-            request_value_for_test(
-                &values,
+        rooted_constant_effect(&values, |access| {
+            request_value(
+                access,
                 &Tags::new().r,
                 vec![Value::binary_from_text("unused")],
-            ),
-        ),
+            )
+        }),
         TestEffects,
         Arc::new(TestHost::with_values(values.clone())),
     )
@@ -2995,16 +3039,15 @@ fn malformed_restore_stack_fails_before_popping_the_delimiter() {
     let values = Assembler::default().core_values();
     let host = Arc::new(TestHost::with_values(values.clone()));
     let generation = <TestHost as TaskHost<TestEffects>>::snapshot(host.as_ref()).generation();
-    let mut task = EffectTask::new(
+    let mut task = EffectTask::new_rooted(
         &values,
-        eval::constant_effect(
-            &values,
-            request_value_for_test(
-                &values,
+        rooted_constant_effect(&values, |access| {
+            request_value(
+                access,
                 &Tags::new().r,
                 vec![Value::binary_from_text("unused")],
-            ),
-        ),
+            )
+        }),
         TestEffects,
         host,
     )
@@ -3075,8 +3118,8 @@ fn malformed_restore_stack_fails_before_popping_the_delimiter() {
 fn retry_wake_and_terminalization_discard_blocked_control_work() {
     fn blocked_reset_task(values: &CoreValueFactory) -> EffectTask<TestEffects> {
         let tags = Tags::new();
-        let key = PromisedValue::new(values, "discarded reset key");
-        let mut task = EffectTask::new(
+        let (key, _key_root) = rooted_promise(values, "discarded reset key");
+        let mut task = EffectTask::new_rooted(
             values,
             reset_request_effect(values, &tags, &key),
             TestEffects,
@@ -3527,11 +3570,12 @@ fn fixpoint_frames_retain_the_shared_function_root_until_retirement() {
         },
         scope_depth: 0,
     });
+    let (_, handle) = rooted_promise(&core, "test fixpoint");
     let active = ActiveFix {
         root: root.clone(),
         choices: vec![FixChoice::Left],
         next_choice: 0,
-        handle: PromisedValue::new(&core, "test fixpoint").root(&core),
+        handle,
     };
     let restart = FixRestart {
         root: root.clone(),
@@ -4631,17 +4675,16 @@ fn isolated_search_reports_and_resumes_lazy_dependencies() {
         .task_owned_promise(Arc::from("isolated search dependency"))
         .unwrap();
     let observer = session.with_new_task().unwrap();
-    let effect = eval::apply_values(
+    let effect = rooted_application(
         &observer,
         function.clone_core_for_test(),
         vec![Value::Promised(
             promised.duplicate_for_test(observer.values()),
         )],
-    )
-    .unwrap();
+    );
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let mut search = IsolatedEffectSearch::new_in_context(
-        &public_value(&assembler.core_values(), effect),
+        &PublicValue::from_runtime_root(effect),
         TestEffects,
         host,
         observer,
@@ -5869,11 +5912,12 @@ fn metadata_inspection_returns_hidden_values_without_forcing_them() {
     assert!(metadata.is_empty());
 
     let (assembler, inspect) = compile_effect("\\value -> .meta.inspect value");
-    let metadata = Value::error(&assembler.core_values(), "latent metadata failure");
-    let carrier = assembler
-        .core_values()
-        .with_runtime_value_access(|access| access.metadata_carrier(metadata));
-    let carrier = public_value(&assembler.core_values(), carrier);
+    let carrier = public_value_with(&assembler.core_values(), |access| {
+        access.metadata_carrier(Value::Lazy(LazyValue::error_in(
+            access,
+            "latent metadata failure",
+        )))
+    });
     let effect = assembler
         .apply(&inspect, [carrier])
         .expect("metadata inspection function should accept its carrier");
@@ -6386,15 +6430,13 @@ fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
         .task_owned_promise(Arc::from("eval test dependency"))
         .unwrap();
     let observer = session.with_new_task().unwrap();
-    let effect = eval::apply_values(
+    let effect = rooted_application(
         &observer,
         function.clone_core_for_test(),
         vec![Value::Promised(
             promised.duplicate_for_test(observer.values()),
         )],
-    )
-    .unwrap();
-    let effect = root_value(&observer, effect);
+    );
     let mut task = EffectTask::new_in_context(
         effect,
         TestEffects,
@@ -6539,16 +6581,14 @@ fn specialization_request_propagates_terminal_demand_failure_without_replay() {
         .task_owned_promise(Arc::from("failed specialization dependency"))
         .unwrap();
     let observer = session.with_new_task().unwrap();
-    let effect = eval::apply_values(
+    let effect = rooted_application(
         &observer,
         function.clone_core_for_test(),
         vec![Value::Promised(
             promised.duplicate_for_test(observer.values()),
         )],
-    )
-    .unwrap();
+    );
     let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
-    let effect = root_value(&observer, effect);
     let mut task = EffectTask::new_in_context(effect, TestEffects, host.clone(), observer).unwrap();
 
     let blocked = loop {
@@ -8270,14 +8310,13 @@ fn publication_after_validation_before_registration_is_rechecked() {
     let (assembler, build_effect) = compile_effect(
         "\\x -> .cut (.heap.get ['watched] >>= (\\_observed -> .r x >>= (\\value -> (value == \"done\") =>> .r value)))",
     );
-    let gate = public_value(
-        &assembler.core_values(),
-        Value::Lazy(LazyValue::from_reflection_gate(
-            &assembler.core_values(),
+    let gate = public_value_with(&assembler.core_values(), |access| {
+        Value::Lazy(LazyValue::from_reflection_gate_in(
+            access,
             Value::Number(Number::from_u64(0)),
             Value::binary_from_text("done"),
-        )),
-    );
+        ))
+    });
     let effect = assembler.apply(&build_effect, [gate]).unwrap();
     let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
     let (context, task) = schedule_composed_test_task(&assembler, &effect, host.clone());
@@ -8606,6 +8645,10 @@ fn task_failure_propagates_one_structured_failure_to_owned_promises() {
             Arc::from("resolved owned promise"),
         ])
         .unwrap();
+    let _promise_roots = promises
+        .iter()
+        .map(|promise| promise.root(context.values()))
+        .collect::<Vec<_>>();
     let mut promises = promises.into_iter();
     let unresolved = [
         promises.next().expect("first promise should exist"),
@@ -8709,6 +8752,7 @@ fn task_completion_and_cancellation_fail_unresolved_owned_promises() {
         let (promise, owner_task, owner) = context
             .task_owned_promise(Arc::from("unfinished owned promise"))
             .unwrap();
+        let _promise_root = promise.root(context.values());
         let wait = promise
             .task(context.values())
             .expect("task-owned promise should expose its wait")

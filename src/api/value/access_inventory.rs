@@ -823,10 +823,12 @@ fn every_runtime_root_publication_has_an_exact_disposition() {
     }
     // D.2h.4c.2b.2 adds one test-only publication that constructs a host-call
     // lazy and its public value root within the same bounded access region.
-    assert_eq!(actual.len(), 267, "runtime-root publication count drifted");
+    // D.2h.4c.2b.3 adds five rooted reflection fixtures for constant effects,
+    // application checkpoints, metadata carriers, and reflection gates.
+    assert_eq!(actual.len(), 272, "runtime-root publication count drifted");
     assert_eq!(
         root_publication_fingerprint(&occurrences),
-        8_082_431_218_437_841_319,
+        11_317_655_089_926_401_572,
         "runtime-root publication source fingerprint drifted"
     );
 
