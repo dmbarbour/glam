@@ -1,7 +1,8 @@
 # Garbage Collector Persistent Edge Trait Migration Plan — 2026-09-12
 
-Status: P0-P2 complete; P3 active through parent D.2h; P4-P5 planned as the
-explicit D.2h.2-D.2h.5 cutover and closure sequence.
+Status: P0-P4 and P5C complete. P5A's ordinary/aggressive behavioral matrix is
+complete; its focused Miri portion and P5B's explicit release-cost/codegen
+audit remain open under I11D.2.
 This is the nested implementation plan
 for the managed-edge part of GCI11R-002D.2a-D.2b in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
@@ -572,6 +573,8 @@ traits; only inventoried compatibility carriers prevent final removal.
 
 ## Phase P3 — Parent Raw-Value Interlock
 
+Status: complete on 2026-10-01 through parent D.2h.
+
 This phase is completed through the parent remediation rather than duplicated
 here:
 
@@ -687,6 +690,9 @@ current P3 authority; parent D.2d-D.2g must reduce it to zero before P4 begins.
 
 ## Phase P4 — Trait Removal Cutover
 
+Status: complete on 2026-09-30 through parent D.2h.2, with final source and
+dynamic reconciliation on 2026-10-01.
+
 ### P4A — Remove implicit duplication
 
 - Remove `Copy` and `Clone` from `Gc<T>`.
@@ -719,6 +725,10 @@ no compatibility trait remains to conceal a missed occurrence.
 
 ### P5A — Focused dynamic verification
 
+Status: ordinary and aggressive repository behavior complete on 2026-10-01;
+focused Miri remains open under I11D.2. Loom is not required because the trait
+cutover introduced no synchronization primitive or protocol.
+
 Run:
 
 - ordinary and aggressive collector graph/root/mutation suites;
@@ -736,12 +746,19 @@ model checker. Repetition is stress evidence only.
 
 ### P5B — Cost and layout verification
 
+Status: open. Existing one-pointer layout and root-registration fixtures are
+supporting evidence, but the explicit release-codegen or microbenchmark audit
+has not been performed for closure.
+
 Recheck one-pointer `Gc<T>` layout, registered-root counts, allocation counts,
 and release-mode code generation or microbenchmarks. Investigate any new lock,
 root registration, allocation, or reference-count operation on an ordinary
 edge duplicate before closure.
 
 ### P5C — Parent reconciliation and review
+
+Status: complete on 2026-10-01 through
+[`GarbageCollectorAggressiveVerificationClosure_2026-10-01.md`](../reviews/GarbageCollectorAggressiveVerificationClosure_2026-10-01.md).
 
 Reconcile this manifest with D.2h's raw-value API, durable-owner,
 managed-edge, machine-state, capture, and external-owner inventories. Publish

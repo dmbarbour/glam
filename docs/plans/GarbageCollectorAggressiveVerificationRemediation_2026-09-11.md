@@ -1,9 +1,9 @@
 # Aggressive GC Verification Remediation Plan — 2026-09-11
 
-Status: GCI11R-002A-C, D.1a-D.2g, and D.2h.0-D.2h.4d complete;
-D.2h.5 is active. This plan expands
+Status: complete on 2026-10-01. This plan expands
 GCI11R-002 and Phase I11D.1. The private repository mode exists and is useful,
-but its complete workspace suite does not yet pass. Gate G3 remains closed.
+and its complete workspace suite passes. Gate G3 remains closed pending
+I11D.2-I11D.4.
 
 ## Purpose
 
@@ -615,7 +615,8 @@ D.2 rather than masquerading as the ordinary orchestration path.
 
 #### GCI11R-002D.2 — Remaining Production Owners
 
-Status: planned; this is a hard prerequisite for Gate G3.
+Status: complete on 2026-10-01 through D.2a-D.2h below. This was a hard
+prerequisite for Gate G3; the remaining gate work is I11D.2-I11D.4.
 
 D.2 closes both kinds of production violation which D.1a deliberately left
 open:
@@ -2979,8 +2980,16 @@ inventory relatch:
     clippy, ordinary workspace, interaction-net profiling, and complete
     aggressive workspace gates recorded in D.2h.4c. No baseline moved after
     this final rerun.
-- **D.2h.5 — record:** publish the dated accepted-surface and verification
-  record, and close nested P3/P4/P5 only to the extent evidenced here.
+- **D.2h.5 — record: complete 2026-10-01.** Publish the dated accepted-surface
+  and verification record, and close nested P3/P4/P5 only to the extent
+  evidenced here.
+
+  [`GarbageCollectorAggressiveVerificationClosure_2026-10-01.md`](../reviews/GarbageCollectorAggressiveVerificationClosure_2026-10-01.md)
+  records the final surfaces, semantic decisions, resolved defect families,
+  and exact dynamic gates. GCI11R-002 and I11D.1 are complete. Nested
+  persistent-edge P3-P4 and P5C are complete; P5A's focused Miri portion and
+  P5B's explicit release-cost/code-generation audit remain open and align
+  with I11D.2 rather than being inferred from the aggressive workspace run.
 
 0. Repair the aggressive admission witnesses exposed by closure verification:
    - **List-effect admission: complete 2026-09-29.**
@@ -3040,6 +3049,10 @@ production-shaped exact tests pass aggressively. Gate G3 cannot pass without
 this result.
 
 ### GCI11R-002E — Test Fixture Regional Migration
+
+Status: complete on 2026-10-01 through D.2h.4a-D.2h.4c.2b.3. General runtime
+fixtures publish their managed values and durable owners in one access region;
+retained isolated helpers have exact fixture-only classifications.
 
 Two narrow evaluator fixtures were pulled forward by WHNFHR-001 because they
 blocked the focused holistic WHNF aggressive gate. The forwarding-chain
@@ -3110,6 +3123,10 @@ production code.
 
 ### GCI11R-002F — Schedule-Fixture Adaptation
 
+Status: complete on 2026-10-01 through D.2h.4b-D.2h.4c.2a. The disputed
+orders are forced by barriers, hooks, or explicit serial-order loops; no
+ordering claim rests on repetition.
+
 1. Inventory every one-shot collector probe and all managed entries between
    probe installation and the intended collection action.
 2. Reorder
@@ -3137,6 +3154,10 @@ schedule claim remains constructively ordered.
 
 ### GCI11R-002G — Cluster Closure
 
+Status: complete on 2026-10-01 through the ordinary and aggressive API,
+evaluator, compiler/syntax, reflection, interaction-net, and collector
+partitions recorded in D.2h.4b-D.2h.4c.
+
 Run each subsystem in a fresh process after the shared repairs:
 
 1. API and production runtime;
@@ -3150,6 +3171,9 @@ Do not proceed while an aggregate panic, hang, or stack overflow prevents a
 cluster from completing.
 
 ### GCI11R-002H — Repository Certification
+
+Status: complete on 2026-10-01. The dated D.2h.5 review is the authoritative
+certification record.
 
 Run and record:
 

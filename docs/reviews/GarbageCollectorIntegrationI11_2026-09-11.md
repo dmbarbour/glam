@@ -4,14 +4,11 @@ Baseline: `6746551`, the completed I11A-I11C implementation. Gate G2 was
 certified independently at `585cfec`; this review covers the production
 collection work from that gate through I11C.
 
-Status: review follow-up active; Gate G3 remains closed. The implemented
-collector, finalization, request-coalescing, and runtime-retirement boundaries
-remain coherent, and no collector tracing-algorithm defect has been found.
-GCI11R-001 and GCI11R-003 are resolved. Implementing GCI11R-002's aggressive
-mode exposed two downstream production regional-ownership defects, invalid
-test-fixture handoffs, and schedule-probe interference. Those findings now
-have a dedicated remediation plan. Production remains
-`CollectionPolicy::NoAuto`.
+Status: GCI11R-001 through GCI11R-004 and I11D.0-I11D.1 are resolved. Gate G3
+remains closed pending I11D.2-I11D.4. The implemented collector,
+finalization, request-coalescing, runtime-retirement, and aggressive regional-
+ownership boundaries remain coherent, and no collector tracing-algorithm
+defect has been found. Production remains `CollectionPolicy::NoAuto`.
 
 ## Scope and Method
 
@@ -46,8 +43,8 @@ Repeated success is not evidence for a concurrency ordering.
 | I11B.2 | Complete. The production serial fixture preserves compilation results, reflection roots, queued output, structured diagnostics, settlement, readiness stamps, observation epochs, and net topology across controlled collections. |
 | I11B.3 | Complete. Production runtimes reclaim recursive identity and compatibility-container cycles, while reviewed external owners retain and retire according to their explicit lifecycle. |
 | I11B.4 | Complete. The dated I11B review and routine checks reconcile the serial boundary with Gate G2. |
-| I11C.1 | Implementation behavior is plausible and lower-level collector tests cover exclusive admission, but the production worker fixture does not yet latch that its collector reached the blocked admission state. GCI11R-001 keeps this verification checkpoint open for Gate G3. |
-| I11C.2 | Passive shell finalization preserves runtime/coordinator/event state and external payload ownership. Its no-managed-allocation claim needs exact slot accounting under GCI11R-003. |
+| I11C.1 | Complete. GCI11R-001 added an authoritative admission-wait probe and forced the collector/worker ordering without relying on scheduling luck. |
+| I11C.2 | Complete. GCI11R-003 added exact allocated-slot accounting around passive shell finalization while preserving runtime/coordinator/event state and external payload ownership. |
 | I11C.3 | Complete. The Finalizing-phase probe establishes durable finalizer work without holding a collector component mutex; a host callback issues a nonblocking request, successful completion coalesces it, and a later explicit pass advances exactly once. |
 | I11C.4 | Complete. Public values do not retain or revive a retired value domain, and the one-shot finalizer probe has an independent RAII release test. |
 
@@ -130,38 +127,37 @@ repository aggressive mode adds unrelated pre-entry collections.
 
 **Severity:** high verification gap; blocks Gate G3.
 
-**Status:** implementation present; aggressive suite remains failing and the
-finding remains open.
+**Status:** resolved by I11D.1 on 2026-10-01.
 
-The audit and executable remediation sequence now live in
+The complete record is
+[`GarbageCollectorAggressiveVerificationClosure_2026-10-01.md`](GarbageCollectorAggressiveVerificationClosure_2026-10-01.md).
+Both complete repository modes pass, all exact ownership inventories close,
+and the private aggressive mode preserves immutable `NoAuto`. This resolves
+the regional-ownership and repository-mode finding without claiming the
+separate I11D.2 unsafe-boundary or I11D.3 static certification work.
+
+The audit and executable remediation sequence lives in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](../plans/GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
-It separates two confirmed production ownership defects, invalid test-fixture
-handoffs, and one-shot schedule-probe interference. GCI11R-002 is resolved only
-after that plan's ordinary/aggressive repository certification; the existence
-of the feature alone is not closure.
+It separated two confirmed production ownership defects, invalid test-fixture
+handoffs, and one-shot schedule-probe interference. Its completed
+ordinary/aggressive repository certification, rather than the existence of the
+feature alone, closes this finding.
 
-GCI11R-002A completed the first exact failure matrix and enriched collector
-lookup failures with their immediate traced predecessor without adding
-successful-mark state. GCI11R-002B and C have since closed the confirmed
-poll-spanning evaluator-owner gap and closed compiler-evaluation result gap;
-the production root sweep in GCI11R-002D is next.
+GCI11R-002A established the exact failure matrix and enriched collector lookup
+failures with their immediate traced predecessor without adding successful-
+mark state. B-C repaired the first evaluator/compiler defects; D-H then closed
+the production raw-value surface, fixture publication, deterministic schedule,
+cluster, and repository gates.
 
 At the reviewed baseline, `Heap::enable_collection_before_outer_entry` was a
 sound heap-local deterministic hook, and focused collector/runtime tests proved
 its outer-versus-recursive-entry behavior, but nothing enabled it for every
-production `RuntimeValueDomain` constructed by a repository test run. I11D.1
-has since added that missing root-crate mode; the remaining finding is that the
-mode exposes regional ownership defects and therefore does not yet complete a
-repository run.
-
-Add one private root-crate verification feature which forwards the collector's
-`deterministic-test-hooks` feature and enables aggressive pre-entry collection
-when a production runtime value domain is constructed. The mode must remain a
-compile-time/test invocation choice, preserve immutable `NoAuto`, and expose no
-supported embedding API. Run the complete workspace both normally and with
-that feature. Assertions about exact operational collection epochs may be made
-mode-aware, but semantic, ownership, and schedule assertions must not be
-weakened or skipped.
+production `RuntimeValueDomain` constructed by a repository test run. The
+selected resolution was one private root-crate verification feature which
+forwards `deterministic-test-hooks` and enables aggressive pre-entry collection
+for a complete production runtime value domain. It remains a compile-time test
+choice, preserves immutable `NoAuto`, and exposes no supported embedding API.
+Semantic, ownership, and schedule assertions were not weakened or skipped.
 
 I11D.1 added `aggressive-gc-verification`, enabled it after complete production
 runtime construction, retained `NoAuto`, and made cross-heap nested entry defer
@@ -180,8 +176,10 @@ verified indirect-owner case rather than a confirmed defect.
 Several test helpers independently construct a raw managed identity in one
 region and root it only in a later region. The feature also changes when a
 one-shot phase probe may be consumed, requiring schedule-fixture setup to be
-ordered more precisely without weakening its assertion. The failing feature
-run is now the authoritative reproducer and Gate G3 remains closed.
+ordered more precisely without weakening its assertion. That failing feature
+run became the authoritative reproducer. The completed ordinary/aggressive run
+linked above is the authoritative resolution. Gate G3 remains closed only for
+I11D.2-I11D.4.
 
 ### GCI11R-003 — Passive-finalizer allocation absence is not measured exactly
 
@@ -231,9 +229,9 @@ deterministic verification gaps are closed:
 
 1. **I11D.0 — Post-I11 remediation.** Close GCI11R-001 and GCI11R-003, add the
    exact pre/during/post worker chronology, and rerun all focused I11 tests.
-2. **I11D.1 — Aggressive repository mode.** Close GCI11R-002, run the complete
-   repository in ordinary and aggressive modes, and retain a focused assertion
-   that the verification mode never changes `NoAuto`.
+2. **I11D.1 — Aggressive repository mode. Complete 2026-10-01.** GCI11R-002
+   is closed by complete ordinary and aggressive repository runs, with a
+   focused assertion that the verification mode never changes `NoAuto`.
 3. **I11D.2 — Dynamic unsafe-boundary verification.** Run named focused Miri
    tests for roots, tracing, mutation transitions, allocation, collection,
    finalization, and the deterministic hooks. Run AddressSanitizer and
