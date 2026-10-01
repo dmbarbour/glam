@@ -61,17 +61,17 @@ fn evaluated_module_value(context: &CompileContext, lowered: &LoweredSource) -> 
     let Value::Promised(final_defs) = context_final_defs(context) else {
         panic!("final module binding should be a promised value");
     };
+    let definitions = context
+        .values()
+        .with_runtime_value_access(|access| lowered.definitions(&access));
     crate::core::set_test_promise(
         context.values(),
         &final_defs,
-        lowered.definitions.duplicate_for_test(context.values()),
+        definitions.duplicate_for_test(context.values()),
     )
     .expect_without_debug("future should not be set yet");
-    crate::evaluation::EvalContext::evaluate_compatibility_whnf(
-        &test_eval_context(),
-        &lowered.definitions,
-    )
-    .expect("lowered module should evaluate")
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_eval_context(), &definitions)
+        .expect("lowered module should evaluate")
 }
 
 fn assert_reserved_keyword_diagnostic(source: &str, keyword: &str) {
@@ -326,17 +326,20 @@ fn reflection_test_module(
     let Value::Promised(final_defs) = context_final_defs(&context) else {
         panic!("final module binding should be promised");
     };
+    let lowered_definitions = context
+        .values()
+        .with_runtime_value_access(|access| lowered.definitions(&access));
     crate::core::set_test_promise(
         context.values(),
         &final_defs,
-        lowered.definitions.duplicate_for_test(context.values()),
+        lowered_definitions.duplicate_for_test(context.values()),
     )
     .expect_without_debug("final module binding should be unset");
 
     let eval_context = assembler.eval_context();
     let definitions = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &eval_context,
-        &lowered.definitions,
+        &lowered_definitions,
     )
     .expect("reflection-enabled module should expose its dictionary");
     let definitions_root = context
@@ -390,17 +393,20 @@ fn latent_source_meta_refl_cycle_reclaims_with_its_module() {
         let Value::Promised(final_defs) = context_final_defs(&context) else {
             panic!("final module binding should be promised");
         };
+        let lowered_definitions = context
+            .values()
+            .with_runtime_value_access(|access| lowered.definitions(&access));
         crate::core::set_test_promise(
             context.values(),
             &final_defs,
-            lowered.definitions.duplicate_for_test(context.values()),
+            lowered_definitions.duplicate_for_test(context.values()),
         )
         .expect_without_debug("final module binding should start unassigned");
 
         let eval_context = assembler.eval_context();
         let module = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
             &eval_context,
-            &lowered.definitions,
+            &lowered_definitions,
         )
         .expect("the source reflection-cycle module should expose its dictionary");
         assert!(matches!(

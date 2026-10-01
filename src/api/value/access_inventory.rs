@@ -5,7 +5,7 @@
 //! `RuntimeValueAccess`. Authority-free bare-core conversions are not a
 //! migration allowance: the second latch rejects them anywhere in production.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -97,16 +97,16 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/compiler.rs",
         4,
-        5,
+        6,
         0,
         "rooted source context, origins, definition promises, and import results; I10A import inputs are declared HostCall captures",
         "I3E.2 bounded compiler regions; I4F.1 durable roots; I10A explicit deferred-capture handoff"
     ),
     entry!(
         "src/core.rs",
-        3,
+        2,
         1,
-        5,
+        6,
         "post-domain canonical-root initialization, test mutation-root publication, I10A one-shot HostCall capture bundles, and transient reflection handoff roots",
         "I4F.2d.0 canonical initialization; I4F.2a.1c fixture closure; GCI5R-001B regional construction entry; GCI5R-003E root-owned mutation; GCI5R-005B direct reflection semantic edges; I10A deferred callback containment; W6G.1f.3b autonomous reflection handoff"
     ),
@@ -127,6 +127,14 @@ const INVENTORY: &[InventoryEntry] = &[
         "I11B managed containment closure; GCI11R-002D.2b.2 scoped root publication inventory"
     ),
     entry!(
+        "src/core/managed/payload_edges.rs",
+        0,
+        2,
+        0,
+        "test-only failure and host-call capture traversal fixtures",
+        "GCI11R-002D.2h collector-only edge closure"
+    ),
+    entry!(
         "src/core/managed/recursive_cells.rs",
         0,
         4,
@@ -138,7 +146,7 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/diagnostic.rs",
         0,
         3,
-        8,
+        4,
         "root-preserving diagnostic normalization, context composition, and summary demand",
         "GCI11R-002D.2g rooted diagnostic transformations"
     ),
@@ -193,7 +201,7 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/evaluation/access.rs",
         0,
-        1,
+        3,
         1,
         "poll/evaluator-step completion rooting and scoped projection",
         "I3A.4/I3C.2 outcome typing and projection; I4F.2 managed root switch; GCI11R-002D.2d.3 access-qualified result publication"
@@ -330,7 +338,7 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/runtime.rs",
         0,
         0,
-        2,
+        3,
         "shallow direct-value rooting for one runtime failure root",
         "I4F.1c.1 failure-root boundary; I6C failure-shell and owner audit"
     ),
@@ -473,7 +481,7 @@ impl RootPublicationOccurrence {
                 | "src/compiler.rs::impl CompileContext::new"
                 | "src/compiler.rs::impl CompileContext::with_compilation_trace"
                 | "src/core.rs::impl CoreValues::new"
-                | "src/core.rs::impl HostCallRootBundle::from_captures"
+                | "src/core.rs::impl HostCallRootBundle::from_producer"
                 | "src/core.rs::impl ReflectionComputation::handoff_roots_in"
                 | "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in"
                 | "src/eval/strategy_machine.rs::impl StrategyDemandMachine::poll"
@@ -708,280 +716,18 @@ fn collect_root_publication_occurrences(manifest: &Path) -> Vec<RootPublicationO
     occurrences
 }
 
-const EXPECTED_ROOT_PUBLICATION_OCCURRENCES: &[&str] = &[
-    "src/api/assembly.rs::impl Assembler::load_local_binary#1|surface=scoped-factory|scope=production",
-    "src/api/diagnostics.rs::impl Diagnostic::from_compile#1|surface=scoped-factory|scope=production",
-    "src/api/runtime/readiness.rs::blocked_reasoning_diagnostic#1|surface=scoped-factory|scope=production",
-    "src/api/tests/diagnostic_tests.rs::diagnostic_enrichment_is_an_authoritative_object_mixin#1|surface=scoped-factory|scope=test",
-    "src/api/tests/diagnostic_tests.rs::viewers_can_inherit_one_diagnostic_independently#1|surface=scoped-factory|scope=test",
-    "src/api/value.rs::impl ScopedValues < '_ >::wrap#1|surface=access-publication|scope=production",
-    "src/api/value.rs::impl Values::wrap_in#1|surface=access-publication|scope=production",
-    "src/compiler.rs::impl CompileContext::new#1|surface=scoped-factory|scope=production",
-    "src/compiler.rs::impl CompileContext::new#2|surface=scoped-factory|scope=production",
-    "src/compiler.rs::impl CompileContext::new#3|surface=scoped-factory|scope=production",
-    "src/compiler.rs::impl CompileContext::with_compilation_trace#1|surface=scoped-factory|scope=production",
-    "src/compiler.rs::impl CompileContext::with_prior_defs#1|surface=scoped-factory|scope=test",
-    "src/compiler.rs::tests::binary_import_forwards_hidden_source_provenance#1|surface=compatibility-new|scope=test",
-    "src/compiler.rs::tests::invalid_local_request_never_reaches_the_loader#1|surface=scoped-factory|scope=test",
-    "src/compiler.rs::tests::module_import_qualifies_only_the_relative_child_namespace#1|surface=compatibility-new|scope=test",
-    "src/compiler.rs::tests::module_load_arguments_retain_definition_roots_until_handoff_retires#1|surface=compatibility-new|scope=test",
-    "src/compiler.rs::tests::module_load_arguments_retain_definition_roots_until_handoff_retires#2|surface=compatibility-new|scope=test",
-    "src/core.rs::impl CoreValueFactory::construct_runtime_value_root#1|surface=scoped-factory|scope=production",
-    "src/core.rs::impl CoreValueFactory::try_construct_runtime_value_root#1|surface=access-publication|scope=production",
-    "src/core.rs::impl CoreValues::new#1|surface=access-publication|scope=production",
-    "src/core.rs::impl HostCallRootBundle::from_captures#1|surface=access-publication|scope=production",
-    "src/core.rs::impl ReflectionComputation::handoff_roots_in#1|surface=access-publication|scope=production",
-    "src/core.rs::impl ReflectionComputation::handoff_roots_in#2|surface=access-publication|scope=production",
-    "src/core.rs::tests::losing_complete_cache_candidate_retires_after_the_atomic_winner_race#1|surface=compatibility-new|scope=test",
-    "src/core.rs::tests::runtime_cache_rejects_a_root_from_another_runtime_before_publication#1|surface=compatibility-new|scope=test",
-    "src/core.rs::tests::runtime_cache_retires_an_admitted_owner_with_the_value_domain#1|surface=compatibility-new|scope=test",
-    "src/core/managed/active_owner_inventory.rs::arbitrary_host_callback_root_backedge_is_conservative_external_ownership#1|surface=compatibility-new|scope=test",
-    "src/core/managed/containment_inventory.rs::managed_drop_during_domain_teardown_is_passive#1|surface=scoped-factory|scope=test",
-    "src/core/managed/recursive_cells.rs::tests::early_regional_return_leaves_partial_managed_graph_collectible#1|surface=scoped-factory|scope=test",
-    "src/core/managed/recursive_cells.rs::tests::failed_lazy_gateway_is_terminal_before_traced_handoff#1|surface=scoped-factory|scope=test",
-    "src/core/managed/recursive_cells.rs::tests::fresh_managed_facades_survive_until_first_publication#1|surface=scoped-factory|scope=test",
-    "src/core/managed/recursive_cells.rs::tests::regional_value_publication_retains_only_the_returned_managed_graph#1|surface=scoped-factory|scope=test",
-    "src/diagnostic.rs::conventional_summary_root#1|surface=access-publication|scope=production",
-    "src/diagnostic.rs::conventional_summary_root#2|surface=access-publication|scope=production",
-    "src/diagnostic.rs::conventional_summary_root#3|surface=access-publication|scope=production",
-    "src/diagnostic.rs::conventional_summary_root#4|surface=access-publication|scope=production",
-    "src/diagnostic.rs::diagnostic_object_root#1|surface=access-publication|scope=production",
-    "src/diagnostic.rs::enrich_root#1|surface=scoped-factory|scope=production",
-    "src/diagnostic.rs::failure_diagnostic_root_with#1|surface=scoped-factory|scope=production",
-    "src/diagnostic.rs::failure_diagnostic_root_with#1|surface=access-publication|scope=production",
-    "src/diagnostic.rs::failure_diagnostic_root_with#2|surface=access-publication|scope=production",
-    "src/diagnostic.rs::prepend_contexts_root#1|surface=scoped-factory|scope=production",
-    "src/diagnostic.rs::prepend_contexts_root#1|surface=access-publication|scope=production",
-    "src/eval/access_machine.rs::tests::shared_key_converter_uses_one_managed_root_and_traces_nested_regional_state#1|surface=scoped-factory|scope=test",
-    "src/eval/access_machine.rs::tests::shared_key_list_converter_survives_deferred_collection_with_one_root#1|surface=scoped-factory|scope=test",
-    "src/eval/builtins/net/tests/mod.rs::hidden_builder_whole_state_checkpoint_restores_reset_scope#1|surface=access-publication|scope=test",
-    "src/eval/builtins/net/tests/mod.rs::hidden_builder_whole_state_checkpoint_restores_reset_scope#2|surface=access-publication|scope=test",
-    "src/eval/builtins/net/tests/mod.rs::hidden_builder_whole_state_checkpoint_restores_reset_scope#3|surface=access-publication|scope=test",
-    "src/eval/builtins/net/tests/mod.rs::hidden_builder_whole_state_checkpoint_restores_reset_scope#4|surface=access-publication|scope=test",
-    "src/eval/builtins/net/tests/mod.rs::public_construction_adds_one_context_at_each_early_failure_boundary#1|surface=access-publication|scope=test",
-    "src/eval/builtins/net/tests/mod.rs::public_construction_does_not_demand_its_effect_until_observed#1|surface=compatibility-new|scope=test",
-    "src/eval/builtins/net/tests/mod.rs::run_rooted_builder_at#1|surface=scoped-factory|scope=test",
-    "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in#1|surface=access-publication|scope=production",
-    "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in#2|surface=access-publication|scope=production",
-    "src/eval/list_machine.rs::tests::front_projection_uses_one_managed_root_and_survives_deferred_collection#1|surface=scoped-factory|scope=test",
-    "src/eval/net/tests/nc5.rs::callable_checkpoint_admits_each_lazy_source_family_once#1|surface=compatibility-new|scope=test",
-    "src/eval/strategy_machine.rs::impl StrategyDemandMachine::poll#1|surface=access-publication|scope=production",
-    "src/eval/test_support.rs::impl ResumableTestValueDemand::new#1|surface=scoped-factory|scope=test",
-    "src/eval/tests.rs::concurrent_host_calls_share_one_rooted_producer_across_patient_client_demands#1|surface=compatibility-new|scope=test",
-    "src/eval/tests.rs::demanded_forwarding_chain_caches_whnf_in_every_lazy_member#1|surface=access-publication|scope=test",
-    "src/eval/tests.rs::dropped_reflection_completion_activation_permit_terminalizes_managed_promise#1|surface=access-publication|scope=test",
-    "src/eval/tests.rs::effect_map_finishes_its_list_front_before_observing_the_api#1|surface=access-publication|scope=test",
-    "src/eval/tests.rs::host_call_rejects_a_foreign_runtime_root#1|surface=compatibility-new|scope=test",
-    "src/eval/tests.rs::lazy_list_chunks_error_when_they_do_not_evaluate_to_lists#1|surface=access-publication|scope=test",
-    "src/eval/tests.rs::ordinary_observers_do_not_unseal_metadata_carriers#1|surface=access-publication|scope=test",
-    "src/eval/tests.rs::reflection_completion_activation_and_first_session_close_have_both_orders#1|surface=access-publication|scope=test",
-    "src/eval/tests.rs::reflection_completion_activation_and_first_session_close_have_both_orders#2|surface=access-publication|scope=test",
-    "src/eval/tests.rs::unobserved_reflection_failure_remains_reportable_until_promise_propagation#1|surface=access-publication|scope=test",
-    "src/eval/tests.rs::wrapper_application_budget_probe_yields_without_publishing_a_cache#1|surface=compatibility-new|scope=test",
-    "src/eval/tests.rs::wrapper_returning_function_then_accepts_remaining_application#1|surface=compatibility-new|scope=test",
-    "src/eval/tests/w7b.rs::application_chain_root_with_depth#1|surface=scoped-factory|scope=test",
-    "src/eval/tests/w7b.rs::deep_static_access_path_completes_on_the_small_stack#1|surface=scoped-factory|scope=test",
-    "src/eval/tests/w7b.rs::deeply_nested_dictionary_key_conversion_completes_on_the_small_stack#1|surface=compatibility-new|scope=test",
-    "src/eval/tests/w7b.rs::fixpoint_chain_root#1|surface=scoped-factory|scope=test",
-    "src/eval/tests/w7b.rs::large_strict_collection_conversion_completes_on_the_small_stack#1|surface=scoped-factory|scope=test",
-    "src/eval/tests/w7b.rs::lazy_alias_root#1|surface=scoped-factory|scope=test",
-    "src/eval/tests/w7b.rs::promised_alias_root#1|surface=compatibility-new|scope=test",
-    "src/eval/tests/w7b.rs::rooted_closed_function#1|surface=compatibility-new|scope=test",
-    "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint#1|surface=access-publication|scope=production",
-    "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint#2|surface=access-publication|scope=production",
-    "src/eval/value.rs::impl LazyTaskMachine::poll_builtin_checkpoint#1|surface=access-publication|scope=production",
-    "src/eval/value.rs::impl LazyTaskMachine::poll_list_effect_checkpoint#1|surface=access-publication|scope=production",
-    "src/eval/value.rs::impl LazyTaskMachine::poll_list_effect_checkpoint#2|surface=access-publication|scope=production",
-    "src/eval/value.rs::impl LazyTaskMachine::poll_object_fixpoint_checkpoint#1|surface=access-publication|scope=production",
-    "src/eval/value.rs::impl LazyTaskMachine::poll_object_fixpoint_checkpoint#2|surface=access-publication|scope=production",
-    "src/eval/value/tests/w4.rs::builder_checkpoint_survives_path_and_state_dependencies_without_replay#1|surface=compatibility-new|scope=test",
-    "src/eval/value/tests/w4.rs::builder_checkpoint_survives_path_and_state_dependencies_without_replay#2|surface=compatibility-new|scope=test",
-    "src/eval/value/tests/w4.rs::builder_copy_checkpoint_preserves_count_then_state_dependencies_without_replay#1|surface=compatibility-new|scope=test",
-    "src/eval/value/tests/w4.rs::builder_copy_checkpoint_preserves_count_then_state_dependencies_without_replay#2|surface=compatibility-new|scope=test",
-    "src/eval/value/tests/w4.rs::builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencies#1|surface=compatibility-new|scope=test",
-    "src/eval/value/tests/w4.rs::builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencies#2|surface=compatibility-new|scope=test",
-    "src/eval/value/tests/w4.rs::builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencies#3|surface=compatibility-new|scope=test",
-    "src/eval/value/tests/w4.rs::completed_host_call_checkpoint_survives_route_loss_and_collection#1|surface=compatibility-new|scope=test",
-    "src/eval/value/tests/w4.rs::counted_success#1|surface=compatibility-new|scope=test",
-    "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation#1|surface=access-publication|scope=test",
-    "src/eval/value/tests/w4.rs::host_call_yields_on_both_sides_and_consumes_its_result_once#1|surface=compatibility-new|scope=test",
-    "src/eval/value/tests/w4.rs::later_builder_fix_alternative_survives_route_loss_without_replay#1|surface=compatibility-new|scope=test",
-    "src/eval/value/tests/w4.rs::later_builder_fix_alternative_survives_route_loss_without_replay#2|surface=compatibility-new|scope=test",
-    "src/eval/value/tests/w4.rs::list_effect_fix_checkpoint_constructs_and_assigns_one_promise#1|surface=compatibility-new|scope=test",
-    "src/eval/value/tests/w4.rs::list_effect_fix_checkpoint_constructs_and_assigns_one_promise#2|surface=compatibility-new|scope=test",
-    "src/eval/value/tests/w4.rs::list_effect_run_checkpoint_does_not_replay_effect_or_handler_demand#1|surface=compatibility-new|scope=test",
-    "src/eval/value/tests/w4.rs::list_effect_run_checkpoint_does_not_replay_effect_or_handler_demand#2|surface=compatibility-new|scope=test",
-    "src/eval/value/tests/w4.rs::list_front#1|surface=compatibility-new|scope=test",
-    "src/eval/value/tests/w4.rs::object_checkpoint_does_not_replay_mixin_stages_after_route_loss#1|surface=compatibility-new|scope=test",
-    "src/eval/value/tests/w4.rs::object_checkpoint_does_not_replay_mixin_stages_after_route_loss#2|surface=compatibility-new|scope=test",
-    "src/eval/value/tests/w4.rs::public_pure_construction_survives_route_loss_without_repeating_effect_or_continuation#1|surface=compatibility-new|scope=test",
-    "src/eval/value/tests/w4.rs::public_pure_construction_survives_route_loss_without_repeating_effect_or_continuation#2|surface=compatibility-new|scope=test",
-    "src/eval/whnf.rs::impl WhnfComputation::from_promise_root#1|surface=scoped-factory|scope=production",
-    "src/eval/whnf.rs::regional_status_poll#1|surface=access-publication|scope=production",
-    "src/eval/whnf/tests/w1c.rs::collection_between_polls_preserves_only_the_installed_checkpoint#1|surface=scoped-factory|scope=test",
-    "src/eval/whnf/tests/w1c.rs::root#1|surface=scoped-factory|scope=test",
-    "src/eval/whnf/tests/w2a.rs::lazy_computation#1|surface=scoped-factory|scope=test",
-    "src/eval/whnf/tests/w2b.rs::promise_computation#1|surface=scoped-factory|scope=test",
-    "src/eval/whnf/tests/w6g3a.rs::root#1|surface=scoped-factory|scope=test",
-    "src/eval/whnf/tests/w6g3e.rs::managed_checkpoint_resumes_on_another_worker_after_collection#1|surface=scoped-factory|scope=test",
-    "src/eval/whnf/tests/w6g3e.rs::one_poll_aggregates_every_focus_and_frame_edit_into_one_edge_transition#1|surface=scoped-factory|scope=test",
-    "src/evaluation/access.rs::impl EvaluationPollContext::root_value#1|surface=scoped-factory|scope=test",
-    "src/evaluation/access.rs::impl EvaluationValueAccess < 'scope >::root_value#1|surface=access-publication|scope=production",
-    "src/evaluation/coordinator/spark.rs::impl EvaluationWorkCoordinator::submit_spark#1|surface=scoped-factory|scope=test",
-    "src/evaluation/coordinator/task.rs::promise_assignment_terminal#1|surface=access-publication|scope=production",
-    "src/evaluation/coordinator/tests.rs::a_task_reblocked_on_another_wait_ignores_its_prior_terminal_source#1|surface=compatibility-new|scope=test",
-    "src/evaluation/coordinator/tests.rs::a_task_reblocked_on_another_wait_ignores_its_prior_terminal_source#2|surface=compatibility-new|scope=test",
-    "src/evaluation/coordinator/tests.rs::deferred_insertion_is_immediately_dormant_and_promotable#1|surface=compatibility-new|scope=test",
-    "src/evaluation/coordinator/tests.rs::exact_and_broad_task_wakes_share_one_block_epoch#1|surface=compatibility-new|scope=test",
-    "src/evaluation/coordinator/tests.rs::exact_wait_completion_requeues_only_its_cross_session_task#1|surface=compatibility-new|scope=test",
-    "src/evaluation/coordinator/tests.rs::exact_wait_completion_requeues_only_its_cross_session_task#2|surface=compatibility-new|scope=test",
-    "src/evaluation/coordinator/tests.rs::permanent_exit_wait_retains_only_its_summary_and_obligations#1|surface=compatibility-new|scope=test",
-    "src/evaluation/coordinator/tests.rs::reflection_promise_terminal_mapper_covers_every_terminal_disposition#1|surface=compatibility-new|scope=test",
-    "src/evaluation/coordinator/tests.rs::reflection_promise_terminal_mapper_covers_every_terminal_disposition#2|surface=compatibility-new|scope=test",
-    "src/evaluation/coordinator/tests.rs::retired_deferred_machine_does_not_delay_same_session_client_admission#1|surface=compatibility-new|scope=test",
-    "src/evaluation/coordinator/tests.rs::retired_task_makes_a_late_exact_wait_wake_harmless#1|surface=compatibility-new|scope=test",
-    "src/evaluation/coordinator/tests.rs::running_deferred_machine_does_not_serialize_same_session_client_admission#1|surface=compatibility-new|scope=test",
-    "src/evaluation/coordinator/tests.rs::worker_and_runtime_pump_selectors_reject_foreground_client_demand#1|surface=compatibility-new|scope=test",
-    "src/evaluation/pump.rs::poison_lazy_cycle#1|surface=access-publication|scope=production",
-    "src/evaluation/session.rs::impl EvalContext::complete_wait_with_value#1|surface=compatibility-new|scope=test",
-    "src/evaluation/session.rs::impl EvalContext::compose_builtin#1|surface=scoped-factory|scope=production",
-    "src/evaluation/session.rs::impl EvalContext::evaluate_compatibility_whnf#1|surface=scoped-factory|scope=test",
-    "src/evaluation/tests.rs::abandoning_one_client_demand_preserves_another_exact_consumer#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::all_poll_routes_use_scheduler_context#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::blocked_client_checkpoint_survives_collection_until_promise_assignment#1|surface=access-publication|scope=test",
-    "src/evaluation/tests.rs::bounded_background_pump_excludes_foreground_clients_and_sparks#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::cancelled_effect_child_never_publishes_a_launch_parent#1|surface=scoped-factory|scope=test",
-    "src/evaluation/tests.rs::client_demand_can_follow_a_lazy_producer_owned_by_another_session#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::client_demand_completes_whnf_into_its_result_cell#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::client_demand_exactly_restarts_after_promise_assignment#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::client_demand_operation_and_result_roots_follow_owner_lifecycle#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::client_demand_operation_and_result_roots_follow_owner_lifecycle#2|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::client_demand_owner_close_and_forced_kill_answer_once#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::client_demand_owner_close_and_forced_kill_answer_once#2|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::client_demand_result_cell_releases_after_terminal_handle_drop#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::client_demand_retirement_publishes_after_runtime_unlock#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::client_demand_retirement_publishes_after_runtime_unlock#2|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::client_demand_retirement_publishes_after_runtime_unlock#3|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::client_demand_retirement_publishes_after_runtime_unlock#4|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::client_failure_root_survives_work_and_owner_session_retirement#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::client_lazy_root#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::direct_effect_child_launch_publishes_causal_parent_only_on_commit#1|surface=scoped-factory|scope=test",
-    "src/evaluation/tests.rs::direct_effect_child_launch_publishes_causal_parent_only_on_commit#2|surface=scoped-factory|scope=test",
-    "src/evaluation/tests.rs::exit_readiness_snapshot_root_survives_after_settlement_report_drop#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::exit_wait_does_not_publish_task_status_or_failure#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::forced_deadlock_settlement_preserves_exits_and_kills_other_participants#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::foreground_client_demand_closes_the_retirement_publication_handoff#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::generic_client_demand_resumes_composed_access_and_binary_annotation#1|surface=access-publication|scope=test",
-    "src/evaluation/tests.rs::lazy_task_follow_retains_a_fresh_deferred_result_across_polls#1|surface=scoped-factory|scope=test",
-    "src/evaluation/tests.rs::logger_shaped_session_drain_leaves_independent_producer_client_and_spark_for_runtime#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::parked_client_is_external_activity_while_task_deadlocks_remain_typed#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::patient_claimed_task_wait_releases_mutator#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::patient_claimed_task_wait_releases_mutator#2|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::pending_reflection_activation_roots_retire_with_their_reservations#1|surface=scoped-factory|scope=test",
-    "src/evaluation/tests.rs::pending_reflection_activation_roots_retire_with_their_reservations#1|surface=access-publication|scope=test",
-    "src/evaluation/tests.rs::promise_follow_reprojects_its_rooted_assignment_across_polls#1|surface=scoped-factory|scope=test",
-    "src/evaluation/tests.rs::readiness_reports_terminalizing_work_as_busy_without_mutating_it#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::ready_settlement_publishes_exited_once_and_retains_exit_errors#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::retained_client_handle_waits_across_external_disturbance_without_a_lost_wake#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::retained_client_handle_waits_across_external_disturbance_without_a_lost_wake#2|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::root_promise_value#1|surface=access-publication|scope=test",
-    "src/evaluation/tests.rs::rooted_promise_value#1|surface=access-publication|scope=test",
-    "src/evaluation/tests.rs::rooted_semantic_lazy_value#1|surface=access-publication|scope=test",
-    "src/evaluation/tests.rs::runtime_readiness_retains_exit_dispositions_without_settling_tasks#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::scheduled_effect_children_keep_causal_parent_without_implicit_join#1|surface=scoped-factory|scope=test",
-    "src/evaluation/tests.rs::settled_report_root_survives_after_exit_snapshot_and_task_retire#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests.rs::terminal_wait_dispositions_retain_only_their_documented_runtime_roots#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests/w7c.rs::assigned_promise_chain_root#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests/w7c.rs::background_selection_excludes_foreground_clients_even_when_both_are_ready#1|surface=compatibility-new|scope=test",
-    "src/evaluation/tests/w7c.rs::checkpointed_promise_chain_root#1|surface=scoped-factory|scope=test",
-    "src/evaluation/whnf.rs::tests::task_owned_promise_self_observation_fails_outside_regional_access#1|surface=scoped-factory|scope=test",
-    "src/evaluation/whnf.rs::tests::unassigned_resolver_promise_becomes_a_direct_dependency#1|surface=scoped-factory|scope=test",
-    "src/evaluation/whnf.rs::tests::uncached_lazy_admission_occurs_after_regional_access_closes#1|surface=scoped-factory|scope=test",
-    "src/g_syntax.rs::impl Diagnostic::into_emission#1|surface=scoped-factory|scope=production",
-    "src/g_syntax/compiler_values.rs::build_effect_path_value#1|surface=access-publication|scope=production",
-    "src/g_syntax/compiler_values.rs::build_module#1|surface=scoped-factory|scope=production",
-    "src/g_syntax/compiler_values.rs::evaluate_closed#1|surface=scoped-factory|scope=production",
-    "src/g_syntax/compiler_values.rs::fail_effect_root#1|surface=access-publication|scope=production",
-    "src/g_syntax/compiler_values.rs::root_value#1|surface=access-publication|scope=production",
-    "src/g_syntax/macro_expansion/effects.rs::hidden_effect#1|surface=scoped-factory|scope=production",
-    "src/g_syntax/macro_expansion/runner.rs::select_field_root#1|surface=access-publication|scope=production",
-    "src/g_syntax/macro_expansion/tests.rs::assembler_claimed_reflection_gate_is_unavailable_to_macro_session#1|surface=scoped-factory|scope=test",
-    "src/g_syntax/macro_expansion/tests.rs::assembler_claimed_reflection_gate_is_unavailable_to_macro_session#2|surface=scoped-factory|scope=test",
-    "src/g_syntax/macro_expansion/tests.rs::environment_root#1|surface=compatibility-new|scope=test",
-    "src/g_syntax/macro_expansion/tests.rs::unstarted_reflection_gate_runs_inside_the_macro_session#1|surface=scoped-factory|scope=test",
-    "src/g_syntax/macro_expansion/tests.rs::unstarted_reflection_result_uses_runtime_default_profile_from_macro_demand#1|surface=scoped-factory|scope=test",
-    "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::lower_declaration#1|surface=access-publication|scope=production",
-    "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::lower_declaration#2|surface=access-publication|scope=production",
-    "src/g_syntax/parser/expression/tests.rs::embedded_data_is_an_ordinary_parser_atom#1|surface=compatibility-new|scope=test",
-    "src/g_syntax/parser/source.rs::apply_macro_context#1|surface=scoped-factory|scope=production",
-    "src/g_syntax/parser/source.rs::macro_compiler_diagnostic#1|surface=scoped-factory|scope=production",
-    "src/g_syntax/parser/source.rs::macro_lookup#1|surface=access-publication|scope=production",
-    "src/g_syntax/resolve/do_expr.rs::tests::embedded_semantic_data_lowers_without_reconstruction#1|surface=compatibility-new|scope=test",
-    "src/g_syntax/tests.rs::reflection_test_module#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine.rs::alternative_returns_root#1|surface=access-publication|scope=production",
-    "src/reflection/machine.rs::effect_api#1|surface=scoped-factory|scope=production",
-    "src/reflection/machine.rs::impl Branch < S >::new#1|surface=access-publication|scope=test",
-    "src/reflection/machine.rs::impl Branch < S >::new#2|surface=access-publication|scope=test",
-    "src/reflection/machine.rs::impl Branch < S >::root_value#1|surface=access-publication|scope=production",
-    "src/reflection/machine.rs::impl EffectTask < S >::capture_continuation#1|surface=scoped-factory|scope=production",
-    "src/reflection/machine.rs::impl EffectTask < S >::new_exit_in_context#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine.rs::impl EffectTask < S >::new_owned_in_context#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine.rs::impl EffectTask < S >::new_rooted_in_context_with_capabilities#1|surface=scoped-factory|scope=production",
-    "src/reflection/machine.rs::impl EffectTask < S >::store_path_step#1|surface=scoped-factory|scope=production",
-    "src/reflection/machine.rs::lazy_value_path_root#1|surface=access-publication|scope=production",
-    "src/reflection/machine.rs::lazy_value_path_root#2|surface=access-publication|scope=production",
-    "src/reflection/machine.rs::volume_effects#1|surface=scoped-factory|scope=production",
-    "src/reflection/machine/tests.rs::captured_control_installation_waits_before_publishing_its_resume_layer#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::captured_control_installation_waits_before_publishing_its_resume_layer#2|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::captured_control_installation_waits_before_publishing_its_resume_layer#3|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::captured_control_payloads_retain_roots_until_retirement#1|surface=compatibility-new|scope=test",
-    "src/reflection/machine/tests.rs::contextual_effect_wrapper_retires_its_context_root_exactly_with_the_wrapper#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::delivery_selects_reset_or_delimiter_only_after_stack_decoding#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::delivery_selects_reset_or_delimiter_only_after_stack_decoding#2|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::delivery_selects_reset_or_delimiter_only_after_stack_decoding#3|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::dropping_a_blocked_reset_stack_decoder_releases_its_owner_without_consuming_the_promise#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::evaluation_session_pumps_a_type_erased_effect_task#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::execution_work_and_cut_payloads_retain_roots_until_retirement#1|surface=compatibility-new|scope=test",
-    "src/reflection/machine/tests.rs::fixpoint_frames_retain_the_shared_function_root_until_retirement#1|surface=compatibility-new|scope=test",
-    "src/reflection/machine/tests.rs::fixpoint_restart_retains_its_selection_while_the_entry_stack_is_blocked#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::fixpoint_restart_retains_its_selection_while_the_entry_stack_is_blocked#2|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::initial_fixpoint_waits_for_the_reset_stack_before_allocating_control#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::malformed_restore_stack_fails_before_popping_the_delimiter#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::malformed_restore_stack_fails_before_popping_the_delimiter#2|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::malformed_restore_stack_fails_before_popping_the_delimiter#3|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::reflection_task_launcher_requires_unit_when_requested#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::reflection_task_launcher_returns_arbitrary_effect_result_when_requested#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::request_decode_resumes_the_exact_lazy_list_chunk_without_replay#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::request_decode_resumes_the_exact_lazy_payload_without_replay#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::reset_stack_decoder_checks_every_fixed_frame_arity#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::reset_stack_decoder_preserves_strict_frames_and_serialized_root#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::reset_stack_decoder_propagates_a_deferred_failure#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::reset_stack_decoder_rejects_each_invalid_frame_field#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::reset_stack_decoder_rejects_non_list_and_wrong_arity#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::reset_stack_decoder_resumes_a_promised_numeric_field#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::reset_stack_decoder_resumes_each_lazy_field_once_and_leaves_continuation_lazy#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::reset_stack_decoder_resumes_each_lazy_structural_layer_once#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::restore_delimiter_waits_for_its_saved_stack_before_replacing_control#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::restore_delimiter_waits_for_its_saved_stack_before_replacing_control#2|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::restore_delimiter_waits_for_its_saved_stack_before_replacing_control#3|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::restore_delimiter_waits_for_its_saved_stack_before_replacing_control#4|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::resume_request_decodes_lazy_ids_once_in_source_order#1|surface=scoped-factory|scope=test",
-    "src/reflection/machine/tests.rs::root_value#1|surface=scoped-factory|scope=test",
-    "src/reflection/protocol.rs::impl EffectRequestSpec < R >::effect#1|surface=scoped-factory|scope=production",
-    "src/reflection/requests.rs::classify_key_value#1|surface=access-publication|scope=production",
-    "src/reflection/requests.rs::task_status_public_value#1|surface=scoped-factory|scope=production",
-    "src/reflection/store.rs::apply_edit#1|surface=scoped-factory|scope=production",
-    "src/reflection/store.rs::complete_query_value#1|surface=scoped-factory|scope=production",
-    "src/reflection/store.rs::decode_query_state#1|surface=access-publication|scope=production",
-    "src/reflection/store.rs::impl ReflectionStore::retire_queries#1|surface=scoped-factory|scope=production",
-    "src/reflection/store.rs::impl StoreJournal::peek_query_with_observation#1|surface=scoped-factory|scope=production",
-    "src/reflection/store.rs::impl StoreSnapshot::poll_query#1|surface=scoped-factory|scope=production",
-    "src/reflection/store.rs::pending_query_value#1|surface=scoped-factory|scope=test",
-    "src/reflection/store/tests.rs::query_state_is_transactional_and_retired_after_the_last_handle#1|surface=scoped-factory|scope=test",
-    "src/reflection/store/tests.rs::unforced_store_value#1|surface=scoped-factory|scope=test",
-    "src/runtime.rs::impl RuntimeFailureRoot::root_direct_values#1|surface=access-publication|scope=production",
-    "src/runtime.rs::impl RuntimeValueRoot::new#1|surface=access-publication|scope=test",
-];
+fn root_publication_fingerprint(occurrences: &[RootPublicationOccurrence]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut fingerprint = FNV_OFFSET;
+    for occurrence in occurrences {
+        for byte in occurrence.record().bytes().chain([0xff]) {
+            fingerprint = (fingerprint ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
+        }
+    }
+    fingerprint
+}
 
 fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(directory).expect("the source tree should be readable") {
@@ -1070,36 +816,17 @@ fn every_runtime_root_publication_has_an_exact_disposition() {
         .iter()
         .map(RootPublicationOccurrence::record)
         .collect::<Vec<_>>();
-    let expected = EXPECTED_ROOT_PUBLICATION_OCCURRENCES
-        .iter()
-        .map(|record| (*record).to_owned())
-        .collect::<Vec<_>>();
-
-    if actual.len() != expected.len() {
-        let actual_set = actual.iter().collect::<BTreeSet<_>>();
-        let expected_set = expected.iter().collect::<BTreeSet<_>>();
-        let missing = expected_set
-            .difference(&actual_set)
-            .copied()
-            .collect::<Vec<_>>();
-        let unexpected = actual_set
-            .difference(&expected_set)
-            .copied()
-            .collect::<Vec<_>>();
-        panic!(
-            "runtime-root publication ledger length drifted: missing {missing:?}; unexpected {unexpected:?}"
-        );
+    if std::env::var_os("GLAM_DUMP_ROOT_PUBLICATION_INVENTORY").is_some() {
+        for occurrence in &actual {
+            eprintln!("{occurrence}");
+        }
     }
-    if let Some((index, (actual, expected))) = actual
-        .iter()
-        .zip(&expected)
-        .enumerate()
-        .find(|(_, (actual, expected))| actual != expected)
-    {
-        panic!(
-            "runtime-root publication ledger drifted at index {index}:\n  actual: {actual}\nexpected: {expected}"
-        );
-    }
+    assert_eq!(actual.len(), 266, "runtime-root publication count drifted");
+    assert_eq!(
+        root_publication_fingerprint(&occurrences),
+        6_797_765_277_293_480_222,
+        "runtime-root publication source fingerprint drifted"
+    );
 
     let reviews = occurrences
         .iter()

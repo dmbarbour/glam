@@ -1000,9 +1000,13 @@ const DECLARATION_BASELINE_COUNT: usize = 253;
 // retains two Value fields, while KeyListStep contributes five bounded Value
 // fields; the diagnostic transformation boundary also replaces one raw Value
 // field with an existing RuntimeValueRoot.
+// D.2h closure removes LoweredSource's parallel raw definitions field and
+// projects its sole definitions root only under caller-held test access. The
+// failure/diagnostic and canonical-root migrations also retire six redundant
+// RuntimeValueRoot fields without changing the reviewed declaration set.
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([320, 118, 5, 35, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 15_218_284_482_102_248_769;
+    DeclarationSignals::new([319, 112, 5, 35, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 13_224_810_679_222_499_778;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

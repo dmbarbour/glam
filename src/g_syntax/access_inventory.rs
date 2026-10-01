@@ -89,7 +89,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax/module_lowering.rs",
-        [4, 0, 4, 0],
+        [4, 0, 3, 0],
         "rooted declaration-to-declaration definitions and reflection boundary; syntax resolution and lowering share one regional projection"
     ),
     entry!(

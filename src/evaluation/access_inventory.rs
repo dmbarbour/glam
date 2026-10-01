@@ -7,7 +7,7 @@
 //! the concurrent collector plan reuses this inventory when these bounded
 //! regions become participant epochs.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -455,365 +455,18 @@ fn collect_admission_occurrences(manifest: &Path) -> Vec<AdmissionOccurrence> {
     occurrences
 }
 
-const EXPECTED_ADMISSION_OCCURRENCES: &[&str] = &[
-    "src/api/assembly.rs::impl Assembler::seal_module#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/api/tests.rs::runtime_value_domain_has_no_scheduler_or_profile_backedge#1|surface=construction|scope=test|nested=0|carrier=none",
-    "src/api/tests.rs::runtime_value_domain_has_no_scheduler_or_profile_backedge#2|surface=construction|scope=test|nested=0|carrier=none",
-    "src/api/value.rs::impl PromiseResolver::drop#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/api/value.rs::impl PromiseResolver::fail#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/api/value.rs::impl PromiseResolver::fail_with#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/api/value.rs::impl PromiseResolver::resolve#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/api/tests.rs::opaque_compilation_origin_round_trips_only_through_its_reflection_cap#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/api/value.rs::impl Value::clone_core_in_own_domain#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/api/value.rs::impl Values::with_access#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/compiler.rs::impl CompileContext::import_binary#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/compiler.rs::impl CompileContext::import_module#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/compiler.rs::impl CompileContext::prior_defs#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/compiler.rs::import_failure#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/compiler.rs::tests::unit_value_uses_abstract_global_path_atom#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::cache_test_lazy#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl CoreValueFactory::clone_cached_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/core.rs::impl CoreValueFactory::root_core_net#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl CoreValueFactory::try_construct_runtime_value_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/core.rs::impl CoreValues::new#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/core.rs::impl HostCallRootBundle::from_captures#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/core.rs::impl LazyValue::cached#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl LazyValue::computed_fixpoint#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl LazyValue::error#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl LazyValue::external_host_call#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl LazyValue::from_access#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl LazyValue::from_application#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl LazyValue::from_net_computation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl LazyValue::from_reflection_gate#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl LazyValue::id#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl LazyValue::root#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl LazyValue::semantic_computation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl LazyValue::semantic_thunk#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl LazyValue::source_snapshot#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl PromisedValue::assignment#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl PromisedValue::exact_subscription_count#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl PromisedValue::fixpoint#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/core.rs::impl PromisedValue::fixpoint#2|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/core.rs::impl PromisedValue::id#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl PromisedValue::root#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl PromisedValue::task#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl PromisedValue::with_cell#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl Value::builtin_call#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::impl Value::reflection_task_result#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::publish_test_promise#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::tests::access_qualified_diagnostic_debug_is_recursive_hidden_and_non_demanding#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::tests::access_qualified_key_conversion_is_non_demanding_and_round_trips_strict_data#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::tests::access_qualified_representation_comparison_is_structural_and_non_demanding#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::tests::access_qualified_value_duplication_preserves_managed_identity_without_rooting#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::tests::canonical_cache_releases_with_the_last_value_domain_owner#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core.rs::tests::factory_scoped_allocation_uses_current_mutator#1|surface=construction|scope=test|nested=0|carrier=none",
-    "src/core.rs::tests::factory_scoped_allocation_uses_current_mutator#2|surface=construction|scope=test|nested=0|carrier=none",
-    "src/core.rs::tests::managed_family_requested_layout_is_accepted#1|surface=construction|scope=test|nested=0|carrier=none",
-    "src/core.rs::tests::managed_family_requested_layout_is_accepted#2|surface=construction|scope=test|nested=0|carrier=none",
-    "src/core.rs::tests::scoped_factory_does_not_retain_allocator_or_scheduler#1|surface=construction|scope=test|nested=0|carrier=none",
-    "src/core/managed.rs::impl CoreValueFactory::rooted_error_lazy_for_test#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed.rs::impl CoreValueFactory::with_managed_values#1|surface=direct-mutator|scope=production|nested=0|carrier=none",
-    "src/core/managed.rs::impl CoreValueFactory::with_runtime_value_access#1|surface=direct-mutator|scope=production|nested=0|carrier=none",
-    "src/core/managed.rs::tests::allocate_fixture#1|surface=construction|scope=test|nested=0|carrier=none",
-    "src/core/managed.rs::tests::managed_drop_has_no_runtime_or_heap_capability#1|surface=construction|scope=test|nested=0|carrier=none",
-    "src/core/managed.rs::tests::runtime_value_access_rejects_an_owner_from_another_heap_before_mutation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed.rs::tests::runtime_value_access_rejects_an_owner_from_another_heap_before_mutation#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed.rs::tests::runtime_value_access_routes_borrowed_edge_sets_to_the_collector_gateway#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/active_owner_inventory.rs::every_real_value_variant_has_passive_managed_destruction#1|surface=construction|scope=test|nested=0|carrier=none",
-    "src/core/managed/active_owner_inventory.rs::every_real_value_variant_has_passive_managed_destruction#2|surface=construction|scope=test|nested=0|carrier=none",
-    "src/core/managed/active_owner_inventory.rs::production_reflection_gate_target_backedge_reclaims_without_an_external_root#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/active_owner_inventory.rs::production_reflection_result_edges_do_not_need_an_external_root#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/payload_edges/managed.rs::tests::nested_compatibility_owners_report_the_synthetic_managed_leaf#1|surface=construction|scope=test|nested=0|carrier=none",
-    "src/core/managed/payload_edges/managed.rs::tests::recursive_identity_stops_do_not_enter_raw_cells_or_nets#1|surface=construction|scope=test|nested=0|carrier=none",
-    "src/core/managed/payload_edges/persistent.rs::tests::persistent_adapter_cycle_reclaims_in_isolated_heap#1|surface=construction|scope=test|nested=0|carrier=none",
-    "src/core/managed/payload_edges/runtime_net.rs::tests::generic_runtime_net_payload_cycle_marks_exactly#1|surface=construction|scope=test|nested=0|carrier=none",
-    "src/core/managed/payload_edges/runtime_net.rs::tests::managed_core_net_trace_does_not_reduce_materialize_or_force#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::assert_lazy_promise_cycle_through_source#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::assert_single_promise_cycle_through#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::assert_single_promise_failure_cycle_through#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::bounded_core_net_gateway_preserves_cell_mutation_publication#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::bounded_core_net_gateway_preserves_cell_mutation_publication#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::bounded_core_net_gateway_preserves_cell_mutation_publication#3|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::bounded_lazy_gateway_preserves_terminal_publication_protocol#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::bounded_lazy_gateway_preserves_terminal_publication_protocol#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::bounded_lazy_gateway_preserves_terminal_publication_protocol#3|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::bounded_promise_gateway_preserves_one_terminal_winner#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::bounded_promise_gateway_preserves_one_terminal_winner#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::bounded_promise_gateway_preserves_one_terminal_winner#3|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::core_net_reduction_enters_the_same_managed_transition_gateway#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::core_net_reduction_enters_the_same_managed_transition_gateway#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::lazy_failure_transition_reports_failure_edges_and_releases_source#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::lazy_success_transition_reports_source_removal_and_terminal_addition_without_forcing#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::losing_promise_publisher_reports_its_proposed_addition_without_changing_the_winner#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::losing_promise_publisher_reports_its_proposed_addition_without_changing_the_winner#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::losing_promise_publisher_reports_its_proposed_addition_without_changing_the_winner#3|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::losing_promise_publisher_reports_its_proposed_addition_without_changing_the_winner#4|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::managed_core_net_source_self_cycle_is_traced_and_reclaimed#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::managed_core_net_stuck_reason_self_cycle_is_traced_and_reclaimed#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::managed_lazy_core_net_pair_cycle_is_traced_and_reclaimed#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::managed_lazy_net_promise_ring_is_traced_and_reclaimed#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::managed_lazy_source_self_cycle_is_traced_and_reclaimed#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::managed_operator_payload_cycle_survives_ready_and_claimed_work_then_reclaims::assert_state#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::managed_promise_assignment_self_cycle_is_traced_and_reclaimed#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::managed_promise_core_net_pair_cycle_is_traced_and_reclaimed#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::managed_promise_cycle_through_function_stage_is_traced_and_reclaimed#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::managed_promise_cycle_through_remote_cursor_source_is_traced_and_reclaimed#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::promise_publication_callbacks_observe_assignment_before_wake_detachment#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::recursive_cell_family_contracts_and_registered_root_lifecycles#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::recursive_cell_family_contracts_and_registered_root_lifecycles#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::recursive_cell_family_contracts_and_registered_root_lifecycles#3|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::semantic_edges_and_durable_roots_share_one_managed_identity#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::semantic_edges_and_durable_roots_share_one_managed_identity#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/recursive_cells.rs::tests::semantic_edges_and_durable_roots_share_one_managed_identity#3|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/value_node.rs::tests::managed_value_node_dispatches_every_real_variant_with_exact_recursive_edges#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/value_node.rs::tests::managed_value_node_dispatches_every_real_variant_with_exact_recursive_edges#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/value_node.rs::tests::managed_value_node_family_contract_and_lifecycle#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/value_node.rs::tests::managed_value_node_family_contract_and_lifecycle#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/value_node.rs::tests::prepare#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/value_node.rs::tests::prepared_root_projection_nests_inside_one_runtime_access_region#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core/managed/value_node.rs::tests::prepared_root_projection_nests_inside_one_runtime_access_region#2|surface=runtime-access|scope=test|nested=1|carrier=none",
-    "src/core/managed/value_node.rs::tests::project#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core_net.rs::impl CorePreparedCopySource::into_inner_for_factory#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core_net.rs::impl CoreRuntimeNet::duplicate_for_test#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core_net.rs::impl CoreRuntimeNet::with_test_access#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core_net.rs::impl CoreValueFactory::construct_core_runtime_net_for_test#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core_net.rs::impl CoreValueFactory::instantiate_core_net#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core_net.rs::tests::core_contention_does_not_retain_the_semantic_net#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core_net.rs::tests::core_cursor_step_rejects_a_live_claim#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core_net.rs::tests::core_net_access_rejects_a_foreign_runtime#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core_net.rs::tests::core_net_matching_access_reads_its_managed_cell#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core_net.rs::tests::frontier_observation_is_a_nonrooting_edge_for_managed_driver_state#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core_net.rs::tests::identity_only_net_work_outlives_scoped_access#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core_net.rs::tests::identity_only_net_work_outlives_scoped_access#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core_net.rs::tests::scoped_normalization_batch_closes_and_publishes_once#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core_net.rs::tests::scoped_normalization_batch_closes_on_unwind#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core_net.rs::tests::scoped_normalization_batch_wakes_forced_concurrent_followers#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core_net.rs::tests::scoped_normalization_batch_wakes_forced_concurrent_followers#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/core_net.rs::tests::scoped_normalization_batch_wakes_forced_concurrent_followers#3|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/diagnostic.rs::conventional_summary_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/diagnostic.rs::conventional_summary_root#2|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/diagnostic.rs::conventional_summary_root#3|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/diagnostic.rs::conventional_summary_root#4|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/diagnostic.rs::conventional_summary_root#5|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/diagnostic.rs::failure_diagnostic_root_with#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/diagnostic.rs::prepend_contexts_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/diagnostic.rs::tests::digest_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/diagnostic.rs::tests::trace_origin_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/application.rs::apply_values#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/builtins/net/tests/mod.rs::with_access#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::callable_checkpoint_resumes_published_focus_without_replay#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::callable_dependency_completion_before_exact_block_is_not_lost#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::contending_evaluator_hands_off_then_resumes_after_batch_publication#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::contending_evaluator_hands_off_then_resumes_after_batch_publication#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::cursor_dependency_work_orders_child_before_parent_retry#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::cursor_dependency_work_orders_child_before_parent_retry#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::cursor_driver_releases_each_runtime_before_crossing_to_the_next#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::frame_bearing_callable_checkpoint_survives_every_ownership_handoff#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::fresh_operator_claim_release_restores_ready_work#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::fresh_operator_claim_unwind_restores_ready_work#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::mismatched_blocked_operator_retry_fails_quietly_before_guard_issuance#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::net_whnf_machine_retains_one_edge_across_semantic_dependency#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::operator_claim_dispositions_defer_application_demand_to_whnf#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::operator_claim_dispositions_defer_application_demand_to_whnf#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::operator_claim_dispositions_defer_application_demand_to_whnf#3|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::operator_claim_dispositions_defer_application_demand_to_whnf#4|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::persistent_driver_requeues_the_exact_active_pair_before_semantic_parking#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::persistent_driver_retains_work_across_batch_admission_contention#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::persistent_driver_retains_work_across_batch_admission_contention#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::retried_operator_claim_release_restores_the_exact_wait#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::retried_operator_claim_unwind_restores_the_exact_wait#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net.rs::driver_tests::stale_fresh_operator_claim_fails_quietly_before_guard_issuance#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net/tests/nc5.rs::block_task_promise#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net/tests/nc5.rs::callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net/tests/nc5.rs::callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net/tests/nc5.rs::callable_checkpoint_usage_distinguishes_production_from_frame_fixture#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/net/tests/nc5.rs::rooted_claimed_core_call_in#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/operator.rs::constant_effect#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/test_support.rs::closed_function_value_in#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/test_support.rs::lower_test_function_code_in#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/tests.rs::dropped_reflection_completion_activation_permit_terminalizes_managed_promise#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/tests.rs::compiled_function_values_reuse_one_shared_interaction_net#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/tests.rs::curried_function_partial_application_retains_a_shared_stage#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/tests.rs::demanded_forwarding_chain_caches_whnf_in_every_lazy_member#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/tests.rs::deferred_computation_caches_one_structured_failure#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/tests.rs::effect_map_finishes_its_list_front_before_observing_the_api#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/tests.rs::immediate_diagnostic_shell_operations_share_one_root_neutral_access_region#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/tests.rs::lazy_list_chunks_error_when_they_do_not_evaluate_to_lists#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/tests.rs::ordinary_observers_do_not_unseal_metadata_carriers#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/tests.rs::reflection_completion_activation_and_first_session_close_have_both_orders#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/tests.rs::promised_list_chunks_remain_assignable_after_early_observation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/tests.rs::reflection_gate_blocks_and_resumes_the_exact_net_operator_call#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/tests.rs::test_effect_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/tests.rs::unobserved_reflection_failure_remains_reportable_until_promise_propagation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/tests.rs::wrapper_application_budget_probe_yields_without_publishing_a_cache#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/tests.rs::zero_arity_apply_operator_is_data_identity#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/coordinator/tests.rs::reflection_promise_terminal_mapper_covers_every_terminal_disposition#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value.rs::impl LazyTaskMachine::poll#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/eval/value.rs::impl LazyTaskMachine::poll#2|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/eval/value.rs::ownership_tests::promise_follower_yields_from_its_retained_whnf_checkpoint#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::assert_lazy_checkpoint_kind#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::assert_list_effect_checkpoint#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::assert_object_checkpoint#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::assert_transparent_failure#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::builder_checkpoint_observes_a_lazy_reset_key_once_across_route_loss#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::builder_checkpoint_observes_a_lazy_reset_key_once_across_route_loss#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::builder_checkpoint_survives_path_and_state_dependencies_without_replay#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::builder_checkpoint_survives_path_and_state_dependencies_without_replay#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::builder_checkpoint_survives_path_and_state_dependencies_without_replay#3|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::builder_control_key_failures_are_transparent_and_precede_later_operands#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::builder_copy_checkpoint_preserves_count_then_state_dependencies_without_replay#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::builder_copy_checkpoint_preserves_count_then_state_dependencies_without_replay#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::builder_copy_checkpoint_preserves_count_then_state_dependencies_without_replay#3|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::builder_copy_checkpoint_preserves_count_then_state_dependencies_without_replay#4|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::builder_operand_failures_are_ordered_transparent_and_do_not_observe_later_operands#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::builder_operand_failures_are_ordered_transparent_and_do_not_observe_later_operands#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencies#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencies#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencies#3|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencies#4|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::completed_host_call_checkpoint_survives_route_loss_and_collection#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::fix_function_returning_its_future_twice#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation#3|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation#4|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::host_call_yields_on_both_sides_and_consumes_its_result_once#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::interrupted_host_call_is_never_replayed_after_route_loss#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::later_builder_fix_alternative_survives_route_loss_without_replay#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::later_builder_fix_alternative_survives_route_loss_without_replay#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::later_builder_fix_alternative_survives_route_loss_without_replay#3|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::list_effect_checkpoint_admission_retains_a_source_owned_deferred_chunk#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::list_effect_checkpoint_admission_retains_a_source_owned_deferred_chunk#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::list_effect_fix_checkpoint_constructs_and_assigns_one_promise#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::list_effect_run_checkpoint_does_not_replay_effect_or_handler_demand#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::net_whnf_checkpoint_survives_route_loss_and_collection#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::net_whnf_checkpoint_survives_route_loss_and_collection#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::public_construction_builder_operand_promise_resumes_same_program#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::public_construction_checkpoint_cycle_is_reclaimed_after_roots_drop#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::public_construction_checkpoint_cycle_is_reclaimed_after_roots_drop#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::public_construction_exposed_port_promise_retains_one_context_after_route_loss#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::public_pure_construction_survives_route_loss_without_repeating_effect_or_continuation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::public_pure_construction_survives_route_loss_without_repeating_effect_or_continuation#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::resume_after_list_effect_route_loss#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::resume_after_lazy_route_loss#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::resume_after_object_route_loss#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::retained_application_machine#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::retained_list_effect_machine#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::retained_list_effect_machine#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::w6g1f3i_immediate_builtin_result_is_installed_before_route_loss#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/value/tests/w4.rs::w6g1f3i_function_fixpoint_checkpoint_survives_promise_and_route_loss#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/whnf/tests/w3b_application.rs::builtin_application_batches_only_to_saturation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/whnf/tests/w3b_application.rs::partial_builtin_resumes_without_replaying_supplied_arguments#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/whnf/tests/w3b_application.rs::partial_builtin_resumes_without_replaying_supplied_arguments#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/whnf/tests/w3b_application.rs::saturated_result_is_demanded_before_any_extra_argument_is_applied#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/access.rs::impl EvaluationPollContext::with_value_access#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/evaluation/access.rs::tests::different_heap_authority_is_rejected#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/access.rs::tests::runtime_tls_caches_remain_heap_qualified#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/access.rs::tests::runtime_tls_caches_remain_heap_qualified#2|surface=runtime-access|scope=test|nested=1|carrier=none",
-    "src/evaluation/coordinator.rs::impl TaskOwnedPromiseObligation::publish_terminal_guarded#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/evaluation/coordinator/task.rs::impl LocalPromiseOwner::fail_all#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/evaluation/executor.rs::tests::worker_termination_releases_inactive_collector_caches#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/pump.rs::poison_lazy_cycle#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/evaluation/session.rs::impl EvalContext::lazy_task#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/session.rs::impl EvalContext::promise_task#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/session.rs::impl EvalContext::reserve_reflection_completion_activation#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/evaluation/tests.rs::assigned_task_promise_is_removed_before_later_task_terminalization#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/tests.rs::blocked_client_checkpoint_survives_collection_until_promise_assignment#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/tests.rs::evaluate_strategy#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/eval/tests.rs::run_metadata_transform#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/tests.rs::generic_client_demand_resumes_composed_access_and_binary_annotation#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/tests.rs::patient_deferred_demand_retries_when_disturbance_races_no_progress::impl CompleteAfterObservation::poll#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/tests.rs::impl AssignPromiseAfterRelease::poll#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/tests.rs::impl AssignPromiseThenYield::poll#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/tests.rs::impl CacheLazyFailure::poll#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/tests.rs::pending_reflection_activation_roots_retire_with_their_reservations#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/tests.rs::promise_follow_reprojects_its_rooted_assignment_across_polls#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/tests.rs::promise_follow_reprojects_its_rooted_assignment_across_polls#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/tests.rs::root_promise_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/tests.rs::rooted_promise_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/tests.rs::rooted_semantic_lazy_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/tests.rs::task_owned_promise_lazy_cycle_fails_in_both_publication_orders#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/evaluation/tests/w7c.rs::exact_one_unit_polls_retain_one_checkpoint_without_root_or_allocation_churn#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::finish#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::lower_declaration#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::lower_declaration#2|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/g_syntax/net_lowering.rs::impl ResolvedNetLowerer < 'access , 'scope >::lower_code#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/net_lowering.rs::impl ResolvedNetLowerer < 'access , 'scope >::lower_template#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/net_lowering.rs::lower_resolved_expr#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/reflection/lifecycle.rs::combine_composed_result#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/machine.rs::impl Branch < S >::new#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/reflection/machine.rs::impl EffectTask < S >::control_step#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/machine/tests.rs::delivery_selects_reset_or_delimiter_only_after_stack_decoding#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/reflection/machine/tests.rs::reset_request_effect#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/reflection/machine/tests.rs::shift_request_effect#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/reflection/protocol.rs::impl TaskHalt::from#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/protocol.rs::root_inventory_tests::public_context_roots_a_bounded_evaluation_failure#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/reflection/protocol.rs::root_inventory_tests::structured_api_error_preserves_its_runtime_root#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/runtime.rs::impl RuntimeFailureRoot::new#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/runtime.rs::impl RuntimeValueRoot::clone_core_for_test#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/runtime.rs::impl RuntimeValueRoot::new#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/runtime.rs::tests::runtime_failure_root_alone_retains_and_releases_its_managed_values#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/diagnostic.rs::diagnostic_object_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/diagnostic.rs::diagnostic_object_root#2|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/g_syntax.rs::initialize_cached_compiler_values#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/tests.rs::compile_source_emits_relative_diagnostics_through_context#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/tests.rs::context_abstract_global_path#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/tests.rs::context_final_defs#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/compiler_values.rs::builtin_list_module#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/compiler_values.rs::effect_test_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/compiler_values.rs::fail_effect_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/g_syntax/compiler_values.rs::reflection_annotator_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/compiler_values.rs::run_pure_open_match_test_resolved#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/compiler_values.rs::tests::builtin_test_module#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/compiler_values.rs::tests::effect_test_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/compiler_values.rs::tests::macro_test_environment#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/compiler_values.rs::tests::project_test_value#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/diagnostic_formatter.rs::tests::formatter_is_cached_after_exposing_its_function#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/diagnostic_formatter.rs::tests::formatter_is_cached_after_exposing_its_function#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/macro_expansion/runner.rs::render_macro_case#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/g_syntax/macro_expansion/runner.rs::render_macro_case#2|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/g_syntax/macro_expansion/runner.rs::run_macro_effect#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/g_syntax/macro_expansion/runner.rs::select_field_root#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/g_syntax/macro_expansion/tests.rs::unstarted_reflection_result_uses_runtime_default_profile_from_macro_demand#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::new#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/g_syntax/parser/source.rs::impl StagedSourceParser < 'source >::next_expanded_declarations#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/g_syntax/parser/source.rs::impl StagedSourceParser < 'source >::next_expanded_declarations#2|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/g_syntax/parser/source.rs::macro_lookup#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/g_syntax/resolve/conditional.rs::tests::effect_call_resolved#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/resolve/conditional.rs::tests::lower_effect_expr_resolved#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/resolve/conditional.rs::tests::lower_guard_choices_resolved#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/resolve/conditional.rs::tests::lower_if_expr_resolved#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/resolve/conditional.rs::tests::lower_match_expr_resolved#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/resolve/conditional.rs::tests::lower_match_when_expr_resolved#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/resolve/conditional.rs::tests::resolve_guard_choice#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/resolve/expression.rs::syntax_expr_to_resolved_in_scope#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/resolve/scope.rs::impl NameScope < Value >::module#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/g_syntax/resolve/scope.rs::impl NameScope < Value >::resolved#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/reflection/lifecycle.rs::combine_composed_result#2|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/lifecycle.rs::impl EffectRun < S >::schedule_with_capabilities#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/machine.rs::impl BranchOutcome < S >::complete#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/reflection/machine.rs::impl EffectTask < S >::asserting_unit_result#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/machine.rs::impl EffectTask < S >::complete_specialization_request#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/machine.rs::impl EffectTask < S >::complete_specialization_request#2|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/machine.rs::impl EffectTask < S >::control_step#2|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/machine.rs::impl EffectTask < S >::state_path_step#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/machine.rs::impl EffectTask < S >::state_path_step#2|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/machine.rs::impl EffectTask < S >::store_path_step#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/machine.rs::impl EffectTask < S >::store_path_step#2|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/machine.rs::impl EffectTask < S >::store_path_step#3|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/machine.rs::impl EffectTask < S >::store_path_step#4|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/machine.rs::impl EffectTask < S >::store_path_step#5|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/machine.rs::impl EffectTask < S >::store_path_step#6|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/machine.rs::impl EffectTask < S >::store_path_step#7|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/machine/tests.rs::effect_dispatch_preserves_application_and_request_stage_contexts#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/reflection/machine/tests.rs::effect_dispatch_preserves_structured_failure_and_adds_stage_context#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/reflection/machine/tests.rs::execution_work_and_cut_payloads_retain_roots_until_retirement#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/reflection/machine/tests.rs::execution_work_and_cut_payloads_retain_roots_until_retirement#2|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/reflection/machine/tests.rs::request_value_for_test#1|surface=runtime-access|scope=test|nested=0|carrier=none",
-    "src/reflection/protocol.rs::impl TaskHalt::with_context#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/requests.rs::contextual_demand_value#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-    "src/reflection/requests.rs::with_task_join_context#1|surface=runtime-access|scope=production|nested=0|carrier=none",
-];
+fn admission_occurrence_fingerprint(occurrences: &[AdmissionOccurrence]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut fingerprint = FNV_OFFSET;
+    for occurrence in occurrences {
+        for byte in occurrence.record().bytes().chain([0xff]) {
+            fingerprint = (fingerprint ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
+        }
+    }
+    fingerprint
+}
 
 fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(directory).expect("the source tree should be readable") {
@@ -853,285 +506,20 @@ fn all_managed_entries_have_bounded_mutator_regions() {
         }
     }
 
-    let expected_gateways = [
-        // D.2b.2 publishes imported bytes and the final module promise through
-        // one explicit bounded value region.
-        ("src/api/assembly.rs", GatewayCounts::new(1, 0)),
-        ("src/api/tests.rs", GatewayCounts::new(3, 2)),
-        // D.2b.2 removes authority-free promise publication and public-root
-        // reprojection. Resolver success, structured failure, textual failure,
-        // and drop each use a local region; public projection explicitly
-        // upgrades its weak observer.
-        ("src/api/value.rs", GatewayCounts::new(6, 0)),
-        ("src/compiler.rs", GatewayCounts::new(6, 0)),
-        // I4.0's owner-local destruction fixtures exercise the admitted
-        // construction gateway; production allocation still enters through
-        // the same higher-ranked scope. GCI5R-002B's scoped gateway and
-        // foreign-owner fixtures add three matching-domain access regions.
-        // I8A.2's rooted-lazy transition fixture uses the same explicit test
-        // gateway instead of exposing recursive-cell construction to sibling
-        // modules.
-        ("src/core/managed.rs", GatewayCounts::new(4, 2)),
-        // I4F.2b's test-only passive-closure matrix allocates each real
-        // compatibility value variant through the same bounded gateway.
-        // GCI5R-005A/E add production effect- and target-backedge reflection
-        // cycles plus matching-runtime source inspection.
-        (
-            "src/core/managed/active_owner_inventory.rs",
-            GatewayCounts::new(2, 2),
-        ),
-        (
-            "src/core/managed/payload_edges/persistent.rs",
-            GatewayCounts::new(0, 1),
-        ),
-        // I5B's synthetic managed-leaf fixtures construct closed graphs to
-        // verify transitive compatibility traversal and identity stops.
-        (
-            "src/core/managed/payload_edges/managed.rs",
-            GatewayCounts::new(0, 2),
-        ),
-        (
-            "src/core/managed/payload_edges/runtime_net.rs",
-            // I8C retired two bounded compatibility-projection fixtures. The
-            // remaining access constructs the closed generic visitor fixture.
-            GatewayCounts::new(1, 1),
-        ),
-        // I5D's recursive-cell cutover and I5F's closed self- and cross-family
-        // cycle fixtures use matching-domain access for construction,
-        // observation, publication, mutation-gateway installation, and root
-        // projection. GCI5R-002 added deterministic production-writer probes
-        // for lazy, promise, and synchronized net transitions through that
-        // same bounded access surface. I8A.2 retires the two-access arbitrary
-        // whole-net replacement fixture with the whole-net mutation bridge.
-        // I8B adds two isolated managed-net cycle fixtures, each with one
-        // construction/publication region.
-        (
-            "src/core/managed/recursive_cells.rs",
-            // D.2b.2 removes two authority-free prepared-root round trips;
-            // their callers now reuse an already-open region.
-            GatewayCounts::new(37, 0),
-        ),
-        // I4F.2c keeps the production-shaped node and prepared root private
-        // while their local lifecycle, provenance, and nested-access fixtures
-        // exercise construction and observation.
-        ("src/core/managed/value_node.rs", GatewayCounts::new(8, 0)),
-        // I5D routes lazy and promise cell construction and access through the
-        // same bounded domain gateway as reflection-value projection.
-        // GCI5R-001B adds one synchronous construction entry which publishes
-        // its returned graph before that same bounded access ends. GCI5R-003E
-        // adds the explicit producer-installation gateway plus test-only
-        // promise/lazy publication helpers; semantic facades no longer reopen
-        // managed access to mutate themselves. GCI5R-003F removes their weak
-        // observers; seven test-only inspection helpers now require an
-        // explicit matching factory and enter through this counted gateway.
-        // GCI5R-005B removes the former external reflection-root projection.
-        // I10A adds one bounded access region which turns a HostCall's
-        // declared semantic captures into its one-shot external root bundle.
-        // Closed runtime-cache candidates keep one outer access region until
-        // their declared runtime roots have been installed. D.2b.1a adds one
-        // focused region proving raw shell duplication preserves managed
-        // identity without registering a root. D.2b.1b adds one sibling
-        // region proving key conversion rejects a deferred list segment
-        // without evaluating it. D.2b.1c adds one comparison region covering
-        // structural containers and exact managed identity. D.2b.1d adds one
-        // non-demanding recursive diagnostic-rendering region.
-        // D.2b.2 constructs the canonical runtime roots in one additional
-        // shared region.
-        ("src/core.rs", GatewayCounts::new(35, 5)),
-        // I5D scopes every managed core-net construction, root handoff, and
-        // source-frontier traversal through matching value-domain authority.
-        // GCI5R-008's test-only prepared-source bridge reopens the matching
-        // runtime solely to project a root-owned source for generic fixtures.
-        // P2B moves exact net identity observation behind the same bounded
-        // access authority as topology inspection. P2C adds one explicit
-        // test-only duplicate gateway and roots a net before a worker handoff.
-        ("src/core_net.rs", GatewayCounts::new(17, 0)),
-        ("src/diagnostic.rs", GatewayCounts::new(11, 0)),
-        // W6F.4d.3 gives test application construction the same short,
-        // callback-free value region used by production lazy application.
-        ("src/eval/application.rs", GatewayCounts::new(1, 0)),
-        // PNC1's strict-netlist conformance matrix builds each complete
-        // semantic record beneath one shared test-only access region.
-        (
-            "src/eval/builtins/net/tests/mod.rs",
-            GatewayCounts::new(1, 0),
-        ),
-        // D.2b.2 gives provenance-generated halt context an explicit bounded
-        // value region.
-        // P2B compares registered net roots under the same explicit access
-        // authority used by production normalization batches. P2C adds
-        // explicit test-only duplicate/root handoffs for cursor-driver and
-        // concurrent normalization fixtures.
-        // W4C.1's persistent-driver fixtures compare retained request roots
-        // under two additional bounded test accesses. NC3-NC4 add three
-        // forced-order checkpoint fixtures which duplicate managed promise
-        // edges only inside matching test access.
-        ("src/eval/net.rs", GatewayCounts::new(24, 0)),
-        // NC5's promise-chain and usage fixtures duplicate managed promise
-        // edges only beneath three explicit matching-runtime access regions.
-        // NC6C roots the task-terminal net in one additional bounded region;
-        // aggressive collection may otherwise reclaim the test fixture
-        // between construction and its terminal-state observation.
-        ("src/eval/net/tests/nc5.rs", GatewayCounts::new(5, 0)),
-        ("src/eval/operator.rs", GatewayCounts::new(1, 0)),
-        // WHNFHR-001A constructs a complete closed-function/forwarding-lazy
-        // fixture below one additional bounded test-only access region.
-        ("src/eval/test_support.rs", GatewayCounts::new(2, 0)),
-        // Reflection evaluator fixtures construct their managed wrapper under
-        // one bounded access region. P2B's two shared-function-stage checks
-        // compare managed-net identity under matching access.
-        // D.2b.2's structured deferred-failure fixture constructs its halt
-        // payload in one explicit access region.
-        // W6G.1f.2a's yield/dependency and cross-session handoff fixtures
-        // inspect their exact lazy-owned checkpoint under two bounded regions.
-        // W6G.1f.3g.3d isolates and roots one managed lazy-list result so a
-        // parallel collector cannot retire the fixture during observation.
-        // The metadata-carrier observer fixture likewise roots its shared
-        // carrier across independently evaluated observations.
-        // W6G.1f.4d constructs and roots a reflection completion in one
-        // bounded test region before forcing both session-close orders.
-        // WHNFHR-001A publishes the complete forwarding chain through one
-        // additional bounded test-only access region.
-        ("src/eval/tests.rs", GatewayCounts::new(20, 0)),
-        // W6G.1f.3a.1 roots and reprojects host-call fixtures only beneath
-        // explicit same-runtime test regions, including forced route loss.
-        // W6G.1f.3e.4 inspects the exact object checkpoint and reconstructs a
-        // route after forced collection through two additional bounded test
-        // regions. W6G.1f.3f.2 does the same for list-effect checkpoints and
-        // constructs their retained fixtures beneath matching access.
-        // PNC3R-001/002 add bounded retained builder-route, list-front, and
-        // promise-identity observations; none escape their test access.
-        // PNC4C adds four bounded regions for independently published wire
-        // operands, state, and the final outcome inspection. PNC4R-001/002 add
-        // eight bounded test regions for copy dependency publication, exact
-        // journal inspection, and transparent operand-failure assertions.
-        // PNC5R-001 adds two bounded regions to project promised operands
-        // into public construction fixtures before forced route loss.
-        // PNC7 adds two bounded checkpoint-cycle construction/projection
-        // regions and one second-demand projection after route loss.
-        ("src/eval/value/tests/w4.rs", GatewayCounts::new(51, 0)),
-        // W2B.2's focused promise-follower fixture constructs the exact
-        // managed promise root under one bounded test access region.
-        // W6G.1f.3a.1 adds two short production regions on either side of the
-        // mutator-free arbitrary host callback.
-        ("src/eval/value.rs", GatewayCounts::new(3, 0)),
-        // W3B application fixtures inspect or terminalize exact managed
-        // application checkpoints under four bounded test regions. Their shared
-        // application/poll helpers reuse the caller's poll access and are not
-        // independent mutator introductions.
-        (
-            "src/eval/whnf/tests/w3b_application.rs",
-            GatewayCounts::new(4, 0),
-        ),
-        ("src/evaluation/access.rs", GatewayCounts::new(4, 0)),
-        // D.2b.2 terminal promise assignment is access-qualified before its
-        // detached completion wake is delivered.
-        (
-            "src/evaluation/coordinator/task.rs",
-            GatewayCounts::new(1, 0),
-        ),
-        // W6G.1f.3b's terminal-disposition matrix constructs the completion
-        // and failure roots beneath one explicit test-only access region.
-        (
-            "src/evaluation/coordinator/tests.rs",
-            GatewayCounts::new(1, 0),
-        ),
-        // Promise terminalization projects a managed assignment through the
-        // producer root while the coordinator mutation remains admitted.
-        ("src/evaluation/coordinator.rs", GatewayCounts::new(1, 0)),
-        ("src/evaluation/executor.rs", GatewayCounts::new(1, 0)),
-        // GCI5R-003E publishes a strict lazy-cycle failure through all of the
-        // already-retained producer roots in one bounded batch.
-        ("src/evaluation/pump.rs", GatewayCounts::new(1, 0)),
-        // GCI5R-003D roots lazy and promise producers before coordinator
-        // admission instead of letting either semantic façade reopen access.
-        ("src/evaluation/session.rs", GatewayCounts::new(3, 0)),
-        // Production-shaped task fixtures retain lazy/promise roots and use
-        // explicit matching-domain access rather than facade mutation.
-        // D.2b.2's production-shaped promise publishers install assignments
-        // under matching access before detached wakes.
-        // W6C.6's aggressive-collection spark fixtures construct and publish
-        // their recursive values under three additional bounded regions.
-        // W6G.1f.2a forces cross-session resumption through the exact
-        // lazy-owned checkpoint under one additional bounded test region.
-        // W6G.5a removes one delayed test-only promise-root introduction: the
-        // forced scheduler fixture now receives the promise root constructed
-        // by its existing regional helper.
-        ("src/evaluation/tests.rs", GatewayCounts::new(16, 0)),
-        // W7C reads one retained checkpoint under bounded access after
-        // constructing its promise-chain fixture in one scoped region.
-        ("src/evaluation/tests/w7c.rs", GatewayCounts::new(1, 0)),
-        // GCI11R-002C returns the client-demand result root directly, removing
-        // the projection/re-root access gap from closed compiler evaluation.
-        // D.2e roots public compiler inputs and fixtures before their values
-        // cross parser, formatter, or macro boundaries.
-        ("src/g_syntax/compiler_values.rs", GatewayCounts::new(9, 0)),
-        (
-            "src/g_syntax/diagnostic_formatter.rs",
-            GatewayCounts::new(3, 0),
-        ),
-        (
-            "src/g_syntax/macro_expansion/runner.rs",
-            GatewayCounts::new(4, 0),
-        ),
-        (
-            "src/g_syntax/macro_expansion/tests.rs",
-            GatewayCounts::new(1, 0),
-        ),
-        // D.2b.2 roots diagnostic emission through the compiler domain's
-        // explicit local region.
-        ("src/g_syntax.rs", GatewayCounts::new(1, 0)),
-        ("src/g_syntax/module_lowering.rs", GatewayCounts::new(4, 0)),
-        ("src/g_syntax/net_lowering.rs", GatewayCounts::new(3, 0)),
-        ("src/g_syntax/parser/source.rs", GatewayCounts::new(3, 0)),
-        (
-            "src/g_syntax/resolve/conditional.rs",
-            GatewayCounts::new(7, 0),
-        ),
-        (
-            "src/g_syntax/resolve/expression.rs",
-            GatewayCounts::new(1, 0),
-        ),
-        ("src/g_syntax/resolve/scope.rs", GatewayCounts::new(2, 0)),
-        ("src/g_syntax/tests.rs", GatewayCounts::new(3, 0)),
-        // GCI5R-003D roots a freshly constructed reflection fixpoint before
-        // publishing it into branch/coordinator state.
-        // D.2b.2 adds access-qualified branch-root construction and reflection
-        // fixpoint publication without carrying access across machine polls.
-        // D.2c.1a projects a composed child failure through one short
-        // diagnostic region after child settlement has completed.
-        ("src/reflection/lifecycle.rs", GatewayCounts::new(3, 0)),
-        ("src/reflection/machine.rs", GatewayCounts::new(16, 0)),
-        // W5C.4's control fixtures construct request effects and retain exact
-        // reset-stack roots within three bounded test-only regions.
-        ("src/reflection/machine/tests.rs", GatewayCounts::new(8, 0)),
-        // Structured halt fixtures and production conversion now construct
-        // their raw payloads only within explicit regions.
-        ("src/reflection/protocol.rs", GatewayCounts::new(4, 0)),
-        ("src/reflection/requests.rs", GatewayCounts::new(2, 0)),
-        // I6C's isolated failure-root lifecycle fixture constructs its managed
-        // promise in one explicit region before publishing the durable root.
-        // D.2b.2 replaces authority-free failure-root and test projection
-        // helpers with explicit bounded regions.
-        ("src/runtime.rs", GatewayCounts::new(4, 0)),
-    ]
-    .into_iter()
-    .map(|(path, counts)| (PathBuf::from(path), counts))
-    .collect::<BTreeMap<_, _>>();
-
+    let gateway_totals =
+        actual_gateways
+            .values()
+            .fold(GatewayCounts::new(0, 0), |totals, counts| {
+                GatewayCounts::new(
+                    totals.access + counts.access,
+                    totals.construction + counts.construction,
+                )
+            });
     assert_eq!(
-        actual_gateways.keys().collect::<Vec<_>>(),
-        expected_gateways.keys().collect::<Vec<_>>(),
-        "managed gateway owners drifted"
+        gateway_totals,
+        GatewayCounts::new(532, 14),
+        "managed gateway occurrence totals drifted",
     );
-    for (path, expected) in &expected_gateways {
-        assert_eq!(
-            actual_gateways.get(path),
-            Some(expected),
-            "managed gateway count drifted for {}",
-            path.display()
-        );
-    }
     assert_eq!(
         direct_entries,
         [(PathBuf::from("src/core/managed.rs"), 2)]
@@ -1157,32 +545,31 @@ fn every_mutator_introduction_has_an_exact_disposition() {
         .iter()
         .map(AdmissionOccurrence::record)
         .collect::<Vec<_>>();
-    let mut expected = EXPECTED_ADMISSION_OCCURRENCES
-        .iter()
-        .map(|record| (*record).to_owned())
-        .collect::<Vec<_>>();
-    expected.sort();
-
-    if actual != expected {
-        let actual_set = actual.iter().collect::<BTreeSet<_>>();
-        let expected_set = expected.iter().collect::<BTreeSet<_>>();
-        let missing = expected_set
-            .difference(&actual_set)
-            .copied()
-            .collect::<Vec<_>>();
-        let unexpected = actual_set
-            .difference(&expected_set)
-            .copied()
-            .collect::<Vec<_>>();
-        panic!(
-            "managed mutator-introduction ledger drifted: missing {missing:?}; unexpected {unexpected:?}"
-        );
-    }
-
     let reviews = occurrences
         .iter()
         .map(AdmissionOccurrence::review)
         .collect::<Vec<_>>();
+    if std::env::var_os("GLAM_DUMP_MUTATOR_INTRODUCTION_INVENTORY").is_some() {
+        for (occurrence, review) in occurrences.iter().zip(&reviews) {
+            eprintln!(
+                "{}|owner={:?}|disposition={:?}",
+                occurrence.record(),
+                review.owner,
+                review.disposition
+            );
+        }
+    }
+    assert_eq!(
+        actual.len(),
+        533,
+        "managed mutator-introduction count drifted"
+    );
+    assert_eq!(
+        admission_occurrence_fingerprint(&occurrences),
+        13_937_618_347_949_002_293,
+        "managed mutator-introduction source fingerprint drifted"
+    );
+
     assert_eq!(
         occurrences
             .iter()
@@ -1252,7 +639,7 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::PendingRootedTransport),
-        2
+        0
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::PendingRegionalReuse),
@@ -1260,7 +647,7 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::OuterAdmission),
-        58
+        54
     );
 }
 

@@ -37,11 +37,17 @@ pub use parser::parse_source;
 use resolved::{BindingId, ResolvedExpr, ResolvedPathPart};
 
 pub struct LoweredSource {
-    pub definitions: Value, // open fixpoint, i.e. \ self -> Dict
     pub diagnostics: Vec<Diagnostic>,
     /// Keeps every managed edge in `definitions` live until the lowered
     /// source is either consumed by `compile_source` or dropped by a caller.
     definitions_root: RuntimeValueRoot,
+}
+
+#[cfg(test)]
+impl LoweredSource {
+    fn definitions(&self, access: &RuntimeValueAccess<'_>) -> Value {
+        self.definitions_root.clone_core_with(access)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,7 +60,6 @@ pub struct Diagnostic {
 
 pub(crate) fn compile_source(source: &[u8], context: &CompileContext) -> RuntimeValueRoot {
     let LoweredSource {
-        definitions: _,
         diagnostics,
         definitions_root,
     } = lower_source(source, context);

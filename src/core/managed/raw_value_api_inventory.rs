@@ -1038,13 +1038,13 @@ fn raw_core_value_api_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        533,
+        518,
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
     assert_eq!(
         occurrence_fingerprint(&actual),
-        14_755_529_202_494_495_996,
+        9_495_114_017_072_832_932,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );
@@ -1073,14 +1073,12 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
         // PNC5 adds the shared effect-header projection and two retained
         // runner constructors; each requires caller-owned value access. W7B
         // adds one ready key-list constructor within that same region.
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 465),
-        ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 30),
-        ((ApiKind::Function, ApiDisposition::Violation), 29),
+        ((ApiKind::Function, ApiDisposition::RegionalAccess), 485),
+        ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 28),
         (
             (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
-            6,
+            5,
         ),
-        ((ApiKind::DerivedTrait, ApiDisposition::Violation), 3),
     ]);
 
     assert_eq!(
@@ -1130,13 +1128,7 @@ fn raw_core_value_api_inventory_has_reviewed_dispositions() {
 fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let actual = collect_occurrences(manifest);
-    let expected = BTreeMap::from([(
-        (
-            RemediationOwner::D2bCoreCompatibility,
-            ReplacementShape::CoreStructuralOperation,
-        ),
-        32,
-    )]);
+    let expected = BTreeMap::new();
 
     assert_eq!(
         remediation_summary(&actual),
@@ -1167,43 +1159,7 @@ fn d2b_core_compatibility_declarations_are_exact() {
         })
         .map(|occurrence| occurrence.declaration)
         .collect::<BTreeSet<_>>();
-    let expected = [
-        "src/core.rs::CoreValueFactory::atom",
-        "src/core.rs::CoreValueFactory::clone_cached_root",
-        "src/core.rs::CoreValueFactory::error",
-        "src/core.rs::CoreValueFactory::info",
-        "src/core.rs::CoreValueFactory::key_value",
-        "src/core.rs::CoreValueFactory::object_reflection_guard",
-        "src/core.rs::CoreValueFactory::tuple",
-        "src/core.rs::CoreValueFactory::unit",
-        "src/core.rs::CoreValueFactory::warn",
-        "src/core.rs::EvaluatedValue::into_value",
-        "src/core.rs::EvaluatedValue::from_whnf",
-        "src/core.rs::EvaluationFailure::emission",
-        "src/core.rs::EvaluationFailure::visit_direct_values",
-        "src/core.rs::EvaluationFailure::with_context",
-        "src/core.rs::HostCallProducer::captures",
-        "src/core.rs::HostCallRootBundle::from_captures",
-        "src/core.rs::Key::from_value",
-        "src/core.rs::Key::to_value_with",
-        "src/core.rs::LazyApplication::arguments",
-        "src/core.rs::LazyApplication::function",
-        "src/core.rs::MetadataCarrier::associated_metadata",
-        "src/core.rs::MetadataCarrier::new",
-        "src/core.rs::Value::associated_metadata",
-        "src/core.rs::Value::diagnostic_kind_name",
-        "src/core.rs::Value::fmt",
-        "src/core.rs::Value::metadata_carrier",
-        "src/core.rs::Value::singleton_list",
-        "src/core.rs::derive Clone",
-        "src/core.rs::derive Eq",
-        "src/core.rs::derive PartialEq",
-        "src/core.rs::immediate_failure_text",
-        "src/core.rs::list_to_key_items",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect::<BTreeSet<_>>();
+    let expected = BTreeSet::new();
 
     assert_eq!(
         actual, expected,

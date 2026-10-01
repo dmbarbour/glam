@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        884,
+        875,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -968,7 +968,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // added or removed, while source-qualified identity changes accordingly.
     assert_eq!(
         occurrence_fingerprint(actual),
-        15_952_803_931_990_826_020,
+        3_417_325_090_164_704_709,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -1013,9 +1013,9 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 198),
+            ((SourceScope::Production, EdgeSurface::Typed), 151),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 636),
+            ((SourceScope::Test, EdgeSurface::Typed), 674),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"
@@ -1035,69 +1035,15 @@ fn persistent_edge_inventory_classifications_are_closed() {
     }), "macro-contained edge operations must remain visible to the inventory");
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-enum RemainingDefectOwner {
-    P4CollectorTraitCutover,
-    P4ManagedFacadeCutoverAfterParent,
-    ParentRawValueCompatibilityCutover,
-}
-
-fn remaining_defect_owner(occurrence: &EdgeOccurrence) -> Option<RemainingDefectOwner> {
-    if occurrence.disposition != EdgeDisposition::Defect {
-        return None;
-    }
-    match occurrence.declaration.as_str() {
-        declaration if declaration.starts_with("crates/glam-gc/src/pointer.rs::") => {
-            Some(RemainingDefectOwner::P4CollectorTraitCutover)
-        }
-        declaration if declaration.starts_with("src/core/managed/recursive_cells.rs::") => {
-            Some(RemainingDefectOwner::P4ManagedFacadeCutoverAfterParent)
-        }
-        declaration
-            if declaration.starts_with("src/core.rs::")
-                || declaration.starts_with("src/core_net.rs::")
-                || matches!(
-                    declaration,
-                    "src/eval/net.rs::NetDriverWork" | "src/eval/net.rs::NormalizationRequest"
-                ) =>
-        {
-            Some(RemainingDefectOwner::ParentRawValueCompatibilityCutover)
-        }
-        _ => None,
-    }
-}
-
 #[test]
 fn remaining_persistent_edge_defects_have_exact_cutover_owners() {
     let defects = current_inventory()
         .iter()
         .filter(|occurrence| occurrence.disposition == EdgeDisposition::Defect)
         .collect::<Vec<_>>();
-    assert_eq!(defects.len(), 77);
-    assert!(defects.iter().all(|occurrence| matches!(
-        occurrence.kind,
-        OccurrenceKind::TraitDependency | OccurrenceKind::PointerIdentity
-    )));
-
-    let owners = defects
-        .iter()
-        .fold(BTreeMap::new(), |mut owners, occurrence| {
-            let owner = remaining_defect_owner(occurrence).unwrap_or_else(|| {
-                panic!(
-                    "direct or unassigned persistent-edge defect reopened P2A-P2C: {}",
-                    occurrence.record()
-                )
-            });
-            *owners.entry(owner).or_default() += 1;
-            owners
-        });
-    assert_eq!(
-        owners,
-        BTreeMap::from([
-            (RemainingDefectOwner::P4CollectorTraitCutover, 5),
-            (RemainingDefectOwner::P4ManagedFacadeCutoverAfterParent, 13),
-            (RemainingDefectOwner::ParentRawValueCompatibilityCutover, 59),
-        ])
+    assert!(
+        defects.is_empty(),
+        "the completed P4 cutover permits no persistent-edge defect: {defects:#?}"
     );
 }
 
@@ -1105,10 +1051,7 @@ fn remaining_persistent_edge_defects_have_exact_cutover_owners() {
 fn parent_raw_value_compatibility_interlocks_are_exact() {
     let actual = current_inventory()
         .iter()
-        .filter(|occurrence| {
-            remaining_defect_owner(occurrence)
-                == Some(RemainingDefectOwner::ParentRawValueCompatibilityCutover)
-        })
+        .filter(|occurrence| occurrence.disposition == EdgeDisposition::Defect)
         .fold(
             BTreeMap::<String, BTreeSet<String>>::new(),
             |mut map, occurrence| {
@@ -1119,103 +1062,10 @@ fn parent_raw_value_compatibility_interlocks_are_exact() {
             },
         );
 
-    let traits = |names: &[&str]| {
-        names
-            .iter()
-            .map(|name| format!("trait-dependency:{name}"))
-            .collect::<BTreeSet<_>>()
-    };
-    let mut expected = BTreeMap::new();
-    for declaration in [
-        "src/core.rs::BuiltinCall",
-        "src/core.rs::EvaluatedValue",
-        "src/core.rs::EvaluationFailure",
-        "src/core.rs::EvaluationFailureKind",
-        "src/core.rs::FunctionCode",
-        "src/core.rs::FunctionValue",
-        "src/core.rs::ListThunk",
-        "src/core.rs::NetValue",
-    ] {
-        let names = if declaration.ends_with("FunctionCode") {
-            &["Debug", "Eq", "PartialEq"][..]
-        } else if declaration.ends_with("ListThunk") {
-            &["Debug"][..]
-        } else {
-            &["Clone", "Debug", "Eq", "PartialEq"][..]
-        };
-        expected.insert(declaration.to_owned(), traits(names));
-    }
-    for declaration in [
-        "src/core.rs::LazyValue",
-        "src/core.rs::MetadataCarrier",
-        "src/core.rs::PromisedValue",
-    ] {
-        expected.insert(declaration.to_owned(), traits(&["Clone"]));
-        for name in ["Debug", "Eq", "PartialEq"] {
-            expected.insert(
-                format!(
-                    "src/core.rs::impl {name} for {}",
-                    declaration.rsplit("::").next().unwrap()
-                ),
-                traits(&[name]),
-            );
-        }
-    }
-    expected.insert(
-        "src/core.rs::Value".to_owned(),
-        traits(&["Clone", "Eq", "PartialEq"]),
-    );
-    expected.insert(
-        "src/core.rs::impl Debug for Value".to_owned(),
-        traits(&["Debug"]),
-    );
-    expected.insert(
-        "src/core.rs::FixpointComputation".to_owned(),
-        traits(&["Clone"]),
-    );
-    expected.insert(
-        "src/core.rs::ListEffectComputation".to_owned(),
-        traits(&["Clone"]),
-    );
-    expected.insert("src/core.rs::LazySource".to_owned(), traits(&["Clone"]));
-    expected.insert(
-        "src/core_net.rs::CoreRuntimeNet".to_owned(),
-        traits(&["Clone"]),
-    );
-    expected.insert(
-        "src/core_net.rs::CoreCursorDependency".to_owned(),
-        traits(&["Clone", "Debug"]),
-    );
-    expected.insert(
-        "src/core_net.rs::CoreCursorStep".to_owned(),
-        traits(&["Debug"]),
-    );
-    expected.insert(
-        "src/core_net.rs::CoreFrontierObservation".to_owned(),
-        traits(&["Clone", "Debug"]),
-    );
-    expected.insert(
-        "src/eval/net.rs::NetDriverWork".to_owned(),
-        traits(&["Clone"]),
-    );
-    expected.insert(
-        "src/eval/net.rs::NormalizationRequest".to_owned(),
-        traits(&["Clone"]),
-    );
-    for name in ["Debug", "Eq", "PartialEq"] {
-        expected.insert(
-            format!("src/core_net.rs::impl {name} for CoreRuntimeNet"),
-            traits(&[name]),
-        );
-    }
-    expected.insert(
-        "src/core_net.rs::eq::ptr_eq".to_owned(),
-        BTreeSet::from(["pointer-identity:self . ptr_eq (other)".to_owned()]),
-    );
-
     assert_eq!(
-        actual, expected,
-        "D.2b.4 permits only the exact carrier traits required until downstream D.2c-D.2g compatibility callers migrate"
+        actual,
+        BTreeMap::new(),
+        "the completed parent-carrier cutover permits no compatibility interlock"
     );
 }
 
@@ -1259,14 +1109,8 @@ fn collector_p2a_direct_trait_dependencies_are_closed() {
 
     assert_eq!(
         collector_defects,
-        BTreeSet::from([
-            "crates/glam-gc/src/pointer.rs::impl Clone for Gc",
-            "crates/glam-gc/src/pointer.rs::impl Copy for Gc",
-            "crates/glam-gc/src/pointer.rs::impl Debug for Gc",
-            "crates/glam-gc/src/pointer.rs::impl Eq for Gc",
-            "crates/glam-gc/src/pointer.rs::impl PartialEq for Gc",
-        ]),
-        "P2A permits only the five explicitly transitional Gc trait implementations in the collector crate"
+        BTreeSet::new(),
+        "the completed P4 collector cutover permits no Gc trait defect"
     );
 }
 
@@ -1311,44 +1155,10 @@ fn glam_p2b_managed_identity_trait_dependencies_are_closed() {
         .map(|occurrence| (occurrence.declaration.clone(), occurrence.shape.clone()))
         .collect::<BTreeSet<_>>();
 
-    let mut expected = BTreeSet::new();
-    for edge in [
-        "ManagedLazyEdge",
-        "ManagedPromiseEdge",
-        "ManagedCoreNetEdge",
-    ] {
-        expected.insert((
-            format!("src/core/managed/recursive_cells.rs::{edge}"),
-            "Clone".to_owned(),
-        ));
-        for implemented in ["Eq", "PartialEq"] {
-            expected.insert((
-                format!("src/core/managed/recursive_cells.rs::impl {implemented} for {edge}"),
-                implemented.to_owned(),
-            ));
-        }
-    }
-    expected.insert((
-        "src/core/managed/recursive_cells.rs::impl Debug for ManagedCoreNetEdge".to_owned(),
-        "Debug".to_owned(),
-    ));
-    for (source, carrier) in [
-        ("src/core.rs", "LazyValue"),
-        ("src/core.rs", "PromisedValue"),
-        ("src/core_net.rs", "CoreRuntimeNet"),
-    ] {
-        expected.insert((format!("{source}::{carrier}"), "Clone".to_owned()));
-        for implemented in ["Debug", "Eq", "PartialEq"] {
-            expected.insert((
-                format!("{source}::impl {implemented} for {carrier}"),
-                implemented.to_owned(),
-            ));
-        }
-    }
-
     assert_eq!(
-        direct_managed_traits, expected,
-        "P2B permits only parent-carrier trait interlocks on the three managed identity families"
+        direct_managed_traits,
+        BTreeSet::new(),
+        "the completed managed-identity cutover permits no trait interlock"
     );
 }
 
@@ -1393,7 +1203,6 @@ fn persistent_edge_inventory_records_every_selected_disposition() {
             EdgeDisposition::AccessQualifiedObservation,
             EdgeDisposition::MutationInput,
             EdgeDisposition::CollectorPrivateErasedIdentity,
-            EdgeDisposition::Defect,
         ])
     );
 }

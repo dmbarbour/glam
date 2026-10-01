@@ -1,6 +1,6 @@
 # Aggressive GC Verification Remediation Plan — 2026-09-11
 
-Status: GCI11R-002A-C and D.1a-D.2g complete; GCI11R-002D.2h planned. This plan expands
+Status: GCI11R-002A-C, D.1a-D.2g, and D.2h.0-D.2h.4a complete; D.2h.4b-D.2h.5 active. This plan expands
 GCI11R-002 and Phase I11D.1. The private repository mode exists and is useful,
 but its complete workspace suite does not yet pass. Gate G3 remains closed.
 
@@ -2773,9 +2773,48 @@ inventory relatch:
     violation entry. Exact fixture migration, count/fingerprint updates, and
     full dynamic closure remain D.2h.3b.2 and D.2h.4 work rather than being
     hidden in this checkpoint.
-- **D.2h.4 — dynamic closure:** run focused ordinary/aggressive ownership
-  checks followed by the routine workspace gates and the complete aggressive
-  workspace suite.
+- **D.2h.4 — dynamic closure:** close the migrated surface in four separately
+  latched checkpoints. An exact count or fingerprint is refreshed only after
+  the corresponding classification test reports no violation; repetition is
+  not evidence for a concurrent ownership failure.
+  - **D.2h.4a — exact source-ledger closure: complete 2026-10-01.** Run the raw-value API,
+    durable-owner, persistent-edge, machine-state, callback-capture,
+    external-owner, root-traffic, and mutator-introduction inventories. Repair
+    or explicitly classify every mismatch, require zero pending/defect/raw
+    violation entry, then update the reviewed counts and fingerprints.
+
+    All 121 inventory tests pass. The raw-value ledger contains 518 reviewed
+    operations and no violation or remediation assignment; the persistent-edge
+    ledger contains 875 occurrences and no defect. The admission ledger has
+    533 exact source occurrences, no nested or carrier-reopening production
+    entry, no pending production disposition, and only the two private
+    collector gateways. The root-publication ledger has 266 exact source
+    occurrences, no defect, and no nested scoped-factory construction.
+
+    Closure found one real production residue rather than merely stale
+    baselines: `LoweredSource` stored both raw definitions and the root which
+    kept those same definitions live, and `ModuleLowerer::finish` reopened the
+    heap solely to populate that test-facing copy. `LoweredSource` now owns
+    only `RuntimeValueRoot`; test inspection projects through explicit access.
+    The access and root-publication ledgers use source-qualified count/FNV
+    latches plus dump modes instead of hundreds of duplicated literal records;
+    their semantic owner/disposition checks remain independent. Durable-owner,
+    compiler-boundary, recursive-identity, callable-checkpoint, and resolved
+    call-graph baselines were reconciled only after their focused closure tests
+    passed.
+  - **D.2h.4b — production-shaped dynamic closure:** run the focused ordinary
+    and aggressive ownership/admission fixtures named by those inventories.
+    Force both relevant serial orders for every concurrency repair; a fixture
+    that passes only after repetition remains a failure. Changing only a test
+    constructor cannot close a production-shaped mismatch unless the fixture
+    itself violated the documented handoff contract.
+  - **D.2h.4c — workspace gate closure:** run formatting, all-target/all-feature
+    clippy, the complete ordinary workspace suite, the interaction-net
+    profiling script, and the complete aggressive workspace suite. Classify
+    failures against the exact ledgers before accepting any baseline movement.
+  - **D.2h.4d — closure reconciliation:** rerun the exact inventories after
+    dynamic fixes, verify their accepted surfaces did not drift, and record
+    the final gate evidence for D.2h.5.
 - **D.2h.5 — record:** publish the dated accepted-surface and verification
   record, and close nested P3/P4/P5 only to the extent evidenced here.
 

@@ -691,11 +691,6 @@ const COMPATIBILITY_ADAPTER_INVENTORY: &[CompatibilityAdapterEntry] = &[
     },
     CompatibilityAdapterEntry {
         path: "src/core/managed/payload_edges.rs",
-        declaration: "impl CompatibilityValueEdges for EvaluationFailure {",
-        reason: "immutable emission and context value paths",
-    },
-    CompatibilityAdapterEntry {
-        path: "src/core/managed/payload_edges.rs",
         declaration: "impl CompatibilityValueEdges for BuiltinCall {",
         reason: "immutable argument slice",
     },
@@ -855,7 +850,7 @@ fn compatibility_adapter_inventory_is_closed_and_acyclic_between_identities() {
         );
     }
 
-    assert_eq!(COMPATIBILITY_ADAPTER_INVENTORY.len(), 14);
+    assert_eq!(COMPATIBILITY_ADAPTER_INVENTORY.len(), 13);
 }
 
 #[test]

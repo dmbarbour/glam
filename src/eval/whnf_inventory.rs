@@ -1341,7 +1341,7 @@ const EXPECTED_W7_UNAPPROVED_RECURSION: &[&str] = &[];
 // two deleted helper edges leave the resolved graph smaller without changing
 // its cycle set.
 const EXPECTED_W7_RESOLVED_CALLS: usize = 1_138;
-const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 3_859_013_188_797_305_230;
+const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 5_331_304_411_371_925_014;
 const EXPECTED_W7_CYCLIC_FUNCTIONS: &[&str] = &[];
 const EXPECTED_W8_REMAINING_RETRYABLE_HALT_CALLS: &[&str] = &[
     "src/eval/net.rs::drive_net_semantic_action#1|HaltBlocked",
