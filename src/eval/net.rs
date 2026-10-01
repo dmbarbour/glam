@@ -4361,9 +4361,9 @@ mod driver_tests {
                 .expect_err_without_debug("the emitted application must retain its promise wait");
         assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
 
-        let failed_operator = context.values().with_runtime_value_access(|access| {
-            applicable_operator(&access, access.values().unit())
-        });
+        let failed_operator = context
+            .values()
+            .with_runtime_value_access(|access| applicable_operator(&access, access.unit()));
         let failed_unit = context
             .values()
             .with_runtime_value_access(|access| access.unit());

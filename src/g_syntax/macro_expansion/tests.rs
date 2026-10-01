@@ -4,7 +4,7 @@ use crate::api::{
     Assembler, CompilationExecution, Diagnostic, DiagnosticEvent, DiagnosticSubscriber,
     TestValueFacade, Value as PublicValue,
 };
-use crate::core::{CoreValueFactory, Dict, Key, LazyValue, List, Value, keys};
+use crate::core::{CoreValueFactory, Dict, Key, LazyValue, List, Value};
 use crate::diagnostic::Severity;
 use crate::eval;
 use crate::runtime::RuntimeValueRoot;
@@ -240,11 +240,11 @@ fn unstarted_reflection_gate_runs_inside_the_macro_session() {
     let values = assembler.core_values();
     let macro_effect =
         PublicValue::from_runtime_root(values.construct_runtime_value_root(|access| {
-            let reflection = return_effect(&values, keys::unit_value());
+            let reflection = return_effect(&values, access.unit());
             let gate = Value::Lazy(LazyValue::from_reflection_gate_in(
                 access,
                 reflection,
-                keys::unit_value(),
+                access.unit(),
             ));
             return_effect(&values, gate)
         }));
@@ -307,7 +307,7 @@ fn assembler_claimed_reflection_gate_is_unavailable_to_macro_session() {
                 .clone()
                 .into_runtime_root()
                 .clone_core_with(access),
-            keys::unit_value(),
+            access.unit(),
         ))
     });
     let error = assembler

@@ -2727,7 +2727,8 @@ fn fixpoint_restart_retains_its_selection_while_the_entry_stack_is_blocked() {
         .clone_core_for_test();
     let values = assembler.core_values();
     let stack = PromisedValue::new(&values, "restart entry stack");
-    let mut entry = Branch::<TestEffects>::new(&values, values.unit(), values.unit());
+    let (effect, state) = values.with_runtime_value_access(|access| (access.unit(), access.unit()));
+    let mut entry = Branch::<TestEffects>::new(&values, effect, state);
     entry.state = values.construct_runtime_value_root(|access| {
         Value::Dict(Dict::new_sync().insert(
             Tags::new().continuation_state,
@@ -3417,7 +3418,11 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
     let core = crate::core::test_value_factory();
     let values = Values::from_core_factory(core.clone());
     let domain = EffectTokenDomain::new(&values);
-    let branch = || Branch::<TestEffects>::new(&core, core.unit(), core.unit());
+    let branch = || {
+        let (effect, state) =
+            core.with_runtime_value_access(|access| (access.unit(), access.unit()));
+        Branch::<TestEffects>::new(&core, effect, state)
+    };
 
     let (value, retained) = retained_machine_value(&values, &domain);
     let work =
@@ -3515,7 +3520,11 @@ fn fixpoint_frames_retain_the_shared_function_root_until_retirement() {
     let (function, retained) = retained_machine_value(&assembler.values(), &domain);
     let root = Arc::new(FixRoot {
         function: RuntimeValueRoot::new(&core, function),
-        entry: Branch::<TestEffects>::new(&core, core.unit(), core.unit()),
+        entry: {
+            let (effect, state) =
+                core.with_runtime_value_access(|access| (access.unit(), access.unit()));
+            Branch::<TestEffects>::new(&core, effect, state)
+        },
         scope_depth: 0,
     });
     let active = ActiveFix {

@@ -72,11 +72,6 @@ protocol_key!(FIX, "fix");
 pub(crate) static UNIT: LazyLock<Key> =
     LazyLock::new(|| Key::abstract_global_path(["builtin", "unit"]));
 
-#[cfg(test)]
-pub(crate) fn unit_value() -> super::Value {
-    super::test_value_factory().unit()
-}
-
 pub(crate) static OBJECT_REFLECTION_GUARD: LazyLock<Key> =
     LazyLock::new(|| Key::abstract_global_path(["builtin", "reflection", "object_guard"]));
 

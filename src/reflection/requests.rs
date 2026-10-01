@@ -2039,7 +2039,12 @@ mod tests {
         let values = context.values().clone();
         let public_values = Values::from_core_factory(values.clone());
         let task = context
-            .schedule_task(|task_context| Ok(Box::new(CompleteTask(task_context.values().unit()))))
+            .schedule_task(|task_context| {
+                let unit = task_context
+                    .values()
+                    .with_runtime_value_access(|access| access.unit());
+                Ok(Box::new(CompleteTask(unit)))
+            })
             .expect("terminal task-handle fixture should schedule");
         let store = Arc::new(Mutex::new(crate::reflection::ReflectionStore::new(
             values.clone(),
@@ -2100,7 +2105,12 @@ mod tests {
         let values = context.values().clone();
         let public_values = Values::from_core_factory(values.clone());
         let task = context
-            .schedule_task(|task_context| Ok(Box::new(CompleteTask(task_context.values().unit()))))
+            .schedule_task(|task_context| {
+                let unit = task_context
+                    .values()
+                    .with_runtime_value_access(|access| access.unit());
+                Ok(Box::new(CompleteTask(unit)))
+            })
             .expect("task-handle backedge fixture should schedule");
         let status = {
             let mut store = crate::reflection::ReflectionStore::new(
@@ -2151,7 +2161,12 @@ mod tests {
         let values = context.values().clone();
         let public_values = Values::from_core_factory(values.clone());
         let task = context
-            .schedule_task(|task_context| Ok(Box::new(CompleteTask(task_context.values().unit()))))
+            .schedule_task(|task_context| {
+                let unit = task_context
+                    .values()
+                    .with_runtime_value_access(|access| access.unit());
+                Ok(Box::new(CompleteTask(unit)))
+            })
             .expect("foreign-runtime task-handle fixture should schedule");
         let mut store = crate::reflection::ReflectionStore::new(
             values.clone(),

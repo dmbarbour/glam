@@ -572,11 +572,6 @@ impl CoreValueFactory {
     // D.2h.3b fixture bridge. Production has no factory-level raw-value
     // projection; the all-target fixture migration removes these helpers
     // before ledger closure.
-    #[cfg(test)]
-    pub(crate) fn unit(&self) -> Value {
-        self.with_runtime_value_access(|access| access.unit())
-    }
-
     /// Returns one runtime-local cache entry, allowing harmless duplicate
     /// construction when callers race. Only the completed value is installed.
     pub(crate) fn cached<T>(&self, build: impl FnOnce() -> T) -> Arc<T>

@@ -670,6 +670,8 @@ mod tests {
             result: Box::new(SyntaxExpr::Unit),
         }));
 
+        let unit =
+            crate::compiler::test_value_factory().with_runtime_value_access(|access| access.unit());
         assert!(matches!(
             resolved,
             ResolvedExpr::ApplyLambda {
@@ -680,7 +682,7 @@ mod tests {
                 && matches!(body.as_ref(), ResolvedExpr::Embedded(value)
                     if crate::compiler::test_value_factory().same_representation_for_test(
                         value,
-                        &crate::core::keys::unit_value(),
+                        &unit,
                     ))
                 && matches!(arguments.as_slice(),
                     [ResolvedExpr::Embedded(Value::Number(number))]

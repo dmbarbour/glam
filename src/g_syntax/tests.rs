@@ -2194,11 +2194,12 @@ fn braced_do_evaluates_like_layout_do_and_supports_empty_blocks() {
             "{path}"
         );
     }
+    let unit = crate::core::test_value_factory().with_runtime_value_access(|access| access.unit());
     for path in ["empty", "commented"] {
         assert!(
             same_value_representation(
                 &fully_evaluated_value(resolved_value_at_path(&value, &["asm", path])),
-                &crate::core::keys::unit_value(),
+                &unit,
             ),
             "{path}"
         );

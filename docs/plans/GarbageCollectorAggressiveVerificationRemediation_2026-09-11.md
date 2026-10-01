@@ -2693,8 +2693,15 @@ inventory relatch:
        All targets compile; focused escaped-context ownership, nested
        dependency, bounded background pump, worker spark/reflection, and FIFO
        reflection-budget witnesses pass.
-    4. migrate reflection and syntax fixtures, then delete both
-       `CoreValueFactory::unit` and `keys::unit_value`.
+    4. **Reflection/syntax and bridge removal complete 2026-10-01:** reflection
+       task fixtures construct unit before scheduling and branch creation;
+       macro and syntax fixtures reuse construction access or a bounded
+       expected-value region. `CoreValueFactory::unit` and
+       `keys::unit_value` are deleted. All targets compile; focused macro
+       reflection-gate, terminal task-handle, do-wildcard lowering, execution
+       payload-liveness, and fixpoint-frame ownership witnesses pass. The raw
+       inventory emits no violation; its exact count/fingerprint remains
+       intentionally stale for D.2h.4 closure.
     At each boundary, reuse an already-open `RuntimeValueAccess` where one is
     present. Where WHNF, scheduling, waiting, or another callback-capable
     operation is involved, finish that work before opening a short unit
