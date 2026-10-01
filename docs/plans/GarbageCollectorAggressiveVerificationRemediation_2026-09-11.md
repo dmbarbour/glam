@@ -2933,9 +2933,21 @@ inventory relatch:
           after the common promise migration also pass in isolated schedules.
           The source inventories classify five additional test-only runtime
           root publications and three fewer self-opening test admissions.
-        - **D.2h.4c.2b.4 — complete aggressive gate:** rerun the whole
+        - **D.2h.4c.2b.4 — complete aggressive gate: complete 2026-10-01.** Rerun the whole
           workspace. Investigate the prior final blocked test independently;
           do not accept the eleven-minute no-progress run as verification.
+
+          The first repaired full run completed all runtime targets and found
+          only a source-ledger mismatch: the regional-constructor inventory
+          correctly detected four new same-region fixture builders. They are
+          now classified explicitly as exact fixture roots or explicit family
+          roots, according to whether they publish a containing runtime root
+          or return the exact managed-family root. The repeated complete
+          aggressive workspace gate passes: 1,885 library tests pass with two
+          ignored, followed by every command-line, executable-sample, invalid
+          sample, macro-project, profiling, and crate test target. The five
+          direct-assembly subprocesses remained compute-bound and completed;
+          they were not the no-progress condition seen in the superseded run.
   - **D.2h.4d — closure reconciliation:** rerun the exact inventories after
     dynamic fixes, verify their accepted surfaces did not drift, and record
     the final gate evidence for D.2h.5.

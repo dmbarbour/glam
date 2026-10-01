@@ -1901,6 +1901,8 @@ mod tests {
                     "src/api/assembly.rs::ReflectionEnvironmentBuilder::promise",
                     "src/core.rs::PromisedValue::fixpoint",
                     "src/eval/net/tests/nc5.rs::rooted_claimed_core_call_in",
+                    "src/evaluation/tests.rs::rooted_promise",
+                    "src/reflection/machine/tests.rs::rooted_promise",
                 ],
             ),
             (
@@ -1913,9 +1915,11 @@ mod tests {
                     "src/eval/tests/w7b.rs::application_chain_root_with_depth",
                     "src/eval/tests/w7b.rs::fixpoint_chain_root",
                     "src/eval/tests/w7b.rs::lazy_alias_root",
+                    "src/evaluation/tests.rs::rooted_inert_lazy",
                     "src/evaluation/tests.rs::rooted_promise_value",
                     "src/evaluation/tests.rs::rooted_semantic_lazy_value",
                     "src/evaluation/tests/w7c.rs::checkpointed_promise_chain_root",
+                    "src/reflection/machine/tests.rs::rooted_application",
                 ],
             ),
         ];
