@@ -1,6 +1,7 @@
 # Aggressive GC Verification Remediation Plan — 2026-09-11
 
-Status: GCI11R-002A-C, D.1a-D.2g, D.2h.0-D.2h.4b, D.2h.4c.1-.2a, and D.2h.4c.2b.1 complete; D.2h.4c.2b.2-D.2h.5 active. This plan expands
+Status: GCI11R-002A-C, D.1a-D.2g, and D.2h.0-D.2h.4d complete;
+D.2h.5 is active. This plan expands
 GCI11R-002 and Phase I11D.1. The private repository mode exists and is useful,
 but its complete workspace suite does not yet pass. Gate G3 remains closed.
 
@@ -2948,9 +2949,36 @@ inventory relatch:
           sample, macro-project, profiling, and crate test target. The five
           direct-assembly subprocesses remained compute-bound and completed;
           they were not the no-progress condition seen in the superseded run.
-  - **D.2h.4d — closure reconciliation:** rerun the exact inventories after
-    dynamic fixes, verify their accepted surfaces did not drift, and record
-    the final gate evidence for D.2h.5.
+  - **D.2h.4d — closure reconciliation: complete 2026-10-01.** Rerun the
+    exact inventories after dynamic fixes, verify their accepted surfaces did
+    not drift, and record the final gate evidence for D.2h.5.
+
+    The reconciled `cargo test -q inventory` gate passes all 121 library
+    inventory tests and the eight integration tests selected by that filter.
+    The final exact surfaces are:
+
+    - 518 raw core-value API occurrences, fingerprint
+      `9_495_114_017_072_832_932`: 485 access-qualified regional functions,
+      28 collector-only primitives, and five regional representation aliases,
+      with no violation or remediation assignment;
+    - 873 persistent-edge occurrences, fingerprint
+      `13_687_440_433_971_841_379`: 148 production typed, 36 production
+      erased, 675 test typed, and 14 test erased, with no defect or pending
+      classification;
+    - 272 runtime-root publications, fingerprint
+      `11_317_655_089_926_401_572`, with no defect and only the two canonical
+      runtime-root constructors; and
+    - 534 mutator introductions, fingerprint
+      `852_771_498_578_214_529`, alongside 533 access-gateway and 14
+      construction-gateway call sites. Direct mutator admission remains
+      confined to the two higher-ranked gateways in `src/core/managed.rs`.
+
+    All other exact ownership, containment, callback, machine-state,
+    recursive-identity, and resolved-call inventories pass unchanged. The
+    source reconciliation follows successful formatting, denied-warning
+    clippy, ordinary workspace, interaction-net profiling, and complete
+    aggressive workspace gates recorded in D.2h.4c. No baseline moved after
+    this final rerun.
 - **D.2h.5 — record:** publish the dated accepted-surface and verification
   record, and close nested P3/P4/P5 only to the extent evidenced here.
 
