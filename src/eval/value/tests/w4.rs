@@ -47,7 +47,7 @@ fn stale_route_cannot_replace_a_newer_lazy_checkpoint() {
             let lazy = access.lazy_root(&rooted);
             let initial = ManagedLazyCheckpointEdge::allocate_regional_in(
                 &access,
-                super::super::whnf::RegionalWhnfWork::from_focus(&access, context.values().unit()),
+                super::super::whnf::RegionalWhnfWork::from_focus(&access, access.values().unit()),
             )
             .expect("the initial fixture checkpoint must fit its managed slot");
             assert!(lazy.install_checkpoint(initial).is_ok());
@@ -1126,7 +1126,11 @@ fn net_whnf_checkpoint_survives_route_loss_and_collection() {
     let function = builder.data(Value::Promised(
         promise.duplicate_for_test(context.values()),
     ));
-    let value = builder.data(context.values().unit());
+    let value = builder.data(
+        context
+            .values()
+            .with_runtime_value_access(|access| access.unit()),
+    );
     builder.wire(application, function);
     builder.wire(argument, value);
     let runtime = context
@@ -1185,10 +1189,13 @@ fn net_whnf_checkpoint_survives_route_loss_and_collection() {
         "dropping the route must retire exactly its lazy root while the checkpoint and semantic subscription remain live"
     );
 
+    let unit = context
+        .values()
+        .with_runtime_value_access(|access| access.unit());
     let callable = crate::eval::test_support::closed_function_value_in(
         context.values(),
         1,
-        crate::eval::test_support::TestExpr::Value(context.values().unit()),
+        crate::eval::test_support::TestExpr::Value(unit),
     );
     crate::core::set_test_promise(context.values(), &promise, callable)
         .expect_without_debug("the retained callable promise should accept its assignment");
@@ -1226,7 +1233,9 @@ fn net_whnf_checkpoint_survives_route_loss_and_collection() {
         }
         unreachable!("bounded resume loop must complete or panic")
     };
-    value.assert_same_representation_for_test(context.values(), &context.values().unit());
+    context.values().with_runtime_value_access(|access| {
+        value.assert_same_representation_for_test(context.values(), &access.unit());
+    });
 }
 
 #[test]
@@ -1934,7 +1943,9 @@ fn builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencie
         crate::eval::builtins::decode_outcome_for_test(&access, &outcome)
             .expect("builder wire must retain the strict outcome schema")
     });
-    assert_same_value(&context, &unit, &context.values().unit());
+    context.values().with_runtime_value_access(|access| {
+        assert_same_value(&context, &unit, &access.unit());
+    });
     context.values().with_runtime_value_access(|access| {
         assert_eq!(
             crate::eval::builtins::construction_journal_lengths_for_test(&access, &state)
@@ -2134,7 +2145,9 @@ fn builder_control_key_failures_are_transparent_and_precede_later_operands() {
                     &context,
                     "later builder control operation",
                     &operation_demands,
-                    context.values().unit(),
+                    context
+                        .values()
+                        .with_runtime_value_access(|access| access.unit()),
                 ),
                 counted_success(
                     &context,

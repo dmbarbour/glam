@@ -46,7 +46,7 @@ fn retryable_halt_wait(error: &EvaluationHalt) -> Option<EvaluationWaitToken> {
 }
 
 fn unit_value() -> Value {
-    crate::core::test_value_factory().unit()
+    crate::core::test_value_factory().with_runtime_value_access(|access| access.unit())
 }
 
 fn initial_metadata() -> Value {

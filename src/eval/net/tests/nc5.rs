@@ -412,7 +412,9 @@ fn callable_checkpoint_admits_each_lazy_source_family_once() {
     );
     let reflection = match Value::reflection_task_result(
         context.values(),
-        context.values().unit(),
+        context
+            .values()
+            .with_runtime_value_access(|access| access.unit()),
     ) {
         Value::Lazy(lazy) => lazy,
         _ => unreachable!("reflection task results are lazy"),
@@ -551,7 +553,7 @@ fn rooted_claimed_core_call_in(
 ) -> (crate::core::ManagedCoreNetRoot, CoreRuntimeNet, Call) {
     let mut net = NetBuilder::<CoreSpecialization>::new();
     let bind = net.push(crate::interaction_net::Node::Bind);
-    let data = net.data(values.unit());
+    let data = net.data(values.with_runtime_value_access(|access| access.unit()));
     let erase = net.push(crate::interaction_net::Node::Erase);
     net.wire(Port::principal(bind), data);
     net.wire(Port::auxiliary(bind, 2), Port::principal(erase));
@@ -619,7 +621,7 @@ fn claimed_applied_core_call_in(
     let mut net = NetBuilder::<CoreSpecialization>::new();
     let [application, argument, result] = net.bind();
     let callable = net.data(callable);
-    let argument_value = net.data(values.unit());
+    let argument_value = net.data(values.with_runtime_value_access(|access| access.unit()));
     net.wire(application, callable);
     net.wire(argument, argument_value);
     let runtime = values.instantiate_core_net(&net.finish(result));
@@ -857,10 +859,11 @@ fn cursor_deferral_and_collection_retain_only_the_source_checkpoint() {
         .collect_managed_for_test()
         .expect("collection while a blocked checkpoint cursor is deferred must succeed");
 
+    let unit = values.with_runtime_value_access(|access| access.unit());
     let result = crate::eval::test_support::closed_function_value_in(
         &values,
         1,
-        crate::eval::test_support::TestExpr::Value(values.unit()),
+        crate::eval::test_support::TestExpr::Value(unit),
     );
     crate::core::set_test_promise(
         &values,
@@ -952,7 +955,9 @@ fn callable_checkpoint_usage_distinguishes_production_from_frame_fixture() {
     assert_eq!(production.nonempty_source_owner, 0);
     assert_eq!(production.nonempty_cycle_promise, 2);
 
-    let argument = context.values().unit();
+    let argument = context
+        .values()
+        .with_runtime_value_access(|access| access.unit());
     let (_runtime_root, runtime, call, _) = install_checkpoint(&context, |access| {
         crate::eval::whnf::NetWhnfState::application_checkpoint_for_test(
             access,

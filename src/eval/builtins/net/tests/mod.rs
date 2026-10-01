@@ -73,7 +73,7 @@ fn valid_all_operations(access: &RuntimeValueAccess<'_>) -> Value {
         8,
         vec![
             encode_bind(access),
-            encode_data(access, access.values().unit()),
+            encode_data(access, access.unit()),
             encode_copy(access, 2),
         ],
         vec![
@@ -215,7 +215,7 @@ fn builder_state_has_fixed_arity_and_terminal_replay_requires_an_empty_sequence(
         );
 
         let mut active_sequence = fields;
-        active_sequence[5] = Value::List(List::from_values(vec![access.values().unit()]));
+        active_sequence[5] = Value::List(List::from_values(vec![access.unit()]));
         let selected = encode_selected_netlist(
             access,
             Value::List(List::from_values(active_sequence)),
@@ -271,7 +271,7 @@ fn replay_rejects_malformed_compact_records() {
                         access,
                         &brand,
                         2,
-                        vec![encode_data(access, access.values().unit())],
+                        vec![encode_data(access, access.unit())],
                         Vec::new(),
                         Value::Dict(Dict::new_sync()),
                     );
@@ -1053,7 +1053,7 @@ fn hidden_builder_copy_and_wire_complete_one_replayable_compact_netlist() {
         assert_same_representation(
             &context,
             &unit,
-            &with_access(&context, |access| access.values().unit()),
+            &with_access(&context, |access| access.unit()),
         );
         state = next_state;
     }
@@ -1499,7 +1499,7 @@ fn hidden_builder_reset_shift_handles_nested_keys_cut_and_missing_scope() {
             vec![partial_builder(
                 access,
                 Builtin::InteractionNetBuilderReturn,
-                vec![access.values().unit()],
+                vec![access.unit()],
             )],
         );
         let shift_after_cut = partial_builder(
@@ -1953,7 +1953,7 @@ fn hidden_builder_rejects_malformed_control_records() {
             let returned = partial_builder(
                 access,
                 Builtin::InteractionNetBuilderReturn,
-                vec![access.values().unit()],
+                vec![access.unit()],
             );
             (
                 malformed_reset,
@@ -2027,7 +2027,7 @@ fn hidden_builder_fix_uses_independent_alternatives_and_restores_control() {
                 partial_builder(
                     access,
                     Builtin::InteractionNetBuilderReturn,
-                    vec![access.values().unit()],
+                    vec![access.unit()],
                 ),
             )],
         );

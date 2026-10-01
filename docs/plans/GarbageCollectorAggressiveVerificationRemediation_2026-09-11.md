@@ -2675,7 +2675,15 @@ inventory relatch:
        their step-qualified access. All targets compile; focused canonical
        cache, cross-runtime cache rejection, lazy-source release, profiled net
        rewrite, and diagnostic-consumer activation witnesses pass.
-    2. migrate evaluator net/builder/value fixtures;
+    2. **Evaluator net/builder/value family complete 2026-10-01:** builder
+       encoding reuses its existing runtime or evaluation access; net topology
+       fixtures construct edge-free unit payloads before synchronized net
+       access; callable-checkpoint and route-loss fixtures use their regional
+       access or a bounded construction region. The evaluator's broad fixture
+       helper now delegates through explicit runtime access instead of the
+       factory bridge. All targets compile; focused builder-composition,
+       callable-family checkpoint, retained net-WHNF, and profiled callable
+       rewrite witnesses pass.
     3. migrate coordinator, session, and cross-layer evaluation fixtures;
     4. migrate reflection and syntax fixtures, then delete both
        `CoreValueFactory::unit` and `keys::unit_value`.
