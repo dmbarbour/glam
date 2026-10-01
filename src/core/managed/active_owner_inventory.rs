@@ -545,7 +545,7 @@ pub(super) fn closed_compatibility_variants(
             },
         ),
         Value::Promised(PromisedValue::new(values, "I4F.2b passive closure promise")),
-        values.initial_metadata(),
+        values.with_runtime_value_access(|access| access.initial_metadata()),
         Value::Opaque(OpaqueValue::new(values, opaque_probe)),
     ]
 }

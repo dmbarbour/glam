@@ -316,7 +316,9 @@ fn reflection_test_module(
     });
     let prior = prior.insert(
         Key::atom_from_text("object_refl_marker"),
-        keys::object_reflection_guard_value(),
+        assembler
+            .core_values()
+            .with_runtime_value_access(|access| access.object_reflection_guard()),
     );
     let context = context.with_prior_defs(Value::Dict(prior));
     let lowered = lower_parsed_source(parse(source), &context);

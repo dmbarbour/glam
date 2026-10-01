@@ -577,36 +577,6 @@ impl CoreValueFactory {
         self.with_runtime_value_access(|access| access.unit())
     }
 
-    #[cfg(test)]
-    pub(crate) fn object_reflection_guard(&self) -> Value {
-        self.with_runtime_value_access(|access| access.object_reflection_guard())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn info(&self) -> Value {
-        self.with_runtime_value_access(|access| access.info())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn warn(&self) -> Value {
-        self.with_runtime_value_access(|access| access.warn())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn error(&self) -> Value {
-        self.with_runtime_value_access(|access| access.error())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn initial_metadata(&self) -> Value {
-        self.with_runtime_value_access(|access| access.initial_metadata())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn key_value(&self, key: &Key) -> Value {
-        self.with_runtime_value_access(|access| access.key_value(key))
-    }
-
     /// Returns one runtime-local cache entry, allowing harmless duplicate
     /// construction when callers race. Only the completed value is installed.
     pub(crate) fn cached<T>(&self, build: impl FnOnce() -> T) -> Arc<T>
@@ -1211,11 +1181,6 @@ impl Key {
                 }))
             }
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn to_value_with(&self, values: &CoreValueFactory) -> Value {
-        values.with_runtime_value_access(|access| self.to_value_in(&access))
     }
 }
 
@@ -2395,12 +2360,6 @@ impl Value {
         ))
     }
 
-    /// Returns the canonical carrier whose associated metadata is `{}`.
-    #[cfg(test)]
-    pub(crate) fn initial_metadata_carrier(values: &CoreValueFactory) -> Self {
-        values.initial_metadata()
-    }
-
     /// Returns a sealed carrier's associated metadata for privileged clients.
     pub(crate) fn associated_metadata(&self, access: &RuntimeValueAccess<'_>) -> Option<Value> {
         match self {
@@ -3455,16 +3414,20 @@ mod tests {
         let roots = [&core.initial_metadata];
 
         assert!(roots.iter().all(|root| root.runtime_id() == runtime));
-        factory.assert_same_representation_for_test(
-            &factory.initial_metadata(),
-            &core.initial_metadata.clone_core_for_test(),
-        );
+        factory.with_runtime_value_access(|access| {
+            access.assert_same_representation_for_test(
+                &access.initial_metadata(),
+                &core.initial_metadata.clone_core_for_test(),
+            );
+        });
 
         let scoped = factory.scoped();
-        factory.assert_same_representation_for_test(
-            &scoped.initial_metadata(),
-            &factory.initial_metadata(),
-        );
+        factory.with_runtime_value_access(|access| {
+            access.assert_same_representation_for_test(
+                &access.initial_metadata(),
+                &core.initial_metadata.clone_core_for_test(),
+            );
+        });
         factory.assert_same_representation_for_test(&scoped.unit(), &factory.unit());
 
         let live = factory
@@ -4323,8 +4286,9 @@ mod tests {
     #[test]
     fn metadata_carriers_hide_unit_and_associated_metadata() {
         let values = values();
-        let first = Value::initial_metadata_carrier(&values);
-        let second = Value::initial_metadata_carrier(&values);
+        let (first, second) = values.with_runtime_value_access(|access| {
+            (access.initial_metadata(), access.initial_metadata())
+        });
         let Value::Metadata(first_carrier) = &first else {
             panic!("initial metadata value should be a sealed carrier");
         };
@@ -4355,7 +4319,7 @@ mod tests {
     #[test]
     fn metadata_carriers_transport_through_ordinary_containers() {
         let values = values();
-        let carrier = Value::initial_metadata_carrier(&values);
+        let carrier = values.with_runtime_value_access(|access| access.initial_metadata());
         let list = Value::List(List::from_values(vec![carrier.duplicate_for_test(&values)]));
         let dict = Value::Dict(Dict::new_sync().insert(
             Key::atom_from_text("trace"),
@@ -4429,7 +4393,7 @@ mod tests {
             Key::atom_from_text("field"),
             field.duplicate_for_test(&values),
         ));
-        let sealed = Value::initial_metadata_carrier(&values);
+        let sealed = values.with_runtime_value_access(|access| access.initial_metadata());
 
         values.with_runtime_value_access(|access| {
             let evaluated =

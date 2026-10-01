@@ -1923,10 +1923,12 @@ mod tests {
         let values = Values::from_core_factory(core);
         let encoded = task_status_public_value(&values, EvaluationTaskStatus::Abandoned);
 
-        values.core().assert_same_representation_for_test(
-            &values.clone_core(&encoded).unwrap(),
-            &values.core().key_value(&keys::ABANDONED),
-        );
+        values.core().with_runtime_value_access(|access| {
+            access.assert_same_representation_for_test(
+                &values.clone_core(&encoded).unwrap(),
+                &access.key_value(&keys::ABANDONED),
+            );
+        });
         assert!(matches!(
             tagged_task_state(&values, &encoded).expect("abandoned status should decode"),
             TaggedTaskState::Abandoned
@@ -1938,10 +1940,12 @@ mod tests {
         let core = crate::core::test_value_factory();
         let values = Values::from_core_factory(core.clone());
         let exited = task_status_public_value(&values, EvaluationTaskStatus::Exited);
-        values.core().assert_same_representation_for_test(
-            &values.clone_core(&exited).unwrap(),
-            &values.core().key_value(&keys::EXITED),
-        );
+        values.core().with_runtime_value_access(|access| {
+            access.assert_same_representation_for_test(
+                &values.clone_core(&exited).unwrap(),
+                &access.key_value(&keys::EXITED),
+            );
+        });
         assert!(matches!(
             tagged_task_state(&values, &exited).expect("exited status should decode"),
             TaggedTaskState::Exited
@@ -1954,10 +1958,12 @@ mod tests {
                 Arc::new(crate::core::EvaluationFailure::message("killed fixture")),
             )),
         );
-        values.core().assert_same_representation_for_test(
-            &values.clone_core(&killed).unwrap(),
-            &values.core().key_value(&keys::KILLED),
-        );
+        values.core().with_runtime_value_access(|access| {
+            access.assert_same_representation_for_test(
+                &values.clone_core(&killed).unwrap(),
+                &access.key_value(&keys::KILLED),
+            );
+        });
         assert!(matches!(
             tagged_task_state(&values, &killed).expect("killed status should decode"),
             TaggedTaskState::Killed
@@ -2019,10 +2025,12 @@ mod tests {
         };
         let updates = updates.lock().expect("test query updates were poisoned");
         assert_eq!(updates.len(), 1);
-        values.assert_same_representation_for_test(
-            &public_values.clone_core(&updates[0]).unwrap(),
-            &values.key_value(&keys::BLOCKED),
-        );
+        values.with_runtime_value_access(|access| {
+            access.assert_same_representation_for_test(
+                &public_values.clone_core(&updates[0]).unwrap(),
+                &access.key_value(&keys::BLOCKED),
+            );
+        });
     }
 
     #[test]

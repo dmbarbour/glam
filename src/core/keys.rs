@@ -85,8 +85,3 @@ protocol_key!(FILE, "file");
 pub(crate) fn unit_value() -> super::Value {
     super::test_value_factory().unit()
 }
-
-#[cfg(test)]
-pub(crate) fn object_reflection_guard_value() -> super::Value {
-    super::test_value_factory().object_reflection_guard()
-}

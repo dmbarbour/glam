@@ -50,7 +50,7 @@ fn unit_value() -> Value {
 }
 
 fn initial_metadata() -> Value {
-    Value::initial_metadata_carrier(&crate::core::test_value_factory())
+    crate::core::test_value_factory().with_runtime_value_access(|access| access.initial_metadata())
 }
 
 fn metadata_carrier(context: &EvalContext, metadata: Value) -> Value {
@@ -997,38 +997,42 @@ fn terminal_lazy_evaluation_releases_successful_and_failed_sources() {
 
 #[test]
 fn evaluation_context_frames_use_an_atom_operation_and_optional_named_arguments() {
-    crate::core::test_value_factory().assert_same_representation_for_test(
-        &evaluation_context_frame("list_index"),
-        &Value::Dict(Dict::new_sync().insert(
-            (*keys::EVAL).clone(),
-            Value::Dict(Dict::new_sync().insert(
-                (*keys::OP).clone(),
-                Key::atom_from_text("list_index").to_value_with(&crate::core::test_value_factory()),
+    let values = crate::core::test_value_factory();
+    values.with_runtime_value_access(|access| {
+        access.assert_same_representation_for_test(
+            &evaluation_context_frame("list_index"),
+            &Value::Dict(Dict::new_sync().insert(
+                (*keys::EVAL).clone(),
+                Value::Dict(Dict::new_sync().insert(
+                    (*keys::OP).clone(),
+                    Key::atom_from_text("list_index").to_value_in(&access),
+                )),
             )),
-        )),
-    );
+        );
+    });
 
     let args = Dict::new_sync().insert(
         Key::atom_from_text("path"),
         Value::binary_from_text("conf.env"),
     );
-    crate::core::test_value_factory().assert_same_representation_for_test(
-        &evaluation_context_frame_with_args("path_lookup", args.clone()),
-        &Value::Dict(
-            Dict::new_sync().insert(
-                (*keys::EVAL).clone(),
-                Value::Dict(
-                    Dict::new_sync()
-                        .insert(
-                            (*keys::OP).clone(),
-                            Key::atom_from_text("path_lookup")
-                                .to_value_with(&crate::core::test_value_factory()),
-                        )
-                        .insert((*keys::ARGS).clone(), Value::Dict(args)),
+    values.with_runtime_value_access(|access| {
+        access.assert_same_representation_for_test(
+            &evaluation_context_frame_with_args("path_lookup", args.clone()),
+            &Value::Dict(
+                Dict::new_sync().insert(
+                    (*keys::EVAL).clone(),
+                    Value::Dict(
+                        Dict::new_sync()
+                            .insert(
+                                (*keys::OP).clone(),
+                                Key::atom_from_text("path_lookup").to_value_in(&access),
+                            )
+                            .insert((*keys::ARGS).clone(), Value::Dict(args)),
+                    ),
                 ),
             ),
-        ),
-    );
+        );
+    });
 }
 
 #[test]
@@ -3734,9 +3738,8 @@ fn ordinary_observers_do_not_unseal_metadata_carriers() {
     // independently evaluated fixtures. Keep that carrier rooted while a
     // parallel test may explicitly collect the shared test value domain.
     let values = crate::core::test_value_factory();
-    let carrier_root = values.with_runtime_value_access(|access| {
-        access.root_runtime_value(Value::initial_metadata_carrier(&values))
-    });
+    let carrier_root = values
+        .with_runtime_value_access(|access| access.root_runtime_value(access.initial_metadata()));
     let carrier = carrier_root.clone_core_for_test();
 
     for builtin in [Builtin::Equal, Builtin::NotEqual, Builtin::Greater] {
@@ -8345,7 +8348,11 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_operator_call() {
             .values()
             .with_runtime_value_access(|access| applicable_operator(&access, gate));
         let [input, result] = builder.operator(operator);
-        let argument = builder.data(key.to_value_with(context.values()));
+        let argument = builder.data(
+            context
+                .values()
+                .with_runtime_value_access(|access| key.to_value_in(&access)),
+        );
         builder.wire(input, argument);
         result
     });

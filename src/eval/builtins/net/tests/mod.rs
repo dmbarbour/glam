@@ -317,15 +317,13 @@ fn replay_rejects_malformed_compact_records() {
                     access,
                     &brand,
                     1,
-                    vec![Value::List(List::from_values(vec![
-                        access
-                            .values()
-                            .key_value(&crate::core::Key::abstract_global_path([
-                                "test",
-                                "interaction_net",
-                                "unknown_constructor",
-                            ])),
-                    ]))],
+                    vec![Value::List(List::from_values(vec![access.key_value(
+                        &crate::core::Key::abstract_global_path([
+                            "test",
+                            "interaction_net",
+                            "unknown_constructor",
+                        ]),
+                    )]))],
                     Vec::new(),
                     port(1),
                 ),
@@ -746,12 +744,12 @@ fn builder_result_at(
 }
 
 fn path(
-    values: &crate::core::CoreValueFactory,
+    access: &RuntimeValueAccess<'_>,
     keys: impl IntoIterator<Item = crate::core::Key>,
 ) -> Value {
     Value::List(List::from_values(
         keys.into_iter()
-            .map(|key| key.to_value_with(values))
+            .map(|key| key.to_value_in(access))
             .collect(),
     ))
 }
@@ -782,9 +780,7 @@ fn return_continuation(access: &RuntimeValueAccess<'_>) -> Value {
         apply_expr(
             crate::eval::test_support::TestExpr::Value(Value::Builtin(Builtin::EffectCall)),
             crate::eval::test_support::TestExpr::Value(
-                access
-                    .values()
-                    .key_value(&crate::core::Key::atom_from_text("r")),
+                access.key_value(&crate::core::Key::atom_from_text("r")),
             ),
         ),
         arguments,
@@ -792,9 +788,7 @@ fn return_continuation(access: &RuntimeValueAccess<'_>) -> Value {
     let effect = apply_expr(
         apply_expr(
             crate::eval::test_support::TestExpr::Value(Value::Builtin(Builtin::DictSingleton)),
-            crate::eval::test_support::TestExpr::Value(
-                access.values().key_value(&crate::core::keys::EFF),
-            ),
+            crate::eval::test_support::TestExpr::Value(access.key_value(&crate::core::keys::EFF)),
         ),
         handler,
     );
@@ -811,18 +805,14 @@ fn return_first_port_continuation(access: &RuntimeValueAccess<'_>) -> Value {
     let handler = apply_expr(
         apply_expr(
             TestExpr::Value(Value::Builtin(Builtin::EffectCall)),
-            TestExpr::Value(
-                access
-                    .values()
-                    .key_value(&crate::core::Key::atom_from_text("r")),
-            ),
+            TestExpr::Value(access.key_value(&crate::core::Key::atom_from_text("r"))),
         ),
         TestExpr::List(Arc::from([Arc::new(first)])),
     );
     let effect = apply_expr(
         apply_expr(
             TestExpr::Value(Value::Builtin(Builtin::DictSingleton)),
-            TestExpr::Value(access.values().key_value(&crate::core::keys::EFF)),
+            TestExpr::Value(access.key_value(&crate::core::keys::EFF)),
         ),
         handler,
     );
@@ -862,10 +852,7 @@ fn hidden_builder_composition_threads_branch_local_state_through_list_search() {
         let mutate = partial_builder(
             access,
             Builtin::InteractionNetBuilderSet,
-            vec![
-                path(access.values(), [visible.clone()]),
-                Value::Number(99.into()),
-            ],
+            vec![path(access, [visible.clone()]), Value::Number(99.into())],
         );
         let mutate_then_fail = partial_builder(
             access,
@@ -906,10 +893,7 @@ fn hidden_builder_composition_threads_branch_local_state_through_list_search() {
                 partial_builder(
                     access,
                     Builtin::InteractionNetBuilderSet,
-                    vec![
-                        path(access.values(), [visible.clone()]),
-                        Value::Number(20.into()),
-                    ],
+                    vec![path(access, [visible.clone()]), Value::Number(20.into())],
                 ),
                 constant_builder_continuation(
                     access,
@@ -928,10 +912,7 @@ fn hidden_builder_composition_threads_branch_local_state_through_list_search() {
                 partial_builder(
                     access,
                     Builtin::InteractionNetBuilderSet,
-                    vec![
-                        path(access.values(), [visible.clone()]),
-                        Value::Number(30.into()),
-                    ],
+                    vec![path(access, [visible.clone()]), Value::Number(30.into())],
                 ),
                 constant_builder_continuation(
                     access,
@@ -960,7 +941,7 @@ fn hidden_builder_composition_threads_branch_local_state_through_list_search() {
         partial_builder(
             access,
             Builtin::InteractionNetBuilderGet,
-            vec![path(access.values(), [visible])],
+            vec![path(access, [visible])],
         )
     });
     assert_same_representation(
@@ -1326,25 +1307,25 @@ fn hidden_builder_state_paths_preserve_control_and_whole_state_semantics() {
         let get_all = partial_builder(
             access,
             Builtin::InteractionNetBuilderGet,
-            vec![path(access.values(), [])],
+            vec![path(access, [])],
         );
         let set_visible = partial_builder(
             access,
             Builtin::InteractionNetBuilderSet,
             vec![
-                path(access.values(), [visible.clone()]),
+                path(access, [visible.clone()]),
                 Value::binary_from_text("kept"),
             ],
         );
         let set_all = partial_builder(
             access,
             Builtin::InteractionNetBuilderSet,
-            vec![path(access.values(), []), Value::Dict(Dict::new_sync())],
+            vec![path(access, []), Value::Dict(Dict::new_sync())],
         );
         let invalid_set = partial_builder(
             access,
             Builtin::InteractionNetBuilderSet,
-            vec![path(access.values(), []), Value::Number(42.into())],
+            vec![path(access, []), Value::Number(42.into())],
         );
         (initial, get_all, set_visible, set_all, invalid_set)
     });
@@ -1407,7 +1388,9 @@ fn hidden_builder_get_resumes_lazy_paths_and_intermediates_and_rejects_invalid_o
     let context = EvalContext::standalone();
     let outer = crate::core::Key::atom_from_text("outer");
     let inner = crate::core::Key::atom_from_text("inner");
-    let source_path = path(context.values(), [outer.clone(), inner.clone()]);
+    let source_path = with_access(&context, |access| {
+        path(access, [outer.clone(), inner.clone()])
+    });
     let path_values = context.values().clone();
     let lazy_path = Value::Lazy(LazyValue::semantic_thunk(
         context.values(),
@@ -1438,10 +1421,7 @@ fn hidden_builder_get_resumes_lazy_paths_and_intermediates_and_rejects_invalid_o
         let get_missing = partial_builder(
             access,
             Builtin::InteractionNetBuilderGet,
-            vec![path(
-                access.values(),
-                [crate::core::Key::atom_from_text("missing")],
-            )],
+            vec![path(access, [crate::core::Key::atom_from_text("missing")])],
         );
         (state, get, get_missing)
     });
@@ -1471,7 +1451,7 @@ fn hidden_builder_get_resumes_lazy_paths_and_intermediates_and_rejects_invalid_o
         let get = partial_builder(
             access,
             Builtin::InteractionNetBuilderGet,
-            vec![path(access.values(), [outer, inner])],
+            vec![path(access, [outer, inner])],
         );
         (state, get)
     });
@@ -1769,7 +1749,7 @@ fn hidden_builder_whole_state_clear_does_not_erase_the_active_sequence() {
         let clear = partial_builder(
             access,
             Builtin::InteractionNetBuilderSet,
-            vec![path(access.values(), []), Value::Dict(Dict::new_sync())],
+            vec![path(access, []), Value::Dict(Dict::new_sync())],
         );
         let shift = partial_builder(
             access,
@@ -1826,7 +1806,7 @@ fn hidden_builder_whole_state_checkpoint_restores_reset_scope() {
                 partial_builder(
                     access,
                     Builtin::InteractionNetBuilderGet,
-                    vec![path(access.values(), [])],
+                    vec![path(access, [])],
                 ),
             ],
         );
@@ -1853,7 +1833,7 @@ fn hidden_builder_whole_state_checkpoint_restores_reset_scope() {
         let clear = partial_builder(
             access,
             Builtin::InteractionNetBuilderSet,
-            vec![path(access.values(), []), Value::Dict(Dict::new_sync())],
+            vec![path(access, []), Value::Dict(Dict::new_sync())],
         );
         let shift = partial_builder(
             access,
@@ -1870,7 +1850,7 @@ fn hidden_builder_whole_state_checkpoint_restores_reset_scope() {
                 partial_builder(
                     access,
                     Builtin::InteractionNetBuilderSet,
-                    vec![path(access.values(), []), checkpoint],
+                    vec![path(access, []), checkpoint],
                 ),
                 constant_builder_continuation(access, shift),
             ],
@@ -1936,12 +1916,10 @@ fn hidden_builder_rejects_malformed_control_records() {
                     super::builder::control_key_for_test(),
                     Value::List(List::from_values(vec![Value::List(List::from_values(
                         vec![
-                        access
-                            .values()
-                            .key_value(&super::builder::reset_tag_for_test()),
-                        Value::Builtin(Builtin::InteractionNetBuilderReturn),
-                        Value::List(List::empty()),
-                    ],
+                            access.key_value(&super::builder::reset_tag_for_test()),
+                            Value::Builtin(Builtin::InteractionNetBuilderReturn),
+                            Value::List(List::empty()),
+                        ],
                     ))])),
                 )),
             );

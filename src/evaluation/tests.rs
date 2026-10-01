@@ -8790,7 +8790,10 @@ fn spark_root_survives_queued_claimed_and_blocked_ownership() {
         .collect_managed_for_test()
         .expect("the isolated spark fixture should collect before admission");
 
-    context.spark(context.values().initial_metadata());
+    let metadata = context
+        .values()
+        .with_runtime_value_access(|access| access.initial_metadata());
+    context.spark(metadata);
     let queued = context
         .values()
         .collect_managed_for_test()

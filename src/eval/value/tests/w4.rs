@@ -328,31 +328,29 @@ fn assert_construction_promise_dependency(
 fn builder_return_first_port_continuation(context: &EvalContext) -> Value {
     use crate::eval::test_support::TestExpr;
 
-    let first = TestExpr::Apply(
-        Arc::new(TestExpr::Value(Value::Builtin(Builtin::ListHead))),
-        Arc::new(TestExpr::Local(0)),
-    );
-    let call = TestExpr::Apply(
-        Arc::new(TestExpr::Apply(
-            Arc::new(TestExpr::Value(Value::Builtin(Builtin::EffectCall))),
-            Arc::new(TestExpr::Value(
-                context
-                    .values()
-                    .key_value(&crate::core::Key::atom_from_text("r")),
+    context.values().with_runtime_value_access(|access| {
+        let first = TestExpr::Apply(
+            Arc::new(TestExpr::Value(Value::Builtin(Builtin::ListHead))),
+            Arc::new(TestExpr::Local(0)),
+        );
+        let call = TestExpr::Apply(
+            Arc::new(TestExpr::Apply(
+                Arc::new(TestExpr::Value(Value::Builtin(Builtin::EffectCall))),
+                Arc::new(TestExpr::Value(
+                    access.key_value(&crate::core::Key::atom_from_text("r")),
+                )),
             )),
-        )),
-        Arc::new(TestExpr::List(Arc::from([Arc::new(first)]))),
-    );
-    let effect = TestExpr::Apply(
-        Arc::new(TestExpr::Apply(
-            Arc::new(TestExpr::Value(Value::Builtin(Builtin::DictSingleton))),
-            Arc::new(TestExpr::Value(
-                context.values().key_value(&crate::core::keys::EFF),
+            Arc::new(TestExpr::List(Arc::from([Arc::new(first)]))),
+        );
+        let effect = TestExpr::Apply(
+            Arc::new(TestExpr::Apply(
+                Arc::new(TestExpr::Value(Value::Builtin(Builtin::DictSingleton))),
+                Arc::new(TestExpr::Value(access.key_value(&crate::core::keys::EFF))),
             )),
-        )),
-        Arc::new(call),
-    );
-    crate::eval::test_support::closed_function_value_in(context.values(), 1, effect)
+            Arc::new(call),
+        );
+        crate::eval::test_support::closed_function_value_in(context.values(), 1, effect)
+    })
 }
 
 fn list_front(context: &EvalContext, list: Value) -> Option<(Value, Value)> {
@@ -405,7 +403,7 @@ fn fix_function_returning_its_future_twice(context: &EvalContext) -> Value {
     };
     let eff_key = context
         .values()
-        .with_runtime_value_access(|access| access.values().key_value(&crate::core::keys::EFF));
+        .with_runtime_value_access(|access| access.key_value(&crate::core::keys::EFF));
     let effect = crate::eval::test_support::TestExpr::Apply(
         Arc::new(crate::eval::test_support::TestExpr::Apply(
             Arc::new(crate::eval::test_support::TestExpr::Value(Value::Builtin(
@@ -1802,9 +1800,9 @@ fn builder_checkpoint_survives_path_and_state_dependencies_without_replay() {
     let path_owner = path_promise.root(context.values());
     let state_promise = PromisedValue::new(context.values(), "builder state dependency");
     let state_owner = state_promise.root(context.values());
-    let path_value = Value::List(List::from_values(vec![
-        visible.to_value_with(context.values()),
-    ]));
+    let path_value = context.values().with_runtime_value_access(|access| {
+        Value::List(List::from_values(vec![visible.to_value_in(&access)]))
+    });
     let path_root = crate::runtime::RuntimeValueRoot::new(context.values(), path_value);
     let state = context.values().with_runtime_value_access(|access| {
         crate::eval::builtins::initial_state_for_test(
@@ -2247,16 +2245,16 @@ fn later_builder_fix_alternative_survives_route_loss_without_replay() {
                 Arc::new(crate::eval::test_support::TestExpr::Value(
                     Value::PartialBuiltin(BuiltinCall {
                         builtin: Builtin::DictSingleton,
-                        arguments: Arc::from([context.values().key_value(&crate::core::keys::EFF)]),
+                        arguments: Arc::from([access.key_value(&crate::core::keys::EFF)]),
                     }),
                 )),
                 Arc::new(crate::eval::test_support::TestExpr::Apply(
                     Arc::new(crate::eval::test_support::TestExpr::Value(
                         Value::PartialBuiltin(BuiltinCall {
                             builtin: Builtin::EffectCall,
-                            arguments: Arc::from([context
-                                .values()
-                                .key_value(&crate::core::Key::atom_from_text("r"))]),
+                            arguments: Arc::from([
+                                access.key_value(&crate::core::Key::atom_from_text("r"))
+                            ]),
                         }),
                     )),
                     Arc::new(crate::eval::test_support::TestExpr::List(Arc::from([

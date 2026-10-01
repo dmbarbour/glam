@@ -2650,6 +2650,20 @@ inventory relatch:
     root or nested admission. Temporary `#[cfg(test)]` factory projections
     keep the fixture corpus compilable while D.2h.3b.2 migrates it by
     subsystem; they are explicitly not part of the accepted final surface.
+  - **D.2h.3b.2a — non-unit fixture projection migration complete
+    2026-09-30.** Test-only factory projections for the object-reflection
+    guard, severity atoms, arbitrary key values, and initial metadata are
+    removed, together with `Key::to_value_with`, the metadata-carrier shim,
+    and the global reflection-guard helper. Syntax, diagnostics, builder,
+    reflection-status, metadata, and ownership fixtures now construct and
+    inspect these values under their matching `RuntimeValueAccess`. One
+    task-observer fixture initially held that access while forcing a status
+    field; its focused witness rejected the boundary, and the fixture now
+    completes WHNF orchestration first before opening the short comparison
+    region. All targets compile and the focused canonical-cache, metadata,
+    diagnostic, builder-checkpoint, task-status, and cross-session observer
+    fixtures pass. D.2h.3b.2b owns the remaining high-volume unit projection
+    and its helper surfaces.
   - **D.2h.3c — failure and host-call traversal split complete 2026-09-30.**
     Managed failure emissions, contexts, and host-call captures now reach the
     collector only through its `Visitor`; the raw `visit_direct_values` and

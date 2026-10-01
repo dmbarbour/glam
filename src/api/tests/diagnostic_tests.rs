@@ -734,9 +734,10 @@ fn diagnostic_enrichment_is_an_authoritative_object_mixin() {
     else {
         unreachable!()
     };
+    let fixture_values = crate::core::test_value_factory();
     let interface = interface.insert(
         (*crate::core::keys::SEVERITY).clone(),
-        crate::core::test_value_factory().error(),
+        fixture_values.with_runtime_value_access(|access| access.error()),
     );
     let message = CoreValue::Dict(message.insert(
         (*crate::core::keys::MSG).clone(),
@@ -756,10 +757,12 @@ fn diagnostic_enrichment_is_an_authoritative_object_mixin() {
     let Some(CoreValue::Dict(interface)) = emission.get(&*crate::core::keys::MSG) else {
         panic!("raw diagnostic should provide msg");
     };
-    values.core().assert_same_representation_for_test(
-        &interface.get(&*crate::core::keys::SEVERITY),
-        &Some(&crate::core::test_value_factory().error()),
-    );
+    fixture_values.with_runtime_value_access(|access| {
+        access.assert_same_representation_for_test(
+            &interface.get(&*crate::core::keys::SEVERITY),
+            &Some(&access.error()),
+        );
+    });
     assert!(interface.get(&*crate::core::keys::ORIGIN).is_none());
     assert!(emission.get(&*crate::core::keys::SPEC).is_none());
 
@@ -773,10 +776,12 @@ fn diagnostic_enrichment_is_an_authoritative_object_mixin() {
     let Some(CoreValue::Dict(interface)) = enriched.get(&*crate::core::keys::MSG) else {
         panic!("enriched diagnostic should provide msg");
     };
-    values.core().assert_same_representation_for_test(
-        &interface.get(&*crate::core::keys::SEVERITY),
-        &Some(&values.core.warn()),
-    );
+    values.core.with_runtime_value_access(|access| {
+        access.assert_same_representation_for_test(
+            &interface.get(&*crate::core::keys::SEVERITY),
+            &Some(&access.warn()),
+        );
+    });
     values.core().assert_same_representation_for_test(
         &interface
             .get(&*crate::core::keys::ORIGIN)

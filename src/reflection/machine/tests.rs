@@ -6837,10 +6837,16 @@ fn task_observers_accept_handles_from_another_same_runtime_session() {
     else {
         panic!("a same-runtime observer should read the pre-pump task status")
     };
-    launched.assert_same_representation_for_test(
-        &assembler.core_values(),
-        &assembler.core_values().key_value(&keys::LAUNCHED),
-    );
+    assembler.core_values().with_runtime_value_access(|access| {
+        launched
+            .with_core(&access, |launched| {
+                access.assert_same_representation_for_test(
+                    launched,
+                    &access.key_value(&keys::LAUNCHED),
+                );
+            })
+            .expect("launched status must belong to the test runtime");
+    });
     drop(launched_observer);
 
     let EvaluationSessionRun::Deadlocked(before_observation) = owner.run_until_quiescent() else {
@@ -6875,10 +6881,13 @@ fn task_observers_accept_handles_from_another_same_runtime_session() {
         )
         .unwrap_or_else(|error| panic!("task observation {name} should evaluate: {error}"))
     };
-    assembler.core_values().assert_same_representation_for_test(
-        &field("blocked_status"),
-        &assembler.core_values().key_value(&keys::BLOCKED),
-    );
+    let blocked_status = field("blocked_status");
+    assembler.core_values().with_runtime_value_access(|access| {
+        access.assert_same_representation_for_test(
+            &blocked_status,
+            &access.key_value(&keys::BLOCKED),
+        );
+    });
     let Value::Dict(complete_status) = field("complete_status") else {
         panic!("complete task status should be tagged data")
     };
@@ -6901,10 +6910,13 @@ fn task_observers_accept_handles_from_another_same_runtime_session() {
     };
     assert!(failed_status.get(&*keys::ERR).is_some());
     assert!(matches!(field("failed_error"), Value::Dict(_)));
-    assembler.core_values().assert_same_representation_for_test(
-        &field("canceled_status"),
-        &assembler.core_values().key_value(&keys::CANCELED),
-    );
+    let canceled_status = field("canceled_status");
+    assembler.core_values().with_runtime_value_access(|access| {
+        access.assert_same_representation_for_test(
+            &canceled_status,
+            &access.key_value(&keys::CANCELED),
+        );
+    });
 
     let EvaluationSessionRun::Deadlocked(after_observation) = owner.run_until_quiescent() else {
         panic!("observation must not disturb the blocked owner task")
@@ -6924,13 +6936,16 @@ fn task_observers_accept_handles_from_another_same_runtime_session() {
     else {
         panic!("a retained same-runtime handle should remain observable after owner closure")
     };
-    assert!(
-        abandoned.same_representation_for_test(
-            &assembler.core_values(),
-            &assembler.core_values().key_value(&keys::ABANDONED),
-        ),
-        "observer-held task handles must not keep their producer demand open"
-    );
+    assembler.core_values().with_runtime_value_access(|access| {
+        abandoned
+            .with_core(&access, |abandoned| {
+                assert!(
+                    access.same_representation(abandoned, &access.key_value(&keys::ABANDONED)),
+                    "observer-held task handles must not keep their producer demand open"
+                );
+            })
+            .expect("abandoned status must belong to the test runtime");
+    });
 }
 
 #[test]
