@@ -1,7 +1,7 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I11 and their mandatory reviews are
-complete. Gates G2 and G3 passed on 2026-09-11 and 2026-10-02 respectively. The
+Status: complete; Phases I0 through I13 and their mandatory reviews are
+complete. Gates G2, G3, and G4 passed on 2026-09-11 and 2026-10-02. The
 production public-value facade uses an inline-or-registered-root
 representation, every durable owner stores that facade, and lazy, promise,
 and core-net identities are one exact managed graph. Production collection
@@ -16,6 +16,10 @@ I12A completed explicit runtime maintenance, actionable readiness, durable
 failure reporting, and pressure-boundary closure on 2026-10-02. I12B selected
 permanently explicit `NoAuto` runtime maintenance and completed stable pressure
 promotion plus the mandatory post-I12 review on 2026-10-02.
+I13 reconciled every remaining owner and adapter, retired only proven-redundant
+scaffolding, documented the implemented collector boundary, and passed Gate
+G4 on 2026-10-02. Collector C7/C8 and concurrent/moving work remain separate
+post-integration plans.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -299,8 +303,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I13A | complete | final ownership, provenance, gate, adapter, and drop-record inventory |
 | I13B | complete | proven-redundant scaffolding retirement and stable terminology |
 | I13C | complete | current architecture, safepoint, and starvation documentation |
-| I13D | pending | Gate G4 audit, post-I13 review, and plan closure |
-| I13 | pending | redundant ownership removal, documentation, and Gate G4 |
+| I13D | complete | Gate G4 audit, post-I13 review, and plan closure |
+| I13 | complete | redundant ownership removal, documentation, and Gate G4 |
 
 ## Major-Stage Review Policy
 
@@ -7081,6 +7085,16 @@ remains owned by the separate deferred plan.
 - Record a dated Gate G4/post-I13 review. Mark the integration plan and roadmap
   complete only when every I13A inventory entry has a stable disposition and
   no correctness work was deferred into cleanup.
+
+**Completed 2026-10-02.** Gate G4 and the post-I13 review are recorded in
+[`GarbageCollectorGateG4_2026-10-02.md`](../reviews/GarbageCollectorGateG4_2026-10-02.md).
+The audit found and structurally latched one test-only defect: fixtures which
+force collection must own private value domains and may never collect the
+process-wide shared test factory. The complete ordinary/workspace matrices,
+all 129 source inventories, focused collection and cycle fixtures, aggressive
+entry smoke, release artifact, and profiling regressions pass. No production
+owner, trace edge, mutation gateway, root lifecycle, or finalizer was deferred
+into cleanup. I0-I13 and the initial collector integration are complete.
 
 ## Integration Verification Matrix
 

@@ -1,10 +1,9 @@
 # Glam-Owned Garbage Collection Roadmap — 2026-08-19
 
-Status: in progress; collector Phases C0 through C6D.3 plus C2C.6 and
-integration Phases I0 through I12 are complete. I13A-C have reconciled final
-ownership, retired stale migration scaffolding, and updated current
-documentation; Gate G4 and the post-I13 audit remain. Gates G0 through G3 are
-established, including repository-wide ordinary/aggressive closure and the
+Status: in progress for collector C7/C8; the initial integration is complete.
+Collector Phases C0 through C6D.3 plus C2C.6 and integration Phases I0 through
+I13 are complete. Gates G0 through G4 are established, including final
+ownership reconciliation, repository-wide ordinary/aggressive closure, and the
 supported Miri, ASan/LSan, and TSan targets. Production heaps remain immutable
 `NoAuto`: explicit runtime maintenance is available, and pressure becomes
 actionable only at the reviewed stable pump boundary. Automatic collection is
@@ -12,6 +11,8 @@ not enabled. Collector stress, metrics, and tuning continue in C7/C8.
 
 The final ownership disposition is recorded in
 [`GarbageCollectorI13CleanupInventory_2026-10-02.md`](../reviews/GarbageCollectorI13CleanupInventory_2026-10-02.md).
+Gate G4 and the post-I13 audit are recorded in
+[`GarbageCollectorGateG4_2026-10-02.md`](../reviews/GarbageCollectorGateG4_2026-10-02.md).
 The completed raw-value/persistent-edge remediation and forward-path
 reconciliation are reviewed in
 [`GarbageCollectorGCI11R002Holistic_2026-10-01.md`](../reviews/GarbageCollectorGCI11R002Holistic_2026-10-01.md).
@@ -424,6 +425,9 @@ and outer mutator entry does not elect collection. The stable pump promotes
 collector pressure without changing heap policy or collecting in the pump.
 
 ### Gate G4 — legacy ownership retired
+
+**Passed 2026-10-02.** The dated certification is
+[`GarbageCollectorGateG4_2026-10-02.md`](../reviews/GarbageCollectorGateG4_2026-10-02.md).
 
 Cycle-bearing `Arc` scaffolding made redundant by the collector is removed;
 remaining `Arc`s have a deliberate role such as immutable bytes, external

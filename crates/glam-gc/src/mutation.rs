@@ -20,7 +20,7 @@ impl Mutator<'_> {
     #[inline(always)]
     pub unsafe fn with_edge_state_transition<Owner, State, Leaving, Adding, Result>(
         &self,
-        owner: &Gc<Owner>,
+        _owner: &Gc<Owner>,
         state: &mut State,
         leaving: Leaving,
         adding: Adding,
@@ -32,7 +32,7 @@ impl Mutator<'_> {
         Adding: for<'visit> Fn(&State, &mut Visitor<'visit>),
     {
         #[cfg(debug_assertions)]
-        owner.debug_assert_owned_by(self);
+        _owner.debug_assert_owned_by(self);
 
         #[cfg(feature = "deterministic-test-hooks")]
         if let Some(probe) = self.heap().edge_transition_probe() {

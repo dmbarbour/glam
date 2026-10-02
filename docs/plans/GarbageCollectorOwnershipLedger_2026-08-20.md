@@ -1,9 +1,9 @@
 # Glam GC Ownership and Mutation Ledger — 2026-08-20
 
-Status: Phases I0 through I12 and their mandatory reviews are complete; I13A-C
-have reconciled the final ownership inventory, scaffolding, and current
-documentation. Gates G2 and G3 passed on 2026-09-11 and 2026-10-02
-respectively; Gate G4 awaits the final delta audit. GCI11R-002D.2 and
+Status: Phases I0 through I13 and their mandatory reviews are complete. Gates
+G2, G3, and G4 passed on 2026-09-11 and 2026-10-02; the final ownership
+inventory, scaffolding cleanup, current documentation, and delta audit agree.
+GCI11R-002D.2 and
 the nested persistent-edge cutover closed on 2026-10-01 with zero unclassified
 raw API or persistent-edge occurrence and passing ordinary/aggressive
 workspaces. I11D.2 dynamic
@@ -460,5 +460,10 @@ must work without opening a mutator. The compatibility visitor remains the
 authoritative bridge through immutable aggregate shells until Value
 Representation Refinement. `ManagedDropRecord` remains mandatory textual
 collector-admission evidence because `Trace` alone does not constrain
-destruction. The final Gate G4 audit must reuse the authoritative inventories
-rather than create another ownership census.
+destruction. The final Gate G4 audit reused these authoritative inventories
+rather than creating another ownership census and passed on 2026-10-02. Its
+certification is
+[`GarbageCollectorGateG4_2026-10-02.md`](../reviews/GarbageCollectorGateG4_2026-10-02.md).
+The only corrective finding was test-only: explicit collection now rejects the
+process-wide shared fixture domain and every collection-sensitive fixture owns
+a private domain. No production ownership classification changed.

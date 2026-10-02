@@ -16,11 +16,12 @@ when their historical value no longer justifies keeping them.
   the runtime value domain.
 - [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
   builds and verifies the standalone collector subcrate.
-- [`GarbageCollectorIntegration_2026-08-19.md`](GarbageCollectorIntegration_2026-08-19.md)
-  migrates Glam values, roots, workers, reflection, and interaction nets.
 
 ## Recent Completed Plans
 
+- [`GarbageCollectorIntegration_2026-08-19.md`](GarbageCollectorIntegration_2026-08-19.md)
+  completed the I0-I13 migration of Glam values, roots, workers, reflection,
+  interaction nets, and explicit runtime maintenance, passing Gate G4.
 - [`GarbageCollectorPersistentEdgeTraits_2026-09-12.md`](GarbageCollectorPersistentEdgeTraits_2026-09-12.md)
   completed the explicit managed-edge ownership migration and closed its
   dynamic and release-cost verification under collector-integration I11D.2.
