@@ -296,7 +296,11 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I12B.2 | complete | stable pump-boundary pressure promotion and forced-order races |
 | I12B.3 | complete | direct, snapshot, batch, reclamation, output, and policy closure |
 | I12B | complete | stable pressure promotion and manual-policy closure |
-| I13 | pending | redundant ownership removal and documentation |
+| I13A | pending | final ownership, provenance, gate, adapter, and drop-record inventory |
+| I13B | pending | proven-redundant scaffolding retirement and stable terminology |
+| I13C | pending | current architecture, safepoint, and starvation documentation |
+| I13D | pending | Gate G4 audit, post-I13 review, and plan closure |
+| I13 | pending | redundant ownership removal, documentation, and Gate G4 |
 
 ## Major-Stage Review Policy
 
@@ -6985,27 +6989,70 @@ not be the first phase to discover or repair a missing trace edge, temporal
 publication gap, mutation barrier, durable owner, or active-lifecycle escape;
 such a defect reopens the earliest phase which introduced it.
 
-- Remove `Arc` wrappers whose only remaining role was recursive value
-  lifetime. Retain intentional `Arc`s for public roots, immutable leaf buffers,
-  host identities, and edge-free scheduler notification companions.
-- Remove duplicated runtime provenance fields when heap identity is
-  authoritative and the boundary check remains equally cheap.
-- Remove temporary collection-disable gates and migration-only adapters.
-- Revisit I4.0's `ManagedDropRecord` after Gate G3 and the production
-  integration have made the stable ownership ledger mechanically auditable.
-  Keep the private `ManagedFamily` admission boundary; decide then whether its
-  textual per-family record still prevents real mistakes or should contract to
-  a simpler reviewed-admission token. Do not remove it merely as incidental
-  cleanup before that audit.
-- Update `docs/architecture/evaluation.md`, `docs/AgentContext.md`, focused
-  agent notes, and `src/README.md` with current ownership and safepoint rules.
-- Document that the baseline idle-entry collector may starve under
-  continuously overlapping mutator regions. This accepted progress limitation
-  is owned by the post-integration
+### I13A — Final Cleanup Inventory and Decisions
+
+- Reconcile every remaining `Arc` adjacent to managed semantic data against
+  one of four stable roles: immutable structural sharing, registered external
+  root, host identity/resource, or edge-free scheduler/notification sidecar.
+  An `Arc` which still owns a recursive lazy, promise, or core-net semantic
+  identity is a defect, not cleanup.
+- Inventory copied runtime IDs, observers, labels, and coordinator keys.
+  Remove a copy only when heap identity remains available at the same boundary
+  without opening another mutator or retaining the runtime. Access-free
+  routing, diagnostics, empty capture bundles, and public weak observers are
+  legitimate reasons to retain a scalar identity.
+- Classify collection gates and compatibility adapters as production policy,
+  verification mechanism, deferred value-representation seam, or obsolete
+  migration scaffolding. Do not remove aggressive verification or the exact
+  compatibility trace walk merely because their introducing phase is complete.
+- Decide `ManagedDropRecord` explicitly. Preserve `ManagedFamily` regardless;
+  if the record remains, rewrite its contract as stable collector admission
+  rather than phase history and require every managed family to keep a
+  nonempty destruction review.
+- Use the existing authoritative ownership, containment, raw-value, persistent-
+  edge, and active-owner inventories. Add only delta latches needed to prevent
+  a retired representation from returning; do not duplicate their full source
+  census.
+
+### I13B — Retire Only Proven-Redundant Scaffolding
+
+- Remove wrappers, duplicated provenance, gates, adapters, and test fixtures
+  only when I13A identifies a concrete replacement or proves the role absent.
+- Refresh stale phase-specific `allow(dead_code)` reasons and comments on
+  production paths. Remove an allowance when the path is live; use a stable
+  invariant explanation when a field exists only to hold authority or a
+  lifetime.
+- Rename retained verification fixtures and records whose names incorrectly
+  imply they are temporary migration machinery. Preserve their independent
+  dynamic evidence where Gate G3 or Gate G4 still relies on it.
+- Run focused layout, source-inventory, finalization, cycle-reclamation, and
+  aggressive-entry tests after each representation-affecting cleanup.
+
+### I13C — Document the Implemented Boundary
+
+- Update current architecture, focused agent context, and the source map with
+  the final managed-edge, registered-root, mutation, safepoint, pressure, and
+  finalization rules. Keep target design and deferred concurrent/moving GC
+  separate.
+- Document that the serial `NoAuto` baseline services pressure only at an
+  explicit stable pump/service boundary and may defer collection while runtime
+  work never reaches that boundary. The post-integration
   [`ConcurrentGarbageCollection_2026-08-28.md`](ConcurrentGarbageCollection_2026-08-28.md)
-  plan and does not weaken the baseline collector's safety or Gate G4.
-- Pass roadmap Gate G4 and mark the roadmap and both plans complete only after
-  a final invariant and trace-edge audit.
+  plan owns the accepted progress limitation and future concurrent remedy.
+- Reconcile the ownership ledger and roadmap with every retained `Arc`, copied
+  provenance field, compatibility adapter, and admission record.
+
+### I13D — Gate G4 and Final Review
+
+- Re-run the invariant and trace-edge audits which established Gates G2/G3,
+  now as a delta audit proving that cleanup introduced no owner, edge, active
+  destructor, or unqualified managed access.
+- Exercise full collection, pressure promotion, retained production output,
+  cycle reclamation, finalizer schedules, ordinary/aggressive modes, and the
+  routine repository gates in proportion to the code changed by I13B.
+- Record a dated Gate G4/post-I13 review. Mark the integration plan and roadmap
+  complete only when every I13A inventory entry has a stable disposition and
+  no correctness work was deferred into cleanup.
 
 ## Integration Verification Matrix
 
