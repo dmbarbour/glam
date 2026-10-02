@@ -15,7 +15,8 @@ request-coalescing, and retirement schedules. I11D.0 repaired the missing
 worker/collector ordering proof, and I11D.1 completed repository-wide ordinary
 and aggressive ownership closure on 2026-10-01. I11D.4 certified Gate G3 on
 2026-10-02. Production remains `NoAuto`; I12A explicit runtime maintenance is
-complete and I12B.0's new-runtime collection-policy decision is next.
+complete and I12B.0 selected permanently manual runtime heaps. I12B's stable
+pressure promotion and policy closure is next.
 I11D.2 is complete. The supported Miri, ASan/LSan, and TSan targets pass, with
 one broad end-to-end Miri target explicitly excluded for unreasonable
 execution time. Persistent edges retain one-pointer layout, zero allocation
@@ -23,7 +24,8 @@ and root traffic, and minimal release code generation. I11D.3 completed the
 static closure audit on 2026-10-02 without a production repair.
 I12A.0 selected the runtime GC activity/readiness and durable maintenance-
 failure protocol on 2026-10-02; I12A then implemented and reviewed explicit
-`NoAuto` maintenance. Automatic policy remains disabled pending I12B.0.
+`NoAuto` maintenance. I12B.0 rejected automatic runtime construction for the
+bootstrap; I12B will promote pressure at an explicit stable pump boundary.
 The completed remediation and forward-path reconciliation are reviewed in
 [`GarbageCollectorGCI11R002Holistic_2026-10-01.md`](../reviews/GarbageCollectorGCI11R002Holistic_2026-10-01.md).
 
@@ -429,11 +431,10 @@ plus a durable maintenance failure rather than anonymous permanent `Busy`.
 Permanent poison becomes `MaintenanceFailed` and is rendered without entering
 the damaged value domain. The decision artifact is
 [`GarbageCollectorReadinessIntegration_2026-10-02.md`](../reviews/GarbageCollectorReadinessIntegration_2026-10-02.md).
-Collection policy is immutable for one heap: the later I12B.0 policy review may
-change construction of new runtimes, but never transitions a live `NoAuto`
-runtime to `Automatic`. If it retains manual production policy, pressure is
-serviced only through explicit runtime maintenance and outer mutator entry does
-not elect collection.
+Collection policy is immutable for one heap. I12B.0 retained `NoAuto` for all
+Glam runtimes: pressure is serviced only through explicit runtime maintenance,
+and outer mutator entry does not elect collection. I12B promotes collector
+pressure at a stable pump boundary without changing heap policy.
 
 ### Gate G4 — legacy ownership retired
 
@@ -442,6 +443,12 @@ remaining `Arc`s have a deliberate role such as immutable bytes, external
 roots, host identities, or non-value scheduler sidecars. Architecture and
 agent-context documentation describe the implemented collector rather than
 this transition.
+
+Production documentation and source inventories describe immutable `NoAuto`
+runtimes with explicit maintenance. Real collector pressure becomes actionable
+at the reviewed stable pump boundary, while ordinary mutator entry cannot
+elect collection. Gate G4 requires the completed I12B pressure/reclamation
+matrix, not automatic heap construction.
 
 ## Work Which May Proceed in Parallel
 

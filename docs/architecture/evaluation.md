@@ -67,13 +67,13 @@ Retaining `Values`, a demand context, or a runtime service can therefore keep
 value construction usable without also preserving the scheduler, executor,
 runtime facade, or default reflection profile. Production non-inline values
 already use registered roots over managed outer value nodes, but collection
-remains `NoAuto`. Private controlled-collection fixtures exercise serial,
-worker, and finalizer schedules without exposing a routine maintenance API or
-changing heap policy. Repository-wide aggressive verification, runtime
-maintenance, and any automatic policy remain separate gates. The complete
-ordinary/aggressive repository ownership matrix passed on 2026-10-01; dynamic
-unsafe-boundary tools, the final static delta audit, and Gate G3 certification
-remain before runtime maintenance is authorized.
+remains `NoAuto`. Controlled fixtures exercise serial, worker, and finalizer
+schedules, while I12A exposes explicit request and service through runtime
+maintenance without changing heap policy. I12B.0 selected permanent manual
+runtime heaps: a stable pump boundary will promote collector pressure into
+that explicit protocol, and ordinary mutator entry will not elect collection.
+Repository-wide aggressive verification and the Gate G3 certification cover
+the complete production ownership graph without becoming production policy.
 
 Every production evaluator entry receives an `EvalContext` derived from an
 external `EvaluationSession` owner lease. An `Assembler` and its clones share

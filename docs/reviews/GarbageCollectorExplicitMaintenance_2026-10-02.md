@@ -7,7 +7,7 @@ Phase I12A.
 Status: **complete; I12A passes.** Immutable `NoAuto` runtimes now expose
 explicit, readiness-integrated collection without adding synchronization to
 ordinary production value access. Automatic collection remains disabled and
-requires I12B.0's separate construction-policy decision.
+I12B.0 subsequently selected permanently manual runtime heaps.
 
 ## Scope and Outcome
 
@@ -52,10 +52,9 @@ runtime revision assertion in
 `explicit_managed_collection_request_is_actionable_runtime_state` prevent the
 ordinary path from quietly inheriting verification-mode lease traffic.
 
-This is not an argument that future automatic collection is free. I12B.0 must
-measure and choose how automatic heaps register potentially collecting outer
-entries. Moving today's test-only authority/branch into production without
-that review would violate this phase's boundary.
+This was not an argument that automatic collection would be free. I12B.0's
+subsequent review rejected moving the test-only authority/branch into
+production and selected stable-boundary pressure promotion instead.
 
 ## Concurrency and Linearization
 
@@ -141,19 +140,17 @@ added.
 
 ### I12AR-004 — Automatic-entry cost and policy remain open
 
-Disposition: **deferred by design to I12B.0.** I12A supplies correctness,
-pressure, survivor, and boundary data, but does not justify enabling an
-automatic policy or paying an entry lease on every value region. I12B.0 must
-compare explicit boundary service with automatic outer-entry election and
-record latency, throughput, and pause effects before selecting policy for new
-runtimes.
+Disposition: **resolved by I12B.0 on 2026-10-02.** The decision in
+[`GarbageCollectorRuntimePolicy_2026-10-02.md`](GarbageCollectorRuntimePolicy_2026-10-02.md)
+retains permanently manual `NoAuto` runtimes. Stable pump-boundary pressure
+promotion will reuse I12A's explicit service rather than putting a lease and
+wake protocol around every outer value region.
 
 No unresolved correctness finding blocks I12B.0.
 
 ## Forward-Plan Review
 
-I12B.0 remains correctly sequenced after I12A. Its decision must treat the
-following as current implementation facts:
+I12B.0 ran after I12A and treated the following as implementation facts:
 
 - runtime policy is immutable after construction;
 - explicit maintenance already gives embeddings a complete supported path;
