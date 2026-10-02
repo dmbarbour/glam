@@ -14,15 +14,16 @@ collection boundary, and I11C exercised worker, finalizer,
 request-coalescing, and retirement schedules. I11D.0 repaired the missing
 worker/collector ordering proof, and I11D.1 completed repository-wide ordinary
 and aggressive ownership closure on 2026-10-01. I11D.4 certified Gate G3 on
-2026-10-02. Production remains `NoAuto`; I12 explicit runtime maintenance is
-next.
+2026-10-02. Production remains `NoAuto`; I12A explicit runtime maintenance is
+complete and I12B.0's new-runtime collection-policy decision is next.
 I11D.2 is complete. The supported Miri, ASan/LSan, and TSan targets pass, with
 one broad end-to-end Miri target explicitly excluded for unreasonable
 execution time. Persistent edges retain one-pointer layout, zero allocation
 and root traffic, and minimal release code generation. I11D.3 completed the
 static closure audit on 2026-10-02 without a production repair.
 I12A.0 selected the runtime GC activity/readiness and durable maintenance-
-failure protocol on 2026-10-02; I12A explicit `NoAuto` maintenance is next.
+failure protocol on 2026-10-02; I12A then implemented and reviewed explicit
+`NoAuto` maintenance. Automatic policy remains disabled pending I12B.0.
 The completed remediation and forward-path reconciliation are reviewed in
 [`GarbageCollectorGCI11R002Holistic_2026-10-01.md`](../reviews/GarbageCollectorGCI11R002Holistic_2026-10-01.md).
 

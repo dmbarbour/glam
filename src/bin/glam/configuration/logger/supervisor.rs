@@ -5,8 +5,8 @@ use glam::{
     Diagnostic, DiagnosticBus, DiagnosticIngress, Error, EvaluationRuntime, QuiescenceReport,
     RuntimeDeadlockWork, RuntimeDeliveryFailure, RuntimeDeliveryOutcome, RuntimeDependency,
     RuntimeDisposition, RuntimeDispositionKind, RuntimeEventJournal, RuntimeInputReader,
-    RuntimeOutputDelivery, RuntimeOutputWriter, RuntimeTaskCapability, RuntimeWorkKind,
-    RuntimeWorkState, Severity, Value, Values,
+    RuntimeMaintenanceFailure, RuntimeOutputDelivery, RuntimeOutputWriter, RuntimeTaskCapability,
+    RuntimeWorkKind, RuntimeWorkState, Severity, Value, Values,
 };
 
 use crate::rendering::DefaultLogger;
@@ -38,6 +38,7 @@ pub(crate) struct SettledReportSelection {
     pub(crate) delivery_failures: Vec<Arc<RuntimeDeliveryFailure>>,
     pub(crate) exit_errors: Vec<RuntimeDisposition>,
     pub(crate) killed_work: Vec<RuntimeDeadlockWork>,
+    pub(crate) maintenance_failures: Vec<RuntimeMaintenanceFailure>,
 }
 
 #[derive(Clone)]
@@ -158,6 +159,7 @@ impl LoggerSupervisor {
                 .collect(),
             exit_errors: report.pending_exit_error_reports().to_vec(),
             killed_work: report.pending_killed_work_reports().to_vec(),
+            maintenance_failures: report.pending_maintenance_failure_reports().to_vec(),
         };
         let values = self.input.runtime.values();
         let diagnostics = settled_report_diagnostics(&values, selected)?;
@@ -254,6 +256,14 @@ pub(crate) fn settled_report_diagnostics(
                 .with_context(values, context)?,
         );
     }
+    for failure in selection.maintenance_failures {
+        diagnostics.push(maintenance_failure_diagnostic(
+            values,
+            failure.id(),
+            failure.kind(),
+            failure.message(),
+        )?);
+    }
     for disposition in selection.exit_errors {
         let RuntimeDispositionKind::ExitError(message) = disposition.kind() else {
             unreachable!("report selection retains only error exits")
@@ -320,6 +330,30 @@ pub(crate) fn settled_report_diagnostics(
             .push(Diagnostic::new(values, Severity::Error, message).with_context(values, context)?);
     }
     Ok(diagnostics)
+}
+
+fn maintenance_failure_diagnostic(
+    values: &Values,
+    id: u64,
+    kind: glam::RuntimeMaintenanceFailureKind,
+    message: &str,
+) -> Result<Diagnostic, Error> {
+    let context = runtime_report_context(
+        values,
+        "maintenance_failure",
+        vec![
+            ("failure", report_id(values, id)?),
+            (
+                "kind",
+                values.atom_from_text(match kind {
+                    glam::RuntimeMaintenanceFailureKind::CollectorPanic => "collector_panic",
+                    glam::RuntimeMaintenanceFailureKind::FinalizerPanic => "finalizer_panic",
+                    glam::RuntimeMaintenanceFailureKind::Poisoned => "poisoned",
+                }),
+            ),
+        ],
+    )?;
+    Diagnostic::new(values, Severity::Error, message).with_context(values, context)
 }
 
 fn report_id(values: &Values, id: u64) -> Result<Value, Error> {
@@ -490,7 +524,7 @@ mod tests {
 
     use super::{
         LogHost, LoggerInstallation, LoggerSupervisor, LoggerSupervisorState,
-        SettledReportSelection,
+        SettledReportSelection, maintenance_failure_diagnostic,
     };
     use crate::DiagnosticBusLocal;
 
@@ -522,6 +556,7 @@ mod tests {
             delivery_failures: _,
             exit_errors: _,
             killed_work: _,
+            maintenance_failures: _,
         } = selection;
         let LoggerInstallation {
             generation: _,
@@ -538,6 +573,28 @@ mod tests {
             &SettledReportSelection,
             &LoggerInstallation,
         ) = assert_logger_supervisor_owner_inventory;
+    }
+
+    #[test]
+    fn maintenance_failures_render_as_structured_error_diagnostics() {
+        let runtime = glam::EvaluationRuntime::new(0).unwrap();
+        let values = runtime.values();
+        let diagnostic = maintenance_failure_diagnostic(
+            &values,
+            7,
+            glam::RuntimeMaintenanceFailureKind::FinalizerPanic,
+            "injected finalizer panic",
+        )
+        .unwrap();
+
+        assert_eq!(diagnostic.severity(), Severity::Error);
+        assert_eq!(diagnostic.message(), "injected finalizer panic");
+        assert!(
+            values
+                .access_names(diagnostic.emission(), ["msg", "context"])
+                .is_ok(),
+            "maintenance diagnostics should retain structured runtime context"
+        );
     }
 
     #[test]

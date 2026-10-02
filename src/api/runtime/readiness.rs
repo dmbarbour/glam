@@ -62,6 +62,8 @@ fn blocked_reasoning_diagnostic(
 #[derive(Clone)]
 pub enum RuntimeReadiness {
     Busy,
+    MaintenanceRequired(RuntimeMaintenanceSnapshot),
+    MaintenanceFailed(RuntimeMaintenanceSnapshot),
     Ready(QuiescenceSnapshot),
     Deadlocked(DeadlockSnapshot),
 }
@@ -70,6 +72,14 @@ impl fmt::Debug for RuntimeReadiness {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Busy => formatter.write_str("Busy"),
+            Self::MaintenanceRequired(snapshot) => formatter
+                .debug_tuple("MaintenanceRequired")
+                .field(snapshot)
+                .finish(),
+            Self::MaintenanceFailed(snapshot) => formatter
+                .debug_tuple("MaintenanceFailed")
+                .field(snapshot)
+                .finish(),
             Self::Ready(snapshot) => formatter.debug_tuple("Ready").field(snapshot).finish(),
             Self::Deadlocked(snapshot) => {
                 formatter.debug_tuple("Deadlocked").field(snapshot).finish()
@@ -83,6 +93,7 @@ impl fmt::Debug for RuntimeReadiness {
 pub struct RuntimeReadinessStamp {
     pub(super) work_generation: u64,
     pub(super) observation_epoch: u64,
+    pub(super) gc_maintenance_revision: u64,
 }
 
 impl RuntimeReadinessStamp {
@@ -92,6 +103,199 @@ impl RuntimeReadinessStamp {
 
     pub fn observation_epoch(&self) -> u64 {
         self.observation_epoch
+    }
+
+    pub fn gc_maintenance_revision(&self) -> u64 {
+        self.gc_maintenance_revision
+    }
+}
+
+/// Actionable managed-heap state retained by a readiness observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeMaintenanceState {
+    Requested,
+    RetryRequired,
+    Poisoned,
+}
+
+/// Runtime-local managed-heap maintenance observation.
+#[derive(Clone)]
+pub struct RuntimeMaintenanceSnapshot {
+    pub(super) runtime: EvaluationRuntime,
+    pub(super) revision: u64,
+    pub(super) state: RuntimeMaintenanceState,
+    pub(super) failure: Option<RuntimeMaintenanceFailure>,
+}
+
+impl fmt::Debug for RuntimeMaintenanceSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimeMaintenanceSnapshot")
+            .field("runtime", &self.runtime.id())
+            .field("revision", &self.revision)
+            .field("state", &self.state)
+            .field("failure", &self.failure)
+            .finish()
+    }
+}
+
+impl RuntimeMaintenanceSnapshot {
+    pub fn runtime_id(&self) -> EvaluationRuntimeId {
+        self.runtime.id()
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn state(&self) -> RuntimeMaintenanceState {
+        self.state
+    }
+
+    pub fn failure(&self) -> Option<&RuntimeMaintenanceFailure> {
+        self.failure.as_ref()
+    }
+
+    /// Services the observed runtime's current maintenance obligation.
+    ///
+    /// The observed revision is revalidated before the activity lease is
+    /// admitted. A stale snapshot returns [`RuntimeMaintenanceErrorKind::RuntimeChanged`]
+    /// rather than consuming a newer maintenance obligation.
+    pub fn service(&self) -> Result<RuntimeMaintenanceReport, RuntimeMaintenanceError> {
+        self.runtime
+            .service_managed_collection_revision(self.revision)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeMaintenanceFailureKind {
+    CollectorPanic,
+    FinalizerPanic,
+    Poisoned,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeMaintenanceFailure {
+    id: u64,
+    kind: RuntimeMaintenanceFailureKind,
+    message: Arc<str>,
+}
+
+impl RuntimeMaintenanceFailure {
+    pub(super) fn new(id: u64, kind: RuntimeMaintenanceFailureKind, message: Arc<str>) -> Self {
+        Self { id, kind, message }
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn kind(&self) -> RuntimeMaintenanceFailureKind {
+        self.kind
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeMaintenanceErrorKind {
+    RuntimeChanged,
+    ActiveMutator,
+    CollectorPanic,
+    FinalizerPanic,
+    Poisoned,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeMaintenanceError {
+    kind: RuntimeMaintenanceErrorKind,
+    message: Arc<str>,
+}
+
+impl RuntimeMaintenanceError {
+    pub(super) fn new(kind: RuntimeMaintenanceErrorKind, message: impl Into<Arc<str>>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    pub fn kind(&self) -> RuntimeMaintenanceErrorKind {
+        self.kind
+    }
+}
+
+impl fmt::Display for RuntimeMaintenanceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RuntimeMaintenanceError {}
+
+/// Scalar results from one explicitly serviced managed collection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeMaintenanceReport {
+    report: glam_gc::CollectionReport,
+    statistics: glam_gc::HeapStatistics,
+}
+
+impl RuntimeMaintenanceReport {
+    pub(super) fn new(
+        report: glam_gc::CollectionReport,
+        statistics: glam_gc::HeapStatistics,
+    ) -> Self {
+        Self { report, statistics }
+    }
+
+    pub fn epoch(self) -> u64 {
+        self.report.epoch()
+    }
+
+    pub fn root_entries(self) -> usize {
+        self.report.root_entries()
+    }
+
+    pub fn traced_objects(self) -> usize {
+        self.report.traced_objects()
+    }
+
+    pub fn marked_slots(self) -> usize {
+        self.report.marked_slots()
+    }
+
+    pub fn conservatively_retained_slots(self) -> usize {
+        self.report.conservatively_retained_slots()
+    }
+
+    pub fn reclaimed_slots(self) -> usize {
+        self.report.reclaimed_slots()
+    }
+
+    pub fn finalized_slots(self) -> usize {
+        self.report.finalized_slots()
+    }
+
+    pub fn reclaimed_runs(self) -> usize {
+        self.report.reclaimed_runs()
+    }
+
+    pub fn assigned_runs(self) -> usize {
+        self.statistics.assigned_runs()
+    }
+
+    pub fn run_high_water_mark(self) -> usize {
+        self.statistics.run_high_water_mark()
+    }
+
+    pub fn run_headroom(self) -> usize {
+        self.statistics.run_headroom()
+    }
+
+    pub fn pending_finalizers(self) -> usize {
+        self.statistics.pending_finalizers()
     }
 }
 
@@ -256,10 +460,12 @@ pub struct QuiescenceReport {
     pub(super) delivery_failures: RuntimeDeliveryFailureSnapshot,
     pub(super) reflection: crate::reflection::StoreSnapshot,
     pub(super) killed_work: Vec<RuntimeDeadlockWork>,
+    pub(super) maintenance_failures: Vec<RuntimeMaintenanceFailure>,
     pub(super) pending_task_failure_reports: Vec<ReasoningFailure>,
     pub(super) pending_delivery_failure_reports: RuntimeDeliveryFailureSnapshot,
     pub(super) pending_exit_error_reports: Vec<RuntimeDisposition>,
     pub(super) pending_killed_work_reports: Vec<RuntimeDeadlockWork>,
+    pub(super) pending_maintenance_failure_reports: Vec<RuntimeMaintenanceFailure>,
 }
 
 impl fmt::Debug for QuiescenceReport {
@@ -271,6 +477,7 @@ impl fmt::Debug for QuiescenceReport {
             .field("dispositions", &self.dispositions)
             .field("task_failures", &self.task_failures)
             .field("killed_work", &self.killed_work.len())
+            .field("maintenance_failures", &self.maintenance_failures)
             .field(
                 "delivery_failures",
                 &self.delivery_failures.failures().len(),
@@ -309,6 +516,10 @@ impl QuiescenceReport {
         &self.killed_work
     }
 
+    pub fn maintenance_failures(&self) -> &[RuntimeMaintenanceFailure] {
+        &self.maintenance_failures
+    }
+
     /// Task failures whose reporting responsibility was committed to this
     /// settlement rather than an earlier one.
     #[doc(hidden)]
@@ -337,6 +548,11 @@ impl QuiescenceReport {
         &self.pending_killed_work_reports
     }
 
+    #[doc(hidden)]
+    pub fn pending_maintenance_failure_reports(&self) -> &[RuntimeMaintenanceFailure] {
+        &self.pending_maintenance_failure_reports
+    }
+
     /// Records that every pending report entry was accepted by the selected
     /// transport. Persistent failure ledgers are unaffected.
     #[doc(hidden)]
@@ -345,6 +561,7 @@ impl QuiescenceReport {
         self.pending_delivery_failure_reports.failures = RedBlackTreeMapSync::new_sync();
         self.pending_exit_error_reports.clear();
         self.pending_killed_work_reports.clear();
+        self.pending_maintenance_failure_reports.clear();
     }
 }
 

@@ -896,6 +896,125 @@ fn readiness_stamp_tracks_heap_query_and_event_observations() {
 }
 
 #[test]
+fn gc_activity_invalidates_readiness_and_remains_busy_until_retired() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let RuntimeReadiness::Ready(before) = runtime.readiness() else {
+        panic!("new runtime should be ready")
+    };
+    let lease = runtime
+        .state
+        .shared_resources
+        .mutation_admission
+        .begin_gc_activity();
+
+    assert!(matches!(runtime.readiness(), RuntimeReadiness::Busy));
+    assert_eq!(
+        before.validate_without_settling(),
+        Err(RuntimeSettlementError::RuntimeChanged),
+        "a lease admitted after observation must stale the earlier snapshot"
+    );
+
+    let heap = runtime.values().core().managed_maintenance_snapshot();
+    lease.finish(crate::runtime::RuntimeGcLeaseOutcome::success(heap));
+    let RuntimeReadiness::Ready(after) = runtime.readiness() else {
+        panic!("retiring the only maintenance lease should restore readiness")
+    };
+    assert!(after.stamp().gc_maintenance_revision() > before.stamp().gc_maintenance_revision());
+}
+
+#[test]
+fn explicit_managed_collection_request_is_actionable_runtime_state() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let RuntimeReadiness::Ready(before) = runtime.readiness() else {
+        panic!("new runtime should be ready")
+    };
+    drop(runtime.values().text("ordinary NoAuto access"));
+    let RuntimeReadiness::Ready(after_access) = runtime.readiness() else {
+        panic!("ordinary NoAuto access should not create maintenance work")
+    };
+    assert_eq!(
+        after_access.stamp().gc_maintenance_revision(),
+        before.stamp().gc_maintenance_revision(),
+        "ordinary NoAuto value access must remain outside the lease path"
+    );
+
+    runtime
+        .request_managed_collection()
+        .expect("usable runtime should accept a collection request");
+    let RuntimeReadiness::MaintenanceRequired(maintenance) = runtime.readiness() else {
+        panic!("explicit request should become actionable maintenance")
+    };
+    assert_eq!(maintenance.state(), RuntimeMaintenanceState::Requested);
+    assert_eq!(maintenance.runtime_id(), runtime.id());
+    assert!(maintenance.revision() > before.stamp().gc_maintenance_revision());
+    assert_eq!(
+        before.validate_without_settling(),
+        Err(RuntimeSettlementError::RuntimeChanged)
+    );
+
+    let report = maintenance
+        .service()
+        .expect("explicit NoAuto maintenance should complete");
+    assert_ne!(report.epoch(), 0);
+    let stale = maintenance
+        .service()
+        .expect_err("the consumed readiness action must not collect twice");
+    assert_eq!(stale.kind(), RuntimeMaintenanceErrorKind::RuntimeChanged);
+    assert_eq!(
+        runtime
+            .values()
+            .core()
+            .completed_collection_epoch_for_test(),
+        report.epoch()
+    );
+    let RuntimeReadiness::Ready(after) = runtime.readiness() else {
+        panic!("successful maintenance should consume the explicit request")
+    };
+    assert!(after.stamp().gc_maintenance_revision() > maintenance.revision());
+}
+
+#[test]
+fn one_readiness_snapshot_admits_exactly_one_maintenance_service() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    runtime
+        .request_managed_collection()
+        .expect("runtime should accept a request");
+    let RuntimeReadiness::MaintenanceRequired(maintenance) = runtime.readiness() else {
+        panic!("request should produce one actionable snapshot")
+    };
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+    let threads = (0..2)
+        .map(|_| {
+            let maintenance = maintenance.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                maintenance.service().map(|report| report.epoch())
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    let outcomes = threads
+        .into_iter()
+        .map(|thread| thread.join().expect("maintenance worker should not panic"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|result| {
+                result
+                    .as_ref()
+                    .is_err_and(|error| error.kind() == RuntimeMaintenanceErrorKind::RuntimeChanged)
+            })
+            .count(),
+        1
+    );
+    assert!(matches!(runtime.readiness(), RuntimeReadiness::Ready(_)));
+}
+
+#[test]
 fn quiescence_validation_rejects_observation_and_delivery_changes() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let RuntimeReadiness::Ready(no_op_snapshot) = runtime.readiness() else {
@@ -2175,6 +2294,11 @@ fn reasoning_failure_acknowledgement_is_idempotent_and_runtime_bound() {
             .settle()
             .expect("unchanged runtime readiness should settle"),
         RuntimeReadiness::Busy => panic!("draining should reach a stable instant"),
+        RuntimeReadiness::MaintenanceRequired(maintenance)
+        | RuntimeReadiness::MaintenanceFailed(maintenance) => panic!(
+            "failing-task fixture unexpectedly required {:?} managed maintenance",
+            maintenance.state()
+        ),
         RuntimeReadiness::Deadlocked(deadlock) => panic!(
             "failing task unexpectedly deadlocked with {} unfinished work items",
             deadlock.unfinished().len()

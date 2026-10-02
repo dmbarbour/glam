@@ -53,7 +53,8 @@ pub use deterministic::{
 
 pub use class::UnsupportedLayout;
 pub use heap::{
-    CollectionError, CollectionPolicy, CollectionReport, Heap, HeapActivity, HeapStatistics,
+    CollectionError, CollectionPolicy, CollectionReport, Heap, HeapActivity,
+    HeapMaintenanceSnapshot, HeapStatistics,
 };
 pub use mutator::{Allocator, Mutator};
 pub use pointer::Gc;

@@ -3,6 +3,8 @@ use std::fmt;
 use std::num::NonZeroU64;
 #[cfg(test)]
 use std::sync::LazyLock;
+#[cfg(any(test, feature = "aggressive-gc-verification"))]
+use std::sync::atomic::AtomicBool;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -327,6 +329,10 @@ pub(crate) struct RuntimeValueDomain {
     heap: Heap,
     cache: RuntimeValueCache,
     work_coordinator: Arc<Mutex<Weak<EvaluationWorkCoordinator>>>,
+    #[cfg(any(test, feature = "aggressive-gc-verification"))]
+    gc_activity_admission: Mutex<Weak<crate::runtime::RuntimeMutationAdmission>>,
+    #[cfg(any(test, feature = "aggressive-gc-verification"))]
+    gc_activity_for_entries: AtomicBool,
     external_owners: ExternalOwnerRegistry,
     #[cfg(test)]
     managed_promise_allocations: AtomicUsize,
@@ -374,6 +380,10 @@ impl CoreValueFactory {
                 extension_lookups: AtomicUsize::new(0),
             },
             work_coordinator: Arc::new(Mutex::new(Weak::new())),
+            #[cfg(any(test, feature = "aggressive-gc-verification"))]
+            gc_activity_admission: Mutex::new(Weak::new()),
+            #[cfg(any(test, feature = "aggressive-gc-verification"))]
+            gc_activity_for_entries: AtomicBool::new(false),
             external_owners: ExternalOwnerRegistry::new(runtime),
             #[cfg(test)]
             managed_promise_allocations: AtomicUsize::new(0),
@@ -455,6 +465,26 @@ impl CoreValueFactory {
             );
         } else {
             *binding = Arc::downgrade(coordinator);
+        }
+    }
+
+    #[cfg(any(test, feature = "aggressive-gc-verification"))]
+    pub(crate) fn attach_gc_activity_admission(
+        &self,
+        admission: &Arc<crate::runtime::RuntimeMutationAdmission>,
+    ) {
+        let mut binding = self
+            .domain
+            .gc_activity_admission
+            .lock()
+            .expect("runtime GC activity binding was poisoned");
+        if let Some(installed) = binding.upgrade() {
+            assert!(
+                Arc::ptr_eq(&installed, admission),
+                "one live value domain cannot have multiple GC activity authorities"
+            );
+        } else {
+            *binding = Arc::downgrade(admission);
         }
     }
 

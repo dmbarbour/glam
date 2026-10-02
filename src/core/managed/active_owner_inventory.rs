@@ -164,6 +164,13 @@ struct ActiveRaiiEntry {
 /// new active destructor from being hidden beneath a managed value.
 const ACTIVE_RAII_INVENTORY: &[ActiveRaiiEntry] = &[
     ActiveRaiiEntry {
+        path: "src/runtime.rs",
+        owner: "RuntimeGcActivityLease",
+        disposition: ActiveRaiiDisposition::RuntimeInfrastructure,
+        retirement: "publish one authoritative GC-maintenance retirement or conservative retry disposition",
+        verification: "abandoned_gc_activity_is_actionable_and_wakes_a_parked_observer",
+    },
+    ActiveRaiiEntry {
         path: "src/api/diagnostics.rs",
         owner: "DiagnosticSubscriptionInner",
         disposition: ActiveRaiiDisposition::ExternalLifecycleOwner,

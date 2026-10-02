@@ -12,8 +12,9 @@ maintenance seams. I11D.1 closed the regional-ownership and repository-mode
 gap on 2026-10-01. I11D.2 dynamic tools and persistent-edge cost closure,
 I11D.3's final delta-oriented static audit, and I11D.4 certification are
 complete. Collector Gate G1 passed on 2026-08-25. Production remains `NoAuto`;
-I12A.0 selected the runtime activity/readiness protocol on 2026-10-02, and
-I12A explicit maintenance is next.
+I12A completed explicit runtime maintenance, actionable readiness, durable
+failure reporting, and pressure-boundary closure on 2026-10-02. I12B.0's
+new-runtime collection-policy review is next.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -281,14 +282,14 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I11D.3 | complete | unsafe, trace, mutation, owner, and lock/region delta audit |
 | I11D.4 | complete | dated Gate G3 certification |
 | I11 | complete | certified whole-production-graph forced collection |
-| I12 | pending | runtime maintenance and threshold collection |
+| I12 | in progress | explicit runtime maintenance complete; threshold-policy decision pending |
 | I12A.0 | complete | selected authoritative GC activity, actionable readiness, and durable maintenance-failure policy |
-| I12A | pending | explicit maintenance for immutable `NoAuto` runtimes |
-| I12A.1 | pending | authoritative activity state, lease, collector snapshot, and source boundary |
-| I12A.2 | pending | readiness and settlement projection |
-| I12A.3 | pending | explicit request, synchronous service, and panic/retry recovery |
-| I12A.4 | pending | reporting, batch policy, fallback rendering, and metrics |
-| I12A.5 | pending | pressure-boundary closure and post-phase review |
+| I12A | complete | explicit maintenance for immutable `NoAuto` runtimes |
+| I12A.1 | complete | authoritative activity state, lease, collector snapshot, and source boundary |
+| I12A.2 | complete | readiness and settlement projection |
+| I12A.3 | complete | explicit request, synchronous service, and panic/retry recovery |
+| I12A.4 | complete | reporting, batch policy, fallback rendering, and metrics |
+| I12A.5 | complete | pressure-boundary closure and post-phase review |
 | I12B.0 | pending | new-runtime collection-policy decision review gate |
 | I13 | pending | redundant ownership removal and documentation |
 
@@ -6721,6 +6722,14 @@ Verification: force exclusive admission before lease registration, concurrent
 lease admission/retirement, lease unwind, and last-lease wake. Run the three
 I12A.0 artifact latches.
 
+**Completed 2026-10-02.** `RuntimeMutationAdmission` now owns the activity
+count, maintenance revision, explicit request, disposition, and failure
+ledgers. The unwind-safe lease brackets every explicit or verification-only
+potentially collecting entry. `HeapMaintenanceSnapshot` reports usable
+statistics or permanent poison without re-entering damaged state. Exact source
+inventories classify the new lease destructor, panic payload boundary, and
+test-only managed fixtures.
+
 #### I12A.2 — Readiness and Settlement Projection
 
 - Add `gc_maintenance_revision` to `RuntimeReadinessStamp` and revalidate it
@@ -6737,6 +6746,13 @@ Verification: force a lease immediately after a ready/deadlock observation
 and reject the stale snapshot; force several leases and retain `Busy` until the
 last retires; park before finalizer completion and prove the release wake is
 not lost.
+
+**Completed 2026-10-02.** Readiness stamps include the maintenance revision.
+Active leases are `Busy`; requests and recoverable failures are actionable
+`MaintenanceRequired`; poison is terminal `MaintenanceFailed`. Settlement
+requires the exact idle revision, and forced-order fixtures cover admission
+against exclusive observation, stale snapshots, several leases, and the
+last-lease wake.
 
 #### I12A.3 — Explicit `NoAuto` Request, Service, and Recovery
 
@@ -6760,6 +6776,14 @@ Verification: force success, reversible trace panic, finalizer panic, retry,
 permanent poison, two concurrent services, request-before-completion, and
 request-after-completion. Each path retires its lease exactly once.
 
+**Completed 2026-10-02.** The public runtime facade exposes a coalescing
+request and synchronous service without exposing heap or mutator types.
+Reversible trace and finalizer panics become structured retryable maintenance;
+successful retry preserves durable history. Completion epochs prevent an
+older attempt from resurrecting work, revision-qualified snapshots admit one
+service, and a deterministic irreversible topology panic proves the actual
+runtime path reaches terminal poison without re-entry.
+
 #### I12A.4 — Reporting, Batch Policy, and Maintenance Metrics
 
 - Add the complete and pending maintenance-failure collections to
@@ -6775,6 +6799,13 @@ request-after-completion. Each path retires its lease exactly once.
 
 Verification: force once-only report delivery, durable batch failure after a
 successful retry, terminal fallback rendering, and unchanged assembly output.
+
+**Completed 2026-10-02.** Quiescence reports retain complete maintenance
+history and one-shot pending reports. Both batch settlement paths service
+actionable work; ordinary logger enrichment emits structured maintenance
+diagnostics, while poison uses fallback host rendering. The public report
+projects collection, pressure, survivor, reclaimed-run, and finalizer metrics
+without leaking collector authority.
 
 #### I12A.5 — Pressure Boundaries and Phase Closure
 
@@ -6792,6 +6823,12 @@ successful retry, terminal fallback rendering, and unchanged assembly output.
 Named verification includes
 `runtime_no_auto_pressure_requires_explicit_service` and
 `runtime_manual_maintenance_never_mutates_heap_policy`.
+
+**Completed 2026-10-02.** A production runtime crosses real typed-run pressure
+while repeated ordinary value entries remain `NoAuto`, do not collect, and do
+not create authoritative runtime work. Explicit service consumes the advisory
+collector request while preserving immutable policy. The mandatory review is
+[`GarbageCollectorExplicitMaintenance_2026-10-02.md`](../reviews/GarbageCollectorExplicitMaintenance_2026-10-02.md).
 
 ### Phase I12B.0 — New-Runtime Collection-Policy Decision Review
 

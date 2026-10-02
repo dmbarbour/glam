@@ -721,6 +721,10 @@ fn opaque_type_erasure_inventory_is_reconciled() {
         .collect::<BTreeMap<_, _>>();
     let expected = [
         (
+            PathBuf::from("src/api/runtime.rs"),
+            TypeErasureCounts::new(1, 1),
+        ),
+        (
             PathBuf::from("src/api/runtime/events.rs"),
             TypeErasureCounts::new(1, 1),
         ),

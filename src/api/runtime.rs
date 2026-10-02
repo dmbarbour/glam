@@ -1,4 +1,5 @@
 use std::marker::PhantomData;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, Weak};
 
 use rpds::RedBlackTreeMapSync;
@@ -16,8 +17,10 @@ use crate::reflection::{
     ReflectionQueryWriter, ReflectionStore, RuntimeInputEndpointId, VolumeId,
 };
 use crate::runtime::{
-    EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationAuthority,
-    RuntimeMutationGuard, RuntimeSettlementGuard, RuntimeValueRoot, allocate_evaluation_runtime_id,
+    EvaluationRuntimeId, RuntimeGcLeaseOutcome, RuntimeGcMaintenanceDisposition,
+    RuntimeGcMaintenanceFailure, RuntimeGcMaintenanceFailureKind, RuntimeIds,
+    RuntimeMutationAdmission, RuntimeMutationAuthority, RuntimeMutationGuard,
+    RuntimeSettlementGuard, RuntimeValueRoot, allocate_evaluation_runtime_id,
 };
 
 mod events;
@@ -39,6 +42,38 @@ use readiness::{
     RuntimeSettlementSnapshot, reasoning_diagnostic, runtime_deadlock_work_from_snapshot,
     runtime_disposition_from_snapshot, runtime_killed_failure,
 };
+
+fn maintenance_failure_kind(
+    kind: RuntimeGcMaintenanceFailureKind,
+) -> RuntimeMaintenanceFailureKind {
+    match kind {
+        RuntimeGcMaintenanceFailureKind::CollectorPanic => {
+            RuntimeMaintenanceFailureKind::CollectorPanic
+        }
+        RuntimeGcMaintenanceFailureKind::FinalizerPanic => {
+            RuntimeMaintenanceFailureKind::FinalizerPanic
+        }
+        RuntimeGcMaintenanceFailureKind::Poisoned => RuntimeMaintenanceFailureKind::Poisoned,
+    }
+}
+
+fn maintenance_failure(failure: RuntimeGcMaintenanceFailure) -> RuntimeMaintenanceFailure {
+    RuntimeMaintenanceFailure::new(
+        failure.id,
+        maintenance_failure_kind(failure.kind),
+        failure.message,
+    )
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> Arc<str> {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        Arc::from(*message)
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        Arc::from(message.as_str())
+    } else {
+        Arc::from("managed collection panicked with a non-text payload")
+    }
+}
 
 /// Opaque background execution resources shared by related evaluation
 /// sessions, including the assembler, logger, and future IDE services.
@@ -520,6 +555,10 @@ impl EvaluationRuntime {
             core: CoreValueFactory::new(id, ids.clone()),
         };
         let mutation_admission = RuntimeMutationAdmission::new();
+        #[cfg(any(test, feature = "aggressive-gc-verification"))]
+        values
+            .core()
+            .attach_gc_activity_admission(&mutation_admission);
         let observations = RuntimeObservationState::new();
         let work = EvaluationWorkCoordinator::new(
             values.core(),
@@ -641,24 +680,164 @@ impl EvaluationRuntime {
         self.state.shared_resources.values()
     }
 
-    /// Performs one explicit full collection at a caller-established stable
-    /// runtime maintenance boundary.
+    /// Records a nonblocking, coalescing managed-collection request.
     ///
-    /// This remains crate-private through I11. It deliberately does not infer
-    /// readiness or acquire settlement authority: I11B tests call it only from
-    /// serial boundaries, while I12 owns integration with runtime activity.
-    #[allow(
-        dead_code,
-        reason = "I11B establishes this private seam before I12 runtime maintenance"
-    )]
+    /// This does not collect and does not acquire a GC activity lease. It
+    /// publishes an authoritative runtime obligation so a stable embedding
+    /// client can observe [`RuntimeReadiness::MaintenanceRequired`].
+    pub fn request_managed_collection(&self) -> Result<(), RuntimeMaintenanceError> {
+        let resources = &self.state.shared_resources;
+        let mutation = resources.mutation_admission.mutation_guard();
+        let request = catch_unwind(AssertUnwindSafe(|| {
+            resources.values.core().request_managed_collection()
+        }));
+        match request {
+            Ok(()) => {
+                resources.mutation_admission.record_gc_request(&mutation);
+                drop(mutation);
+                Ok(())
+            }
+            Err(payload) => {
+                let message = panic_payload_message(payload.as_ref());
+                let heap = resources.values.core().managed_maintenance_snapshot();
+                let kind = if heap.is_poisoned() {
+                    RuntimeGcMaintenanceFailureKind::Poisoned
+                } else if heap
+                    .statistics()
+                    .is_some_and(|statistics| statistics.pending_finalizers() != 0)
+                {
+                    RuntimeGcMaintenanceFailureKind::FinalizerPanic
+                } else {
+                    RuntimeGcMaintenanceFailureKind::CollectorPanic
+                };
+                resources.mutation_admission.record_gc_request_failure(
+                    &mutation,
+                    RuntimeGcLeaseOutcome::failure(heap, kind, message.clone()),
+                );
+                drop(mutation);
+                Err(RuntimeMaintenanceError::new(
+                    match kind {
+                        RuntimeGcMaintenanceFailureKind::CollectorPanic => {
+                            RuntimeMaintenanceErrorKind::CollectorPanic
+                        }
+                        RuntimeGcMaintenanceFailureKind::FinalizerPanic => {
+                            RuntimeMaintenanceErrorKind::FinalizerPanic
+                        }
+                        RuntimeGcMaintenanceFailureKind::Poisoned => {
+                            RuntimeMaintenanceErrorKind::Poisoned
+                        }
+                    },
+                    message,
+                ))
+            }
+        }
+    }
+
+    /// Performs one synchronous full managed collection outside every mutator.
+    ///
+    /// The runtime publishes an activity lease before entering the collector,
+    /// catches collector unwinds long enough to retain an actionable failure,
+    /// and retires the lease before returning.
+    pub fn service_managed_collection(
+        &self,
+    ) -> Result<RuntimeMaintenanceReport, RuntimeMaintenanceError> {
+        let resources = &self.state.shared_resources;
+        let lease = resources.mutation_admission.begin_gc_activity();
+        self.service_managed_collection_with_lease(lease)
+    }
+
+    pub(super) fn service_managed_collection_revision(
+        &self,
+        revision: u64,
+    ) -> Result<RuntimeMaintenanceReport, RuntimeMaintenanceError> {
+        let Some(lease) = self
+            .state
+            .shared_resources
+            .mutation_admission
+            .begin_gc_activity_for_snapshot(revision)
+        else {
+            return Err(RuntimeMaintenanceError::new(
+                RuntimeMaintenanceErrorKind::RuntimeChanged,
+                "runtime maintenance changed after its readiness snapshot",
+            ));
+        };
+        self.service_managed_collection_with_lease(lease)
+    }
+
+    fn service_managed_collection_with_lease(
+        &self,
+        lease: crate::runtime::RuntimeGcActivityLease,
+    ) -> Result<RuntimeMaintenanceReport, RuntimeMaintenanceError> {
+        let resources = &self.state.shared_resources;
+        let attempted = catch_unwind(AssertUnwindSafe(|| {
+            resources.values.core().collect_managed_for_maintenance()
+        }));
+        let heap = resources.values.core().managed_maintenance_snapshot();
+        match attempted {
+            Ok(Ok(report)) => {
+                let statistics = heap
+                    .statistics()
+                    .expect("successful collection must leave a usable managed heap");
+                lease.finish(RuntimeGcLeaseOutcome::success(heap));
+                Ok(RuntimeMaintenanceReport::new(report, statistics))
+            }
+            Ok(Err(glam_gc::CollectionError::ActiveMutator)) => {
+                lease.finish(RuntimeGcLeaseOutcome::no_collection(heap));
+                Err(RuntimeMaintenanceError::new(
+                    RuntimeMaintenanceErrorKind::ActiveMutator,
+                    glam_gc::CollectionError::ActiveMutator.to_string(),
+                ))
+            }
+            Ok(Err(glam_gc::CollectionError::Poisoned)) => {
+                let message: Arc<str> = Arc::from(glam_gc::CollectionError::Poisoned.to_string());
+                lease.finish(RuntimeGcLeaseOutcome::failure(
+                    heap,
+                    RuntimeGcMaintenanceFailureKind::Poisoned,
+                    message.clone(),
+                ));
+                Err(RuntimeMaintenanceError::new(
+                    RuntimeMaintenanceErrorKind::Poisoned,
+                    message,
+                ))
+            }
+            Err(payload) => {
+                let message = panic_payload_message(payload.as_ref());
+                let (failure_kind, error_kind) = if heap.is_poisoned() {
+                    (
+                        RuntimeGcMaintenanceFailureKind::Poisoned,
+                        RuntimeMaintenanceErrorKind::Poisoned,
+                    )
+                } else if heap
+                    .statistics()
+                    .is_some_and(|statistics| statistics.pending_finalizers() != 0)
+                {
+                    (
+                        RuntimeGcMaintenanceFailureKind::FinalizerPanic,
+                        RuntimeMaintenanceErrorKind::FinalizerPanic,
+                    )
+                } else {
+                    (
+                        RuntimeGcMaintenanceFailureKind::CollectorPanic,
+                        RuntimeMaintenanceErrorKind::CollectorPanic,
+                    )
+                };
+                lease.finish(RuntimeGcLeaseOutcome::failure(
+                    heap,
+                    failure_kind,
+                    message.clone(),
+                ));
+                Err(RuntimeMaintenanceError::new(error_kind, message))
+            }
+        }
+    }
+
+    /// Test compatibility name retained while I11 fixtures migrate to the
+    /// public I12 maintenance service.
+    #[cfg(test)]
     pub(crate) fn collect_managed_for_maintenance(
         &self,
-    ) -> Result<glam_gc::CollectionReport, glam_gc::CollectionError> {
-        self.state
-            .shared_resources
-            .values
-            .core()
-            .collect_managed_for_maintenance()
+    ) -> Result<RuntimeMaintenanceReport, RuntimeMaintenanceError> {
+        self.service_managed_collection()
     }
 
     #[cfg(test)]
@@ -885,6 +1064,7 @@ impl EvaluationRuntime {
                 activity.wait_for_change(observed_activity);
                 continue;
             };
+            let maintenance = admission.gc_maintenance_snapshot(&settlement);
             let work = self.state.work.runtime_pump_snapshot();
             let running_delivery = self.state.shared_resources.has_running_delivery();
             drop(settlement);
@@ -892,7 +1072,11 @@ impl EvaluationRuntime {
             if work.background_ready || work.abandonable_sparks {
                 continue;
             }
-            if work.background_busy || work.spark_busy || running_delivery {
+            if maintenance.active_leases != 0
+                || work.background_busy
+                || work.spark_busy
+                || running_delivery
+            {
                 activity.wait_for_change(observed_activity);
                 continue;
             }
@@ -909,6 +1093,41 @@ impl EvaluationRuntime {
         let Some(settlement) = self.try_settlement_guard() else {
             return RuntimeReadiness::Busy;
         };
+        let maintenance = self
+            .state
+            .shared_resources
+            .mutation_admission
+            .gc_maintenance_snapshot(&settlement);
+        if maintenance.active_leases != 0 {
+            drop(settlement);
+            return RuntimeReadiness::Busy;
+        }
+        if maintenance.disposition == RuntimeGcMaintenanceDisposition::Poisoned {
+            drop(settlement);
+            return RuntimeReadiness::MaintenanceFailed(RuntimeMaintenanceSnapshot {
+                runtime: self.clone(),
+                revision: maintenance.revision,
+                state: RuntimeMaintenanceState::Poisoned,
+                failure: maintenance.latest_failure.map(maintenance_failure),
+            });
+        }
+        if maintenance.explicit_request
+            || maintenance.disposition == RuntimeGcMaintenanceDisposition::RetryRequired
+        {
+            let state = if maintenance.disposition == RuntimeGcMaintenanceDisposition::RetryRequired
+            {
+                RuntimeMaintenanceState::RetryRequired
+            } else {
+                RuntimeMaintenanceState::Requested
+            };
+            drop(settlement);
+            return RuntimeReadiness::MaintenanceRequired(RuntimeMaintenanceSnapshot {
+                runtime: self.clone(),
+                revision: maintenance.revision,
+                state,
+                failure: maintenance.latest_failure.map(maintenance_failure),
+            });
+        }
         let coordinator = self.state.work.runtime_readiness_snapshot();
         if matches!(coordinator, RuntimeCoordinatorReadiness::Busy) {
             drop(settlement);
@@ -949,6 +1168,7 @@ impl EvaluationRuntime {
                     stamp: RuntimeReadinessStamp {
                         work_generation,
                         observation_epoch,
+                        gc_maintenance_revision: maintenance.revision,
                     },
                     dispositions,
                     reflection,
@@ -965,6 +1185,7 @@ impl EvaluationRuntime {
                 stamp: RuntimeReadinessStamp {
                     work_generation,
                     observation_epoch,
+                    gc_maintenance_revision: maintenance.revision,
                 },
                 dispositions: exits
                     .iter()
@@ -989,7 +1210,7 @@ impl EvaluationRuntime {
         snapshot: &QuiescenceSnapshot,
     ) -> Result<ValidatedRuntimeSettlementPlan, RuntimeSettlementError> {
         let settlement = self.settlement_guard();
-        let validated = self.validate_quiescence_guarded(snapshot);
+        let validated = self.validate_quiescence_guarded(snapshot, &settlement);
         drop(settlement);
         validated.ok_or(RuntimeSettlementError::RuntimeChanged)
     }
@@ -997,6 +1218,7 @@ impl EvaluationRuntime {
     fn validate_quiescence_guarded(
         &self,
         snapshot: &QuiescenceSnapshot,
+        settlement: &RuntimeSettlementGuard<'_>,
     ) -> Option<ValidatedRuntimeSettlementPlan> {
         if snapshot.runtime.id() != self.id() {
             return None;
@@ -1011,9 +1233,18 @@ impl EvaluationRuntime {
                 .expect("runtime transaction mutex should not be poisoned");
             state.events.outputs.records.is_empty()
         };
+        let maintenance = self
+            .state
+            .shared_resources
+            .mutation_admission
+            .gc_maintenance_snapshot(settlement);
         if !state_matches
             || self.state.shared_resources.observations.current().get()
                 != snapshot.stamp.observation_epoch
+            || maintenance.active_leases != 0
+            || maintenance.explicit_request
+            || maintenance.disposition != RuntimeGcMaintenanceDisposition::Idle
+            || maintenance.revision != snapshot.stamp.gc_maintenance_revision
         {
             return None;
         }
@@ -1030,7 +1261,7 @@ impl EvaluationRuntime {
         previously_validated: Option<&ValidatedRuntimeSettlementPlan>,
     ) -> Result<QuiescenceReport, RuntimeSettlementError> {
         let settlement = self.settlement_guard();
-        let Some(current) = self.validate_quiescence_guarded(snapshot) else {
+        let Some(current) = self.validate_quiescence_guarded(snapshot, &settlement) else {
             drop(settlement);
             return Err(RuntimeSettlementError::RuntimeChanged);
         };
@@ -1066,6 +1297,11 @@ impl EvaluationRuntime {
             "settlement must consume every validated exit disposition"
         );
         let (task_ledger, pending_task_reports) = self.state.work.failure_ledgers_for_settlement();
+        let (maintenance_failures, pending_maintenance_reports, gc_maintenance_revision) = self
+            .state
+            .shared_resources
+            .mutation_admission
+            .gc_failure_ledgers_for_settlement(&settlement);
         let (reflection, delivery_failures, pending_delivery_reports) = {
             let mut state = self
                 .state
@@ -1139,16 +1375,25 @@ impl EvaluationRuntime {
             stamp: RuntimeReadinessStamp {
                 work_generation,
                 observation_epoch,
+                gc_maintenance_revision,
             },
             dispositions: snapshot.dispositions.clone(),
             task_failures,
             delivery_failures,
             reflection,
             killed_work: snapshot.killed_work.clone(),
+            maintenance_failures: maintenance_failures
+                .into_iter()
+                .map(maintenance_failure)
+                .collect(),
             pending_task_failure_reports,
             pending_delivery_failure_reports: pending_delivery_reports,
             pending_exit_error_reports,
             pending_killed_work_reports: snapshot.killed_work.clone(),
+            pending_maintenance_failure_reports: pending_maintenance_reports
+                .into_iter()
+                .map(maintenance_failure)
+                .collect(),
         })
     }
 

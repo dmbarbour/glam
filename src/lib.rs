@@ -27,10 +27,12 @@ pub use api::{
     RuntimeDeliveryFailure, RuntimeDeliveryFailureKind, RuntimeDeliveryFailureSnapshot,
     RuntimeDeliveryId, RuntimeDeliveryOutcome, RuntimeDependency, RuntimeDisposition,
     RuntimeDispositionKind, RuntimeEventJournal, RuntimeEventSnapshot, RuntimeInputEndpoint,
-    RuntimeInputReader, RuntimeInputSender, RuntimeKillReason, RuntimeOutputDelivery,
-    RuntimeOutputEndpoint, RuntimeOutputEndpointId, RuntimeOutputWriter, RuntimeReadiness,
-    RuntimeReadinessStamp, RuntimeSettlementError, RuntimeTaskCapability, RuntimeTaskWait,
-    RuntimeWorkKind, RuntimeWorkState, Value, ValueEvaluator, ValueKind, Values,
+    RuntimeInputReader, RuntimeInputSender, RuntimeKillReason, RuntimeMaintenanceError,
+    RuntimeMaintenanceErrorKind, RuntimeMaintenanceFailure, RuntimeMaintenanceFailureKind,
+    RuntimeMaintenanceReport, RuntimeMaintenanceSnapshot, RuntimeMaintenanceState,
+    RuntimeOutputDelivery, RuntimeOutputEndpoint, RuntimeOutputEndpointId, RuntimeOutputWriter,
+    RuntimeReadiness, RuntimeReadinessStamp, RuntimeSettlementError, RuntimeTaskCapability,
+    RuntimeTaskWait, RuntimeWorkKind, RuntimeWorkState, Value, ValueEvaluator, ValueKind, Values,
 };
 #[cfg(feature = "interaction-net-profiling")]
 pub use api::{

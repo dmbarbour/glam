@@ -145,6 +145,11 @@ fn settle_ready_reasoning(assembler: &Assembler) -> QuiescenceReport {
             .settle()
             .expect("unchanged runtime readiness should settle"),
         RuntimeReadiness::Busy => panic!("draining should return a stable readiness snapshot"),
+        RuntimeReadiness::MaintenanceRequired(maintenance)
+        | RuntimeReadiness::MaintenanceFailed(maintenance) => panic!(
+            "reasoning unexpectedly required {:?} managed maintenance",
+            maintenance.state()
+        ),
         RuntimeReadiness::Deadlocked(deadlock) => panic!(
             "reasoning unexpectedly deadlocked with {} unfinished work items",
             deadlock.unfinished().len()

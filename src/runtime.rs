@@ -9,6 +9,8 @@ use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use glam_gc::HeapMaintenanceSnapshot;
+
 use crate::core::{CoreValueFactory, EvaluationFailure, PreparedRuntimeValueRoot, Value};
 
 static NEXT_EVALUATION_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
@@ -86,6 +88,67 @@ impl RuntimeMutationAdmission {
         }
     }
 
+    /// Registers one potentially collecting runtime operation before it may
+    /// enter the managed heap.
+    pub(crate) fn begin_gc_activity(self: &Arc<Self>) -> RuntimeGcActivityLease {
+        let mutation = self.mutation_guard();
+        self.activity.begin_gc_activity();
+        drop(mutation);
+        RuntimeGcActivityLease {
+            admission: self.clone(),
+            active: true,
+        }
+    }
+
+    pub(crate) fn begin_gc_activity_for_snapshot(
+        self: &Arc<Self>,
+        revision: u64,
+    ) -> Option<RuntimeGcActivityLease> {
+        let mutation = self.mutation_guard();
+        let admitted = self.activity.begin_gc_activity_for_snapshot(revision);
+        drop(mutation);
+        admitted.then(|| RuntimeGcActivityLease {
+            admission: self.clone(),
+            active: true,
+        })
+    }
+
+    pub(crate) fn gc_maintenance_snapshot(
+        &self,
+        _settlement: &RuntimeSettlementGuard<'_>,
+    ) -> RuntimeGcMaintenanceSnapshot {
+        self.activity.gc_maintenance_snapshot()
+    }
+
+    pub(crate) fn record_gc_request(&self, _mutation: &RuntimeMutationGuard<'_>) {
+        self.activity.record_gc_request();
+    }
+
+    pub(crate) fn record_gc_request_failure(
+        &self,
+        _mutation: &RuntimeMutationGuard<'_>,
+        outcome: RuntimeGcLeaseOutcome,
+    ) {
+        self.activity.record_gc_request_failure(outcome);
+    }
+
+    pub(crate) fn gc_failure_ledgers_for_settlement(
+        &self,
+        _settlement: &RuntimeSettlementGuard<'_>,
+    ) -> (
+        Vec<RuntimeGcMaintenanceFailure>,
+        Vec<RuntimeGcMaintenanceFailure>,
+        u64,
+    ) {
+        self.activity.gc_failure_ledgers_for_settlement()
+    }
+
+    fn finish_gc_activity(&self, outcome: RuntimeGcLeaseOutcome) {
+        let mutation = self.mutation_guard();
+        self.activity.finish_gc_activity(outcome);
+        drop(mutation);
+    }
+
     /// Wakes runtime clients after an exclusive settlement publication.
     pub(crate) fn notify_settlement(&self) {
         self.activity.advance();
@@ -99,6 +162,102 @@ pub(crate) struct RuntimeMutationGuard<'a> {
 
 pub(crate) struct RuntimeSettlementGuard<'a> {
     _guard: RwLockWriteGuard<'a, ()>,
+}
+
+/// Runtime-owned disposition of managed-heap maintenance.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum RuntimeGcMaintenanceDisposition {
+    #[default]
+    Idle,
+    RetryRequired,
+    Poisoned,
+}
+
+/// Rust-side category retained for one failed maintenance attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RuntimeGcMaintenanceFailureKind {
+    CollectorPanic,
+    FinalizerPanic,
+    Poisoned,
+}
+
+/// Durable host failure which never requires entering the managed heap.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RuntimeGcMaintenanceFailure {
+    pub(crate) id: u64,
+    pub(crate) kind: RuntimeGcMaintenanceFailureKind,
+    pub(crate) message: Arc<str>,
+}
+
+/// Authoritative GC state observed only while settlement admission is held.
+#[derive(Clone, Debug)]
+pub(crate) struct RuntimeGcMaintenanceSnapshot {
+    pub(crate) active_leases: usize,
+    pub(crate) revision: u64,
+    pub(crate) explicit_request: bool,
+    pub(crate) disposition: RuntimeGcMaintenanceDisposition,
+    pub(crate) latest_failure: Option<RuntimeGcMaintenanceFailure>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RuntimeGcLeaseOutcome {
+    pub(crate) heap: HeapMaintenanceSnapshot,
+    pub(crate) failure: Option<(RuntimeGcMaintenanceFailureKind, Arc<str>)>,
+}
+
+impl RuntimeGcLeaseOutcome {
+    pub(crate) fn success(heap: HeapMaintenanceSnapshot) -> Self {
+        Self {
+            heap,
+            failure: None,
+        }
+    }
+
+    pub(crate) fn no_collection(heap: HeapMaintenanceSnapshot) -> Self {
+        Self {
+            heap,
+            failure: None,
+        }
+    }
+
+    pub(crate) fn failure(
+        heap: HeapMaintenanceSnapshot,
+        kind: RuntimeGcMaintenanceFailureKind,
+        message: impl Into<Arc<str>>,
+    ) -> Self {
+        Self {
+            heap,
+            failure: Some((kind, message.into())),
+        }
+    }
+}
+
+/// Owned runtime activity obligation for one potentially collecting entry.
+///
+/// The ordinary path explicitly publishes its collector snapshot. Dropping an
+/// unfinished lease is a conservative unwind fallback: readiness remains
+/// actionable rather than silently accepting an unknown heap disposition.
+pub(crate) struct RuntimeGcActivityLease {
+    admission: Arc<RuntimeMutationAdmission>,
+    active: bool,
+}
+
+impl RuntimeGcActivityLease {
+    pub(crate) fn finish(mut self, outcome: RuntimeGcLeaseOutcome) {
+        self.admission.finish_gc_activity(outcome);
+        self.active = false;
+    }
+}
+
+impl Drop for RuntimeGcActivityLease {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mutation = self.admission.mutation_guard();
+        self.admission.activity.abandon_gc_activity();
+        drop(mutation);
+    }
 }
 
 mod mutation_authority {
@@ -136,16 +295,34 @@ impl Drop for RuntimeMutationGuard<'_> {
 /// rechecks authoritative state, then sleeps only while the snapshot remains
 /// current. Transactions and readiness must never validate this generation.
 pub(crate) struct RuntimeActivityState {
-    generation: Mutex<u64>,
+    state: Mutex<RuntimeActivityData>,
     changed: Condvar,
     #[cfg(test)]
     waits: AtomicU64,
 }
 
+#[derive(Default)]
+struct RuntimeActivityData {
+    generation: u64,
+    gc: RuntimeGcMaintenanceState,
+}
+
+#[derive(Default)]
+struct RuntimeGcMaintenanceState {
+    active_leases: usize,
+    revision: u64,
+    explicit_request: bool,
+    disposition: RuntimeGcMaintenanceDisposition,
+    next_failure_id: u64,
+    completed_collection_epoch: u64,
+    failures: Vec<RuntimeGcMaintenanceFailure>,
+    pending_failure_reports: Vec<RuntimeGcMaintenanceFailure>,
+}
+
 impl RuntimeActivityState {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            generation: Mutex::new(0),
+            state: Mutex::new(RuntimeActivityData::default()),
             changed: Condvar::new(),
             #[cfg(test)]
             waits: AtomicU64::new(0),
@@ -153,42 +330,220 @@ impl RuntimeActivityState {
     }
 
     pub(crate) fn current(&self) -> u64 {
-        *self
-            .generation
+        self.state
             .lock()
             .expect("runtime activity mutex should not be poisoned")
+            .generation
     }
 
     fn advance(&self) {
-        let mut generation = self
-            .generation
+        let mut state = self
+            .state
             .lock()
             .expect("runtime activity mutex should not be poisoned");
-        *generation = generation
+        state.generation = state
+            .generation
             .checked_add(1)
             .expect("runtime activity generations exhausted");
-        drop(generation);
+        drop(state);
         self.changed.notify_all();
     }
 
     pub(crate) fn wait_for_change(&self, observed: u64) {
         #[cfg(test)]
         self.waits.fetch_add(1, Ordering::Relaxed);
-        let mut generation = self
-            .generation
+        let mut state = self
+            .state
             .lock()
             .expect("runtime activity mutex should not be poisoned");
-        while *generation == observed {
-            generation = self
+        while state.generation == observed {
+            state = self
                 .changed
-                .wait(generation)
+                .wait(state)
                 .expect("runtime activity mutex should not be poisoned");
         }
+    }
+
+    fn begin_gc_activity(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("runtime activity mutex should not be poisoned");
+        state.gc.active_leases = state
+            .gc
+            .active_leases
+            .checked_add(1)
+            .expect("runtime GC activity lease count exhausted");
+        state.gc.advance_revision();
+    }
+
+    fn begin_gc_activity_for_snapshot(&self, revision: u64) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .expect("runtime activity mutex should not be poisoned");
+        if state.gc.revision != revision
+            || state.gc.active_leases != 0
+            || !(state.gc.explicit_request
+                || state.gc.disposition == RuntimeGcMaintenanceDisposition::RetryRequired)
+        {
+            return false;
+        }
+        state.gc.active_leases = state
+            .gc
+            .active_leases
+            .checked_add(1)
+            .expect("runtime GC activity lease count exhausted");
+        state.gc.advance_revision();
+        true
+    }
+
+    fn finish_gc_activity(&self, outcome: RuntimeGcLeaseOutcome) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("runtime activity mutex should not be poisoned");
+        state.gc.retire_lease();
+        state.gc.publish_outcome(outcome);
+        state.gc.advance_revision();
+    }
+
+    fn abandon_gc_activity(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("runtime activity mutex should not be poisoned");
+        state.gc.retire_lease();
+        state.gc.disposition = RuntimeGcMaintenanceDisposition::RetryRequired;
+        state.gc.advance_revision();
+    }
+
+    fn record_gc_request(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("runtime activity mutex should not be poisoned");
+        if !state.gc.explicit_request {
+            state.gc.explicit_request = true;
+            state.gc.advance_revision();
+        }
+    }
+
+    fn record_gc_request_failure(&self, outcome: RuntimeGcLeaseOutcome) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("runtime activity mutex should not be poisoned");
+        state.gc.explicit_request = true;
+        state.gc.publish_outcome(outcome);
+        state.gc.advance_revision();
+    }
+
+    fn gc_failure_ledgers_for_settlement(
+        &self,
+    ) -> (
+        Vec<RuntimeGcMaintenanceFailure>,
+        Vec<RuntimeGcMaintenanceFailure>,
+        u64,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("runtime activity mutex should not be poisoned");
+        let pending = std::mem::take(&mut state.gc.pending_failure_reports);
+        if !pending.is_empty() {
+            state.gc.advance_revision();
+        }
+        (state.gc.failures.clone(), pending, state.gc.revision)
+    }
+
+    fn gc_maintenance_snapshot(&self) -> RuntimeGcMaintenanceSnapshot {
+        let state = self
+            .state
+            .lock()
+            .expect("runtime activity mutex should not be poisoned");
+        state.gc.snapshot()
     }
 
     #[cfg(test)]
     pub(crate) fn wait_count(&self) -> u64 {
         self.waits.load(Ordering::Relaxed)
+    }
+}
+
+impl RuntimeGcMaintenanceState {
+    fn advance_revision(&mut self) {
+        self.revision = self
+            .revision
+            .checked_add(1)
+            .expect("runtime GC maintenance revision exhausted");
+    }
+
+    fn retire_lease(&mut self) {
+        self.active_leases = self
+            .active_leases
+            .checked_sub(1)
+            .expect("runtime GC activity lease retired twice");
+    }
+
+    fn publish_outcome(&mut self, outcome: RuntimeGcLeaseOutcome) {
+        let was_poisoned = self.disposition == RuntimeGcMaintenanceDisposition::Poisoned;
+        match outcome.heap {
+            HeapMaintenanceSnapshot::Poisoned => {
+                self.disposition = RuntimeGcMaintenanceDisposition::Poisoned;
+            }
+            HeapMaintenanceSnapshot::Usable(statistics) => {
+                let observed_epoch = statistics.completed_collection_epoch();
+                if observed_epoch > self.completed_collection_epoch {
+                    self.completed_collection_epoch = observed_epoch;
+                    self.explicit_request = false;
+                    self.disposition =
+                        if outcome.failure.is_some() || statistics.pending_finalizers() != 0 {
+                            RuntimeGcMaintenanceDisposition::RetryRequired
+                        } else {
+                            RuntimeGcMaintenanceDisposition::Idle
+                        };
+                } else if observed_epoch == self.completed_collection_epoch
+                    && (outcome.failure.is_some() || statistics.pending_finalizers() != 0)
+                {
+                    self.disposition = RuntimeGcMaintenanceDisposition::RetryRequired;
+                }
+                // An older attempt may publish historical failure data after
+                // a later successful collection. It must not resurrect retry
+                // work already consumed by the later epoch. Likewise, an idle
+                // observation of an already-published epoch cannot consume a
+                // request which may have linearized after that collection.
+            }
+        }
+        if let Some((kind, message)) = outcome.failure
+            && !(was_poisoned && kind == RuntimeGcMaintenanceFailureKind::Poisoned)
+        {
+            self.push_failure(kind, message);
+        }
+    }
+
+    fn push_failure(&mut self, kind: RuntimeGcMaintenanceFailureKind, message: Arc<str>) {
+        self.next_failure_id = self
+            .next_failure_id
+            .checked_add(1)
+            .expect("runtime GC maintenance failure IDs exhausted");
+        let failure = RuntimeGcMaintenanceFailure {
+            id: self.next_failure_id,
+            kind,
+            message,
+        };
+        self.failures.push(failure.clone());
+        self.pending_failure_reports.push(failure);
+    }
+
+    fn snapshot(&self) -> RuntimeGcMaintenanceSnapshot {
+        RuntimeGcMaintenanceSnapshot {
+            active_leases: self.active_leases,
+            revision: self.revision,
+            explicit_request: self.explicit_request,
+            disposition: self.disposition,
+            latest_failure: self.failures.last().cloned(),
+        }
     }
 }
 
@@ -557,6 +912,122 @@ mod tests {
     use super::*;
     use crate::core::{CoreValueFactory, LazyValue, PromisedValue, Value, test_value_factory};
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    fn usable_empty_heap() -> HeapMaintenanceSnapshot {
+        glam_gc::Heap::new_with_policy(glam_gc::CollectionPolicy::NoAuto).maintenance_snapshot()
+    }
+
+    #[test]
+    fn gc_activity_leases_are_authoritative_until_the_last_retirement() {
+        let admission = RuntimeMutationAdmission::new();
+        let first = admission.begin_gc_activity();
+        let second = admission.begin_gc_activity();
+
+        let settlement = admission.settlement_guard();
+        let active = admission.gc_maintenance_snapshot(&settlement);
+        assert_eq!(active.active_leases, 2);
+        assert_eq!(active.revision, 2);
+        drop(settlement);
+
+        first.finish(RuntimeGcLeaseOutcome::success(usable_empty_heap()));
+        let settlement = admission.settlement_guard();
+        let one_left = admission.gc_maintenance_snapshot(&settlement);
+        assert_eq!(one_left.active_leases, 1);
+        assert_eq!(one_left.revision, 3);
+        drop(settlement);
+
+        second.finish(RuntimeGcLeaseOutcome::success(usable_empty_heap()));
+        let settlement = admission.settlement_guard();
+        let idle = admission.gc_maintenance_snapshot(&settlement);
+        assert_eq!(idle.active_leases, 0);
+        assert_eq!(idle.revision, 4);
+        assert_eq!(idle.disposition, RuntimeGcMaintenanceDisposition::Idle);
+    }
+
+    #[test]
+    fn exclusive_readiness_admission_orders_before_gc_lease_registration() {
+        let admission = RuntimeMutationAdmission::new();
+        let settlement = admission.settlement_guard();
+        let worker_admission = admission.clone();
+        let (registered_tx, registered_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let lease = worker_admission.begin_gc_activity();
+            registered_tx.send(()).unwrap();
+            lease
+        });
+        assert!(
+            registered_rx
+                .recv_timeout(Duration::from_millis(25))
+                .is_err(),
+            "exclusive readiness admission must exclude lease publication"
+        );
+        assert_eq!(
+            admission.gc_maintenance_snapshot(&settlement).active_leases,
+            0
+        );
+
+        drop(settlement);
+        registered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("lease should register after readiness releases admission");
+        let lease = worker.join().unwrap();
+        let settlement = admission.settlement_guard();
+        assert_eq!(
+            admission.gc_maintenance_snapshot(&settlement).active_leases,
+            1
+        );
+        drop(settlement);
+        lease.finish(RuntimeGcLeaseOutcome::success(usable_empty_heap()));
+    }
+
+    #[test]
+    fn abandoned_gc_activity_is_actionable_and_wakes_a_parked_observer() {
+        let admission = RuntimeMutationAdmission::new();
+        let activity = admission.activity();
+        let lease = admission.begin_gc_activity();
+        let observed = activity.current();
+        let (woke_tx, woke_rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            activity.wait_for_change(observed);
+            woke_tx.send(()).unwrap();
+        });
+
+        drop(lease);
+
+        woke_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("lease retirement must wake a parked runtime observer");
+        waiter.join().unwrap();
+        let settlement = admission.settlement_guard();
+        let snapshot = admission.gc_maintenance_snapshot(&settlement);
+        assert_eq!(snapshot.active_leases, 0);
+        assert_eq!(
+            snapshot.disposition,
+            RuntimeGcMaintenanceDisposition::RetryRequired
+        );
+    }
+
+    #[test]
+    fn older_failed_outcome_cannot_resurrect_retry_after_later_success() {
+        let heap = glam_gc::Heap::new_with_policy(glam_gc::CollectionPolicy::NoAuto);
+        heap.collect_full().unwrap();
+        let older = heap.maintenance_snapshot();
+        heap.collect_full().unwrap();
+        let newer = heap.maintenance_snapshot();
+        let mut state = RuntimeGcMaintenanceState::default();
+
+        state.publish_outcome(RuntimeGcLeaseOutcome::success(newer));
+        state.publish_outcome(RuntimeGcLeaseOutcome::failure(
+            older,
+            RuntimeGcMaintenanceFailureKind::CollectorPanic,
+            "older attempt failed",
+        ));
+
+        assert_eq!(state.disposition, RuntimeGcMaintenanceDisposition::Idle);
+        assert_eq!(state.completed_collection_epoch, 2);
+        assert_eq!(state.failures.len(), 1);
+    }
 
     #[test]
     fn runtime_failure_root_preserves_identity_and_direct_value_occurrences() {

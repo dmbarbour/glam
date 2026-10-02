@@ -183,6 +183,38 @@ pub struct HeapStatistics {
     collection_requested: bool,
     finalization_batch_runs: usize,
     finalizer_activity: HeapActivity,
+    completed_collection_epoch: u64,
+}
+
+/// Non-panicking maintenance disposition of one managed heap.
+///
+/// Runtime coordination uses this after a caught collection unwind. A
+/// poisoned heap deliberately exposes no allocator or finalizer details:
+/// crossing the irreversible collector boundary invalidates those
+/// observations even though the heap can still report its terminal state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HeapMaintenanceSnapshot {
+    /// The heap remains usable and exposes its ordinary maintenance metrics.
+    Usable(HeapStatistics),
+    /// An irreversible collection panic permanently poisoned the heap.
+    Poisoned,
+}
+
+impl HeapMaintenanceSnapshot {
+    /// Returns usable heap statistics, or `None` after permanent poison.
+    #[must_use]
+    pub const fn statistics(self) -> Option<HeapStatistics> {
+        match self {
+            Self::Usable(statistics) => Some(statistics),
+            Self::Poisoned => None,
+        }
+    }
+
+    /// Returns whether the heap crossed an irreversible collection boundary.
+    #[must_use]
+    pub const fn is_poisoned(self) -> bool {
+        matches!(self, Self::Poisoned)
+    }
 }
 
 impl HeapStatistics {
@@ -232,6 +264,12 @@ impl HeapStatistics {
     #[must_use]
     pub const fn pending_finalizers(self) -> usize {
         self.finalizer_activity.queued_finalizers + self.finalizer_activity.running_finalizers
+    }
+
+    /// Returns the latest successfully completed collection epoch.
+    #[must_use]
+    pub const fn completed_collection_epoch(self) -> u64 {
+        self.completed_collection_epoch
     }
 }
 
@@ -330,7 +368,11 @@ impl Heap {
         after_admission: impl FnOnce(),
         operation: impl for<'heap> FnOnce(&Mutator<'heap>) -> R,
     ) -> R {
+        #[cfg(any(test, feature = "deterministic-test-hooks"))]
         let mut prepared =
+            ThreadHeapEntry::prepare(&self.inner, self.inner.current_allocation_lease_epoch());
+        #[cfg(not(any(test, feature = "deterministic-test-hooks")))]
+        let prepared =
             ThreadHeapEntry::prepare(&self.inner, self.inner.current_allocation_lease_epoch());
         let outer = prepared.is_outer();
         #[cfg(any(test, feature = "deterministic-test-hooks"))]
@@ -427,6 +469,28 @@ impl Heap {
     #[must_use]
     pub fn statistics(&self) -> HeapStatistics {
         self.inner.statistics()
+    }
+
+    /// Returns a collector-maintenance snapshot without panicking after heap
+    /// poison.
+    ///
+    /// This remains operational host information. It is intended for runtime
+    /// recovery immediately after a caught collector unwind; it does not
+    /// authorize another collection or make the snapshot semantic state.
+    #[must_use]
+    pub fn maintenance_snapshot(&self) -> HeapMaintenanceSnapshot {
+        self.inner.maintenance_snapshot()
+    }
+
+    /// Arms one deterministic panic immediately after the collector's first
+    /// irreversible topology mutation.
+    ///
+    /// This is repository verification infrastructure for runtime poison
+    /// handling. It is unavailable without deterministic test hooks.
+    #[cfg(feature = "deterministic-test-hooks")]
+    #[doc(hidden)]
+    pub fn inject_irreversible_topology_panic_for_verification(&self) {
+        self.inner.inject_panic_after_topology_mutation();
     }
 
     /// Installs one heap-local deterministic edge-transition observer.
@@ -576,6 +640,7 @@ pub(crate) struct HeapInner {
     collection_policy: CollectionPolicy,
     poisoned: AtomicBool,
     collection_requested: AtomicBool,
+    completed_collection_epoch: AtomicU64,
     admission_changed: Condvar,
     allocation_lease_epoch: AtomicU64,
     #[cfg(feature = "deterministic-test-hooks")]
@@ -600,7 +665,7 @@ pub(crate) struct HeapInner {
     allocation_cursor_slow_path_hook: Mutex<Option<AllocationCursorSlowPathHook>>,
     #[cfg(test)]
     collection_acknowledgement_hook: Mutex<Option<CollectionAcknowledgementHook>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "deterministic-test-hooks"))]
     panic_after_topology_mutation: AtomicBool,
     #[cfg(test)]
     panic_after_finalizer_terminal_recording: AtomicBool,
@@ -646,6 +711,7 @@ impl HeapInner {
             collection_policy,
             poisoned: AtomicBool::new(false),
             collection_requested: AtomicBool::new(false),
+            completed_collection_epoch: AtomicU64::new(0),
             admission_changed: Condvar::new(),
             allocation_lease_epoch: AtomicU64::new(AllocationLeaseEpoch::INITIAL.get()),
             #[cfg(feature = "deterministic-test-hooks")]
@@ -670,7 +736,7 @@ impl HeapInner {
             allocation_cursor_slow_path_hook: Mutex::new(None),
             #[cfg(test)]
             collection_acknowledgement_hook: Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "deterministic-test-hooks"))]
             panic_after_topology_mutation: AtomicBool::new(false),
             #[cfg(test)]
             panic_after_finalizer_terminal_recording: AtomicBool::new(false),
@@ -2456,19 +2522,39 @@ impl HeapInner {
 
     fn statistics(&self) -> HeapStatistics {
         assert!(!self.is_poisoned(), "managed heap is permanently poisoned");
+        match self.maintenance_snapshot() {
+            HeapMaintenanceSnapshot::Usable(statistics) => statistics,
+            HeapMaintenanceSnapshot::Poisoned => {
+                panic!("managed heap is permanently poisoned")
+            }
+        }
+    }
+
+    fn maintenance_snapshot(&self) -> HeapMaintenanceSnapshot {
+        if self.is_poisoned() {
+            return HeapMaintenanceSnapshot::Poisoned;
+        }
         let data = self
             .data
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A collection which can publish poison must pass through the data
+        // lock before its irreversible transition. Rechecking after acquiring
+        // it prevents an observer which raced that transition from inspecting
+        // damaged allocator state.
+        if self.is_poisoned() {
+            return HeapMaintenanceSnapshot::Poisoned;
+        }
         let pressure = data.allocation_pressure;
-        HeapStatistics {
+        HeapMaintenanceSnapshot::Usable(HeapStatistics {
             collection_policy: self.collection_policy,
             assigned_runs: pressure.assigned_runs,
             run_high_water_mark: pressure.high_water_mark,
             collection_requested: self.collection_requested.load(Ordering::Acquire),
             finalization_batch_runs: data.finalization_batch.runs.len(),
             finalizer_activity: data.activity(),
-        }
+            completed_collection_epoch: self.completed_collection_epoch.load(Ordering::Acquire),
+        })
     }
 
     fn notify_coordinator_waiters(&self) {
@@ -2664,7 +2750,7 @@ impl HeapInner {
             let finalization_batch = data.prepare_swept_allocator_transition(&post_mark.dead_set);
             attempt.begin_topology_mutation();
             data.withdraw_allocator_frontiers();
-            #[cfg(test)]
+            #[cfg(any(test, feature = "deterministic-test-hooks"))]
             self.maybe_panic_after_topology_mutation();
 
             // Wholly dead no-drop run records leave class topology only after
@@ -2934,7 +3020,7 @@ impl HeapInner {
         });
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "deterministic-test-hooks"))]
     fn inject_panic_after_topology_mutation(&self) {
         assert!(
             !self
@@ -2944,7 +3030,7 @@ impl HeapInner {
         );
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "deterministic-test-hooks"))]
     fn maybe_panic_after_topology_mutation(&self) {
         if self
             .panic_after_topology_mutation
@@ -3709,6 +3795,9 @@ impl<'heap> CollectionAttempt<'heap> {
             };
             coordinator.latest_collection_report = Some(report);
             coordinator.completed_collection_epoch = self.epoch.get();
+            self.heap
+                .completed_collection_epoch
+                .store(self.epoch.get(), Ordering::Release);
             coordinator.active_collection = None;
             coordinator.phase = AdmissionPhase::Ordinary;
             self.heap.notify_coordinator_waiters();
@@ -3965,9 +4054,9 @@ mod tests {
         AdmissionPhase, AllocationClass, AllocationPressure, AllocationPressureSnapshot,
         CollectionError, CollectionPolicy, CollectorLookupError, CollectorSlot, DeadBitmapWord,
         DeadSlotDisposition, FIXED_SURVIVOR_RUN_HEADROOM, Heap, HeapActivity, HeapInner,
-        MarkSummary, PrepareRunError, RootValidationError, RunLocation, RunPublicationError,
-        SURVIVOR_GROWTH_DENOMINATOR, SURVIVOR_GROWTH_NUMERATOR, class_index, resolve_slot_in_state,
-        survivor_run_high_water_mark, validate_rootable_in_state,
+        HeapMaintenanceSnapshot, MarkSummary, PrepareRunError, RootValidationError, RunLocation,
+        RunPublicationError, SURVIVOR_GROWTH_DENOMINATOR, SURVIVOR_GROWTH_NUMERATOR, class_index,
+        resolve_slot_in_state, survivor_run_high_water_mark, validate_rootable_in_state,
     };
 
     fn internal_class<T: Trace>(heap: &Heap) -> AllocationClass<T> {
@@ -8540,6 +8629,11 @@ mod tests {
             "managed heap is permanently poisoned"
         );
         assert_eq!(heap.collect_full(), Err(CollectionError::Poisoned));
+        assert_eq!(
+            heap.maintenance_snapshot(),
+            HeapMaintenanceSnapshot::Poisoned,
+            "runtime recovery must inspect poison without reentering damaged state"
+        );
         let activity = catch_unwind(AssertUnwindSafe(|| heap.activity()));
         assert_eq!(
             panic_string(activity.unwrap_err().as_ref()),
@@ -8599,6 +8693,11 @@ mod tests {
             "managed heap is permanently poisoned"
         );
         assert_eq!(heap.collect_full(), Err(CollectionError::Poisoned));
+        assert_eq!(
+            heap.maintenance_snapshot(),
+            HeapMaintenanceSnapshot::Poisoned,
+            "runtime recovery must inspect finalizer-commit poison without panicking"
+        );
         let activity = catch_unwind(AssertUnwindSafe(|| heap.activity()));
         assert_eq!(
             panic_string(activity.unwrap_err().as_ref()),

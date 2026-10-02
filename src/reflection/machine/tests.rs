@@ -5692,6 +5692,11 @@ fn coordinator_terminal_policy_preserves_a_descendant_failure_before_root_return
             runtime.pump_until_stable();
             match runtime.readiness() {
                 crate::api::RuntimeReadiness::Busy => continue,
+                crate::api::RuntimeReadiness::MaintenanceRequired(maintenance)
+                | crate::api::RuntimeReadiness::MaintenanceFailed(maintenance) => panic!(
+                    "logger fixture unexpectedly required {:?} managed maintenance",
+                    maintenance.state()
+                ),
                 crate::api::RuntimeReadiness::Ready(snapshot) => break snapshot,
                 readiness @ crate::api::RuntimeReadiness::Deadlocked(_) => panic!(
                     "a terminal logger root and retained child failure should be ready, got {readiness:?}"

@@ -38,7 +38,7 @@ const ENTRY_INVENTORY: &[EntryRecord] = &[
         future: EntryClass::MayElect,
     },
     EntryRecord {
-        family: "EvaluationRuntime::collect_managed_for_maintenance",
+        family: "EvaluationRuntime::service_managed_collection",
         current: EntryClass::ExplicitCollection,
         future: EntryClass::ExplicitCollection,
     },
@@ -98,8 +98,32 @@ fn gc_activity_entry_inventory_is_complete() {
     assert!(core.contains(&format!("{heap_constructor}CollectionPolicy::NoAuto)")));
 
     let runtime = include_str!("../runtime.rs");
-    assert!(runtime.contains("pub(crate) fn collect_managed_for_maintenance"));
+    assert!(runtime.contains("pub fn request_managed_collection"));
+    assert!(runtime.contains("pub fn service_managed_collection"));
     assert!(runtime.contains("enable_collection_before_outer_entry_for_verification"));
+}
+
+#[test]
+fn ordinary_no_auto_entries_compile_without_runtime_lease_work() {
+    let managed = include_str!("../../core/managed.rs");
+    assert!(managed.contains(
+        "#[cfg(not(any(test, feature = \"aggressive-gc-verification\")))]\n    #[inline]\n    fn with_maybe_collecting_entry"
+    ));
+    assert_eq!(
+        managed
+            .matches("let lease = admission.begin_gc_activity();")
+            .count(),
+        1,
+        "only the test/aggressive entry facade may register a GC lease"
+    );
+
+    let core = include_str!("../../core.rs");
+    assert_eq!(
+        core.matches("gc_activity_for_entries: AtomicBool").count(),
+        2,
+        "the verification-only enable flag should have one declaration and one initializer"
+    );
+    assert!(core.contains("#[cfg(any(test, feature = \"aggressive-gc-verification\"))]"));
 }
 
 #[test]
@@ -116,7 +140,9 @@ fn gc_readiness_plan_has_one_authoritative_activity_source() {
     assert!(review.contains(
         "Readiness and settlement validate\nthe revision, never the parking generation and never a sampled collector"
     ));
-    assert!(plan.contains("I12A.0 selected the runtime activity/readiness protocol"));
+    assert!(
+        plan.contains("I12A completed explicit runtime maintenance, actionable readiness, durable")
+    );
     assert!(!plan.contains("The review must also select a durable disposition"));
 }
 

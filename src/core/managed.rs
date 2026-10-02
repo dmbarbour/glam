@@ -8,6 +8,8 @@ use super::{CoreValueFactory, RuntimeValueDomain};
 #[cfg(test)]
 use super::{LazySource, LazyValue};
 use crate::runtime::EvaluationRuntimeId;
+#[cfg(any(test, feature = "aggressive-gc-verification"))]
+use crate::runtime::RuntimeGcLeaseOutcome;
 
 /// Initial minimum slot extent for Glam-owned managed representations.
 ///
@@ -35,6 +37,87 @@ pub(crate) const fn managed_slot_extent<T>() -> usize {
 }
 
 const _: () = assert!(managed_slot_extent::<usize>() == MANAGED_SLOT_SIZE_FLOOR);
+
+#[cfg(test)]
+pub(crate) struct RecoverableTracePanicFixture {
+    panicked: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(test)]
+unsafe impl Trace for RecoverableTracePanicFixture {
+    const REQUESTED_SLOT_SIZE: Option<usize> = Some(managed_slot_extent::<Self>());
+
+    fn trace(&self, _visitor: &mut Visitor<'_>) {
+        if !self
+            .panicked
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            panic!("injected recoverable runtime trace panic");
+        }
+    }
+}
+
+#[cfg(test)]
+unsafe impl ManagedFamily for RecoverableTracePanicFixture {
+    const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
+        "I12A recoverable trace-panic fixture",
+        "src/core/managed.rs",
+        "direct Drop releases one ordinary Arc",
+        "the atomic test probe has passive destruction",
+    );
+}
+
+#[cfg(test)]
+struct RecoverableFinalizerPanicFixture {
+    panicked: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(test)]
+impl Drop for RecoverableFinalizerPanicFixture {
+    fn drop(&mut self) {
+        if !self
+            .panicked
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            panic!("injected recoverable runtime finalizer panic");
+        }
+    }
+}
+
+#[cfg(test)]
+unsafe impl Trace for RecoverableFinalizerPanicFixture {
+    const REQUESTED_SLOT_SIZE: Option<usize> = Some(managed_slot_extent::<Self>());
+
+    fn trace(&self, _visitor: &mut Visitor<'_>) {}
+}
+
+#[cfg(test)]
+unsafe impl ManagedFamily for RecoverableFinalizerPanicFixture {
+    const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
+        "I12A recoverable finalizer-panic fixture",
+        "src/core/managed.rs",
+        "direct Drop only updates an atomic test probe before its injected panic",
+        "the ordinary Arc and atomic probe have passive destruction",
+    );
+}
+
+#[cfg(test)]
+pub(crate) struct RuntimePressureFixture {
+    _value: u8,
+}
+
+#[cfg(test)]
+unsafe impl Trace for RuntimePressureFixture {
+    const REQUESTED_SLOT_SIZE: Option<usize> = Some(60 * 1024);
+
+    fn trace(&self, _visitor: &mut Visitor<'_>) {}
+}
+
+#[cfg(test)]
+unsafe impl ManagedFamily for RuntimePressureFixture {
+    const DROP_RECORD: ManagedDropRecord =
+        ManagedDropRecord::no_drop("I12A runtime pressure fixture", "src/core/managed.rs");
+}
 
 #[cfg(test)]
 thread_local! {
@@ -414,6 +497,36 @@ pub(crate) struct CoreValueAllocator<'scope, T: ManagedFamily> {
 }
 
 impl CoreValueFactory {
+    #[cfg(any(test, feature = "aggressive-gc-verification"))]
+    fn with_maybe_collecting_entry<R>(&self, operation: impl FnOnce() -> R) -> R {
+        if !self
+            .domain
+            .gc_activity_for_entries
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return operation();
+        }
+        let admission = self
+            .domain
+            .gc_activity_admission
+            .lock()
+            .expect("runtime GC activity binding was poisoned")
+            .upgrade()
+            .expect("a potentially collecting runtime entry must retain its activity authority");
+        let lease = admission.begin_gc_activity();
+        let result = operation();
+        lease.finish(RuntimeGcLeaseOutcome::no_collection(
+            self.domain.heap.maintenance_snapshot(),
+        ));
+        result
+    }
+
+    #[cfg(not(any(test, feature = "aggressive-gc-verification")))]
+    #[inline]
+    fn with_maybe_collecting_entry<R>(&self, operation: impl FnOnce() -> R) -> R {
+        operation()
+    }
+
     #[cfg(feature = "interaction-net-profiling")]
     pub(crate) fn interaction_net_profile(
         &self,
@@ -474,9 +587,11 @@ impl CoreValueFactory {
         &self,
         operation: impl for<'scope> FnOnce(CoreValueAllocationScope<'scope>) -> R,
     ) -> R {
-        self.domain
-            .heap
-            .with_mutator(|mutator| operation(CoreValueAllocationScope { mutator }))
+        self.with_maybe_collecting_entry(|| {
+            self.domain
+                .heap
+                .with_mutator(|mutator| operation(CoreValueAllocationScope { mutator }))
+        })
     }
 
     /// Opens one factory-qualified managed-access region.
@@ -488,12 +603,14 @@ impl CoreValueFactory {
         &self,
         operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,
     ) -> R {
-        self.domain.heap.with_mutator(|mutator| {
-            #[cfg(test)]
-            let _access_depth = RuntimeValueAccessDepthGuard::enter();
-            operation(RuntimeValueAccess {
-                values: self,
-                scope: CoreValueAllocationScope { mutator },
+        self.with_maybe_collecting_entry(|| {
+            self.domain.heap.with_mutator(|mutator| {
+                #[cfg(test)]
+                let _access_depth = RuntimeValueAccessDepthGuard::enter();
+                operation(RuntimeValueAccess {
+                    values: self,
+                    scope: CoreValueAllocationScope { mutator },
+                })
             })
         })
     }
@@ -513,12 +630,66 @@ impl CoreValueFactory {
     }
 
     #[cfg(test)]
+    pub(crate) fn install_recoverable_trace_panic_for_test(
+        &self,
+    ) -> Root<RecoverableTracePanicFixture> {
+        let panicked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.with_managed_values(|scope| {
+            let allocator = scope
+                .allocator::<RecoverableTracePanicFixture>()
+                .expect("trace-panic fixture should fit a managed run");
+            scope.root(allocator.alloc(RecoverableTracePanicFixture { panicked }))
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_recoverable_finalizer_panic_for_test(&self) {
+        let panicked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.with_managed_values(|scope| {
+            let allocator = scope
+                .allocator::<RecoverableFinalizerPanicFixture>()
+                .expect("finalizer-panic fixture should fit a managed run");
+            let _first = allocator.alloc(RecoverableFinalizerPanicFixture {
+                panicked: panicked.clone(),
+            });
+            let _second = allocator.alloc(RecoverableFinalizerPanicFixture { panicked });
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cross_managed_pressure_threshold_for_test(
+        &self,
+    ) -> Vec<Root<RuntimePressureFixture>> {
+        self.with_managed_values(|scope| {
+            let allocator = scope
+                .allocator::<RuntimePressureFixture>()
+                .expect("pressure fixture should fit a managed run");
+            (0..128)
+                .map(|_| scope.root(allocator.alloc(RuntimePressureFixture { _value: 0 })))
+                .collect()
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_irreversible_collection_panic_for_test(&self) {
+        self.domain
+            .heap
+            .inject_irreversible_topology_panic_for_verification();
+    }
+
+    #[cfg(test)]
     pub(crate) fn enable_collection_before_outer_entry_for_test(&self) {
+        self.domain
+            .gc_activity_for_entries
+            .store(true, std::sync::atomic::Ordering::Release);
         self.domain.heap.enable_collection_before_outer_entry();
     }
 
     #[cfg(feature = "aggressive-gc-verification")]
     pub(crate) fn enable_collection_before_outer_entry_for_verification(&self) {
+        self.domain
+            .gc_activity_for_entries
+            .store(true, std::sync::atomic::Ordering::Release);
         self.domain.heap.enable_collection_before_outer_entry();
     }
 
@@ -553,6 +724,11 @@ impl CoreValueFactory {
 
     #[cfg(test)]
     pub(crate) fn request_managed_collection_for_test(&self) {
+        self.request_managed_collection();
+    }
+
+    /// Records a nonblocking collector request without entering a mutator.
+    pub(crate) fn request_managed_collection(&self) {
         self.domain.heap.request_collection();
     }
 
@@ -571,6 +747,12 @@ impl CoreValueFactory {
         &self,
     ) -> Result<glam_gc::CollectionReport, glam_gc::CollectionError> {
         self.domain.heap.collect_full()
+    }
+
+    /// Returns a non-panicking collector disposition for runtime maintenance
+    /// recovery. This never grants managed-value access.
+    pub(crate) fn managed_maintenance_snapshot(&self) -> glam_gc::HeapMaintenanceSnapshot {
+        self.domain.heap.maintenance_snapshot()
     }
 
     #[cfg(test)]

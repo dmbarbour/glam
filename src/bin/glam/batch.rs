@@ -219,6 +219,25 @@ pub(super) fn settle_batch_runtime(
         }
         let snapshot = match runtime.readiness() {
             RuntimeReadiness::Busy => continue,
+            RuntimeReadiness::MaintenanceRequired(maintenance) => {
+                if let Err(error) = maintenance.service()
+                    && error.kind() != glam::RuntimeMaintenanceErrorKind::RuntimeChanged
+                {
+                    failed = true;
+                }
+                continue;
+            }
+            RuntimeReadiness::MaintenanceFailed(maintenance) => {
+                if let Some(failure) = maintenance.failure() {
+                    eprintln!("error: managed maintenance failed: {}", failure.message());
+                } else {
+                    eprintln!(
+                        "error: evaluation runtime {} managed heap is permanently poisoned",
+                        maintenance.runtime_id().get()
+                    );
+                }
+                return true;
+            }
             RuntimeReadiness::Ready(snapshot) => snapshot,
             RuntimeReadiness::Deadlocked(deadlock) => deadlock.kill(RuntimeKillReason::Deadlock),
         };
@@ -242,6 +261,7 @@ pub(super) fn settle_batch_runtime(
 fn settled_report_is_fatal(report: &QuiescenceReport) -> bool {
     !report.task_failures().is_empty()
         || !report.delivery_failures().failures().is_empty()
+        || !report.maintenance_failures().is_empty()
         || report
             .dispositions()
             .iter()
@@ -259,6 +279,25 @@ fn settle_batch_runtime_default(
         runtime.pump_until_stable();
         let snapshot = match runtime.readiness() {
             RuntimeReadiness::Busy => continue,
+            RuntimeReadiness::MaintenanceRequired(maintenance) => {
+                if let Err(error) = maintenance.service()
+                    && error.kind() != glam::RuntimeMaintenanceErrorKind::RuntimeChanged
+                {
+                    failed = true;
+                }
+                continue;
+            }
+            RuntimeReadiness::MaintenanceFailed(maintenance) => {
+                if let Some(failure) = maintenance.failure() {
+                    eprintln!("error: managed maintenance failed: {}", failure.message());
+                } else {
+                    eprintln!(
+                        "error: evaluation runtime {} managed heap is permanently poisoned",
+                        maintenance.runtime_id().get()
+                    );
+                }
+                return true;
+            }
             RuntimeReadiness::Ready(snapshot) => snapshot,
             RuntimeReadiness::Deadlocked(deadlock) => deadlock.kill(RuntimeKillReason::Deadlock),
         };
@@ -276,6 +315,7 @@ fn settle_batch_runtime_default(
                 .collect(),
             exit_errors: report.pending_exit_error_reports().to_vec(),
             killed_work: report.pending_killed_work_reports().to_vec(),
+            maintenance_failures: report.pending_maintenance_failure_reports().to_vec(),
         };
         let rendered = match settled_report_diagnostics(values, selection) {
             Ok(rendered) => rendered,

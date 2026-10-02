@@ -181,13 +181,26 @@ fn production_collection_preserves_each_serial_boundary() {
         panic!("collection should not create runtime work")
     };
     assert_eq!(
-        after_quiescent_collection.stamp(),
-        before_quiescent_collection.stamp(),
-        "collection is operational maintenance, not a semantic observation"
+        after_quiescent_collection.stamp().work_generation(),
+        before_quiescent_collection.stamp().work_generation(),
+        "collection is not semantic coordinator work"
     );
-    before_quiescent_collection
-        .validate_without_settling()
-        .expect("collection should not stale a readiness snapshot");
+    assert_eq!(
+        after_quiescent_collection.stamp().observation_epoch(),
+        before_quiescent_collection.stamp().observation_epoch(),
+        "collection is not a reflection or event observation"
+    );
+    assert!(
+        after_quiescent_collection.stamp().gc_maintenance_revision()
+            > before_quiescent_collection
+                .stamp()
+                .gc_maintenance_revision(),
+        "collection must invalidate a snapshot which preceded its activity lease"
+    );
+    assert_eq!(
+        before_quiescent_collection.validate_without_settling(),
+        Err(RuntimeSettlementError::RuntimeChanged)
+    );
     let retained_reflection = access_path(
         &assembler,
         after_quiescent_collection.reflection().root(),
@@ -272,10 +285,20 @@ fn production_collection_preserves_each_serial_boundary() {
     runtime
         .collect_managed_for_maintenance()
         .expect("the pre-settlement serial boundary should collect");
-    let report = settlement
+    assert!(
+        matches!(
+            settlement.settle(),
+            Err(RuntimeSettlementError::RuntimeChanged)
+        ),
+        "a collection lease must invalidate an earlier settlement snapshot"
+    );
+    let RuntimeReadiness::Ready(post_collection) = runtime.readiness() else {
+        panic!("completed collection should restore settlement readiness")
+    };
+    let report = post_collection
         .settle()
-        .expect("collection should preserve settlement validation");
-    assert_eq!(report.stamp(), settlement.stamp());
+        .expect("post-collection readiness should settle");
+    assert_eq!(report.stamp(), post_collection.stamp());
     assert_eq!(report.reflection().root().runtime_id(), runtime.id());
     assert_eq!(net_topology_revision(&runtime, &net), net_revision);
 
@@ -782,6 +805,59 @@ fn external_request_during_finalization_is_coalesced() {
 }
 
 #[test]
+fn runtime_request_during_finalization_coalesces_and_lease_release_wakes_pump() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    runtime
+        .service_managed_collection()
+        .expect("baseline collection should complete");
+    let dead_shell = runtime.values().empty_dict();
+    drop(dead_shell);
+    let probe = runtime.install_finalizing_phase_probe_for_test();
+
+    let collector_runtime = runtime.clone();
+    let collector = std::thread::spawn(move || {
+        collector_runtime
+            .service_managed_collection()
+            .expect("paused collection should complete after release")
+    });
+    probe.wait_until_reached();
+    assert!(matches!(runtime.readiness(), RuntimeReadiness::Busy));
+
+    runtime
+        .request_managed_collection()
+        .expect("request during finalization should publish without waiting");
+    let (pump_tx, pump_rx) = mpsc::channel();
+    let pump_runtime = runtime.clone();
+    let pump = std::thread::spawn(move || {
+        pump_runtime.pump_until_stable();
+        pump_tx.send(()).unwrap();
+    });
+    assert!(
+        pump_rx.recv_timeout(Duration::from_millis(25)).is_err(),
+        "the pump must wait while the collection lease owns finalization"
+    );
+
+    probe.release();
+    collector.join().expect("collector thread should not panic");
+    pump_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("lease retirement must wake the parked pump");
+    pump.join().expect("runtime pump should finish cleanly");
+    assert!(
+        matches!(runtime.readiness(), RuntimeReadiness::Ready(_)),
+        "a request linearized before successful completion should be coalesced"
+    );
+
+    runtime
+        .request_managed_collection()
+        .expect("post-completion request should publish");
+    assert!(matches!(
+        runtime.readiness(),
+        RuntimeReadiness::MaintenanceRequired(_)
+    ));
+}
+
+#[test]
 fn aggressive_debug_collection_runs_before_outer_runtime_entry() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let _assembler = Assembler::builder()
@@ -811,6 +887,208 @@ fn aggressive_debug_collection_runs_before_outer_runtime_entry() {
             .collection_policy(),
         glam_gc::CollectionPolicy::NoAuto,
         "aggressive verification must not mutate heap policy"
+    );
+}
+
+#[test]
+fn recoverable_trace_panic_becomes_retryable_maintenance_and_durable_failure() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let trace_root = runtime
+        .values()
+        .core()
+        .install_recoverable_trace_panic_for_test();
+
+    let first = runtime
+        .service_managed_collection()
+        .expect_err("the first trace attempt should inject a recoverable panic");
+    assert_eq!(first.kind(), RuntimeMaintenanceErrorKind::CollectorPanic);
+    let RuntimeReadiness::MaintenanceRequired(retry) = runtime.readiness() else {
+        panic!("a reversible trace panic should require explicit retry")
+    };
+    assert_eq!(retry.state(), RuntimeMaintenanceState::RetryRequired);
+
+    retry
+        .service()
+        .expect("the trace fixture should succeed on its second attempt");
+    let RuntimeReadiness::Ready(snapshot) = runtime.readiness() else {
+        panic!("a successful retry should restore ordinary readiness")
+    };
+    let mut report = snapshot.settle().expect("retry result should settle");
+    assert_eq!(report.maintenance_failures().len(), 1);
+    assert_eq!(
+        report.maintenance_failures()[0].kind(),
+        RuntimeMaintenanceFailureKind::CollectorPanic
+    );
+    assert_eq!(report.pending_maintenance_failure_reports().len(), 1);
+    report.mark_reports_enqueued();
+    assert!(report.pending_maintenance_failure_reports().is_empty());
+    let RuntimeReadiness::Ready(repeated) = runtime.readiness() else {
+        panic!("reported maintenance failure should remain retained state")
+    };
+    let repeated = repeated
+        .settle()
+        .expect("retained maintenance failure should settle repeatedly");
+    assert_eq!(repeated.maintenance_failures().len(), 1);
+    assert!(repeated.pending_maintenance_failure_reports().is_empty());
+    drop(trace_root);
+}
+
+#[test]
+fn recoverable_finalizer_panic_retains_retry_work_and_failure_history() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    runtime
+        .values()
+        .core()
+        .install_recoverable_finalizer_panic_for_test();
+
+    let first = runtime
+        .service_managed_collection()
+        .expect_err("the first finalizer should inject a recoverable panic");
+    assert_eq!(first.kind(), RuntimeMaintenanceErrorKind::FinalizerPanic);
+    let RuntimeReadiness::MaintenanceRequired(retry) = runtime.readiness() else {
+        panic!("untouched finalizers should remain an actionable retry")
+    };
+    assert_eq!(retry.state(), RuntimeMaintenanceState::RetryRequired);
+
+    let completed = retry
+        .service()
+        .expect("the untouched finalizer suffix should retry successfully");
+    assert_eq!(completed.pending_finalizers(), 0);
+    let RuntimeReadiness::Ready(snapshot) = runtime.readiness() else {
+        panic!("successful finalizer retry should restore readiness")
+    };
+    let report = snapshot.settle().expect("finalizer retry should settle");
+    assert_eq!(report.maintenance_failures().len(), 1);
+    assert_eq!(
+        report.maintenance_failures()[0].kind(),
+        RuntimeMaintenanceFailureKind::FinalizerPanic
+    );
+}
+
+#[test]
+fn poisoned_maintenance_disposition_is_terminal_readiness() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let lease = runtime
+        .state
+        .shared_resources
+        .mutation_admission
+        .begin_gc_activity();
+    lease.finish(crate::runtime::RuntimeGcLeaseOutcome::failure(
+        glam_gc::HeapMaintenanceSnapshot::Poisoned,
+        crate::runtime::RuntimeGcMaintenanceFailureKind::Poisoned,
+        "injected terminal maintenance poison",
+    ));
+
+    let RuntimeReadiness::MaintenanceFailed(failed) = runtime.readiness() else {
+        panic!("poisoned runtime maintenance must not become ready or anonymous busy")
+    };
+    assert_eq!(failed.state(), RuntimeMaintenanceState::Poisoned);
+    assert_eq!(
+        failed.failure().map(RuntimeMaintenanceFailure::message),
+        Some("injected terminal maintenance poison")
+    );
+}
+
+#[test]
+fn irreversible_collection_panic_becomes_terminal_runtime_maintenance() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    runtime
+        .values()
+        .core()
+        .inject_irreversible_collection_panic_for_test();
+
+    let failure = runtime
+        .service_managed_collection()
+        .expect_err("irreversible topology panic must interrupt maintenance");
+    assert_eq!(failure.kind(), RuntimeMaintenanceErrorKind::Poisoned);
+    let RuntimeReadiness::MaintenanceFailed(snapshot) = runtime.readiness() else {
+        panic!("irreversible collector poison must become terminal readiness")
+    };
+    assert_eq!(snapshot.state(), RuntimeMaintenanceState::Poisoned);
+    assert_eq!(
+        snapshot.failure().map(RuntimeMaintenanceFailure::kind),
+        Some(RuntimeMaintenanceFailureKind::Poisoned)
+    );
+    assert!(
+        runtime.request_managed_collection().is_err(),
+        "a poisoned heap must reject later requests without losing terminal readiness"
+    );
+    assert!(matches!(
+        runtime.readiness(),
+        RuntimeReadiness::MaintenanceFailed(_)
+    ));
+}
+
+#[test]
+fn runtime_no_auto_pressure_requires_explicit_service() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let before = runtime
+        .service_managed_collection()
+        .expect("baseline collection should complete");
+    let retained = runtime
+        .values()
+        .core()
+        .cross_managed_pressure_threshold_for_test();
+    assert!(
+        runtime
+            .values()
+            .core()
+            .managed_statistics()
+            .collection_requested(),
+        "typed-run publication should cross the collector pressure threshold"
+    );
+
+    for value in 0..16 {
+        drop(runtime.values().integer(value));
+    }
+    assert_eq!(
+        runtime
+            .values()
+            .core()
+            .completed_collection_epoch_for_test(),
+        before.epoch(),
+        "ordinary NoAuto outer entries must not service advisory pressure"
+    );
+    assert!(matches!(runtime.readiness(), RuntimeReadiness::Ready(_)));
+
+    let serviced = runtime
+        .service_managed_collection()
+        .expect("explicit runtime maintenance should service pressure");
+    assert_eq!(serviced.epoch(), before.epoch() + 1);
+    assert!(
+        !runtime
+            .values()
+            .core()
+            .managed_statistics()
+            .collection_requested()
+    );
+    drop(retained);
+}
+
+#[test]
+fn runtime_manual_maintenance_never_mutates_heap_policy() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    assert_eq!(
+        runtime
+            .values()
+            .core()
+            .managed_statistics()
+            .collection_policy(),
+        glam_gc::CollectionPolicy::NoAuto
+    );
+    runtime
+        .request_managed_collection()
+        .expect("manual request should publish");
+    runtime
+        .service_managed_collection()
+        .expect("manual service should complete");
+    assert_eq!(
+        runtime
+            .values()
+            .core()
+            .managed_statistics()
+            .collection_policy(),
+        glam_gc::CollectionPolicy::NoAuto
     );
 }
 
