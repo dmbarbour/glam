@@ -84,8 +84,12 @@ fn apply_test_values(function: Value, arguments: impl IntoIterator<Item = Value>
 
 fn cached_value(lazy: &LazyValue) -> Value {
     let values = crate::core::test_value_factory();
+    cached_value_in(&values, lazy)
+}
+
+fn cached_value_in(values: &CoreValueFactory, lazy: &LazyValue) -> Value {
     let value = lazy
-        .cached(&values)
+        .cached(values)
         .expect("lazy value should be cached")
         .expect_without_debug("lazy value should succeed");
     values.with_runtime_value_access(|access| value.into_value_in(&access))
@@ -2869,11 +2873,11 @@ fn demanded_forwarding_chain_caches_whnf_in_every_lazy_member() {
 
 #[test]
 fn lazy_whnf_checkpoint_survives_yield_and_dependency_until_terminal_cache() {
-    let context = test_context();
+    let context = isolated_test_context();
     let promise = PromisedValue::new(context.values(), "lazy checkpoint dependency");
     let lazy = LazyValue::from_application(
         context.values(),
-        closed_function_value(1, TestExpr::Local(0)),
+        closed_function_value_in(context.values(), 1, TestExpr::Local(0)),
         Arc::from([Value::Promised(
             promise.duplicate_for_test(context.values()),
         )]),
@@ -2918,7 +2922,7 @@ fn lazy_whnf_checkpoint_survives_yield_and_dependency_until_terminal_cache() {
     ));
     context
         .values()
-        .assert_same_representation_for_test(&cached_value(&lazy), &n(42));
+        .assert_same_representation_for_test(&cached_value_in(context.values(), &lazy), &n(42));
     assert!(context.values().with_runtime_value_access(|access| {
         root.access(&access)
             .expect("lazy root and access should share one runtime")

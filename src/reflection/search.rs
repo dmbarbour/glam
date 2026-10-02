@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn isolated_host_and_branches_retain_roots_until_retirement() {
-        let core = crate::core::test_value_factory();
+        let core = crate::core::private_test_value_factory();
         let values = Values::from_core_factory(core);
         let domain = EffectTokenDomain::new(&values);
         let store = search_store(&values);
@@ -520,7 +520,7 @@ mod tests {
 
     #[test]
     fn search_policy_discards_progress_but_returned_results_own_their_roots() {
-        let core = crate::core::test_value_factory();
+        let core = crate::core::private_test_value_factory();
         let values = Values::from_core_factory(core);
         let domain = EffectTokenDomain::new(&values);
         let (root, retained_root) = retained_search_value(&domain);
@@ -564,7 +564,7 @@ mod tests {
 
     #[test]
     fn blocked_search_error_retains_a_runtime_root_until_retirement() {
-        let core = crate::core::test_value_factory();
+        let core = crate::core::private_test_value_factory();
         let values = Values::from_core_factory(core);
         let domain = EffectTokenDomain::new(&values);
         let (context, retained) = retained_search_value(&domain);

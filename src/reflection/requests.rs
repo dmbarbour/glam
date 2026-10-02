@@ -1846,7 +1846,7 @@ mod tests {
 
     #[test]
     fn request_journal_and_decoded_results_retain_public_roots_until_retirement() {
-        let core = crate::core::test_value_factory();
+        let core = crate::core::private_test_value_factory();
         let values = Values::from_core_factory(core);
         let domain = EffectTokenDomain::new(&values);
 
@@ -2035,7 +2035,7 @@ mod tests {
 
     #[test]
     fn terminal_task_handle_cell_releases_the_final_query_lease() {
-        let context = EvalContext::standalone();
+        let context = EvalContext::isolated(crate::core::private_test_value_factory());
         let values = context.values().clone();
         let public_values = Values::from_core_factory(values.clone());
         let task = context
@@ -2101,7 +2101,7 @@ mod tests {
 
     #[test]
     fn task_handle_root_backedge_is_conservatively_external() {
-        let context = EvalContext::standalone();
+        let context = EvalContext::isolated(crate::core::private_test_value_factory());
         let values = context.values().clone();
         let public_values = Values::from_core_factory(values.clone());
         let task = context

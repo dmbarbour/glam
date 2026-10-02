@@ -403,7 +403,7 @@ mod owner_tests {
 
     #[test]
     fn macro_results_and_failures_retain_public_values_until_retirement() {
-        let core = crate::core::test_value_factory();
+        let core = crate::core::private_test_value_factory();
         let values = Values::from_core_factory(core.clone());
         let domain = EffectTokenDomain::new(&values);
         let (visited, retained_visited) = retained_value(&domain);

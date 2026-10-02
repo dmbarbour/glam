@@ -1788,7 +1788,7 @@ mod ownership_tests {
 
     #[test]
     fn stale_access_route_adopts_the_exact_whnf_replacement() {
-        let context = EvalContext::standalone();
+        let context = EvalContext::isolated(crate::core::private_test_value_factory());
         let result = PromisedValue::new(context.values(), "access replacement result");
         let source = LazyValue::from_access(
             context.values(),

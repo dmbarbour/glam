@@ -746,6 +746,11 @@ impl CoreValueFactory {
     pub(crate) fn collect_managed_for_test(
         &self,
     ) -> Result<glam_gc::CollectionReport, glam_gc::CollectionError> {
+        assert_ne!(
+            super::SHARED_TEST_VALUE_RUNTIME.get().copied(),
+            Some(self.runtime_id()),
+            "tests must not collect the process-wide shared value domain; use a private CoreValueFactory"
+        );
         self.collect_managed_for_maintenance()
     }
 }

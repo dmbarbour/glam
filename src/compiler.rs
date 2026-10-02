@@ -541,7 +541,7 @@ mod tests {
 
     #[test]
     fn module_load_arguments_retain_definition_roots_until_handoff_retires() {
-        let values = test_value_factory();
+        let values = crate::core::private_test_value_factory();
         let public_values = crate::api::Values::from_core_factory(values.clone());
         let domain = crate::api::EffectTokenDomain::new(&public_values);
         let prior_payload = Arc::new(());

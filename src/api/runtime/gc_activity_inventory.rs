@@ -294,7 +294,9 @@ fn runtime_gc_policy_review_links_selected_plan_and_completion_gate() {
     assert!(review.contains("## Gate G4 and Forward Work"));
     assert!(plan.contains("### Phase I12B — Stable Pressure Promotion for Manual Runtimes"));
     assert!(plan.contains("GarbageCollectorRuntimePolicy_2026-10-02.md"));
-    assert!(roadmap.contains("I12B rejected automatic runtime construction"));
+    assert!(roadmap.contains("Production heaps remain immutable"));
+    assert!(roadmap.contains("Automatic collection is"));
+    assert!(roadmap.contains("not enabled. Collector stress"));
     assert!(roadmap.contains("Gate G4 requires the completed I12B pressure/reclamation"));
 }
 

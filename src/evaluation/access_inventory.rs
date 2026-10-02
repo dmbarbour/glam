@@ -1,8 +1,9 @@
 //! I3F inventory of every Glam-side managed-heap admission.
 //!
 //! The core value domain owns the only direct `Heap::with_mutator` calls.
-//! Evaluation, compiler, API, and test code enter through one of its two
-//! higher-ranked gateways, so mutator authority cannot outlive the callback.
+//! Production code enters through its runtime-qualified higher-ranked gateway;
+//! direct collector fixtures use a separate test-only allocation-scope bridge.
+//! Neither form lets mutator authority outlive the callback.
 //! Exact per-owner counts make a new admission site an explicit review event;
 //! the concurrent collector plan reuses this inventory when these bounded
 //! regions become participant epochs.
@@ -574,9 +575,12 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     // same-region rooted builders, retiring three separate test admissions.
     // I12A adds three test-only construction regions for recoverable trace,
     // recoverable finalizer, and pressure-threshold maintenance fixtures.
+    // I13D names the one private factory admission used by fixtures which
+    // deliberately force collection; the process-wide shared test domain is
+    // never a valid collection target.
     assert_eq!(
         admission_occurrence_fingerprint(&occurrences),
-        926_874_688_153_584_830,
+        9_019_238_070_737_707_413,
         "managed mutator-introduction source fingerprint drifted"
     );
 
@@ -589,8 +593,8 @@ fn every_mutator_introduction_has_an_exact_disposition() {
                     && occurrence.surface == AdmissionSurface::DirectMutator
             })
             .count(),
-        2,
-        "only the two CoreValueFactory gateways may directly enter the collector"
+        1,
+        "only RuntimeValueAccess may directly enter the collector in production"
     );
     assert_eq!(
         reviews
@@ -645,7 +649,7 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     };
     assert_eq!(
         production_disposition_count(AdmissionDisposition::CanonicalGateway),
-        5
+        4
     );
     assert_eq!(
         production_disposition_count(AdmissionDisposition::PendingRootedTransport),

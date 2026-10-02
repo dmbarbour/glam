@@ -3438,7 +3438,7 @@ fn outer_machine_root_inventory_is_complete() {
 
 #[test]
 fn branch_retires_its_effect_and_state_roots_exactly_with_the_branch() {
-    let core = crate::core::test_value_factory();
+    let core = crate::core::private_test_value_factory();
     let values = Values::from_core_factory(core.clone());
     let domain = EffectTokenDomain::new(&values);
     let (effect, retained_effect) = retained_machine_value(&values, &domain);
@@ -3458,7 +3458,7 @@ fn branch_retires_its_effect_and_state_roots_exactly_with_the_branch() {
 
 #[test]
 fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
-    let core = crate::core::test_value_factory();
+    let core = crate::core::private_test_value_factory();
     let values = Values::from_core_factory(core.clone());
     let domain = EffectTokenDomain::new(&values);
     let branch = || {
@@ -3518,7 +3518,7 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
 
 #[test]
 fn captured_control_payloads_retain_roots_until_retirement() {
-    let core = crate::core::test_value_factory();
+    let core = crate::core::private_test_value_factory();
     let values = Values::from_core_factory(core.clone());
     let domain = EffectTokenDomain::new(&values);
     let mut retained = Vec::new();
@@ -3666,7 +3666,7 @@ fn terminal_failure_poll_preserves_its_root_until_the_poll_is_retired() {
 
 #[test]
 fn blocked_failure_poll_preserves_its_root_after_the_block_is_retired() {
-    let core = crate::core::test_value_factory();
+    let core = crate::core::private_test_value_factory();
     let values = Values::from_core_factory(core.clone());
     let domain = EffectTokenDomain::new(&values);
     let (emission, retained) = retained_machine_value(&values, &domain);

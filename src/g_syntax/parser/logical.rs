@@ -734,7 +734,7 @@ mod tests {
 
     #[test]
     fn macro_input_and_rewrite_state_retain_embedded_data_until_retirement() {
-        let values = Values::from_core_factory(crate::core::test_value_factory());
+        let values = Values::from_core_factory(crate::core::private_test_value_factory());
         let domain = EffectTokenDomain::new(&values);
         let (input_value, retained_input) = retained_value(&domain);
         let input = MacroInput::new(

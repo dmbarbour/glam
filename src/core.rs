@@ -641,14 +641,32 @@ impl CoreValueFactory {
 }
 
 #[cfg(test)]
+static SHARED_TEST_VALUE_RUNTIME: OnceLock<EvaluationRuntimeId> = OnceLock::new();
+
+#[cfg(test)]
 pub(crate) fn test_value_factory() -> CoreValueFactory {
     static FACTORY: LazyLock<CoreValueFactory> = LazyLock::new(|| {
-        CoreValueFactory::new(
-            crate::runtime::allocate_evaluation_runtime_id(),
-            RuntimeIds::compiler_test_values(),
-        )
+        let runtime = crate::runtime::allocate_evaluation_runtime_id();
+        assert!(
+            SHARED_TEST_VALUE_RUNTIME.set(runtime).is_ok(),
+            "the shared test value runtime must initialize exactly once"
+        );
+        CoreValueFactory::new(runtime, RuntimeIds::compiler_test_values())
     });
     FACTORY.clone()
+}
+
+/// Creates a private test value domain that may be collected explicitly.
+///
+/// Most tests use [`test_value_factory`] to amortize compiler-value setup. A
+/// test that forces collection must not use that process-wide domain because
+/// parallel tests can temporarily hold unrooted values in it.
+#[cfg(test)]
+pub(crate) fn private_test_value_factory() -> CoreValueFactory {
+    CoreValueFactory::new(
+        crate::runtime::allocate_evaluation_runtime_id(),
+        RuntimeIds::compiler_test_values(),
+    )
 }
 
 #[cfg(test)]
@@ -3908,7 +3926,13 @@ mod tests {
 
     #[test]
     fn access_qualified_value_duplication_preserves_managed_identity_without_rooting() {
-        let values = values();
+        // This fixture performs explicit collection. Give it a private heap so
+        // it cannot reclaim raw compatibility values held by another parallel
+        // test using the shared value factory.
+        let values = CoreValueFactory::new(
+            crate::runtime::allocate_evaluation_runtime_id(),
+            RuntimeIds::new(),
+        );
         let baseline = values
             .collect_managed_for_test()
             .expect("canonical roots should collect before duplication");

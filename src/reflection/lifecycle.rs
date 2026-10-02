@@ -794,7 +794,7 @@ mod root_inventory_tests {
 
     #[test]
     fn lifecycle_status_preserves_coordinator_failure_root_identity() {
-        let values = crate::core::test_value_factory();
+        let values = crate::core::private_test_value_factory();
         let public_values = crate::api::Values::from_core_factory(values.clone());
         let domain = crate::api::EffectTokenDomain::new(&public_values);
         let state = EffectLifecycleState {

@@ -395,6 +395,11 @@ control-flow overview.
 
 ## Verification Discipline
 
+- The process-wide `test_value_factory()` amortizes compiler-value setup but
+  is never an explicit collection target: parallel fixtures can temporarily
+  hold unrooted compatibility values in that domain. Any test that forces GC
+  must use `private_test_value_factory()` or another private runtime. A
+  test-only assertion at the collection gateway latches this rule.
 - For an order-dependent evaluator, coordinator, promise, reflection, or spark
   defect, place the participating operations explicitly on both sides of the
   disputed transition. Repeating an uncontrolled threaded test is only a

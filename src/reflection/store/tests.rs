@@ -203,7 +203,7 @@ fn unforced_store_value(
 
 #[test]
 fn snapshot_journal_edits_and_protected_volumes_retain_roots_without_forcing() {
-    let mut store = store();
+    let mut store = store_with(crate::core::private_test_value_factory());
     let collector = store.values.clone();
     let (heap_root, heap_retained, heap_forced) =
         unforced_store_value(&store.values, "snapshot heap root");
