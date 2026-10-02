@@ -12,7 +12,8 @@ maintenance seams. I11D.1 closed the regional-ownership and repository-mode
 gap on 2026-10-01. I11D.2 dynamic tools and persistent-edge cost closure,
 I11D.3's final delta-oriented static audit, and I11D.4 certification are
 complete. Collector Gate G1 passed on 2026-08-25. Production remains `NoAuto`;
-I12 explicit maintenance is next.
+I12A.0 selected the runtime activity/readiness protocol on 2026-10-02, and
+I12A explicit maintenance is next.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -281,8 +282,13 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I11D.4 | complete | dated Gate G3 certification |
 | I11 | complete | certified whole-production-graph forced collection |
 | I12 | pending | runtime maintenance and threshold collection |
-| I12A.0 | pending | GC operational-activity/readiness decision review gate |
+| I12A.0 | complete | selected authoritative GC activity, actionable readiness, and durable maintenance-failure policy |
 | I12A | pending | explicit maintenance for immutable `NoAuto` runtimes |
+| I12A.1 | pending | authoritative activity state, lease, collector snapshot, and source boundary |
+| I12A.2 | pending | readiness and settlement projection |
+| I12A.3 | pending | explicit request, synchronous service, and panic/retry recovery |
+| I12A.4 | pending | reporting, batch policy, fallback rendering, and metrics |
+| I12A.5 | pending | pressure-boundary closure and post-phase review |
 | I12B.0 | pending | new-runtime collection-policy decision review gate |
 | I13 | pending | redundant ownership removal and documentation |
 
@@ -6662,125 +6668,128 @@ does not change any existing heap from `CollectionPolicy::NoAuto`.
 
 ### Phase I12A.0 — GC Operational Activity and Readiness Review
 
-This is a hard design gate after Gate G3 and before explicit maintenance is
-enabled outside I11's stable serial test boundaries. It reviews the existing
-`RuntimeMutationAdmission`, authoritative readiness snapshots and validation,
-`RuntimeActivityState` parking generation, private runtime heap-entry paths,
-and collector activity/finalization statistics. Collector snapshots are
-observational inputs only; readiness must not infer authority by sampling them.
+Completed 2026-10-02. The dated
+[`GarbageCollectorReadinessIntegration_2026-10-02.md`](../reviews/GarbageCollectorReadinessIntegration_2026-10-02.md)
+review selects one runtime-owned maintenance record beneath
+`RuntimeMutationAdmission`. Potentially collecting entries acquire an owned
+activity lease under shared admission, release the gate while collection and
+finalization run, then publish outcome and retire the lease under shared
+admission before waking waiters. Readiness observes its active count and
+revision only under exclusive admission. Collector snapshots remain
+observational, and `glam-gc` receives no runtime callback.
 
-The review adopts the following protocol shape:
+The review makes ordinary `NoAuto` allocation pressure advisory rather than
+authoritative runtime work. Current value access therefore pays no activity
+lease: it cannot collect. An explicit runtime request has its own authoritative
+bit and wake. Explicit full maintenance, aggressive pre-entry verification,
+and every future `Automatic` outer entry use the lease. The private value
+domain remains the finite source boundary: it contains exactly two direct
+mutator entries, one full-collection call, one test-only request precursor, and
+one heap-policy construction call.
 
-- a private runtime heap-entry/maintenance facade acquires a logical runtime
-  operational-activity lease *before* invoking any entry which may elect or
-  explicitly run collection;
-- lease admission is published under the same shared runtime mutation gate
-  which excludes readiness/settlement's exclusive validation. The gate is then
-  released while collection and passive finalization run;
-- authoritative readiness observes the active-lease count/revision under its
-  exclusive gate. A readiness snapshot includes the corresponding revision so
-  a lease admitted after observation invalidates later acceptance;
-- the lease survives collection and every running finalizer and is retired
-  under shared mutation admission after success or unwind. Releasing it
-  advances the existing runtime activity generation and wakes parked pumps only
-  after the authoritative state change;
-- `glam-gc` receives no runtime callback and knows nothing about readiness;
-  `Heap::activity()` and `Heap::statistics()` remain diagnostics/profiling
-  snapshots rather than settlement stamps; and
-- a request-only operation does not claim an active lease because it cannot
-  collect. If it creates a serviceable runtime obligation, the selected
-  maintenance policy must nevertheless issue the ordinary runtime wake.
-
-The review's required source inventory assigns every current and planned heap
-entry to one of three classes:
-
-1. cannot collect under its immutable heap policy and needs no GC activity
-   lease;
-2. may elect collection (including every outer entry on a future `Automatic`
-   runtime) and must enter through the leased facade; or
-3. explicitly collects and must enter through the same leased facade.
-
-Recursive same-heap entries, direct test/debug entry, aggressive collection,
-factory/evaluator access, explicit maintenance, and every runtime constructor
-must appear in the inventory. Before an automatic runtime can be selected by
-I12B.0, privacy/compile-time evidence must prove production callers cannot
-bypass the facade.
-
-The inventory must separately identify every constructor or helper which can
-open a second mutator region while its caller retains an interior managed edge.
-Controlled I11 maintenance may never exercise that gap, but a future
-`Automatic` heap can elect collection on precisely the second outer entry.
-Each such constructor must either reuse the caller's access region, publish or
-root the edge before re-entry, or carry the same deterministic temporal proof
-required by the I6+ regional allocation rule.
-
-The review must also select a durable disposition for a finalizer panic which
-leaves a pending batch. An inactive pending batch may not remain anonymous
-permanent `Busy`. The decision must choose and specify either a reportable
-runtime maintenance failure carried by readiness/settlement, or an explicit
-retry-required maintenance state with a public/client-visible disposition and
-wake protocol. It must define acknowledgement/retry, batch ownership, runtime
-exit-code impact, and how successful retry clears the state. An actively
-running retry remains covered by the activity lease.
-
-The output is a dated GC-readiness integration review which rewrites I12A and,
-where necessary, runtime readiness/report types, snapshot stamps, settlement
-validation, I12B's automatic-entry prerequisites, and the completion criteria.
-No routine concurrent maintenance or automatic runtime construction may begin
-until that artifact and its plan changes land.
-
-Required forced-order verification in the rewritten plan:
-
-- readiness holds or has just released exclusive admission as a collecting
-  entry attempts to register its lease;
-- readiness observes the runtime immediately before collection election and
-  later rejects the stale snapshot;
-- a pump snapshots the parking generation while a finalizer is blocked, then
-  sleeps or rechecks as the lease is released, proving no lost wake;
-- several concurrent may-collect entries hold independent leases and readiness
-  remains `Busy` until the last retires;
-- collection/finalization success, trace panic, finalizer panic, and retry all
-  retire or preserve exactly the selected authoritative state; and
-- both `NoAuto` manual service and any future `Automatic` outer-entry election
-  use the same activity protocol without giving the collector a callback.
-
-Named review-artifact checks:
-`gc_activity_entry_inventory_is_complete`,
-`gc_readiness_plan_has_one_authoritative_activity_source`, and
-`pending_finalizer_batch_has_durable_nonbusy_disposition`.
+Readiness gains a GC maintenance revision plus actionable
+`MaintenanceRequired` and `MaintenanceFailed` dispositions. A recoverable
+collector panic records a durable maintenance failure and `RetryRequired`;
+successful retry clears the retry obligation but not the historical failure. A
+finalizer panic additionally retains the collector's pending batch. Maintenance
+failures independently contribute to batch failure policy. Permanent poison is
+terminal and must use fallback host rendering without re-entering the poisoned
+value domain. The three review-artifact latches freeze these decisions before
+I12A implementation.
 
 ### Phase I12A — Explicit Maintenance for `NoAuto` Runtimes
 
-- Expose a narrow embedding maintenance method or runtime tuning policy; do not
-  expose raw heap internals.
-- Preserve the collector crate's two-level control surface: a nonblocking,
-  coalescing request which may be issued before a known batch boundary, and a
-  synchronous full-collection operation used only outside an active mutator.
-  These are Rust runtime-maintenance controls, not Glam evaluation effects.
-- Collect `NoAuto` runtimes only through explicit service at reviewed
-  batch/idle boundaries. Successful typed-run publication may latch a
-  pressure request, but ordinary outer mutator entry does not service it.
-  Runtime maintenance observes the request/statistics and deliberately calls
-  synchronous collection when its boundary policy permits. Lease-word claims
-  and individual slot allocations remain outside shared pressure accounting.
-- Implement the operational-activity lease, readiness revision, wake, and
-  pending-finalizer disposition selected by I12A.0 before enabling this path
-  for routine concurrent runtime operation. Until that implementation passes,
-  I12A may run only at the stable serial boundaries already certified by I11.
-- Do not begin a requested collection while the heap is in `Finalizing`.
-  Requests made before successful completion are heuristic hints coalesced into
-  the active collection and are cleared with its pressure baseline; they do not
-  queue a second writer or deny fresh mutator admission. A request serialized
-  after completion remains latched for the next explicit maintenance service.
-- Ensure a request cannot make a worker spin, hold settlement admission, or
-  publish semantic activity merely because collection ran.
-- Report metrics for debugging and profiling without making them observable to
-  pure evaluation.
+#### I12A.1 — Authoritative State, Lease, and Source Boundary
 
-Verification: construct a production runtime with immutable `NoAuto`, cross
-its pressure threshold, prove repeated outer mutator entries do not collect,
-then explicitly service the request at each reviewed boundary. Preserve request
-coalescing, finalizer panic/retry, and no-recursive-collection behavior. Add
+- Extend the existing runtime activity component with the mutex-protected
+  active-lease count, GC maintenance revision, explicit-request bit,
+  maintenance disposition, durable failures, and pending-report ledger
+  selected by I12A.0. Keep the parking generation separate.
+- Introduce one owned, unwind-safe activity lease. Admit and retire it under
+  shared mutation admission; run no collector or finalizer while holding that
+  gate. Lease retirement publishes state before the existing activity wake.
+- Add the source-backed entry inventory. Latch the two direct value-domain
+  mutator entries, one full-collection entry, the test-only request precursor
+  and its production successor, one heap construction entry, and every
+  higher-level delegate. Isolated collector and value-domain fixtures remain
+  outside runtime readiness and explicit in the record.
+- Add a non-panicking collector maintenance snapshot sufficient to distinguish
+  usable idle, queued/running finalizers, and permanent poison after a caught
+  unwind. It remains observational and contains no runtime callback.
+
+Verification: force exclusive admission before lease registration, concurrent
+lease admission/retirement, lease unwind, and last-lease wake. Run the three
+I12A.0 artifact latches.
+
+#### I12A.2 — Readiness and Settlement Projection
+
+- Add `gc_maintenance_revision` to `RuntimeReadinessStamp` and revalidate it
+  together with work generation and observation epoch.
+- Return `Busy` for active leases, `MaintenanceFailed` for poison, and
+  `MaintenanceRequired` for an explicit request or retry-required pending
+  finalizers before applying the existing coordinator/event classification.
+  These snapshots retain the runtime and revision, not a raw heap.
+- Require an idle maintenance disposition and exact revision when accepting a
+  ready/deadlock settlement. `pump_until_stable` may return with actionable
+  maintenance because service belongs to the embedding client.
+
+Verification: force a lease immediately after a ready/deadlock observation
+and reject the stale snapshot; force several leases and retain `Busy` until the
+last retires; park before finalizer completion and prove the release wake is
+not lost.
+
+#### I12A.3 — Explicit `NoAuto` Request, Service, and Recovery
+
+- Expose narrow runtime maintenance types and methods, not raw heap internals:
+  a nonblocking coalescing request and a synchronous service operation. Keep
+  them outside Glam evaluation effects.
+- Explicit request publishes its authoritative bit and calls the collector's
+  request operation under shared runtime admission, without taking a lease.
+  Pressure raised internally by ordinary `NoAuto` allocation remains advisory.
+- Synchronous service takes the lease and calls full collection outside every
+  mutator. Convert a recovered trace or finalizer panic into a structured
+  runtime maintenance error, durable failure, and retry-required disposition;
+  distinguish the pending-finalizer case. Record poison terminally. A
+  successful retry clears retry state but preserves the historical failure.
+- Linearize request clearing with outcome publication. Requests before a
+  successful completion coalesce; a request after completion remains latched.
+  Derive retry state from the current collector snapshot so concurrent service
+  completion order cannot resurrect an already-consumed pending batch.
+
+Verification: force success, reversible trace panic, finalizer panic, retry,
+permanent poison, two concurrent services, request-before-completion, and
+request-after-completion. Each path retires its lease exactly once.
+
+#### I12A.4 — Reporting, Batch Policy, and Maintenance Metrics
+
+- Add the complete and pending maintenance-failure collections to
+  `QuiescenceReport`. Settlement acknowledges report delivery but does not
+  erase failure history. Any maintenance failure independently implies batch
+  failure even after a successful retry.
+- Teach the batch client to service `MaintenanceRequired`, report recoverable
+  failures through normal enrichment while the heap remains usable, and emit a
+  fallback host diagnostic for `MaintenanceFailed` without entering a poisoned
+  value domain.
+- Expose a runtime maintenance report with useful collection/pressure metrics
+  without exposing `glam_gc::Heap`, mutators, or pure Glam-observable state.
+
+Verification: force once-only report delivery, durable batch failure after a
+successful retry, terminal fallback rendering, and unchanged assembly output.
+
+#### I12A.5 — Pressure Boundaries and Phase Closure
+
+- Construct a production runtime with immutable `NoAuto`, cross its pressure
+  threshold, and prove repeated ordinary outer entries neither collect nor
+  create authoritative maintenance work. Explicit service at each reviewed
+  batch/idle boundary consumes the advisory request deliberately.
+- Preserve no-recursive-collection behavior and prove manual maintenance never
+  changes heap policy. Ensure request/service cannot make workers spin or hold
+  settlement admission while collection runs.
+- Run the routine, workspace, aggressive, deterministic-order, and relevant
+  dynamic-tool checks, then perform the mandatory post-I12A implementation and
+  forward-plan review before I12B.0.
+
+Named verification includes
 `runtime_no_auto_pressure_requires_explicit_service` and
 `runtime_manual_maintenance_never_mutates_heap_policy`.
 
@@ -6808,8 +6817,14 @@ The review selects exactly one policy for future runtime construction:
    any explicit manual/testing construction mode retained by the selected
    runtime API). Existing `NoAuto` runtimes remain manual forever. Successful
    pressure requests may be elected by a later idle outer mutator entry only
-   for those new automatic heaps. This option is blocked until I12A.0's
-   activity/wake protocol covers every entry which may elect collection.
+   for those new automatic heaps. This option is blocked until I12A's
+   activity/wake protocol is implemented. Construction must install immutable
+   policy and runtime activity authority before the first potentially
+   collecting cache/value entry. Both private factory entries, aggressive
+   verification, and any successor entry must acquire the common lease before
+   entering the heap; the source latch must reject a direct bypass. A caught
+   automatic-entry unwind must publish retry-required or poisoned state before
+   preserving any unrelated Rust unwind.
 2. **Permanently manual runtimes.** Production construction continues to use
    `CollectionPolicy::NoAuto`. Pressure requests remain latches consumed only
    by I12A's explicit maintenance service; no plan or documentation may claim
@@ -6843,7 +6858,7 @@ outcome:
 
 If `Automatic` is selected, additionally construct and exercise both manual
 and automatic runtimes, prove pressure-triggered collection occurs only on the
-automatic heap, and require the completed I12A.0 entry/activity protocol. If
+automatic heap, and require the completed I12A entry/activity protocol. If
 manual service is selected, remove every remaining suggestion that mutator
 entry services production pressure and exercise each explicit maintenance
 boundary under `NoAuto`.
@@ -6934,8 +6949,9 @@ semantics.
 - Every entry which can actually collect is represented as authoritative
   runtime operational activity before collection election and wakes readiness
   waiters after retirement. Collector statistics are never readiness
-  authority, and an inactive pending finalizer batch has the durable disposition
-  selected by I12A.0 rather than anonymous permanent `Busy`.
+  authority. A recoverable collector panic is durable `RetryRequired` state
+  plus failure history; permanent poison is `MaintenanceFailed`; neither is
+  anonymous permanent `Busy`.
 - Every heap's collection policy is fixed at construction. The I12B.0 decision
   governs only newly created runtimes; no live `NoAuto` heap becomes
   `Automatic`.

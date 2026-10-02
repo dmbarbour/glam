@@ -21,6 +21,8 @@ one broad end-to-end Miri target explicitly excluded for unreasonable
 execution time. Persistent edges retain one-pointer layout, zero allocation
 and root traffic, and minimal release code generation. I11D.3 completed the
 static closure audit on 2026-10-02 without a production repair.
+I12A.0 selected the runtime GC activity/readiness and durable maintenance-
+failure protocol on 2026-10-02; I12A explicit `NoAuto` maintenance is next.
 The completed remediation and forward-path reconciliation are reviewed in
 [`GarbageCollectorGCI11R002Holistic_2026-10-01.md`](../reviews/GarbageCollectorGCI11R002Holistic_2026-10-01.md).
 
@@ -414,14 +416,18 @@ durable-owner inventories to account for every raw payload retained outside a
 matching mutator/access region. Passing tests without that static closure is
 not Gate G3 evidence.
 
-Before routine concurrent maintenance or automatic construction, I12A.0 must
-integrate every may-collect entry with authoritative runtime readiness. The
+Before routine concurrent maintenance or automatic construction, I12A must
+implement I12A.0's selected integration of every may-collect entry with
+authoritative runtime readiness. The
 runtime records an operational-activity lease under its mutation-admission
 gate before collection can begin and retires it with the ordinary activity wake
 after collection/finalization returns or unwinds. Collector activity snapshots
 remain observational; `glam-gc` receives no runtime callback. An inactive
-pending finalizer batch after panic must have a durable reportable or explicit
-retry-required disposition rather than anonymous permanent `Busy`.
+pending finalizer batch after panic becomes actionable `RetryRequired` state
+plus a durable maintenance failure rather than anonymous permanent `Busy`.
+Permanent poison becomes `MaintenanceFailed` and is rendered without entering
+the damaged value domain. The decision artifact is
+[`GarbageCollectorReadinessIntegration_2026-10-02.md`](../reviews/GarbageCollectorReadinessIntegration_2026-10-02.md).
 Collection policy is immutable for one heap: the later I12B.0 policy review may
 change construction of new runtimes, but never transitions a live `NoAuto`
 runtime to `Automatic`. If it retains manual production policy, pressure is

@@ -21,6 +21,8 @@ use crate::runtime::{
 };
 
 mod events;
+#[cfg(test)]
+mod gc_activity_inventory;
 mod readiness;
 
 pub use events::*;

@@ -29,7 +29,7 @@ not define language semantics or collect subsystem invariants.
 | `api/value/access_inventory.rs` | Test-only production-root and forbidden bare-core escape inventories for the managed public facade |
 | `core/managed.rs`, `core/managed/` | Private managed-family and opaque-payload admission, scoped allocation/access, production managed value nodes, source-backed closure/opaque containment inventory, and pre-migration exact semantic-edge adapters |
 | `api/diagnostics.rs` | Diagnostic values, buses, subscriptions, enrichment, and runtime ingress |
-| `api/runtime.rs`, `api/runtime/` | Runtime ownership, transactional events, delivery, readiness, deadlock reports, and settlement |
+| `api/runtime.rs`, `api/runtime/` | Runtime ownership, transactional events, delivery, readiness, deadlock reports, and settlement; I12A.0 has selected but not yet implemented authoritative GC maintenance activity |
 | `api/assembly.rs` | Assembler/reasoning construction, protected volumes, sources, imports, and module builds |
 | `g_source.rs` | Non-evaluating public `.g` inspection summary |
 | `compiler.rs` | Per-source compiler capabilities and hidden provenance |

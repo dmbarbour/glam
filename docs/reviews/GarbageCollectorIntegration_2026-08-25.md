@@ -1076,7 +1076,7 @@ hybrid transition.
 
 **Confidence:** high
 
-**Status:** resolved by planned review gate 2026-08-27
+**Status:** resolved 2026-10-02
 
 I12 says queued and running finalizers count as runtime operational activity and
 that readiness waits for passive finalization. The collector currently exposes
@@ -1118,6 +1118,14 @@ bypass. It must also choose a durable reportable or explicit retry-required
 disposition for a pending finalizer batch after panic; anonymous permanent
 `Busy` is forbidden. The artifact rewrites I12A, readiness/settlement state as
 needed, I12B prerequisites, completion criteria, and forced-order tests.
+
+**Follow-up resolution:** I12A.0 completed in
+[`GarbageCollectorReadinessIntegration_2026-10-02.md`](GarbageCollectorReadinessIntegration_2026-10-02.md).
+It selected one runtime-owned activity/revision source, actionable
+`MaintenanceRequired` / `MaintenanceFailed` readiness, durable maintenance
+failure history, and `RetryRequired` for an inactive pending finalizer batch.
+I12A is partitioned around the required forced-order implementation evidence;
+production remains `NoAuto` until that work is complete.
 
 ### GCI-017 — The managed opaque representation is not selected
 
@@ -1229,10 +1237,10 @@ the plan now rather than leaving prose which says to decide later:
 16. **Finding GCI-015, resolved by planned review gate:** execute I12B.0 after
     stable I12A manual maintenance and apply its immutable new-runtime policy
     to the rewritten I12B; and
-17. **Finding GCI-016, resolved by planned review gate:** execute I12A.0 before
-    routine concurrent collection and require its activity lease, readiness
-    revision, wake, entry inventory, and pending-finalizer disposition to
-    rewrite I12A and I12B prerequisites.
+17. **Finding GCI-016, resolved by completed review gate:** I12A.0 ran before
+    routine concurrent collection and selected its activity lease, readiness
+    revision, wake, entry inventory, and pending-finalizer disposition. It
+    rewrote I12A and I12B prerequisites.
 
 These checkpoints are part of the implementation plan and therefore part of
 the work to be implemented. They are not reminders to reopen this review from
@@ -1246,7 +1254,7 @@ artifacts must rewrite dependent phases before those phases become
 implementation-ready.
 
 Gate G1 remains sufficient and passed; C7/C8 collector stress and tuning may
-continue later in response to production use. I1C-I1E are the next integration
-implementation checkpoints. I10B.0, I12A.0, and I12B.0 are ordinary explicit
-future phases of that transition rather than reminders to reopen this review
-from memory. This review still does not authorize production collection.
+continue later in response to production use. I12A.0 has now completed as an
+ordinary explicit phase of the transition; I12B.0 remains a future phase, not
+a reminder to reopen this review from memory. This review still does not
+authorize production collection.
