@@ -4,11 +4,13 @@ Baseline: `6746551`, the completed I11A-I11C implementation. Gate G2 was
 certified independently at `585cfec`; this review covers the production
 collection work from that gate through I11C.
 
-Status: GCI11R-001 through GCI11R-004 and I11D.0-I11D.2 are resolved. Gate G3
-remains closed pending I11D.3-I11D.4. The implemented collector,
+Status: GCI11R-001 through GCI11R-004 and I11D.0-I11D.3 are resolved. Gate G3
+remains closed pending I11D.4. The implemented collector,
 finalization, request-coalescing, runtime-retirement, and aggressive regional-
 ownership boundaries remain coherent, and no collector tracing-algorithm
-defect has been found. Production remains `CollectionPolicy::NoAuto`.
+defect has been found. The I11D.3 delta audit is recorded in
+[`GarbageCollectorI11D3StaticClosure_2026-10-02.md`](GarbageCollectorI11D3StaticClosure_2026-10-02.md).
+Production remains `CollectionPolicy::NoAuto`.
 
 ## Scope and Method
 
@@ -179,8 +181,8 @@ one-shot phase probe may be consumed, requiring schedule-fixture setup to be
 ordered more precisely without weakening its assertion. That failing feature
 run became the authoritative reproducer. The completed ordinary/aggressive run
 linked above is the authoritative resolution. Follow-up dynamic-tool and
-persistent-edge cost verification closed I11D.2; Gate G3 remains closed only
-for I11D.3-I11D.4.
+persistent-edge cost verification closed I11D.2, and the final static delta
+audit closed I11D.3; Gate G3 remains closed only for I11D.4.
 
 ### GCI11R-003 — Passive-finalizer allocation absence is not measured exactly
 

@@ -14,12 +14,12 @@ collection boundary, and I11C exercised worker, finalizer,
 request-coalescing, and retirement schedules. I11D.0 repaired the missing
 worker/collector ordering proof, and I11D.1 completed repository-wide ordinary
 and aggressive ownership closure on 2026-10-01. Production remains `NoAuto`
-while I11D.3-I11D.4 own the final delta audit and Gate G3 certification.
+while I11D.4 owns the final Gate G3 certification.
 I11D.2 is complete. The supported Miri, ASan/LSan, and TSan targets pass, with
 one broad end-to-end Miri target explicitly excluded for unreasonable
 execution time. Persistent edges retain one-pointer layout, zero allocation
-and root traffic, and minimal release code generation. I11D.3 now owns the
-static closure audit.
+and root traffic, and minimal release code generation. I11D.3 completed the
+static closure audit on 2026-10-02 without a production repair.
 The completed remediation and forward-path reconciliation are reviewed in
 [`GarbageCollectorGCI11R002Holistic_2026-10-01.md`](../reviews/GarbageCollectorGCI11R002Holistic_2026-10-01.md).
 
@@ -390,8 +390,8 @@ admission wait, and also identified missing suite-wide aggressive-mode and
 exact finalizer-allocation evidence. I11D closes those gaps before G3.
 I11D.0 has since closed the deterministic schedule/allocation gap, and I11D.1
 has closed the suite-wide aggressive-mode and regional-ownership gap. I11D.2
-has closed dynamic-tool and persistent-edge cost verification. The remaining
-Gate G3 work is I11D.3-I11D.4.
+has closed dynamic-tool and persistent-edge cost verification. I11D.3 has
+closed the final static delta audit. The remaining Gate G3 work is I11D.4.
 
 Only after G2 may tests force a full collection over the complete production
 graph.

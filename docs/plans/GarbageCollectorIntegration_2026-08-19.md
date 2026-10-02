@@ -10,9 +10,9 @@ remains disabled in ordinary execution; I11B exercised controlled serial
 whole-runtime collection and I11C exercised worker, finalizer,
 request-coalescing, and runtime-retirement schedules through private test and
 maintenance seams. I11D.1 closed the regional-ownership and repository-mode
-gap on 2026-10-01. I11D.2 dynamic tools, I11D.3 the final delta-oriented
-static audit, and I11D.4 certification remain before Gate G3. Collector Gate
-G1 passed on 2026-08-25.
+gap on 2026-10-01. I11D.2 dynamic tools and persistent-edge cost closure and
+I11D.3's final delta-oriented static audit are complete; I11D.4 certification
+remains before Gate G3. Collector Gate G1 passed on 2026-08-25.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -277,7 +277,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I11D.2a | complete | dynamic-tool environment and exact collector/production target matrix |
 | I11D.2b-d | complete | focused Miri, AddressSanitizer, and ThreadSanitizer execution, with one explicit broad-target Miri performance exclusion |
 | I11D.2e | complete | persistent-edge release cost and code-generation closure |
-| I11D.3 | pending | unsafe, trace, mutation, and lock/region closure audit |
+| I11D.3 | complete | unsafe, trace, mutation, owner, and lock/region delta audit |
 | I11D.4 | pending | dated Gate G3 certification |
 | I11 | pending | whole-production-graph forced collection |
 | I12 | pending | runtime maintenance and threshold collection |
@@ -6556,20 +6556,20 @@ gaps block Gate G3. Close them and certify the boundary in these checkpoints:
     a focused microbenchmark for `duplicate_in`. Investigate any unexpected
     lock, root registration, allocation, or reference-count operation before
     accepting the explicit edge API.
-- **I11D.3 — Static closure audit.** Treat the D.2h accepted surfaces as the
+- **I11D.3 — Static closure audit: complete 2026-10-02.** Treat the D.2h accepted surfaces as the
   starting baseline rather than repeating their migration:
-  - **I11D.3a — source delta:** enumerate unsafe, trace, mutation, managed
+  - **I11D.3a — source delta: complete.** Enumerate unsafe, trace, mutation, managed
     entry, lock/wait, finalizer, and external-owner changes since Gate G2 and
     distinguish the already reviewed D.2h interval from any I11D.2 repair.
-  - **I11D.3b — authoritative ledger reconciliation:** rerun the raw-value,
+  - **I11D.3b — authoritative ledger reconciliation: complete.** Rerun the raw-value,
     persistent-edge, root-publication, mutator-introduction, durable-owner,
     containment, capture, machine-state, and recursive-identity inventories.
     Review every changed-file delta; require zero unclassified or pending
     occurrence rather than mechanically accepting a new fingerprint.
-  - **I11D.3c — protocol boundary audit:** reconcile locks and waits, passive
+  - **I11D.3c — protocol boundary audit: complete.** Reconcile locks and waits, passive
     finalizers, active external owners, collector panic/retry, and runtime
     retirement with their existing deterministic fixtures and current source.
-  - **I11D.3d — focused closure:** rerun every source latch and focused I11
+  - **I11D.3d — focused closure: complete.** Rerun every source latch and focused I11
     production fixture after any repair from the preceding checkpoints.
 - **I11D.4 — Certification.** Publish a dated Gate G3 review accounting for
   every I11 schedule, both collection modes, all dynamic-tool results, and any
@@ -6642,7 +6642,13 @@ traffic fixtures observe no allocation or root registration; and a continuing
 release LLVM-IR check requires duplication and identity to remain bare pointer
 operations without calls or synchronization. The evidence is recorded in
 [`GarbageCollectorI11D2PersistentEdgeCost_2026-10-02.md`](../reviews/GarbageCollectorI11D2PersistentEdgeCost_2026-10-02.md).
-I11D.3 static closure audit is next.
+I11D.3 completed on 2026-10-02 without a production repair. It distinguishes
+the already reviewed Gate G2-to-D.2h migration from I11D.2's seven-file
+verification-only delta, closes every exact ownership/source ledger, and
+reconciles locks, waits, finalization, external owners, panic/retry, and
+runtime retirement with their deterministic fixtures. The evidence is in
+[`GarbageCollectorI11D3StaticClosure_2026-10-02.md`](../reviews/GarbageCollectorI11D3StaticClosure_2026-10-02.md).
+I11D.4 Gate G3 certification is next.
 
 ## Phase I12 — Explicit Runtime Maintenance and Threshold Collection
 

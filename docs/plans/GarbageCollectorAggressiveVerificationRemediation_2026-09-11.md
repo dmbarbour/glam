@@ -3,8 +3,8 @@
 Status: complete on 2026-10-01. This plan expands
 GCI11R-002 and Phase I11D.1. The private repository mode exists and is useful,
 and its complete workspace suite passes. Gate G3 remains closed pending
-I11D.3-I11D.4; I11D.2 dynamic and persistent-edge cost verification is now
-complete.
+I11D.4; I11D.2 dynamic and persistent-edge cost verification and I11D.3's
+static delta audit are complete.
 
 ## Purpose
 
@@ -617,7 +617,7 @@ D.2 rather than masquerading as the ordinary orchestration path.
 #### GCI11R-002D.2 — Remaining Production Owners
 
 Status: complete on 2026-10-01 through D.2a-D.2h below. This was a hard
-prerequisite for Gate G3; I11D.2 is now complete, leaving I11D.3-I11D.4.
+prerequisite for Gate G3; I11D.2 and I11D.3 are now complete, leaving I11D.4.
 
 D.2 closes both kinds of production violation which D.1a deliberately left
 open:

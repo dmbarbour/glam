@@ -127,5 +127,6 @@ all-feature collector check.
 ## Disposition
 
 P5B and I11D.2e are complete. The explicit API has the intended semantic
-friction at source level without release-mode runtime friction. I11D.3 is next:
-it owns the static source-delta, ledger, protocol, and focused closure audits.
+friction at source level without release-mode runtime friction. Follow-up:
+I11D.3 completed the static source-delta, ledger, protocol, and focused closure
+audits on 2026-10-02; I11D.4 certification is next.

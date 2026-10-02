@@ -147,6 +147,9 @@ Those documents now distinguish:
 - the deferred optional `ScopedGc` working-view experiment from the already
   completed stored-edge cutover.
 
+Follow-up: I11D.3 completed its static delta audit on 2026-10-02, leaving only
+I11D.4 Gate G3 certification open.
+
 ### GCI2HR-004 — I11D.2 was too broad to execute safely as one checkpoint
 
 **Severity:** planning risk.
