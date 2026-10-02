@@ -1103,6 +1103,26 @@ mod tests {
     }
 
     #[test]
+    fn configured_batch_settlement_services_managed_maintenance() {
+        let diagnostics = DiagnosticBus::new();
+        let input = Arc::new(LogHost::new(&diagnostics));
+        let supervisor = LoggerSupervisor::new(input.clone(), |_| {});
+        supervisor
+            .fallback_and_deliver()
+            .expect("empty fallback route should activate");
+        input
+            .runtime
+            .request_managed_collection()
+            .expect("explicit maintenance should publish");
+
+        assert!(!settle_batch_runtime(&input.runtime, &supervisor));
+        assert!(matches!(
+            input.runtime.readiness(),
+            RuntimeReadiness::Ready(_)
+        ));
+    }
+
+    #[test]
     fn diagnostic_publication_racing_ingress_rearm_is_routed_once() {
         let diagnostics = DiagnosticBus::new();
         let input = Arc::new(LogHost::new(&diagnostics));

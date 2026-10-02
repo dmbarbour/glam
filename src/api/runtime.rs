@@ -1,5 +1,7 @@
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+#[cfg(test)]
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, Weak};
 
 use rpds::RedBlackTreeMapSync;
@@ -109,6 +111,44 @@ pub(super) struct RuntimeState {
     pub(super) work: Arc<EvaluationWorkCoordinator>,
     pub(super) shared_resources: Arc<RuntimeSharedResources>,
     pub(super) diagnostic_ingresses: Mutex<Vec<Arc<DiagnosticIngressInner>>>,
+    #[cfg(test)]
+    gc_outcome_publication_pause: Mutex<Option<RuntimeGcOutcomePublicationPause>>,
+}
+
+#[cfg(test)]
+struct RuntimeGcOutcomePublicationPause {
+    reached: mpsc::Sender<()>,
+    release: mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+pub(crate) struct RuntimeGcOutcomePublicationProbe {
+    reached: mpsc::Receiver<()>,
+    release: Option<mpsc::Sender<()>>,
+}
+
+#[cfg(test)]
+impl RuntimeGcOutcomePublicationProbe {
+    pub(crate) fn wait_until_reached(&self, timeout: std::time::Duration) -> bool {
+        self.reached.recv_timeout(timeout).is_ok()
+    }
+
+    pub(crate) fn release(mut self) {
+        self.release
+            .take()
+            .expect("GC outcome-publication probe released twice")
+            .send(())
+            .expect("paused GC outcome publisher should remain live");
+    }
+}
+
+#[cfg(test)]
+impl Drop for RuntimeGcOutcomePublicationProbe {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+    }
 }
 
 impl Drop for RuntimeState {
@@ -595,6 +635,8 @@ impl EvaluationRuntime {
                 work,
                 shared_resources,
                 diagnostic_ingresses: Mutex::new(Vec::new()),
+                #[cfg(test)]
+                gc_outcome_publication_pause: Mutex::new(None),
             }),
             default_reflection_profile,
         };
@@ -773,6 +815,8 @@ impl EvaluationRuntime {
             resources.values.core().collect_managed_for_maintenance()
         }));
         let heap = resources.values.core().managed_maintenance_snapshot();
+        #[cfg(test)]
+        self.pause_gc_outcome_publication_for_test();
         match attempted {
             Ok(Ok(report)) => {
                 let statistics = heap
@@ -867,6 +911,52 @@ impl EvaluationRuntime {
             .values
             .core()
             .install_synchronous_collection_wait_probe_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_gc_outcome_publication_probe_for_test(
+        &self,
+    ) -> RuntimeGcOutcomePublicationProbe {
+        let (reached_tx, reached_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let prior = self
+            .state
+            .gc_outcome_publication_pause
+            .lock()
+            .expect("GC outcome-publication probe mutex should not be poisoned")
+            .replace(RuntimeGcOutcomePublicationPause {
+                reached: reached_tx,
+                release: release_rx,
+            });
+        assert!(
+            prior.is_none(),
+            "GC outcome-publication probe already installed"
+        );
+        RuntimeGcOutcomePublicationProbe {
+            reached: reached_rx,
+            release: Some(release_tx),
+        }
+    }
+
+    #[cfg(test)]
+    fn pause_gc_outcome_publication_for_test(&self) {
+        let Some(pause) = self
+            .state
+            .gc_outcome_publication_pause
+            .lock()
+            .expect("GC outcome-publication probe mutex should not be poisoned")
+            .take()
+        else {
+            return;
+        };
+        pause
+            .reached
+            .send(())
+            .expect("GC outcome-publication probe should remain live");
+        pause
+            .release
+            .recv()
+            .expect("GC outcome-publication probe should release the publisher");
     }
 
     #[cfg(test)]
@@ -1038,8 +1128,10 @@ impl EvaluationRuntime {
     ///
     /// This operation does not construct or commit a readiness report. It
     /// waits for work currently owned by a worker or delivery callback,
-    /// abandons only unclaimed best-effort sparks, and leaves queued external
-    /// output for its host adapter.
+    /// abandons only unclaimed best-effort sparks, leaves queued external
+    /// output for its host adapter, and promotes collector-local pressure into
+    /// an explicit maintenance request only after reaching a stable runtime
+    /// boundary. It does not perform collection itself.
     pub fn pump_until_stable(&self) {
         const BACKGROUND_DRAIN_BUDGET: usize = 4096;
 
@@ -1067,7 +1159,27 @@ impl EvaluationRuntime {
             let maintenance = admission.gc_maintenance_snapshot(&settlement);
             let work = self.state.work.runtime_pump_snapshot();
             let running_delivery = self.state.shared_resources.has_running_delivery();
+            let stable = maintenance.active_leases == 0
+                && !work.background_ready
+                && !work.abandonable_sparks
+                && !work.background_busy
+                && !work.spark_busy
+                && !running_delivery;
+            let pressure_promoted = stable
+                && admission.promote_gc_pressure_request(
+                    &settlement,
+                    self.state
+                        .shared_resources
+                        .values
+                        .core()
+                        .managed_maintenance_snapshot(),
+                );
             drop(settlement);
+
+            if pressure_promoted {
+                admission.notify_settlement();
+                return;
+            }
 
             if work.background_ready || work.abandonable_sparks {
                 continue;
@@ -1590,6 +1702,7 @@ pub(crate) fn compiler_test_runtime() -> EvaluationRuntime {
                 work,
                 shared_resources,
                 diagnostic_ingresses: Mutex::new(Vec::new()),
+                gc_outcome_publication_pause: Mutex::new(None),
             }),
             default_reflection_profile: Arc::new(ReflectionTaskProfile::unsealed()),
         }

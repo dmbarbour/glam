@@ -48,6 +48,11 @@ const ENTRY_INVENTORY: &[EntryRecord] = &[
         selected: EntryClass::RequestOnly,
     },
     EntryRecord {
+        family: "stable pump collector-pressure promotion",
+        current: EntryClass::RequestOnly,
+        selected: EntryClass::RequestOnly,
+    },
+    EntryRecord {
         family: "aggressive pre-outer-entry verification",
         current: EntryClass::MayElect,
         selected: EntryClass::MayElect,
@@ -289,6 +294,29 @@ fn runtime_gc_policy_review_links_selected_plan_and_completion_gate() {
     assert!(review.contains("## Gate G4 and Forward Work"));
     assert!(plan.contains("### Phase I12B — Stable Pressure Promotion for Manual Runtimes"));
     assert!(plan.contains("GarbageCollectorRuntimePolicy_2026-10-02.md"));
-    assert!(roadmap.contains("I12B.0 selected permanently manual runtime heaps"));
+    assert!(roadmap.contains("I12B rejected automatic runtime construction"));
     assert!(roadmap.contains("Gate G4 requires the completed I12B pressure/reclamation"));
+}
+
+#[test]
+fn stable_pressure_promotion_has_one_explicit_runtime_boundary() {
+    let api_runtime = include_str!("../runtime.rs");
+    let admission = include_str!("../../runtime.rs");
+
+    assert_eq!(
+        api_runtime
+            .matches("admission.promote_gc_pressure_request(")
+            .count(),
+        1,
+        "the stable runtime pump should be the only pressure-promotion caller"
+    );
+    assert!(api_runtime.contains("let stable = maintenance.active_leases == 0"));
+    assert_eq!(
+        admission
+            .matches("pub(crate) fn promote_gc_pressure_request(")
+            .count(),
+        1,
+        "runtime mutation admission should own the one publication facade"
+    );
+    assert!(admission.contains("_settlement: &RuntimeSettlementGuard<'_>"));
 }

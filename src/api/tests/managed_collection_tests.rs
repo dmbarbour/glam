@@ -1092,6 +1092,318 @@ fn runtime_manual_maintenance_never_mutates_heap_policy() {
     );
 }
 
+#[test]
+fn stable_pump_without_pressure_changes_no_maintenance_state() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let RuntimeReadiness::Ready(before) = runtime.readiness() else {
+        panic!("new runtime should be ready")
+    };
+
+    runtime.pump_until_stable();
+
+    let RuntimeReadiness::Ready(after) = runtime.readiness() else {
+        panic!("a pressure-free pump should leave the runtime ready")
+    };
+    assert_eq!(
+        after.stamp().gc_maintenance_revision(),
+        before.stamp().gc_maintenance_revision(),
+        "a pressure-free stable pump must not publish maintenance work"
+    );
+}
+
+#[test]
+fn stable_pump_promotes_pressure_once_without_changing_policy() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    runtime
+        .service_managed_collection()
+        .expect("baseline collection should complete");
+    let RuntimeReadiness::Ready(before_pressure) = runtime.readiness() else {
+        panic!("baseline runtime should be ready")
+    };
+    let retained = runtime
+        .values()
+        .core()
+        .cross_managed_pressure_threshold_for_test();
+    let RuntimeReadiness::Ready(advisory_only) = runtime.readiness() else {
+        panic!("collector-local pressure should remain advisory before a stable pump")
+    };
+    assert_eq!(
+        advisory_only.stamp().gc_maintenance_revision(),
+        before_pressure.stamp().gc_maintenance_revision()
+    );
+
+    runtime.pump_until_stable();
+    let RuntimeReadiness::MaintenanceRequired(first) = runtime.readiness() else {
+        panic!("a stable pump should promote pending pressure")
+    };
+    assert_eq!(first.state(), RuntimeMaintenanceState::Requested);
+    runtime.pump_until_stable();
+    let RuntimeReadiness::MaintenanceRequired(repeated) = runtime.readiness() else {
+        panic!("repeated pumping should retain the one promoted request")
+    };
+    assert_eq!(
+        repeated.revision(),
+        first.revision(),
+        "repeated pumps must coalesce one pending pressure request"
+    );
+
+    repeated
+        .service()
+        .expect("promoted pressure should use ordinary snapshot service");
+    assert_eq!(
+        runtime
+            .values()
+            .core()
+            .managed_statistics()
+            .collection_policy(),
+        glam_gc::CollectionPolicy::NoAuto
+    );
+    assert!(
+        !runtime
+            .values()
+            .core()
+            .managed_statistics()
+            .collection_requested()
+    );
+    drop(retained);
+}
+
+#[test]
+fn pressure_after_one_stable_snapshot_waits_for_the_next_pump() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    runtime.pump_until_stable();
+    let RuntimeReadiness::Ready(before_pressure) = runtime.readiness() else {
+        panic!("pressure-free runtime should be ready")
+    };
+
+    let retained = runtime
+        .values()
+        .core()
+        .cross_managed_pressure_threshold_for_test();
+    let RuntimeReadiness::Ready(before_next_pump) = runtime.readiness() else {
+        panic!("pressure after the prior pump snapshot must remain advisory")
+    };
+    assert_eq!(
+        before_next_pump.stamp().gc_maintenance_revision(),
+        before_pressure.stamp().gc_maintenance_revision()
+    );
+
+    runtime.pump_until_stable();
+    assert!(matches!(
+        runtime.readiness(),
+        RuntimeReadiness::MaintenanceRequired(_)
+    ));
+    drop(retained);
+}
+
+#[test]
+fn explicit_request_and_pressure_promotion_coalesce_in_both_orders() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    runtime
+        .service_managed_collection()
+        .expect("baseline collection should complete");
+
+    let pressure_before_request = runtime
+        .values()
+        .core()
+        .cross_managed_pressure_threshold_for_test();
+    runtime
+        .request_managed_collection()
+        .expect("explicit request should publish");
+    let RuntimeReadiness::MaintenanceRequired(explicit_first) = runtime.readiness() else {
+        panic!("explicit request should be actionable")
+    };
+    runtime.pump_until_stable();
+    let RuntimeReadiness::MaintenanceRequired(after_first_pump) = runtime.readiness() else {
+        panic!("the stable pump should retain the explicit request")
+    };
+    assert_eq!(after_first_pump.revision(), explicit_first.revision());
+    drop(pressure_before_request);
+    after_first_pump
+        .service()
+        .expect("the explicit-first request should collect");
+
+    let pressure_before_pump = runtime
+        .values()
+        .core()
+        .cross_managed_pressure_threshold_for_test();
+    runtime.pump_until_stable();
+    let RuntimeReadiness::MaintenanceRequired(promoted_first) = runtime.readiness() else {
+        panic!("pressure should promote before the later explicit request")
+    };
+    runtime
+        .request_managed_collection()
+        .expect("requesting already-promoted maintenance should coalesce");
+    let RuntimeReadiness::MaintenanceRequired(after_explicit) = runtime.readiness() else {
+        panic!("the promoted request should remain actionable")
+    };
+    assert_eq!(
+        after_explicit.revision(),
+        promoted_first.revision(),
+        "an explicit request after promotion must not publish a second revision"
+    );
+    drop(pressure_before_pump);
+    after_explicit
+        .service()
+        .expect("the promoted-first request should collect");
+}
+
+#[test]
+fn pressure_after_collection_snapshot_survives_older_outcome_publication() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    runtime
+        .service_managed_collection()
+        .expect("baseline collection should complete");
+    runtime
+        .request_managed_collection()
+        .expect("explicit request should publish");
+    let RuntimeReadiness::MaintenanceRequired(maintenance) = runtime.readiness() else {
+        panic!("explicit request should be actionable")
+    };
+    let probe = runtime.install_gc_outcome_publication_probe_for_test();
+    let service = std::thread::spawn(move || maintenance.service());
+
+    assert!(
+        probe.wait_until_reached(Duration::from_secs(2)),
+        "collection should pause after reading its completed heap snapshot"
+    );
+    let retained = runtime
+        .values()
+        .core()
+        .cross_managed_pressure_threshold_for_test();
+    assert!(
+        runtime
+            .values()
+            .core()
+            .managed_statistics()
+            .collection_requested(),
+        "later allocation pressure should be latched before the older outcome publishes"
+    );
+    probe.release();
+    service
+        .join()
+        .expect("maintenance service should not panic")
+        .expect("the older collection should publish successfully");
+
+    assert!(
+        runtime
+            .values()
+            .core()
+            .managed_statistics()
+            .collection_requested(),
+        "publishing an older successful outcome must not clear later collector pressure"
+    );
+    runtime.pump_until_stable();
+    assert!(matches!(
+        runtime.readiness(),
+        RuntimeReadiness::MaintenanceRequired(_)
+    ));
+    drop(retained);
+}
+
+#[test]
+fn parked_pump_promotes_pressure_after_activity_wake() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let activity = runtime.state.shared_resources.mutation_admission.activity();
+    let prior_waits = activity.wait_count();
+    let lease = runtime
+        .state
+        .shared_resources
+        .mutation_admission
+        .begin_gc_activity();
+    let pumping_runtime = runtime.clone();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let pump = std::thread::spawn(move || {
+        pumping_runtime.pump_until_stable();
+        finished_tx
+            .send(())
+            .expect("pump completion observer should remain live");
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while activity.wait_count() == prior_waits {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the pump should park behind the active collection lease"
+        );
+        std::thread::yield_now();
+    }
+    let retained = runtime
+        .values()
+        .core()
+        .cross_managed_pressure_threshold_for_test();
+    assert!(
+        finished_rx.recv_timeout(Duration::from_millis(25)).is_err(),
+        "collector pressure alone must not bypass active runtime activity"
+    );
+
+    lease.finish(crate::runtime::RuntimeGcLeaseOutcome::success(
+        runtime.values().core().managed_maintenance_snapshot(),
+    ));
+    finished_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("lease retirement should wake the pump to promote pressure");
+    pump.join().expect("runtime pump should finish cleanly");
+    assert!(matches!(
+        runtime.readiness(),
+        RuntimeReadiness::MaintenanceRequired(_)
+    ));
+    drop(retained);
+}
+
+#[test]
+fn promoted_pressure_reclaims_dead_allocations_and_preserves_assembly_result() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .expect("assembler should build");
+    let module = assembler
+        .module(["i12b_pressure_promotion"])
+        .script("g", "language g0\nresult = \"preserved\"\n")
+        .build()
+        .expect("module should compile");
+    let assembly_result =
+        access_path(&assembler, module.value(), "result").expect("module should define result");
+    runtime
+        .service_managed_collection()
+        .expect("baseline collection should complete");
+
+    let pressure = runtime
+        .values()
+        .core()
+        .cross_managed_pressure_threshold_for_test();
+    drop(pressure);
+    runtime.pump_until_stable();
+    let RuntimeReadiness::MaintenanceRequired(maintenance) = runtime.readiness() else {
+        panic!("stable pump should expose pressure maintenance")
+    };
+    let report = maintenance
+        .service()
+        .expect("pressure-triggered snapshot service should collect");
+
+    assert!(report.reclaimed_slots() >= 128);
+    assert!(report.reclaimed_runs() >= 112);
+    assert_eq!(
+        assembler
+            .evaluator()
+            .eval(&assembly_result)
+            .expect("retained assembly result should survive pressure collection")
+            .as_bytes()
+            .expect("assembly result should remain a binary")
+            .as_deref(),
+        Some(b"preserved".as_slice())
+    );
+    assert_eq!(
+        runtime
+            .values()
+            .core()
+            .managed_statistics()
+            .collection_policy(),
+        glam_gc::CollectionPolicy::NoAuto
+    );
+}
+
 #[cfg(feature = "aggressive-gc-verification")]
 #[test]
 fn repository_aggressive_mode_enables_each_production_runtime() {

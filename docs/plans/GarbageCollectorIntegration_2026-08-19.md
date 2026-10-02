@@ -13,9 +13,9 @@ gap on 2026-10-01. I11D.2 dynamic tools and persistent-edge cost closure,
 I11D.3's final delta-oriented static audit, and I11D.4 certification are
 complete. Collector Gate G1 passed on 2026-08-25. Production remains `NoAuto`;
 I12A completed explicit runtime maintenance, actionable readiness, durable
-failure reporting, and pressure-boundary closure on 2026-10-02. I12B.0 selected
-permanently explicit `NoAuto` runtime maintenance; I12B's stable pressure
-promotion and policy-closure work is next.
+failure reporting, and pressure-boundary closure on 2026-10-02. I12B selected
+permanently explicit `NoAuto` runtime maintenance and completed stable pressure
+promotion plus the mandatory post-I12 review on 2026-10-02.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -283,7 +283,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I11D.3 | complete | unsafe, trace, mutation, owner, and lock/region delta audit |
 | I11D.4 | complete | dated Gate G3 certification |
 | I11 | complete | certified whole-production-graph forced collection |
-| I12 | in progress | explicit runtime maintenance complete; stable pressure promotion pending |
+| I12 | complete | explicit runtime maintenance, stable pressure promotion, and post-I12 review |
 | I12A.0 | complete | selected authoritative GC activity, actionable readiness, and durable maintenance-failure policy |
 | I12A | complete | explicit maintenance for immutable `NoAuto` runtimes |
 | I12A.1 | complete | authoritative activity state, lease, collector snapshot, and source boundary |
@@ -292,7 +292,10 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I12A.4 | complete | reporting, batch policy, fallback rendering, and metrics |
 | I12A.5 | complete | pressure-boundary closure and post-phase review |
 | I12B.0 | complete | permanently manual `NoAuto` runtime policy selected |
-| I12B | pending | stable pressure promotion and manual-policy closure |
+| I12B.1 | complete | immutable `NoAuto` constructor and entry-source closure |
+| I12B.2 | complete | stable pump-boundary pressure promotion and forced-order races |
+| I12B.3 | complete | direct, snapshot, batch, reclamation, output, and policy closure |
+| I12B | complete | stable pressure promotion and manual-policy closure |
 | I13 | pending | redundant ownership removal and documentation |
 
 ## Major-Stage Review Policy
@@ -6914,6 +6917,11 @@ Named verification:
 `runtime_gc_policy_plan_has_no_live_transition`, and the plan-link validation
 required by I12B.0.
 
+**Completed 2026-10-02.** The source-backed constructor inventory still has
+one authoritative `NoAuto` production heap constructor. Ordinary and recursive
+value access remain non-collecting; aggressive verification remains the only
+pre-entry election path.
+
 #### I12B.2 — Stable pump-boundary pressure promotion
 
 - After `pump_until_stable` has drained useful background work, abandoned
@@ -6937,6 +6945,12 @@ pressure after the snapshot, explicit request racing with promotion,
 collection completion racing with a later pressure event, and a client parked
 on runtime activity. No repetition-only race evidence is accepted.
 
+**Completed 2026-10-02.** `pump_until_stable` samples pressure only after
+establishing a work-stable instant under exclusive settlement admission, then
+publishes through `RuntimeMutationAdmission`. Deterministic channel/probe
+fixtures force every named ordering, including later pressure arriving after
+a completed collection has already captured the older collector snapshot.
+
 #### I12B.3 — Explicit-boundary and client closure
 
 - Exercise direct public service, revision-checked snapshot service, the two
@@ -6957,6 +6971,12 @@ on runtime activity. No repetition-only race evidence is accepted.
 Run the routine repository checks, collector tests, profiling script, focused
 forced-order matrix, and representative direct-assembly sample. Record the
 mandatory post-I12 implementation and forward-plan review before I13.
+
+**Completed 2026-10-02.** Both executable settlement loops service the same
+maintenance snapshots, real pressure reclaims unreachable production values,
+retained assembly output survives, and policy remains `NoAuto`. The mandatory
+review is
+[`GarbageCollectorIntegrationI12_2026-10-02.md`](../reviews/GarbageCollectorIntegrationI12_2026-10-02.md).
 
 ## Phase I13 — Retire Redundant Ownership and Document the Boundary
 
@@ -7049,7 +7069,8 @@ semantics.
   anonymous permanent `Busy`.
 - Every heap's collection policy is fixed at construction. All Glam runtimes
   select `NoAuto`; no live heap changes policy, and ordinary mutator entry
-  never elects production collection.
+  never elects production collection. Stable runtime pumping promotes real
+  collector pressure into the revision-checked explicit maintenance protocol.
 - No pointer-local GC locking or atomic reference count remains on internal
   managed edges.
 - Any conservative retention through external opaque public roots is

@@ -68,10 +68,13 @@ value construction usable without also preserving the scheduler, executor,
 runtime facade, or default reflection profile. Production non-inline values
 already use registered roots over managed outer value nodes, but collection
 remains `NoAuto`. Controlled fixtures exercise serial, worker, and finalizer
-schedules, while I12A exposes explicit request and service through runtime
-maintenance without changing heap policy. I12B.0 selected permanent manual
-runtime heaps: a stable pump boundary will promote collector pressure into
-that explicit protocol, and ordinary mutator entry will not elect collection.
+schedules, while runtime maintenance exposes explicit request and service
+without changing heap policy. Once `pump_until_stable` has drained useful
+background work and obtained exclusive settlement admission, it promotes a
+pending collector pressure latch into that same explicit maintenance protocol.
+The pump does not collect: the next stable readiness observation returns
+`MaintenanceRequired`, whose revision-checked service performs collection.
+Ordinary mutator entry never elects production collection.
 Repository-wide aggressive verification and the Gate G3 certification cover
 the complete production ownership graph without becoming production policy.
 

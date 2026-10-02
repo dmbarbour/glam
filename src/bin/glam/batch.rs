@@ -482,3 +482,25 @@ pub(super) fn assembly_result_context(values: &Values) -> Result<Value, Error> {
         values.record([("result", values.text("asm.result"))])?,
     )])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_batch_settlement_services_managed_maintenance() {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let diagnostics = DiagnosticBus::for_runtime(&runtime);
+        let values = runtime.values();
+        runtime
+            .request_managed_collection()
+            .expect("explicit maintenance should publish");
+
+        assert!(!settle_batch_runtime_default(
+            &runtime,
+            &diagnostics,
+            &values
+        ));
+        assert!(matches!(runtime.readiness(), RuntimeReadiness::Ready(_)));
+    }
+}

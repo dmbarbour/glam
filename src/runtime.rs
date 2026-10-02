@@ -124,6 +124,22 @@ impl RuntimeMutationAdmission {
         self.activity.record_gc_request();
     }
 
+    /// Promotes collector-local pressure into one authoritative runtime
+    /// maintenance request while exclusive settlement admission is held.
+    ///
+    /// The heap remains permanently `NoAuto`; this publication only makes an
+    /// already-latched collector request visible to runtime readiness.
+    pub(crate) fn promote_gc_pressure_request(
+        &self,
+        _settlement: &RuntimeSettlementGuard<'_>,
+        heap: glam_gc::HeapMaintenanceSnapshot,
+    ) -> bool {
+        let pressure_requested = heap
+            .statistics()
+            .is_some_and(glam_gc::HeapStatistics::collection_requested);
+        pressure_requested && self.activity.promote_gc_pressure_request()
+    }
+
     pub(crate) fn record_gc_request_failure(
         &self,
         _mutation: &RuntimeMutationGuard<'_>,
@@ -427,6 +443,22 @@ impl RuntimeActivityState {
             state.gc.explicit_request = true;
             state.gc.advance_revision();
         }
+    }
+
+    fn promote_gc_pressure_request(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .expect("runtime activity mutex should not be poisoned");
+        if state.gc.active_leases != 0
+            || state.gc.explicit_request
+            || state.gc.disposition != RuntimeGcMaintenanceDisposition::Idle
+        {
+            return false;
+        }
+        state.gc.explicit_request = true;
+        state.gc.advance_revision();
+        true
     }
 
     fn record_gc_request_failure(&self, outcome: RuntimeGcLeaseOutcome) {
