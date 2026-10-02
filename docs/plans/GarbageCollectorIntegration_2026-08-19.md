@@ -296,7 +296,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I12B.2 | complete | stable pump-boundary pressure promotion and forced-order races |
 | I12B.3 | complete | direct, snapshot, batch, reclamation, output, and policy closure |
 | I12B | complete | stable pressure promotion and manual-policy closure |
-| I13A | pending | final ownership, provenance, gate, adapter, and drop-record inventory |
+| I13A | complete | final ownership, provenance, gate, adapter, and drop-record inventory |
 | I13B | pending | proven-redundant scaffolding retirement and stable terminology |
 | I13C | pending | current architecture, safepoint, and starvation documentation |
 | I13D | pending | Gate G4 audit, post-I13 review, and plan closure |
@@ -7013,6 +7013,16 @@ such a defect reopens the earliest phase which introduced it.
   edge, and active-owner inventories. Add only delta latches needed to prevent
   a retired representation from returning; do not duplicate their full source
   census.
+
+**Completed 2026-10-02.** The dated inventory is
+[`GarbageCollectorI13CleanupInventory_2026-10-02.md`](../reviews/GarbageCollectorI13CleanupInventory_2026-10-02.md).
+Recursive semantic identities are already exact `Gc` edges. Every remaining
+adjacent `Arc` and copied provenance field has a stable structural, root,
+host, scheduler, routing, or diagnostic role; none has an equally cheap heap-
+identity replacement at its current boundary. The complete textual
+`ManagedDropRecord` remains valuable admission evidence. I13B is restricted
+to stale scaffolding names, comments, and allowances unless a new concrete
+redundancy is first added to this inventory.
 
 ### I13B — Retire Only Proven-Redundant Scaffolding
 
