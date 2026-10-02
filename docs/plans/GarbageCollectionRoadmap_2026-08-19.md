@@ -1,32 +1,19 @@
 # Glam-Owned Garbage Collection Roadmap — 2026-08-19
 
-Status: in progress; collector Phases C0 through C6D.3, the C2C.6 verification
-follow-up, and integration Phases I0 through I11 are complete.
-Gates G0 through G3 are established, and all mandatory collector reviews
-through post-C6 plus the post-I1 through post-I11 integration reviews and
-independent Gate G2 audit have been performed. Collector
-stress, metrics, and tuning continue in C7/C8 while production collection
-remains disabled. The original focused I5-I10 forward review is recorded in
-[`GarbageCollectorIntegrationI5I10_2026-09-03.md`](../reviews/GarbageCollectorIntegrationI5I10_2026-09-03.md);
-its findings have been resolved by the completed phases and remediation
-reviews. I11B completed the first controlled serial whole-production-graph
-collection boundary, and I11C exercised worker, finalizer,
-request-coalescing, and retirement schedules. I11D.0 repaired the missing
-worker/collector ordering proof, and I11D.1 completed repository-wide ordinary
-and aggressive ownership closure on 2026-10-01. I11D.4 certified Gate G3 on
-2026-10-02. Production remains `NoAuto`; I12 explicit runtime maintenance,
-stable pressure promotion, policy closure, and its mandatory review are
-complete.
-I11D.2 is complete. The supported Miri, ASan/LSan, and TSan targets pass, with
-one broad end-to-end Miri target explicitly excluded for unreasonable
-execution time. Persistent edges retain one-pointer layout, zero allocation
-and root traffic, and minimal release code generation. I11D.3 completed the
-static closure audit on 2026-10-02 without a production repair.
-I12A.0 selected the runtime GC activity/readiness and durable maintenance-
-failure protocol on 2026-10-02; I12A then implemented and reviewed explicit
-`NoAuto` maintenance. I12B rejected automatic runtime construction for the
-bootstrap and now promotes pressure at an explicit stable pump boundary.
-The completed remediation and forward-path reconciliation are reviewed in
+Status: in progress; collector Phases C0 through C6D.3 plus C2C.6 and
+integration Phases I0 through I12 are complete. I13A-C have reconciled final
+ownership, retired stale migration scaffolding, and updated current
+documentation; Gate G4 and the post-I13 audit remain. Gates G0 through G3 are
+established, including repository-wide ordinary/aggressive closure and the
+supported Miri, ASan/LSan, and TSan targets. Production heaps remain immutable
+`NoAuto`: explicit runtime maintenance is available, and pressure becomes
+actionable only at the reviewed stable pump boundary. Automatic collection is
+not enabled. Collector stress, metrics, and tuning continue in C7/C8.
+
+The final ownership disposition is recorded in
+[`GarbageCollectorI13CleanupInventory_2026-10-02.md`](../reviews/GarbageCollectorI13CleanupInventory_2026-10-02.md).
+The completed raw-value/persistent-edge remediation and forward-path
+reconciliation are reviewed in
 [`GarbageCollectorGCI11R002Holistic_2026-10-01.md`](../reviews/GarbageCollectorGCI11R002Holistic_2026-10-01.md).
 
 This roadmap keeps two large transitions aligned:
@@ -466,41 +453,26 @@ The following must remain sequential:
 - full-graph tracing precedes any production sweep;
 - full collection correctness precedes concurrent marking.
 
-## Remaining Phase Checkpoints
+## Settled Integration Decisions
 
-- C4 supplies one direct managed root representation: a one-word typed root
-  handle, a non-generic cell containing a weak heap identity and erased `Gc`,
-  and a thin weak registry entry. I2 selected a Glam-owned opaque wrapper which
-  keeps small integers inline and otherwise shares that direct registered root;
-  I4F installed it as the production representation. No alternate collector
-  root-cell representation is required.
-
-- I5 prepares one transitive managed-edge walk and lazy, promise, and core-net
-  families separately, then changes all three production recursive identities
-  in one indivisible checkpoint. I5.0 must first separate interior, durable,
-  scoped, coordination, and weak-liveness roles for those identities.
-
-The I8 ownership choice is closed: production core runtime nets use one
-managed synchronization-owning outer cell per shared net. Individual agents,
-ports, maps, and topology allocations remain ordinary fields/storage inside
-that cell. Generic non-core interaction-net ownership remains
-collector-independent. I5 performs this transition atomically with lazy and
-promise identity; I8 performs the final post-cutover payload, mutation, and
-cycle audit without introducing a managed allocation per net node.
-GCI5R-002 has already routed lazy, promise, and core-net production writers
-through owner-qualified collector transitions. The net route currently uses a
-policy-selected whole-net pre/post visitor under the existing mutex; I8 must
-replace that correctness bridge with exact edit deltas before concurrent
-collection makes it a high-volume barrier.
-
-C6D has resolved the collector-side terminal question: allocation capabilities
-are mutator-scoped and non-owning, roots retain their cell but only weakly name
-the heap, and last-owner teardown runs without manufacturing mutator authority.
-Integration must preserve that ownership boundary rather than choose another
-collector terminal protocol.
-
-Each remaining choice must be resolved and latched by the named phase. None permits
-weakening runtime locality, exact tracing, or the collection-admission gates.
+- Roots use one typed handle to a non-generic cell which weakly identifies its
+  heap and stores the erased managed pointer. Glam's private public-value
+  wrapper keeps small integers inline and otherwise owns exactly one such
+  registered root.
+- Lazy, promise, and core-net semantic identities are exact managed edges.
+  Durable Rust owners use registered roots; access-free scheduler and
+  diagnostic fields are copied only where the final ownership inventory names
+  their role.
+- Production core nets use one managed synchronization-owning outer cell per
+  shared net. Topology remains ordinary storage inside that cell, and every
+  semantic mutation supplies exact owner transitions under the net mutex.
+  Generic non-core nets remain collector-independent.
+- Allocation capabilities are mutator-scoped and non-owning. Roots retain
+  their root cell but only weakly name the heap; last-owner teardown does not
+  manufacture mutator authority.
+- Compatibility visitors for immutable aggregate shells remain deliberate
+  until Value Representation Refinement. They do not represent an unfinished
+  recursive-identity migration.
 
 ## Explicitly Deferred
 

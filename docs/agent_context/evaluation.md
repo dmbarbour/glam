@@ -16,6 +16,25 @@ control-flow overview.
   `Key` descriptions if useful, but do not add a production static which
   retains a constructed `Value`. Optional compiler caches publish one complete
   type-indexed bundle rather than exposing partially initialized entries.
+- Treat `Gc<T>` as a non-rooting interior edge. Code may inspect, duplicate,
+  compare, or install one only under matching `RuntimeValueAccess` (or its
+  evaluator-qualified view). Anything surviving that access must already be
+  beneath an exact traced owner or published as a registered root. Do not put a
+  root inside the managed graph to solve a liveness problem; that hides the
+  cycles collection is meant to reclaim.
+- Managed access is callback-free. Close it before acquiring coordinator or
+  host lifecycle locks, waiting, invoking user/loader/logger callbacks,
+  delivering events, or sleeping a worker. The retained allocation scope in
+  `RuntimeValueAccess` is intentional mutator authority, not redundant state.
+- Glam heaps use immutable `CollectionPolicy::NoAuto`. Allocation pressure is
+  promoted only after the runtime pump reaches a revision-checked stable
+  boundary, and explicit maintenance performs collection as runtime activity.
+  If work never becomes stable, collection may be deferred indefinitely; do
+  not “fix” that accepted baseline by collecting on ordinary mutator entry.
+- Managed `Drop` is passive: it may release Rust shells but cannot observe or
+  preserve dying managed edges, enter the heap/runtime, invoke callbacks, or
+  perform active retirement. Put active cleanup in the external-owner registry
+  with explicit registered roots instead.
 - Production evaluation starts from closed `Value`s. The small fixture IR in
   `src/eval/test_support.rs` must lower to nets before evaluation; do not add a
   second expression interpreter or local environment.

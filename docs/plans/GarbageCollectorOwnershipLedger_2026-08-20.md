@@ -1,7 +1,9 @@
 # Glam GC Ownership and Mutation Ledger — 2026-08-20
 
-Status: Phases I0 through I11 and their mandatory reviews are complete. Gates
-G2 and G3 passed on 2026-09-11 and 2026-10-02 respectively. GCI11R-002D.2 and
+Status: Phases I0 through I12 and their mandatory reviews are complete; I13A-C
+have reconciled the final ownership inventory, scaffolding, and current
+documentation. Gates G2 and G3 passed on 2026-09-11 and 2026-10-02
+respectively; Gate G4 awaits the final delta audit. GCI11R-002D.2 and
 the nested persistent-edge cutover closed on 2026-10-01 with zero unclassified
 raw API or persistent-edge occurrence and passing ordinary/aggressive
 workspaces. I11D.2 dynamic
@@ -440,3 +442,23 @@ and reran the collector layout/class suite. The certification is recorded in
 This closes the inventory gate only: production remains `NoAuto`, and I11B
 owns the first controlled forced collection over the complete production
 runtime graph.
+
+## I13 Final Ownership Reconciliation
+
+The dated
+[`GarbageCollectorI13CleanupInventory_2026-10-02.md`](../reviews/GarbageCollectorI13CleanupInventory_2026-10-02.md)
+reconciles the post-I12 implementation against this ledger. Lazy, promise, and
+core-net semantic facades each contain one exact managed edge. No remaining
+`Arc` exists merely to keep one of those recursive identities alive. Retained
+reference-counted owners are immutable structural sharing, registered
+external roots, edge-free scheduler/notification state, host resources, or
+the generic non-core net API.
+
+Copied runtime IDs, weak observers, lazy labels, and promise sidecars remain
+only where routing, dead-runtime identity, scheduler indexing, or diagnostics
+must work without opening a mutator. The compatibility visitor remains the
+authoritative bridge through immutable aggregate shells until Value
+Representation Refinement. `ManagedDropRecord` remains mandatory textual
+collector-admission evidence because `Trace` alone does not constrain
+destruction. The final Gate G4 audit must reuse the authoritative inventories
+rather than create another ownership census.

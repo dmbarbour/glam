@@ -298,7 +298,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I12B | complete | stable pressure promotion and manual-policy closure |
 | I13A | complete | final ownership, provenance, gate, adapter, and drop-record inventory |
 | I13B | complete | proven-redundant scaffolding retirement and stable terminology |
-| I13C | pending | current architecture, safepoint, and starvation documentation |
+| I13C | complete | current architecture, safepoint, and starvation documentation |
 | I13D | pending | Gate G4 audit, post-I13 review, and plan closure |
 | I13 | pending | redundant ownership removal, documentation, and Gate G4 |
 
@@ -7059,6 +7059,16 @@ destruction, and active-owner inventories all pass after the cleanup.
   plan owns the accepted progress limitation and future concurrent remedy.
 - Reconcile the ownership ledger and roadmap with every retained `Arc`, copied
   provenance field, compatibility adapter, and admission record.
+
+**Completed 2026-10-02.** Current evaluation architecture now centralizes the
+interior-edge/registered-root boundary, regional allocation chronology,
+callback-free safepoints, mutation gateways, passive managed destruction,
+explicit maintenance, and recoverable maintenance state. Agent context records
+the corresponding regression rules, including the accepted possibility that
+serial `NoAuto` collection is deferred while runtime work never reaches a
+stable pump boundary. The source map, ownership ledger, and roadmap now use
+current roles rather than transition-phase terminology; concurrent progress
+remains owned by the separate deferred plan.
 
 ### I13D — Gate G4 and Final Review
 

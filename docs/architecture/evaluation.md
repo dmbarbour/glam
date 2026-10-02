@@ -78,6 +78,16 @@ Ordinary mutator entry never elects production collection.
 Repository-wide aggressive verification and the Gate G3 certification cover
 the complete production ownership graph without becoming production policy.
 
+The `NoAuto` policy deliberately separates pressure detection from collection.
+Allocation records pressure on the value domain; only a runtime client which
+has pumped to a stable readiness boundary may promote that latch to
+`MaintenanceRequired` and explicitly service it. Collection and finalization
+then run as runtime activity under exclusive mutation admission. This baseline
+can defer collection indefinitely when useful runtime work never reaches a
+stable boundary. That is an accepted progress limitation, not permission for
+ordinary mutator entry to elect collection; the deferred concurrent-collector
+plan owns the eventual starvation remedy.
+
 Every production evaluator entry receives an `EvalContext` derived from an
 external `EvaluationSession` owner lease. An `Assembler` and its clones share
 one internal `ReasoningSession`, which retains that lease and the assembler's
@@ -202,6 +212,41 @@ task quantum before polling and does not refund unused units. Its
 inner spend. The runtime background pump instead translates exact inner spend
 into its public report. Finer foreground accounting remains observational
 until scheduler policy is revisited.
+
+## Collector Boundary
+
+One `RuntimeValueDomain` owns one non-moving collector heap. A `Gc<T>` is a
+non-rooting interior graph edge and may be observed or duplicated only under
+matching `RuntimeValueAccess`. A `Root<T>` is the registered durable owner used
+when a value crosses an access region into scheduler, host, cache, or public
+state. The public value facade keeps small integers inline and otherwise owns
+one private registered root; it exposes neither representation identity nor a
+raw core value without bounded matching access.
+
+Lazy, promise, and core-net semantic facades each contain exactly one managed
+edge. Their durable roots copy only the access-free scheduler, diagnostic, or
+coordination fields justified by the ownership inventory. Immutable list,
+dictionary, function, metadata, and failure shells remain ordinary structural
+sharing, but their central compatibility visitor reaches every exact managed
+identity beneath them. They are a deliberate boundary pending Value
+Representation Refinement, not leftover recursive `Arc` ownership.
+
+Fresh allocation is temporarily live only for its mutator region. Before that
+region ends it must be installed under an exactly traced owner or published as
+a registered root. Post-publication lazy, promise, and net changes go through
+their collector-owned mutation gateways; the current stop-the-world policy
+makes those barriers structural no-ops while preserving the exact sites a
+future concurrent policy needs. No managed destructor may open the runtime,
+observe or preserve a dying `Gc`, invoke a callback, or perform active
+retirement. Such behavior belongs to an external owner which holds explicit
+roots and is retired outside collector locks.
+
+Managed access is a callback-free safepoint region. Coordinator locks, waits,
+host callbacks, event delivery, diagnostic rendering, and worker sleeps occur
+after it closes. Full collection stops new mutators, traces registered roots,
+eagerly sweeps ordinary runs, and finalizes reviewed passive-drop families.
+Recoverable trace/finalizer panics remain explicit maintenance state; permanent
+heap damage is reported without re-entering the value domain.
 
 ## WHNF Submachine Flow
 
