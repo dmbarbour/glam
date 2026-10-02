@@ -148,7 +148,8 @@ Those documents now distinguish:
   completed stored-edge cutover.
 
 Follow-up: I11D.3 completed its static delta audit on 2026-10-02, leaving only
-I11D.4 Gate G3 certification open.
+I11D.4 Gate G3 certification open. I11D.4 subsequently certified the gate on
+the same date.
 
 ### GCI2HR-004 — I11D.2 was too broad to execute safely as one checkpoint
 

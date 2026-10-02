@@ -1,8 +1,8 @@
 # Glam-Owned Garbage Collection Roadmap — 2026-08-19
 
 Status: in progress; collector Phases C0 through C6D.3, the C2C.6 verification
-follow-up, integration Phases I0 through I11C, and I11D.0-I11D.1 are complete.
-Gates G0, G1, and G2 are established, and all mandatory collector reviews
+follow-up, and integration Phases I0 through I11 are complete.
+Gates G0 through G3 are established, and all mandatory collector reviews
 through post-C6 plus the post-I1 through post-I11 integration reviews and
 independent Gate G2 audit have been performed. Collector
 stress, metrics, and tuning continue in C7/C8 while production collection
@@ -13,8 +13,9 @@ reviews. I11B completed the first controlled serial whole-production-graph
 collection boundary, and I11C exercised worker, finalizer,
 request-coalescing, and retirement schedules. I11D.0 repaired the missing
 worker/collector ordering proof, and I11D.1 completed repository-wide ordinary
-and aggressive ownership closure on 2026-10-01. Production remains `NoAuto`
-while I11D.4 owns the final Gate G3 certification.
+and aggressive ownership closure on 2026-10-01. I11D.4 certified Gate G3 on
+2026-10-02. Production remains `NoAuto`; I12 explicit runtime maintenance is
+next.
 I11D.2 is complete. The supported Miri, ASan/LSan, and TSan targets pass, with
 one broad end-to-end Miri target explicitly excluded for unreasonable
 execution time. Persistent edges retain one-pointer layout, zero allocation
@@ -390,13 +391,18 @@ admission wait, and also identified missing suite-wide aggressive-mode and
 exact finalizer-allocation evidence. I11D closes those gaps before G3.
 I11D.0 has since closed the deterministic schedule/allocation gap, and I11D.1
 has closed the suite-wide aggressive-mode and regional-ownership gap. I11D.2
-has closed dynamic-tool and persistent-edge cost verification. I11D.3 has
-closed the final static delta audit. The remaining Gate G3 work is I11D.4.
+has closed dynamic-tool and persistent-edge cost verification. I11D.3 closed
+the final static delta audit, and I11D.4 certified the combined result.
 
 Only after G2 may tests force a full collection over the complete production
 graph.
 
 ### Gate G3 — production full collection certified
+
+**Passed 2026-10-02.** The dated certification is
+[`GarbageCollectorGateG3_2026-10-02.md`](../reviews/GarbageCollectorGateG3_2026-10-02.md).
+It authorizes I12's explicit runtime-maintenance work but changes no existing
+heap from immutable `CollectionPolicy::NoAuto`.
 
 Forced full collections pass the complete semantic, concurrency, and drop
 tests. Passing the gate authorizes I12 to implement collection at explicit

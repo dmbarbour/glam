@@ -129,4 +129,4 @@ all-feature collector check.
 P5B and I11D.2e are complete. The explicit API has the intended semantic
 friction at source level without release-mode runtime friction. Follow-up:
 I11D.3 completed the static source-delta, ledger, protocol, and focused closure
-audits on 2026-10-02; I11D.4 certification is next.
+audits on 2026-10-02; I11D.4 subsequently certified Gate G3 that day.

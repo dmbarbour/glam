@@ -7,7 +7,7 @@ Status: complete. GCI11R-002 and I11D.1 are resolved. The private
 `aggressive-gc-verification` repository mode completes the entire workspace
 without changing production's immutable `CollectionPolicy::NoAuto`. Follow-up
 I11D.2 dynamic unsafe-boundary verification and I11D.3's static closure audit
-are complete; Gate G3 remains closed pending I11D.4 certification.
+are complete; I11D.4 certified Gate G3 on 2026-10-02.
 
 Follow-up review separates the focused D.2h implementation accounting in
 [`GarbageCollectorAggressiveD2h_2026-10-01.md`](GarbageCollectorAggressiveD2h_2026-10-01.md)

@@ -11,8 +11,11 @@ persistent-edge cost verification.
 Status: complete. I11D.3a-I11D.3d distinguish the already reviewed D.2h
 migration from the seven-file I11D.2 follow-up, reconcile every authoritative
 ownership ledger, and rerun the deterministic production protocol witnesses.
-No production repair was required. Gate G3 remains closed pending the dated
-I11D.4 certification.
+No production repair was required. At this audit boundary, Gate G3 remained
+closed pending the dated I11D.4 certification.
+
+Follow-up: I11D.4 certified Gate G3 later on 2026-10-02 in
+[`GarbageCollectorGateG3_2026-10-02.md`](GarbageCollectorGateG3_2026-10-02.md).
 
 ## Scope and Method
 

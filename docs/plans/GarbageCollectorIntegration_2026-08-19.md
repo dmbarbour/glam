@@ -1,8 +1,7 @@
 # Glam GC Integration Plan — 2026-08-19
 
-Status: in progress; Phases I0 through I11C and their mandatory reviews,
-I11D.0 deterministic remediation, and I11D.1 repository-wide aggressive
-verification are complete. Gate G2 passed on 2026-09-11. The
+Status: in progress; Phases I0 through I11 and their mandatory reviews are
+complete. Gates G2 and G3 passed on 2026-09-11 and 2026-10-02 respectively. The
 production public-value facade uses an inline-or-registered-root
 representation, every durable owner stores that facade, and lazy, promise,
 and core-net identities are one exact managed graph. Production collection
@@ -10,9 +9,10 @@ remains disabled in ordinary execution; I11B exercised controlled serial
 whole-runtime collection and I11C exercised worker, finalizer,
 request-coalescing, and runtime-retirement schedules through private test and
 maintenance seams. I11D.1 closed the regional-ownership and repository-mode
-gap on 2026-10-01. I11D.2 dynamic tools and persistent-edge cost closure and
-I11D.3's final delta-oriented static audit are complete; I11D.4 certification
-remains before Gate G3. Collector Gate G1 passed on 2026-08-25.
+gap on 2026-10-01. I11D.2 dynamic tools and persistent-edge cost closure,
+I11D.3's final delta-oriented static audit, and I11D.4 certification are
+complete. Collector Gate G1 passed on 2026-08-25. Production remains `NoAuto`;
+I12 explicit maintenance is next.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
@@ -278,8 +278,8 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I11D.2b-d | complete | focused Miri, AddressSanitizer, and ThreadSanitizer execution, with one explicit broad-target Miri performance exclusion |
 | I11D.2e | complete | persistent-edge release cost and code-generation closure |
 | I11D.3 | complete | unsafe, trace, mutation, owner, and lock/region delta audit |
-| I11D.4 | pending | dated Gate G3 certification |
-| I11 | pending | whole-production-graph forced collection |
+| I11D.4 | complete | dated Gate G3 certification |
+| I11 | complete | certified whole-production-graph forced collection |
 | I12 | pending | runtime maintenance and threshold collection |
 | I12A.0 | pending | GC operational-activity/readiness decision review gate |
 | I12A | pending | explicit maintenance for immutable `NoAuto` runtimes |
@@ -6571,9 +6571,10 @@ gaps block Gate G3. Close them and certify the boundary in these checkpoints:
     retirement with their existing deterministic fixtures and current source.
   - **I11D.3d — focused closure: complete.** Rerun every source latch and focused I11
     production fixture after any repair from the preceding checkpoints.
-- **I11D.4 — Certification.** Publish a dated Gate G3 review accounting for
-  every I11 schedule, both collection modes, all dynamic-tool results, and any
-  intentional nondeterministic reflection behavior. The complete aggressive
+- **I11D.4 — Certification: complete 2026-10-02.** Publish a dated Gate G3
+  review accounting for every I11 schedule, both collection modes, all
+  dynamic-tool results, and any intentional nondeterministic reflection
+  behavior. The complete aggressive
   workspace result recorded by D.2h remains valid across documentation,
   tool-orchestration, and unsupported-tool-record changes. Rerun it if I11D.2
   or I11D.3 changes runtime/collector code, unsafe tracing or mutation, root or
@@ -6648,7 +6649,14 @@ verification-only delta, closes every exact ownership/source ledger, and
 reconciles locks, waits, finalization, external owners, panic/retry, and
 runtime retirement with their deterministic fixtures. The evidence is in
 [`GarbageCollectorI11D3StaticClosure_2026-10-02.md`](../reviews/GarbageCollectorI11D3StaticClosure_2026-10-02.md).
-I11D.4 Gate G3 certification is next.
+I11D.4 certified Gate G3 on 2026-10-02. The current ordinary workspace and
+focused aggressive smoke pass; the complete D.2h aggressive workspace remains
+authoritative because the intervening source delta is verification-only under
+the recorded semantic rerun trigger. The combined schedule, ownership,
+dynamic-tool, static, reflection, and deferred-work accounting is in
+[`GarbageCollectorGateG3_2026-10-02.md`](../reviews/GarbageCollectorGateG3_2026-10-02.md).
+I11 is complete. I12's explicit runtime-maintenance gate is next; certification
+does not change any existing heap from `CollectionPolicy::NoAuto`.
 
 ## Phase I12 — Explicit Runtime Maintenance and Threshold Collection
 

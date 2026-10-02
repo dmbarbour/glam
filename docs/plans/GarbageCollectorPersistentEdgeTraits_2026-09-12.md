@@ -55,8 +55,8 @@ durable liveness cell, not an unrooted graph edge.
   gateway. Mutator qualification here does not itself implement SATB,
   relocation, or a concurrent write barrier.
 - [Collector integration](GarbageCollectorIntegration_2026-08-19.md) Gate G3
-  remains closed until both this plan and the parent D.2 closure prove that no
-  raw value or edge crosses a regional boundary without an exact owner.
+  passed on 2026-10-02 after this plan and the parent D.2 closure proved that
+  no raw value or edge crosses a regional boundary without an exact owner.
 
 ## Selected Contract
 
@@ -784,8 +784,9 @@ cargo test -q
 ```
 
 Also run the parent plan's complete workspace aggressive-verification command.
-P5 completion contributes to Gate G3 but cannot pass it without D.2h and the
-remaining GCI11R remediation.
+P5 completion contributed to Gate G3 but did not pass it alone; D.2h, the
+remaining GCI11R remediation, and I11D certification subsequently passed the
+gate on 2026-10-02.
 
 ## Verification Matrix
 
