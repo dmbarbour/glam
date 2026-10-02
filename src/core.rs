@@ -424,10 +424,6 @@ impl CoreValueFactory {
     /// an orchestration boundary retains this factory and opens a later access
     /// region instead. Family-specific installation beneath an existing
     /// traced owner remains separate from this containing-value root path.
-    #[allow(
-        dead_code,
-        reason = "GCI5R-001B establishes the regional publisher before the C-F family cutovers"
-    )]
     pub(crate) fn construct_runtime_value_root(
         &self,
         construction: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> Value,

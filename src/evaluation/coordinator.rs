@@ -740,10 +740,6 @@ impl WorkCoordinatorState {
 /// registrations retain only weak demand-state liveness and closure state.
 pub(crate) struct EvaluationWorkCoordinator {
     runtime: EvaluationRuntimeId,
-    #[allow(
-        dead_code,
-        reason = "I4F.2d.1 installs weak publication authority before the I4F.2d.2 root switch"
-    )]
     values: crate::core::RuntimeValueObserver,
     ids: Arc<RuntimeIds>,
     admission: Arc<RuntimeMutationAdmission>,
@@ -1246,10 +1242,6 @@ impl EvaluationWorkCoordinator {
         self.runtime
     }
 
-    #[allow(
-        dead_code,
-        reason = "I4F.2d.1 installs weak publication authority before the I4F.2d.2 root switch"
-    )]
     pub(crate) fn value_observer(&self) -> crate::core::RuntimeValueObserver {
         self.values.clone()
     }

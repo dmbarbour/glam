@@ -60,7 +60,7 @@ unsafe impl Trace for RecoverableTracePanicFixture {
 #[cfg(test)]
 unsafe impl ManagedFamily for RecoverableTracePanicFixture {
     const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
-        "I12A recoverable trace-panic fixture",
+        "recoverable trace-panic fixture",
         "src/core/managed.rs",
         "direct Drop releases one ordinary Arc",
         "the atomic test probe has passive destruction",
@@ -94,7 +94,7 @@ unsafe impl Trace for RecoverableFinalizerPanicFixture {
 #[cfg(test)]
 unsafe impl ManagedFamily for RecoverableFinalizerPanicFixture {
     const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
-        "I12A recoverable finalizer-panic fixture",
+        "recoverable finalizer-panic fixture",
         "src/core/managed.rs",
         "direct Drop only updates an atomic test probe before its injected panic",
         "the ordinary Arc and atomic probe have passive destruction",
@@ -116,7 +116,7 @@ unsafe impl Trace for RuntimePressureFixture {
 #[cfg(test)]
 unsafe impl ManagedFamily for RuntimePressureFixture {
     const DROP_RECORD: ManagedDropRecord =
-        ManagedDropRecord::no_drop("I12A runtime pressure fixture", "src/core/managed.rs");
+        ManagedDropRecord::no_drop("runtime managed-pressure fixture", "src/core/managed.rs");
 }
 
 #[cfg(test)]
@@ -206,10 +206,6 @@ impl ManagedDropRecord {
     }
 
     /// Records reviewed passive direct and transitive destruction.
-    #[allow(
-        dead_code,
-        reason = "I4.0 establishes the constructor before production drop-bearing families migrate"
-    )]
     pub(crate) const fn passive(
         family: &'static str,
         source: &'static str,
@@ -282,10 +278,11 @@ pub(crate) unsafe trait ManagedFamily: Trace {
 
 /// Test-only admission gate for the complete compatibility value shell.
 ///
-/// This wrapper deliberately reports no managed edges: before I4F.2d, every
-/// recursive compatibility edge remains ordinary Rust ownership. Its only
-/// purpose is to prove that those owners now have passive destruction before
-/// the production managed node is introduced.
+/// This wrapper is a destruction specimen, not a semantic graph owner. It
+/// deliberately reports no managed edges so the test can reclaim recursive
+/// identities independently while proving that every remaining ordinary Rust
+/// shell destroys passively. Production values use `ManagedValueNode` and the
+/// authoritative compatibility edge walk instead.
 #[cfg(test)]
 pub(crate) struct ClosedCompatibilityValue {
     value: super::Value,
@@ -314,10 +311,9 @@ impl Drop for ClosedCompatibilityValue {
     }
 }
 
-// SAFETY: the compatibility representation contains no `Gc` edge before the
-// production switch. I4B-I4E exhaustively inventory its ordinary Rust value
-// and net ownership; I4F.2b.1-.3 moved every active destructor behind passive
-// external-owner handles. The test fixture therefore has zero managed edges.
+// SAFETY: this test-only destruction specimen deliberately owns no managed
+// identity for tracing purposes. It is never used as a semantic graph owner;
+// its wrapped shells are dropped only to audit passive destruction.
 #[cfg(test)]
 unsafe impl Trace for ClosedCompatibilityValue {
     const REQUESTED_SLOT_SIZE: Option<usize> = Some(managed_slot_extent::<Self>());
@@ -332,7 +328,7 @@ unsafe impl Trace for ClosedCompatibilityValue {
 #[cfg(test)]
 unsafe impl ManagedFamily for ClosedCompatibilityValue {
     const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
-        "I4F.2b closed compatibility value fixture",
+        "passive compatibility value fixture",
         "src/core/managed.rs",
         "direct Drop updates only an external atomic counter",
         "compatibility Value ownership is passive after active-owner extraction",
@@ -343,9 +339,10 @@ unsafe impl ManagedFamily for ClosedCompatibilityValue {
 ///
 /// Unlike [`ManagedDropRecord`], this is not collector admission. It prevents
 /// `OpaqueValue`'s `Any` boundary from accepting a new family merely because
-/// the Rust type is `Send + Sync`. I10 keeps every admitted external family in
-/// the audited external-owner inventory; a family that instead needs managed
-/// edges or managed destructor authority requires a new representation review.
+/// the Rust type is `Send + Sync`. Every admitted external family remains in
+/// the authoritative external-owner inventory; a family that instead needs
+/// managed edges or managed destructor authority requires a new
+/// representation review.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(
     dead_code,
@@ -365,7 +362,7 @@ impl OpaquePayloadRecord {
     }
 
     /// Records an external capability whose lifecycle remains outside the
-    /// collector and is covered by the completed I9/I10 ownership audit.
+    /// collector and is covered by the authoritative ownership audit.
     pub(crate) const fn external(family: &'static str, source: &'static str) -> Self {
         Self::reviewed(family, source, "external capability")
     }
@@ -449,20 +446,18 @@ pub(crate) struct CoreValueAllocationScope<'scope> {
 
 /// Factory-qualified managed access for one bounded runtime operation.
 ///
-/// This is the foundational I3 authority. It combines I1's narrow allocation
-/// scope with the exact factory view which admitted its mutator, including any
-/// compilation-local extensions on that view. Subsystems derive shorter-lived
-/// views from this carrier rather than entering the heap independently or
-/// supplying a second factory argument which could disagree with it.
+/// This combines the narrow allocation scope with the exact factory view which
+/// admitted its mutator, including any compilation-local extensions on that
+/// view. Subsystems derive shorter-lived views from this carrier rather than
+/// entering the heap independently or supplying a second factory argument
+/// which could disagree with it.
 /// Admission is only temporary liveness: any fresh managed graph which must
 /// survive this access must be installed beneath an exactly traced owner or
 /// published through the intended registered-root operation before return.
 pub(crate) struct RuntimeValueAccess<'scope> {
     values: &'scope CoreValueFactory,
-    #[allow(
-        dead_code,
-        reason = "I4 introduces production managed allocation, rooting, and borrowing through this scope"
-    )]
+    // Retaining the allocation scope keeps the mutator region active for this
+    // access lifetime even when an operation only reads through `values`.
     scope: CoreValueAllocationScope<'scope>,
 }
 
@@ -574,15 +569,11 @@ impl CoreValueFactory {
     /// Runs one bounded managed-allocation region in this factory's value
     /// domain.
     ///
-    /// This is I1's construction-oriented factory bridge to the collector.
-    /// The callback receives only allocation, rooting, and rooted-access
-    /// operations; it cannot retain the heap, mutator, or a typed allocator.
-    /// I3 evaluator work instead derives its domain-qualified authority through
+    /// This test-only bridge exposes the collector's narrower allocation
+    /// scope for direct admission and reclamation fixtures. Production work
+    /// derives domain-qualified authority through
     /// [`Self::with_runtime_value_access`].
-    #[allow(
-        dead_code,
-        reason = "Phase I1C installs the allocation seam before production managed values"
-    )]
+    #[cfg(test)]
     pub(crate) fn with_managed_values<R>(
         &self,
         operation: impl for<'scope> FnOnce(CoreValueAllocationScope<'scope>) -> R,
@@ -597,8 +588,8 @@ impl CoreValueFactory {
     /// Opens one factory-qualified managed-access region.
     ///
     /// The higher-ranked callback prevents the access carrier, its mutator,
-    /// allocators, and managed borrows from escaping. I3 scheduler poll
-    /// contexts use this entry to derive evaluator-specific authority.
+    /// allocators, and managed borrows from escaping. Scheduler poll contexts
+    /// use this entry to derive evaluator-specific authority.
     pub(crate) fn with_runtime_value_access<R>(
         &self,
         operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,
@@ -739,10 +730,6 @@ impl CoreValueFactory {
     /// maintenance operation. Ordinary evaluation remains `NoAuto`; choosing
     /// when collection is compatible with runtime activity belongs to the
     /// runtime owner rather than the value factory.
-    #[allow(
-        dead_code,
-        reason = "I11B establishes this private seam before I12 runtime maintenance"
-    )]
     pub(crate) fn collect_managed_for_maintenance(
         &self,
     ) -> Result<glam_gc::CollectionReport, glam_gc::CollectionError> {
@@ -873,10 +860,6 @@ impl RuntimeValueAccess<'_> {
     }
 
     /// Discovers or reuses one heap-local allocation class for this region.
-    #[allow(
-        dead_code,
-        reason = "I4 introduces production managed allocation through runtime-qualified access"
-    )]
     pub(crate) fn allocator<T: ManagedFamily>(
         &self,
     ) -> Result<CoreValueAllocator<'_, T>, UnsupportedLayout> {
@@ -884,19 +867,11 @@ impl RuntimeValueAccess<'_> {
     }
 
     /// Publishes a root before a managed pointer leaves this region.
-    #[allow(
-        dead_code,
-        reason = "I4F introduces production managed roots through runtime-qualified access"
-    )]
     pub(crate) fn root<T: ManagedFamily>(&self, value: Gc<T>) -> Root<T> {
         self.scope.root(value)
     }
 
     /// Borrows one same-domain root under this region's mutator authority.
-    #[allow(
-        dead_code,
-        reason = "I4F introduces production managed-root observation through runtime-qualified access"
-    )]
     pub(crate) fn get<'access, T: ManagedFamily>(&'access self, root: &Root<T>) -> &'access T {
         self.scope.get(root)
     }
@@ -1039,10 +1014,6 @@ impl CoreValueFactory {
 
 impl CoreValueAllocationScope<'_> {
     /// Discovers or reuses one heap-local allocation class for this region.
-    #[allow(
-        dead_code,
-        reason = "Phase I1C installs the allocation seam before production managed values"
-    )]
     pub(crate) fn allocator<T: ManagedFamily>(
         &self,
     ) -> Result<CoreValueAllocator<'_, T>, UnsupportedLayout> {
@@ -1055,20 +1026,12 @@ impl CoreValueAllocationScope<'_> {
     }
 
     /// Publishes an external root before a managed pointer leaves this region.
-    #[allow(
-        dead_code,
-        reason = "Phase I1C installs the rooting seam before durable and public roots migrate in I4F"
-    )]
     pub(crate) fn root<T: ManagedFamily>(&self, value: Gc<T>) -> Root<T> {
         self.mutator.root(value)
     }
 
     /// Borrows one same-domain root while this region supplies access
     /// authority.
-    #[allow(
-        dead_code,
-        reason = "Phase I1C installs the root-access seam before the public-root switch in I4F.2"
-    )]
     pub(crate) fn get<'access, T: ManagedFamily>(&'access self, root: &Root<T>) -> &'access T {
         root.get(self.mutator)
     }
@@ -1098,10 +1061,6 @@ impl CoreValueAllocationScope<'_> {
 
 impl<T: ManagedFamily> CoreValueAllocator<'_, T> {
     /// Allocates through the class already selected for this region.
-    #[allow(
-        dead_code,
-        reason = "Phase I1C installs the allocation seam before production managed values"
-    )]
     pub(crate) fn alloc(&self, value: T) -> Gc<T> {
         self.allocator.alloc(value)
     }
@@ -1135,10 +1094,6 @@ mod payload_edges;
 /// This narrow adapter lets evaluator-owned managed containers compose the
 /// same exhaustive value walk used by the core managed families. It performs
 /// no semantic observation and does not retain the visitor.
-#[allow(
-    dead_code,
-    reason = "NC1 defines the traced net-WHNF payload before NC2 installs its runtime node"
-)]
 pub(crate) fn trace_compatibility_value_managed_edges(
     value: &super::Value,
     visitor: &mut Visitor<'_>,
@@ -1288,7 +1243,7 @@ mod tests {
     // invoke Glam, enter the heap, or preserve the spoiled `child` edge.
     unsafe impl ManagedFamily for PassiveManagedFixture {
         const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
-            "I4.0 passive managed destruction fixture",
+            "passive managed-destruction fixture",
             "src/core/managed.rs",
             "direct Drop updates only an external atomic counter",
             "Gc is inert on drop; Arc and PassiveResource release ordinary Rust resources",
@@ -1318,7 +1273,7 @@ mod tests {
     // and inert managed pointers destroy without observing the managed heap.
     unsafe impl ManagedFamily for TransitionFixture {
         const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
-            "GCI5R-002B transition fixture",
+            "managed edge-transition fixture",
             "src/core/managed.rs",
             "no direct Drop implementation",
             "mutex, vector, and inert Gc edges destroy passively",
@@ -1373,7 +1328,7 @@ mod tests {
         values.with_managed_values(|scope| {
             let allocator = scope
                 .allocator::<PassiveManagedFixture>()
-                .expect("the I4.0 fixture should fit one collector slot");
+                .expect("the passive fixture should fit one collector slot");
             scope.root(allocator.alloc(PassiveManagedFixture {
                 child: None,
                 direct_drops: Arc::clone(direct_drops),
@@ -1501,7 +1456,7 @@ mod tests {
         assert_eq!(
             requires_admission::<PassiveManagedFixture>().fields(),
             (
-                "I4.0 passive managed destruction fixture",
+                "passive managed-destruction fixture",
                 "src/core/managed.rs",
                 "direct Drop updates only an external atomic counter",
                 "Gc is inert on drop; Arc and PassiveResource release ordinary Rust resources",

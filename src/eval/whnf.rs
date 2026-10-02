@@ -704,7 +704,7 @@ unsafe impl glam_gc::Trace for NetWhnfState {
 // contract above; no callback or runtime capability is invoked by Drop.
 unsafe impl crate::core::ManagedFamily for NetWhnfState {
     const DROP_RECORD: crate::core::ManagedDropRecord = crate::core::ManagedDropRecord::passive(
-        "NC2.0 canonical net-owned WHNF fixture",
+        "canonical net-owned WHNF fixture",
         "src/eval/whnf.rs",
         "direct Drop releases passive compatibility values",
         "every managed identity is reported by WhnfState's canonical edge walk",

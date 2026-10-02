@@ -1,8 +1,8 @@
 //! Managed representations for the three recursive identity cells.
 //!
-//! I5C prepared these layouts and their access roles. I5D routes lazy,
-//! promise, and core-net production identities through them as one exact
-//! traced graph.
+//! Lazy, promise, and core-net production identities each occupy one exact
+//! traced allocation. Durable Rust owners retain registered roots; values
+//! inside the semantic graph retain only the corresponding managed edge.
 
 use std::cell::RefCell;
 use std::fmt;
@@ -78,8 +78,9 @@ pub(crate) struct ManagedPromiseCell {
 /// Synchronization-owning managed core interaction-net identity.
 ///
 /// The owner-neutral generic cell remains the sole topology/revision mutex.
-/// I5C.3 supplied its exact payload trace; I5D installed the managed edge and
-/// registered-root holders atomically.
+/// Its payload trace reaches every semantic value and prepared cross-net
+/// source; interior values and durable external owners use managed edges and
+/// registered roots respectively.
 pub(crate) struct ManagedCoreNetCell {
     runtime: RuntimeNetCell<CoreSpecialization>,
 }
@@ -340,10 +341,6 @@ impl RuntimeValueAccess<'_> {
     /// Constructs one promise and publishes its explicit registered owner
     /// before this access region ends. A facade can be projected from the root
     /// while that owner remains live.
-    #[allow(
-        dead_code,
-        reason = "GCI5R-001C establishes rooted handoff before the D-F production cutovers"
-    )]
     pub(crate) fn construct_rooted_managed_promise(
         &self,
         label: impl Into<Arc<str>>,
@@ -353,11 +350,10 @@ impl RuntimeValueAccess<'_> {
     }
 
     /// Constructs one core net and publishes its explicit registered owner
-    /// before this access region ends.
-    #[allow(
-        dead_code,
-        reason = "GCI5R-001C establishes rooted handoff before the D-F production cutovers"
-    )]
+    /// before this access region ends. Production core-net creation installs
+    /// the edge directly beneath its containing semantic owner; this helper is
+    /// retained only for collector and interaction-net fixtures.
+    #[cfg(test)]
     pub(crate) fn construct_rooted_managed_core_net(
         &self,
         runtime: RuntimeNet<CoreSpecialization>,
@@ -1274,8 +1270,8 @@ unsafe impl Trace for ManagedCoreNetCell {
 
 // SAFETY: the lazy cell's direct synchronization fields have no active Drop
 // behavior. Its source and result contain only compatibility values whose
-// transitive destruction passed I4F.2b's passive-closure gate; managed
-// identities reached after I5D are inert Gc edges.
+// transitive destruction passed the passive-closure gate; recursive managed
+// identities are inert Gc edges.
 unsafe impl ManagedFamily for ManagedLazyCell {
     const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
         "managed lazy identity cell",
@@ -1311,7 +1307,8 @@ unsafe impl ManagedFamily for ManagedCoreNetCell {
 }
 
 // These are representation records, not a value-size policy. A deliberate
-// field change must update the I5C ledger and these target-specific latches.
+// field change must update the ownership ledger and these target-specific
+// latches.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 const _: () = {
     assert!(std::mem::size_of::<ManagedLazyCell>() == 144);
@@ -3384,8 +3381,8 @@ mod tests {
         let owner_path = manifest.join("src/core/managed/recursive_cells.rs");
         let inventory_path = manifest.join("src/core/managed/recursive_identity_inventory.rs");
         let gate_inventory_path = manifest.join("src/core/managed/gate_g2_inventory.rs");
-        // The I9 active-owner and I11A gate audits name the managed cells only
-        // as test-only inventory data; neither may construct or expose them.
+        // The active-owner and managed-gateway audits name these cells only as
+        // test inventory data; neither may construct or expose them.
         let active_inventory_path = manifest.join("src/core/managed/active_owner_inventory.rs");
         let owner = fs::read_to_string(&owner_path).expect("the recursive-cell source should read");
         let count = |parts: &[&str]| owner.matches(&parts.concat()).count();

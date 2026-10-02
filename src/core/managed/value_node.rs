@@ -1,10 +1,9 @@
 //! Private production managed storage for one core value.
 //!
-//! I4F.2d routes every production runtime root through this private node or
-//! the allocation-free inline arm. Lazy, promise, and core-net identities now
-//! expose exact managed edges; immutable structural payload shells continue to
-//! compose through the central compatibility walk until an audited exact
-//! replacement exists.
+//! Every production runtime root uses this private node or the allocation-free
+//! inline arm. Lazy, promise, and core-net identities expose exact managed
+//! edges; immutable structural payload shells compose through the central
+//! compatibility walk until Value Representation Refinement replaces them.
 
 use std::fmt;
 
@@ -33,7 +32,7 @@ const _: () = {
 
 /// Prepared private representation for the production runtime value root.
 ///
-/// Small integer values preserve I2's allocation-free inline opportunity.
+/// Small integer values preserve the allocation-free inline opportunity.
 /// Every other current value is kept in the exact production managed shell.
 /// Inline provenance is a weak value-domain witness; managed provenance is
 /// the collector root's heap identity. Neither arm keeps its domain alive.
@@ -145,7 +144,7 @@ impl ManagedValueNode {
     ///
     /// Recursive lazy, promise, and core-net identities report their exact
     /// managed pointers. Remaining compatibility containers compose
-    /// transitively until their later family migrations.
+    /// transitively until the later value-representation transition.
     fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
         visit_compatibility_managed_edges(&self.value, visitor);
     }
@@ -163,7 +162,7 @@ unsafe impl Trace for ManagedValueNode {
 }
 
 // SAFETY: the node has no direct Drop implementation. Its sole compatibility
-// payload was admitted by the I4F.2b passive-destruction closure gate; all
+// payload was admitted by the passive-destruction closure gate; all
 // active callback, reservation, and opaque retirement remains in the runtime
 // external-owner registry.
 unsafe impl ManagedFamily for ManagedValueNode {
@@ -171,7 +170,7 @@ unsafe impl ManagedFamily for ManagedValueNode {
         "production managed core value node",
         "src/core/managed/value_node.rs",
         "no direct Drop implementation",
-        "compatibility Value destruction passed the I4F.2b passive closure gate",
+        "compatibility Value destruction passed the passive closure gate",
     );
 }
 
@@ -263,7 +262,7 @@ mod tests {
                 "production managed core value node",
                 "src/core/managed/value_node.rs",
                 "no direct Drop implementation",
-                "compatibility Value destruction passed the I4F.2b passive closure gate",
+                "compatibility Value destruction passed the passive closure gate",
             )
         );
 

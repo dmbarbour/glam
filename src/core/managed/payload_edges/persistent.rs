@@ -341,7 +341,7 @@ mod tests {
     // passively without acquiring a Glam service or observing a dying edge.
     unsafe impl ManagedFamily for PersistentFixtureNode {
         const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
-            "I4D closed persistent adapter fixture",
+            "closed persistent adapter fixture",
             "src/core/managed/payload_edges/persistent.rs",
             "direct Drop updates only an external atomic counter",
             "collection spines, mutex, keys, and Gc edges drop passively",

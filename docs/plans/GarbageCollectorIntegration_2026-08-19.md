@@ -297,7 +297,7 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I12B.3 | complete | direct, snapshot, batch, reclamation, output, and policy closure |
 | I12B | complete | stable pressure promotion and manual-policy closure |
 | I13A | complete | final ownership, provenance, gate, adapter, and drop-record inventory |
-| I13B | pending | proven-redundant scaffolding retirement and stable terminology |
+| I13B | complete | proven-redundant scaffolding retirement and stable terminology |
 | I13C | pending | current architecture, safepoint, and starvation documentation |
 | I13D | pending | Gate G4 audit, post-I13 review, and plan closure |
 | I13 | pending | redundant ownership removal, documentation, and Gate G4 |
@@ -7037,6 +7037,14 @@ redundancy is first added to this inventory.
   dynamic evidence where Gate G3 or Gate G4 still relies on it.
 - Run focused layout, source-inventory, finalization, cycle-reclamation, and
   aggressive-entry tests after each representation-affecting cleanup.
+
+**Completed 2026-10-02.** No representation-affecting cleanup was justified
+by I13A. The implementation now removes obsolete dead-code suppressions from
+live managed gateways, makes the direct allocation-scope bridge test-only,
+and describes the retained mutator scope, recursive identity cells, managed
+value shell, WHNF cell, and destruction fixtures in stable architectural
+terms. The focused ownership, root-source, persistent-edge, passive-
+destruction, and active-owner inventories all pass after the cleanup.
 
 ### I13C — Document the Implemented Boundary
 

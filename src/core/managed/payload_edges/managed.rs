@@ -96,7 +96,7 @@ mod tests {
     // managed or runtime-owned field.
     unsafe impl ManagedFamily for SyntheticManagedLeaf {
         const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
-            "I5B synthetic compatibility leaf",
+            "synthetic compatibility leaf",
             "src/core/managed/payload_edges/managed.rs",
             "direct Drop updates only an external atomic counter",
             "no transitive fields",
@@ -157,7 +157,7 @@ mod tests {
     // values and the inert Gc pointer destroy without observing managed state.
     unsafe impl ManagedFamily for SyntheticCompatibilityOwner {
         const DROP_RECORD: ManagedDropRecord = ManagedDropRecord::passive(
-            "I5B synthetic compatibility owner",
+            "synthetic compatibility owner",
             "src/core/managed/payload_edges/managed.rs",
             "direct Drop updates only an external atomic counter",
             "compatibility values and the inert Gc edge drop passively",
@@ -196,7 +196,7 @@ mod tests {
         let values = values();
         let baseline = values
             .collect_managed_for_test()
-            .expect("canonical roots should collect before the I5B fixture");
+            .expect("canonical roots should collect before the compatibility fixture");
         let leaf_drops = Arc::new(AtomicUsize::new(0));
         let owner_drops = Arc::new(AtomicUsize::new(0));
         let marker_visits = Arc::new(AtomicUsize::new(0));
@@ -274,14 +274,14 @@ mod tests {
 
         let lazy = LazyValue::semantic_computation(
             &values,
-            "I5B raw lazy stop",
+            "raw lazy compatibility stop",
             [marker()],
             |context, captures| {
                 Ok(context
                     .with_value_access(|access| access.values().duplicate_value(&captures[0])))
             },
         );
-        let promise = PromisedValue::new(&values, "I5B raw promise stop");
+        let promise = PromisedValue::new(&values, "raw promise compatibility stop");
         assert!(
             crate::core::set_test_promise(&values, &promise, marker()).is_ok(),
             "the fresh raw promise should accept one assignment"

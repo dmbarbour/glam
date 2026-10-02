@@ -1,9 +1,8 @@
 //! One managed cell for rooted and lazy-owned resumable-WHNF demand state.
 //!
-//! W6G.3c establishes this family before production ownership migrates in
-//! W6G.3d. The state mutex is a stop-the-world collector baseline: evaluation
-//! mutates one bounded callback-free quantum beneath it, while `Trace` runs
-//! only after mutator quiescence and therefore must never find an active lock.
+//! The state mutex is a stop-the-world collector baseline: evaluation mutates
+//! one bounded callback-free quantum beneath it, while `Trace` runs only after
+//! mutator quiescence and therefore must never find an active lock.
 
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -57,9 +56,8 @@ impl ManagedLazyCheckpointCell {
 impl ManagedWhnfRoot {
     /// Allocates and roots one complete regional state before access closes.
     ///
-    /// W6G.3d routes seed promotion and access-qualified structured
-    /// construction through this caller-supplied access rather than opening a
-    /// hidden nested region.
+    /// Seed promotion and structured construction use caller-supplied access
+    /// rather than opening a hidden nested mutator region.
     pub(crate) fn from_regional_in(
         access: &EvaluationValueAccess<'_>,
         work: RegionalWhnfWork,

@@ -1116,7 +1116,7 @@ fn every_real_value_variant_has_passive_managed_destruction() {
     assert_eq!(
         <ClosedCompatibilityValue as super::ManagedFamily>::DROP_RECORD.fields(),
         (
-            "I4F.2b closed compatibility value fixture",
+            "passive compatibility value fixture",
             "src/core/managed.rs",
             "direct Drop updates only an external atomic counter",
             "compatibility Value ownership is passive after active-owner extraction",

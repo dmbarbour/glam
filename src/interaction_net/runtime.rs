@@ -352,10 +352,6 @@ impl<S: NetSpecialization> CursorDependency<S> {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "I4E source visitation is consumed by the I5D production core-net trace and I8 audit"
-    )]
     fn source_runtime(&self) -> Option<&S::RuntimeSource> {
         match self {
             Self::LocalCursor(_) => None,

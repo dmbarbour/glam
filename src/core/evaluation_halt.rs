@@ -36,10 +36,6 @@ enum EvaluationHaltKind {
 ///
 /// This crate-private classification keeps collector adapters exhaustive
 /// without exposing scheduler wait identities as semantic values.
-#[allow(
-    dead_code,
-    reason = "I4E installs exact halt payload classification before managed net migration"
-)]
 pub(crate) enum EvaluationHaltPayload<'payload> {
     Failure(&'payload EvaluationFailure),
     Blocked,
@@ -118,10 +114,6 @@ impl EvaluationHalt {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "I4E installs exact halt payload classification before managed net migration"
-    )]
     pub(crate) fn payload(&self) -> EvaluationHaltPayload<'_> {
         match &self.kind {
             EvaluationHaltKind::Failure(failure) => {
