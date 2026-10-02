@@ -152,7 +152,11 @@ not newly satisfied by this closure and remains part of I11D.2. P5B's explicit
 release-cost/code-generation review likewise remains open; existing pointer
 layout and root-registration tests do not substitute for that final audit.
 
-The next Gate G3 work is therefore I11D.2, not more GCI11R-002 fixture
+Follow-up: I11D.2 completed both remaining obligations on 2026-10-02. The
+release-cost evidence and continuing code-generation latch are recorded in
+[`GarbageCollectorI11D2PersistentEdgeCost_2026-10-02.md`](GarbageCollectorI11D2PersistentEdgeCost_2026-10-02.md).
+
+The next Gate G3 work is therefore I11D.3, not more GCI11R-002 fixture
 migration. Moving collection, lifetime-branded managed pointers, concurrent
 collection, automatic production policy, and broader diagnostic rendering
 cleanup remain their existing deferred plans.

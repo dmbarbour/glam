@@ -18,13 +18,12 @@ when their historical value no longer justifies keeping them.
   builds and verifies the standalone collector subcrate.
 - [`GarbageCollectorIntegration_2026-08-19.md`](GarbageCollectorIntegration_2026-08-19.md)
   migrates Glam values, roots, workers, reflection, and interaction nets.
-- [`GarbageCollectorPersistentEdgeTraits_2026-09-12.md`](GarbageCollectorPersistentEdgeTraits_2026-09-12.md)
-  completed its trait, semantic, behavioral, and focused Miri cutover; only
-  release-cost evidence remains active under collector-integration Phase
-  I11D.2e.
 
 ## Recent Completed Plans
 
+- [`GarbageCollectorPersistentEdgeTraits_2026-09-12.md`](GarbageCollectorPersistentEdgeTraits_2026-09-12.md)
+  completed the explicit managed-edge ownership migration and closed its
+  dynamic and release-cost verification under collector-integration I11D.2.
 - [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md)
   closed the regional ownership, fixture, schedule, exact-inventory, and full
   ordinary/aggressive workspace issues exposed by I11D.1.

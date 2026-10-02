@@ -233,6 +233,28 @@ mod tests {
         });
     }
 
+    #[cfg(feature = "deterministic-test-hooks")]
+    #[test]
+    fn pointer_duplication_and_identity_allocate_no_managed_slots() {
+        let heap = Heap::new();
+        heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<u64>().unwrap();
+            let first = allocator.alloc(42_u64);
+            let equal_value = allocator.alloc(42_u64);
+            let allocated_before = heap.allocated_slots_for_verification();
+            let roots_before = heap.root_registrations_for_verification();
+
+            for _ in 0..1_024 {
+                let alias = first.duplicate_in(mutator);
+                assert!(first.same_allocation_in(&alias, mutator));
+                assert!(!alias.same_allocation_in(&equal_value, mutator));
+            }
+
+            assert_eq!(heap.allocated_slots_for_verification(), allocated_before);
+            assert_eq!(heap.root_registrations_for_verification(), roots_before);
+        });
+    }
+
     #[test]
     fn explicit_identity_distinguishes_equal_payload_allocations() {
         let heap = Heap::new();

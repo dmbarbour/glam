@@ -1,7 +1,7 @@
 # Garbage Collector Persistent Edge Trait Migration Plan — 2026-09-12
 
-Status: P0-P4, P5A, and P5C complete. P5B's explicit release-cost/codegen
-audit remains open under I11D.2e.
+Status: complete. P0-P5 closed the explicit persistent-edge migration,
+dynamic verification, release-cost/codegen audit, and parent reconciliation.
 This is the nested implementation plan
 for the managed-edge part of GCI11R-002D.2a-D.2b in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
@@ -748,14 +748,22 @@ model checker. Repetition is stress evidence only.
 
 ### P5B — Cost and layout verification
 
-Status: open under I11D.2e. Existing one-pointer layout and root-registration
-fixtures are supporting evidence, but the explicit release-codegen or
-microbenchmark audit has not been performed for closure.
+Status: complete 2026-10-02 under I11D.2e. The one-pointer assertion,
+registered-root fixtures, exact allocated-slot latch, and optimized LLVM-IR
+inspection are recorded in
+[`GarbageCollectorI11D2PersistentEdgeCost_2026-10-02.md`](../reviews/GarbageCollectorI11D2PersistentEdgeCost_2026-10-02.md).
 
 Recheck one-pointer `Gc<T>` layout, registered-root counts, allocation counts,
 and release-mode code generation or microbenchmarks. Investigate any new lock,
 root registration, allocation, or reference-count operation on an ordinary
 edge duplicate before closure.
+
+The completed check compiles policy-free wrappers in release mode. Duplication
+is exactly one pointer load and return; identity is two pointer loads, one
+comparison, and return. A continuing script rejects any call, stack
+allocation, atomic operation, fence, or extra instruction in those bodies.
+The deterministic traffic fixture performs 1,024 operations without changing
+allocated-slot or monotonic root-registration counts.
 
 ### P5C — Parent reconciliation and review
 

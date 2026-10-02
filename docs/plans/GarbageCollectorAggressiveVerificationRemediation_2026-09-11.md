@@ -3,7 +3,8 @@
 Status: complete on 2026-10-01. This plan expands
 GCI11R-002 and Phase I11D.1. The private repository mode exists and is useful,
 and its complete workspace suite passes. Gate G3 remains closed pending
-I11D.2-I11D.4.
+I11D.3-I11D.4; I11D.2 dynamic and persistent-edge cost verification is now
+complete.
 
 ## Purpose
 
@@ -616,7 +617,7 @@ D.2 rather than masquerading as the ordinary orchestration path.
 #### GCI11R-002D.2 — Remaining Production Owners
 
 Status: complete on 2026-10-01 through D.2a-D.2h below. This was a hard
-prerequisite for Gate G3; the remaining gate work is I11D.2-I11D.4.
+prerequisite for Gate G3; I11D.2 is now complete, leaving I11D.3-I11D.4.
 
 D.2 closes both kinds of production violation which D.1a deliberately left
 open:
@@ -2987,9 +2988,11 @@ inventory relatch:
   [`GarbageCollectorAggressiveVerificationClosure_2026-10-01.md`](../reviews/GarbageCollectorAggressiveVerificationClosure_2026-10-01.md)
   records the final surfaces, semantic decisions, resolved defect families,
   and exact dynamic gates. GCI11R-002 and I11D.1 are complete. Nested
-  persistent-edge P3-P4 and P5C are complete; P5A's focused Miri portion and
-  P5B's explicit release-cost/code-generation audit remain open and align
-  with I11D.2 rather than being inferred from the aggressive workspace run.
+  persistent-edge P3-P5 are complete. I11D.2 completed P5A's focused Miri and
+  P5B's explicit release-cost/code-generation obligations on 2026-10-02
+  rather than inferring them from the aggressive workspace run. Its cost
+  record is
+  [`GarbageCollectorI11D2PersistentEdgeCost_2026-10-02.md`](../reviews/GarbageCollectorI11D2PersistentEdgeCost_2026-10-02.md).
   The focused
   [`D.2h review`](../reviews/GarbageCollectorAggressiveD2h_2026-10-01.md)
   accepts the phase's representation/API drift and records its proof limits;

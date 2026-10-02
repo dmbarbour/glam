@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        873,
+        878,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -975,9 +975,13 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // promise/lazy identities across deliberately forced terminal and
     // collection transitions. They replace invalid raw-facade handoffs and
     // do not change production edge ownership.
+    // I11D.2e adds two policy-free test-only code-generation wrappers and
+    // three test-only traffic-latch operations. They make release pointer
+    // cost and zero allocation/root traffic mechanically visible without
+    // changing any production edge.
     assert_eq!(
         occurrence_fingerprint(actual),
-        13_687_440_433_971_841_379,
+        7_836_447_809_315_229_698,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -1024,7 +1028,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 148),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 675),
+            ((SourceScope::Test, EdgeSurface::Typed), 680),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"

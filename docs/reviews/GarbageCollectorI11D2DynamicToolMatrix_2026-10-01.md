@@ -262,6 +262,7 @@ ASan/LSan, and TSan as part of the selected matrix.
 
 I11D.2a-I11D.2d are complete. The exact environment, supported targets,
 results, one Miri performance exclusion, and test-only corrections are
-recorded without substituting repetition for dynamic-tool evidence. I11D.2e is
-next and owns persistent-edge layout, traffic, and release-code-generation
-closure.
+recorded without substituting repetition for dynamic-tool evidence. Follow-up:
+I11D.2e completed the persistent-edge layout, traffic, and release-code-
+generation closure on 2026-10-02 in
+[`GarbageCollectorI11D2PersistentEdgeCost_2026-10-02.md`](GarbageCollectorI11D2PersistentEdgeCost_2026-10-02.md).

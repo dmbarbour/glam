@@ -273,10 +273,10 @@ interaction nets. Cross-plan invariants and enablement gates live in
 | I11C | complete | worker/finalizer schedule fixtures, request coalescing, and runtime retirement |
 | I11D.0 | complete | post-I11 deterministic schedule and passive-finalization remediation |
 | I11D.1 | complete | repository-wide aggressive mode, zero-violation regional ownership, and ordinary/aggressive workspace closure |
-| I11D.2 | pending | focused Miri and sanitizer verification |
+| I11D.2 | complete | dynamic unsafe-boundary verification and persistent-edge cost closure |
 | I11D.2a | complete | dynamic-tool environment and exact collector/production target matrix |
 | I11D.2b-d | complete | focused Miri, AddressSanitizer, and ThreadSanitizer execution, with one explicit broad-target Miri performance exclusion |
-| I11D.2e | pending | persistent-edge release cost and code-generation closure |
+| I11D.2e | complete | persistent-edge release cost and code-generation closure |
 | I11D.3 | pending | unsafe, trace, mutation, and lock/region closure audit |
 | I11D.4 | pending | dated Gate G3 certification |
 | I11 | pending | whole-production-graph forced collection |
@@ -6551,7 +6551,7 @@ gaps block Gate G3. Close them and certify the boundary in these checkpoints:
     synchronization targets. Ordering contracts still require their existing
     latches or model fixtures; a sanitizer pass alone is not concurrency
     evidence.
-  - **I11D.2e — persistent-edge cost closure:** close P5B by rechecking the
+  - **I11D.2e — persistent-edge cost closure: complete 2026-10-02.** Close P5B by rechecking the
     one-pointer layout, root/allocation traffic, and release code generation or
     a focused microbenchmark for `duplicate_in`. Investigate any unexpected
     lock, root registration, allocation, or reference-count operation before
@@ -6621,8 +6621,8 @@ verification record are in
 [`GarbageCollectorAggressiveVerificationClosure_2026-10-01.md`](../reviews/GarbageCollectorAggressiveVerificationClosure_2026-10-01.md),
 and the focused implementation-drift review is in
 [`GarbageCollectorAggressiveD2h_2026-10-01.md`](../reviews/GarbageCollectorAggressiveD2h_2026-10-01.md).
-P5A's focused Miri work and P5B's release-cost audit move forward under
-I11D.2; they do not keep I11D.1 open.
+P5A's focused Miri work and P5B's release-cost audit are now complete under
+I11D.2; neither was inferred from or kept I11D.1 open.
 
 I11D.2a-I11D.2d completed on 2026-10-01. The current x86-64 Linux container
 retains stable Rust 1.98.1 as its default and has an exact Rust 1.101.0-nightly
@@ -6637,7 +6637,12 @@ production target is explicitly excluded from Miri after fifteen CPU-minutes
 without completion or a diagnostic; it remains covered natively and under
 both sanitizers, while its ownership components pass separately under Miri.
 The exact record and test-only corrections are in the linked matrix review.
-I11D.2e persistent-edge cost closure is next.
+I11D.2e closed P5B on 2026-10-02. `Gc<T>` remains one pointer; deterministic
+traffic fixtures observe no allocation or root registration; and a continuing
+release LLVM-IR check requires duplication and identity to remain bare pointer
+operations without calls or synchronization. The evidence is recorded in
+[`GarbageCollectorI11D2PersistentEdgeCost_2026-10-02.md`](../reviews/GarbageCollectorI11D2PersistentEdgeCost_2026-10-02.md).
+I11D.3 static closure audit is next.
 
 ## Phase I12 — Explicit Runtime Maintenance and Threshold Collection
 

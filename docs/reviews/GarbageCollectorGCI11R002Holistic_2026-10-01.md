@@ -8,9 +8,9 @@ Status: complete. GCI2HR-001 through GCI2HR-008 reconcile GCI11R-002 with the
 collector roadmap, integration plan, ownership ledger, persistent-edge and
 scoped-pointer plans, value-representation plan, architecture guide, and
 source map. No new implementation defect was found. Parent-plan drift is
-repaired. I11D.2a subsequently recorded the exact tool/target matrix; the
-forward path is now I11D.2b-I11D.2e, I11D.3a-I11D.3d, then I11D.4 Gate G3
-certification.
+repaired. I11D.2 subsequently completed the dynamic-tool matrix and persistent-
+edge cost closure; the forward path is now I11D.3a-I11D.3d, then I11D.4 Gate
+G3 certification.
 
 ## Scope and Review Boundary
 
@@ -51,8 +51,8 @@ D.2h.4 pass.
 | GCI11R-002D.2h / persistent edges | Complete. Ambient semantic duplication, equality, formatting, and pointer identity are gone; exact ledgers report zero defect or pending disposition. |
 | GCI11R-002E-F | Complete. Test fixtures publish roots in the construction region, and concurrency claims use observed barriers/probes rather than repetition. |
 | GCI11R-002G-H / I11D.1 | Complete. Ordinary and aggressive subsystem clusters and both complete workspaces pass under immutable production `NoAuto`. |
-| Persistent-edge P5A/P5B | Partially open by design. Ordinary/aggressive behavior and parent reconciliation pass; focused Miri and release-cost/code-generation evidence are now explicit I11D.2 work. |
-| Gate G3 | Open. I11D.2 dynamic tools, I11D.3 final static delta audit, and I11D.4 certification remain. I12 production maintenance is not authorized. |
+| Persistent-edge P5A/P5B | Complete. Ordinary/aggressive behavior, focused Miri, release-cost/code-generation evidence, and parent reconciliation pass. |
+| Gate G3 | Open. I11D.3 final static delta audit and I11D.4 certification remain. I12 production maintenance is not authorized. |
 
 ## Current Architectural Result
 
@@ -141,7 +141,7 @@ subplans as active.
 Those documents now distinguish:
 
 - completed I11D.0-I11D.1 regional and repository verification;
-- open I11D.2-I11D.4 Gate G3 work;
+- open I11D.3-I11D.4 Gate G3 work after the completed I11D.2 follow-up;
 - the completed move-only persistent-edge representation from its remaining
   Miri/cost evidence; and
 - the deferred optional `ScopedGc` working-view experiment from the already
@@ -242,7 +242,7 @@ would conflate stronger future protocols with the boundary just certified.
 2. **I11D.2b-I11D.2d (complete):** provision and fingerprint one nightly
    toolchain, then run focused Miri, ASan, and TSan work with explicit
    unsupported dispositions and repair only demonstrated defects.
-3. **I11D.2e:** close persistent-edge P5B layout/traffic/code-generation cost.
+3. **I11D.2e (complete):** close persistent-edge P5B layout/traffic/code-generation cost.
 4. **I11D.3a-I11D.3d:** audit the source delta, rerun and review the exact
    ledgers, reconcile protocol boundaries, and close focused I11 tests.
 5. **I11D.4:** apply the aggressive-rerun trigger, run the required routine and

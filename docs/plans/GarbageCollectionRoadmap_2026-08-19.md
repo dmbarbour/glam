@@ -14,12 +14,12 @@ collection boundary, and I11C exercised worker, finalizer,
 request-coalescing, and retirement schedules. I11D.0 repaired the missing
 worker/collector ordering proof, and I11D.1 completed repository-wide ordinary
 and aggressive ownership closure on 2026-10-01. Production remains `NoAuto`
-while I11D.2-I11D.4 own dynamic tools, the final delta audit, and Gate G3
-certification.
-I11D.2a-I11D.2d have recorded and executed the exact dynamic-tool/target
-matrix. The supported Miri, ASan/LSan, and TSan targets pass, with one broad
-end-to-end Miri target explicitly excluded for unreasonable execution time.
-I11D.2e now owns persistent-edge cost closure.
+while I11D.3-I11D.4 own the final delta audit and Gate G3 certification.
+I11D.2 is complete. The supported Miri, ASan/LSan, and TSan targets pass, with
+one broad end-to-end Miri target explicitly excluded for unreasonable
+execution time. Persistent edges retain one-pointer layout, zero allocation
+and root traffic, and minimal release code generation. I11D.3 now owns the
+static closure audit.
 The completed remediation and forward-path reconciliation are reviewed in
 [`GarbageCollectorGCI11R002Holistic_2026-10-01.md`](../reviews/GarbageCollectorGCI11R002Holistic_2026-10-01.md).
 
@@ -60,8 +60,8 @@ GCI11R-002D's completed nested
 transition removed implicit copying, equality, and formatting from persistent
 `Gc<T>` edges and their managed facades. It added explicit mutator-qualified
 duplication and identity without claiming lifetime branding or moving-GC
-readiness. Focused Miri and release-cost/code-generation evidence remain under
-I11D.2 rather than reopening the cutover.
+readiness. I11D.2 has now closed its focused Miri and
+release-cost/code-generation evidence without reopening the cutover.
 
 The later
 [`GarbageCollectorScopedPointerSafety_2026-09-09.md`](GarbageCollectorScopedPointerSafety_2026-09-09.md)
@@ -84,8 +84,8 @@ The collector is specialized for Glam:
   explicit mutator-qualified operation rather than ambient `Copy`/`Clone`;
 - an ordinary release-mode managed-edge duplicate is intended to remain a
   pointer-only operation with no locking, reference-counting, rooting, or
-  collector bookkeeping; I11D.2 performs the remaining code-generation or
-  microbenchmark audit of that cost;
+  collector bookkeeping; I11D.2's continuing release-IR check certifies that
+  cost;
 - ordinary allocation uses worker-local cursors over exclusively leased ranges
   of allocation-bitmap words in homogeneous typed runs; shared synchronization
   is reserved for allocation-class discovery, claiming another range,
@@ -389,8 +389,9 @@ found that the worker fixture did not yet observe the collector's authoritative
 admission wait, and also identified missing suite-wide aggressive-mode and
 exact finalizer-allocation evidence. I11D closes those gaps before G3.
 I11D.0 has since closed the deterministic schedule/allocation gap, and I11D.1
-has closed the suite-wide aggressive-mode and regional-ownership gap. The
-remaining Gate G3 work is I11D.2-I11D.4.
+has closed the suite-wide aggressive-mode and regional-ownership gap. I11D.2
+has closed dynamic-tool and persistent-edge cost verification. The remaining
+Gate G3 work is I11D.3-I11D.4.
 
 Only after G2 may tests force a full collection over the complete production
 graph.

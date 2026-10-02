@@ -12,6 +12,14 @@ and every module-level unsafe opt-in with the checked-in inventories before
 building all crate targets and features under the crate's default
 `unsafe_code` denial.
 
+The stable check also compiles the persistent-edge code-generation fixture in
+release mode and inspects its LLVM IR. `Gc::duplicate_in` must remain exactly
+one pointer load and return; `Gc::same_allocation_in` must remain two pointer
+loads, one equality comparison, and return. Either body gaining a call,
+allocation, atomic operation, or fence fails the check. This is the durable
+I11D.2e/P5B latch against accidentally implementing ordinary managed-edge
+duplication through a root, lock, reference count, or heap allocation.
+
 Optional toolchain checks:
 
 ```sh
