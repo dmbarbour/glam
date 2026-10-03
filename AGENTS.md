@@ -49,11 +49,14 @@ Contingent:
 
 ## Routine Checks
 
-Run these after Rust edits:
+Run `scripts/check.sh` after Rust edits. Its levels are cumulative:
 
 ```sh
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test -q
-scripts/check-interaction-net-profiling.sh
+scripts/check.sh fast   # fmt, workspace clippy, workspace tests
+scripts/check.sh        # (all) fast + glam-gc suite, G0 semantics, profiling
+scripts/check.sh full   # all + aggressive GC, scale, cursor stress, miri/san
 ```
+
+Use `all` (the default) as the pre-commit gate and `full` before performance
+work and periodically. See [`docs/AgentContext.md`](docs/AgentContext.md) for
+what each level covers and the nightly-only Miri/sanitizer gap.

@@ -94,22 +94,29 @@ part of unrelated work. Upgrade it at a plan boundary in a dedicated commit
 that updates both files and fixes any new lints. Record `rustc --version`
 alongside verification results in reviews.
 
-After Rust edits run:
+After Rust edits run `scripts/check.sh`, the workspace verification entry
+point. Its levels are cumulative:
 
-```sh
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test -q
-scripts/check-interaction-net-profiling.sh
-```
+- `scripts/check.sh fast` — `cargo fmt --check`, workspace Clippy, and the
+  workspace test suite at default features. The quick inner-loop gate.
+- `scripts/check.sh` (default `all`) — adds the collector's own `check.sh`
+  (glam-gc all-features tests, persistent-edge codegen latch, unsafe-site
+  audit), the G0 semantic regressions, and the interaction-net profiling
+  fixtures. The pre-commit gate. The profiling check names only the
+  profiling-specific and profiling-augmented fixtures; it does not repeat the
+  whole suite under instrumentation.
+- `scripts/check.sh full` — adds the expensive periodic tier: the aggressive-GC
+  verification pass over the whole workspace, the cursor-stress and
+  million-edge scale proofs, and Miri and the sanitizers. Run before
+  performance work and periodically.
 
-The interaction-net profiling check names only the profiling-specific and
-profiling-augmented regression fixtures. It does not repeat the complete test
-suite under instrumentation.
-
-The routine suite keeps scale-only proofs ignored. After changes to productive
-cursor materialization or its iterative driver, additionally run
-`scripts/check-cursor-stress.sh` to exercise the retained 1,100-layer cases.
+Scale-only proofs (cursor stress, million-edge) stay `#[ignore]`d in the
+ordinary suite and run only at `full`. The project pins a stable toolchain, so
+`full` skips Miri and the sanitizers with a notice unless a nightly with the
+`miri` and `rust-src` components is installed; run
+`crates/glam-gc/scripts/check-miri.sh` and
+`crates/glam-gc/scripts/check-sanitizer.sh {address,thread}` directly once a
+nightly is available. There is no CI yet; `scripts/check.sh` is the gate.
 
 Add a focused regression before a broad fix when practical, then run the full
 suite. Documentation-only changes need link/path validation and
