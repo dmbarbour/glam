@@ -1465,6 +1465,19 @@ mutation closure runs.
   relaxed publication after that point adds no pointer or bitmap ordering
   obligation. The new observations therefore reuse existing C2C/C5 safety
   boundaries and add no unsafe site.
+- C8's measurement-only geometry and rootability hooks compile solely behind
+  the private deterministic-test feature. Geometry calls the same canonical
+  pure derivation used by allocation-class discovery. Rootability holds the
+  managed-data mutex and calls the ordinary checked publication predicate; it
+  neither creates a root nor grants access. Worklist-size observation is a
+  `size_of` query. The measured wide-array cost did not justify a stable-range
+  visitor extension, so C8 adds no borrowed-range lifetime contract, erased
+  continuation, or unsafe dispatch path.
+- The C8 final inventory contains 148 exact constructs across the existing ten
+  unsafe-bearing source files and 11 module expectations. Every production
+  raw operation remains under the arena/topology, canonical dispatch,
+  allocation, access/root, mutation, or trace contract documented above; C8
+  introduced no unsafe construct or new unsafe-bearing module.
 - The ordinary crate checks, exact unsafe inventory, focused Miri run, and
   repository-wide checks are required at completed checkpoints.
 - Miri passes all implemented tests with leak checking enabled. C1's temporary

@@ -104,7 +104,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C8B.2a | completed | geometry and assigned-run scan measurements |
 | C8B.2b | completed | finalization-state measurements |
 | C8B.3 | completed | paged array tracing exploration; baseline retained |
-| C8C.1 | pending | unsafe and documentation audit |
+| C8C.1 | completed | unsafe and documentation audit |
 | C8C.2 | pending | extended verification matrix |
 | C8C.3 | pending | collector-plan closeout |
 

@@ -112,6 +112,23 @@ tracing in C8. Reopen the additive `Visitor` range operation only alongside a
 real Glam-owned contiguous managed container and fresh measurements. Do not
 turn ordinary bounded `Trace` implementations into resumable cursors.
 
+## C8C.1 — unsafe and documentation audit
+
+`scripts/audit-unsafe.sh` confirms the checked ledger exactly matches 148
+constructs across ten unsafe-bearing source files and the 11 existing module
+expectations. The distribution is 48 arena, 18 canonical metadata/class, 32
+heap/collector, 11 mutation, 10 pointer, 13 trace, and 16 across the root,
+mutator, thread-cache, and crate test boundaries.
+
+The safety ledger's concrete invariants cover each category. C8 itself adds no
+unsafe operation: its private measurement hooks call pure geometry derivation,
+the mutex-protected ordinary rootability predicate, or `size_of`. The rejected
+paged-range design therefore adds no erased borrowed-range continuation or
+new visitor lifetime obligation.
+
+No safety mismatch or architecture revision was found.
+
 ## Remaining work
 
-- C8C: unsafe, documentation, and extended verification closeout.
+- C8C.2: extended verification matrix;
+- C8C.3: plan and roadmap closeout.

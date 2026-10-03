@@ -994,3 +994,16 @@ The default output is `target/glam-gc-c8-measurements.jsonl`; an alternate
 path may be supplied as the first argument. The harness runs in release mode,
 records its source revision and host/compiler context, validates workload
 outcomes before printing them, and deliberately imposes no timing threshold.
+Its geometry, rootability, and private work-item-size observations are exposed
+only by `deterministic-test-hooks`; they are repository measurement aids, not a
+supported downstream collector API.
+
+The C8 unsafe/documentation audit remains independently reproducible with:
+
+```sh
+crates/glam-gc/scripts/audit-unsafe.sh
+```
+
+The exact inventory contains 148 constructs in ten source files under the 11
+reviewed module expectations. C8 adds no unsafe site and does not adopt the
+measured but currently unjustified paged-range tracing extension.
