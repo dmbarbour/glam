@@ -47,6 +47,9 @@ fn add_metric(counter: &AtomicU64, amount: u64) {
 ///
 /// The report is published atomically with its completion epoch. It contains
 /// no bitmap, allocation identity, or other retained collection history.
+/// Counts describe collector work, while durations are process-local
+/// operational telemetry measured with [`Instant`]. Neither constitutes a
+/// semantic result or a stable performance threshold across builds or hosts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CollectionReport {
     epoch: NonZeroU64,
@@ -264,8 +267,10 @@ pub struct HeapStatistics {
 /// Cumulative collector and allocator observations for tuning one heap.
 ///
 /// Reading this snapshot scans assigned run headers to measure current slot
-/// utilization. Allocation, marking, and finalization may advance immediately
-/// afterward, so these values are telemetry rather than synchronization state.
+/// utilization, including detached runs retained by an active finalization
+/// batch. Allocation, marking, and finalization may advance immediately
+/// afterward, so these values are telemetry rather than synchronization state
+/// or a stable performance interface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HeapMetrics {
     collection_attempts: u64,
@@ -627,7 +632,10 @@ impl Heap {
     /// Returns cumulative tuning metrics and current allocator utilization.
     ///
     /// Unlike [`Heap::statistics`], this operation scans assigned allocation
-    /// words. It remains observational and never requests collection.
+    /// words. Durable finalization records keep detached runs visible during
+    /// active destructor work, so the utilization fields cover every assigned
+    /// run in the coherent snapshot. The operation remains observational and
+    /// never requests collection.
     #[must_use]
     pub fn metrics(&self) -> HeapMetrics {
         self.inner.metrics()
@@ -8444,6 +8452,50 @@ mod tests {
             collector_slot(&heap, &replacement).owner.location,
             dead_slot.owner.location
         );
+    }
+
+    #[test]
+    fn utilization_snapshot_includes_a_running_detached_finalizer_run() {
+        let heap = Heap::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let finalizer_arrived = Arc::new(Barrier::new(2));
+        let continue_finalization = Arc::new(Barrier::new(2));
+        let _dead = allocate(
+            &heap,
+            ConcurrentReleaseDrop {
+                drops: Arc::clone(&drops),
+                pause_on_drop: true,
+                released_before: Arc::clone(&finalizer_arrived),
+                continue_finalization: Arc::clone(&continue_finalization),
+            },
+        );
+        let before = heap.metrics();
+        assert_eq!(before.assigned_runs(), 1);
+        assert_ne!(before.assigned_slot_capacity(), 0);
+        assert_eq!(before.allocated_slots(), 1);
+
+        let collector = std::thread::spawn({
+            let heap = heap.clone();
+            move || heap.collect_full().unwrap()
+        });
+        finalizer_arrived.wait();
+
+        let during = heap.metrics();
+        assert_eq!(during.assigned_runs(), 1);
+        assert_eq!(
+            during.assigned_slot_capacity(),
+            before.assigned_slot_capacity()
+        );
+        assert_eq!(during.allocated_slots(), 1);
+
+        continue_finalization.wait();
+        let report = collector.join().expect("collector worker panicked");
+        assert_eq!(report.finalized_slots(), 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        let after = heap.metrics();
+        assert_eq!(after.assigned_runs(), 0);
+        assert_eq!(after.assigned_slot_capacity(), 0);
+        assert_eq!(after.allocated_slots(), 0);
     }
 
     #[test]

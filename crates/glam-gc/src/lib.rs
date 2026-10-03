@@ -19,6 +19,10 @@
 //! runs. C7 composes the lifetime and admission rules across shared workers
 //! and exposes cold-path collection reports plus an explicit operational
 //! tuning snapshot; neither metric surface participates in collector state.
+//! Run and arena geometry, worker-cache width, collection-pressure thresholds,
+//! and metric timing details remain implementation policy rather than runtime
+//! configuration or managed-program semantics. The bootstrap collector uses
+//! one fixed run size; it does not offer variable-size runs.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]

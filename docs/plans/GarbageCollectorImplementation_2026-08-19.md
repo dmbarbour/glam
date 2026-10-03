@@ -1,9 +1,9 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C7 are complete, including the C2C.6
+Status: in progress; Phases C0 through C7 and C8A are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
 post-C5, and post-C6 reviews are complete. Every post-C6 finding through
-GC6-007 is resolved and Gate G1 passed on 2026-08-25. C8A is next.
+GC6-007 is resolved and Gate G1 passed on 2026-08-25. C8B.1a is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -97,11 +97,16 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C7C.1 | completed | collection and finalization metrics |
 | C7C.2 | completed | allocation and cache metrics |
 | C7C.3 | completed | metric consistency audit |
-| C8A | pending | tuning and reporting boundary |
-| C8B.1 | pending | measurement harness |
-| C8B.2 | pending | geometry and workload measurements |
+| C8A.1 | completed | collection-report and utilization-snapshot contract |
+| C8A.2 | completed | private tuning and geometry boundary |
+| C8B.1a | pending | measurement schema and harness |
+| C8B.1b | pending | representative measurement workloads |
+| C8B.2a | pending | geometry and assigned-run scan measurements |
+| C8B.2b | pending | finalization-state measurements |
 | C8B.3 | pending | paged array tracing exploration |
-| C8C | pending | final collector audit |
+| C8C.1 | pending | unsafe and documentation audit |
+| C8C.2 | pending | extended verification matrix |
+| C8C.3 | pending | collector-plan closeout |
 
 ## Intended Crate Shape
 
@@ -4306,23 +4311,32 @@ collection correctness; C8A still owns the final reporting-surface review.
 
 ## Phase C8 — Tuning Surface and Final Collector Audit
 
-Execute C8 as five checkpoints:
+Execute C8 through the following bounded checkpoints:
 
-- **C8A — tuning and reporting boundary.** Stabilize the explicit collection
+- **C8A.1 — report and snapshot contract.** Stabilize the explicit collection
   report assembled during C5 through C7 for tests and future runtime metrics.
   The report covers observable non-terminal collection attempts; C7C.3's
-  terminal test probes are not promoted into this API. Keep collection
-  thresholds and similar operational policy as private per-heap tuning. Treat
-  arena-chunk size, the single fixed run size, and the direct-mapped worker
-  class-cache
-  width as build-time/private-fixture parameters because they participate in
-  layout, pointer masking, or compiled TLS shape; do not advertise them as
-  runtime heap options. C8 does not introduce variable-size runs.
-- **C8B.1 — measurement harness.** Add reproducible allocator, tracing, pause,
-  finalization, and reclamation workloads with machine-readable output. Keep
-  correctness assertions separate from timing and do not introduce brittle
-  unit-test thresholds.
-- **C8B.2 — geometry and workload measurements.** Compare selected geometry
+  terminal test probes are not promoted into this API. Explicitly distinguish
+  exact cumulative observations from current utilization scans. Verify that a
+  detached run claimed by an active finalizer attempt remains represented by
+  its authoritative durable batch record until commit, so current utilization
+  covers every assigned run without adding another public completeness state.
+- **C8A.2 — private tuning boundary.** Keep collection thresholds and similar
+  operational policy as private per-heap tuning. Treat arena-chunk size, the
+  single fixed run size, and the direct-mapped worker class-cache width as
+  build-time/private-fixture parameters because they participate in layout,
+  pointer masking, or compiled TLS shape; do not advertise them as runtime
+  heap options. C8 does not introduce variable-size runs. Document timing and
+  metric fields as operational telemetry rather than semantic or stable
+  performance guarantees.
+- **C8B.1a — measurement schema and harness.** Add a reproducible, versioned,
+  machine-readable measurement entry point. Record relevant build and host
+  context. Keep correctness assertions separate from timing and do not
+  introduce brittle unit-test thresholds.
+- **C8B.1b — representative workloads.** Add allocator, tracing, pause,
+  finalization, and reclamation workloads to that harness. Each workload
+  validates its semantic outcome before emitting observations.
+- **C8B.2a — geometry and assigned-run measurements.** Compare selected geometry
   builds or private fixtures, report bitmap bytes and internal fragmentation
   by metadata-requested slot stride, and record representative measurements.
   These observations guide the value layer's later type-layout policy rather
@@ -4330,7 +4344,8 @@ Execute C8 as five checkpoints:
   bitmap scan before considering use of the spare `RunHeader` `u32` as a live-
   slot count reset with the mark bitmap. Do not add that count merely to avoid
   an already-cache-local scan; future parallel marking must also account for
-  counter contention. Also measure safe-root/debug-access checks while a
+  counter contention.
+- **C8B.2b — finalization-state measurements.** Measure safe-root/debug-access checks while a
   finalization batch is active, including the hash-table and sparse-word cost
   of C6C.1b's indexed representation. Measure the one O(capacity) run-map scan
   per finalization attempt and the one pending-word-map scan per selected run,
@@ -4353,10 +4368,16 @@ Execute C8 as five checkpoints:
   private and operational. Adopt the extension only if measurement justifies
   its API and unsafe-contract cost; otherwise retain the C5 baseline and record
   the negative result.
-- **C8C — final collector audit.** Audit every unsafe block against
-  `SAFETY.md`; run Miri, Loom, sanitizers, randomized graph tests, worker stress,
-  and all repository checks; reconcile the implementation plan, roadmap,
-  verification ledger, and public crate documentation.
+- **C8C.1 — unsafe and documentation audit.** Audit every unsafe block against
+  `SAFETY.md`, reconcile public crate documentation, and record any remaining
+  deferred optimization or representation work.
+- **C8C.2 — extended verification matrix.** Run Miri, Loom, sanitizers,
+  randomized graph tests, worker stress, scale fixtures, and all repository
+  checks. Do not accept repetition as evidence for a concurrency ordering; all
+  new ordering claims require a deterministic fixture or model.
+- **C8C.3 — closeout.** Reconcile the implementation plan, roadmap,
+  verification ledger, and public crate documentation, then record whether the
+  isolated collector is ready for its integration gate.
 
 The subcrate is ready for production enablement only when the integration plan
 also reaches Gate G2.
