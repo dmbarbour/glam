@@ -8,15 +8,15 @@ actual_sites="$(mktemp)"
 actual_modules="$(mktemp)"
 trap 'rm -f "$actual_sites" "$actual_modules"' EXIT
 
-rg --with-filename --no-line-number \
+grep -rHE --include='*.rs' \
   'unsafe[[:space:]]+(fn|impl|trait)|unsafe[[:space:]]*\{' \
-  crates/glam-gc/src -g '*.rs' \
+  crates/glam-gc/src \
   | grep -v ':[[:space:]]*///' \
   | sort >"$actual_sites"
 
-rg --with-filename --no-line-number \
+grep -rHE --include='*.rs' \
   '^#\[(allow|expect)\(unsafe_code.*\)\]$' \
-  crates/glam-gc/src -g '*.rs' \
+  crates/glam-gc/src \
   | sort >"$actual_modules"
 
 diff -u crates/glam-gc/scripts/unsafe-sites.txt "$actual_sites"

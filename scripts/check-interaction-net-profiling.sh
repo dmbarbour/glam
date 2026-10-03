@@ -37,8 +37,7 @@ available="$(
 )"
 
 for test_name in "${tests[@]}"; do
-  if ! rg --fixed-strings --line-regexp --quiet \
-    -- "$test_name: test" <<<"$available"; then
+  if ! grep -Fxq -- "$test_name: test" <<<"$available"; then
     echo "missing interaction-net profiling regression: $test_name" >&2
     exit 1
   fi
