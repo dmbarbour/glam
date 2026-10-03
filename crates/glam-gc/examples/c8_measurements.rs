@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use glam_gc::{CollectionPolicy, CollectionReport, Gc, Heap, HeapMetrics, Trace, Visitor};
+#[cfg(feature = "deterministic-test-hooks")]
+use glam_gc::{GeometryMeasurement, geometry_measurement};
 
 const SCHEMA: &str = "glam-gc-c8-v1";
 const ALLOCATION_COUNT: usize = 500_000;
@@ -40,6 +42,18 @@ unsafe impl Trace for GraphNode {
 
 struct DropCounter {
     drops: Arc<AtomicUsize>,
+}
+
+struct RequestedStride<const STRIDE: usize> {
+    _payload: u64,
+}
+
+// SAFETY: `RequestedStride` contains no managed edge. Each instantiation uses
+// its const parameter as a total slot-extent request for measurement only.
+unsafe impl<const STRIDE: usize> Trace for RequestedStride<STRIDE> {
+    const REQUESTED_SLOT_SIZE: Option<usize> = Some(STRIDE);
+
+    fn trace(&self, _visitor: &mut Visitor<'_>) {}
 }
 
 impl Drop for DropCounter {
@@ -295,16 +309,83 @@ fn selected(selections: &[String], name: &str) -> bool {
         || selections.iter().any(|selection| selection == name)
 }
 
+#[cfg(feature = "deterministic-test-hooks")]
+fn emit_geometry(requested_stride: usize, geometry: GeometryMeasurement) {
+    println!(
+        "{{\"schema\":{schema},\"kind\":\"geometry\",\"requested_stride\":{requested_stride},\"run_bytes\":{run_bytes},\"header_bytes\":{header_bytes},\"slot_stride\":{slot_stride},\"slot_count\":{slot_count},\"allocation_bitmap_bytes\":{allocation_bitmap_bytes},\"lease_bitmap_bytes\":{lease_bitmap_bytes},\"mark_bitmap_bytes\":{mark_bitmap_bytes},\"bitmap_padding_bytes\":{bitmap_padding_bytes},\"payload_bytes\":{payload_bytes},\"tail_slack_bytes\":{tail_slack_bytes}}}",
+        schema = json_string(SCHEMA),
+        run_bytes = geometry.run_bytes(),
+        header_bytes = geometry.header_bytes(),
+        slot_stride = geometry.slot_stride(),
+        slot_count = geometry.slot_count(),
+        allocation_bitmap_bytes = geometry.allocation_bitmap_bytes(),
+        lease_bitmap_bytes = geometry.lease_bitmap_bytes(),
+        mark_bitmap_bytes = geometry.mark_bitmap_bytes(),
+        bitmap_padding_bytes = geometry.bitmap_padding_bytes(),
+        payload_bytes = geometry.payload_bytes(),
+        tail_slack_bytes = geometry.tail_slack_bytes(),
+    );
+}
+
+#[cfg(feature = "deterministic-test-hooks")]
+fn geometry_workload() {
+    macro_rules! measure {
+        ($stride:literal) => {
+            emit_geometry(
+                $stride,
+                geometry_measurement::<RequestedStride<$stride>>()
+                    .expect("requested-stride fixture must fit one run"),
+            );
+        };
+    }
+    measure!(8);
+    measure!(16);
+    measure!(24);
+    measure!(32);
+    measure!(64);
+    measure!(128);
+    measure!(256);
+    measure!(1024);
+    measure!(4096);
+}
+
+fn assigned_run_scan_workload() {
+    const SCANS: usize = 10_000;
+    let heap = Heap::new_with_policy(CollectionPolicy::NoAuto);
+    heap.with_mutator(|mutator| {
+        let allocator = mutator
+            .allocator::<SmallValue>()
+            .expect("small-value layout is supported");
+        for index in 0..ALLOCATION_COUNT {
+            let _ = allocator.alloc(SmallValue {
+                _payload: index as u64,
+            });
+        }
+    });
+    let started = Instant::now();
+    let mut observed_slots = 0_usize;
+    for _ in 0..SCANS {
+        observed_slots = observed_slots
+            .checked_add(std::hint::black_box(heap.metrics().allocated_slots()))
+            .expect("measurement accumulator overflowed");
+    }
+    let elapsed = started.elapsed();
+    assert_eq!(observed_slots, ALLOCATION_COUNT * SCANS);
+    emit_workload("assigned_run_scan", SCANS, elapsed, None, heap.metrics());
+}
+
 fn main() {
     let selections = std::env::args().skip(1).collect::<Vec<_>>();
     if selections.iter().any(|argument| argument == "--help") {
         println!(
-            "usage: c8_measurements [all|allocator|trace_deep|trace_wide|finalization|reclamation]..."
+            "usage: c8_measurements [all|geometry|assigned_run_scan|allocator|trace_deep|trace_wide|finalization|reclamation]..."
         );
         return;
     }
     const WORKLOADS: &[&str] = &[
         "all",
+        "geometry",
+        "assigned_run_scan",
         "allocator",
         "trace_deep",
         "trace_wide",
@@ -320,6 +401,13 @@ fn main() {
     }
 
     emit_context();
+    #[cfg(feature = "deterministic-test-hooks")]
+    if selected(&selections, "geometry") {
+        geometry_workload();
+    }
+    if selected(&selections, "assigned_run_scan") {
+        assigned_run_scan_workload();
+    }
     if selected(&selections, "allocator") {
         allocator_workload();
     }

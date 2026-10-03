@@ -1,0 +1,77 @@
+# Garbage Collector C8 Tuning and Final Audit — 2026-10-03
+
+Status: in progress; C8A, C8B.1, and C8B.2a are complete.
+
+This review records tuning evidence and the final isolated-collector audit for
+[`GarbageCollectorImplementation_2026-08-19.md`](../plans/GarbageCollectorImplementation_2026-08-19.md).
+Measurements are operational observations, not semantic contracts or test
+thresholds.
+
+## Method
+
+Run:
+
+```sh
+crates/glam-gc/scripts/capture-c8-measurements.sh
+```
+
+The release-mode harness writes versioned JSON Lines and records its revision,
+compiler, host, and available parallelism. Each workload checks its semantic
+outcome before emitting a record. The committed harness is authoritative; the
+numbers below are one dated observation from the development container and
+should be recaptured before making later tuning decisions.
+
+Observed environment:
+
+- revision before the C8B.2a commit: `3a8b6e54`;
+- Rust 1.98.1, LLVM 22.1.8;
+- x86-64 Linux container, eight available logical workers;
+- release profile with debug assertions disabled.
+
+## C8A — reporting boundary
+
+`CollectionReport` is one atomically published successful-attempt summary.
+Terminal teardown still has no invented observer. Counts describe collector
+work and durations are process-local `Instant` measurements. `HeapMetrics`
+remains a coherent operational snapshot rather than semantic state.
+
+A forced finalizer schedule confirmed an important existing invariant: an
+actively finalized detached run remains in the durable finalization map until
+commit. The current utilization scan therefore continues to include every
+assigned run; no public completeness flag or parallel record was needed.
+
+Run size, chunk size, worker class-cache width, and collection-pressure
+thresholds remain private build-time or per-heap implementation policy. C8
+does not add variable-size runs.
+
+## C8B.2a — geometry and assigned-run scan
+
+The fixed 64 KiB run produced these representative geometries:
+
+| requested stride | slots | allocation + lease + mark bitmap bytes | alignment padding | tail slack |
+|---:|---:|---:|---:|---:|
+| 8 | 7,920 | 2,000 | 112 | 0 |
+| 16 | 4,024 | 1,016 | 72 | 0 |
+| 24 | 2,698 | 696 | 8 | 16 |
+| 32 | 2,028 | 520 | 56 | 0 |
+| 64 | 1,018 | 264 | 56 | 0 |
+| 128 | 510 | 136 | 56 | 0 |
+| 256 | 255 | 72 | 120 | 0 |
+| 1,024 | 63 | 24 | 40 | 896 |
+| 4,096 | 15 | 24 | 40 | 3,968 |
+
+Ten thousand `Heap::metrics()` scans over 64 assigned 8-byte runs containing
+500,000 allocations took 191.8 ms in aggregate, about 19.2 us per scan. This
+is already a cold, explicit telemetry operation. The evidence does not justify
+turning the spare run-header word into a live-slot counter, adding allocation-
+path contention, or complicating future parallel marking.
+
+Disposition: retain the current geometry and cache-local allocation-word scan.
+Use these results as input to the later value-representation layout policy,
+not as a public collector configuration.
+
+## Remaining work
+
+- C8B.2b: finalization-state measurements;
+- C8B.3: wide-array worklist/paged tracing decision;
+- C8C: unsafe, documentation, and extended verification closeout.

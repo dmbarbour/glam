@@ -101,7 +101,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C8A.2 | completed | private tuning and geometry boundary |
 | C8B.1a | completed | measurement schema and harness |
 | C8B.1b | completed | representative measurement workloads |
-| C8B.2a | pending | geometry and assigned-run scan measurements |
+| C8B.2a | completed | geometry and assigned-run scan measurements |
 | C8B.2b | pending | finalization-state measurements |
 | C8B.3 | pending | paged array tracing exploration |
 | C8C.1 | pending | unsafe and documentation audit |
@@ -4378,6 +4378,25 @@ Execute C8 through the following bounded checkpoints:
 - **C8C.3 — closeout.** Reconcile the implementation plan, roadmap,
   verification ledger, and public crate documentation, then record whether the
   isolated collector is ready for its integration gate.
+
+### C8A completion
+
+Completed on 2026-10-03. The report and metrics surfaces now explicitly state
+their operational, non-semantic contract and keep geometry, cache width,
+thresholds, and timing policy private. A forced paused-destructor fixture
+confirmed that an active detached run remains authoritatively indexed by the
+durable finalization batch until commit, so utilization scans remain complete
+without a second topology record or public completeness state.
+
+### C8B.1 and C8B.2a completion
+
+Completed on 2026-10-03. The release-mode JSON-lines harness records source,
+compiler, host, allocator, trace-shape, finalization, reclamation, geometry,
+and assigned-run scan observations without enforcing timing thresholds. The
+dated evidence and disposition are recorded in
+[`GarbageCollectorC8_2026-10-03.md`](../reviews/GarbageCollectorC8_2026-10-03.md).
+The 64-run utilization scan is sufficiently small and cold that no live-slot
+counter or allocation-path synchronization was added.
 
 The subcrate is ready for production enablement only when the integration plan
 also reaches Gate G2.

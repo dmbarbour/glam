@@ -7,7 +7,90 @@
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use crate::{Mutator, Visitor, trace::ErasedGc};
+use crate::{
+    Mutator, Trace, UnsupportedLayout, Visitor,
+    class::metadata_for,
+    run::{RUN_HEADER_SIZE, RUN_SIZE, RunGeometry},
+    trace::ErasedGc,
+};
+
+/// Private-fixture view of the fixed-run geometry for one representation.
+///
+/// This supports repository tuning measurements without promoting run layout
+/// into the collector's downstream configuration surface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GeometryMeasurement {
+    run_bytes: usize,
+    header_bytes: usize,
+    slot_stride: usize,
+    slot_count: usize,
+    allocation_bitmap_bytes: usize,
+    lease_bitmap_bytes: usize,
+    mark_bitmap_bytes: usize,
+    bitmap_padding_bytes: usize,
+    payload_bytes: usize,
+    tail_slack_bytes: usize,
+}
+
+macro_rules! geometry_accessors {
+    ($(($name:ident, $field:ident)),* $(,)?) => {
+        impl GeometryMeasurement {
+            $(
+                #[must_use]
+                pub const fn $name(self) -> usize {
+                    self.$field
+                }
+            )*
+        }
+    };
+}
+
+geometry_accessors! {
+    (run_bytes, run_bytes),
+    (header_bytes, header_bytes),
+    (slot_stride, slot_stride),
+    (slot_count, slot_count),
+    (allocation_bitmap_bytes, allocation_bitmap_bytes),
+    (lease_bitmap_bytes, lease_bitmap_bytes),
+    (mark_bitmap_bytes, mark_bitmap_bytes),
+    (bitmap_padding_bytes, bitmap_padding_bytes),
+    (payload_bytes, payload_bytes),
+    (tail_slack_bytes, tail_slack_bytes),
+}
+
+/// Derives the collector-private fixed-run geometry for a measurement type.
+///
+/// This private-feature function is not a supported downstream layout API.
+pub fn geometry_measurement<T: Trace>() -> Result<GeometryMeasurement, UnsupportedLayout> {
+    let metadata = metadata_for::<T>();
+    let geometry = RunGeometry::derive(metadata.layout(), metadata.requested_slot_size())
+        .map_err(UnsupportedLayout::from_validated_geometry)?;
+    let allocation_bitmap_bytes = geometry.allocation_bitmap.byte_len();
+    let lease_bitmap_bytes = geometry.lease_bitmap.byte_len();
+    let mark_bitmap_bytes = geometry.mark_bitmap.byte_len();
+    let bitmap_end = geometry.mark_bitmap.end();
+    let payload_bytes = geometry
+        .slot_count
+        .checked_mul(geometry.slot_stride)
+        .expect("validated geometry payload bytes overflowed");
+    Ok(GeometryMeasurement {
+        run_bytes: RUN_SIZE,
+        header_bytes: RUN_HEADER_SIZE,
+        slot_stride: geometry.slot_stride,
+        slot_count: geometry.slot_count,
+        allocation_bitmap_bytes,
+        lease_bitmap_bytes,
+        mark_bitmap_bytes,
+        bitmap_padding_bytes: geometry
+            .first_slot_offset
+            .checked_sub(bitmap_end)
+            .expect("validated geometry overlaps its bitmaps"),
+        payload_bytes,
+        tail_slack_bytes: RUN_SIZE
+            .checked_sub(geometry.first_slot_offset + payload_bytes)
+            .expect("validated geometry exceeds its run"),
+    })
+}
 
 /// One-shot observation that a synchronous collector is blocked by a mutator.
 ///

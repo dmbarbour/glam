@@ -11,7 +11,7 @@ trap 'rm -f "$temporary"' EXIT
 
 GLAM_GC_MEASUREMENT_REVISION="$(git rev-parse HEAD)" \
   cargo run --quiet --release --package glam-gc \
-    --example c8_measurements -- all >"$temporary"
+    --features deterministic-test-hooks --example c8_measurements -- all >"$temporary"
 mv "$temporary" "$output"
 trap - EXIT
 printf 'wrote %s\n' "$output"
