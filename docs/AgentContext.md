@@ -78,6 +78,12 @@ verify current bootstrap acceptance against tests and samples.
   than accepting a transient or repeatedly passing test.
 - When removing a check or representation, distinguish redundant work from a
   deliberate boundary projection or zero-cost invariant type.
+- During a major representation or ownership transition, add syntax-backed
+  negative tests that show a retired type, signature shape, or call path
+  cannot reappear. Key them by module and item, not by exact source text or
+  counts. At the transition's closing review, retire these tests and keep only
+  the negative rules that remain durable. Do not use fingerprints or census
+  totals as evidence of safety. Rust tests must not read plan or review prose.
 
 ## Verification
 
