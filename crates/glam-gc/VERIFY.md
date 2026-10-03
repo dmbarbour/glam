@@ -981,3 +981,16 @@ That script reports release-process timing and peak RSS; it does not enforce
 performance thresholds. The dated measurements, environment, methodology, and
 known pre-GC worker-stack observation are recorded in
 [`GarbageCollectionGateG0Baseline_2026-08-20.md`](../../docs/plans/GarbageCollectionGateG0Baseline_2026-08-20.md).
+
+## C8 collector measurements
+
+Capture the versioned, machine-readable collector tuning observations with:
+
+```sh
+crates/glam-gc/scripts/capture-c8-measurements.sh
+```
+
+The default output is `target/glam-gc-c8-measurements.jsonl`; an alternate
+path may be supplied as the first argument. The harness runs in release mode,
+records its source revision and host/compiler context, validates workload
+outcomes before printing them, and deliberately imposes no timing threshold.
