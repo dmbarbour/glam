@@ -5482,6 +5482,163 @@ mod tests {
     }
 
     #[test]
+    fn c7_collection_rebuilds_an_exhausted_allocator_after_regional_drain() {
+        let heap = Heap::new();
+        let geometry = RunGeometry::derive(
+            metadata_for::<u64>().layout(),
+            metadata_for::<u64>().requested_slot_size(),
+        )
+        .unwrap();
+        let root = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<u64>().unwrap();
+            let mut last = None;
+            for value in 0..=geometry.slot_count {
+                last = Some(allocator.alloc(value as u64));
+            }
+            mutator.root(last.expect("fixture must allocate at least one slot"))
+        });
+        let prior_epoch = cache_snapshot(&heap.inner).unwrap().captured_epoch;
+        assert_eq!(heap.statistics().assigned_runs(), 2);
+
+        let (active_tx, active_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let reader = std::thread::spawn({
+            let heap = heap.clone();
+            let root = root.clone();
+            move || {
+                heap.with_mutator(|mutator| {
+                    assert_eq!(*root.get(mutator), geometry.slot_count as u64);
+                    active_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                });
+            }
+        });
+        active_rx.recv().unwrap();
+
+        heap.request_collection();
+        let collector = std::thread::spawn({
+            let heap = heap.clone();
+            move || heap.collect_full().unwrap()
+        });
+        heap.inner.wait_for_collection_waiters(1);
+        release_tx.send(()).unwrap();
+        reader.join().expect("regional reader panicked");
+        let report = collector.join().expect("collector panicked");
+
+        assert_eq!(report.reclaimed_slots(), geometry.slot_count);
+        assert_eq!(report.reclaimed_runs(), 1);
+        assert_eq!(heap.statistics().assigned_runs(), 1);
+        assert_eq!(
+            cache_snapshot(&heap.inner).unwrap().captured_epoch,
+            prior_epoch,
+            "inactive TLS retains its old epoch until the next outer entry"
+        );
+
+        heap.with_mutator(|mutator| {
+            assert_eq!(*root.get(mutator), geometry.slot_count as u64);
+            let cache = cache_snapshot(&heap.inner).unwrap();
+            assert_ne!(cache.captured_epoch, prior_epoch);
+            assert_eq!(cache.cursor_count, 0);
+            let _ = mutator.allocator::<u64>().unwrap().alloc(999);
+        });
+    }
+
+    #[test]
+    fn c7_external_blocking_after_nested_unwind_holds_no_gc_obligation() {
+        let outer = Heap::new();
+        let nested = Heap::new();
+        let (parked_tx, parked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = std::thread::spawn({
+            let outer = outer.clone();
+            let nested = nested.clone();
+            move || {
+                let panic = catch_unwind(AssertUnwindSafe(|| {
+                    outer.with_mutator(|_| {
+                        nested.with_mutator(|mutator| {
+                            let _ = mutator.allocator::<u64>().unwrap().alloc(7);
+                            panic!("injected cross-heap worker unwind");
+                        });
+                    });
+                }));
+                assert!(panic.is_err());
+                assert!(!thread_has_any_active_mutator());
+                parked_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }
+        });
+        parked_rx.recv().unwrap();
+
+        // The worker is still externally parked, but its regional obligations
+        // ended during unwind. Neither heap may confuse that host wait for an
+        // admitted mutator.
+        assert_eq!(outer.collect_full().unwrap().epoch(), 1);
+        assert_eq!(nested.collect_full().unwrap().epoch(), 1);
+
+        release_tx.send(()).unwrap();
+        worker.join().expect("externally parked worker panicked");
+    }
+
+    #[test]
+    fn c7_allocator_coordinator_scale_reuses_collected_runs() {
+        const WORKERS: usize = 8;
+        const VALUES_PER_WORKER: usize = 384;
+
+        let heap = Heap::new();
+        let nested = Heap::new();
+        let start = Arc::new(Barrier::new(WORKERS + 1));
+        let workers = (0..WORKERS)
+            .map(|worker_index| {
+                let heap = heap.clone();
+                let nested = nested.clone();
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    heap.with_mutator(|mutator| {
+                        let allocator = mutator.allocator::<u64>().unwrap();
+                        for offset in 0..VALUES_PER_WORKER {
+                            let value = worker_index * VALUES_PER_WORKER + offset;
+                            let _ = allocator.alloc(value as u64);
+                        }
+                        nested.with_mutator(|nested_mutator| {
+                            let _ = nested_mutator
+                                .allocator::<u64>()
+                                .unwrap()
+                                .alloc(worker_index as u64);
+                        });
+                    });
+                })
+            })
+            .collect::<Vec<_>>();
+        start.wait();
+        heap.request_collection();
+        for worker in workers {
+            worker.join().expect("scaled allocation worker panicked");
+        }
+
+        let report = heap.collect_full().unwrap();
+        assert_eq!(report.reclaimed_slots(), WORKERS * VALUES_PER_WORKER);
+        assert!(report.reclaimed_runs() >= 1);
+        let free_before_reuse = heap.inner.data.lock().unwrap().free_runs.clone();
+        assert!(!free_before_reuse.is_empty());
+
+        let reused = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<u64>().unwrap();
+            (0..WORKERS)
+                .map(|value| allocator.alloc(value as u64))
+                .collect::<Vec<_>>()
+        });
+        assert!(reused.iter().any(|value| {
+            let location = collector_slot(&heap, value).owner.location;
+            free_before_reuse.contains(&location)
+        }));
+
+        // The independent nested heap remains coordinated by its own request
+        // and collection epoch.
+        assert_eq!(nested.collect_full().unwrap().reclaimed_slots(), WORKERS);
+    }
+
+    #[test]
     fn synchronous_requesters_coalesce_on_one_idle_collection() {
         let heap = Heap::new();
         let root = heap.with_mutator(|mutator| {

@@ -1,9 +1,9 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C7A are complete, including the C2C.6
+Status: in progress; Phases C0 through C7B are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
 post-C5, and post-C6 reviews are complete. Every post-C6 finding through
-GC6-007 is resolved and Gate G1 passed on 2026-08-25. C7B.1 is next.
+GC6-007 is resolved and Gate G1 passed on 2026-08-25. C7C.1 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -91,9 +91,9 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C7A.1 | completed | deterministic root handoff and lifetime stress |
 | C7A.2 | completed | immutable-reader and collection forced schedules |
 | C7A.3 | completed | shared-root and reader scale composition |
-| C7B.1 | pending | single-heap allocation/admission forced schedules |
-| C7B.2 | pending | cross-heap, external-blocking, and unwind composition |
-| C7B.3 | pending | allocator/coordinator scale composition |
+| C7B.1 | completed | single-heap allocation/admission forced schedules |
+| C7B.2 | completed | cross-heap, external-blocking, and unwind composition |
+| C7B.3 | completed | allocator/coordinator scale composition |
 | C7C.1 | pending | collection and finalization metrics |
 | C7C.2 | pending | allocation and cache metrics |
 | C7C.3 | pending | metric consistency audit |
@@ -4263,6 +4263,22 @@ and proves synchronous collection cannot complete until the final regional
 mutator obligation retires. A bounded twelve-worker/eight-collection graph
 fixture composes shared-root reads, clone/drop histories, transitive tracing,
 and repeated collection without adding a new lifetime rule.
+
+### C7B completion
+
+Completed on 2026-10-03. The new single-heap composition exhausts and publishes
+two typed runs, holds a distinct immutable-reader region while a request and
+synchronous join are pending, then verifies eager reclamation, allocator-view
+epoch invalidation, and lazy TLS-cache refresh on the next outer entry. It
+builds on the pre-existing exact exhausted-frontier and finalized-word forced
+schedules rather than duplicating their ownership proofs. A cross-heap fixture
+unwinds through nested admitted regions, parks only after both obligations are
+gone, and demonstrates that both heaps can collect while the host worker
+remains externally blocked. The bounded scale fixture combines eight allocating
+workers, independent nested-heap entries, request coalescing, reclamation of
+several thousand slots, and reuse of a location from the free-run pool. Novel
+ordering claims remain covered by the smaller deterministic fixtures; the
+scale case is composition evidence only.
 
 ## Phase C8 — Tuning Surface and Final Collector Audit
 
