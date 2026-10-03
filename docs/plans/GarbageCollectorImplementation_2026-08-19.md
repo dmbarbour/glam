@@ -1,9 +1,9 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C7B are complete, including the C2C.6
+Status: in progress; Phases C0 through C7 are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
 post-C5, and post-C6 reviews are complete. Every post-C6 finding through
-GC6-007 is resolved and Gate G1 passed on 2026-08-25. C7C.1 is next.
+GC6-007 is resolved and Gate G1 passed on 2026-08-25. C8A is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -94,9 +94,9 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C7B.1 | completed | single-heap allocation/admission forced schedules |
 | C7B.2 | completed | cross-heap, external-blocking, and unwind composition |
 | C7B.3 | completed | allocator/coordinator scale composition |
-| C7C.1 | pending | collection and finalization metrics |
-| C7C.2 | pending | allocation and cache metrics |
-| C7C.3 | pending | metric consistency audit |
+| C7C.1 | completed | collection and finalization metrics |
+| C7C.2 | completed | allocation and cache metrics |
+| C7C.3 | completed | metric consistency audit |
 | C8A | pending | tuning and reporting boundary |
 | C8B.1 | pending | measurement harness |
 | C8B.2 | pending | geometry and workload measurements |
@@ -4279,6 +4279,30 @@ workers, independent nested-heap entries, request coalescing, reclamation of
 several thousand slots, and reuse of a location from the free-run pool. Novel
 ordering claims remain covered by the smaller deterministic fixtures; the
 scale case is composition evidence only.
+
+### C7C completion
+
+Completed on 2026-10-03. `CollectionReport` now records the installed
+finalization-batch size, eager partial-run sweep work, peak mark-worklist
+length and capacity, and pause/trace/sweep/finalization/total durations. These
+measurements are gathered only on the cold collection path. `Heap::metrics()`
+adds cumulative collection outcomes, request coalescing and synchronous joins,
+mutator-region and class-cache activity, class/run activation history, current
+arena/run/slot utilization, partial-run fragmentation, and cumulative eager
+sweep work. Cache observations remain thread-local throughout an admitted
+region and are merged with relaxed atomics once at outer exit; ordinary
+allocations acquire no new shared lock or atomic counter.
+
+Forced fixtures cover a successful collection with eager sweep and managed
+finalization, exact cursor hit/miss batching and recycled-run activation, an
+abandoned mark, a recovered destructor panic, request coalescing, and retry.
+They prove `attempts == successes + failures`, that failed attempts do not
+publish completion epochs, and that cumulative eager/recycling metrics describe
+only committed transitions. Existing terminal-teardown drop counters remain
+the test-only consistency evidence for last-owner release: no report or metric
+observer is invented after the heap itself is gone. The metrics remain
+operational observations. They do not participate in admission, liveness, or
+collection correctness; C8A still owns the final reporting-surface review.
 
 ## Phase C8 — Tuning Surface and Final Collector Audit
 

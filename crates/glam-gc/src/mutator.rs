@@ -170,7 +170,7 @@ impl<T: Trace> Allocator<'_, T> {
         self.cache.install(cursor);
         let pointer = self
             .cache
-            .try_allocate(self.class.id(), value)
+            .try_allocate_after_refill(self.class.id(), value)
             .unwrap_or_else(|_| panic!("fresh allocation cursor contains no free slot"));
 
         // SAFETY: the worker-local allocator initialized `T` in its exclusively

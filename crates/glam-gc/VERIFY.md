@@ -874,6 +874,41 @@ The collector unit matrix now contains 189 tests (187 passing plus two ignored
 scale fixtures). GCI-001 adds no unsafe site and does not change automatic-mode
 behavior.
 
+## C7 Shared-Worker Stress and Operational Metrics
+
+C7 adds six named worker-shaped fixtures. Three force root handoff, independent
+heap-facade release, immutable-reader drain, and repeated shared-graph
+collection. Three force exhausted allocator reconstruction, cross-heap unwind
+followed by external parking, and bounded allocator/coordinator scale with
+free-run reuse. Every semantic ordering uses barriers or channels; the scale
+fixture is supplementary composition evidence rather than a substitute for an
+exact schedule.
+
+Three further fixtures verify collection and allocator telemetry. Per-attempt
+reports cover finalization-batch size, eager sweep work, mark-worklist peaks,
+and phase durations. Heap metrics batch cache observations in TLS until outer
+mutator exit, distinguish cold class discovery from retained lookup and virgin
+from recycled activation, scan current slot utilization only on explicit
+request, and partition collection attempts into successful and failed
+outcomes. The failure fixture forces both retryable mark unwind and managed
+destructor panic; retries do not double-count committed work. Existing
+last-owner destructor counters remain the terminal consistency oracle because
+no heap survives to receive a terminal report.
+
+Focused verification is:
+
+```sh
+cargo test -p glam-gc --lib --all-features c7_
+cargo test -p glam-gc --lib --all-features \
+  synchronous_requesters_coalesce_on_one_idle_collection
+cargo clippy -p glam-gc --all-targets --all-features -- -D warnings
+```
+
+The all-feature collector library matrix now contains 215 tests (213 passing
+plus two ignored scale fixtures). C7 adds no unsafe site. Its production
+changes are operational observation only: relaxed metric publication cannot
+grant admission, preserve liveness, or alter a collection decision.
+
 ## Integration GCI5R-008A Root Projection
 
 `Root::as_gc` now reconstructs the root's exact typed, non-rooting edge only

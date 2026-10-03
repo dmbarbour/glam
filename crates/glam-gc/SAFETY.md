@@ -1457,6 +1457,14 @@ mutation closure runs.
   boundaries, dense and sparse death, preservation of drop-bearing dead slots,
   all/one/zero repeated collection, and durable retry after a finalizer panic.
   The mixed, boundary, and panic/retry fixtures pass focused Miri.
+- C7's tuning snapshot holds managed topology while it enumerates assigned
+  runs and reads each allocation word atomically. It never dereferences a
+  payload, treats the result as an operational instant rather than a liveness
+  proof, and cannot feed a value back into admission or collection. Hot cache
+  counts remain ordinary thread-local integers until outer-region retirement;
+  relaxed publication after that point adds no pointer or bitmap ordering
+  obligation. The new observations therefore reuse existing C2C/C5 safety
+  boundaries and add no unsafe site.
 - The ordinary crate checks, exact unsafe inventory, focused Miri run, and
   repository-wide checks are required at completed checkpoints.
 - Miri passes all implemented tests with leak checking enabled. C1's temporary

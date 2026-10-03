@@ -174,6 +174,15 @@ struct ThreadHeapState {
     recursive_depth: usize,
     captured_epoch: AllocationLeaseEpoch,
     cursors: ClassCursorCache,
+    region_metrics: ThreadRegionMetrics,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ThreadRegionMetrics {
+    pub(crate) outer_entries: u64,
+    pub(crate) recursive_entries: u64,
+    pub(crate) class_cache_hits: u64,
+    pub(crate) class_cache_misses: u64,
 }
 
 impl ThreadHeapState {
@@ -183,6 +192,7 @@ impl ThreadHeapState {
             recursive_depth: 0,
             captured_epoch,
             cursors: ClassCursorCache::default(),
+            region_metrics: ThreadRegionMetrics::default(),
         }
     }
 
@@ -228,8 +238,32 @@ impl ThreadCacheHandle {
         let mut state = self.state.borrow_mut();
         assert_ne!(state.recursive_depth, 0, "mutator cache is not active");
         let Some(cursor) = state.cursors.get_mut(class_id) else {
+            state.region_metrics.class_cache_misses += 1;
             return Err(value);
         };
+        match cursor.try_allocate(value) {
+            Ok(pointer) => {
+                state.region_metrics.class_cache_hits += 1;
+                Ok(pointer)
+            }
+            Err(value) => {
+                state.region_metrics.class_cache_misses += 1;
+                Err(value)
+            }
+        }
+    }
+
+    pub(crate) fn try_allocate_after_refill<T: Trace>(
+        &self,
+        class_id: AllocationClassId,
+        value: T,
+    ) -> Result<NonNull<T>, T> {
+        let mut state = self.state.borrow_mut();
+        assert_ne!(state.recursive_depth, 0, "mutator cache is not active");
+        let cursor = state
+            .cursors
+            .get_mut(class_id)
+            .expect("fresh allocation cursor is absent from the cache");
         cursor.try_allocate(value)
     }
 
@@ -304,11 +338,16 @@ impl PreparedThreadHeapEntry {
             let mut state = self.state.borrow_mut();
             if self.outer {
                 state.begin_outer_entry(epoch);
+                state.region_metrics = ThreadRegionMetrics {
+                    outer_entries: 1,
+                    ..ThreadRegionMetrics::default()
+                };
             } else {
                 debug_assert_eq!(
                     state.captured_epoch, epoch,
                     "allocation lease epoch changed inside a mutator region"
                 );
+                state.region_metrics.recursive_entries += 1;
             }
             state.recursive_depth = state
                 .recursive_depth
@@ -361,16 +400,27 @@ impl<'heap> ThreadHeapEntry<'heap> {
 
     fn deactivate(&mut self) -> bool {
         assert!(self.active, "mutator entry is already inactive");
-        let mut state = self.state.borrow_mut();
-        let prior_depth = state.recursive_depth;
-        state.recursive_depth = prior_depth
-            .checked_sub(1)
-            .expect("mutator entry depth underflow");
+        let (prior_depth, completed_metrics, heap) = {
+            let mut state = self.state.borrow_mut();
+            let prior_depth = state.recursive_depth;
+            state.recursive_depth = prior_depth
+                .checked_sub(1)
+                .expect("mutator entry depth underflow");
+            let completed_metrics =
+                (prior_depth == 1).then(|| std::mem::take(&mut state.region_metrics));
+            let heap = completed_metrics
+                .is_some()
+                .then(|| state.heap.upgrade().expect("active mutator lost its heap"));
+            (prior_depth, completed_metrics, heap)
+        };
         assert_eq!(
             self.outer_admission.is_some(),
             prior_depth == 1,
             "coordinator obligation does not match outer mutator exit"
         );
+        if let (Some(metrics), Some(heap)) = (completed_metrics, heap) {
+            heap.record_thread_region_metrics(metrics);
+        }
         self.active = false;
         prior_depth == 1
     }

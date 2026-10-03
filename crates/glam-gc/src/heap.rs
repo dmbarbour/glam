@@ -5,6 +5,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use crate::{
     Mutator, Root, Trace, Visitor,
@@ -34,6 +35,14 @@ const _: () = assert!(FIXED_SURVIVOR_RUN_HEADROOM != 0);
 const _: () = assert!(FIXED_SURVIVOR_RUN_HEADROOM < crate::arena::RUNS_PER_CHUNK);
 const _: () = assert!(SURVIVOR_GROWTH_DENOMINATOR != 0);
 
+fn add_metric(counter: &AtomicU64, amount: u64) {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(amount)
+        })
+        .expect("collector metric exhausted");
+}
+
 /// Scalar results from one completed stop-the-world collection.
 ///
 /// The report is published atomically with its completion epoch. It contains
@@ -48,10 +57,16 @@ pub struct CollectionReport {
     reclaimed_slots: usize,
     finalized_slots: usize,
     reclaimed_runs: usize,
-    #[cfg(test)]
+    finalization_batch_size: usize,
+    eagerly_swept_words: usize,
+    eagerly_swept_slots: usize,
     peak_object_worklist_len: usize,
-    #[cfg(test)]
     peak_object_worklist_capacity: usize,
+    pause_duration: Duration,
+    trace_duration: Duration,
+    sweep_duration: Duration,
+    finalization_duration: Duration,
+    total_duration: Duration,
 }
 
 impl CollectionReport {
@@ -117,6 +132,66 @@ impl CollectionReport {
     #[must_use]
     pub const fn reclaimed_runs(self) -> usize {
         self.reclaimed_runs
+    }
+
+    /// Returns the number of destructor obligations installed for this attempt.
+    #[must_use]
+    pub const fn finalization_batch_size(self) -> usize {
+        self.finalization_batch_size
+    }
+
+    /// Returns allocation-bitmap words eagerly swept in retained no-drop runs.
+    #[must_use]
+    pub const fn eagerly_swept_words(self) -> usize {
+        self.eagerly_swept_words
+    }
+
+    /// Returns slots eagerly swept from retained partial no-drop runs.
+    #[must_use]
+    pub const fn eagerly_swept_slots(self) -> usize {
+        self.eagerly_swept_slots
+    }
+
+    /// Returns the peak number of pending objects in the mark worklist.
+    #[must_use]
+    pub const fn peak_object_worklist_len(self) -> usize {
+        self.peak_object_worklist_len
+    }
+
+    /// Returns the peak reserved object-worklist capacity.
+    #[must_use]
+    pub const fn peak_object_worklist_capacity(self) -> usize {
+        self.peak_object_worklist_capacity
+    }
+
+    /// Returns time for which this attempt excluded ordinary mutator admission.
+    #[must_use]
+    pub const fn pause_duration(self) -> Duration {
+        self.pause_duration
+    }
+
+    /// Returns time spent clearing, seeding, and tracing the mark graph.
+    #[must_use]
+    pub const fn trace_duration(self) -> Duration {
+        self.trace_duration
+    }
+
+    /// Returns time spent classifying and publishing the swept allocator view.
+    #[must_use]
+    pub const fn sweep_duration(self) -> Duration {
+        self.sweep_duration
+    }
+
+    /// Returns time spent in synthetic and payload finalizer work.
+    #[must_use]
+    pub const fn finalization_duration(self) -> Duration {
+        self.finalization_duration
+    }
+
+    /// Returns elapsed wall time from exclusive work through finalization.
+    #[must_use]
+    pub const fn total_duration(self) -> Duration {
+        self.total_duration
     }
 }
 
@@ -184,6 +259,84 @@ pub struct HeapStatistics {
     finalization_batch_runs: usize,
     finalizer_activity: HeapActivity,
     completed_collection_epoch: u64,
+}
+
+/// Cumulative collector and allocator observations for tuning one heap.
+///
+/// Reading this snapshot scans assigned run headers to measure current slot
+/// utilization. Allocation, marking, and finalization may advance immediately
+/// afterward, so these values are telemetry rather than synchronization state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HeapMetrics {
+    collection_attempts: u64,
+    successful_collections: u64,
+    failed_collections: u64,
+    finalizer_panics: u64,
+    entry_elected_collections: u64,
+    synchronous_collection_requests: u64,
+    synchronous_collection_joins: u64,
+    explicit_collection_requests: u64,
+    coalesced_collection_requests: u64,
+    outer_mutator_entries: u64,
+    recursive_mutator_entries: u64,
+    class_cache_hits: u64,
+    class_cache_misses: u64,
+    arena_chunks: usize,
+    assigned_runs: usize,
+    free_runs: usize,
+    virgin_run_activations: u64,
+    recycled_run_activations: u64,
+    allocation_classes: usize,
+    cold_class_discoveries: u64,
+    retained_class_lookups: u64,
+    assigned_slot_capacity: usize,
+    allocated_slots: usize,
+    partial_run_free_slots: usize,
+    eagerly_swept_words: u64,
+    eagerly_swept_slots: u64,
+}
+
+macro_rules! metric_accessors {
+    ($(($name:ident, $field:ident, $type:ty, $doc:literal)),* $(,)?) => {
+        impl HeapMetrics {
+            $(
+                #[doc = $doc]
+                #[must_use]
+                pub const fn $name(self) -> $type {
+                    self.$field
+                }
+            )*
+        }
+    };
+}
+
+metric_accessors! {
+    (collection_attempts, collection_attempts, u64, "Returns collection attempts begun."),
+    (successful_collections, successful_collections, u64, "Returns successfully published collections."),
+    (failed_collections, failed_collections, u64, "Returns attempts which unwound before success."),
+    (finalizer_panics, finalizer_panics, u64, "Returns caught managed-destructor panics."),
+    (entry_elected_collections, entry_elected_collections, u64, "Returns collections elected by mutator entry."),
+    (synchronous_collection_requests, synchronous_collection_requests, u64, "Returns synchronous collection calls."),
+    (synchronous_collection_joins, synchronous_collection_joins, u64, "Returns synchronous calls joining an active attempt."),
+    (explicit_collection_requests, explicit_collection_requests, u64, "Returns nonblocking explicit collection requests."),
+    (coalesced_collection_requests, coalesced_collection_requests, u64, "Returns requests observing an already-pending request."),
+    (outer_mutator_entries, outer_mutator_entries, u64, "Returns completed outer mutator regions."),
+    (recursive_mutator_entries, recursive_mutator_entries, u64, "Returns completed recursive same-heap entries."),
+    (class_cache_hits, class_cache_hits, u64, "Returns allocations served by an existing worker-local cursor."),
+    (class_cache_misses, class_cache_misses, u64, "Returns allocations requiring cursor refill."),
+    (arena_chunks, arena_chunks, usize, "Returns committed arena chunks."),
+    (assigned_runs, assigned_runs, usize, "Returns currently assigned typed runs."),
+    (free_runs, free_runs, usize, "Returns untyped runs available for recycling."),
+    (virgin_run_activations, virgin_run_activations, u64, "Returns typed runs activated from new arena capacity."),
+    (recycled_run_activations, recycled_run_activations, u64, "Returns typed runs reactivated from the free pool."),
+    (allocation_classes, allocation_classes, usize, "Returns heap-local allocation classes."),
+    (cold_class_discoveries, cold_class_discoveries, u64, "Returns newly installed allocation classes."),
+    (retained_class_lookups, retained_class_lookups, u64, "Returns discoveries reusing an installed class."),
+    (assigned_slot_capacity, assigned_slot_capacity, usize, "Returns slot capacity across assigned runs."),
+    (allocated_slots, allocated_slots, usize, "Returns allocated slots observed in assigned runs."),
+    (partial_run_free_slots, partial_run_free_slots, usize, "Returns free slots stranded in nonempty partial runs."),
+    (eagerly_swept_words, eagerly_swept_words, u64, "Returns allocation words eagerly swept cumulatively."),
+    (eagerly_swept_slots, eagerly_swept_slots, u64, "Returns slots eagerly swept cumulatively."),
 }
 
 /// Non-panicking maintenance disposition of one managed heap.
@@ -471,6 +624,15 @@ impl Heap {
         self.inner.statistics()
     }
 
+    /// Returns cumulative tuning metrics and current allocator utilization.
+    ///
+    /// Unlike [`Heap::statistics`], this operation scans assigned allocation
+    /// words. It remains observational and never requests collection.
+    #[must_use]
+    pub fn metrics(&self) -> HeapMetrics {
+        self.inner.metrics()
+    }
+
     /// Returns a collector-maintenance snapshot without panicking after heap
     /// poison.
     ///
@@ -643,6 +805,19 @@ pub(crate) struct HeapInner {
     completed_collection_epoch: AtomicU64,
     admission_changed: Condvar,
     allocation_lease_epoch: AtomicU64,
+    collection_attempts: AtomicU64,
+    successful_collections: AtomicU64,
+    failed_collections: AtomicU64,
+    finalizer_panics: AtomicU64,
+    entry_elected_collections: AtomicU64,
+    synchronous_collection_requests: AtomicU64,
+    synchronous_collection_joins: AtomicU64,
+    explicit_collection_requests: AtomicU64,
+    coalesced_collection_requests: AtomicU64,
+    outer_mutator_entries: AtomicU64,
+    recursive_mutator_entries: AtomicU64,
+    class_cache_hits: AtomicU64,
+    class_cache_misses: AtomicU64,
     #[cfg(feature = "deterministic-test-hooks")]
     edge_transition_probe: Mutex<Option<Arc<EdgeTransitionProbeState>>>,
     #[cfg(feature = "deterministic-test-hooks")]
@@ -714,6 +889,19 @@ impl HeapInner {
             completed_collection_epoch: AtomicU64::new(0),
             admission_changed: Condvar::new(),
             allocation_lease_epoch: AtomicU64::new(AllocationLeaseEpoch::INITIAL.get()),
+            collection_attempts: AtomicU64::new(0),
+            successful_collections: AtomicU64::new(0),
+            failed_collections: AtomicU64::new(0),
+            finalizer_panics: AtomicU64::new(0),
+            entry_elected_collections: AtomicU64::new(0),
+            synchronous_collection_requests: AtomicU64::new(0),
+            synchronous_collection_joins: AtomicU64::new(0),
+            explicit_collection_requests: AtomicU64::new(0),
+            coalesced_collection_requests: AtomicU64::new(0),
+            outer_mutator_entries: AtomicU64::new(0),
+            recursive_mutator_entries: AtomicU64::new(0),
+            class_cache_hits: AtomicU64::new(0),
+            class_cache_misses: AtomicU64::new(0),
             #[cfg(feature = "deterministic-test-hooks")]
             edge_transition_probe: Mutex::new(None),
             #[cfg(feature = "deterministic-test-hooks")]
@@ -761,6 +949,12 @@ struct ManagedData {
     free_runs: Vec<RunLocation>,
     allocation_pressure: AllocationPressure,
     roots: Vec<Weak<RootCell>>,
+    virgin_run_activations: u64,
+    recycled_run_activations: u64,
+    cold_class_discoveries: u64,
+    retained_class_lookups: u64,
+    eagerly_swept_words: u64,
+    eagerly_swept_slots: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1261,17 +1455,34 @@ impl ManagedData {
         hook.release.wait();
     }
 
-    fn sweep_partial_no_drop_runs(&mut self, dead_set: &DeadSetPlan) {
+    fn sweep_partial_no_drop_runs(&mut self, dead_set: &DeadSetPlan) -> (usize, usize) {
         let is_swept = |run: &&DeadRunPlan| {
             run.disposition == DeadSlotDisposition::NoDrop
                 && run.live_slots != 0
                 && run.dead_slots != 0
         };
+        let mut swept_words = 0_usize;
+        let mut swept_slots = 0_usize;
         for run in dead_set.dead_runs.iter().filter(is_swept) {
             debug_assert!(!run.metadata.needs_drop());
+            swept_words = swept_words
+                .checked_add(run.dead_words.len())
+                .expect("eagerly swept word count exhausted");
+            swept_slots = swept_slots
+                .checked_add(run.dead_slots)
+                .expect("eagerly swept slot count exhausted");
             self.arena
                 .retain_marked_allocations(run.target, run.class_id);
         }
+        self.eagerly_swept_words = self
+            .eagerly_swept_words
+            .checked_add(u64::try_from(swept_words).expect("swept word metric does not fit u64"))
+            .expect("cumulative eagerly swept word metric exhausted");
+        self.eagerly_swept_slots = self
+            .eagerly_swept_slots
+            .checked_add(u64::try_from(swept_slots).expect("swept slot metric does not fit u64"))
+            .expect("cumulative eagerly swept slot metric exhausted");
+        (swept_words, swept_slots)
     }
 
     fn publish_swept_allocator_view(&mut self) {
@@ -1336,7 +1547,13 @@ impl ManagedData {
                 .arena
                 .initialize_run(location.chunk, location.run, class_id, geometry)
             {
-                Ok(()) => location,
+                Ok(()) => {
+                    self.recycled_run_activations = self
+                        .recycled_run_activations
+                        .checked_add(1)
+                        .expect("recycled-run activation metric exhausted");
+                    location
+                }
                 Err(error) => {
                     // Initialization validates before mutating the empty run,
                     // so a rejected retype remains reusable.
@@ -1345,7 +1562,12 @@ impl ManagedData {
                 }
             }
         } else {
-            self.arena.publish_run(class_id, geometry)?
+            let location = self.arena.publish_run(class_id, geometry)?;
+            self.virgin_run_activations = self
+                .virgin_run_activations
+                .checked_add(1)
+                .expect("virgin-run activation metric exhausted");
+            location
         };
         let target = self
             .arena
@@ -1491,9 +1713,7 @@ struct MarkSummary {
     traced_objects: usize,
     marked_slots: usize,
     conservatively_retained_slots: usize,
-    #[cfg(test)]
     peak_object_worklist_len: usize,
-    #[cfg(test)]
     peak_object_worklist_capacity: usize,
 }
 
@@ -1501,6 +1721,9 @@ struct MarkSummary {
 struct SweepSummary {
     reclaimed_slots: usize,
     reclaimed_runs: usize,
+    finalization_batch_size: usize,
+    eagerly_swept_words: usize,
+    eagerly_swept_slots: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1515,6 +1738,14 @@ struct CollectionSummary {
     reclaimed_slots: usize,
     finalized_slots: usize,
     reclaimed_runs: usize,
+    finalization_batch_size: usize,
+    eagerly_swept_words: usize,
+    eagerly_swept_slots: usize,
+    pause_duration: Duration,
+    trace_duration: Duration,
+    sweep_duration: Duration,
+    finalization_duration: Duration,
+    total_duration: Duration,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2238,9 +2469,7 @@ struct MarkAttempt {
     panic_before_worklist_push: Option<usize>,
     #[cfg(test)]
     completed_worklist_pushes: usize,
-    #[cfg(test)]
     peak_object_worklist_len: usize,
-    #[cfg(test)]
     peak_object_worklist_capacity: usize,
 }
 
@@ -2275,10 +2504,7 @@ impl MarkAttempt {
         self.worklist
             .try_reserve(root_registry_len)
             .expect("collector root worklist capacity exhausted");
-        #[cfg(test)]
-        {
-            self.peak_object_worklist_capacity = self.worklist.capacity();
-        }
+        self.peak_object_worklist_capacity = self.worklist.capacity();
     }
 
     fn discover(
@@ -2324,12 +2550,12 @@ impl MarkAttempt {
             );
         }
         self.worklist.push(work);
+        self.peak_object_worklist_len = self.peak_object_worklist_len.max(self.worklist.len());
+        self.peak_object_worklist_capacity = self
+            .peak_object_worklist_capacity
+            .max(self.worklist.capacity());
         #[cfg(test)]
         {
-            self.peak_object_worklist_len = self.peak_object_worklist_len.max(self.worklist.len());
-            self.peak_object_worklist_capacity = self
-                .peak_object_worklist_capacity
-                .max(self.worklist.capacity());
             self.completed_worklist_pushes = self
                 .completed_worklist_pushes
                 .checked_add(1)
@@ -2407,9 +2633,7 @@ impl MarkAttempt {
             traced_objects: self.traced_object_count,
             marked_slots: self.marked_slot_count,
             conservatively_retained_slots: self.conservatively_retained_slot_count,
-            #[cfg(test)]
             peak_object_worklist_len: self.peak_object_worklist_len,
-            #[cfg(test)]
             peak_object_worklist_capacity: self.peak_object_worklist_capacity,
         }
     }
@@ -2475,6 +2699,7 @@ impl HeapInner {
         let Some(epoch) = elected else {
             return (MutatorAdmission { heap: self }, false);
         };
+        add_metric(&self.entry_elected_collections, 1);
         (
             self.run_synthetic_collection(epoch, true, |_, _| {}, |_| {})
                 .expect("entry-elected collection must preserve its mutator admission"),
@@ -2484,7 +2709,10 @@ impl HeapInner {
 
     fn request_collection(&self) {
         assert!(!self.is_poisoned(), "managed heap is permanently poisoned");
-        self.collection_requested.store(true, Ordering::Release);
+        add_metric(&self.explicit_collection_requests, 1);
+        if self.collection_requested.swap(true, Ordering::AcqRel) {
+            add_metric(&self.coalesced_collection_requests, 1);
+        }
         if self.is_poisoned() {
             self.collection_requested.store(false, Ordering::Release);
             panic!("managed heap is permanently poisoned");
@@ -2530,6 +2758,90 @@ impl HeapInner {
         }
     }
 
+    fn metrics(&self) -> HeapMetrics {
+        assert!(!self.is_poisoned(), "managed heap is permanently poisoned");
+        let data = self
+            .data
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.is_poisoned() {
+            panic!("managed heap is permanently poisoned");
+        }
+
+        let mut assigned_slot_capacity = 0_usize;
+        let mut allocated_slots = 0_usize;
+        let mut partial_run_free_slots = 0_usize;
+        let mut observe_run = |target: RunClaimTarget, class_id: AllocationClassId| {
+            let capacity = target.geometry.slot_count;
+            let allocated = data.arena.allocated_slot_count(target, class_id);
+            assigned_slot_capacity = assigned_slot_capacity
+                .checked_add(capacity)
+                .expect("assigned slot capacity exhausted");
+            allocated_slots = allocated_slots
+                .checked_add(allocated)
+                .expect("allocated slot metric exhausted");
+            if allocated != 0 && allocated != capacity {
+                partial_run_free_slots = partial_run_free_slots
+                    .checked_add(capacity - allocated)
+                    .expect("partial-run fragmentation metric exhausted");
+            }
+        };
+        for (index, class) in data.classes.iter().enumerate() {
+            let class_id = class_id(index);
+            for target in class.runs() {
+                observe_run(**target, class_id);
+            }
+        }
+        for run in data.finalization_batch.runs.values() {
+            if run.target.is_detached() {
+                observe_run(run.target.target(), run.class_id);
+            }
+        }
+
+        HeapMetrics {
+            collection_attempts: self.collection_attempts.load(Ordering::Relaxed),
+            successful_collections: self.successful_collections.load(Ordering::Relaxed),
+            failed_collections: self.failed_collections.load(Ordering::Relaxed),
+            finalizer_panics: self.finalizer_panics.load(Ordering::Relaxed),
+            entry_elected_collections: self.entry_elected_collections.load(Ordering::Relaxed),
+            synchronous_collection_requests: self
+                .synchronous_collection_requests
+                .load(Ordering::Relaxed),
+            synchronous_collection_joins: self.synchronous_collection_joins.load(Ordering::Relaxed),
+            explicit_collection_requests: self.explicit_collection_requests.load(Ordering::Relaxed),
+            coalesced_collection_requests: self
+                .coalesced_collection_requests
+                .load(Ordering::Relaxed),
+            outer_mutator_entries: self.outer_mutator_entries.load(Ordering::Relaxed),
+            recursive_mutator_entries: self.recursive_mutator_entries.load(Ordering::Relaxed),
+            class_cache_hits: self.class_cache_hits.load(Ordering::Relaxed),
+            class_cache_misses: self.class_cache_misses.load(Ordering::Relaxed),
+            arena_chunks: data.arena.run_capacity() / crate::arena::RUNS_PER_CHUNK,
+            assigned_runs: data.allocation_pressure.assigned_runs,
+            free_runs: data.free_runs.len(),
+            virgin_run_activations: data.virgin_run_activations,
+            recycled_run_activations: data.recycled_run_activations,
+            allocation_classes: data.classes.len(),
+            cold_class_discoveries: data.cold_class_discoveries,
+            retained_class_lookups: data.retained_class_lookups,
+            assigned_slot_capacity,
+            allocated_slots,
+            partial_run_free_slots,
+            eagerly_swept_words: data.eagerly_swept_words,
+            eagerly_swept_slots: data.eagerly_swept_slots,
+        }
+    }
+
+    pub(crate) fn record_thread_region_metrics(
+        &self,
+        metrics: crate::thread_cache::ThreadRegionMetrics,
+    ) {
+        add_metric(&self.outer_mutator_entries, metrics.outer_entries);
+        add_metric(&self.recursive_mutator_entries, metrics.recursive_entries);
+        add_metric(&self.class_cache_hits, metrics.class_cache_hits);
+        add_metric(&self.class_cache_misses, metrics.class_cache_misses);
+    }
+
     fn maintenance_snapshot(&self) -> HeapMaintenanceSnapshot {
         if self.is_poisoned() {
             return HeapMaintenanceSnapshot::Poisoned;
@@ -2565,6 +2877,7 @@ impl HeapInner {
     }
 
     fn collect_full(self: &Arc<Self>) -> Result<CollectionReport, CollectionError> {
+        add_metric(&self.synchronous_collection_requests, 1);
         let target = {
             let coordinator = self
                 .coordinator
@@ -2575,7 +2888,12 @@ impl HeapInner {
             }
             let (target, request) = coordinator.request_synchronous_collection();
             if request {
-                self.collection_requested.store(true, Ordering::Release);
+                if self.collection_requested.swap(true, Ordering::AcqRel) {
+                    add_metric(&self.coalesced_collection_requests, 1);
+                    add_metric(&self.synchronous_collection_joins, 1);
+                }
+            } else {
+                add_metric(&self.synchronous_collection_joins, 1);
             }
             target
         };
@@ -2695,9 +3013,12 @@ impl HeapInner {
         assert_eq!(coordinator.active_outer_mutators, 0);
         drop(coordinator);
 
+        add_metric(&self.collection_attempts, 1);
+        let collection_started = Instant::now();
         remove_inactive_thread_cache(self);
         let mut attempt = CollectionAttempt::new(self, epoch);
         let mut mark_attempt = MarkAttempt::default();
+        let trace_started = Instant::now();
         {
             let mut data = self
                 .data
@@ -2727,6 +3048,8 @@ impl HeapInner {
                 .unwrap_or_else(|error| error.raise());
         }
         let mark_summary = mark_attempt.finish();
+        let trace_duration = trace_started.elapsed();
+        let sweep_started = Instant::now();
         let sweep_summary = {
             // Post-mark work is deliberately data-side. Exclusive authority
             // was validated above and keeps this topology stable; the callback
@@ -2759,12 +3082,14 @@ impl HeapInner {
             // free-run pool.
             let reclaimed_runs = data.retire_wholly_dead_no_drop_runs(&post_mark.dead_set);
             data.install_finalization_batch(finalization_batch);
+            let finalization_batch_size = data.finalization_batch.pending_slot_count();
             data.recycle_retired_no_drop_runs();
 
             // Only dead allocations in retained partial no-drop runs can be
             // cleared immediately. Drop-bearing words remain intact under
             // finalization-batch ownership.
-            data.sweep_partial_no_drop_runs(&post_mark.dead_set);
+            let (eagerly_swept_words, eagerly_swept_slots) =
+                data.sweep_partial_no_drop_runs(&post_mark.dead_set);
 
             // Publish each lease word from the final swept view, keep
             // finalization-bearing words reserved, and select the first
@@ -2776,8 +3101,12 @@ impl HeapInner {
             SweepSummary {
                 reclaimed_slots: post_mark.dead_set.no_drop_dead_slots,
                 reclaimed_runs,
+                finalization_batch_size,
+                eagerly_swept_words,
+                eagerly_swept_slots,
             }
         };
+        let sweep_duration = sweep_started.elapsed();
         attempt.publish_allocator_view();
 
         // Prepare the TLS record without activating it. Under the coordinator
@@ -2802,6 +3131,7 @@ impl HeapInner {
             self.notify_coordinator_waiters();
             MutatorAdmission { heap: self }
         };
+        let pause_duration = collection_started.elapsed();
         let thread_entry =
             prepared.activate(self.current_allocation_lease_epoch(), Some(admission));
         let mutator = Mutator::new(self, thread_entry.cache());
@@ -2810,8 +3140,10 @@ impl HeapInner {
         // Test-only/synthetic work observes the established Finalizing
         // boundary before production destruction begins. A panic here has not
         // invoked any payload destructor and remains safely retryable.
+        let finalization_started = Instant::now();
         finalizer_work(&mutator);
         let finalization_summary = self.run_finalization_batch(&mut attempt, &mutator);
+        let finalization_duration = finalization_started.elapsed();
         drop(mutator);
         let admission = thread_entry.into_outer_admission();
 
@@ -2826,6 +3158,14 @@ impl HeapInner {
                 .reclaimed_runs
                 .checked_add(finalization_summary.reclaimed_runs)
                 .expect("collection reclaimed-run count exhausted"),
+            finalization_batch_size: sweep_summary.finalization_batch_size,
+            eagerly_swept_words: sweep_summary.eagerly_swept_words,
+            eagerly_swept_slots: sweep_summary.eagerly_swept_slots,
+            pause_duration,
+            trace_duration,
+            sweep_duration,
+            finalization_duration,
+            total_duration: collection_started.elapsed(),
         });
         if continue_as_mutator {
             Some(admission)
@@ -2900,6 +3240,7 @@ impl HeapInner {
                     .expect("finalized-run count exhausted");
             }
             if let Some(payload) = panic {
+                add_metric(&self.finalizer_panics, 1);
                 resume_unwind(payload);
             }
         }
@@ -3167,8 +3508,12 @@ impl HeapInner {
     ) -> AllocationClass<T> {
         let identity = MetadataIdentity::new(metadata);
         {
-            let state = self.data.lock().expect("heap state should not be poisoned");
+            let mut state = self.data.lock().expect("heap state should not be poisoned");
             if let Some(id) = state.classes_by_metadata.get(&identity).copied() {
+                state.retained_class_lookups = state
+                    .retained_class_lookups
+                    .checked_add(1)
+                    .expect("retained-class lookup metric exhausted");
                 let shared = Arc::clone(
                     state.classes[class_index(id).expect("known class ID must be valid")].shared(),
                 );
@@ -3192,6 +3537,10 @@ impl HeapInner {
 
         let mut state = self.data.lock().expect("heap state should not be poisoned");
         if let Some(id) = state.classes_by_metadata.get(&identity).copied() {
+            state.retained_class_lookups = state
+                .retained_class_lookups
+                .checked_add(1)
+                .expect("retained-class lookup metric exhausted");
             let shared = Arc::clone(
                 state.classes[class_index(id).expect("known class ID must be valid")].shared(),
             );
@@ -3219,6 +3568,10 @@ impl HeapInner {
         );
         let replaced = state.classes_by_metadata.insert(identity, next);
         debug_assert!(replaced.is_none());
+        state.cold_class_discoveries = state
+            .cold_class_discoveries
+            .checked_add(1)
+            .expect("cold class-discovery metric exhausted");
 
         AllocationClass::new(self, metadata, next, shared)
     }
@@ -3709,6 +4062,7 @@ struct CollectionAttempt<'heap> {
     heap: &'heap HeapInner,
     epoch: CollectionEpoch,
     state: CollectionAttemptState,
+    failure_recorded: bool,
 }
 
 impl<'heap> CollectionAttempt<'heap> {
@@ -3717,6 +4071,7 @@ impl<'heap> CollectionAttempt<'heap> {
             heap,
             epoch,
             state: CollectionAttemptState::Reversible,
+            failure_recorded: false,
         }
     }
 
@@ -3744,8 +4099,16 @@ impl<'heap> CollectionAttempt<'heap> {
         // This is an unwind-safety path: its callers establish the
         // irreversible state structurally, and poisoning itself must not add
         // another assertion panic while preserving the original payload.
+        self.record_failure();
         self.heap.poison_collection(self.epoch);
         self.state = CollectionAttemptState::Poisoned;
+    }
+
+    fn record_failure(&mut self) {
+        if !self.failure_recorded {
+            add_metric(&self.heap.failed_collections, 1);
+            self.failure_recorded = true;
+        }
     }
 
     fn complete(&mut self, summary: CollectionSummary) {
@@ -3788,10 +4151,16 @@ impl<'heap> CollectionAttempt<'heap> {
                 reclaimed_slots: summary.reclaimed_slots,
                 finalized_slots: summary.finalized_slots,
                 reclaimed_runs: summary.reclaimed_runs,
-                #[cfg(test)]
+                finalization_batch_size: summary.finalization_batch_size,
+                eagerly_swept_words: summary.eagerly_swept_words,
+                eagerly_swept_slots: summary.eagerly_swept_slots,
                 peak_object_worklist_len: summary.mark.peak_object_worklist_len,
-                #[cfg(test)]
                 peak_object_worklist_capacity: summary.mark.peak_object_worklist_capacity,
+                pause_duration: summary.pause_duration,
+                trace_duration: summary.trace_duration,
+                sweep_duration: summary.sweep_duration,
+                finalization_duration: summary.finalization_duration,
+                total_duration: summary.total_duration,
             };
             coordinator.latest_collection_report = Some(report);
             coordinator.completed_collection_epoch = self.epoch.get();
@@ -3802,14 +4171,21 @@ impl<'heap> CollectionAttempt<'heap> {
             coordinator.phase = AdmissionPhase::Ordinary;
             self.heap.notify_coordinator_waiters();
         }
+        add_metric(&self.heap.successful_collections, 1);
         self.state = CollectionAttemptState::Completed;
     }
 }
 
 impl Drop for CollectionAttempt<'_> {
     fn drop(&mut self) {
+        if matches!(
+            self.state,
+            CollectionAttemptState::Poisoned | CollectionAttemptState::Completed
+        ) {
+            return;
+        }
+        self.record_failure();
         match self.state {
-            CollectionAttemptState::Poisoned | CollectionAttemptState::Completed => return,
             CollectionAttemptState::TopologyMutation
             | CollectionAttemptState::FinalizerCommitPending => {
                 self.poison();
@@ -3817,6 +4193,7 @@ impl Drop for CollectionAttempt<'_> {
             }
             CollectionAttemptState::Reversible | CollectionAttemptState::AllocatorViewPublished => {
             }
+            CollectionAttemptState::Poisoned | CollectionAttemptState::Completed => unreachable!(),
         }
         let data = self
             .heap
@@ -5683,6 +6060,11 @@ mod tests {
             heap.inner.coordinator_snapshot().completed_collection_epoch,
             1
         );
+        let metrics = heap.metrics();
+        assert_eq!(metrics.synchronous_collection_requests(), 2);
+        assert_eq!(metrics.synchronous_collection_joins(), 1);
+        assert_eq!(metrics.collection_attempts(), 1);
+        assert_eq!(metrics.successful_collections(), 1);
         heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 42));
     }
 
@@ -6705,6 +7087,145 @@ mod tests {
                 root_alias.get(mutator)
             ));
         });
+    }
+
+    #[test]
+    fn c7_collection_report_covers_phase_work_and_timings() {
+        let heap = Heap::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let live = heap.with_mutator(|mutator| {
+            let plain = mutator.allocator::<u64>().unwrap();
+            let live = plain.alloc(1);
+            for value in 2..=5 {
+                let _ = plain.alloc(value);
+            }
+            let _ = mutator
+                .allocator::<DropCounter>()
+                .unwrap()
+                .alloc(DropCounter(Arc::clone(&drops)));
+            mutator.root(live)
+        });
+
+        let report = heap.collect_full().unwrap();
+        assert_eq!(report.finalization_batch_size(), 1);
+        assert_eq!(report.finalized_slots(), 1);
+        assert_eq!(report.eagerly_swept_slots(), 4);
+        assert_eq!(report.eagerly_swept_words(), 1);
+        assert_eq!(report.reclaimed_slots(), 5);
+        assert!(report.peak_object_worklist_len() >= 1);
+        assert!(report.peak_object_worklist_capacity() >= report.peak_object_worklist_len());
+        assert!(report.pause_duration() >= report.trace_duration());
+        assert!(report.pause_duration() >= report.sweep_duration());
+        assert!(report.total_duration() >= report.pause_duration());
+        assert!(report.total_duration() >= report.finalization_duration());
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_eq!(heap.metrics().eagerly_swept_words(), 1);
+        assert_eq!(heap.metrics().eagerly_swept_slots(), 4);
+        heap.with_mutator(|mutator| assert_eq!(*live.get(mutator), 1));
+    }
+
+    #[test]
+    fn c7_allocation_metrics_batch_hot_path_observations_per_region() {
+        let heap = Heap::new();
+        heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<u64>().unwrap();
+            for value in 0..70_u64 {
+                let _ = allocator.alloc(value);
+            }
+            heap.with_mutator(|recursive| {
+                let _ = recursive.allocator::<u64>().unwrap().alloc(70);
+            });
+        });
+
+        let metrics = heap.metrics();
+        let geometry = RunGeometry::derive(
+            metadata_for::<u64>().layout(),
+            metadata_for::<u64>().requested_slot_size(),
+        )
+        .unwrap();
+        assert_eq!(metrics.outer_mutator_entries(), 1);
+        assert_eq!(metrics.recursive_mutator_entries(), 1);
+        assert_eq!(metrics.class_cache_misses(), 2);
+        assert_eq!(metrics.class_cache_hits(), 69);
+        assert_eq!(metrics.arena_chunks(), 1);
+        assert_eq!(metrics.assigned_runs(), 1);
+        assert_eq!(metrics.free_runs(), 0);
+        assert_eq!(metrics.virgin_run_activations(), 1);
+        assert_eq!(metrics.recycled_run_activations(), 0);
+        assert_eq!(metrics.allocation_classes(), 1);
+        assert_eq!(metrics.cold_class_discoveries(), 1);
+        assert_eq!(metrics.retained_class_lookups(), 1);
+        assert_eq!(metrics.assigned_slot_capacity(), geometry.slot_count);
+        assert_eq!(metrics.allocated_slots(), 71);
+        assert_eq!(metrics.partial_run_free_slots(), geometry.slot_count - 71);
+
+        let report = heap.collect_full().unwrap();
+        assert_eq!(report.reclaimed_slots(), 71);
+        assert_eq!(report.reclaimed_runs(), 1);
+        let _ = allocate(&heap, 99_u64);
+        let recycled = heap.metrics();
+        assert_eq!(recycled.recycled_run_activations(), 1);
+        assert_eq!(recycled.virgin_run_activations(), 1);
+        assert_eq!(recycled.free_runs(), 0);
+        assert_eq!(recycled.allocated_slots(), 1);
+    }
+
+    #[test]
+    fn c7_metric_outcomes_partition_success_failure_and_coalescing() {
+        let heap = Heap::new();
+        heap.request_collection();
+        heap.request_collection();
+        heap.with_mutator(|_| {});
+
+        let armed = Arc::new(AtomicBool::new(true));
+        let traces = Arc::new(AtomicUsize::new(0));
+        let root = heap.with_mutator(|mutator| {
+            let value =
+                mutator
+                    .allocator::<PanickingTraceNode>()
+                    .unwrap()
+                    .alloc(PanickingTraceNode {
+                        edges: Vec::new(),
+                        panic_after_edges: Some(0),
+                        armed: Arc::clone(&armed),
+                        traces: Arc::clone(&traces),
+                    });
+            mutator.root(value)
+        });
+        let panic = catch_unwind(AssertUnwindSafe(|| heap.collect_full()));
+        assert!(panic.is_err());
+        armed.store(false, Ordering::Release);
+        assert_eq!(heap.collect_full().unwrap().epoch(), 2);
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let _ = allocate(
+            &heap,
+            SelectivePanickingDrop {
+                id: 0,
+                panic: true,
+                events: Arc::clone(&events),
+            },
+        );
+        let panic = catch_unwind(AssertUnwindSafe(|| heap.collect_full()));
+        assert!(panic.is_err());
+        assert_eq!(heap.collect_full().unwrap().epoch(), 3);
+
+        let metrics = heap.metrics();
+        assert_eq!(metrics.explicit_collection_requests(), 2);
+        assert_eq!(metrics.coalesced_collection_requests(), 3);
+        assert_eq!(metrics.entry_elected_collections(), 1);
+        assert_eq!(metrics.synchronous_collection_requests(), 4);
+        assert_eq!(metrics.synchronous_collection_joins(), 2);
+        assert_eq!(metrics.collection_attempts(), 5);
+        assert_eq!(metrics.successful_collections(), 3);
+        assert_eq!(metrics.failed_collections(), 2);
+        assert_eq!(metrics.finalizer_panics(), 1);
+        assert_eq!(
+            metrics.collection_attempts(),
+            metrics.successful_collections() + metrics.failed_collections()
+        );
+        assert_eq!(*events.lock().unwrap(), vec![0]);
+        heap.with_mutator(|mutator| assert_eq!(root.get(mutator).edges.len(), 0));
     }
 
     #[test]

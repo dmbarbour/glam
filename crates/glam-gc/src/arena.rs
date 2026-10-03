@@ -482,13 +482,11 @@ impl Arena {
         }
     }
 
-    /// Counts allocated slots in one published run for deterministic
-    /// verification.
+    /// Counts allocated slots in one published run for operational metrics.
     ///
     /// Each allocation word is observed atomically. The caller establishes a
     /// boundary without concurrent allocation or finalization when it needs an
     /// exact whole-heap count.
-    #[cfg(feature = "deterministic-test-hooks")]
     pub(crate) fn allocated_slot_count(
         &self,
         target: RunClaimTarget,

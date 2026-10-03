@@ -16,7 +16,9 @@
 //! aligns activity, pressure, and successful reports with those durable
 //! commits. C6D selects restricted last-owner teardown without mutator
 //! authority and visits detached pending runs before ordinary attached class
-//! runs.
+//! runs. C7 composes the lifetime and admission rules across shared workers
+//! and exposes cold-path collection reports plus an explicit operational
+//! tuning snapshot; neither metric surface participates in collector state.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -54,7 +56,7 @@ pub use deterministic::{
 pub use class::UnsupportedLayout;
 pub use heap::{
     CollectionError, CollectionPolicy, CollectionReport, Heap, HeapActivity,
-    HeapMaintenanceSnapshot, HeapStatistics,
+    HeapMaintenanceSnapshot, HeapMetrics, HeapStatistics,
 };
 pub use mutator::{Allocator, Mutator};
 pub use pointer::Gc;

@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        884,
+        910,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -982,9 +982,14 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // I12A adds four fresh test-only maintenance fixtures and two roots. They
     // force recoverable trace/finalizer panic and pressure-threshold service
     // without introducing a production managed edge.
+    // C7 adds nine collector-only stress and metric fixtures. Their root
+    // handoffs, graph construction, allocation observations, and failure
+    // retries contribute 26 test-typed occurrences while leaving both
+    // production partitions and the collector-private erased partition
+    // unchanged.
     assert_eq!(
         occurrence_fingerprint(actual),
-        15_343_616_663_971_815_051,
+        4_080_720_613_931_560_035,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -1031,7 +1036,7 @@ fn persistent_edge_inventory_classifications_are_closed() {
         BTreeMap::from([
             ((SourceScope::Production, EdgeSurface::Typed), 148),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 686),
+            ((SourceScope::Test, EdgeSurface::Typed), 712),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"
