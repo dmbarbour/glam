@@ -1,6 +1,6 @@
 # Garbage Collector C8 Tuning and Final Audit — 2026-10-03
 
-Status: in progress; C8A, C8B.1, and C8B.2a are complete.
+Status: in progress; C8A, C8B.1, and C8B.2 are complete.
 
 This review records tuning evidence and the final isolated-collector audit for
 [`GarbageCollectorImplementation_2026-08-19.md`](../plans/GarbageCollectorImplementation_2026-08-19.md).
@@ -70,8 +70,27 @@ Disposition: retain the current geometry and cache-local allocation-word scan.
 Use these results as input to the later value-representation layout policy,
 not as a public collector configuration.
 
+## C8B.2b — finalization-state structures
+
+The exceptional-state workload allocated 4,096 finalizers at a requested
+1,024-byte stride, distributing them across 66 runs. It forced a destructor
+panic on the penultimate obligation. This left exactly one pending slot in one
+durable run while retaining the hash tables' grown capacity, then measured the
+normal lookup and retry paths:
+
+- the failed attempt terminally retired 4,095 obligations in about 0.76 ms;
+- 100,000 non-mutating rootability checks against the sparse pending identity
+  took about 14.1 ms, or 141 ns per checked lookup including mutex admission;
+- the retry scanned the retained run map, conservatively marked and finalized
+  the single pending slot, and reclaimed its run in about 20 us total.
+
+The ordinary dense workload finalized 100,000 small objects across 13 runs in
+about 13.3 ms. These results do not justify a specialized hasher, a dense or
+ordered replacement for the exceptional sparse maps, or another persistent
+dispatch index. Pending masks remain authoritative and the ephemeral dispatch
+snapshot remains the only per-attempt work vector.
+
 ## Remaining work
 
-- C8B.2b: finalization-state measurements;
 - C8B.3: wide-array worklist/paged tracing decision;
 - C8C: unsafe, documentation, and extended verification closeout.

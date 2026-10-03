@@ -95,6 +95,11 @@ impl<'heap> Mutator<'heap> {
     pub(crate) fn assert_observed_edge_for_test(&self, edge: ErasedGc) {
         self.heap.assert_observed_edge(edge);
     }
+
+    #[cfg(feature = "deterministic-test-hooks")]
+    pub(crate) fn is_rootable_for_measurement<T: Trace>(&self, value: &Gc<T>) -> bool {
+        self.heap.is_rootable_for_measurement(value)
+    }
 }
 
 /// Typed allocation authority borrowed from one admitted mutator region.

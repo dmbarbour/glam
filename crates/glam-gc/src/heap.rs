@@ -3873,6 +3873,13 @@ impl HeapInner {
     }
 
     #[cfg(feature = "deterministic-test-hooks")]
+    pub(crate) fn is_rootable_for_measurement<T: Trace>(&self, value: &crate::Gc<T>) -> bool {
+        let expected = metadata_for::<T>();
+        let state = self.data.lock().expect("heap state should not be poisoned");
+        validate_rootable_in_state(&state, value.erase(), expected).is_ok()
+    }
+
+    #[cfg(feature = "deterministic-test-hooks")]
     pub(crate) fn edge_transition_probe(&self) -> Option<Arc<EdgeTransitionProbeState>> {
         self.edge_transition_probe
             .lock()

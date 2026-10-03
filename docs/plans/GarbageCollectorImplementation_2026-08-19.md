@@ -102,7 +102,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C8B.1a | completed | measurement schema and harness |
 | C8B.1b | completed | representative measurement workloads |
 | C8B.2a | completed | geometry and assigned-run scan measurements |
-| C8B.2b | pending | finalization-state measurements |
+| C8B.2b | completed | finalization-state measurements |
 | C8B.3 | pending | paged array tracing exploration |
 | C8C.1 | pending | unsafe and documentation audit |
 | C8C.2 | pending | extended verification matrix |
@@ -4397,6 +4397,16 @@ dated evidence and disposition are recorded in
 [`GarbageCollectorC8_2026-10-03.md`](../reviews/GarbageCollectorC8_2026-10-03.md).
 The 64-run utilization scan is sufficiently small and cold that no live-slot
 counter or allocation-path synchronization was added.
+
+### C8B.2b completion
+
+Completed on 2026-10-03. A release workload spread 4,096 large-stride
+finalizers across 66 runs, forced a panic on the penultimate obligation, and
+left one sparse pending identity in the grown durable maps. Rootability checks
+including mutex admission remained sub-microsecond and the single-slot retry
+remained tens of microseconds on the recorded host. Together with the dense
+100,000-finalizer workload, the evidence does not justify a specialized
+hasher, another persistent dispatch index, or a dense/ordered replacement.
 
 The subcrate is ready for production enablement only when the integration plan
 also reaches Gate G2.

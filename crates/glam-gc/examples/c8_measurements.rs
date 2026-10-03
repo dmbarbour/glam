@@ -5,12 +5,12 @@
 
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use glam_gc::{CollectionPolicy, CollectionReport, Gc, Heap, HeapMetrics, Trace, Visitor};
 #[cfg(feature = "deterministic-test-hooks")]
-use glam_gc::{GeometryMeasurement, geometry_measurement};
+use glam_gc::{GeometryMeasurement, geometry_measurement, is_rootable_for_measurement};
 
 const SCHEMA: &str = "glam-gc-c8-v1";
 const ALLOCATION_COUNT: usize = 500_000;
@@ -46,6 +46,29 @@ struct DropCounter {
 
 struct RequestedStride<const STRIDE: usize> {
     _payload: u64,
+}
+
+struct SparseFinalizer {
+    id: usize,
+    countdown: Arc<AtomicUsize>,
+    dropped: Arc<[AtomicBool]>,
+}
+
+impl Drop for SparseFinalizer {
+    fn drop(&mut self) {
+        self.dropped[self.id].store(true, Ordering::Relaxed);
+        if self.countdown.fetch_sub(1, Ordering::Relaxed) == 1 {
+            panic!("injected C8 sparse-finalizer panic");
+        }
+    }
+}
+
+// SAFETY: `SparseFinalizer` contains host-owned measurement state and no
+// managed edge. The large requested stride creates many sparse finalizer runs.
+unsafe impl Trace for SparseFinalizer {
+    const REQUESTED_SLOT_SIZE: Option<usize> = Some(1024);
+
+    fn trace(&self, _visitor: &mut Visitor<'_>) {}
 }
 
 // SAFETY: `RequestedStride` contains no managed edge. Each instantiation uses
@@ -374,11 +397,115 @@ fn assigned_run_scan_workload() {
     emit_workload("assigned_run_scan", SCANS, elapsed, None, heap.metrics());
 }
 
+#[cfg(feature = "deterministic-test-hooks")]
+fn emit_finalization_state(name: &str, operations: usize, elapsed: Duration, heap: &Heap) {
+    let statistics = heap.statistics();
+    let metrics = heap.metrics();
+    println!(
+        "{{\"schema\":{schema},\"kind\":\"finalization_state\",\"name\":{name},\"operations\":{operations},\"elapsed_ns\":{elapsed_ns},\"pending_finalizers\":{pending_finalizers},\"finalization_batch_runs\":{batch_runs},\"failed_collections\":{failed_collections},\"finalizer_panics\":{finalizer_panics},\"assigned_runs\":{assigned_runs},\"allocated_slots\":{allocated_slots}}}",
+        schema = json_string(SCHEMA),
+        name = json_string(name),
+        elapsed_ns = nanos(elapsed),
+        pending_finalizers = statistics.pending_finalizers(),
+        batch_runs = statistics.finalization_batch_runs(),
+        failed_collections = metrics.failed_collections(),
+        finalizer_panics = metrics.finalizer_panics(),
+        assigned_runs = metrics.assigned_runs(),
+        allocated_slots = metrics.allocated_slots(),
+    );
+}
+
+#[cfg(feature = "deterministic-test-hooks")]
+fn sparse_finalization_workload() {
+    const VALUES: usize = 4_096;
+    const ROOTABILITY_CHECKS: usize = 100_000;
+
+    let heap = Heap::new_with_policy(CollectionPolicy::NoAuto);
+    let countdown = Arc::new(AtomicUsize::new(VALUES - 1));
+    let dropped = (0..VALUES)
+        .map(|_| AtomicBool::new(false))
+        .collect::<Arc<[_]>>();
+    let mut values = heap.with_mutator(|mutator| {
+        let allocator = mutator
+            .allocator::<SparseFinalizer>()
+            .expect("sparse-finalizer layout is supported");
+        (0..VALUES)
+            .map(|id| {
+                Some(allocator.alloc(SparseFinalizer {
+                    id,
+                    countdown: Arc::clone(&countdown),
+                    dropped: Arc::clone(&dropped),
+                }))
+            })
+            .collect::<Vec<_>>()
+    });
+
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let started = Instant::now();
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| heap.collect_full()));
+    let failed_elapsed = started.elapsed();
+    std::panic::set_hook(previous_hook);
+    assert!(failed.is_err(), "sparse finalizer did not inject its panic");
+    assert_eq!(
+        dropped
+            .iter()
+            .filter(|dropped| dropped.load(Ordering::Relaxed))
+            .count(),
+        VALUES - 1
+    );
+    assert_eq!(heap.statistics().pending_finalizers(), 1);
+    assert_eq!(heap.statistics().finalization_batch_runs(), 1);
+    emit_finalization_state(
+        "sparse_finalization_failure",
+        VALUES - 1,
+        failed_elapsed,
+        &heap,
+    );
+
+    let pending_index = dropped
+        .iter()
+        .position(|dropped| !dropped.load(Ordering::Relaxed))
+        .expect("sparse finalization lost its pending allocation");
+    let pending = values[pending_index]
+        .take()
+        .expect("pending finalizer handle disappeared");
+    let started = Instant::now();
+    heap.with_mutator(|mutator| {
+        for _ in 0..ROOTABILITY_CHECKS {
+            assert!(!is_rootable_for_measurement(mutator, &pending));
+        }
+    });
+    emit_finalization_state(
+        "sparse_rootability_checks",
+        ROOTABILITY_CHECKS,
+        started.elapsed(),
+        &heap,
+    );
+
+    let started = Instant::now();
+    let report = heap
+        .collect_full()
+        .expect("sparse finalization retry failed");
+    let elapsed = started.elapsed();
+    assert_eq!(report.conservatively_retained_slots(), 1);
+    assert_eq!(report.finalized_slots(), 1);
+    assert_eq!(report.reclaimed_slots(), 1);
+    assert_eq!(heap.statistics().pending_finalizers(), 0);
+    emit_workload(
+        "sparse_finalization_retry",
+        1,
+        elapsed,
+        Some(report),
+        heap.metrics(),
+    );
+}
+
 fn main() {
     let selections = std::env::args().skip(1).collect::<Vec<_>>();
     if selections.iter().any(|argument| argument == "--help") {
         println!(
-            "usage: c8_measurements [all|geometry|assigned_run_scan|allocator|trace_deep|trace_wide|finalization|reclamation]..."
+            "usage: c8_measurements [all|geometry|assigned_run_scan|sparse_finalization|allocator|trace_deep|trace_wide|finalization|reclamation]..."
         );
         return;
     }
@@ -386,6 +513,7 @@ fn main() {
         "all",
         "geometry",
         "assigned_run_scan",
+        "sparse_finalization",
         "allocator",
         "trace_deep",
         "trace_wide",
@@ -407,6 +535,10 @@ fn main() {
     }
     if selected(&selections, "assigned_run_scan") {
         assigned_run_scan_workload();
+    }
+    #[cfg(feature = "deterministic-test-hooks")]
+    if selected(&selections, "sparse_finalization") {
+        sparse_finalization_workload();
     }
     if selected(&selections, "allocator") {
         allocator_workload();

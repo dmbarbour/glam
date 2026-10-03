@@ -8,7 +8,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use crate::{
-    Mutator, Trace, UnsupportedLayout, Visitor,
+    Gc, Mutator, Trace, UnsupportedLayout, Visitor,
     class::metadata_for,
     run::{RUN_HEADER_SIZE, RUN_SIZE, RunGeometry},
     trace::ErasedGc,
@@ -90,6 +90,15 @@ pub fn geometry_measurement<T: Trace>() -> Result<GeometryMeasurement, Unsupport
             .checked_sub(geometry.first_slot_offset + payload_bytes)
             .expect("validated geometry exceeds its run"),
     })
+}
+
+/// Checks the ordinary root-publication predicate without creating a root.
+///
+/// This private-feature operation exists only to measure finalization lookup
+/// costs. It provides no liveness and is not a supported observation API.
+#[must_use]
+pub fn is_rootable_for_measurement<T: Trace>(mutator: &Mutator<'_>, value: &Gc<T>) -> bool {
+    mutator.is_rootable_for_measurement(value)
 }
 
 /// One-shot observation that a synchronous collector is blocked by a mutator.
