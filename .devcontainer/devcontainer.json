@@ -33,6 +33,7 @@
         "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,consistency=cached",
         "source=${localEnv:HOME}/.Xauthority,target=/root/.Xauthority,type=bind,readonly",
         "source=${localEnv:HOME}/.codex,target=/root/.codex,type=bind,consistency=cached",
+        "source=${localEnv:HOME}/.claude,target=/root/.claude,type=bind,consistency=cached",
     ],
     "runArgs":[
         // "--net=host",
