@@ -1715,6 +1715,11 @@ struct TraceWork {
     metadata: &'static ObjectMetadata,
 }
 
+#[cfg(feature = "deterministic-test-hooks")]
+pub(crate) const fn trace_work_item_bytes_for_measurement() -> usize {
+    std::mem::size_of::<TraceWork>()
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct MarkSummary {
     root_entries: usize,

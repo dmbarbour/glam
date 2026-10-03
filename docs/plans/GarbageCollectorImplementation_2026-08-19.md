@@ -103,7 +103,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C8B.1b | completed | representative measurement workloads |
 | C8B.2a | completed | geometry and assigned-run scan measurements |
 | C8B.2b | completed | finalization-state measurements |
-| C8B.3 | pending | paged array tracing exploration |
+| C8B.3 | completed | paged array tracing exploration; baseline retained |
 | C8C.1 | pending | unsafe and documentation audit |
 | C8C.2 | pending | extended verification matrix |
 | C8C.3 | pending | collector-plan closeout |
@@ -4407,6 +4407,16 @@ including mutex admission remained sub-microsecond and the single-slot retry
 remained tens of microseconds on the recorded host. Together with the dense
 100,000-finalizer workload, the evidence does not justify a specialized
 hasher, another persistent dispatch index, or a dense/ordered replacement.
+
+### C8B.3 completion
+
+Completed on 2026-10-03 without changing the tracing API. The synthetic
+million-edge fanout reserves a 16 MiB object stack on the measured 64-bit
+target, while a million-node chain stays at constant stack depth. No production
+managed Glam representation currently owns such a flat edge array. Adding a
+stable-range unsafe contract before the value representation identifies a real
+contiguous consumer would be premature, so the plain `Vec<TraceWork>` remains
+the bootstrap policy and the measurement is retained for later reconsideration.
 
 The subcrate is ready for production enablement only when the integration plan
 also reaches Gate G2.

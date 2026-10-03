@@ -10,6 +10,7 @@ use std::time::Duration;
 use crate::{
     Gc, Mutator, Trace, UnsupportedLayout, Visitor,
     class::metadata_for,
+    heap::trace_work_item_bytes_for_measurement,
     run::{RUN_HEADER_SIZE, RUN_SIZE, RunGeometry},
     trace::ErasedGc,
 };
@@ -99,6 +100,12 @@ pub fn geometry_measurement<T: Trace>() -> Result<GeometryMeasurement, Unsupport
 #[must_use]
 pub fn is_rootable_for_measurement<T: Trace>(mutator: &Mutator<'_>, value: &Gc<T>) -> bool {
     mutator.is_rootable_for_measurement(value)
+}
+
+/// Returns the current private object-worklist entry size for C8 measurements.
+#[must_use]
+pub const fn trace_work_item_bytes() -> usize {
+    trace_work_item_bytes_for_measurement()
 }
 
 /// One-shot observation that a synchronous collector is blocked by a mutator.

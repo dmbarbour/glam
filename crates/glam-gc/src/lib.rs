@@ -55,7 +55,7 @@ mod deterministic;
 pub use deterministic::{
     EdgeTransitionObservation, EdgeTransitionProbe, EdgeTransitionRecord, FinalizingPhaseProbe,
     GeometryMeasurement, SynchronousCollectionWaitProbe, geometry_measurement,
-    is_rootable_for_measurement,
+    is_rootable_for_measurement, trace_work_item_bytes,
 };
 
 pub use class::UnsupportedLayout;

@@ -1,6 +1,6 @@
 # Garbage Collector C8 Tuning and Final Audit — 2026-10-03
 
-Status: in progress; C8A, C8B.1, and C8B.2 are complete.
+Status: in progress; C8A and C8B are complete.
 
 This review records tuning evidence and the final isolated-collector audit for
 [`GarbageCollectorImplementation_2026-08-19.md`](../plans/GarbageCollectorImplementation_2026-08-19.md).
@@ -90,7 +90,28 @@ ordered replacement for the exceptional sparse maps, or another persistent
 dispatch index. Pending masks remain authoritative and the ephemeral dispatch
 snapshot remains the only per-attempt work vector.
 
+## C8B.3 — paged array tracing
+
+`TraceWork` is currently two pointers, or 16 bytes on the measured x86-64
+target. The representative 100,000-edge flat fanout reached a length of
+100,000 and a `Vec` capacity of 131,072, reserving 2 MiB. The isolated scale
+fixture's one-million-edge fanout reached a capacity of 1,048,576, reserving
+16 MiB. In contrast, the million-node deep-chain fixture retained a constant-
+depth object stack and verified the nonrecursive traversal goal.
+
+The wide peak is material enough to retain as tuning evidence, but not enough
+to justify a new unsafe API today. The repository has no production managed
+representation containing a flat `Vec<Gc<_>>`; current high-level containers
+trace bounded or tree-shaped ownership, and the flat fanout exists only in GC
+fixtures. A stable-range continuation would add lifetime and stability
+obligations before value-representation work has selected the contiguous
+containers which could honor them.
+
+Disposition: retain `Vec<TraceWork>` and do not prototype or adopt paged range
+tracing in C8. Reopen the additive `Visitor` range operation only alongside a
+real Glam-owned contiguous managed container and fresh measurements. Do not
+turn ordinary bounded `Trace` implementations into resumable cursors.
+
 ## Remaining work
 
-- C8B.3: wide-array worklist/paged tracing decision;
 - C8C: unsafe, documentation, and extended verification closeout.

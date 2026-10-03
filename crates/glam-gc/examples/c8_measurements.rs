@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use glam_gc::{CollectionPolicy, CollectionReport, Gc, Heap, HeapMetrics, Trace, Visitor};
 #[cfg(feature = "deterministic-test-hooks")]
-use glam_gc::{GeometryMeasurement, geometry_measurement, is_rootable_for_measurement};
+use glam_gc::{
+    GeometryMeasurement, geometry_measurement, is_rootable_for_measurement, trace_work_item_bytes,
+};
 
 const SCHEMA: &str = "glam-gc-c8-v1";
 const ALLOCATION_COUNT: usize = 500_000;
@@ -144,6 +146,18 @@ fn nanos(duration: Duration) -> u128 {
     duration.as_nanos()
 }
 
+#[cfg(feature = "deterministic-test-hooks")]
+fn peak_worklist_bytes(capacity: usize) -> usize {
+    capacity
+        .checked_mul(trace_work_item_bytes())
+        .expect("worklist byte measurement overflowed")
+}
+
+#[cfg(not(feature = "deterministic-test-hooks"))]
+fn peak_worklist_bytes(_capacity: usize) -> usize {
+    0
+}
+
 fn emit_workload(
     name: &str,
     operations: usize,
@@ -180,8 +194,9 @@ fn emit_workload(
             nanos(report.finalization_duration()),
         )
     });
+    let worklist_bytes = peak_worklist_bytes(worklist_capacity);
     println!(
-        "{{\"schema\":{schema},\"kind\":\"workload\",\"name\":{name},\"operations\":{operations},\"elapsed_ns\":{elapsed_ns},\"epoch\":{epoch},\"traced_objects\":{traced},\"marked_slots\":{marked},\"reclaimed_slots\":{reclaimed},\"finalized_slots\":{finalized},\"reclaimed_runs\":{reclaimed_runs},\"peak_worklist_len\":{worklist_len},\"peak_worklist_capacity\":{worklist_capacity},\"pause_ns\":{pause_ns},\"trace_ns\":{trace_ns},\"sweep_ns\":{sweep_ns},\"finalization_ns\":{finalization_ns},\"arena_chunks\":{arena_chunks},\"assigned_runs\":{assigned_runs},\"free_runs\":{free_runs},\"assigned_slot_capacity\":{slot_capacity},\"allocated_slots\":{allocated_slots},\"partial_run_free_slots\":{partial_free},\"cache_hits\":{cache_hits},\"cache_misses\":{cache_misses}}}",
+        "{{\"schema\":{schema},\"kind\":\"workload\",\"name\":{name},\"operations\":{operations},\"elapsed_ns\":{elapsed_ns},\"epoch\":{epoch},\"traced_objects\":{traced},\"marked_slots\":{marked},\"reclaimed_slots\":{reclaimed},\"finalized_slots\":{finalized},\"reclaimed_runs\":{reclaimed_runs},\"peak_worklist_len\":{worklist_len},\"peak_worklist_capacity\":{worklist_capacity},\"peak_worklist_bytes\":{worklist_bytes},\"pause_ns\":{pause_ns},\"trace_ns\":{trace_ns},\"sweep_ns\":{sweep_ns},\"finalization_ns\":{finalization_ns},\"arena_chunks\":{arena_chunks},\"assigned_runs\":{assigned_runs},\"free_runs\":{free_runs},\"assigned_slot_capacity\":{slot_capacity},\"allocated_slots\":{allocated_slots},\"partial_run_free_slots\":{partial_free},\"cache_hits\":{cache_hits},\"cache_misses\":{cache_misses}}}",
         schema = json_string(SCHEMA),
         name = json_string(name),
         elapsed_ns = nanos(elapsed),
