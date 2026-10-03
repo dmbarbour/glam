@@ -1,6 +1,7 @@
 # Garbage Collector C8 Tuning and Final Audit — 2026-10-03
 
-Status: in progress; C8A and C8B are complete.
+Status: complete; C8 closed without a collector soundness defect or a required
+architecture revision.
 
 This review records tuning evidence and the final isolated-collector audit for
 [`GarbageCollectorImplementation_2026-08-19.md`](../plans/GarbageCollectorImplementation_2026-08-19.md).
@@ -130,5 +131,55 @@ No safety mismatch or architecture revision was found.
 
 ## Remaining work
 
-- C8C.2: extended verification matrix;
-- C8C.3: plan and roadmap closeout.
+## C8C.2 — extended verification
+
+The completed dynamic and focused matrix is:
+
+- focused native: 214 routine unit tests pass, two scale fixtures isolated;
+- Loom: all seven forced interleaving models pass;
+- doc/compile-fail: all eight pass;
+- scale: million-node depth and million-edge width both pass, with the latter
+  reproducing the 1,048,576-entry capacity used by C8B.3;
+- strict-provenance Miri: 212 pass, three deliberate Miri exclusions, and the
+  one intentional allocator-frontier leak fixture passes separately with only
+  leak checking disabled;
+- AddressSanitizer/LeakSanitizer: 213 pass, two scale fixtures ignored, with
+  the same intentional leak fixture passing separately under ASan;
+- ThreadSanitizer: 214 routine tests pass and two scale fixtures are ignored;
+- release persistent-edge code generation remains one pointer copy/comparison
+  with no call or synchronization.
+
+No retry or repeated-run inference was used as concurrency evidence. Loom and
+the deterministic barrier/channel fixtures establish the relevant orderings;
+worker and scale cases are composition evidence.
+
+Nightly reported the standard-library rename of `AtomicU64::fetch_update` to
+`try_update`. C8 applied that semantic-preserving cleanup before the final
+repository matrix so the audit closes without a fresh toolchain warning.
+
+## Remaining work
+
+## C8C.3 — closeout
+
+After the private rootability measurement added four managed-edge occurrences,
+the repository's syntax-backed source inventory correctly rejected the first
+workspace run. C8 classified the one feature-level carrier, two internal
+feature-gated carriers, and erased validation operation; updated the exact
+count, partitions, and fingerprint; and reran the focused inventory before the
+complete workspace suite.
+
+Final required checks pass:
+
+- `cargo fmt --check`;
+- `cargo clippy --all-targets --all-features -- -D warnings`;
+- `cargo test -q` (1,911 of 1,913 library tests pass, with two intentional
+  ignores, followed by every integration suite);
+- `scripts/check-interaction-net-profiling.sh`;
+- the focused collector, scale, Miri, ASan/LSan, TSan, Loom, doc, unsafe, and
+  release-codegen checks listed above.
+
+The implementation plan and roadmap are complete for the deliberately narrow
+non-moving STW collector. Runtime integration has already passed G2 through G4
+and keeps explicit `NoAuto` maintenance as policy. The deferred concurrent
+collector, value-representation/moving work, and possible future paged tracing
+remain separate plans; none is required to correct C8.

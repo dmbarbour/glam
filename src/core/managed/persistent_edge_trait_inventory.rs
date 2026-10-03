@@ -817,7 +817,7 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
 
     assert_eq!(
         actual.len(),
-        910,
+        914,
         "persistent-edge occurrence count drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -987,9 +987,13 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // retries contribute 26 test-typed occurrences while leaving both
     // production partitions and the collector-private erased partition
     // unchanged.
+    // C8B.2's private measurement path adds one public-feature carrier plus
+    // two internal feature-gated carriers and the exact erased validation
+    // operation. They observe rootability without creating or preserving an
+    // edge and remain absent from ordinary builds.
     assert_eq!(
         occurrence_fingerprint(actual),
-        4_080_720_613_931_560_035,
+        13_015_988_324_278_488_767,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );
@@ -1034,9 +1038,9 @@ fn persistent_edge_inventory_classifications_are_closed() {
     assert_eq!(
         partitions,
         BTreeMap::from([
-            ((SourceScope::Production, EdgeSurface::Typed), 148),
+            ((SourceScope::Production, EdgeSurface::Typed), 149),
             ((SourceScope::Production, EdgeSurface::Erased), 36),
-            ((SourceScope::Test, EdgeSurface::Typed), 712),
+            ((SourceScope::Test, EdgeSurface::Typed), 715),
             ((SourceScope::Test, EdgeSurface::Erased), 14),
         ]),
         "production/test and typed/erased inventory partitions drifted"

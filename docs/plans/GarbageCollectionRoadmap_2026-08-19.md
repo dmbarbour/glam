@@ -1,13 +1,14 @@
 # Glam-Owned Garbage Collection Roadmap — 2026-08-19
 
-Status: in progress for collector C7/C8; the initial integration is complete.
-Collector Phases C0 through C6D.3 plus C2C.6 and integration Phases I0 through
-I13 are complete. Gates G0 through G4 are established, including final
+Status: complete for the initial non-moving, stop-the-world collector and its
+runtime integration. Collector Phases C0 through C8 and integration Phases I0
+through I13 are complete. Gates G0 through G4 are established, including final
 ownership reconciliation, repository-wide ordinary/aggressive closure, and the
 supported Miri, ASan/LSan, and TSan targets. Production heaps remain immutable
 `NoAuto`: explicit runtime maintenance is available, and pressure becomes
 actionable only at the reviewed stable pump boundary. Automatic collection is
-not enabled. Collector stress, metrics, and tuning continue in C7/C8.
+not enabled by deliberate policy. The C8 tuning and final audit is recorded in
+[`GarbageCollectorC8_2026-10-03.md`](../reviews/GarbageCollectorC8_2026-10-03.md).
 
 The final ownership disposition is recorded in
 [`GarbageCollectorI13CleanupInventory_2026-10-02.md`](../reviews/GarbageCollectorI13CleanupInventory_2026-10-02.md).

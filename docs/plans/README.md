@@ -11,14 +11,17 @@ when their historical value no longer justifies keeping them.
 
 ## Active Plans
 
-- [`GarbageCollectionRoadmap_2026-08-19.md`](GarbageCollectionRoadmap_2026-08-19.md)
-  coordinates the Glam-owned collector implementation and its integration into
-  the runtime value domain.
-- [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
-  builds and verifies the standalone collector subcrate.
+No active implementation plan is promoted here at present. Preliminary and
+deferred plans below remain candidates for later work.
 
 ## Recent Completed Plans
 
+- [`GarbageCollectionRoadmap_2026-08-19.md`](GarbageCollectionRoadmap_2026-08-19.md)
+  completed the non-moving stop-the-world collector and its runtime
+  integration through C8 and Gate G4.
+- [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
+  completed and verified the standalone collector subcrate through its C8
+  tuning, safety, and dynamic-tool audit.
 - [`GarbageCollectorIntegration_2026-08-19.md`](GarbageCollectorIntegration_2026-08-19.md)
   completed the I0-I13 migration of Glam values, roots, workers, reflection,
   interaction nets, and explicit runtime maintenance, passing Gate G4.

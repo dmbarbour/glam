@@ -1007,3 +1007,12 @@ crates/glam-gc/scripts/audit-unsafe.sh
 The exact inventory contains 148 constructs in ten source files under the 11
 reviewed module expectations. C8 adds no unsafe site and does not adopt the
 measured but currently unjustified paged-range tracing extension.
+
+## C8 final certification
+
+The final C8 audit passed the focused native/Loom/doc/scale checks, strict-
+provenance Miri, ASan/LSan, TSan, the exact unsafe and persistent-edge source
+inventories, release persistent-edge code generation, the complete workspace
+test suite, and interaction-net profiling regressions. Exact counts and tuning
+dispositions are recorded in
+[`GarbageCollectorC8_2026-10-03.md`](../../docs/reviews/GarbageCollectorC8_2026-10-03.md).

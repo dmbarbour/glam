@@ -18,8 +18,8 @@ permanently explicit `NoAuto` runtime maintenance and completed stable pressure
 promotion plus the mandatory post-I12 review on 2026-10-02.
 I13 reconciled every remaining owner and adapter, retired only proven-redundant
 scaffolding, documented the implemented collector boundary, and passed Gate
-G4 on 2026-10-02. Collector C7/C8 and concurrent/moving work remain separate
-post-integration plans.
+G4 on 2026-10-02. Collector C7/C8 subsequently completed on 2026-10-03;
+concurrent and moving work remain separate post-integration plans.
 
 This plan integrates the collector defined by
 [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)

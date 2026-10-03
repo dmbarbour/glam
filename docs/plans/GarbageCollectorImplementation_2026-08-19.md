@@ -1,9 +1,10 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C7 and C8A are complete, including the C2C.6
+Status: complete; Phases C0 through C8 are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
-post-C5, and post-C6 reviews are complete. Every post-C6 finding through
-GC6-007 is resolved and Gate G1 passed on 2026-08-25. C8B.1a is next.
+post-C5, post-C6, and C8 reviews are complete. Every post-C6 finding through
+GC6-007 is resolved, Gate G1 passed on 2026-08-25, and the final C8 audit
+closed on 2026-10-03.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -105,8 +106,8 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C8B.2b | completed | finalization-state measurements |
 | C8B.3 | completed | paged array tracing exploration; baseline retained |
 | C8C.1 | completed | unsafe and documentation audit |
-| C8C.2 | pending | extended verification matrix |
-| C8C.3 | pending | collector-plan closeout |
+| C8C.2 | completed | extended verification matrix |
+| C8C.3 | completed | collector-plan closeout |
 
 ## Intended Crate Shape
 
@@ -4417,6 +4418,23 @@ managed Glam representation currently owns such a flat edge array. Adding a
 stable-range unsafe contract before the value representation identifies a real
 contiguous consumer would be premature, so the plain `Vec<TraceWork>` remains
 the bootstrap policy and the measurement is retained for later reconsideration.
+
+### C8C completion
+
+Completed on 2026-10-03. The exact 148-site unsafe inventory matches its
+ledger, the native/Loom/doc/scale/Miri/ASan/LSan/TSan matrix passes, and the
+workspace's 1,913-test library matrix plus all integration suites and
+interaction-net profiling regressions pass. The new private rootability
+measurement contributed four explicitly classified occurrences to the
+persistent-edge source inventory; its count, partitions, fingerprint, and
+disposition are latched. No soundness defect or significant architecture
+revision was found.
+
+The standalone collector is complete for the roadmap's non-moving,
+stop-the-world, exact full-collection scope. The already completed integration
+has passed Gate G2 through G4 and deliberately retains explicit `NoAuto`
+runtime maintenance. Concurrent progress, moving/compact representation, and
+any future paged-range visitor remain separate evidence-driven projects.
 
 The subcrate is ready for production enablement only when the integration plan
 also reaches Gate G2.

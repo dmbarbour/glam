@@ -37,7 +37,7 @@ const _: () = assert!(SURVIVOR_GROWTH_DENOMINATOR != 0);
 
 fn add_metric(counter: &AtomicU64, amount: u64) {
     counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             current.checked_add(amount)
         })
         .expect("collector metric exhausted");
