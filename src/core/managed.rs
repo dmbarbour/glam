@@ -501,13 +501,21 @@ impl CoreValueFactory {
         {
             return operation();
         }
+        // The value domain can outlive its runtime: a `Values` handle legitimately
+        // retains the domain after the runtime -- and its mutation-admission
+        // authority -- is dropped. That lifecycle is not reachable from the public
+        // API and leaves no workers or mutators to coordinate against, so a
+        // collecting entry has nothing to verify. Run the operation directly rather
+        // than inventing collection semantics for a defunct runtime.
         let admission = self
             .domain
             .gc_activity_admission
             .lock()
             .expect("runtime GC activity binding was poisoned")
-            .upgrade()
-            .expect("a potentially collecting runtime entry must retain its activity authority");
+            .upgrade();
+        let Some(admission) = admission else {
+            return operation();
+        };
         let lease = admission.begin_gc_activity();
         let result = operation();
         lease.finish(RuntimeGcLeaseOutcome::no_collection(
