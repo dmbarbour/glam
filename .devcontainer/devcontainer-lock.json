@@ -1,5 +1,10 @@
 {
   "features": {
+    "ghcr.io/cjcrobin/devcontainer-features/claudecode:1": {
+      "version": "1.1.1",
+      "resolved": "ghcr.io/cjcrobin/devcontainer-features/claudecode@sha256:e15fcba64e2e20e36daa8b1435c855ad1da7ac0b475ab8414c3e62911a8be028",
+      "integrity": "sha256:e15fcba64e2e20e36daa8b1435c855ad1da7ac0b475ab8414c3e62911a8be028"
+    },
     "ghcr.io/cjcrobin/devcontainer-features/codexcli:1": {
       "version": "1.0.0",
       "resolved": "ghcr.io/cjcrobin/devcontainer-features/codexcli@sha256:143ce35893884c60227b21577a2291c8995c4c415d1496521573ad5dcc9b772e",

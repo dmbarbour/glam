@@ -11,6 +11,7 @@
 	"features": {
 		"ghcr.io/devcontainers/features/rust:1": {},
 		"ghcr.io/cjcrobin/devcontainer-features/codexcli:1": {},
+		"ghcr.io/cjcrobin/devcontainer-features/claudecode:1": {},
 	},
 
 	// Use 'forwardPorts' to make a list of ports inside the container available locally.
