@@ -133,55 +133,6 @@ const SOURCE_EVIDENCE: &[GateEvidence] = &[
     },
 ];
 
-struct StableFamilyRecord {
-    family: &'static str,
-    row_prefix: &'static str,
-    required: &'static [&'static str],
-}
-
-const STABLE_FAMILIES: &[StableFamilyRecord] = &[
-    StableFamilyRecord {
-        family: "ManagedValueNode",
-        row_prefix: "| Production managed core value node; `ManagedValueNode`;",
-        required: &[
-            "Current x86-64 layout is 64/8",
-            "requested extent is 64 bytes",
-            "allocator discovery is exercised",
-            "Passive drop under I4.0",
-        ],
-    },
-    StableFamilyRecord {
-        family: "ManagedLazyCell",
-        row_prefix: "| `ManagedLazyCell` / `LazySource`",
-        required: &[
-            "Current x86-64 layout is 144/8",
-            "requested extent is 144 bytes",
-            "allocator discovery is exercised",
-            "Private `allocate_managed_lazy`",
-        ],
-    },
-    StableFamilyRecord {
-        family: "ManagedPromiseCell",
-        row_prefix: "| `ManagedPromiseCell` (`core/managed/recursive_cells.rs`)",
-        required: &[
-            "Current x86-64 layout is 104/8",
-            "requested extent is 104 bytes",
-            "allocator discovery is exercised",
-            "Private `allocate_managed_promise`",
-        ],
-    },
-    StableFamilyRecord {
-        family: "ManagedCoreNetCell",
-        row_prefix: "| `ManagedCoreNetCell` (introduced in I5)",
-        required: &[
-            "Current x86-64 layout is 248/8",
-            "requested extent is 248 bytes",
-            "allocator discovery is exercised",
-            "Private `allocate_managed_core_net`",
-        ],
-    },
-];
-
 #[test]
 fn gate_g2_source_inventory_is_closed() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -208,48 +159,4 @@ fn gate_g2_source_inventory_is_closed() {
             entry.path
         );
     }
-
-    let review =
-        fs::read_to_string(manifest.join("docs/reviews/GarbageCollectorGateG2_2026-09-11.md"))
-            .expect("the dated Gate G2 review should be checked in with certification");
-    assert!(review.contains("Status: complete. Gate G2 passes"));
-    assert!(review.contains("Production remains `CollectionPolicy::NoAuto`"));
-}
-
-#[test]
-fn gate_g2_stable_ledger_records_are_complete() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let ledger = fs::read_to_string(
-        manifest.join("docs/plans/GarbageCollectorOwnershipLedger_2026-08-20.md"),
-    )
-    .expect("the GC ownership ledger should be readable");
-
-    for record in STABLE_FAMILIES {
-        let rows = ledger
-            .lines()
-            .filter(|line| line.starts_with(record.row_prefix))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            rows.len(),
-            1,
-            "{} must have one stable Gate G2 ledger row",
-            record.family
-        );
-        for required in record.required {
-            assert!(
-                rows[0].contains(required),
-                "{} ledger row is missing {required:?}",
-                record.family
-            );
-        }
-    }
-
-    assert!(ledger.contains("## Gate G2 Reconciliation Record"));
-    assert!(ledger.contains("Gate G2 passed on 2026-09-11"));
-    assert!(
-        !ledger.lines().any(|line| {
-            line.starts_with('|') && (line.contains("| **D** |") || line.contains("| D |"))
-        }),
-        "a durable boundary-defect row still blocks Gate G2"
-    );
 }

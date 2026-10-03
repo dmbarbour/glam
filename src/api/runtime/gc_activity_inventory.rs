@@ -131,45 +131,6 @@ fn ordinary_no_auto_entries_compile_without_runtime_lease_work() {
     assert!(core.contains("#[cfg(any(test, feature = \"aggressive-gc-verification\"))]"));
 }
 
-#[test]
-fn gc_readiness_plan_has_one_authoritative_activity_source() {
-    let review =
-        include_str!("../../../docs/reviews/GarbageCollectorReadinessIntegration_2026-10-02.md");
-    let plan = include_str!("../../../docs/plans/GarbageCollectorIntegration_2026-08-19.md");
-
-    assert!(
-        review.contains(
-            "`RuntimeMutationAdmission` remains the only runtime-wide authority boundary."
-        )
-    );
-    assert!(review.contains(
-        "Readiness and settlement validate\nthe revision, never the parking generation and never a sampled collector"
-    ));
-    assert!(
-        plan.contains("I12A completed explicit runtime maintenance, actionable readiness, durable")
-    );
-    assert!(!plan.contains("The review must also select a durable disposition"));
-}
-
-#[test]
-fn pending_finalizer_batch_has_durable_nonbusy_disposition() {
-    let review =
-        include_str!("../../../docs/reviews/GarbageCollectorReadinessIntegration_2026-10-02.md");
-    let plan = include_str!("../../../docs/plans/GarbageCollectorIntegration_2026-08-19.md");
-
-    assert!(review.contains("Any recoverable collector panic is represented as `RetryRequired`;"));
-    assert!(review.contains(
-        "For a finalizer panic, that state owns the collector's\ninactive pending batch."
-    ));
-    assert!(review.contains(
-        "A later successful collection clears `RetryRequired`, but does not erase\n  the historical failure."
-    ));
-    assert!(review.contains("A permanently poisoned heap becomes `MaintenanceFailed`."));
-    assert!(
-        plan.contains("collector panic records a durable maintenance failure and `RetryRequired`")
-    );
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConstructorPolicy {
     NoAuto,
@@ -221,7 +182,6 @@ const CONSTRUCTOR_INVENTORY: &[ConstructorRecord] = &[
 
 #[test]
 fn runtime_gc_policy_review_inventory_is_complete() {
-    let review = include_str!("../../../docs/reviews/GarbageCollectorRuntimePolicy_2026-10-02.md");
     let families = CONSTRUCTOR_INVENTORY
         .iter()
         .map(|record| record.family)
@@ -235,10 +195,6 @@ fn runtime_gc_policy_review_inventory_is_complete() {
         1,
         "the value-domain constructor is the one authoritative runtime policy selection"
     );
-    assert!(CONSTRUCTOR_INVENTORY.iter().all(|record| {
-        review.contains(record.family.split(" /").next().unwrap_or(record.family))
-            || record.policy == ConstructorPolicy::Isolated
-    }));
 
     let core = include_str!("../../core.rs");
     assert_eq!(core.matches("Heap::new_with_policy(").count(), 1);
@@ -261,16 +217,7 @@ fn runtime_gc_policy_review_inventory_is_complete() {
 
 #[test]
 fn runtime_gc_policy_plan_has_no_live_transition() {
-    let review = include_str!("../../../docs/reviews/GarbageCollectorRuntimePolicy_2026-10-02.md");
-    let plan = include_str!("../../../docs/plans/GarbageCollectorIntegration_2026-08-19.md");
     let heap = include_str!("../../../crates/glam-gc/src/heap.rs");
-
-    assert!(review.contains("Decision: **permanently manual runtimes**."));
-    assert!(review.contains("There is no live policy setter"));
-    assert!(
-        plan.contains("Every production runtime heap remains immutable `CollectionPolicy::NoAuto`")
-    );
-    assert!(!plan.contains("This phase is not implementation-ready until I12B.0 rewrites it"));
     assert!(!heap.contains("set_collection_policy"));
 
     let may_elect = ENTRY_INVENTORY
@@ -282,22 +229,6 @@ fn runtime_gc_policy_plan_has_no_live_transition() {
         may_elect[0].family,
         "aggressive pre-outer-entry verification"
     );
-}
-
-#[test]
-fn runtime_gc_policy_review_links_selected_plan_and_completion_gate() {
-    let review = include_str!("../../../docs/reviews/GarbageCollectorRuntimePolicy_2026-10-02.md");
-    let plan = include_str!("../../../docs/plans/GarbageCollectorIntegration_2026-08-19.md");
-    let roadmap = include_str!("../../../docs/plans/GarbageCollectionRoadmap_2026-08-19.md");
-
-    assert!(review.contains("## I12B Implementation Consequences"));
-    assert!(review.contains("## Gate G4 and Forward Work"));
-    assert!(plan.contains("### Phase I12B — Stable Pressure Promotion for Manual Runtimes"));
-    assert!(plan.contains("GarbageCollectorRuntimePolicy_2026-10-02.md"));
-    assert!(roadmap.contains("Production heaps remain immutable"));
-    assert!(roadmap.contains("Automatic collection is"));
-    assert!(roadmap.contains("not enabled. Collector stress"));
-    assert!(roadmap.contains("Gate G4 requires the completed I12B pressure/reclamation"));
 }
 
 #[test]

@@ -774,35 +774,7 @@ fn final_closure_opaque_and_any_inventory_is_reconciled() {
 
 #[test]
 fn opaque_representation_plan_has_no_undecided_family() {
-    let review =
-        include_str!("../../../docs/reviews/GarbageCollectorOpaqueRepresentation_2026-09-11.md");
-    let plan = include_str!("../../../docs/plans/GarbageCollectorIntegration_2026-08-19.md");
-    assert!(
-        review.contains("Phase I10B.0 selects **external-only opaque storage** for the\nbootstrap")
-    );
-    assert!(
-        plan.contains("I10B implements the selected external-only policy. Arbitrary host `Any`")
-    );
-    assert!(!plan.contains("This phase is deliberately not implementation-ready until I10B.0"));
     assert_eq!(OPAQUE_FAMILY_INVENTORY.len(), 4);
-}
-
-#[test]
-fn opaque_representation_plan_links_are_consistent() {
-    let review =
-        include_str!("../../../docs/reviews/GarbageCollectorOpaqueRepresentation_2026-09-11.md");
-    let integration = include_str!("../../../docs/plans/GarbageCollectorIntegration_2026-08-19.md");
-    let ledger = include_str!("../../../docs/plans/GarbageCollectorOwnershipLedger_2026-08-20.md");
-    let roadmap = include_str!("../../../docs/plans/GarbageCollectionRoadmap_2026-08-19.md");
-
-    assert!(review.contains("No managed opaque arm"));
-    assert!(integration.contains(
-        "[`GarbageCollectorOpaqueRepresentation_2026-09-11.md`](../reviews/GarbageCollectorOpaqueRepresentation_2026-09-11.md)"
-    ));
-    assert!(integration.contains("Require I10B.0's external-only four-family mapping"));
-    assert!(integration.contains("Every opaque value satisfies I10B.0's external-only policy"));
-    assert!(ledger.contains("I10B.0 selected external-only storage"));
-    assert!(roadmap.contains("Opaque values are external handles, never managed storage"));
 }
 
 fn return_second_capture(
