@@ -2,10 +2,16 @@
 members = [".", "crates/glam-gc"]
 resolver = "3"
 
+[workspace.package]
+# Matches the pinned toolchain in `rust-toolchain.toml`. Cargo rejects older
+# compilers with an explicit version error instead of an obscure build failure.
+rust-version = "1.99"
+
 [package]
 name = "glam"
 version = "0.1.0"
 edition = "2024"
+rust-version.workspace = true
 
 [features]
 default = []

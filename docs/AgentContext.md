@@ -87,6 +87,13 @@ verify current bootstrap acceptance against tests and samples.
 
 ## Verification
 
+`rust-toolchain.toml` pins the exact Rust toolchain, and rustup selects it
+automatically. The root `Cargo.toml` declares the matching `rust-version`, so
+older compilers fail with an explicit version error. Do not change the pin as
+part of unrelated work. Upgrade it at a plan boundary in a dedicated commit
+that updates both files and fixes any new lints. Record `rustc --version`
+alongside verification results in reviews.
+
 After Rust edits run:
 
 ```sh

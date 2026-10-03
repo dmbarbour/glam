@@ -1,0 +1,11 @@
+# The project's pinned Rust toolchain. rustup selects it automatically for
+# every cargo command in this workspace, installing it on first use.
+#
+# Rust has no long-term-support channel. This exact pin is the project's
+# stable baseline. Upgrade it deliberately, preferably at a plan boundary, in
+# one dedicated commit that updates this file and `rust-version` in the root
+# `Cargo.toml`, and fixes any new lints that commit introduces.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

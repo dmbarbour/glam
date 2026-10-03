@@ -33,7 +33,7 @@ impl EvaluationRuntimeId {
 
 pub(crate) fn allocate_evaluation_runtime_id() -> EvaluationRuntimeId {
     let id = NEXT_EVALUATION_RUNTIME_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
         .expect("evaluation runtime IDs exhausted");
     EvaluationRuntimeId::from_u64(id).expect("evaluation runtime IDs start at one")
 }
@@ -929,7 +929,7 @@ impl RuntimeIds {
         exhausted: &'static str,
     ) -> Result<NonZeroU64, Arc<str>> {
         source
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .map(|id| NonZeroU64::new(id).expect("runtime-local IDs start at one"))
             .map_err(|_| Arc::from(exhausted))
     }
