@@ -1,9 +1,9 @@
 # Glam GC Subcrate Implementation Plan — 2026-08-19
 
-Status: in progress; Phases C0 through C6D.3 are complete, including the C2C.6
+Status: in progress; Phases C0 through C7A are complete, including the C2C.6
 verification follow-up. The mandatory post-C1, post-C2C, post-C3E, post-C4,
 post-C5, and post-C6 reviews are complete. Every post-C6 finding through
-GC6-007 is resolved and Gate G1 passed on 2026-08-25. C7A.1 is next.
+GC6-007 is resolved and Gate G1 passed on 2026-08-25. C7B.1 is next.
 
 This plan implements an exact, non-moving, runtime-local tracing collector
 without depending on Glam value semantics. The governing requirements and
@@ -88,9 +88,9 @@ to a later performance plan. Concurrent marking is also a later plan.
 | Post-C6 GC6-006 | completed | stale lint, verification-state, and ownership-comment cleanup |
 | Post-C6 GC6-007 | completed | C7/C8 stress, metric, and checkpoint reconciliation |
 | C6D.3 | completed | Gate G1 audit and isolated-collector certification |
-| C7A.1 | pending | deterministic root handoff and lifetime stress |
-| C7A.2 | pending | immutable-reader and collection forced schedules |
-| C7A.3 | pending | shared-root and reader scale composition |
+| C7A.1 | completed | deterministic root handoff and lifetime stress |
+| C7A.2 | completed | immutable-reader and collection forced schedules |
+| C7A.3 | completed | shared-root and reader scale composition |
 | C7B.1 | pending | single-heap allocation/admission forced schedules |
 | C7B.2 | pending | cross-heap, external-blocking, and unwind composition |
 | C7B.3 | pending | allocator/coordinator scale composition |
@@ -4249,6 +4249,20 @@ ownership/admission claim before the later scale checkpoints compose them:
 
 This phase tests collector mechanisms only. It does not imitate Glam scheduler
 semantics beyond the shape needed to validate shared values.
+
+### C7A completion
+
+Completed on 2026-10-03. A barrier/channel-controlled handoff now keeps one
+registered root, its clone, and a bare `Gc` on a worker across an explicit
+collection, verifies that the collection sees one root entry and one live
+slot, then drops every heap facade while those handles remain. The weak heap
+observer expires, proving that neither the root cell nor the bare edge is a
+hidden heap owner. A second forced schedule admits three early immutable
+readers plus one reader entering after a request, releases them individually,
+and proves synchronous collection cannot complete until the final regional
+mutator obligation retires. A bounded twelve-worker/eight-collection graph
+fixture composes shared-root reads, clone/drop histories, transitive tracing,
+and repeated collection without adding a new lifetime rule.
 
 ## Phase C8 — Tuning Surface and Final Collector Audit
 

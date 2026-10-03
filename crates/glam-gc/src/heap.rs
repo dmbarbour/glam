@@ -9716,6 +9716,179 @@ mod tests {
     }
 
     #[test]
+    fn c7_root_handoff_collection_and_heap_lifetime_are_independent() {
+        let heap = Heap::new();
+        let weak = Arc::downgrade(&heap.inner);
+        let (root, bare) = heap.with_mutator(|mutator| {
+            let value = mutator.allocator::<u64>().unwrap().alloc(73);
+            (mutator.root(value.duplicate_in(mutator)), value)
+        });
+        let collector_heap = heap.clone();
+        let retained_facade = heap.clone();
+        let worker_heap = heap.clone();
+        let (received_tx, received_rx) = mpsc::channel();
+        let (collected_tx, collected_rx) = mpsc::channel();
+        let (facade_dropped_tx, facade_dropped_rx) = mpsc::channel();
+        let (finish_tx, finish_rx) = mpsc::channel();
+
+        let worker = std::thread::spawn(move || {
+            let alias = root.clone();
+            received_tx.send(()).unwrap();
+            collected_rx.recv().unwrap();
+            worker_heap.with_mutator(|mutator| {
+                assert_eq!(*root.get(mutator), 73);
+                assert_eq!(*alias.get(mutator), 73);
+                assert!(bare.same_allocation_in(&root.as_gc(mutator), mutator));
+            });
+
+            // The roots and bare edge remain on this thread while its only
+            // heap facade is released. They must not become hidden owners of
+            // the heap allocation itself.
+            drop(worker_heap);
+            facade_dropped_tx.send(()).unwrap();
+            finish_rx.recv().unwrap();
+            drop((root, alias, bare));
+        });
+
+        received_rx.recv().unwrap();
+        let report = collector_heap.collect_full().unwrap();
+        assert_eq!(report.root_entries(), 1);
+        assert_eq!(report.marked_slots(), 1);
+        collected_tx.send(()).unwrap();
+        facade_dropped_rx.recv().unwrap();
+
+        drop((heap, collector_heap, retained_facade));
+        assert!(
+            weak.upgrade().is_none(),
+            "roots and bare edges must not retain their heap"
+        );
+        finish_tx.send(()).unwrap();
+        worker.join().expect("root handoff worker panicked");
+    }
+
+    #[test]
+    fn c7_collection_waits_for_every_immutable_reader_region() {
+        const EARLY_READERS: usize = 3;
+
+        let heap = Heap::new();
+        let root = heap.with_mutator(|mutator| {
+            let value = mutator.allocator::<u64>().unwrap().alloc(91);
+            mutator.root(value)
+        });
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let mut releases = Vec::new();
+        let mut readers = Vec::new();
+
+        for reader_index in 0..EARLY_READERS {
+            let (release_tx, release_rx) = mpsc::channel();
+            releases.push(release_tx);
+            readers.push(std::thread::spawn({
+                let heap = heap.clone();
+                let root = root.clone();
+                let entered_tx = entered_tx.clone();
+                move || {
+                    heap.with_mutator(|mutator| {
+                        assert_eq!(*root.get(mutator), 91);
+                        entered_tx.send(reader_index).unwrap();
+                        release_rx.recv().unwrap();
+                        assert_eq!(*root.get(mutator), 91);
+                    });
+                }
+            }));
+        }
+        for _ in 0..EARLY_READERS {
+            entered_rx.recv().unwrap();
+        }
+
+        heap.request_collection();
+
+        // A request is only a latch while the heap remains active. A later
+        // reader may still join that ordinary admission epoch.
+        let (late_release_tx, late_release_rx) = mpsc::channel();
+        let late_reader = std::thread::spawn({
+            let heap = heap.clone();
+            let root = root.clone();
+            let entered_tx = entered_tx.clone();
+            move || {
+                heap.with_mutator(|mutator| {
+                    assert_eq!(*root.get(mutator), 91);
+                    entered_tx.send(EARLY_READERS).unwrap();
+                    late_release_rx.recv().unwrap();
+                });
+            }
+        });
+        assert_eq!(entered_rx.recv().unwrap(), EARLY_READERS);
+
+        let (report_tx, report_rx) = mpsc::channel();
+        let collector = std::thread::spawn({
+            let heap = heap.clone();
+            move || report_tx.send(heap.collect_full().unwrap()).unwrap()
+        });
+        heap.inner.wait_for_collection_waiters(1);
+
+        for release in releases {
+            release.send(()).unwrap();
+            assert!(
+                report_rx.try_recv().is_err(),
+                "collector completed before every reader retired"
+            );
+        }
+        late_release_tx.send(()).unwrap();
+
+        for reader in readers {
+            reader.join().expect("immutable reader panicked");
+        }
+        late_reader.join().expect("late immutable reader panicked");
+        collector.join().expect("collector panicked");
+        let report = report_rx.recv().unwrap();
+        assert_eq!(report.epoch(), 1);
+        assert_eq!(report.root_entries(), 1);
+        heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 91));
+    }
+
+    #[test]
+    fn c7_shared_root_reader_scale_composes_with_repeated_collections() {
+        const WORKERS: usize = 12;
+        const ROUNDS: u64 = 8;
+
+        let heap = Heap::new();
+        let root = heap.with_mutator(|mutator| {
+            let allocator = mutator.allocator::<GraphNode>().unwrap();
+            let leaf = allocator.alloc(graph_node(Arc::new(AtomicUsize::new(0))));
+            let branch = allocator.alloc(graph_node_with_edge(Arc::new(AtomicUsize::new(0)), leaf));
+            let top = allocator.alloc(graph_node_with_edge(Arc::new(AtomicUsize::new(0)), branch));
+            mutator.root(top)
+        });
+
+        for expected_epoch in 1..=ROUNDS {
+            let start = Arc::new(Barrier::new(WORKERS + 1));
+            let readers = (0..WORKERS)
+                .map(|_| {
+                    let heap = heap.clone();
+                    let root = root.clone();
+                    let start = Arc::clone(&start);
+                    std::thread::spawn(move || {
+                        start.wait();
+                        heap.with_mutator(|mutator| {
+                            let edges = root.get(mutator).edges.lock().unwrap();
+                            assert!(!edges.is_empty());
+                        });
+                    })
+                })
+                .collect::<Vec<_>>();
+            start.wait();
+            for reader in readers {
+                reader.join().expect("scaled immutable reader panicked");
+            }
+
+            let report = heap.collect_full().unwrap();
+            assert_eq!(report.epoch(), expected_epoch);
+            assert_eq!(report.root_entries(), 1);
+            assert_eq!(report.marked_slots(), 3);
+        }
+    }
+
+    #[test]
     fn exclusive_root_walk_visits_live_cells_in_order_and_prunes_dead_cells() {
         let heap = Heap::new();
         let values = heap.with_mutator(|mutator| {
