@@ -4,11 +4,54 @@
 //! release profile, and host context are recorded with the observations.
 
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use glam_gc::{CollectionReport, Heap, HeapMetrics};
+use glam_gc::{CollectionPolicy, CollectionReport, Gc, Heap, HeapMetrics, Trace, Visitor};
 
 const SCHEMA: &str = "glam-gc-c8-v1";
+const ALLOCATION_COUNT: usize = 500_000;
+const GRAPH_COUNT: usize = 100_000;
+const FINALIZATION_COUNT: usize = 100_000;
+const RECLAMATION_COUNT: usize = 100_000;
+
+struct SmallValue {
+    _payload: u64,
+}
+
+// SAFETY: `SmallValue` contains no managed edge.
+unsafe impl Trace for SmallValue {
+    fn trace(&self, _visitor: &mut Visitor<'_>) {}
+}
+
+struct GraphNode {
+    edges: Vec<Gc<GraphNode>>,
+}
+
+// SAFETY: every managed edge is stored in `edges` and reported once.
+unsafe impl Trace for GraphNode {
+    fn trace(&self, visitor: &mut Visitor<'_>) {
+        for edge in &self.edges {
+            visitor.visit(edge);
+        }
+    }
+}
+
+struct DropCounter {
+    drops: Arc<AtomicUsize>,
+}
+
+impl Drop for DropCounter {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+// SAFETY: `DropCounter` contains host-owned counting state and no managed edge.
+unsafe impl Trace for DropCounter {
+    fn trace(&self, _visitor: &mut Visitor<'_>) {}
+}
 
 fn json_string(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len() + 2);
@@ -116,31 +159,180 @@ fn emit_workload(
     );
 }
 
+fn allocator_workload() {
+    let heap = Heap::new_with_policy(CollectionPolicy::NoAuto);
+    let started = Instant::now();
+    heap.with_mutator(|mutator| {
+        let allocator = mutator
+            .allocator::<SmallValue>()
+            .expect("small-value layout is supported");
+        for index in 0..ALLOCATION_COUNT {
+            let _ = allocator.alloc(SmallValue {
+                _payload: std::hint::black_box(index as u64),
+            });
+        }
+    });
+    let elapsed = started.elapsed();
+    let metrics = heap.metrics();
+    assert_eq!(metrics.allocated_slots(), ALLOCATION_COUNT);
+    emit_workload("allocator", ALLOCATION_COUNT, elapsed, None, metrics);
+}
+
+fn deep_trace_workload() {
+    let heap = Heap::new_with_policy(CollectionPolicy::NoAuto);
+    let root = heap.with_mutator(|mutator| {
+        let allocator = mutator
+            .allocator::<GraphNode>()
+            .expect("graph-node layout is supported");
+        let mut head = allocator.alloc(GraphNode { edges: Vec::new() });
+        for _ in 1..GRAPH_COUNT {
+            head = allocator.alloc(GraphNode { edges: vec![head] });
+        }
+        mutator.root(head)
+    });
+    let started = Instant::now();
+    let report = heap.collect_full().expect("deep trace collection failed");
+    let elapsed = started.elapsed();
+    assert_eq!(report.traced_objects(), GRAPH_COUNT);
+    assert_eq!(report.marked_slots(), GRAPH_COUNT);
+    emit_workload(
+        "trace_deep",
+        GRAPH_COUNT,
+        elapsed,
+        Some(report),
+        heap.metrics(),
+    );
+    drop(root);
+}
+
+fn wide_trace_workload() {
+    let heap = Heap::new_with_policy(CollectionPolicy::NoAuto);
+    let root = heap.with_mutator(|mutator| {
+        let allocator = mutator
+            .allocator::<GraphNode>()
+            .expect("graph-node layout is supported");
+        let edges = (0..GRAPH_COUNT)
+            .map(|_| allocator.alloc(GraphNode { edges: Vec::new() }))
+            .collect::<Vec<_>>();
+        mutator.root(allocator.alloc(GraphNode { edges }))
+    });
+    let started = Instant::now();
+    let report = heap.collect_full().expect("wide trace collection failed");
+    let elapsed = started.elapsed();
+    assert_eq!(report.traced_objects(), GRAPH_COUNT + 1);
+    assert_eq!(report.marked_slots(), GRAPH_COUNT + 1);
+    assert_eq!(report.peak_object_worklist_len(), GRAPH_COUNT);
+    emit_workload(
+        "trace_wide",
+        GRAPH_COUNT,
+        elapsed,
+        Some(report),
+        heap.metrics(),
+    );
+    drop(root);
+}
+
+fn finalization_workload() {
+    let heap = Heap::new_with_policy(CollectionPolicy::NoAuto);
+    let drops = Arc::new(AtomicUsize::new(0));
+    heap.with_mutator(|mutator| {
+        let allocator = mutator
+            .allocator::<DropCounter>()
+            .expect("drop-counter layout is supported");
+        for _ in 0..FINALIZATION_COUNT {
+            let _ = allocator.alloc(DropCounter {
+                drops: Arc::clone(&drops),
+            });
+        }
+    });
+    let started = Instant::now();
+    let report = heap
+        .collect_full()
+        .expect("finalization measurement collection failed");
+    let elapsed = started.elapsed();
+    assert_eq!(report.finalized_slots(), FINALIZATION_COUNT);
+    assert_eq!(drops.load(Ordering::Relaxed), FINALIZATION_COUNT);
+    emit_workload(
+        "finalization",
+        FINALIZATION_COUNT,
+        elapsed,
+        Some(report),
+        heap.metrics(),
+    );
+}
+
+fn reclamation_workload() {
+    let heap = Heap::new_with_policy(CollectionPolicy::NoAuto);
+    heap.with_mutator(|mutator| {
+        let allocator = mutator
+            .allocator::<SmallValue>()
+            .expect("small-value layout is supported");
+        for index in 0..RECLAMATION_COUNT {
+            let _ = allocator.alloc(SmallValue {
+                _payload: index as u64,
+            });
+        }
+    });
+    let started = Instant::now();
+    let report = heap
+        .collect_full()
+        .expect("reclamation measurement collection failed");
+    let elapsed = started.elapsed();
+    assert_eq!(report.reclaimed_slots(), RECLAMATION_COUNT);
+    assert_eq!(heap.metrics().allocated_slots(), 0);
+    emit_workload(
+        "reclamation",
+        RECLAMATION_COUNT,
+        elapsed,
+        Some(report),
+        heap.metrics(),
+    );
+}
+
+fn selected(selections: &[String], name: &str) -> bool {
+    selections.is_empty()
+        || selections.iter().any(|selection| selection == "all")
+        || selections.iter().any(|selection| selection == name)
+}
+
 fn main() {
     let selections = std::env::args().skip(1).collect::<Vec<_>>();
     if selections.iter().any(|argument| argument == "--help") {
-        println!("usage: c8_measurements [all]");
+        println!(
+            "usage: c8_measurements [all|allocator|trace_deep|trace_wide|finalization|reclamation]..."
+        );
         return;
     }
-    if !selections.is_empty() && selections != ["all"] {
+    const WORKLOADS: &[&str] = &[
+        "all",
+        "allocator",
+        "trace_deep",
+        "trace_wide",
+        "finalization",
+        "reclamation",
+    ];
+    if selections
+        .iter()
+        .any(|selection| !WORKLOADS.contains(&selection.as_str()))
+    {
         eprintln!("unknown measurement selection: {}", selections.join(" "));
         std::process::exit(2);
     }
 
     emit_context();
-
-    // C8B.1a establishes the schema and runner. C8B.1b adds the workloads;
-    // retaining one empty observation makes an incomplete harness explicit.
-    let heap = Heap::new();
-    let started = Instant::now();
-    let report = heap
-        .collect_full()
-        .expect("empty measurement collection failed");
-    emit_workload(
-        "empty_collection",
-        0,
-        started.elapsed(),
-        Some(report),
-        heap.metrics(),
-    );
+    if selected(&selections, "allocator") {
+        allocator_workload();
+    }
+    if selected(&selections, "trace_deep") {
+        deep_trace_workload();
+    }
+    if selected(&selections, "trace_wide") {
+        wide_trace_workload();
+    }
+    if selected(&selections, "finalization") {
+        finalization_workload();
+    }
+    if selected(&selections, "reclamation") {
+        reclamation_workload();
+    }
 }

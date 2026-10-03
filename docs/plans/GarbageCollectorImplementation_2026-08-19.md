@@ -100,7 +100,7 @@ to a later performance plan. Concurrent marking is also a later plan.
 | C8A.1 | completed | collection-report and utilization-snapshot contract |
 | C8A.2 | completed | private tuning and geometry boundary |
 | C8B.1a | completed | measurement schema and harness |
-| C8B.1b | pending | representative measurement workloads |
+| C8B.1b | completed | representative measurement workloads |
 | C8B.2a | pending | geometry and assigned-run scan measurements |
 | C8B.2b | pending | finalization-state measurements |
 | C8B.3 | pending | paged array tracing exploration |
