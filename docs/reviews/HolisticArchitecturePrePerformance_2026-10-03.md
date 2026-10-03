@@ -221,6 +221,12 @@ folds singleton `List::concat`s into an N-deep left spine
   executed. The last full aggressive workspace run is recorded at `d2d27211`
   ([closure review](GarbageCollectorAggressiveVerificationClosure_2026-10-01.md));
   about 30 commits touching `src/` or `crates/` have landed since.
+  - **Finding 2026-10-03:** executing the P0 aggressive pass (sequence step 1)
+    confirmed the risk — the aggressive suite is broadly red and hangs partway.
+    Bisected to `46dc1487` (I12A explicit GC maintenance), which panics on a
+    supported value-domain-outlives-runtime lifecycle in a test/verification-only
+    collecting-entry wrapper (production unaffected). Remediation tracked in
+    [`GarbageCollectorAggressiveVerificationRegression_2026-10-03.md`](../plans/GarbageCollectorAggressiveVerificationRegression_2026-10-03.md).
 - **No pinned toolchain or CI.** There is no `rust-toolchain.toml`, no
   `rust-version`, and no CI config. The dev container installs unpinned
   stable Rust and no ripgrep. This review hit both problems: the build
