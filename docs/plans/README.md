@@ -52,6 +52,10 @@ Preliminary and deferred plans below remain candidates for later work.
 
 ## Preliminary and Deferred Plans
 
+- [`EvaluationRecursionPerformance_2026-10-04.md`](EvaluationRecursionPerformance_2026-10-04.md)
+  records evaluation time growing roughly quadratically with recursion depth
+  (a release-build countdown of 800 takes 30 s), with hypotheses and first
+  profiling steps.
 - [`ParserBacktrackingPerformance_2026-10-04.md`](ParserBacktrackingPerformance_2026-10-04.md)
   records exponential parse time on nested parentheses and lists, caused by
   alternatives that re-parse a whole group, and a constant-time lookahead

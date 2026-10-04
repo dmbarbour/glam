@@ -1,6 +1,7 @@
 # User-Input Panic Safety Plan — 2026-10-04
 
-Status: open. W1 has begun; F1 is fixed.
+Status: open. W1 and W2 inspection is done: F1 is fixed, and no further
+panic was found. W4 (poisoning) is next.
 
 This plan responds to the holistic pre-performance review, X4 and Maintainer
 Decision 1 ([review](../reviews/HolisticArchitecturePrePerformance_2026-10-03.md)).
@@ -67,6 +68,36 @@ All timings use a release build unless noted.
 - **Duplicated parser helpers have not drifted further.** The copies of
   `view_between`, `split_top_level`, and `error_at_view` are byte-identical.
   F1 shows how such copies diverge, so deduplicating them remains worthwhile.
+
+## W2 findings (2026-10-04)
+
+- **A deterministic sweep found no panics.** It took 11,720 variants of the
+  88 samples: line prefixes, single-line deletions, mid-line cuts, and
+  dropped closing delimiters. Running them through `--parse` produced no
+  panics, aborts, or timeouts. Running them through full compilation and
+  evaluation (`--file`, minimal configuration) also produced no panics or
+  aborts. Four variants timed out, and all four were genuine program
+  divergence: a combinator in `samples/contracts/macros/rewrite_rules.g`
+  that recursed without consuming input once a line was deleted.
+- **Builtins report structured errors.** Targeted probes covered `list`
+  `head`, `tail`, `at`, `slice`, `split`, `split_end`, `len`, `map`, and
+  `concat`; `math` `floor` and `mod`; arithmetic and comparisons;
+  `object_from_dict`; and dictionary paths. Inputs included empty and
+  out-of-range lists, negative, huge, and fractional indices, division and
+  modulus by zero, and type mismatches. Every probe produced a diagnostic.
+  One wording issue: a huge positive index reports "requires non-negative
+  integer indices".
+- **Interaction-net construction validates malformed nets.** Probes covered
+  a port wired twice, a port wired to itself, unwired auxiliaries, a missing
+  or duplicated exposed port, copy counts that were zero, negative, huge, or
+  fractional, non-port wiring, foreign ports, and stuck or garbage pairs.
+  Each produced an error or ran correctly. Some messages print internal
+  `Port { node: NodeId(..) }` structures, which is a diagnostic-quality
+  issue only.
+- **Deep recursion is slow, not unsafe.** Evaluation time grows roughly
+  quadratically with recursion depth, but nothing crashes. The finding is
+  recorded in the deferred
+  [evaluation recursion performance plan](EvaluationRecursionPerformance_2026-10-04.md).
 
 ## Method
 
