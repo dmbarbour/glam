@@ -970,7 +970,6 @@ fn client_demand_preserves_a_promise_inclusive_retryable_cycle() {
     handle.abandon();
 }
 
-#[cfg(feature = "aggressive-gc-verification")]
 #[test]
 fn blocked_client_checkpoint_survives_collection_until_promise_assignment() {
     let fixture = SameRuntimeFixture::new();

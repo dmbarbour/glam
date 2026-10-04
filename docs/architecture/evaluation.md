@@ -74,9 +74,28 @@ background work and obtained exclusive settlement admission, it promotes a
 pending collector pressure latch into that same explicit maintenance protocol.
 The pump does not collect: the next stable readiness observation returns
 `MaintenanceRequired`, whose revision-checked service performs collection.
-Ordinary mutator entry never elects production collection.
-Repository-wide aggressive verification and the Gate G3 certification cover
-the complete production ownership graph without becoming production policy.
+Ordinary mutator entry never elects collection, in any build.
+
+The private `aggressive-gc-verification` mode changes only the pressure input
+of that promotion: any allocation since the previous stable pump counts as
+pressure, and the pump then services its own request, standing in for the
+embedding client, before continuing toward stability. Verification
+collections therefore use the same stable boundary and explicit service path
+as production maintenance, readiness observed after a pump matches ordinary
+mode, and heap policy remains `NoAuto`. Tests that need a collection at a
+particular boundary request it explicitly.
+
+Settlement validation rechecks the probe's work generation and exits, its
+observation epoch, empty outputs, and a clean maintenance state: no active
+lease, no pending request, and an `Idle` disposition. It does not compare the
+maintenance revision. The collector is non-moving and preserves registered
+roots, so a completed collection cannot change the settled instant; a failed
+or in-flight collection surfaces through disposition or leases. The revision
+remains the compare-and-swap token that admits exactly one service of a
+maintenance snapshot. A settled report records the maintenance revision
+current at commit. This treatment of settlement is a known hazard for
+concurrent collection; the concurrent-collector plan's Open Design Gate 9 owns
+it.
 
 The `NoAuto` policy deliberately separates pressure detection from collection.
 Allocation records pressure on the value domain; only a runtime client which

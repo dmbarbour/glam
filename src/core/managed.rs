@@ -8,8 +8,6 @@ use super::{CoreValueFactory, RuntimeValueDomain};
 #[cfg(test)]
 use super::{LazySource, LazyValue};
 use crate::runtime::EvaluationRuntimeId;
-#[cfg(any(test, feature = "aggressive-gc-verification"))]
-use crate::runtime::RuntimeGcLeaseOutcome;
 
 /// Initial minimum slot extent for Glam-owned managed representations.
 ///
@@ -492,44 +490,6 @@ pub(crate) struct CoreValueAllocator<'scope, T: ManagedFamily> {
 }
 
 impl CoreValueFactory {
-    #[cfg(any(test, feature = "aggressive-gc-verification"))]
-    fn with_maybe_collecting_entry<R>(&self, operation: impl FnOnce() -> R) -> R {
-        if !self
-            .domain
-            .gc_activity_for_entries
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            return operation();
-        }
-        // The value domain can outlive its runtime: a `Values` handle legitimately
-        // retains the domain after the runtime -- and its mutation-admission
-        // authority -- is dropped. That lifecycle is not reachable from the public
-        // API and leaves no workers or mutators to coordinate against, so a
-        // collecting entry has nothing to verify. Run the operation directly rather
-        // than inventing collection semantics for a defunct runtime.
-        let admission = self
-            .domain
-            .gc_activity_admission
-            .lock()
-            .expect("runtime GC activity binding was poisoned")
-            .upgrade();
-        let Some(admission) = admission else {
-            return operation();
-        };
-        let lease = admission.begin_gc_activity();
-        let result = operation();
-        lease.finish(RuntimeGcLeaseOutcome::no_collection(
-            self.domain.heap.maintenance_snapshot(),
-        ));
-        result
-    }
-
-    #[cfg(not(any(test, feature = "aggressive-gc-verification")))]
-    #[inline]
-    fn with_maybe_collecting_entry<R>(&self, operation: impl FnOnce() -> R) -> R {
-        operation()
-    }
-
     #[cfg(feature = "interaction-net-profiling")]
     pub(crate) fn interaction_net_profile(
         &self,
@@ -586,11 +546,9 @@ impl CoreValueFactory {
         &self,
         operation: impl for<'scope> FnOnce(CoreValueAllocationScope<'scope>) -> R,
     ) -> R {
-        self.with_maybe_collecting_entry(|| {
-            self.domain
-                .heap
-                .with_mutator(|mutator| operation(CoreValueAllocationScope { mutator }))
-        })
+        self.domain
+            .heap
+            .with_mutator(|mutator| operation(CoreValueAllocationScope { mutator }))
     }
 
     /// Opens one factory-qualified managed-access region.
@@ -602,14 +560,12 @@ impl CoreValueFactory {
         &self,
         operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,
     ) -> R {
-        self.with_maybe_collecting_entry(|| {
-            self.domain.heap.with_mutator(|mutator| {
-                #[cfg(test)]
-                let _access_depth = RuntimeValueAccessDepthGuard::enter();
-                operation(RuntimeValueAccess {
-                    values: self,
-                    scope: CoreValueAllocationScope { mutator },
-                })
+        self.domain.heap.with_mutator(|mutator| {
+            #[cfg(test)]
+            let _access_depth = RuntimeValueAccessDepthGuard::enter();
+            operation(RuntimeValueAccess {
+                values: self,
+                scope: CoreValueAllocationScope { mutator },
             })
         })
     }
@@ -677,22 +633,6 @@ impl CoreValueFactory {
     }
 
     #[cfg(test)]
-    pub(crate) fn enable_collection_before_outer_entry_for_test(&self) {
-        self.domain
-            .gc_activity_for_entries
-            .store(true, std::sync::atomic::Ordering::Release);
-        self.domain.heap.enable_collection_before_outer_entry();
-    }
-
-    #[cfg(feature = "aggressive-gc-verification")]
-    pub(crate) fn enable_collection_before_outer_entry_for_verification(&self) {
-        self.domain
-            .gc_activity_for_entries
-            .store(true, std::sync::atomic::Ordering::Release);
-        self.domain.heap.enable_collection_before_outer_entry();
-    }
-
-    #[cfg(test)]
     pub(crate) fn install_finalizing_phase_probe_for_test(&self) -> glam_gc::FinalizingPhaseProbe {
         self.domain.heap.install_finalizing_phase_probe()
     }
@@ -748,6 +688,15 @@ impl CoreValueFactory {
     /// recovery. This never grants managed-value access.
     pub(crate) fn managed_maintenance_snapshot(&self) -> glam_gc::HeapMaintenanceSnapshot {
         self.domain.heap.maintenance_snapshot()
+    }
+
+    /// Returns cumulative managed allocations. Every production allocation
+    /// records exactly one worker-cache hit or miss. Call only on a usable
+    /// heap: collector metrics panic after poison.
+    #[cfg(feature = "aggressive-gc-verification")]
+    pub(crate) fn managed_allocation_count(&self) -> u64 {
+        let metrics = self.domain.heap.metrics();
+        metrics.class_cache_hits() + metrics.class_cache_misses()
     }
 
     #[cfg(test)]

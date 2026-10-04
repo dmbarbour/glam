@@ -595,10 +595,6 @@ impl EvaluationRuntime {
             core: CoreValueFactory::new(id, ids.clone()),
         };
         let mutation_admission = RuntimeMutationAdmission::new();
-        #[cfg(any(test, feature = "aggressive-gc-verification"))]
-        values
-            .core()
-            .attach_gc_activity_admission(&mutation_admission);
         let observations = RuntimeObservationState::new();
         let work = EvaluationWorkCoordinator::new(
             values.core(),
@@ -640,13 +636,6 @@ impl EvaluationRuntime {
             }),
             default_reflection_profile,
         };
-        #[cfg(feature = "aggressive-gc-verification")]
-        runtime
-            .state
-            .shared_resources
-            .values
-            .core()
-            .enable_collection_before_outer_entry_for_verification();
         Ok(runtime)
     }
 
@@ -882,15 +871,6 @@ impl EvaluationRuntime {
         &self,
     ) -> Result<RuntimeMaintenanceReport, RuntimeMaintenanceError> {
         self.service_managed_collection()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn enable_collection_before_outer_entry_for_test(&self) {
-        self.state
-            .shared_resources
-            .values
-            .core()
-            .enable_collection_before_outer_entry_for_test();
     }
 
     #[cfg(test)]
@@ -1132,6 +1112,11 @@ impl EvaluationRuntime {
     /// output for its host adapter, and promotes collector-local pressure into
     /// an explicit maintenance request only after reaching a stable runtime
     /// boundary. It does not perform collection itself.
+    ///
+    /// Under the private `aggressive-gc-verification` mode only, the pump
+    /// services each request it promotes, standing in for the embedding
+    /// client, and then continues toward stability. Readiness observed after
+    /// the pump therefore matches ordinary mode.
     pub fn pump_until_stable(&self) {
         const BACKGROUND_DRAIN_BUDGET: usize = 4096;
 
@@ -1168,16 +1153,23 @@ impl EvaluationRuntime {
             let pressure_promoted = stable
                 && admission.promote_gc_pressure_request(
                     &settlement,
-                    self.state
-                        .shared_resources
-                        .values
-                        .core()
-                        .managed_maintenance_snapshot(),
+                    self.state.shared_resources.values.core(),
                 );
             drop(settlement);
 
             if pressure_promoted {
                 admission.notify_settlement();
+                // The settlement guard is released and the runtime is stable,
+                // so this is the same boundary at which a client would service
+                // the request. A failed service is retained by maintenance
+                // state and later reported by readiness, and it blocks further
+                // promotion, so the loop still converges.
+                #[cfg(feature = "aggressive-gc-verification")]
+                {
+                    let _ = self.service_managed_collection();
+                    continue;
+                }
+                #[cfg(not(feature = "aggressive-gc-verification"))]
                 return;
             }
 
@@ -1350,13 +1342,26 @@ impl EvaluationRuntime {
             .shared_resources
             .mutation_admission
             .gc_maintenance_snapshot(settlement);
+        // Settlement does not consult the raw GC maintenance revision. The
+        // collector is non-moving and preserves every registered root, so a
+        // collection that ran between probe and commit cannot change the
+        // settlement-relevant instant: pure-evaluation work, observations, and
+        // retained roots are identical before and after. The clauses above
+        // observe that instant directly -- quiescent work generation and exits
+        // (below), observation epoch, empty outputs, and a clean GC disposition
+        // with no in-flight lease. A collection that *failed* surfaces through
+        // `disposition`/`explicit_request`, and an in-flight collection through
+        // `active_leases`, so a transparent collection is correctly invisible
+        // here. The revision remains the compare-and-swap token for the
+        // explicit-service path (`begin_gc_activity_for_snapshot`), which needs
+        // to admit exactly one of several racing services; settlement is
+        // serialized by the exclusive guard and does not.
         if !state_matches
             || self.state.shared_resources.observations.current().get()
                 != snapshot.stamp.observation_epoch
             || maintenance.active_leases != 0
             || maintenance.explicit_request
             || maintenance.disposition != RuntimeGcMaintenanceDisposition::Idle
-            || maintenance.revision != snapshot.stamp.gc_maintenance_revision
         {
             return None;
         }

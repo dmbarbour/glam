@@ -53,9 +53,9 @@ const ENTRY_INVENTORY: &[EntryRecord] = &[
         selected: EntryClass::RequestOnly,
     },
     EntryRecord {
-        family: "aggressive pre-outer-entry verification",
-        current: EntryClass::MayElect,
-        selected: EntryClass::MayElect,
+        family: "aggressive-verification stable-pump service",
+        current: EntryClass::ExplicitCollection,
+        selected: EntryClass::ExplicitCollection,
     },
     EntryRecord {
         family: "runtime construction and canonical cache initialization",
@@ -84,7 +84,8 @@ fn gc_activity_entry_inventory_is_complete() {
     assert!(
         ENTRY_INVENTORY
             .iter()
-            .any(|record| record.selected == EntryClass::MayElect)
+            .all(|record| record.selected != EntryClass::MayElect),
+        "every runtime collection, including aggressive verification, is explicit service"
     );
 
     let managed = include_str!("../../core/managed.rs");
@@ -105,30 +106,22 @@ fn gc_activity_entry_inventory_is_complete() {
     let runtime = include_str!("../runtime.rs");
     assert!(runtime.contains("pub fn request_managed_collection"));
     assert!(runtime.contains("pub fn service_managed_collection"));
-    assert!(runtime.contains("enable_collection_before_outer_entry_for_verification"));
+    assert!(!runtime.contains("enable_collection_before_outer_entry"));
 }
 
 #[test]
 fn ordinary_no_auto_entries_compile_without_runtime_lease_work() {
     let managed = include_str!("../../core/managed.rs");
-    assert!(managed.contains(
-        "#[cfg(not(any(test, feature = \"aggressive-gc-verification\")))]\n    #[inline]\n    fn with_maybe_collecting_entry"
-    ));
-    assert_eq!(
-        managed
-            .matches("let lease = admission.begin_gc_activity();")
-            .count(),
-        1,
-        "only the test/aggressive entry facade may register a GC lease"
+    assert!(
+        !managed.contains("begin_gc_activity"),
+        "value-domain entries never register a GC lease, in any build"
     );
 
     let core = include_str!("../../core.rs");
-    assert_eq!(
-        core.matches("gc_activity_for_entries: AtomicBool").count(),
-        2,
-        "the verification-only enable flag should have one declaration and one initializer"
+    assert!(
+        !core.contains("gc_activity_"),
+        "the value domain holds no GC activity authority or entry flag"
     );
-    assert!(core.contains("#[cfg(any(test, feature = \"aggressive-gc-verification\"))]"));
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -224,10 +217,9 @@ fn runtime_gc_policy_plan_has_no_live_transition() {
         .iter()
         .filter(|record| record.selected == EntryClass::MayElect)
         .collect::<Vec<_>>();
-    assert_eq!(may_elect.len(), 1);
-    assert_eq!(
-        may_elect[0].family,
-        "aggressive pre-outer-entry verification"
+    assert!(
+        may_elect.is_empty(),
+        "no runtime entry may elect a collection; collection is explicit service"
     );
 }
 

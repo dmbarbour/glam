@@ -195,12 +195,14 @@ fn production_collection_preserves_each_serial_boundary() {
             > before_quiescent_collection
                 .stamp()
                 .gc_maintenance_revision(),
-        "collection must invalidate a snapshot which preceded its activity lease"
+        "collection advances the GC maintenance revision"
     );
-    assert_eq!(
-        before_quiescent_collection.validate_without_settling(),
-        Err(RuntimeSettlementError::RuntimeChanged)
-    );
+    // The collector is root-preserving, so a collection that ran after this
+    // snapshot leaves its settlement-relevant instant unchanged: the snapshot
+    // still validates even though the maintenance revision advanced.
+    before_quiescent_collection
+        .validate_without_settling()
+        .expect("a root-preserving collection must not invalidate an earlier settlement snapshot");
     let retained_reflection = access_path(
         &assembler,
         after_quiescent_collection.reflection().root(),
@@ -285,20 +287,24 @@ fn production_collection_preserves_each_serial_boundary() {
     runtime
         .collect_managed_for_maintenance()
         .expect("the pre-settlement serial boundary should collect");
-    assert!(
-        matches!(
-            settlement.settle(),
-            Err(RuntimeSettlementError::RuntimeChanged)
-        ),
-        "a collection lease must invalidate an earlier settlement snapshot"
-    );
-    let RuntimeReadiness::Ready(post_collection) = runtime.readiness() else {
-        panic!("completed collection should restore settlement readiness")
-    };
-    let report = post_collection
+    // The collection is root-preserving, so the snapshot taken before it still
+    // settles the same quiescent instant rather than reporting RuntimeChanged.
+    let report = settlement
         .settle()
-        .expect("post-collection readiness should settle");
-    assert_eq!(report.stamp(), post_collection.stamp());
+        .expect("a root-preserving collection must not invalidate an earlier settlement snapshot");
+    // The report records the committed instant: the snapshot's work and
+    // observations, with the maintenance revision current at commit.
+    assert_eq!(
+        report.stamp().work_generation(),
+        settlement.stamp().work_generation()
+    );
+    assert_eq!(
+        report.stamp().observation_epoch(),
+        settlement.stamp().observation_epoch()
+    );
+    assert!(
+        report.stamp().gc_maintenance_revision() > settlement.stamp().gc_maintenance_revision()
+    );
     assert_eq!(report.reflection().root().runtime_id(), runtime.id());
     assert_eq!(net_topology_revision(&runtime, &net), net_revision);
 
@@ -858,39 +864,6 @@ fn runtime_request_during_finalization_coalesces_and_lease_release_wakes_pump() 
 }
 
 #[test]
-fn aggressive_debug_collection_runs_before_outer_runtime_entry() {
-    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
-    let _assembler = Assembler::builder()
-        .evaluation_runtime(runtime.clone())
-        .build()
-        .expect("assembler should build");
-    let before = runtime
-        .collect_managed_for_maintenance()
-        .expect("baseline collection should complete");
-    runtime.enable_collection_before_outer_entry_for_test();
-
-    let value = runtime.values().empty_dict();
-    assert_eq!(value.runtime_id(), runtime.id());
-    let after = runtime
-        .collect_managed_for_maintenance()
-        .expect("explicit post-entry collection should complete");
-    assert_eq!(
-        after.epoch(),
-        before.epoch() + 2,
-        "one outer value entry should force exactly one intervening collection"
-    );
-    assert_eq!(
-        runtime
-            .values()
-            .core()
-            .managed_statistics()
-            .collection_policy(),
-        glam_gc::CollectionPolicy::NoAuto,
-        "aggressive verification must not mutate heap policy"
-    );
-}
-
-#[test]
 fn recoverable_trace_panic_becomes_retryable_maintenance_and_durable_failure() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let trace_root = runtime
@@ -1092,6 +1065,9 @@ fn runtime_manual_maintenance_never_mutates_heap_policy() {
     );
 }
 
+// Primarily tests the NoAuto pressure-promotion protocol, which aggressive
+// verification replaces; see the 2026-10-03 regression plan, D11.
+#[cfg(not(feature = "aggressive-gc-verification"))]
 #[test]
 fn stable_pump_without_pressure_changes_no_maintenance_state() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
@@ -1111,6 +1087,9 @@ fn stable_pump_without_pressure_changes_no_maintenance_state() {
     );
 }
 
+// Primarily tests the NoAuto pressure-promotion protocol, which aggressive
+// verification replaces; see the 2026-10-03 regression plan, D11.
+#[cfg(not(feature = "aggressive-gc-verification"))]
 #[test]
 fn stable_pump_promotes_pressure_once_without_changing_policy() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
@@ -1168,6 +1147,9 @@ fn stable_pump_promotes_pressure_once_without_changing_policy() {
     drop(retained);
 }
 
+// Primarily tests the NoAuto pressure-promotion protocol, which aggressive
+// verification replaces; see the 2026-10-03 regression plan, D11.
+#[cfg(not(feature = "aggressive-gc-verification"))]
 #[test]
 fn pressure_after_one_stable_snapshot_waits_for_the_next_pump() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
@@ -1196,6 +1178,9 @@ fn pressure_after_one_stable_snapshot_waits_for_the_next_pump() {
     drop(retained);
 }
 
+// Primarily tests the NoAuto pressure-promotion protocol, which aggressive
+// verification replaces; see the 2026-10-03 regression plan, D11.
+#[cfg(not(feature = "aggressive-gc-verification"))]
 #[test]
 fn explicit_request_and_pressure_promotion_coalesce_in_both_orders() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
@@ -1293,11 +1278,16 @@ fn pressure_after_collection_snapshot_survives_older_outcome_publication() {
             .collection_requested(),
         "publishing an older successful outcome must not clear later collector pressure"
     );
-    runtime.pump_until_stable();
-    assert!(matches!(
-        runtime.readiness(),
-        RuntimeReadiness::MaintenanceRequired(_)
-    ));
+    // Promoting the latch is NoAuto protocol, which aggressive verification
+    // replaces; see the 2026-10-03 regression plan, D11.
+    #[cfg(not(feature = "aggressive-gc-verification"))]
+    {
+        runtime.pump_until_stable();
+        assert!(matches!(
+            runtime.readiness(),
+            RuntimeReadiness::MaintenanceRequired(_)
+        ));
+    }
     drop(retained);
 }
 
@@ -1344,13 +1334,21 @@ fn parked_pump_promotes_pressure_after_activity_wake() {
         .recv_timeout(Duration::from_secs(2))
         .expect("lease retirement should wake the pump to promote pressure");
     pump.join().expect("runtime pump should finish cleanly");
+    // Under aggressive verification the woken pump also services its own
+    // promotion; see the 2026-10-03 regression plan, D7 and D11.
+    #[cfg(not(feature = "aggressive-gc-verification"))]
     assert!(matches!(
         runtime.readiness(),
         RuntimeReadiness::MaintenanceRequired(_)
     ));
+    #[cfg(feature = "aggressive-gc-verification")]
+    assert!(matches!(runtime.readiness(), RuntimeReadiness::Ready(_)));
     drop(retained);
 }
 
+// Primarily tests the NoAuto pressure-promotion protocol, which aggressive
+// verification replaces; see the 2026-10-03 regression plan, D11.
+#[cfg(not(feature = "aggressive-gc-verification"))]
 #[test]
 fn promoted_pressure_reclaims_dead_allocations_and_preserves_assembly_result() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
@@ -1406,21 +1404,42 @@ fn promoted_pressure_reclaims_dead_allocations_and_preserves_assembly_result() {
 
 #[cfg(feature = "aggressive-gc-verification")]
 #[test]
-fn repository_aggressive_mode_enables_each_production_runtime() {
+fn repository_aggressive_mode_services_new_allocations_at_each_stable_pump() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
-    let before = runtime
-        .collect_managed_for_maintenance()
-        .expect("baseline collection should complete");
+    let epoch = || {
+        runtime
+            .values()
+            .core()
+            .completed_collection_epoch_for_test()
+    };
+    runtime.pump_until_stable();
+    let settled = epoch();
 
-    let value = runtime.values().empty_dict();
-    assert_eq!(value.runtime_id(), runtime.id());
-    let after = runtime
-        .collect_managed_for_maintenance()
-        .expect("explicit post-entry collection should complete");
+    runtime.pump_until_stable();
     assert_eq!(
-        after.epoch(),
-        before.epoch() + 2,
-        "the repository feature must force one collection before an eligible outer entry"
+        epoch(),
+        settled,
+        "a stable pump without new allocations must not collect again"
+    );
+
+    let retained = runtime
+        .values()
+        .core()
+        .cross_managed_pressure_threshold_for_test();
+    assert_eq!(
+        epoch(),
+        settled,
+        "aggressive verification must not collect at value-domain entries"
+    );
+    runtime.pump_until_stable();
+    assert_eq!(
+        epoch(),
+        settled + 1,
+        "the next stable pump must service the new allocations exactly once"
+    );
+    assert!(
+        matches!(runtime.readiness(), RuntimeReadiness::Ready(_)),
+        "readiness after an aggressive pump should match ordinary mode"
     );
     assert_eq!(
         runtime
@@ -1431,4 +1450,5 @@ fn repository_aggressive_mode_enables_each_production_runtime() {
         glam_gc::CollectionPolicy::NoAuto,
         "repository verification must leave production collection policy immutable"
     );
+    drop(retained);
 }

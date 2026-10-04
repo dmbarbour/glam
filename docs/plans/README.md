@@ -16,6 +16,10 @@ deferred plans below remain candidates for later work.
 
 ## Recent Completed Plans
 
+- [`GarbageCollectorAggressiveVerificationRegression_2026-10-03.md`](GarbageCollectorAggressiveVerificationRegression_2026-10-03.md)
+  restored the aggressive-GC verification mode, broken since I12A, by reusing
+  the NoAuto stable-pump maintenance decision, and recorded the settlement
+  semantics decided along the way.
 - [`GarbageCollectionRoadmap_2026-08-19.md`](GarbageCollectionRoadmap_2026-08-19.md)
   completed the non-moving stop-the-world collector and its runtime
   integration through C8 and Gate G4.

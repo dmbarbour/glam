@@ -47,6 +47,10 @@ pub(crate) fn allocate_evaluation_runtime_id() -> EvaluationRuntimeId {
 pub(crate) struct RuntimeMutationAdmission {
     gate: RwLock<()>,
     activity: Arc<RuntimeActivityState>,
+    /// Heap allocation count observed by the last aggressive pressure
+    /// evaluation. See `gc_pressure_requested`.
+    #[cfg(feature = "aggressive-gc-verification")]
+    aggressive_promoted_allocations: AtomicU64,
 }
 
 impl RuntimeMutationAdmission {
@@ -54,6 +58,8 @@ impl RuntimeMutationAdmission {
         Arc::new(Self {
             gate: RwLock::new(()),
             activity: RuntimeActivityState::new(),
+            #[cfg(feature = "aggressive-gc-verification")]
+            aggressive_promoted_allocations: AtomicU64::new(0),
         })
     }
 
@@ -132,12 +138,46 @@ impl RuntimeMutationAdmission {
     pub(crate) fn promote_gc_pressure_request(
         &self,
         _settlement: &RuntimeSettlementGuard<'_>,
-        heap: glam_gc::HeapMaintenanceSnapshot,
+        values: &CoreValueFactory,
     ) -> bool {
-        let pressure_requested = heap
+        values
+            .managed_maintenance_snapshot()
             .statistics()
-            .is_some_and(glam_gc::HeapStatistics::collection_requested);
-        pressure_requested && self.activity.promote_gc_pressure_request()
+            .is_some_and(|statistics| self.gc_pressure_requested(statistics, values))
+            && self.activity.promote_gc_pressure_request()
+    }
+
+    #[cfg(not(feature = "aggressive-gc-verification"))]
+    fn gc_pressure_requested(
+        &self,
+        statistics: glam_gc::HeapStatistics,
+        _values: &CoreValueFactory,
+    ) -> bool {
+        statistics.collection_requested()
+    }
+
+    /// The private `aggressive-gc-verification` mode replaces only the
+    /// pressure input: any allocation since the previous evaluation counts.
+    /// Every other promotion condition is unchanged, so verification
+    /// collections use the same stable boundary and explicit service path as
+    /// production maintenance. Keying on new allocations, rather than
+    /// unconditional `true`, lets a pump/service loop converge.
+    ///
+    /// Exclusive settlement admission serializes evaluation. Recording the
+    /// count even when promotion is then refused is safe: at a stable boundary,
+    /// refusal means a pending or retry-required collection already covers
+    /// these allocations.
+    #[cfg(feature = "aggressive-gc-verification")]
+    fn gc_pressure_requested(
+        &self,
+        _statistics: glam_gc::HeapStatistics,
+        values: &CoreValueFactory,
+    ) -> bool {
+        let allocations = values.managed_allocation_count();
+        allocations
+            > self
+                .aggressive_promoted_allocations
+                .swap(allocations, Ordering::Relaxed)
     }
 
     pub(crate) fn record_gc_request_failure(

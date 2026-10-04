@@ -583,7 +583,8 @@ payload is dropped exactly once or remains durably pending after panic.
 - Add concurrent collection as an immutable runtime construction policy; do
   not mutate live heaps between collector modes.
 - Integrate collection activity with runtime readiness and settlement without
-  exposing epoch details to Glam evaluation.
+  exposing epoch details to Glam evaluation. Settlement is a known source of
+  issues; resolve Open Design Gate 9 first.
 - Retain explicit reference-collector and `NoAuto` modes for verification.
 - Exercise workers, reflection, interaction nets, diagnostics, macros, imports,
   and assembly output under forced concurrent schedules.
@@ -660,6 +661,22 @@ inventory:
    a fully asynchronous acknowledgement protocol.
 8. Whether production should ever discard the reference stop-the-world
    collector rather than retaining it as an oracle and maintenance mode.
+9. How runtime settlement composes with collection that is not confined to
+   an explicit stable-boundary service. Settlement is a known source of
+   issues; the 2026-10-03 aggressive-verification remediation
+   ([`GarbageCollectorAggressiveVerificationRegression_2026-10-03.md`](GarbageCollectorAggressiveVerificationRegression_2026-10-03.md))
+   found two hazards that a concurrent collector must address deliberately:
+   - Settlement validation no longer compares the GC maintenance revision.
+     It relies on a non-moving, root-preserving collection leaving the
+     settled instant unchanged. Re-examine that premise for collection that
+     overlaps a readiness probe and its later commit, including snapshot-held
+     roots, maintenance-failure ledgers, and finalization.
+   - The runtime mutation-admission gate is not reentrant. Settlement holds
+     it exclusively while constructing managed values (kill failures and
+     report roots). Any allocation path that takes the gate, or initiates
+     collection that needs it, deadlocks settlement. Either allocation must
+     never require the gate, or settlement must stop constructing values
+     under its exclusive hold.
 
 Each gate requires a dated decision, forced-order verification plan, and
 review of effects on later phases before its implementation begins.

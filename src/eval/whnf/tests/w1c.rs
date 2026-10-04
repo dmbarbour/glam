@@ -1,7 +1,6 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-#[cfg(feature = "aggressive-gc-verification")]
 use crate::core::LazyValue;
 use crate::core::{
     CoreValueFactory, EvaluationFailure, Value, thread_has_runtime_value_access_for_test,
@@ -245,14 +244,12 @@ fn dropping_a_suspended_computation_retires_its_complete_checkpoint() {
     );
 }
 
-#[cfg(feature = "aggressive-gc-verification")]
 #[test]
 fn collection_between_polls_preserves_only_the_installed_checkpoint() {
     let values = isolated_values();
     let baseline = values
         .collect_managed_for_test()
         .expect("the collection fixture should begin collectible");
-    values.enable_collection_before_outer_entry_for_verification();
     let context = EvalContext::isolated(values.clone());
     let poll = EvaluationPollContext::for_context(&context);
 
