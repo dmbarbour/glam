@@ -1,7 +1,7 @@
 # User-Input Panic Safety Plan — 2026-10-04
 
-Status: open. W1 and W2 inspection is done: F1 is fixed, and no further
-panic was found. W4 (poisoning) is next.
+Status: open. The parser and evaluation inspections are done: F1 is fixed,
+and no further panic was found. The poisoning workstream is next.
 
 This plan responds to the holistic pre-performance review, X4 and Maintainer
 Decision 1 ([review](../reviews/HolisticArchitecturePrePerformance_2026-10-03.md)).
@@ -40,7 +40,7 @@ Maintainer decision, 2026-10-04. The durable rule lives in
   `braced_empty_member` specifies empty-member diagnostics across line breaks
   for `do`, `let`, `where`, `with`, and `match`.
 
-## W1 findings (2026-10-04)
+## Parser findings (2026-10-04)
 
 All timings use a release build unless noted.
 
@@ -58,7 +58,7 @@ All timings use a release build unless noted.
   A debug build overflows sooner; nested `if` overflows at 1,000. Recursive
   drop of deep syntax trees may contribute, alongside recursive descent.
   Hand-written source does not reach these depths, so this abort class is
-  deferred within W1. The likely remedies are a nesting-limit diagnostic for
+  deferred within the parser workstream. The likely remedies are a nesting-limit diagnostic for
   nested syntax, plus iterative handling of infix chains and deep-tree drop.
 - **The lexer withstands hostile text.** Twenty-two probes covered non-ASCII
   names, text, comments, and operators; a BOM; CRLF and lone CR; tabs;
@@ -69,7 +69,7 @@ All timings use a release build unless noted.
   `view_between`, `split_top_level`, and `error_at_view` are byte-identical.
   F1 shows how such copies diverge, so deduplicating them remains worthwhile.
 
-## W2 findings (2026-10-04)
+## Evaluation findings (2026-10-04)
 
 - **A deterministic sweep found no panics.** It took 11,720 variants of the
   88 samples: line prefixes, single-line deletions, mid-line cuts, and
@@ -125,20 +125,20 @@ Entry surfaces:
 
 ## Workstreams
 
-- **W1 — Parser and lexer.** F1 is fixed. Inspect `g_syntax` for slicing,
+- **Parser and lexer.** F1 is fixed. Inspect `g_syntax` for slicing,
   indexing, and `expect` on token views and spans. Also inspect byte-offset
   arithmetic on source text (UTF-8 boundaries) and recursion depth on nested
   input, which can overflow the stack and abort without unwinding. Each
   finding becomes a deterministic regression, preferably an invalid sample.
-- **W2 — Lowering, builtins, and operators.** Find panics reachable from
+- **Lowering, builtins, and operators.** Find panics reachable from
   program-supplied values, such as arity, shape, and type mismatches, and
   convert them to `EvaluationFailure`.
-- **W3 — Interaction nets.** Covers builder validation and reduction-time
+- **Interaction nets.** Covers builder validation and reduction-time
   panics. N8's random closed-net generator follows the planned net polarity
   change, so the generator exercises the final `bind >< bind` semantics.
   Users can build nets with subnets disconnected from the public port. Such
   garbage must never fail evaluation unless demand reaches it.
-- **W4 — Poisoning.** Inventory the mutexes and `RwLock`s whose poisoning
+- **Poisoning.** Inventory the mutexes and `RwLock`s whose poisoning
   makes a runtime unusable, especially `lock().expect(..)` in `Drop` impls
   and guards, and `try_lock().expect(..)` on collector paths. For each lock
   class, decide between recovering via `PoisonError::into_inner` (when the
@@ -146,8 +146,8 @@ Entry surfaces:
   boundary. Verify with forced panics from client callbacks: after the
   client catches the unwind, the same runtime still evaluates.
 
-Order: W1, W2, W4, then W3. Any converted site that W4's ordering would
-delay can be fixed immediately when found.
+Order: parser, evaluation, poisoning, then interaction nets. Any converted
+site that this ordering would delay can be fixed immediately when found.
 
 ## Decisions for the maintainer
 
@@ -161,12 +161,12 @@ delay can be fixed immediately when found.
    discovery. Fixing that performance issue is not a prerequisite.
 2. **Poison recovery.** Recover per lock class, or keep treating poisoning as
    terminal and instead make every panic-adjacent path avoid holding locks.
-   Expected answer: per-class recovery, decided in W4.
+   Expected answer: per-class recovery, decided in the poisoning workstream.
 
 ## Acceptance
 
-- Every class U site found by W1–W3 reports a diagnostic or
+- Every class U site found by the inspection reports a diagnostic or
   `EvaluationFailure` and has a regression.
-- W4's forced-panic tests show a runtime remains usable after a client
-  catches a callback panic.
+- The poisoning workstream's forced-panic tests show a runtime remains
+  usable after a client catches a callback panic.
 - Remaining panics are class I, with invariant-stating messages.

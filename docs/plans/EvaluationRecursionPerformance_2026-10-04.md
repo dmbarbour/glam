@@ -1,9 +1,9 @@
 # Evaluation Recursion Performance — 2026-10-04
 
 Status: preliminary and deferred. This is a measured finding to investigate
-in a later performance phase, not current work. It was found during
-[user-input panic safety](UserInputPanicSafety_2026-10-04.md) W2. The root
-cause is not yet established.
+in a later performance phase, not current work. It was found during the
+[user-input panic safety](UserInputPanicSafety_2026-10-04.md) evaluation
+inspection. The root cause is not yet established.
 
 ## Problem
 

@@ -1,8 +1,9 @@
 # Parser Backtracking Performance Plan — 2026-10-04
 
 Status: preliminary and deferred. This is low-hanging fruit for a later
-performance phase, not current work. It was found during
-[user-input panic safety](UserInputPanicSafety_2026-10-04.md) W1.
+performance phase, not current work. It was found during the
+[user-input panic safety](UserInputPanicSafety_2026-10-04.md) parser
+inspection.
 
 ## Problem
 
