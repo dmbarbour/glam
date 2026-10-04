@@ -4851,7 +4851,7 @@ fn poll_machine_exit(
             EvaluationMachinePoll::Failed(error) => {
                 panic!("exit fixture failed: {error}")
             }
-            EvaluationMachinePoll::Cancelled => {
+            EvaluationMachinePoll::Cancelled | EvaluationMachinePoll::Panicked { .. } => {
                 panic!("exit fixture was cancelled")
             }
         }
@@ -5111,7 +5111,7 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
             EvaluationMachinePoll::Failed(error) => {
                 panic!("disturbed exit retry failed: {error}")
             }
-            EvaluationMachinePoll::Cancelled => {
+            EvaluationMachinePoll::Cancelled | EvaluationMachinePoll::Panicked { .. } => {
                 panic!("disturbed exit retry was cancelled")
             }
         }

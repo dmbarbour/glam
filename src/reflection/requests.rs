@@ -591,6 +591,15 @@ fn poll_task_join<S: TaskSpecialization>(
             TaskHalt::rooted_failure(error),
             handle.task.id(),
         )),
+        // A panic is never a joinable result. The joiner stays waiting on the
+        // panicked task, and the scheduler's poll boundary halts it.
+        EvaluationWaitPoll::Panicked(_) => {
+            let wait = handle.task.wait().clone();
+            *operation = ReflectionRequestOperation::TaskJoin(TaskJoinRequestWork::Waiting(handle));
+            Ok(SpecializationRequestPoll::Wait(
+                super::protocol::SpecializationRequestWait::new(wait),
+            ))
+        }
     }
 }
 
@@ -667,14 +676,16 @@ fn finish_task_query<S: TaskSpecialization>(
             | TaggedTaskState::Cancelled
             | TaggedTaskState::Abandoned
             | TaggedTaskState::Exited
-            | TaggedTaskState::Killed,
+            | TaggedTaskState::Killed
+            | TaggedTaskState::Panicked,
         )
         | (
             TaskQueryRequest::Halt,
             TaggedTaskState::Complete(_)
             | TaggedTaskState::Abandoned
             | TaggedTaskState::Exited
-            | TaggedTaskState::Killed,
+            | TaggedTaskState::Killed
+            | TaggedTaskState::Panicked,
         ) => Ok(RequestResult::Fail),
         (TaskQueryRequest::Status, _) => unreachable!("status returns before tagged decoding"),
     }
@@ -1599,6 +1610,7 @@ fn task_status_query_value(
         EvaluationTaskStatus::Abandoned => access.value_from_key(&keys::ABANDONED),
         EvaluationTaskStatus::Exited => access.value_from_key(&keys::EXITED),
         EvaluationTaskStatus::Killed(_) => access.value_from_key(&keys::KILLED),
+        EvaluationTaskStatus::Panicked(_) => access.value_from_key(&keys::PANICKED),
     }
 }
 
@@ -1642,6 +1654,7 @@ enum TaggedTaskState {
     Abandoned,
     Exited,
     Killed,
+    Panicked,
 }
 
 fn tagged_task_state(values: &Values, value: &Value) -> Result<TaggedTaskState, TaskHalt> {
@@ -1682,6 +1695,12 @@ fn tagged_task_state(values: &Values, value: &Value) -> Result<TaggedTaskState, 
             .same_representation(&value, &access.runtime_access().key_value(&keys::KILLED))
         {
             return Ok(TaggedTaskState::Killed);
+        }
+        if access
+            .runtime_access()
+            .same_representation(&value, &access.runtime_access().key_value(&keys::PANICKED))
+        {
+            return Ok(TaggedTaskState::Panicked);
         }
         let CoreValue::Dict(state) = value else {
             return Err(TaskHalt::new("reflection task status is malformed"));
@@ -1805,7 +1824,8 @@ mod tests {
             | TaggedTaskState::Cancelled
             | TaggedTaskState::Abandoned
             | TaggedTaskState::Exited
-            | TaggedTaskState::Killed => {}
+            | TaggedTaskState::Killed
+            | TaggedTaskState::Panicked => {}
         }
     }
 
@@ -1967,6 +1987,29 @@ mod tests {
         assert!(matches!(
             tagged_task_state(&values, &killed).expect("killed status should decode"),
             TaggedTaskState::Killed
+        ));
+    }
+
+    #[test]
+    fn panicked_task_status_round_trips_without_a_failure_payload() {
+        let core = crate::core::test_value_factory();
+        let values = Values::from_core_factory(core.clone());
+        let panicked = task_status_public_value(
+            &values,
+            EvaluationTaskStatus::Panicked(crate::core::EvaluationPanic::from_payload(
+                &"panicked fixture",
+                crate::core::EvaluationPanicOrigin::ReflectionTask(1),
+            )),
+        );
+        values.core().with_runtime_value_access(|access| {
+            access.assert_same_representation_for_test(
+                &values.clone_core(&panicked).unwrap(),
+                &access.key_value(&keys::PANICKED),
+            );
+        });
+        assert!(matches!(
+            tagged_task_state(&values, &panicked).expect("panicked status should decode"),
+            TaggedTaskState::Panicked
         ));
     }
 

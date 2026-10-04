@@ -564,7 +564,12 @@ pub(in crate::g_syntax) fn evaluate_closed(
     });
     crate::evaluation::EvalContext::private_closed(values.clone())
         .evaluate_root_whnf(input)
-        .expect("closed g compiler helper must evaluate without session capabilities")
+        .unwrap_or_else(|error| match error.panic_report() {
+            Some(report) => report.resume(),
+            None => panic!(
+                "closed g compiler helper must evaluate without session capabilities: {error}"
+            ),
+        })
 }
 
 fn apply_builtin(

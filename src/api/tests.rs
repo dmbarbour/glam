@@ -2192,6 +2192,89 @@ fn synchronous_assembler_evaluation_waits_for_a_worker_claim() {
 }
 
 #[test]
+fn panicking_evaluation_reports_a_panic_and_leaves_the_runtime_usable() {
+    let assembler = Assembler::new();
+    let values = assembler.values();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let panicking =
+        public_semantic_thunk(&assembler.core_values(), "panicking fixture", move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            panic!("forced evaluation panic");
+        });
+    let dependent = values
+        .access(&panicking, values.atom_from_text("member"))
+        .expect("same-runtime access construction should succeed");
+
+    let error = assembler
+        .evaluator()
+        .eval(&dependent)
+        .expect_err("a panicking dependency must interrupt the demand");
+    assert_eq!(error.kind(), ErrorKind::Panic);
+    assert_eq!(error.panic_message(), Some("forced evaluation panic"));
+    assert!(
+        error.structured_diagnostic().is_none(),
+        "a panic is never a Glam diagnostic"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "waiters must halt instead of reinstalling the panicked work"
+    );
+
+    // The same runtime keeps evaluating, settles, and collects.
+    assert_eq!(value_i64(&assembler, &values.integer(7)), Some(7));
+    let runtime = assembler.evaluation_runtime();
+    runtime.pump_until_stable();
+    assert!(!matches!(runtime.readiness(), RuntimeReadiness::Busy));
+    runtime
+        .service_managed_collection()
+        .expect("collection must succeed after a contained panic");
+}
+
+#[test]
+fn worker_survives_a_panicking_sparked_value() {
+    let runtime = EvaluationRuntime::new(1).expect("worker runtime should build");
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime)
+        .build()
+        .expect("assembler should build");
+    let (started_sender, started_receiver) = std::sync::mpsc::channel();
+    let panicking = public_semantic_thunk(&assembler.core_values(), "panicking spark", {
+        let started_sender = started_sender.clone();
+        move |_| {
+            let _ = started_sender.send("panicking");
+            panic!("forced spark panic");
+        }
+    });
+    assembler
+        .eval_context()
+        .spark(panicking.clone_core_for_test());
+    assert_eq!(
+        started_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("worker should claim the panicking spark"),
+        "panicking"
+    );
+
+    // Only a live worker can claim this spark: the client is not pumping.
+    let surviving = public_semantic_thunk(&assembler.core_values(), "surviving spark", move |_| {
+        let _ = started_sender.send("surviving");
+        Ok(CoreValue::Number(42.into()))
+    });
+    assembler
+        .eval_context()
+        .spark(surviving.clone_core_for_test());
+    assert_eq!(
+        started_receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the worker must survive the earlier panic"),
+        "surviving"
+    );
+    assert_eq!(value_i64(&assembler, &surviving), Some(42));
+}
+
+#[test]
 fn builder_fixes_conflict_analysis_before_reasoning_starts() {
     let assembler = Assembler::builder()
         .conflict_analysis(Arc::new(crate::reflection::CoarseConflictAnalysis))

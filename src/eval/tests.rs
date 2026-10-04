@@ -2385,6 +2385,42 @@ fn failed_task_fails_its_unresolved_fixpoint_promises() {
 }
 
 #[test]
+fn panicked_task_leaves_its_fixpoint_promises_unassigned() {
+    let session = test_context();
+    let (fixpoint, owner_task, _owner) = session
+        .task_owned_promise(Arc::from("test fixpoint"))
+        .unwrap();
+    let observer = session.with_new_task().unwrap();
+    let wait = fixpoint
+        .task(session.values())
+        .expect("task-owned fixpoint should expose its wait")
+        .wait()
+        .clone();
+    let value = Value::Promised(fixpoint.duplicate_for_test(session.values()));
+
+    session.panic_wait(owner_task.wait(), "producer panicked deliberately");
+
+    // A panic is never a semantic result: the promise stays unassigned, and
+    // its observers halt with the panic instead of a failure.
+    assert!(fixpoint.assignment(session.values()).is_none());
+    assert!(matches!(
+        session.poll_wait(&wait),
+        EvaluationWaitPoll::Panicked(report) if report.message() == "producer panicked deliberately"
+    ));
+    let halt = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value)
+        .unwrap_err_without_debug();
+    assert!(halt.permanent_failure().is_none());
+    assert_eq!(
+        halt.panic_report().map(|report| report.message()),
+        Some("producer panicked deliberately")
+    );
+    let counts = session.task_registry_counts();
+    assert_eq!(counts.promises_active, 0);
+    assert_eq!(counts.promises_terminal, 0);
+    assert_eq!(counts.owned_promise_waits, 0);
+}
+
+#[test]
 fn explicitly_failed_task_promise_retires_its_wait_record() {
     let session = test_context();
     let (fixpoint, _owner_task, _owner) = session

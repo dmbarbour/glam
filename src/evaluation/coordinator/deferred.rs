@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use crate::core::{DeferredValueId, ManagedLazyRoot, ManagedPromiseRoot};
+use crate::core::{DeferredValueId, EvaluationPanic, ManagedLazyRoot, ManagedPromiseRoot};
 
 use super::super::{EvaluationDemandState, EvaluationTaskBlock};
 #[cfg(test)]
@@ -767,6 +767,15 @@ impl ClaimedLazyRoute {
         self.id
     }
 
+    /// The panic that interrupted the dependency this work last blocked on.
+    pub(in crate::evaluation) fn prior_dependency_panic(&self) -> Option<EvaluationPanic> {
+        self.prior_block
+            .as_ref()?
+            .dependency
+            .as_ref()?
+            .panic_report()
+    }
+
     pub(in crate::evaluation) fn demand(&self) -> &ClaimedDemandSession {
         &self.demand
     }
@@ -783,6 +792,15 @@ impl ClaimedLazyRoute {
 impl ClaimedDeferredWork {
     pub(in crate::evaluation) fn demand(&self) -> &ClaimedDemandSession {
         &self.demand
+    }
+
+    /// The panic that interrupted the dependency this work last blocked on.
+    pub(in crate::evaluation) fn prior_dependency_panic(&self) -> Option<EvaluationPanic> {
+        self.prior_block
+            .as_ref()?
+            .dependency
+            .as_ref()?
+            .panic_report()
     }
 
     pub(in crate::evaluation) fn id(&self) -> EvaluationWorkId {

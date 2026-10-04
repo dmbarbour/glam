@@ -68,13 +68,7 @@ fn maintenance_failure(failure: RuntimeGcMaintenanceFailure) -> RuntimeMaintenan
 }
 
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> Arc<str> {
-    if let Some(message) = payload.downcast_ref::<&'static str>() {
-        Arc::from(*message)
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        Arc::from(message.as_str())
-    } else {
-        Arc::from("managed collection panicked with a non-text payload")
-    }
+    Arc::from(crate::core::panic_payload_message(payload))
 }
 
 /// Opaque background execution resources shared by related evaluation

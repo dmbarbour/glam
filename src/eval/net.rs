@@ -946,7 +946,10 @@ pub(in crate::eval) fn drive_net_semantic_action(
                 .values()
                 .record_net_driver(crate::interaction_net::profiling::DriverEvent::BlockedRetry);
             match context.context().poll_wait(&blocked.wait.0) {
-                crate::evaluation::EvaluationWaitPoll::Pending(_) => {
+                // A panicked dependency stays blocked here; the scheduler's
+                // poll boundary halts this work instead of retrying it.
+                crate::evaluation::EvaluationWaitPoll::Pending(_)
+                | crate::evaluation::EvaluationWaitPoll::Panicked(_) => {
                     return Err(EvaluationHalt::blocked(blocked.wait));
                 }
                 crate::evaluation::EvaluationWaitPoll::Complete(_)
@@ -969,7 +972,10 @@ pub(in crate::eval) fn drive_net_semantic_action(
                 .values()
                 .record_net_driver(crate::interaction_net::profiling::DriverEvent::BlockedRetry);
             match context.context().poll_wait(&blocked.wait.0) {
-                crate::evaluation::EvaluationWaitPoll::Pending(_) => {
+                // A panicked dependency stays blocked here; the scheduler's
+                // poll boundary halts this work instead of retrying it.
+                crate::evaluation::EvaluationWaitPoll::Pending(_)
+                | crate::evaluation::EvaluationWaitPoll::Panicked(_) => {
                     return Err(EvaluationHalt::blocked(blocked.wait));
                 }
                 crate::evaluation::EvaluationWaitPoll::Failed(failure)
@@ -997,7 +1003,10 @@ pub(in crate::eval) fn drive_net_semantic_action(
                 .values()
                 .record_net_driver(crate::interaction_net::profiling::DriverEvent::BlockedRetry);
             match context.context().poll_wait(&blocked.wait.0) {
-                crate::evaluation::EvaluationWaitPoll::Pending(_) => {
+                // A panicked dependency stays blocked here; the scheduler's
+                // poll boundary halts this work instead of retrying it.
+                crate::evaluation::EvaluationWaitPoll::Pending(_)
+                | crate::evaluation::EvaluationWaitPoll::Panicked(_) => {
                     return Err(EvaluationHalt::blocked(blocked.wait));
                 }
                 crate::evaluation::EvaluationWaitPoll::Complete(_)

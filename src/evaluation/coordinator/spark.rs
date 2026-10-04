@@ -37,6 +37,14 @@ impl ClaimedSparkWork {
         &self.session
     }
 
+    /// Whether the dependency this spark last blocked on was interrupted by
+    /// a panic.
+    pub(in crate::evaluation) fn prior_dependency_panicked(&self) -> bool {
+        self.prior_dependency
+            .as_ref()
+            .is_some_and(|dependency| dependency.panic_report().is_some())
+    }
+
     pub(crate) fn demand_session(&self) -> Arc<EvaluationDemandState> {
         self.session.demand()
     }

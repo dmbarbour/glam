@@ -100,6 +100,11 @@ fn evaluation_step_budget_reports_exact_zero_one_and_many_spend() {
 fn assert_evaluation_machine_poll_boundary_inventory(poll: &EvaluationMachinePoll) {
     match poll {
         EvaluationMachinePoll::Yielded | EvaluationMachinePoll::Cancelled => {}
+        // A panic report holds no managed edges.
+        EvaluationMachinePoll::Panicked { report, torn } => {
+            let _: &crate::core::EvaluationPanic = report;
+            let _: &bool = torn;
+        }
         EvaluationMachinePoll::ScheduleSpark(value) => {
             let _: &RuntimeValueRoot = value;
         }
@@ -183,6 +188,9 @@ fn assert_client_demand_boundary_inventory(poll: &ClientDemandPoll, result: &Cli
             let _: &RuntimeFailureRoot = failure;
         }
         ClientDemandPoll::Blocked(_) | ClientDemandPoll::Yielded => {}
+        ClientDemandPoll::Panicked(report) => {
+            let _: &crate::core::EvaluationPanic = report;
+        }
     }
     match result {
         ClientDemandResult::Complete(value) => {
@@ -192,6 +200,9 @@ fn assert_client_demand_boundary_inventory(poll: &ClientDemandPoll, result: &Cli
             let _: &RuntimeFailureRoot = failure;
         }
         ClientDemandResult::Abandoned => {}
+        ClientDemandResult::Panicked(report) => {
+            let _: &crate::core::EvaluationPanic = report;
+        }
     }
 }
 
@@ -2504,6 +2515,14 @@ impl EvaluationTaskMachine for Await {
                     error: None,
                 })
             }
+            // A panicked wait stays blocked; the poll boundary halts this work.
+            EvaluationWaitPoll::Panicked(_) => {
+                EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                    dependency: Some(WorkDependency::Wait(self.dependency.clone())),
+                    observed_epoch: None,
+                    error: None,
+                })
+            }
             EvaluationWaitPoll::Complete(value) => EvaluationMachinePoll::Complete(*value),
             EvaluationWaitPoll::Failed(error) => self
                 .context
@@ -2533,6 +2552,14 @@ impl EvaluationTaskMachine for AwaitWithObservation {
             EvaluationWaitPoll::Pending(wait) => {
                 EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                     dependency: Some(WorkDependency::Wait(wait)),
+                    observed_epoch: Some(self.observed),
+                    error: None,
+                })
+            }
+            // A panicked wait stays blocked; the poll boundary halts this work.
+            EvaluationWaitPoll::Panicked(_) => {
+                EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                    dependency: Some(WorkDependency::Wait(self.dependency.clone())),
                     observed_epoch: Some(self.observed),
                     error: None,
                 })
@@ -2598,6 +2625,14 @@ impl EvaluationTaskMachine for AwaitCell {
             EvaluationWaitPoll::Pending(wait) => {
                 EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                     dependency: Some(WorkDependency::Wait(wait)),
+                    observed_epoch: None,
+                    error: None,
+                })
+            }
+            // A panicked wait stays blocked; the poll boundary halts this work.
+            EvaluationWaitPoll::Panicked(_) => {
+                EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                    dependency: Some(WorkDependency::Wait(dependency.clone())),
                     observed_epoch: None,
                     error: None,
                 })

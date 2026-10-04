@@ -309,7 +309,82 @@ The panic hook still prints every panic, so each one remains a visible bug.
 2. **Poll-boundary containment.** `catch_unwind` at `ClaimedTask::poll`,
    `poll_claimed_client_demand`, and `poll_claimed_spark` ends the claim as
    `Panicked` through the existing terminal path. Waiters halt, the client
-   API reports the panicked kind, and workers survive.
+   API reports the panicked kind, and workers survive. Done on 2026-10-04.
+
+   Implementation rules:
+   - **Only the poll boundary creates a panic value.** An evaluator machine
+     needs no panic vocabulary: it treats a panicked wait as still blocked,
+     and the boundary halts it. The boundary checks twice. Before polling,
+     it checks the dependency the claim last blocked on. After polling, it
+     checks whether a `Blocked` result names a panicked dependency. The
+     pre-poll check is required: a WHNF demand re-reads its uncached lazy
+     and would reinstall the panicked route, so panic, wake, and reinstall
+     would loop forever.
+   - **Converting a panic into a failure re-raises it.** These sites call
+     `EvaluationPanic::resume` instead of producing a failure:
+     - `EvaluationHalt::into_permanent_failure`, whose catch-all arm
+       previously formatted any non-failure halt into a failure;
+     - `TaskHalt::into_failure` and `into_failure_root`;
+     - `From<api::Error> for TaskHalt`;
+     - the macro, lookup, and compiler-helper sites that format a halt into
+       a message.
+
+     Inside a poll, the boundary catches the re-raised panic again and keeps
+     the original report.
+   - **A machine's own panic outranks cancellation and session closure.**
+     Such a machine is torn: it is dropped without `cancel()`, under an
+     unwind boundary. A panic propagated from a dependency yields to those
+     dispositions, because that machine is intact.
+   - **Promise producers.** `settle_panicked_work` publishes the `Panicked`
+     wait and task status and leaves owned promises unassigned. It records
+     the panic on the producer obligation inside the promise's completion
+     publication. The subscribe predicate and `WorkDependency::is_terminal`
+     both count a panicked producer, so observers neither park nor lose a
+     wake. They halt with the report.
+   - **Sparks are speculative**, and nobody waits on one. A panicking spark,
+     or one blocked on panicked work, retires as complete without a report.
+     The value's real demand reports any panic to its own waiters.
+   - **Direct effect runs** have no poll boundary. A panicked dependency
+     ends the run with a panicked `TaskHalt`, and its local promises stay
+     unassigned.
+   - **Diagnostic-rendering fallbacks are unchanged.** These are the context
+     and enrichment helpers that substitute a fallback rendering on any
+     halt. They never create a semantic failure.
+
+   Public surface:
+   - `ErrorKind::{Failure, Panic}`, `Error::kind`, and `Error::panic_message`.
+   - `TaskHalt::panic_message`.
+   - `EffectLifecycleStatus::Panicked`.
+   - The reflection status `panicked`. Its `.task.value` and `.task.error`
+     fail, as for `abandoned`. A `.task.join` on a panicked task halts the
+     joiner instead of producing `err:`.
+
+   Regressions:
+   - A client-thread panic returns `ErrorKind::Panic` with no diagnostic. It
+     runs the panicking thunk exactly once, and the same runtime then
+     evaluates, settles, and collects.
+   - A worker survives a panic in the lazy route that a spark installs.
+   - A panicked promise producer leaves its promise unassigned, and its
+     observer halts with the report.
+   - The `panicked` status round-trips.
+
+   Both boundary regressions fail with their boundary disabled. The
+   collector inventories record the moved panic-payload helper and six new
+   acyclic call edges.
+
+   Known gaps:
+   - **Step 3.** After a route retires, a new demand reruns a lazy whose own
+     evaluation panicked. A host-call lazy interrupted mid-invocation still
+     becomes the `EvaluationFailure` "refusing to replay".
+   - **Panic after caching.** A panic after a lazy cached its result in the
+     same poll leaves the route `Panicked` although the lazy is cached.
+     Step 3's lazy-state work should check the cache in the own-panic arm.
+   - **Release paths can still panic** on coordinator assertions; this is
+     step 4.
+   - **Unobserved panics** are visible only through the panic hook and
+     `.task.status`. `QuiescenceReport` has no panic ledger.
+   - **Local promise owners** of direct effect runs are outside the
+     boundary.
 3. **The lazy `Panicked` evaluation state**, including torn checkpoints,
    interrupted host calls (which replaces "refusing to replay"), and poisoned
    per-value cells.

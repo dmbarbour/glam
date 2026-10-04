@@ -22,8 +22,10 @@ use crate::number::Number;
 use crate::runtime::{EvaluationRuntimeId, RuntimeIds, RuntimeValueRoot};
 
 mod evaluation_halt;
+mod evaluation_panic;
 pub(crate) mod keys;
 pub(crate) use evaluation_halt::{EvaluationHalt, EvaluationHaltPayload};
+pub(crate) use evaluation_panic::{EvaluationPanic, EvaluationPanicOrigin, panic_payload_message};
 mod managed;
 mod runtime_cache;
 #[cfg(test)]

@@ -14,8 +14,8 @@ use crate::core::LazyValue;
 #[cfg(test)]
 use crate::core::PromisedValue;
 use crate::core::{
-    CoreValueFactory, EvaluationFailure, ManagedPromiseRoot, PromiseAssignment, PromiseId,
-    RuntimeValueAccess,
+    CoreValueFactory, EvaluationFailure, EvaluationPanic, ManagedPromiseRoot, PromiseAssignment,
+    PromiseId, RuntimeValueAccess,
 };
 use crate::runtime::{
     EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationAuthority,
@@ -192,6 +192,9 @@ impl TaskPromiseTerminalMapper {
         terminal: &EvaluationWaitTerminal,
         unresolved_failure: &Arc<EvaluationFailure>,
     ) -> PromiseAssignment {
+        if matches!(terminal, EvaluationWaitTerminal::Panicked(_)) {
+            unreachable!("a panicked producer records its panic instead of assigning promises");
+        }
         let operation = match self {
             Self::UnresolvedFailure => return Err(unresolved_failure.clone()),
             Self::ReflectionReturnValue => "reflection_task",
@@ -229,6 +232,7 @@ impl TaskPromiseTerminalMapper {
                 operation,
                 "reflection task exited without producing a result",
             )),
+            EvaluationWaitTerminal::Panicked(_) => unreachable!("rejected above"),
         }
     }
 }
@@ -273,6 +277,22 @@ impl TaskOwnedPromiseObligation {
                     panic!("a terminalizing task-owned promise must remain unresolved")
                 })
         });
+        (publication.retain_snapshot_root(self.root), wake)
+    }
+
+    /// Publishes a panicked producer without assigning the promise.
+    fn publish_panicked_guarded(
+        self,
+        coordinator: &Arc<EvaluationWorkCoordinator>,
+        mutation: &dyn RuntimeMutationAuthority,
+        report: &EvaluationPanic,
+    ) -> (PromiseProducerPublication, CompletionWake) {
+        let (publication, wake) =
+            self.root
+                .publish_producer_panic_guarded(coordinator, mutation, || {
+                    self.producer
+                        .publish_panic_guarded(coordinator, mutation, report)
+                });
         (publication.retain_snapshot_root(self.root), wake)
     }
 }
@@ -415,12 +435,35 @@ impl WorkDependency {
         }
     }
 
+    /// Whether this dependency can no longer change: its wait is terminal,
+    /// its promise is assigned, or its promise's producer panicked.
     pub(crate) fn is_terminal(&self) -> bool {
         match self {
             Self::Wait(wait) => wait.terminal_poll().is_some(),
-            Self::Promise(promise) => promise.is_terminal(),
+            Self::Promise(promise) => {
+                promise.is_terminal()
+                    || promise
+                        .producer()
+                        .is_some_and(|producer| producer.panic_report().is_some())
+            }
             #[cfg(test)]
             Self::Test(_) => false,
+        }
+    }
+
+    /// The panic that interrupted this dependency's producer, if any.
+    ///
+    /// A waiter on a panicked producer halts instead of reinstalling work,
+    /// which would only rerun the panic.
+    pub(crate) fn panic_report(&self) -> Option<EvaluationPanic> {
+        match self {
+            Self::Wait(wait) => match wait.terminal_poll()? {
+                EvaluationWaitPoll::Panicked(report) => Some(report),
+                _ => None,
+            },
+            Self::Promise(promise) => promise.producer()?.panic_report().cloned(),
+            #[cfg(test)]
+            Self::Test(_) => None,
         }
     }
 
@@ -2504,6 +2547,32 @@ impl EvaluationWorkCoordinator {
         terminal: EvaluationWaitTerminal,
         promise_failure: Arc<EvaluationFailure>,
     ) -> EvaluationWaitTerminal {
+        debug_assert!(
+            !matches!(terminal, EvaluationWaitTerminal::Panicked(_)),
+            "panicked work settles through settle_panicked_work"
+        );
+        self.settle_work(work, terminal, Some(promise_failure))
+    }
+
+    /// Settles work interrupted by a panic.
+    ///
+    /// The wait and task status become `Panicked`. Owned promises stay
+    /// unassigned and record the panic on their producer obligation, because
+    /// a panic is never a semantic result.
+    pub(super) fn settle_panicked_work(
+        self: &Arc<Self>,
+        work: EvaluationWorkId,
+        report: EvaluationPanic,
+    ) -> EvaluationWaitTerminal {
+        self.settle_work(work, EvaluationWaitTerminal::Panicked(report), None)
+    }
+
+    fn settle_work(
+        self: &Arc<Self>,
+        work: EvaluationWorkId,
+        terminal: EvaluationWaitTerminal,
+        promise_failure: Option<Arc<EvaluationFailure>>,
+    ) -> EvaluationWaitTerminal {
         let mutation = self.admission.mutation_guard();
         let (producer, status_update, promises) = {
             let mut state = self
@@ -2567,8 +2636,15 @@ impl EvaluationWorkCoordinator {
         }
         let mut promise_publications = Vec::with_capacity(promises.len());
         for obligation in promises {
-            let (producer, completion) =
-                obligation.publish_terminal_guarded(self, &mutation, &terminal, &promise_failure);
+            let (producer, completion) = match (&terminal, &promise_failure) {
+                (EvaluationWaitTerminal::Panicked(report), _) => {
+                    obligation.publish_panicked_guarded(self, &mutation, report)
+                }
+                (_, Some(failure)) => {
+                    obligation.publish_terminal_guarded(self, &mutation, &terminal, failure)
+                }
+                (_, None) => unreachable!("only panicked settlement omits its promise failure"),
+            };
             promise_publications.push(producer);
             completion_wakes.push(completion);
         }

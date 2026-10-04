@@ -30,6 +30,8 @@ pub(crate) fn trace_halt_managed_edges(halt: &EvaluationHalt, visitor: &mut Visi
         // The registered root is already an independent collector root. It
         // must not also appear as an interior compatibility edge.
         EvaluationHaltPayload::UnassignedPromise => {}
+        // A panic report holds no managed edges.
+        EvaluationHaltPayload::Panicked => {}
     }
 }
 

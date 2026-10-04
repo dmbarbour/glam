@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use crate::core::EvaluationPanic;
 use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeMutationAuthority};
 
 use super::super::{EvaluationDemandState, EvaluationTaskBlock};
@@ -773,6 +774,15 @@ pub(in crate::evaluation) struct ClaimedReflectionWork {
 impl ClaimedReflectionWork {
     pub(in crate::evaluation) fn demand(&self) -> &ClaimedDemandSession {
         &self.demand
+    }
+
+    /// The panic that interrupted the dependency this work last blocked on.
+    pub(in crate::evaluation) fn prior_dependency_panic(&self) -> Option<EvaluationPanic> {
+        self.prior_block
+            .as_ref()?
+            .dependency
+            .as_ref()?
+            .panic_report()
     }
 
     pub(in crate::evaluation) fn id(&self) -> EvaluationWorkId {

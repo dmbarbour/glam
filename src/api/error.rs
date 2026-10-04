@@ -2,7 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use super::{Diagnostic, Value, Values};
-use crate::core::{CoreValueFactory, EvaluationHalt};
+use crate::core::{CoreValueFactory, EvaluationHalt, EvaluationPanic};
 use crate::diagnostic::Severity;
 use crate::evaluation::{EvaluationSessionId, EvaluationTaskId};
 use crate::interaction_net::NetBuildError;
@@ -13,6 +13,20 @@ pub struct Error {
     message: Arc<str>,
     diagnostic: Option<Arc<Diagnostic>>,
     diagnostics: Vec<Diagnostic>,
+    panic: Option<EvaluationPanic>,
+}
+
+/// How an operation failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ErrorKind {
+    /// Invalid input, a Glam evaluation failure, or a host error.
+    Failure,
+    /// Scheduled evaluation was interrupted by a panic. This means a runtime
+    /// implementation error or a client contract violation, never a Glam
+    /// semantic outcome. The runtime remains usable, and a later demand of
+    /// the same value may run it again.
+    Panic,
 }
 
 impl Error {
@@ -23,10 +37,14 @@ impl Error {
             message,
             diagnostic: None,
             diagnostics: Vec::new(),
+            panic: None,
         }
     }
 
     pub(crate) fn from_eval(values: &CoreValueFactory, error: EvaluationHalt) -> Self {
+        if let Some(report) = error.panic_report() {
+            return Self::panicked(report.clone());
+        }
         Self::from_eval_parts(
             values,
             crate::diagnostic::halt_diagnostic_root_with(values, &error),
@@ -55,7 +73,36 @@ impl Error {
             message,
             diagnostic: Some(Arc::new(diagnostic)),
             diagnostics: Vec::new(),
+            panic: None,
         }
+    }
+
+    /// Reports interrupted evaluation. A panic carries no Glam diagnostic,
+    /// because it is never a semantic failure.
+    fn panicked(report: EvaluationPanic) -> Self {
+        Self {
+            message: Arc::from(report.to_string()),
+            diagnostic: None,
+            diagnostics: Vec::new(),
+            panic: Some(report),
+        }
+    }
+
+    pub fn kind(&self) -> ErrorKind {
+        if self.panic.is_some() {
+            ErrorKind::Panic
+        } else {
+            ErrorKind::Failure
+        }
+    }
+
+    /// Returns the panic message when evaluation was interrupted by a panic.
+    pub fn panic_message(&self) -> Option<&str> {
+        self.panic.as_ref().map(EvaluationPanic::message)
+    }
+
+    pub(crate) fn panic_report(&self) -> Option<&EvaluationPanic> {
+        self.panic.as_ref()
     }
 
     pub(super) fn with_diagnostics(mut self, diagnostics: Vec<Diagnostic>) -> Self {

@@ -1850,7 +1850,8 @@ mod ownership_tests {
                 EvaluationMachinePoll::Failed(failure) => panic!("{failure}"),
                 EvaluationMachinePoll::ScheduleSpark(_)
                 | EvaluationMachinePoll::Exit(_)
-                | EvaluationMachinePoll::Cancelled => {
+                | EvaluationMachinePoll::Cancelled
+                | EvaluationMachinePoll::Panicked { .. } => {
                     panic!("computed access must complete without orchestration")
                 }
             }

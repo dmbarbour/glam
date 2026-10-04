@@ -750,7 +750,7 @@ impl<T> RuntimeDeliveryTicket<T> {
                 RuntimeDeliveryFailureKind::Panic,
                 Error::new(format!(
                     "output delivery panicked: {}",
-                    panic_payload_message(panic.as_ref())
+                    crate::core::panic_payload_message(panic.as_ref())
                 )),
             )),
         };
@@ -761,14 +761,6 @@ impl<T> RuntimeDeliveryTicket<T> {
             None => RuntimeDeliveryOutcome::Delivered(delivery),
         })
     }
-}
-
-fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
-    payload
-        .downcast_ref::<&'static str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-        .unwrap_or("non-string panic payload")
 }
 
 pub(in crate::api) fn register_runtime_diagnostic_route(

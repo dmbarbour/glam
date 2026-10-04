@@ -43,6 +43,8 @@ pub enum EffectLifecycleStatus {
     Abandoned,
     Exited,
     Killed(TaskHalt),
+    /// The effect root was interrupted by a panic.
+    Panicked(TaskHalt),
 }
 
 /// Opaque coordinator-terminal policy for one host-owned effect lifecycle.
@@ -217,6 +219,9 @@ impl EffectLifecycleState {
             EvaluationTaskStatus::Killed(error) => {
                 EffectLifecycleStatus::Killed(TaskHalt::rooted_failure(error))
             }
+            EvaluationTaskStatus::Panicked(report) => {
+                EffectLifecycleStatus::Panicked(TaskHalt::panicked(report))
+            }
         }
     }
 }
@@ -293,6 +298,13 @@ impl ScheduledEffectRun {
                     return combine_composed_result(
                         &values,
                         Err(TaskHalt::rooted_failure(error)),
+                        children,
+                    );
+                }
+                EvaluationWaitPoll::Panicked(report) => {
+                    return combine_composed_result(
+                        &values,
+                        Err(TaskHalt::panicked(report)),
                         children,
                     );
                 }
@@ -728,7 +740,9 @@ mod root_inventory_tests {
             EffectLifecycleStatus::Complete(value) => {
                 let _: &PublicValue = value;
             }
-            EffectLifecycleStatus::Failed(failure) | EffectLifecycleStatus::Killed(failure) => {
+            EffectLifecycleStatus::Failed(failure)
+            | EffectLifecycleStatus::Killed(failure)
+            | EffectLifecycleStatus::Panicked(failure) => {
                 let _: &TaskHalt = failure;
             }
         }

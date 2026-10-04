@@ -535,6 +535,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 EffectTaskPoll::Yielded => {}
                 EffectTaskPoll::Blocked(blocked) => {
                     if let Some(dependency) = blocked.dependency {
+                        // A panicked dependency would otherwise be pumped
+                        // forever. A panic is never a task failure, so the
+                        // run ends without assigning its promises.
+                        if let Some(report) = dependency.panic_report() {
+                            return Err(TaskHalt::panicked(report));
+                        }
                         let wait = match dependency {
                             WorkDependency::Wait(wait) => wait,
                             WorkDependency::Promise(promise) => {
@@ -3274,6 +3280,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
         let BlockReason::WaitingOn(dependency) = &blocked.reason else {
             return Some(self.blocked_poll());
         };
+        // A panicked dependency stays blocked: re-polling would reinstall
+        // the panicked work, so the scheduler's poll boundary halts this task.
+        if dependency.panic_report().is_some() {
+            return Some(self.blocked_poll());
+        }
         if dependency.is_terminal() {
             self.blocked = None;
             return None;
@@ -3294,6 +3305,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     Some(self.blocked_poll())
                 }
             }
+            EvaluationWaitPoll::Panicked(_) => Some(self.blocked_poll()),
             EvaluationWaitPoll::Complete(_)
             | EvaluationWaitPoll::Failed(_)
             | EvaluationWaitPoll::Cancelled

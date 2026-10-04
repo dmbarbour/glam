@@ -590,7 +590,14 @@ fn force_macro_lookup_value(
     execution
         .lookup_context()
         .evaluate_root_whnf(value)
-        .map_err(|error| error.to_string())
+        .map_err(|error| {
+            // A panic is never a lookup failure: it re-raises to the
+            // enclosing poll boundary instead.
+            if let Some(report) = error.panic_report() {
+                report.resume();
+            }
+            error.to_string()
+        })
 }
 
 fn parse_expanded_declaration(

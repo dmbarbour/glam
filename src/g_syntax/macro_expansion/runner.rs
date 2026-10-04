@@ -233,6 +233,11 @@ fn force_result(
         .macro_context()
         .evaluate_root_whnf(value)
         .map_err(|error| {
+            // A panic is never a macro failure: it re-raises to the
+            // enclosing poll boundary instead.
+            if let Some(report) = error.panic_report() {
+                report.resume();
+            }
             let detail = if error.blocked_on().is_some() {
                 "macro result is waiting on a lazy producer unavailable to the macro demand session"
                     .to_owned()

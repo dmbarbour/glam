@@ -4,6 +4,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 
 #[cfg(test)]
 use crate::core::EvaluationFailure;
+use crate::core::EvaluationPanic;
 use crate::eval::whnf::WhnfComputation;
 use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeValueRoot};
 
@@ -45,6 +46,8 @@ pub(crate) enum ClientDemandResult {
     Failed(RuntimeFailureRoot),
     Abandoned,
     Killed(RuntimeFailureRoot),
+    /// The demand was interrupted by a panic, its own or a dependency's.
+    Panicked(EvaluationPanic),
 }
 
 pub(crate) struct ClientDemandResultCell {
@@ -262,6 +265,13 @@ pub(super) struct ClientDemandSubscription {
     pub(super) registration: WakeRegistration,
 }
 
+impl ClaimedClientDemand {
+    /// The panic that interrupted the dependency this demand last blocked on.
+    pub(in crate::evaluation) fn prior_dependency_panic(&self) -> Option<EvaluationPanic> {
+        self.prior_subscription.as_ref()?.dependency.panic_report()
+    }
+}
+
 impl ClientDemandSubscription {
     pub(super) fn unsubscribe(self) {
         let _ = self.dependency.unsubscribe_work(self.registration);
@@ -301,6 +311,8 @@ pub(crate) enum ClientDemandPoll {
     Failed(RuntimeFailureRoot),
     Blocked(WorkDependency),
     Yielded,
+    /// Only the scheduler's poll boundary produces this.
+    Panicked(EvaluationPanic),
 }
 
 pub(crate) enum ClientDemandSnapshot {
@@ -324,8 +336,18 @@ impl ClientDemandRetirement {
         if let Some(subscription) = self.subscription {
             subscription.unsubscribe();
         }
+        let panicked = matches!(self.result, ClientDemandResult::Panicked(_));
         let _ = self.sink.publish(self.result);
-        drop(self.operation);
+        if panicked {
+            // A panicked operation may hold torn state, and its destructor
+            // may panic again. That fault was already reported.
+            let operation = self.operation;
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                drop(operation);
+            }));
+        } else {
+            drop(self.operation);
+        }
     }
 }
 
@@ -521,6 +543,13 @@ impl EvaluationWorkCoordinator {
                         claimed.operation.take(),
                         claimed.prior_subscription.take(),
                         ClientDemandResult::Failed(failure),
+                    )),
+                    ClientDemandPoll::Panicked(report) => Some(detach_client_demand(
+                        &mut state,
+                        claimed.id,
+                        claimed.operation.take(),
+                        claimed.prior_subscription.take(),
+                        ClientDemandResult::Panicked(report),
                     )),
                     ClientDemandPoll::Yielded => {
                         obsolete_subscription = claimed.prior_subscription.take();

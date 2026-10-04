@@ -530,6 +530,21 @@ scheduler control state. Core owns this distinction, while `eval` projects
 permanent failures into diagnostic values. Terminal caches and wait cells never
 store the retryable cases.
 
+Its panicked case is neither. A panic is a runtime implementation error or a
+client contract violation, never Glam semantics, so it is a task-layer
+interruption:
+- Only the scheduler's poll boundary creates one. `catch_unwind` around each
+  claimed task, client-demand, and spark poll ends that work as `Panicked`
+  through the ordinary terminal path, so its claim is released and the worker
+  survives.
+- Evaluator machines have no panic vocabulary. They treat a panicked wait as
+  still blocked, and the boundary halts them, both before polling and when a
+  poll blocks on panicked work. Re-polling would reinstall the panicked work.
+- No panic is ever cached as a lazy result, assigned to a promise, or turned
+  into an `EvaluationFailure`. Any such conversion re-raises the panic to the
+  enclosing boundary instead.
+- The client API reports `ErrorKind::Panic`.
+
 All clones of a lazy value share one source/result cell. Workers clone a source
 snapshot without holding its mutex during evaluation. Terminal cache
 publication precedes coordinator retirement, so later observers take the
@@ -612,7 +627,7 @@ state:
 | unacknowledged task failures, partitioned by owner session | runtime work coordinator ledger |
 | task wait, current published status, and optional protected-query publisher | coordinator `TaskTerminalPublisher` obligation |
 | task/wait lookup and retirement indexes | runtime work coordinator |
-| completed, failed, cancelled, abandoned, exited, or killed outcome | shared `EvaluationWaitToken` cell |
+| completed, failed, cancelled, abandoned, exited, killed, or panicked outcome | shared `EvaluationWaitToken` cell |
 | transactional `.task.status`, `.task.value`, or `.task.error` view | reasoning-store query |
 
 Terminal publication precedes coordinator record removal. `poll_wait` checks
@@ -630,6 +645,11 @@ An unresolved task-owned promise is different: the closing producer session
 fulfills it with a structured producer-abandoned failure because that promise
 has lost its sole responsible producer. Host promises remain controlled only
 by their resolver.
+
+A panicked producer differs from an abandoned one: its waiters halt instead
+of installing fresh work, because new work would only rerun the panic. A
+task-owned promise whose producer panicked stays unassigned. The panic is
+recorded on its producer obligation, and observers halt with it.
 
 When a lazy or assigned-promise task blocks on another deferred producer, the
 coordinator records one strict dependency edge. The graph has at most one

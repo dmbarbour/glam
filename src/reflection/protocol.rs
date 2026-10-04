@@ -12,7 +12,8 @@ use super::search::IsolatedEffectSearch;
 use super::store::{StoreJournal, StoreSnapshot, VolumeId};
 use crate::api::{Diagnostic, Error as ApiError, EvaluatedValue, Value as PublicValue, Values};
 use crate::core::{
-    CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, Key, List, RuntimeValueAccess, Value,
+    CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, EvaluationPanic, Key, List,
+    RuntimeValueAccess, Value,
 };
 use crate::diagnostic::Severity;
 use crate::eval;
@@ -468,6 +469,9 @@ pub struct TaskHalt(TaskHaltKind);
 enum TaskHaltKind {
     Failure(TaskFailure),
     Blocked(EvaluationWaitToken),
+    /// Scheduled work was interrupted by a panic. This is never a task
+    /// failure: converting it into one re-raises the panic.
+    Panicked(EvaluationPanic),
 }
 
 /// Root disposition for one permanent task failure.
@@ -532,6 +536,20 @@ impl TaskHalt {
                 Self(TaskHaltKind::Failure(failure))
             }
             TaskHaltKind::Blocked(wait) => Self::blocked(wait),
+            TaskHaltKind::Panicked(report) => Self::panicked(report),
+        }
+    }
+
+    pub(crate) fn panicked(report: EvaluationPanic) -> Self {
+        Self(TaskHaltKind::Panicked(report))
+    }
+
+    /// Returns the panic message when scheduled work was interrupted by a
+    /// panic rather than failing.
+    pub fn panic_message(&self) -> Option<&str> {
+        match &self.0 {
+            TaskHaltKind::Panicked(report) => Some(report.message()),
+            TaskHaltKind::Failure(_) | TaskHaltKind::Blocked(_) => None,
         }
     }
 
@@ -550,6 +568,7 @@ impl TaskHalt {
             TaskHaltKind::Blocked(_) => {
                 panic!("a blocked task halt cannot become a permanent failure root")
             }
+            TaskHaltKind::Panicked(report) => report.resume(),
         }
     }
 
@@ -573,6 +592,7 @@ impl TaskHalt {
                 }
             }
             TaskHaltKind::Blocked(wait) => Self::blocked(wait),
+            TaskHaltKind::Panicked(report) => Self::panicked(report),
         }
     }
 
@@ -605,7 +625,13 @@ impl TaskHalt {
     }
 
     /// Projects a permanent task failure into its structured diagnostic.
+    ///
+    /// A panic is not a failure, so it projects to a host text diagnostic
+    /// rather than a Glam emission.
     pub fn diagnostic(&self, values: &Values) -> Diagnostic {
+        if let TaskHaltKind::Panicked(report) = &self.0 {
+            return Diagnostic::new(values, Severity::Error, report.to_string());
+        }
         let failure = self
             .permanent_failure()
             .expect("a blocked task halt has no failure diagnostic");
@@ -627,13 +653,14 @@ impl TaskHalt {
             TaskHaltKind::Blocked(_) => {
                 panic!("a blocked task halt cannot become a permanent evaluation failure")
             }
+            TaskHaltKind::Panicked(report) => report.resume(),
         }
     }
 
     pub(super) fn permanent_failure(&self) -> Option<&Arc<EvaluationFailure>> {
         match &self.0 {
             TaskHaltKind::Failure(failure) => Some(failure.as_failure()),
-            TaskHaltKind::Blocked(_) => None,
+            TaskHaltKind::Blocked(_) | TaskHaltKind::Panicked(_) => None,
         }
     }
 
@@ -644,14 +671,16 @@ impl TaskHalt {
     pub(super) fn blocked_on(&self) -> Option<&EvaluationWaitToken> {
         match &self.0 {
             TaskHaltKind::Blocked(wait) => Some(wait),
-            TaskHaltKind::Failure(_) => None,
+            TaskHaltKind::Failure(_) | TaskHaltKind::Panicked(_) => None,
         }
     }
 
     pub(super) fn failure_root(&self) -> Option<&RuntimeFailureRoot> {
         match &self.0 {
             TaskHaltKind::Failure(TaskFailure::Rooted(failure)) => Some(failure),
-            TaskHaltKind::Failure(TaskFailure::EdgeFree(_)) | TaskHaltKind::Blocked(_) => None,
+            TaskHaltKind::Failure(TaskFailure::EdgeFree(_))
+            | TaskHaltKind::Blocked(_)
+            | TaskHaltKind::Panicked(_) => None,
         }
     }
 }
@@ -667,6 +696,7 @@ impl fmt::Display for TaskHalt {
                     wait.get()
                 )
             }
+            TaskHaltKind::Panicked(report) => report.fmt(formatter),
         }
     }
 }
@@ -686,7 +716,12 @@ impl From<EvaluationHalt> for TaskHalt {
 }
 
 impl From<ApiError> for TaskHalt {
+    /// A panicked error is never a task failure, so it re-raises to the
+    /// enclosing poll boundary.
     fn from(error: ApiError) -> Self {
+        if let Some(report) = error.panic_report() {
+            report.resume();
+        }
         match error.structured_diagnostic() {
             Some(diagnostic) => {
                 let observer = diagnostic.emission().value_observer();
@@ -1017,6 +1052,10 @@ mod root_inventory_tests {
             }
             TaskHaltKind::Blocked(wait) => {
                 let _: &EvaluationWaitToken = wait;
+            }
+            // A panic report holds no managed edges.
+            TaskHaltKind::Panicked(report) => {
+                let _: &EvaluationPanic = report;
             }
         }
     }

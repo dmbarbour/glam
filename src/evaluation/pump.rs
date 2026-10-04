@@ -1,7 +1,10 @@
 //! Cooperative and runtime evaluation pumping.
 
 use std::collections::HashSet;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+
+use crate::core::{EvaluationPanic, EvaluationPanicOrigin};
 
 use super::coordinator::{
     self, CausalChildSelection, ClaimedDeferredWork, ClaimedLazyRoute, ClaimedReflectionWork,
@@ -93,6 +96,12 @@ enum ReleasedTaskMachine {
         machine: Box<dyn EvaluationTaskMachine>,
         retirement: WorkRetirement,
     },
+    /// A machine whose own poll panicked. Its state may be torn, so it is
+    /// dropped without cancellation, under an unwind boundary.
+    DropTorn {
+        machine: Box<dyn EvaluationTaskMachine>,
+        retirement: WorkRetirement,
+    },
 }
 
 enum WorkRetirement {
@@ -119,6 +128,13 @@ impl ReleasedTaskMachine {
                 retirement,
             } => {
                 machine.cancel();
+                retirement
+            }
+            Self::DropTorn {
+                machine,
+                retirement,
+            } => {
+                drop_torn(machine);
                 retirement
             }
         };
@@ -162,12 +178,32 @@ impl ClaimedTask {
         Self { coordinator, kind }
     }
 
+    /// Polls the claimed machine behind the scheduler's panic boundary.
+    ///
+    /// A panic during the poll ends this work as `Panicked` instead of
+    /// stranding its claim. Work blocked on a panicked dependency also ends
+    /// as `Panicked` without polling, because polling would reinstall the
+    /// panicked work.
     fn poll(&mut self, step_budget: &mut super::EvaluationStepBudget) -> EvaluationMachinePoll {
+        if let Some(report) = self.kind.prior_dependency_panic() {
+            return EvaluationMachinePoll::Panicked {
+                report,
+                torn: false,
+            };
+        }
         let context = EvaluationPollContext::for_claim(self.kind.demand());
-        match &mut self.kind {
+        let kind = &mut self.kind;
+        let polled = catch_unwind(AssertUnwindSafe(|| match kind {
             ClaimedTaskKind::Reflection(task) => task.poll(&context, step_budget),
             ClaimedTaskKind::Deferred(task) => task.poll(&context, step_budget),
             ClaimedTaskKind::LazyRoute(route) => route.poll(&context, step_budget),
+        }));
+        match polled {
+            Ok(poll) => halt_blocked_on_panic(poll),
+            Err(payload) => EvaluationMachinePoll::Panicked {
+                report: EvaluationPanic::from_payload(payload.as_ref(), self.kind.panic_origin()),
+                torn: true,
+            },
         }
     }
 
@@ -212,6 +248,47 @@ impl ClaimedTaskKind {
             Self::LazyRoute(route) => route.demand(),
         }
     }
+
+    fn prior_dependency_panic(&self) -> Option<EvaluationPanic> {
+        match self {
+            Self::Reflection(task) => task.prior_dependency_panic(),
+            Self::Deferred(task) => task.prior_dependency_panic(),
+            Self::LazyRoute(route) => route.prior_dependency_panic(),
+        }
+    }
+
+    fn panic_origin(&self) -> EvaluationPanicOrigin {
+        match self {
+            Self::Reflection(task) => EvaluationPanicOrigin::ReflectionTask(task.id().get()),
+            Self::Deferred(task) => EvaluationPanicOrigin::DeferredWork(task.id().get()),
+            Self::LazyRoute(route) => EvaluationPanicOrigin::LazyRoute(route.id().get()),
+        }
+    }
+}
+
+/// Ends work that blocked on a panicked dependency: a waiter on a panicked
+/// producer halts instead of reinstalling the work that panicked.
+fn halt_blocked_on_panic(poll: EvaluationMachinePoll) -> EvaluationMachinePoll {
+    let EvaluationMachinePoll::Blocked(block) = &poll else {
+        return poll;
+    };
+    match block
+        .dependency
+        .as_ref()
+        .and_then(coordinator::WorkDependency::panic_report)
+    {
+        Some(report) => EvaluationMachinePoll::Panicked {
+            report,
+            torn: false,
+        },
+        None => poll,
+    }
+}
+
+/// Drops state left by a panicked poll. Its destructor may panic again; that
+/// fault was already reported, so the second panic is contained here.
+fn drop_torn<T>(value: T) {
+    let _ = catch_unwind(AssertUnwindSafe(move || drop(value)));
 }
 
 fn release_lazy_route(
@@ -241,6 +318,10 @@ fn release_lazy_route(
             Some(EvaluationWaitTerminal::Failed(error)),
         ),
         EvaluationMachinePoll::Cancelled => unreachable!("lazy route cannot be canceled as a task"),
+        EvaluationMachinePoll::Panicked { report, torn: _ } => (
+            DeferredWorkPoll::Terminal,
+            Some(EvaluationWaitTerminal::Panicked(report)),
+        ),
     };
     let mut release = coordinator.release_lazy_route(claimed, work_poll);
     let route = release.route.take();
@@ -261,7 +342,17 @@ fn release_lazy_route(
             evaluation_failure("lazy route completed without fulfilling its fixpoint")
         }
         EvaluationWaitTerminal::Failed(error) => error.as_failure().clone(),
-        _ => unreachable!("lazy route terminal is complete or failed"),
+        EvaluationWaitTerminal::Panicked(report) => {
+            coordinator.settle_panicked_work(work, report.clone());
+            coordinator.retire_lazy_route(work);
+            return (release.made_progress, false, None, route);
+        }
+        EvaluationWaitTerminal::Cancelled
+        | EvaluationWaitTerminal::Abandoned
+        | EvaluationWaitTerminal::Exited
+        | EvaluationWaitTerminal::Killed(_) => {
+            unreachable!("lazy route terminal is complete, failed, or panicked")
+        }
     };
     coordinator.settle_terminal_work(work, terminal, failure);
     coordinator.retire_lazy_route(work);
@@ -545,6 +636,7 @@ fn release_reflection_task(
     Option<ExactRouteRelease>,
 ) {
     let work = claimed.id();
+    let mut torn = false;
     let (work_poll, terminal) = match poll {
         EvaluationMachinePoll::Yielded => (ReflectionWorkPoll::Yielded, None),
         EvaluationMachinePoll::ScheduleSpark(_) => {
@@ -564,6 +656,16 @@ fn release_reflection_task(
             ReflectionWorkPoll::Terminal,
             Some(EvaluationWaitTerminal::Cancelled),
         ),
+        EvaluationMachinePoll::Panicked {
+            report,
+            torn: own_panic,
+        } => {
+            torn = own_panic;
+            (
+                ReflectionWorkPoll::Terminal,
+                Some(EvaluationWaitTerminal::Panicked(report)),
+            )
+        }
     };
 
     let mut release = coordinator.release_reflection(claimed, work_poll);
@@ -589,7 +691,11 @@ fn release_reflection_task(
         );
     }
 
-    let terminal = if release.cancel {
+    // A machine's own panic outranks cancellation and session closure. A
+    // panic propagated from a dependency does not: that machine is intact.
+    let terminal = if torn {
+        terminal.expect("a panicked reflection poll carries its report")
+    } else if release.cancel {
         EvaluationWaitTerminal::Cancelled
     } else if release.abandoned {
         EvaluationWaitTerminal::Abandoned
@@ -597,28 +703,42 @@ fn release_reflection_task(
         terminal.expect("terminal reflection poll must carry a terminal result")
     };
     let promise_failure = match &terminal {
-        EvaluationWaitTerminal::Complete(_) => {
-            evaluation_failure("reflection task completed without fulfilling its fixpoint")
-        }
-        EvaluationWaitTerminal::Failed(error) => error.as_failure().clone(),
-        EvaluationWaitTerminal::Cancelled => {
-            evaluation_failure("reflection fixpoint producer was cancelled")
-        }
-        EvaluationWaitTerminal::Abandoned => {
-            evaluation_failure("reflection fixpoint producer was abandoned")
-        }
-        EvaluationWaitTerminal::Exited => {
-            evaluation_failure("reflection fixpoint producer exited without a result")
-        }
-        EvaluationWaitTerminal::Killed(error) => error.as_failure().clone(),
+        EvaluationWaitTerminal::Complete(_) => Some(evaluation_failure(
+            "reflection task completed without fulfilling its fixpoint",
+        )),
+        EvaluationWaitTerminal::Failed(error) => Some(error.as_failure().clone()),
+        EvaluationWaitTerminal::Cancelled => Some(evaluation_failure(
+            "reflection fixpoint producer was cancelled",
+        )),
+        EvaluationWaitTerminal::Abandoned => Some(evaluation_failure(
+            "reflection fixpoint producer was abandoned",
+        )),
+        EvaluationWaitTerminal::Exited => Some(evaluation_failure(
+            "reflection fixpoint producer exited without a result",
+        )),
+        EvaluationWaitTerminal::Killed(error) => Some(error.as_failure().clone()),
+        EvaluationWaitTerminal::Panicked(_) => None,
     };
-    coordinator.settle_terminal_work(work, terminal, promise_failure);
+    match (terminal, promise_failure) {
+        (EvaluationWaitTerminal::Panicked(report), _) => {
+            coordinator.settle_panicked_work(work, report);
+        }
+        (terminal, Some(promise_failure)) => {
+            coordinator.settle_terminal_work(work, terminal, promise_failure);
+        }
+        (_, None) => unreachable!("only a panic omits the promise failure"),
+    }
     let machine = release
         .machine
         .take()
         .expect("terminal reflection release must retain its detached machine");
     let retirement = WorkRetirement::Reflection(coordinator.clone(), work);
-    let released = Some(if release.cancel {
+    let released = Some(if torn {
+        ReleasedTaskMachine::DropTorn {
+            machine,
+            retirement,
+        }
+    } else if release.cancel {
         ReleasedTaskMachine::Cancel {
             machine,
             retirement,
@@ -643,6 +763,7 @@ fn release_deferred_task(
     Option<ExactRouteRelease>,
 ) {
     let work = claimed.id();
+    let mut torn = false;
     let (work_poll, terminal) = match poll {
         EvaluationMachinePoll::Yielded => (DeferredWorkPoll::Yielded, None),
         EvaluationMachinePoll::ScheduleSpark(_) => {
@@ -672,6 +793,16 @@ fn release_deferred_task(
                 ),
             )),
         ),
+        EvaluationMachinePoll::Panicked {
+            report,
+            torn: own_panic,
+        } => {
+            torn = own_panic;
+            (
+                DeferredWorkPoll::Terminal,
+                Some(EvaluationWaitTerminal::Panicked(report)),
+            )
+        }
     };
 
     let mut release = coordinator.release_deferred(claimed, work_poll);
@@ -689,38 +820,59 @@ fn release_deferred_task(
         return (release.made_progress, release.remains_blocked, None, route);
     }
 
-    let terminal = if release.abandoned {
+    // A machine's own panic outranks session closure. A panic propagated
+    // from a dependency does not: that machine is intact.
+    let terminal = if torn {
+        terminal.expect("a panicked deferred poll carries its report")
+    } else if release.abandoned {
         EvaluationWaitTerminal::Abandoned
     } else {
         terminal.expect("terminal deferred poll must carry a terminal result")
     };
     let promise_failure = match &terminal {
-        EvaluationWaitTerminal::Complete(_) => {
-            evaluation_failure("evaluation task completed without fulfilling its fixpoint")
-        }
-        EvaluationWaitTerminal::Failed(error) => error.as_failure().clone(),
-        EvaluationWaitTerminal::Cancelled => {
-            evaluation_failure("evaluation fixpoint producer was cancelled")
-        }
-        EvaluationWaitTerminal::Abandoned => {
-            evaluation_failure("evaluation fixpoint producer was abandoned")
-        }
-        EvaluationWaitTerminal::Exited => {
-            evaluation_failure("evaluation fixpoint producer exited without a result")
-        }
-        EvaluationWaitTerminal::Killed(error) => error.as_failure().clone(),
+        EvaluationWaitTerminal::Complete(_) => Some(evaluation_failure(
+            "evaluation task completed without fulfilling its fixpoint",
+        )),
+        EvaluationWaitTerminal::Failed(error) => Some(error.as_failure().clone()),
+        EvaluationWaitTerminal::Cancelled => Some(evaluation_failure(
+            "evaluation fixpoint producer was cancelled",
+        )),
+        EvaluationWaitTerminal::Abandoned => Some(evaluation_failure(
+            "evaluation fixpoint producer was abandoned",
+        )),
+        EvaluationWaitTerminal::Exited => Some(evaluation_failure(
+            "evaluation fixpoint producer exited without a result",
+        )),
+        EvaluationWaitTerminal::Killed(error) => Some(error.as_failure().clone()),
+        EvaluationWaitTerminal::Panicked(_) => None,
     };
-    coordinator.settle_terminal_work(work, terminal, promise_failure);
+    match (terminal, promise_failure) {
+        (EvaluationWaitTerminal::Panicked(report), _) => {
+            coordinator.settle_panicked_work(work, report);
+        }
+        (terminal, Some(promise_failure)) => {
+            coordinator.settle_terminal_work(work, terminal, promise_failure);
+        }
+        (_, None) => unreachable!("only a panic omits the promise failure"),
+    }
     let machine = release
         .machine
         .take()
         .expect("terminal deferred release must detach its machine");
+    let retirement = WorkRetirement::Deferred(coordinator.clone(), work);
     (
         release.made_progress,
         false,
-        Some(ReleasedTaskMachine::Drop {
-            machine,
-            retirement: WorkRetirement::Deferred(coordinator.clone(), work),
+        Some(if torn {
+            ReleasedTaskMachine::DropTorn {
+                machine,
+                retirement,
+            }
+        } else {
+            ReleasedTaskMachine::Drop {
+                machine,
+                retirement,
+            }
         }),
         route,
     )
@@ -864,13 +1016,33 @@ impl EvaluationWorkCoordinator {
         }
     }
 
+    /// Polls a claimed client demand behind the scheduler's panic boundary,
+    /// as [`ClaimedTask::poll`] does for task work.
     pub(super) fn poll_claimed_client_demand(
         self: &Arc<Self>,
         mut claimed: coordinator::ClaimedClientDemand,
     ) {
+        if let Some(report) = claimed.prior_dependency_panic() {
+            self.release_client_demand(claimed, coordinator::ClientDemandPoll::Panicked(report));
+            return;
+        }
         let context = EvaluationPollContext::for_claim(&claimed.demand);
         let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
-        let poll = claimed.poll(&context, &mut budget);
+        let polled = catch_unwind(AssertUnwindSafe(|| claimed.poll(&context, &mut budget)));
+        drop(context);
+        let poll = match polled {
+            Ok(coordinator::ClientDemandPoll::Blocked(dependency)) => {
+                match dependency.panic_report() {
+                    Some(report) => coordinator::ClientDemandPoll::Panicked(report),
+                    None => coordinator::ClientDemandPoll::Blocked(dependency),
+                }
+            }
+            Ok(poll) => poll,
+            Err(payload) => coordinator::ClientDemandPoll::Panicked(EvaluationPanic::from_payload(
+                payload.as_ref(),
+                EvaluationPanicOrigin::ClientDemand(claimed.id.get()),
+            )),
+        };
         self.release_client_demand(claimed, poll);
     }
 
@@ -880,18 +1052,33 @@ impl EvaluationWorkCoordinator {
         let poll_context = EvaluationPollContext::for_claim(claimed.demand());
         let context = EvalContext::for_spark(claimed.demand_session());
         let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
-        let result = poll_context.evaluate(&context, |evaluator| {
-            claimed.poll(&poll_context, evaluator, &context, &mut budget)
-        });
+        // A spark is speculative and nobody waits on it. When it panics, or
+        // blocks on panicked work, it simply retires: the value's real demand
+        // reports any panic to its own waiters.
+        if claimed.prior_dependency_panicked() {
+            drop(context);
+            self.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
+            return;
+        }
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            poll_context.evaluate(&context, |evaluator| {
+                claimed.poll(&poll_context, evaluator, &context, &mut budget)
+            })
+        }));
         let poll = match result {
-            crate::eval::strategy_machine::StrategyDemandPoll::Ready
-            | crate::eval::strategy_machine::StrategyDemandPoll::Failed => {
-                coordinator::SparkWorkPoll::Complete
+            Ok(
+                crate::eval::strategy_machine::StrategyDemandPoll::Ready
+                | crate::eval::strategy_machine::StrategyDemandPoll::Failed,
+            )
+            | Err(_) => coordinator::SparkWorkPoll::Complete,
+            Ok(crate::eval::strategy_machine::StrategyDemandPoll::Pending(dependency)) => {
+                if dependency.panic_report().is_some() {
+                    coordinator::SparkWorkPoll::Complete
+                } else {
+                    coordinator::SparkWorkPoll::Blocked(dependency)
+                }
             }
-            crate::eval::strategy_machine::StrategyDemandPoll::Pending(dependency) => {
-                coordinator::SparkWorkPoll::Blocked(dependency)
-            }
-            crate::eval::strategy_machine::StrategyDemandPoll::Yielded => {
+            Ok(crate::eval::strategy_machine::StrategyDemandPoll::Yielded) => {
                 coordinator::SparkWorkPoll::Yielded
             }
         };

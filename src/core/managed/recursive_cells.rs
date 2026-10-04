@@ -541,9 +541,34 @@ impl ManagedPromiseRoot {
         runtime: crate::runtime::EvaluationRuntimeId,
         registration: WakeRegistration,
     ) -> CompletionSubscriptionOutcome {
+        // A panicked producer leaves the promise unassigned but never changes
+        // it again, so it counts as terminal for subscription.
         self.completion.subscribe(runtime, registration, || {
             self.terminal.load(Ordering::Acquire)
+                || self
+                    .producer
+                    .get()
+                    .is_some_and(|producer| producer.panic_report().is_some())
         })
+    }
+
+    /// Wakes this promise's observers after its producer panicked, leaving
+    /// the promise unassigned.
+    ///
+    /// `record` publishes the panic inside the completion publication, so an
+    /// observer that subscribes concurrently either sees it on recheck or is
+    /// woken here.
+    pub(crate) fn publish_producer_panic_guarded<T>(
+        &self,
+        coordinator: &Arc<EvaluationWorkCoordinator>,
+        mutation: &dyn RuntimeMutationAuthority,
+        record: impl FnOnce() -> T,
+    ) -> (T, CompletionWake) {
+        self.completion
+            .publish_guarded(coordinator, mutation, || {
+                Ok::<_, std::convert::Infallible>(record())
+            })
+            .unwrap_or_else(|never| match never {})
     }
 
     pub(crate) fn unsubscribe_work(&self, registration: WakeRegistration) -> bool {

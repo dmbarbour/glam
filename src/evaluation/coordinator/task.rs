@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use rpds::RedBlackTreeMapSync;
 
 use crate::core::{
-    EvaluationFailure, ManagedPromiseRoot, PromiseAssignment, PromiseId, RuntimeValueAccess,
+    EvaluationFailure, EvaluationPanic, ManagedPromiseRoot, PromiseAssignment, PromiseId,
+    RuntimeValueAccess,
 };
 use crate::runtime::{
     EvaluationRuntimeId, RuntimeFailureRoot, RuntimeMutationAuthority, RuntimeValueRoot,
@@ -70,6 +71,9 @@ pub(crate) enum EvaluationWaitPoll {
     Abandoned,
     Exited,
     Killed(RuntimeFailureRoot),
+    /// The producer was interrupted by a panic. Waiters halt instead of
+    /// reinstalling work, and never treat this as a semantic failure.
+    Panicked(EvaluationPanic),
 }
 
 const _: () = assert!(
@@ -140,6 +144,13 @@ pub(crate) enum EvaluationMachinePoll {
     Complete(RuntimeValueRoot),
     Failed(RuntimeFailureRoot),
     Cancelled,
+    /// Only the scheduler's poll boundary produces this. `torn` means this
+    /// machine itself unwound; otherwise it halted on a panicked dependency
+    /// and remains intact.
+    Panicked {
+        report: EvaluationPanic,
+        torn: bool,
+    },
 }
 
 pub(crate) trait EvaluationTaskMachine: Send {
@@ -162,6 +173,7 @@ pub(crate) enum EvaluationTaskStatus {
     Abandoned,
     Exited,
     Killed(RuntimeFailureRoot),
+    Panicked(EvaluationPanic),
 }
 
 pub(super) struct TaskTerminalPublisher {
@@ -246,6 +258,7 @@ pub(super) fn terminal_task_status(terminal: &EvaluationWaitTerminal) -> Evaluat
         EvaluationWaitTerminal::Abandoned => EvaluationTaskStatus::Abandoned,
         EvaluationWaitTerminal::Exited => EvaluationTaskStatus::Exited,
         EvaluationWaitTerminal::Killed(error) => EvaluationTaskStatus::Killed(error.clone()),
+        EvaluationWaitTerminal::Panicked(report) => EvaluationTaskStatus::Panicked(report.clone()),
     }
 }
 
@@ -357,6 +370,9 @@ pub(crate) enum EvaluationWaitTerminal {
     Abandoned,
     Exited,
     Killed(RuntimeFailureRoot),
+    /// The producer was interrupted by a panic: task-layer state, never a
+    /// semantic result.
+    Panicked(EvaluationPanic),
 }
 
 #[derive(Clone)]
@@ -456,7 +472,8 @@ impl EvaluationWaitToken {
             }
             EvaluationWaitTerminal::Cancelled
             | EvaluationWaitTerminal::Abandoned
-            | EvaluationWaitTerminal::Exited => {}
+            | EvaluationWaitTerminal::Exited
+            | EvaluationWaitTerminal::Panicked(_) => {}
         }
         if let Err(candidate) = self.0.state.terminal.set(terminal) {
             debug_assert_eq!(
@@ -571,6 +588,7 @@ impl EvaluationWaitTerminal {
             Self::Abandoned => EvaluationWaitPoll::Abandoned,
             Self::Exited => EvaluationWaitPoll::Exited,
             Self::Killed(error) => EvaluationWaitPoll::Killed(error.clone()),
+            Self::Panicked(report) => EvaluationWaitPoll::Panicked(report.clone()),
         }
     }
 }
@@ -610,6 +628,10 @@ pub(crate) struct PromiseProducerObligation {
     owner_session: EvaluationSessionId,
     wait: Weak<EvaluationWaitState>,
     source: PromiseProducerSource,
+    /// The panic that interrupted the producer. A panicked producer leaves
+    /// its promises unassigned and records the panic here instead, because a
+    /// panic is never a semantic result.
+    panic: OnceLock<EvaluationPanic>,
 }
 
 enum PromiseProducerSource {
@@ -786,6 +808,7 @@ impl PromiseProducerObligation {
                 promise,
                 coordinator: Arc::downgrade(coordinator),
             },
+            panic: OnceLock::new(),
         }
     }
 
@@ -804,7 +827,16 @@ impl PromiseProducerObligation {
                 promise,
                 owner: Arc::downgrade(local_owner),
             },
+            panic: OnceLock::new(),
         }
+    }
+
+    pub(crate) fn panic_report(&self) -> Option<&EvaluationPanic> {
+        self.panic.get()
+    }
+
+    fn record_panic(&self, report: &EvaluationPanic) {
+        let _ = self.panic.set(report.clone());
     }
 
     pub(crate) fn owner(&self) -> EvaluationTaskId {
@@ -867,6 +899,35 @@ impl PromiseProducerObligation {
             .expect("a publishing task promise must retain its producer obligation");
         let terminal = promise_assignment_terminal(access, &wait, assignment);
         let (_, wake) = wait.publish_terminal_guarded(coordinator, mutation, terminal);
+        PromiseProducerPublication::guarded(wake, retired_root)
+    }
+
+    /// Publishes this producer's panic in place of an assignment.
+    ///
+    /// The promise stays unassigned: its observers find the recorded panic
+    /// and halt, because a panic is never a semantic result.
+    pub(super) fn publish_panic_guarded(
+        &self,
+        coordinator: &Arc<EvaluationWorkCoordinator>,
+        mutation: &dyn RuntimeMutationAuthority,
+        report: &EvaluationPanic,
+    ) -> PromiseProducerPublication {
+        let PromiseProducerSource::Coordinator { work, promise, .. } = self.source else {
+            panic!("a task-local promise cannot publish through a coordinator guard");
+        };
+        let wait = self
+            .try_wait()
+            .expect("an active task promise must retain its external wait owner");
+        debug_assert_eq!(coordinator.runtime_id(), wait.runtime_id());
+        self.record_panic(report);
+        let retired_root = coordinator
+            .complete_task_promise_guarded(mutation, work, &wait, promise)
+            .expect("a publishing task promise must retain its producer obligation");
+        let (_, wake) = wait.publish_terminal_guarded(
+            coordinator,
+            mutation,
+            EvaluationWaitTerminal::Panicked(report.clone()),
+        );
         PromiseProducerPublication::guarded(wake, retired_root)
     }
 
@@ -934,6 +995,10 @@ impl EvaluationTaskHandle {
         }
     }
 
+    pub(crate) fn wait(&self) -> &EvaluationWaitToken {
+        &self.wait
+    }
+
     pub(crate) fn id(&self) -> EvaluationTaskId {
         self.id
     }
@@ -944,11 +1009,6 @@ impl EvaluationTaskHandle {
 
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
         self.wait.runtime_id()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn wait(&self) -> &EvaluationWaitToken {
-        &self.wait
     }
 
     pub(crate) fn acknowledge_propagated_failure(&self) {

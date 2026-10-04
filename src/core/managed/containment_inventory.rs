@@ -724,9 +724,11 @@ fn opaque_type_erasure_inventory_is_reconciled() {
             PathBuf::from("src/api/runtime.rs"),
             TypeErasureCounts::new(1, 1),
         ),
+        // Panic containment borrows panic payloads only to recover a
+        // re-raised report or the panic text.
         (
-            PathBuf::from("src/api/runtime/events.rs"),
-            TypeErasureCounts::new(1, 1),
+            PathBuf::from("src/core/evaluation_panic.rs"),
+            TypeErasureCounts::new(2, 2),
         ),
         (
             PathBuf::from("src/core/managed/external_owners.rs"),

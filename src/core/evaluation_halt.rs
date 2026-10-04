@@ -3,12 +3,13 @@ use std::sync::Arc;
 
 use crate::core_net::CoreWaitToken;
 
-use super::{EvaluationFailure, ManagedPromiseRoot, RuntimeValueAccess, Value};
+use super::{EvaluationFailure, EvaluationPanic, ManagedPromiseRoot, RuntimeValueAccess, Value};
 
 /// Explains why a demand could not currently produce a value.
 ///
 /// A permanent failure may enter a terminal cache. Blocked waits and
-/// unassigned promises are retryable scheduler state and must not.
+/// unassigned promises are retryable scheduler state and must not. A panicked
+/// halt is never semantics: no conversion may turn it into a failure.
 #[derive(Clone)]
 pub struct EvaluationHalt {
     kind: EvaluationHaltKind,
@@ -30,6 +31,8 @@ enum EvaluationHaltKind {
         /// so ordinary evaluator result frames do not pay for its size.
         root: Box<ManagedPromiseRoot>,
     },
+    /// Scheduled work this demand waited on was interrupted by a panic.
+    Panicked(EvaluationPanic),
 }
 
 /// Direct semantic payload retained by one halted evaluation.
@@ -40,6 +43,7 @@ pub(crate) enum EvaluationHaltPayload<'payload> {
     Failure(&'payload EvaluationFailure),
     Blocked,
     UnassignedPromise,
+    Panicked,
 }
 
 impl EvaluationHalt {
@@ -75,34 +79,64 @@ impl EvaluationHalt {
             EvaluationHaltKind::UnassignedPromise { root } => Self {
                 kind: EvaluationHaltKind::UnassignedPromise { root },
             },
+            EvaluationHaltKind::Panicked(report) => Self::panicked(report),
         }
     }
 
+    pub(crate) fn panicked(report: EvaluationPanic) -> Self {
+        Self {
+            kind: EvaluationHaltKind::Panicked(report),
+        }
+    }
+
+    pub(crate) fn panic_report(&self) -> Option<&EvaluationPanic> {
+        match &self.kind {
+            EvaluationHaltKind::Panicked(report) => Some(report),
+            EvaluationHaltKind::Failure(_)
+            | EvaluationHaltKind::Blocked(_)
+            | EvaluationHaltKind::UnassignedPromise { .. } => None,
+        }
+    }
+
+    /// Converts this halt into a failure that may be cached.
+    ///
+    /// A panicked halt is re-raised instead, because a panic is never a
+    /// semantic failure.
     pub(crate) fn into_permanent_failure(self) -> Arc<EvaluationFailure> {
         match self.kind {
             EvaluationHaltKind::Failure(failure) => failure,
-            other => Arc::new(EvaluationFailure::message(Self { kind: other }.to_string())),
+            EvaluationHaltKind::Panicked(report) => report.resume(),
+            other @ (EvaluationHaltKind::Blocked(_)
+            | EvaluationHaltKind::UnassignedPromise { .. }) => {
+                Arc::new(EvaluationFailure::message(Self { kind: other }.to_string()))
+            }
         }
     }
 
     pub(crate) fn permanent_failure(&self) -> Option<&Arc<EvaluationFailure>> {
         match &self.kind {
             EvaluationHaltKind::Failure(failure) => Some(failure),
-            EvaluationHaltKind::Blocked(_) | EvaluationHaltKind::UnassignedPromise { .. } => None,
+            EvaluationHaltKind::Blocked(_)
+            | EvaluationHaltKind::UnassignedPromise { .. }
+            | EvaluationHaltKind::Panicked(_) => None,
         }
     }
 
     pub(crate) fn blocked_on(&self) -> Option<CoreWaitToken> {
         match &self.kind {
             EvaluationHaltKind::Blocked(wait) => Some(wait.clone()),
-            EvaluationHaltKind::Failure(_) | EvaluationHaltKind::UnassignedPromise { .. } => None,
+            EvaluationHaltKind::Failure(_)
+            | EvaluationHaltKind::UnassignedPromise { .. }
+            | EvaluationHaltKind::Panicked(_) => None,
         }
     }
 
     pub(crate) fn unassigned_promise_root(&self) -> Option<&ManagedPromiseRoot> {
         match &self.kind {
             EvaluationHaltKind::UnassignedPromise { root } => Some(root),
-            EvaluationHaltKind::Failure(_) | EvaluationHaltKind::Blocked(_) => None,
+            EvaluationHaltKind::Failure(_)
+            | EvaluationHaltKind::Blocked(_)
+            | EvaluationHaltKind::Panicked(_) => None,
         }
     }
 
@@ -123,6 +157,7 @@ impl EvaluationHalt {
             EvaluationHaltKind::UnassignedPromise { .. } => {
                 EvaluationHaltPayload::UnassignedPromise
             }
+            EvaluationHaltKind::Panicked(_) => EvaluationHaltPayload::Panicked,
         }
     }
 }
@@ -141,6 +176,7 @@ impl fmt::Display for EvaluationHalt {
             EvaluationHaltKind::UnassignedPromise { .. } => {
                 formatter.write_str("promised value was observed before initialization")
             }
+            EvaluationHaltKind::Panicked(report) => report.fmt(formatter),
         }
     }
 }

@@ -962,8 +962,10 @@ impl EvalContext {
             ClientDemandResult::Abandoned => unreachable!(
                 "WHNF client demand must return a value or a propagated evaluation failure"
             ),
-            ClientDemandResult::Failed(_) | ClientDemandResult::Killed(_) => {
-                unreachable!("client failures are returned by drive_client_demand")
+            ClientDemandResult::Failed(_)
+            | ClientDemandResult::Killed(_)
+            | ClientDemandResult::Panicked(_) => {
+                unreachable!("client failures and panics are returned by drive_client_demand")
             }
         }
     }
@@ -998,8 +1000,10 @@ impl EvalContext {
             ClientDemandResult::Abandoned => unreachable!(
                 "WHNF client demand must return a value or a propagated evaluation failure"
             ),
-            ClientDemandResult::Failed(_) | ClientDemandResult::Killed(_) => {
-                unreachable!("client failures are returned by drive_client_demand")
+            ClientDemandResult::Failed(_)
+            | ClientDemandResult::Killed(_)
+            | ClientDemandResult::Panicked(_) => {
+                unreachable!("client failures and panics are returned by drive_client_demand")
             }
         }
     }
@@ -1184,8 +1188,10 @@ impl EvalContext {
             ClientDemandResult::Abandoned => {
                 unreachable!("an explicitly driven client demand remains owned by its caller")
             }
-            ClientDemandResult::Failed(_) | ClientDemandResult::Killed(_) => {
-                unreachable!("client failures are returned by drive_client_demand")
+            ClientDemandResult::Failed(_)
+            | ClientDemandResult::Killed(_)
+            | ClientDemandResult::Panicked(_) => {
+                unreachable!("client failures and panics are returned by drive_client_demand")
             }
         }
     }
@@ -2156,6 +2162,32 @@ impl EvalContext {
         self.fail_wait_with_failure(wait, evaluation_failure(error.into()));
     }
 
+    /// Settles a test reflection task as interrupted by a panic.
+    #[cfg(test)]
+    pub(crate) fn panic_wait(&self, wait: &EvaluationWaitToken, message: &'static str) {
+        let coordinator = self
+            .coordinator()
+            .expect("test wait must retain its coordinator");
+        let target = wait.clone();
+        let wait = test_reflection_dependency(&coordinator, wait);
+        let work = coordinator
+            .reflection_work_for_wait(&wait)
+            .expect("test task must belong to this runtime");
+        assert!(coordinator.terminalize_reflection(work));
+        coordinator.settle_panicked_work(
+            work,
+            crate::core::EvaluationPanic::from_payload(
+                &message,
+                crate::core::EvaluationPanicOrigin::ReflectionTask(work.get()),
+            ),
+        );
+        drop(coordinator.retire_reflection(work));
+        while matches!(
+            self.pump_wait(&target, 256),
+            EvaluationPumpOutcome::BudgetExhausted
+        ) {}
+    }
+
     #[cfg(test)]
     pub(crate) fn fail_wait_with_failure(
         &self,
@@ -2256,7 +2288,8 @@ fn terminal_client_demand_result(
         ClientDemandResult::Abandoned => Err(crate::core::EvaluationHalt::new(
             "client evaluation demand was abandoned",
         )),
-        complete => Ok(complete),
+        ClientDemandResult::Panicked(report) => Err(crate::core::EvaluationHalt::panicked(report)),
+        complete @ ClientDemandResult::Complete(_) => Ok(complete),
     }
 }
 
