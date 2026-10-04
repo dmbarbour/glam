@@ -52,6 +52,10 @@ Preliminary and deferred plans below remain candidates for later work.
 
 ## Preliminary and Deferred Plans
 
+- [`ParserBacktrackingPerformance_2026-10-04.md`](ParserBacktrackingPerformance_2026-10-04.md)
+  records exponential parse time on nested parentheses and lists, caused by
+  alternatives that re-parse a whole group, and a constant-time lookahead
+  guard to make it linear.
 - [`ConcurrentGarbageCollection_2026-08-28.md`](ConcurrentGarbageCollection_2026-08-28.md)
   records the post-integration transition from idle-only stop-the-world
   election to concurrent marking, delayed logical sweep, and epoch-safe run

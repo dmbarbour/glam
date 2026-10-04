@@ -44,16 +44,9 @@ Maintainer decision, 2026-10-04. The durable rule lives in
 All timings use a release build unless noted.
 
 - **Exponential parse time on nested parentheses and lists.** This is a hang
-  rather than a panic, and it is the largest input risk found so far.
-  - Nested parentheses cost about 3× per level: depth 13 takes 12 s and
-    depth 14 takes 38 s.
-  - Nested lists cost about 2× per level: depth 20 takes 11 s.
-  - Nested dictionaries stay linear.
-  - Cause: in `literal_atom` (`parser/expression.rs`), alternatives that open
-    with the same delimiter re-parse the whole inner expression before
-    failing. For example, `postfix_operator_section` parses `(expr` and then
-    expects an operator; `grouped_or_trailing_tuple` parses the same `(expr`
-    again. Each level therefore re-parses its contents several times.
+  rather than a crash, so it belongs to performance work. The causes, the
+  measurements, and a constant-time guard fix are in the deferred
+  [parser backtracking performance plan](ParserBacktrackingPerformance_2026-10-04.md).
 - **Stack overflow aborts on deep nesting.** An overflow cannot be unwound
   or caught. The release-build thresholds, from parsing alone (`--parse`),
   are:
@@ -63,6 +56,9 @@ All timings use a release build unless noted.
 
   A debug build overflows sooner; nested `if` overflows at 1,000. Recursive
   drop of deep syntax trees may contribute, alongside recursive descent.
+  Hand-written source does not reach these depths, so this abort class is
+  deferred within W1. The likely remedies are a nesting-limit diagnostic for
+  nested syntax, plus iterative handling of infix chains and deep-tree drop.
 - **The lexer withstands hostile text.** Twenty-two probes covered non-ASCII
   names, text, comments, and operators; a BOM; CRLF and lone CR; tabs;
   zero-width and non-breaking spaces; invalid and truncated UTF-8; NUL bytes;
@@ -129,7 +125,9 @@ delay can be fixed immediately when found.
    discovery tool, not a routine test. It is deferred until inspection stalls,
    and its tooling (`cargo-fuzz` on a nightly toolchain) is obtained only
    then. Every fuzzing finding becomes a deterministic regression; no fuzz run
-   joins `scripts/check.sh`.
+   joins `scripts/check.sh`. Generated inputs stay shallow, and each run uses a
+   per-input timeout, so the known exponential nesting cost does not block
+   discovery. Fixing that performance issue is not a prerequisite.
 2. **Poison recovery.** Recover per lock class, or keep treating poisoning as
    terminal and instead make every panic-adjacent path avoid holding locks.
    Expected answer: per-class recovery, decided in W4.
