@@ -144,6 +144,14 @@ from the middle of queues, or hold source and target runtime mutexes together.
 An `Erase >< RemoteCursor` pair has no shortcut: it demands normal cursor
 materialization, after which the ordinary erasure rule applies.
 
+An active pair may be linked to itself: one pair node's auxiliary port can be
+wired to another auxiliary port of the same pair, as in an applied identity.
+Every rewrite therefore detaches the pair's complete auxiliary boundary,
+reading each neighbor before clearing any link, and resolves its replacements
+along paths through such links. Closed loops vanish, and an eraser on a loop
+creates nothing. Rules allocate replacement nodes in a fixed order, which the
+payload edge-transition predictions rely on.
+
 Core specialization performs each inspection or mutation through its
 same-runtime scoped net view. Durable frontier and dependency records identify
 work across scheduler boundaries; they do not carry that view or a managed

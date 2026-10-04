@@ -1,3 +1,4 @@
+use super::graph::{BoundaryReplacement, RewriteBoundary, auxiliary_ports};
 use super::*;
 
 impl<S: NetSpecialization> SourceFrontierShape<S> {
@@ -246,15 +247,10 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             self.disconnect(Port::principal(call.bind)),
             Some(Port::principal(call.data))
         );
-        let [argument, result] =
-            <[Port; 2]>::try_from(self.take_auxiliaries(call.bind, 2)).unwrap();
+        let boundary = self.detach_boundary(&auxiliary_ports(call.bind, 2).collect::<Vec<_>>());
         assert!(matches!(self.remove_node(call.data), RuntimeNode::Data(_)));
         assert!(matches!(self.remove_node(call.bind), RuntimeNode::Bind));
-
-        let operator = self.add_node(RuntimeNode::Operator(operator));
-        self.connect(Port::principal(operator), argument);
-        self.connect(Port::auxiliary(operator, 1), result);
-        operator
+        self.attach_application_operator(boundary, operator)
     }
 
     pub fn resume_claimed_checkpoint_with_operator(
@@ -263,13 +259,26 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         operator: S::Operator,
     ) -> NodeId {
         assert!(self.take_empty_claimed_checkpoint(call));
-        let [argument, result] =
-            <[Port; 2]>::try_from(self.take_auxiliaries(call.bind, 2)).unwrap();
+        let boundary = self.detach_boundary(&auxiliary_ports(call.bind, 2).collect::<Vec<_>>());
         assert!(matches!(self.remove_node(call.bind), RuntimeNode::Bind));
+        self.attach_application_operator(boundary, operator)
+    }
 
+    /// Replaces an application Bind's argument and result sockets with one
+    /// operator's principal and result ports.
+    fn attach_application_operator(
+        &mut self,
+        boundary: RewriteBoundary,
+        operator: S::Operator,
+    ) -> NodeId {
         let operator = self.add_node(RuntimeNode::Operator(operator));
-        self.connect(Port::principal(operator), argument);
-        self.connect(Port::auxiliary(operator, 1), result);
+        self.attach_boundary(
+            boundary,
+            &[
+                BoundaryReplacement::Port(Port::principal(operator)),
+                BoundaryReplacement::Port(Port::auxiliary(operator, 1)),
+            ],
+        );
         operator
     }
 

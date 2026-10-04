@@ -4035,3 +4035,260 @@ fn removed_node_ids_are_not_reused() {
     assert_eq!(second.get(), 1);
     assert_eq!(third.get(), 2);
 }
+
+// Active pairs whose auxiliary ports link to one another. Each rewrite must
+// resolve such links instead of treating every auxiliary neighbor as a
+// surviving port.
+
+fn linked<S: NetSpecialization>(net: &RuntimeNet<S>, left: Port, right: Port) -> bool {
+    net.neighbor(left) == Some(right) && net.neighbor(right) == Some(left)
+}
+
+fn test_interface<S: NetSpecialization>(net: &mut RuntimeNet<S>) -> Port {
+    Port::auxiliary(net.add_node(RuntimeNode::Interface), 1)
+}
+
+#[test]
+fn bind_join_resolves_a_self_linked_identity() {
+    // `(λx. x) argument`: the identity's variable is wired to its own body.
+    let mut net = RuntimeNet::<()>::empty();
+    let application = net.add_node(RuntimeNode::Bind);
+    let identity = net.add_node(RuntimeNode::Bind);
+    let argument = net.add_node(RuntimeNode::Data(()));
+    let result = test_interface(&mut net);
+    net.connect(Port::principal(application), Port::principal(identity));
+    net.connect(Port::auxiliary(identity, 1), Port::auxiliary(identity, 2));
+    net.connect(Port::auxiliary(application, 1), Port::principal(argument));
+    net.connect(Port::auxiliary(application, 2), result);
+
+    assert!(matches!(
+        net.reduce_next(),
+        Some(Reduction {
+            kind: ReductionKind::BindJoin,
+            ..
+        })
+    ));
+    assert!(net.node(application).is_none());
+    assert!(net.node(identity).is_none());
+    assert!(linked(&net, Port::principal(argument), result));
+    assert_eq!(net.interface_data(result), Some(&()));
+}
+
+#[test]
+fn bind_join_resolves_links_between_the_pair_nodes() {
+    let mut net = RuntimeNet::<()>::empty();
+    let left = net.add_node(RuntimeNode::Bind);
+    let right = net.add_node(RuntimeNode::Bind);
+    let outer_left = test_interface(&mut net);
+    let outer_right = test_interface(&mut net);
+    net.connect(Port::principal(left), Port::principal(right));
+    net.connect(Port::auxiliary(left, 1), Port::auxiliary(right, 2));
+    net.connect(Port::auxiliary(left, 2), outer_left);
+    net.connect(Port::auxiliary(right, 1), outer_right);
+
+    assert!(matches!(
+        net.reduce_next(),
+        Some(Reduction {
+            kind: ReductionKind::BindJoin,
+            ..
+        })
+    ));
+    assert!(linked(&net, outer_left, outer_right));
+}
+
+#[test]
+fn bind_join_of_two_self_linked_binds_leaves_nothing() {
+    let mut net = RuntimeNet::<()>::empty();
+    let left = net.add_node(RuntimeNode::Bind);
+    let right = net.add_node(RuntimeNode::Bind);
+    net.connect(Port::principal(left), Port::principal(right));
+    net.connect(Port::auxiliary(left, 1), Port::auxiliary(left, 2));
+    net.connect(Port::auxiliary(right, 1), Port::auxiliary(right, 2));
+
+    assert!(matches!(
+        net.reduce_next(),
+        Some(Reduction {
+            kind: ReductionKind::BindJoin,
+            ..
+        })
+    ));
+    assert!(net.nodes.is_empty(), "the closed loop vanishes");
+    assert_eq!(net.active_pairs().len(), 0);
+}
+
+#[test]
+fn erasing_a_self_linked_bind_leaves_nothing() {
+    let mut net = RuntimeNet::<()>::empty();
+    let eraser = net.add_node(RuntimeNode::Erase);
+    let bind = net.add_node(RuntimeNode::Bind);
+    net.connect(Port::principal(eraser), Port::principal(bind));
+    net.connect(Port::auxiliary(bind, 1), Port::auxiliary(bind, 2));
+
+    assert!(matches!(
+        net.reduce_next(),
+        Some(Reduction {
+            kind: ReductionKind::Erase,
+            ..
+        })
+    ));
+    assert!(
+        net.nodes.is_empty(),
+        "no eraser is created for a closed loop"
+    );
+    assert_eq!(net.active_pairs().len(), 0);
+}
+
+#[test]
+fn duplicating_a_self_linked_bind_yields_two_identities() {
+    let mut net = RuntimeNet::<()>::empty();
+    let fan = net.add_node(RuntimeNode::Fan {
+        identity: identity(3),
+    });
+    let bind = net.add_node(RuntimeNode::Bind);
+    let copies = [test_interface(&mut net), test_interface(&mut net)];
+    net.connect(Port::principal(fan), Port::principal(bind));
+    net.connect(Port::auxiliary(bind, 1), Port::auxiliary(bind, 2));
+    net.connect(Port::auxiliary(fan, 1), copies[0]);
+    net.connect(Port::auxiliary(fan, 2), copies[1]);
+
+    assert!(matches!(
+        net.reduce_next(),
+        Some(Reduction {
+            kind: ReductionKind::FanBind { .. },
+            ..
+        })
+    ));
+    // The two residual fans meet each other and annihilate.
+    assert!(matches!(
+        net.reduce_next(),
+        Some(Reduction {
+            kind: ReductionKind::FanJoin { .. },
+            ..
+        })
+    ));
+    for copy in copies {
+        let bind = net.neighbor(copy).expect("each copy should receive a Bind");
+        assert!(bind.is_principal());
+        assert!(matches!(net.node(bind.node()), Some(RuntimeNode::Bind)));
+        assert!(linked(
+            &net,
+            Port::auxiliary(bind.node(), 1),
+            Port::auxiliary(bind.node(), 2)
+        ));
+    }
+    assert_eq!(net.active_pairs().len(), 0);
+}
+
+#[test]
+fn duplicating_data_into_its_own_branches_leaves_one_dead_pair() {
+    let mut net = RuntimeNet::<()>::empty();
+    let fan = net.add_node(RuntimeNode::Fan {
+        identity: identity(3),
+    });
+    let data = net.add_node(RuntimeNode::Data(()));
+    net.connect(Port::principal(fan), Port::principal(data));
+    net.connect(Port::auxiliary(fan, 1), Port::auxiliary(fan, 2));
+
+    assert!(matches!(
+        net.reduce_next(),
+        Some(Reduction {
+            kind: ReductionKind::FanData { .. },
+            ..
+        })
+    ));
+    // The two copies meet each other: an unobservable pair with no rule.
+    let copies = net.nodes.keys().copied().collect::<Vec<_>>();
+    assert_eq!(copies.len(), 2);
+    assert!(
+        copies
+            .iter()
+            .all(|copy| matches!(net.node(*copy), Some(RuntimeNode::Data(()))))
+    );
+    assert!(linked(
+        &net,
+        Port::principal(copies[0]),
+        Port::principal(copies[1])
+    ));
+}
+
+#[test]
+fn fan_commutation_resolves_self_linked_branches() {
+    let mut net = RuntimeNet::<()>::empty();
+    let looped = net.add_node(RuntimeNode::Fan {
+        identity: identity(3),
+    });
+    let other = net.add_node(RuntimeNode::Fan {
+        identity: identity(4),
+    });
+    let outputs = [test_interface(&mut net), test_interface(&mut net)];
+    net.connect(Port::principal(looped), Port::principal(other));
+    net.connect(Port::auxiliary(looped, 1), Port::auxiliary(looped, 2));
+    net.connect(Port::auxiliary(other, 1), outputs[0]);
+    net.connect(Port::auxiliary(other, 2), outputs[1]);
+
+    assert!(matches!(
+        net.reduce_next(),
+        Some(Reduction {
+            kind: ReductionKind::FanCommute { .. },
+            ..
+        })
+    ));
+    let fans = net
+        .nodes
+        .iter()
+        .filter(|(_, entry)| matches!(entry.node, RuntimeNode::Fan { .. }))
+        .count();
+    assert_eq!(fans, 4);
+    for output in outputs {
+        let fan = net.neighbor(output).expect("each output keeps a fan");
+        assert!(fan.is_principal());
+        assert!(matches!(
+            net.node(fan.node()),
+            Some(RuntimeNode::Fan { .. })
+        ));
+    }
+    // The looped branches now join the two residuals of the looped fan's
+    // partner into one active pair.
+    let active = net.active_pairs().collect::<Vec<_>>();
+    assert_eq!(active.len(), 1);
+    let (left, right) = net.pair_nodes(active[0]).expect("active pair nodes");
+    assert!(matches!(net.node(left), Some(RuntimeNode::Fan { .. })));
+    assert!(matches!(net.node(right), Some(RuntimeNode::Fan { .. })));
+}
+
+#[test]
+fn operator_application_resolves_an_argument_wired_to_its_result() {
+    let mut net = RuntimeNet::<i32>::empty();
+    let application = net.add_node(RuntimeNode::Bind);
+    let callable = net.add_node(RuntimeNode::Data(0));
+    net.connect(Port::principal(application), Port::principal(callable));
+    net.connect(
+        Port::auxiliary(application, 1),
+        Port::auxiliary(application, 2),
+    );
+
+    let reduction = net.reduce_next().expect("bind-data must block as a call");
+    let ReductionKind::Call { bind, data } = reduction.kind else {
+        panic!("expected a claimed call");
+    };
+    let call = Call {
+        pair: reduction.pair,
+        bind,
+        data,
+    };
+    assert_eq!(
+        net.claim_call(call, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY),
+        Some(0)
+    );
+    let operator = net.resume_claimed_call_with_operator(
+        call,
+        TestOperator::new("identity", |value| Ok(OperatorYield::Data(*value))),
+    );
+    assert!(linked(
+        &net,
+        Port::principal(operator),
+        Port::auxiliary(operator, 1)
+    ));
+    assert_eq!(net.nodes.len(), 1);
+    assert_eq!(net.active_pairs().len(), 0);
+}

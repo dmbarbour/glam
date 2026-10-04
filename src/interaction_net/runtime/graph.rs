@@ -1,17 +1,159 @@
 use super::*;
 
+/// The recorded link of one socket in a [`RewriteBoundary`].
+#[derive(Clone, Copy)]
+enum BoundaryLink {
+    /// A surviving port outside the rewritten pair.
+    Port(Port),
+    /// Another socket of the same boundary: the pair linked to itself.
+    Socket(usize),
+}
+
+/// The auxiliary ports of an active pair being rewritten, detached together.
+///
+/// Each port becomes a socket. Every neighbor is read before any link is
+/// cleared, so a rule can resolve links between two ports of the pair itself.
+pub(in crate::interaction_net::runtime) struct RewriteBoundary {
+    links: Vec<BoundaryLink>,
+}
+
+/// What a rule substitutes for one socket of its [`RewriteBoundary`].
+#[derive(Clone, Copy)]
+pub(in crate::interaction_net::runtime) enum BoundaryReplacement {
+    /// A port of a node the rule created.
+    Port(Port),
+    /// The socket fuses directly with another socket of the same boundary.
+    /// Fusion is symmetric.
+    Socket(usize),
+    /// An eraser, created only if the resolved path reaches a port.
+    Erase,
+}
+
+/// One end of a resolved boundary path.
+#[derive(Clone, Copy)]
+enum BoundaryEndpoint {
+    Port(Port),
+    Erase,
+}
+
+/// Lists one node's auxiliary ports in index order.
+pub(in crate::interaction_net::runtime) fn auxiliary_ports(
+    node: NodeId,
+    count: u32,
+) -> impl Iterator<Item = Port> {
+    (1..=count).map(move |index| Port::auxiliary(node, index))
+}
+
+impl RewriteBoundary {
+    pub(in crate::interaction_net::runtime) fn len(&self) -> usize {
+        self.links.len()
+    }
+}
+
 impl<S: NetSpecialization> RuntimeNet<S> {
-    pub(in crate::interaction_net::runtime) fn take_auxiliaries(
+    /// Detaches the given auxiliary ports of an active pair whose principal
+    /// ports are already disconnected.
+    pub(in crate::interaction_net::runtime) fn detach_boundary(
         &mut self,
-        node: NodeId,
-        count: u32,
-    ) -> Vec<Port> {
-        (1..=count)
-            .map(|index| {
-                self.disconnect(Port::auxiliary(node, index))
-                    .expect("interaction auxiliary port must be wired")
+        ports: &[Port],
+    ) -> RewriteBoundary {
+        let links = ports
+            .iter()
+            .map(|&port| {
+                let neighbor = self
+                    .neighbor(port)
+                    .expect("interaction auxiliary port must be wired");
+                match ports.iter().position(|&socket| socket == neighbor) {
+                    Some(socket) => BoundaryLink::Socket(socket),
+                    None => BoundaryLink::Port(neighbor),
+                }
             })
-            .collect()
+            .collect();
+        for &port in ports {
+            // The second port of a link between two sockets is already clear.
+            self.disconnect(port);
+        }
+        RewriteBoundary { links }
+    }
+
+    /// Connects a rule's replacements across a detached boundary.
+    ///
+    /// Recorded links and replacements alternate along paths through the
+    /// sockets. Each path joins its two ends: two ports are wired together, a
+    /// port meeting an eraser receives a fresh eraser, and two erasers vanish.
+    /// Sockets linked only to one another form closed loops, which vanish.
+    pub(in crate::interaction_net::runtime) fn attach_boundary(
+        &mut self,
+        boundary: RewriteBoundary,
+        replacements: &[BoundaryReplacement],
+    ) {
+        assert_eq!(boundary.len(), replacements.len());
+        debug_assert!(replacements.iter().enumerate().all(
+            |(socket, replacement)| match replacement {
+                BoundaryReplacement::Socket(other) => matches!(
+                    replacements[*other],
+                    BoundaryReplacement::Socket(back) if back == socket
+                ),
+                BoundaryReplacement::Port(_) | BoundaryReplacement::Erase => true,
+            }
+        ));
+        let recorded = |socket: usize| match boundary.links[socket] {
+            BoundaryLink::Port(port) => Ok(BoundaryEndpoint::Port(port)),
+            BoundaryLink::Socket(other) => Err(other),
+        };
+        let replaced = |socket: usize| match replacements[socket] {
+            BoundaryReplacement::Port(port) => Ok(BoundaryEndpoint::Port(port)),
+            BoundaryReplacement::Erase => Ok(BoundaryEndpoint::Erase),
+            BoundaryReplacement::Socket(other) => Err(other),
+        };
+        let mut visited = vec![false; boundary.len()];
+        for start in 0..boundary.len() {
+            for enter_by_replacement in [false, true] {
+                if visited[start] {
+                    break;
+                }
+                let entry = if enter_by_replacement {
+                    replaced(start)
+                } else {
+                    recorded(start)
+                };
+                let Ok(first) = entry else {
+                    continue;
+                };
+                let mut socket = start;
+                let mut leave_by_replacement = !enter_by_replacement;
+                let last = loop {
+                    visited[socket] = true;
+                    let next = if leave_by_replacement {
+                        replaced(socket)
+                    } else {
+                        recorded(socket)
+                    };
+                    match next {
+                        Ok(endpoint) => break endpoint,
+                        Err(other) => {
+                            socket = other;
+                            leave_by_replacement = !leave_by_replacement;
+                        }
+                    }
+                };
+                self.join_boundary_endpoints(first, last);
+            }
+        }
+    }
+
+    fn join_boundary_endpoints(&mut self, first: BoundaryEndpoint, last: BoundaryEndpoint) {
+        match (first, last) {
+            (BoundaryEndpoint::Port(first), BoundaryEndpoint::Port(last)) => {
+                self.connect(first, last);
+            }
+            (BoundaryEndpoint::Port(port), BoundaryEndpoint::Erase)
+            | (BoundaryEndpoint::Erase, BoundaryEndpoint::Port(port)) => {
+                let erase = self.add_node(RuntimeNode::Erase);
+                self.connect(Port::principal(erase), port);
+            }
+            (BoundaryEndpoint::Erase, BoundaryEndpoint::Erase) => {}
+        }
     }
 
     pub(in crate::interaction_net::runtime) fn add_interface(&mut self, target: Port) -> Port {

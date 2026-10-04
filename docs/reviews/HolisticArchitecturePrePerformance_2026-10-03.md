@@ -996,6 +996,12 @@ Reproduced (see X4).
   (closed loops vanish).
 - Include such shapes in N8's generator.
 
+*Fixed 2026-10-04:* every rewrite now detaches the pair's whole auxiliary
+boundary before rewiring and resolves pair-internal links. This covers the
+five rules above, `duplicate_data`, and the two call-to-operator rewrites.
+Runtime regressions cover each shape, and the program in X4 now evaluates to
+its data. N8's generator remains open.
+
 **N2 — High (for Concurrent GC) — Edge-delta accounting is a second,
 hand-maintained copy of every rewrite.** Reported.
 
@@ -1565,6 +1571,11 @@ findings that raise them are noted, and lower-confidence items are marked.
 
 1. **Panic policy.** Contain and terminalize records, or abort the process?
    (X4)
+   - *Maintainer decision, 2026-10-04:* abort. A panic is a bug and is not
+     contained. Evaluation must detect invalid states and report an
+     `EvaluationFailure`; parsing must backtrack while preserving
+     closest-match diagnostics. An overall inspection of panic sites that
+     observe user input is warranted.
 2. **Foreground GC during CLI assembly.** Add a bounded maintenance yield
    point to foreground demand, or keep `NoAuto` non-collecting until
    Concurrent GC? This affects every CLI benchmark. (X3)

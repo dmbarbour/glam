@@ -1,5 +1,12 @@
+use super::graph::{BoundaryReplacement, auxiliary_ports};
 use super::*;
 
+// Every rule detaches all auxiliary ports of its active pair before creating
+// replacements. A pair may be linked to itself, for example a Bind whose
+// argument is its result; the boundary resolves such links instead of
+// assuming each auxiliary neighbor survives the rewrite. Rules allocate their
+// replacement nodes in a fixed order, which the payload edge-transition
+// predictions rely on.
 impl<S: NetSpecialization> RuntimeNet<S> {
     pub(in crate::interaction_net::runtime) fn join(
         &mut self,
@@ -8,13 +15,17 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         auxiliaries: u32,
     ) {
         self.disconnect(Port::principal(left));
-        let left_neighbors = self.take_auxiliaries(left, auxiliaries);
-        let right_neighbors = self.take_auxiliaries(right, auxiliaries);
+        let ports = auxiliary_ports(left, auxiliaries)
+            .chain(auxiliary_ports(right, auxiliaries))
+            .collect::<Vec<_>>();
+        let boundary = self.detach_boundary(&ports);
         self.remove_node(left);
         self.remove_node(right);
-        for (left, right) in left_neighbors.into_iter().zip(right_neighbors) {
-            self.connect(left, right);
-        }
+        let sockets = boundary.len();
+        let replacements = (0..sockets)
+            .map(|socket| BoundaryReplacement::Socket((socket + sockets / 2) % sockets))
+            .collect::<Vec<_>>();
+        self.attach_boundary(boundary, &replacements);
     }
 
     pub(in crate::interaction_net::runtime) fn duplicate_data(
@@ -24,15 +35,18 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         data: NodeId,
     ) {
         self.disconnect(Port::principal(fan));
-        let targets = self.take_auxiliaries(fan, 2);
+        let boundary = self.detach_boundary(&auxiliary_ports(fan, 2).collect::<Vec<_>>());
         let RuntimeNode::Data(payload) = self.remove_node(data) else {
             unreachable!();
         };
         self.remove_node(fan);
-        for target in targets {
-            let clone = self.add_node(RuntimeNode::Data(duplicator.duplicate_data(&payload)));
-            self.connect(Port::principal(clone), target);
-        }
+        let replacements = (0..boundary.len())
+            .map(|_| {
+                let clone = self.add_node(RuntimeNode::Data(duplicator.duplicate_data(&payload)));
+                BoundaryReplacement::Port(Port::principal(clone))
+            })
+            .collect::<Vec<_>>();
+        self.attach_boundary(boundary, &replacements);
     }
 
     pub(in crate::interaction_net::runtime) fn duplicate_bind(
@@ -42,31 +56,36 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         bind: NodeId,
     ) {
         self.disconnect(Port::principal(fan));
-        let fan_targets = self.take_auxiliaries(fan, 2);
-        let bind_targets = self.take_auxiliaries(bind, 2);
+        let ports = auxiliary_ports(fan, 2)
+            .chain(auxiliary_ports(bind, 2))
+            .collect::<Vec<_>>();
+        let boundary = self.detach_boundary(&ports);
         self.remove_node(fan);
         self.remove_node(bind);
 
-        let binds = fan_targets
-            .into_iter()
-            .map(|target| {
-                let node = self.add_node(RuntimeNode::Bind);
-                self.connect(Port::principal(node), target);
-                node
+        let binds = (0..2)
+            .map(|_| self.add_node(RuntimeNode::Bind))
+            .collect::<Vec<_>>();
+        let residuals = (0..2)
+            .map(|auxiliary| {
+                let residual = self.add_node(RuntimeNode::Fan {
+                    identity: identity.clone(),
+                });
+                for (branch, bind) in binds.iter().enumerate() {
+                    self.connect(
+                        Port::auxiliary(residual, branch as u32 + 1),
+                        Port::auxiliary(*bind, auxiliary + 1),
+                    );
+                }
+                residual
             })
             .collect::<Vec<_>>();
-        for (auxiliary, target) in bind_targets.into_iter().enumerate() {
-            let residual = self.add_node(RuntimeNode::Fan {
-                identity: identity.clone(),
-            });
-            self.connect(Port::principal(residual), target);
-            for (branch, bind) in binds.iter().enumerate() {
-                self.connect(
-                    Port::auxiliary(residual, branch as u32 + 1),
-                    Port::auxiliary(*bind, auxiliary as u32 + 1),
-                );
-            }
-        }
+        let replacements = binds
+            .iter()
+            .chain(&residuals)
+            .map(|node| BoundaryReplacement::Port(Port::principal(*node)))
+            .collect::<Vec<_>>();
+        self.attach_boundary(boundary, &replacements);
     }
 
     pub(in crate::interaction_net::runtime) fn duplicate_operator(
@@ -77,33 +96,37 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         operator: NodeId,
     ) {
         self.disconnect(Port::principal(fan));
-        let fan_targets = self.take_auxiliaries(fan, 2);
-        let [result] = <[Port; 1]>::try_from(self.take_auxiliaries(operator, 1)).unwrap();
+        let ports = auxiliary_ports(fan, 2)
+            .chain(auxiliary_ports(operator, 1))
+            .collect::<Vec<_>>();
+        let boundary = self.detach_boundary(&ports);
         let RuntimeNode::Operator(operator) = self.remove_node(operator) else {
             unreachable!();
         };
         self.remove_node(fan);
 
-        let operators = fan_targets
-            .into_iter()
-            .map(|target| {
-                let node = self.add_node(RuntimeNode::Operator(
+        let operators = (0..2)
+            .map(|_| {
+                self.add_node(RuntimeNode::Operator(
                     duplicator.duplicate_operator(&operator),
-                ));
-                self.connect(Port::principal(node), target);
-                node
+                ))
             })
             .collect::<Vec<_>>();
         let residual = self.add_node(RuntimeNode::Fan {
             identity: identity.clone(),
         });
-        self.connect(Port::principal(residual), result);
-        for (branch, operator) in operators.into_iter().enumerate() {
+        for (branch, operator) in operators.iter().enumerate() {
             self.connect(
                 Port::auxiliary(residual, branch as u32 + 1),
-                Port::auxiliary(operator, 1),
+                Port::auxiliary(*operator, 1),
             );
         }
+        let replacements = operators
+            .iter()
+            .chain([&residual])
+            .map(|node| BoundaryReplacement::Port(Port::principal(*node)))
+            .collect::<Vec<_>>();
+        self.attach_boundary(boundary, &replacements);
     }
 
     pub(in crate::interaction_net::runtime) fn commute_fans(
@@ -114,31 +137,25 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         right_identity: &FanIdentity,
     ) {
         self.disconnect(Port::principal(left));
-        let left_targets = self.take_auxiliaries(left, 2);
-        let right_targets = self.take_auxiliaries(right, 2);
+        let ports = auxiliary_ports(left, 2)
+            .chain(auxiliary_ports(right, 2))
+            .collect::<Vec<_>>();
+        let boundary = self.detach_boundary(&ports);
         self.remove_node(left);
         self.remove_node(right);
 
-        let right_fans = left_targets
-            .into_iter()
-            .enumerate()
-            .map(|(branch, target)| {
-                let node = self.add_node(RuntimeNode::Fan {
-                    identity: right_identity.residual(left_identity, branch as u8),
-                });
-                self.connect(Port::principal(node), target);
-                node
+        let right_fans = (0..2u8)
+            .map(|branch| {
+                self.add_node(RuntimeNode::Fan {
+                    identity: right_identity.residual(left_identity, branch),
+                })
             })
             .collect::<Vec<_>>();
-        let left_fans = right_targets
-            .into_iter()
-            .enumerate()
-            .map(|(branch, target)| {
-                let node = self.add_node(RuntimeNode::Fan {
-                    identity: left_identity.residual(right_identity, branch as u8),
-                });
-                self.connect(Port::principal(node), target);
-                node
+        let left_fans = (0..2u8)
+            .map(|branch| {
+                self.add_node(RuntimeNode::Fan {
+                    identity: left_identity.residual(right_identity, branch),
+                })
             })
             .collect::<Vec<_>>();
         for (left_branch, right_fan) in right_fans.iter().enumerate() {
@@ -149,6 +166,12 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 );
             }
         }
+        let replacements = right_fans
+            .iter()
+            .chain(&left_fans)
+            .map(|node| BoundaryReplacement::Port(Port::principal(*node)))
+            .collect::<Vec<_>>();
+        self.attach_boundary(boundary, &replacements);
     }
 
     pub(in crate::interaction_net::runtime) fn erase(&mut self, eraser: NodeId, other: NodeId) {
@@ -163,12 +186,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 unreachable!("evaluator-only nodes are not erased as ordinary agents")
             }
         };
-        let targets = self.take_auxiliaries(other, auxiliaries);
+        let boundary =
+            self.detach_boundary(&auxiliary_ports(other, auxiliaries).collect::<Vec<_>>());
         self.remove_node(eraser);
         self.remove_node(other);
-        for target in targets {
-            let erase = self.add_node(RuntimeNode::Erase);
-            self.connect(Port::principal(erase), target);
-        }
+        let replacements = vec![BoundaryReplacement::Erase; boundary.len()];
+        self.attach_boundary(boundary, &replacements);
     }
 }

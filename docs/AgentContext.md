@@ -63,8 +63,10 @@ verify current bootstrap acceptance against tests and samples.
 
 - Prefer narrow, testable slices and focused regression tests.
 - Treat valid and invalid samples as executable syntax specifications.
-- Prefer source spans and structured diagnostics to panics for user-facing
-  failures.
+- Treat a panic as a bug; do not add unwind containment to recover from one.
+  Code that observes user input must detect invalid states before they can
+  panic: evaluation reports an `EvaluationFailure`, and parsing backtracks
+  while preserving closest-match diagnostics.
 - Use `rg`/`rg --files` for discovery and preserve unrelated worktree changes.
 - Keep implementation claims out of target-state design documents and
   chronological transition notes out of current architecture/invariant docs.
