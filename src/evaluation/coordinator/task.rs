@@ -405,7 +405,9 @@ impl LazyRouteDemandLease {
 
 impl Drop for LazyRouteDemandLease {
     fn drop(&mut self) {
-        if let Some(coordinator) = self.coordinator.upgrade() {
+        if let Some(coordinator) = self.coordinator.upgrade()
+            && !coordinator.runtime_poisoned()
+        {
             coordinator.release_lazy_route_demand(self.work);
         }
     }
@@ -514,6 +516,9 @@ impl EvaluationWaitToken {
         let Some(coordinator) = self.coordinator() else {
             return;
         };
+        if coordinator.runtime_poisoned() {
+            return;
+        }
         let Some(owner) = coordinator.deferred_owner_for_wait(self) else {
             return;
         };

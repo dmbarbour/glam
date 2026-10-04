@@ -2303,6 +2303,9 @@ fn reasoning_failure_acknowledgement_is_idempotent_and_runtime_bound() {
             "failing task unexpectedly deadlocked with {} unfinished work items",
             deadlock.unfinished().len()
         ),
+        RuntimeReadiness::Poisoned => {
+            panic!("failing-task fixture unexpectedly poisoned its runtime")
+        }
     };
     let report = settle();
     let [failure] = report.task_failures() else {

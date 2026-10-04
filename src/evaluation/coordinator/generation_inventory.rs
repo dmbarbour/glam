@@ -80,6 +80,7 @@ fn coordinator_mutation_kind_vocabulary_is_exact() {
             "WorkRetirement",
             "FailureLedger",
             "StageSettlement",
+            "RuntimePoison",
             "WorkPark",
             "TestTransition",
         ],

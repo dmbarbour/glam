@@ -18,8 +18,8 @@ use crate::core::{
     PromiseId, RuntimeValueAccess,
 };
 use crate::runtime::{
-    EvaluationRuntimeId, RuntimeIds, RuntimeMutationAdmission, RuntimeMutationAuthority,
-    RuntimeMutationGuard, RuntimeValueRoot,
+    EvaluationRuntimeId, RuntimeCoreState, RuntimeIds, RuntimeMutationAdmission,
+    RuntimeMutationAuthority, RuntimeMutationGuard, RuntimeValueRoot,
 };
 
 #[cfg(test)]
@@ -88,6 +88,17 @@ pub(crate) use task::{
     TaskStatusWake,
 };
 use task::{TaskStatusUpdate, TaskTerminalPublisher, terminal_task_status};
+
+impl RuntimeCoreState for EvaluationWorkCoordinator {
+    fn core_poisoned(&self) -> bool {
+        self.state.is_poisoned()
+    }
+
+    fn wake_parked(&self) {
+        // Parked waiters relock the poisoned state and fail loudly.
+        self.notify_all(CoordinatorMutationKind::RuntimePoison);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct EvaluationWorkId(NonZeroU64);
@@ -713,6 +724,8 @@ enum CoordinatorMutationKind {
     WorkRetirement,
     FailureLedger,
     StageSettlement,
+    /// A panic tore runtime-core state; parked waiters must observe it.
+    RuntimePoison,
     #[cfg(test)]
     WorkPark,
     #[cfg(test)]
@@ -754,13 +767,13 @@ impl CoordinatorMutationKind {
 }
 
 #[cfg(any(test, feature = "interaction-net-profiling"))]
-const PRODUCTION_COORDINATOR_MUTATION_KIND_COUNT: usize = 20;
+const PRODUCTION_COORDINATOR_MUTATION_KIND_COUNT: usize = 21;
 #[cfg(all(test, feature = "interaction-net-profiling"))]
-const COORDINATOR_MUTATION_KIND_COUNT: usize = 22;
+const COORDINATOR_MUTATION_KIND_COUNT: usize = 23;
 #[cfg(all(test, not(feature = "interaction-net-profiling")))]
-const COORDINATOR_MUTATION_KIND_COUNT: usize = 22;
+const COORDINATOR_MUTATION_KIND_COUNT: usize = 23;
 #[cfg(all(not(test), feature = "interaction-net-profiling"))]
-const COORDINATOR_MUTATION_KIND_COUNT: usize = 20;
+const COORDINATOR_MUTATION_KIND_COUNT: usize = 21;
 
 impl WorkCoordinatorState {
     /// Publishes one scheduler-visible mutation.
@@ -1183,7 +1196,7 @@ impl EvaluationWorkCoordinator {
         admission: Arc<RuntimeMutationAdmission>,
         observations: Arc<RuntimeObservationState>,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        let coordinator = Arc::new(Self {
             runtime: values.runtime_id(),
             values: values.runtime_value_observer(),
             ids: values.ids().clone(),
@@ -1208,7 +1221,53 @@ impl EvaluationWorkCoordinator {
             notification_profile: Mutex::new(CoordinatorNotificationProfile::default()),
             #[cfg(test)]
             exact_selection_probe: Mutex::new(None),
-        })
+        });
+        coordinator.register_runtime_core();
+        coordinator
+    }
+
+    /// Whether a panic tore runtime-core state. Destructors check this
+    /// before touching scheduler state: dropping a poisoned runtime's
+    /// handles is a no-op, never a second panic.
+    pub(crate) fn runtime_poisoned(&self) -> bool {
+        self.admission.is_poisoned()
+    }
+
+    /// The set-once poison mark, without probing core state. Cheap enough
+    /// for the worker loop.
+    pub(crate) fn runtime_poison_marked(&self) -> bool {
+        self.admission.poison_marked()
+    }
+
+    pub(crate) fn mark_runtime_poisoned(&self) {
+        self.admission.mark_poisoned();
+    }
+
+    pub(crate) fn wake_parked_workers(&self) {
+        self.notify_all(CoordinatorMutationKind::ExecutorAvailability);
+    }
+
+    /// Simulates a scheduler bug: a panic inside a coordinator critical
+    /// section, under mutation authority when `with_authority` is set and in
+    /// a read-only section otherwise.
+    #[cfg(test)]
+    pub(crate) fn poison_scheduler_for_test(&self, with_authority: bool) {
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _mutation = with_authority.then(|| self.admission.mutation_guard());
+            let _state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            panic!("forced scheduler panic");
+        }));
+        assert!(panicked.is_err());
+    }
+
+    /// Registers the scheduler state as runtime core: a panic that tears it
+    /// poisons the whole runtime.
+    fn register_runtime_core(self: &Arc<Self>) {
+        let core: std::sync::Weak<dyn RuntimeCoreState> = Arc::<Self>::downgrade(self);
+        self.admission.register_core(core);
     }
 
     pub(super) fn background_demand_or_init(
@@ -1273,6 +1332,7 @@ impl EvaluationWorkCoordinator {
             notification_profile: Mutex::new(CoordinatorNotificationProfile::default()),
             exact_selection_probe: Mutex::new(None),
         });
+        coordinator.register_runtime_core();
         values.attach_work_coordinator(&coordinator);
         coordinator
     }

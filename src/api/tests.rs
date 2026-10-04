@@ -2322,6 +2322,107 @@ fn worker_survives_a_panicking_sparked_value() {
 }
 
 #[test]
+fn scheduler_panic_poisons_the_runtime_without_hanging_waiters() {
+    let runtime = EvaluationRuntime::new(1).expect("worker runtime should build");
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .expect("assembler should build");
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let producer_release = release.clone();
+    let (started_sender, started_receiver) = std::sync::mpsc::channel();
+    let value = public_semantic_thunk(&assembler.core_values(), "parked worker value", move |_| {
+        let _ = started_sender.send(());
+        let (lock, changed) = &*producer_release;
+        let mut released = lock.lock().expect("test release lock was poisoned");
+        while !*released {
+            released = changed
+                .wait(released)
+                .expect("test release lock was poisoned");
+        }
+        Ok(CoreValue::Number(42.into()))
+    });
+    assembler.eval_context().spark(value.clone_core_for_test());
+    started_receiver
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("worker should claim the sparked value");
+
+    // A client parks waiting on the worker's claim.
+    let (result_sender, result_receiver) = std::sync::mpsc::channel();
+    let evaluator = std::thread::spawn({
+        let assembler = assembler.clone();
+        let value = value.clone();
+        move || {
+            let _ = result_sender.send(assembler.evaluate(&value).is_ok());
+        }
+    });
+    assert!(
+        result_receiver
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err(),
+        "the client must wait while the worker owns the value"
+    );
+
+    // A scheduler bug tears coordinator state under mutation authority.
+    runtime.poison_scheduler_for_test(true);
+
+    // The parked client wakes and fails loudly instead of hanging: its
+    // thread panics, which disconnects the result channel.
+    assert!(matches!(
+        result_receiver.recv_timeout(std::time::Duration::from_secs(2)),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+    ));
+    assert!(evaluator.join().is_err());
+    assert!(matches!(runtime.readiness(), RuntimeReadiness::Poisoned));
+    runtime.pump_until_stable();
+    assert_eq!(
+        runtime
+            .service_managed_collection()
+            .expect_err("a poisoned runtime admits no collection")
+            .kind(),
+        RuntimeMaintenanceErrorKind::Poisoned
+    );
+
+    // Releasing the worker lets it leave its poll; it then observes the
+    // poisoned scheduler and exits. Dropping everything must neither panic
+    // nor abort.
+    let (lock, changed) = &*release;
+    *lock.lock().expect("test release lock was poisoned") = true;
+    changed.notify_all();
+    drop(assembler);
+    drop(runtime);
+}
+
+#[test]
+fn settlement_panic_poisons_the_runtime() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    runtime.poison_settlement_for_test();
+    assert!(matches!(runtime.readiness(), RuntimeReadiness::Poisoned));
+    runtime.pump_until_stable();
+    drop(runtime);
+}
+
+#[test]
+fn read_only_scheduler_panic_is_detected_by_readiness() {
+    let assembler = Assembler::new();
+    let runtime = assembler.evaluation_runtime();
+    runtime.poison_scheduler_for_test(false);
+
+    assert!(matches!(runtime.readiness(), RuntimeReadiness::Poisoned));
+    runtime.pump_until_stable();
+    let values = assembler.values();
+    let evaluation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assembler.evaluator().eval(&values.integer(1))
+    }));
+    assert!(
+        evaluation.is_err(),
+        "a poisoned runtime must fail loudly rather than evaluate"
+    );
+    drop(assembler);
+    drop(runtime);
+}
+
+#[test]
 fn builder_fixes_conflict_analysis_before_reasoning_starts() {
     let assembler = Assembler::builder()
         .conflict_analysis(Arc::new(crate::reflection::CoarseConflictAnalysis))

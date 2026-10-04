@@ -317,6 +317,13 @@ const ACTIVE_RAII_INVENTORY: &[ActiveRaiiEntry] = &[
         retirement: "release mutation admission before publishing a conservative activity wake",
         verification: "runtime_input_admission_wakes_after_releasing_mutation_admission",
     },
+    ActiveRaiiEntry {
+        path: "src/runtime.rs",
+        owner: "RuntimeSettlementGuard",
+        disposition: ActiveRaiiDisposition::BoundedClaimGuard,
+        retirement: "release settlement admission, then mark the runtime poisoned if an unwind tore its core",
+        verification: "settlement_panic_poisons_the_runtime",
+    },
 ];
 
 #[derive(Clone, Copy, Debug)]

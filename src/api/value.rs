@@ -1164,6 +1164,12 @@ impl Drop for PromiseResolver {
         let Some(values) = self.observer.upgrade() else {
             return;
         };
+        if values
+            .work_coordinator()
+            .is_some_and(|coordinator| coordinator.runtime_poisoned())
+        {
+            return;
+        }
         let message = format!(
             "promise resolver for `{}` was dropped before completion",
             self.label

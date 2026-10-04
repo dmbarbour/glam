@@ -19,7 +19,7 @@ use crate::reflection::{
     ReflectionQueryWriter, ReflectionStore, RuntimeInputEndpointId, VolumeId,
 };
 use crate::runtime::{
-    EvaluationRuntimeId, RuntimeGcLeaseOutcome, RuntimeGcMaintenanceDisposition,
+    EvaluationRuntimeId, RuntimeCoreState, RuntimeGcLeaseOutcome, RuntimeGcMaintenanceDisposition,
     RuntimeGcMaintenanceFailure, RuntimeGcMaintenanceFailureKind, RuntimeIds,
     RuntimeMutationAdmission, RuntimeMutationAuthority, RuntimeMutationGuard,
     RuntimeSettlementGuard, RuntimeValueRoot, allocate_evaluation_runtime_id,
@@ -150,7 +150,9 @@ impl Drop for RuntimeState {
     fn drop(&mut self) {
         // The runtime, rather than an asynchronously stopping idle worker, is
         // the lifetime owner of the autonomous background demand domain.
-        self.work.release_background_demand();
+        if !self.work.runtime_poisoned() {
+            self.work.release_background_demand();
+        }
     }
 }
 
@@ -159,6 +161,24 @@ impl Drop for RuntimeState {
 /// The coordinator route is deliberately weak: retaining these resources must
 /// not retain the runtime scheduler, executor, public runtime wrapper, or
 /// default reflection profile.
+/// The transaction state is runtime core: a panic inside its critical section
+/// can tear a commit, so it poisons the whole runtime.
+impl RuntimeCoreState for RuntimeSharedResources {
+    fn core_poisoned(&self) -> bool {
+        self.transactions.state.is_poisoned()
+    }
+
+    // Nothing parks on the transaction state.
+    fn wake_parked(&self) {}
+}
+
+impl RuntimeSharedResources {
+    fn register_runtime_core(self: &Arc<Self>) {
+        let core: std::sync::Weak<dyn RuntimeCoreState> = Arc::<Self>::downgrade(self);
+        self.mutation_admission.register_core(core);
+    }
+}
+
 pub(crate) struct RuntimeSharedResources {
     pub(super) id: EvaluationRuntimeId,
     pub(super) values: RuntimeValueFactory,
@@ -613,6 +633,7 @@ impl EvaluationRuntime {
             mutation_admission,
             work: Arc::downgrade(&work),
         });
+        shared_resources.register_runtime_core();
         let default_reflection_profile = Arc::new(ReflectionTaskProfile::unsealed());
         EvaluationSession::install_runtime_background(
             &work,
@@ -712,6 +733,7 @@ impl EvaluationRuntime {
     /// publishes an authoritative runtime obligation so a stable embedding
     /// client can observe [`RuntimeReadiness::MaintenanceRequired`].
     pub fn request_managed_collection(&self) -> Result<(), RuntimeMaintenanceError> {
+        self.refuse_maintenance_if_poisoned()?;
         let resources = &self.state.shared_resources;
         let mutation = resources.mutation_admission.mutation_guard();
         let request = catch_unwind(AssertUnwindSafe(|| {
@@ -767,15 +789,46 @@ impl EvaluationRuntime {
     pub fn service_managed_collection(
         &self,
     ) -> Result<RuntimeMaintenanceReport, RuntimeMaintenanceError> {
+        self.refuse_maintenance_if_poisoned()?;
         let resources = &self.state.shared_resources;
         let lease = resources.mutation_admission.begin_gc_activity();
         self.service_managed_collection_with_lease(lease)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn poison_scheduler_for_test(&self, with_authority: bool) {
+        self.state.work.poison_scheduler_for_test(with_authority);
+    }
+
+    /// Simulates a panic while exclusive settlement admission is held.
+    #[cfg(test)]
+    pub(crate) fn poison_settlement_for_test(&self) {
+        let admission = &self.state.shared_resources.mutation_admission;
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _settlement = admission.settlement_guard();
+            panic!("forced settlement panic");
+        }));
+        assert!(panicked.is_err());
+        assert!(admission.poison_marked());
+    }
+
+    /// A poisoned runtime admits no GC lease: its scheduler, transaction, or
+    /// settlement state is torn, so no collection may start.
+    fn refuse_maintenance_if_poisoned(&self) -> Result<(), RuntimeMaintenanceError> {
+        if self.state.shared_resources.mutation_admission.is_poisoned() {
+            return Err(RuntimeMaintenanceError::new(
+                RuntimeMaintenanceErrorKind::Poisoned,
+                "evaluation runtime is poisoned by an internal panic",
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn service_managed_collection_revision(
         &self,
         revision: u64,
     ) -> Result<RuntimeMaintenanceReport, RuntimeMaintenanceError> {
+        self.refuse_maintenance_if_poisoned()?;
         let Some(lease) = self
             .state
             .shared_resources
@@ -1118,6 +1171,11 @@ impl EvaluationRuntime {
         let admission = &self.state.shared_resources.mutation_admission;
         let activity = admission.activity();
         loop {
+            // A poisoned runtime makes no further progress, so it is as
+            // stable as it will get; `readiness` reports why.
+            if admission.is_poisoned() {
+                return;
+            }
             if matches!(
                 self.pump_background(BACKGROUND_DRAIN_BUDGET).state,
                 BackgroundPumpState::Runnable
@@ -1189,6 +1247,9 @@ impl EvaluationRuntime {
     /// Call [`Self::pump_until_stable`] first when the client wants queued work
     /// and best-effort spark normalization to run before classification.
     pub fn readiness(&self) -> RuntimeReadiness {
+        if self.state.shared_resources.mutation_admission.is_poisoned() {
+            return RuntimeReadiness::Poisoned;
+        }
         let Some(settlement) = self.try_settlement_guard() else {
             return RuntimeReadiness::Busy;
         };
@@ -1696,6 +1757,7 @@ pub(crate) fn compiler_test_runtime() -> EvaluationRuntime {
             mutation_admission,
             work: Arc::downgrade(&work),
         });
+        shared_resources.register_runtime_core();
         EvaluationRuntime {
             state: Arc::new(RuntimeState {
                 executor,

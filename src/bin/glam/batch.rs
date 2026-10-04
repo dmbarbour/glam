@@ -238,6 +238,13 @@ pub(super) fn settle_batch_runtime(
                 }
                 return true;
             }
+            RuntimeReadiness::Poisoned => {
+                eprintln!(
+                    "error: evaluation runtime {} is poisoned by an internal panic",
+                    runtime.id().get()
+                );
+                return true;
+            }
             RuntimeReadiness::Ready(snapshot) => snapshot,
             RuntimeReadiness::Deadlocked(deadlock) => deadlock.kill(RuntimeKillReason::Deadlock),
         };
@@ -296,6 +303,13 @@ fn settle_batch_runtime_default(
                         maintenance.runtime_id().get()
                     );
                 }
+                return true;
+            }
+            RuntimeReadiness::Poisoned => {
+                eprintln!(
+                    "error: evaluation runtime {} is poisoned by an internal panic",
+                    runtime.id().get()
+                );
                 return true;
             }
             RuntimeReadiness::Ready(snapshot) => snapshot,

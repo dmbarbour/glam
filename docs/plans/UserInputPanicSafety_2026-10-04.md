@@ -2,8 +2,7 @@
 
 Status: open. The parser and evaluation inspections are done: F1 is fixed,
 and no further panic was found. The poisoning audit is done, and its
-containment design is decided. Steps 1-3 are implemented; steps 4 and 5
-remain.
+containment design is decided. Steps 1-4 are implemented; step 5 remains.
 
 This plan responds to the holistic pre-performance review, X4 and Maintainer
 Decision 1 ([review](../reviews/HolisticArchitecturePrePerformance_2026-10-03.md)).
@@ -428,7 +427,63 @@ The panic hook still prints every panic, so each one remains a visible bug.
    - **Remaining limit.** A net shared by several lazies, once torn, faults
      each later observer with "shared runtime net was poisoned", not the
      original report.
-4. **Runtime-core fault handling.**
+4. **Runtime-core fault handling.** Done on 2026-10-04, with a narrowed
+   surface decided by the maintainer. Instrumenting every core lock site
+   (about 130) is unnecessary:
+   - **Detection is free.** Std mutexes already record poison when a guard
+     unwinds.
+   - **One authority covers every core mutation.** Every coordinator and
+     transaction mutation holds `RuntimeMutationGuard` or a settlement guard.
+   - **Clients park in two places.** These are the coordinator's
+     `wait_for_change_for` and the activity condvar.
+
+   Mechanism:
+   - **The poison flag.** `RuntimeMutationAdmission` holds a set-once
+     `poisoned` flag. The coordinator and the transaction state register as
+     `RuntimeCoreState`s, which report their poison and wake their parked
+     threads.
+   - **Marking.** Three triggers set the flag:
+     - A mutation or settlement guard unwinding probes actual core poison.
+       It checks poison rather than `panicking()`, because contained
+       evaluation panics also unwind through guards taken inside a poll.
+     - The worker loop has an outer catch. A panic that escapes the poll
+       boundaries came from scheduler code, so it marks the runtime and the
+       worker exits.
+     - Any `is_poisoned` probe marks the runtime when it finds poison.
+
+     Marking wakes coordinator waiters and advances activity, so parked
+     threads relock and fail loudly instead of hanging.
+   - **Checks:**
+     - `mutation_guard()` checks the flag with one atomic load and fails
+       loudly.
+     - Core-reaching destructors return early: client-demand handles,
+       lazy-route leases, sessions, reflection reservations, deferred-
+       producer abandonment, promise resolvers, the runtime state, the
+       executor (which still wakes parked workers), and GC leases. Dropping a
+       poisoned runtime is safe.
+     - `readiness()` returns the unit variant `RuntimeReadiness::Poisoned`.
+       The panic message went to the thread that unwound.
+     - `pump_until_stable` returns immediately.
+     - GC request and service return `RuntimeMaintenanceErrorKind::Poisoned`,
+       whose message names the runtime core.
+   - **Accepted gap.** A core panic in a read-only critical section, with no
+     authority held, is detected lazily: by the next mutation, worker access,
+     or readiness probe. Until then, a client parked only on another thread's
+     progress may stay parked.
+   - **Regressions:**
+     - A scheduler panic under mutation authority, while a client waits on a
+       worker-held value. The client wakes and fails loudly, readiness is
+       `Poisoned`, the stable pump returns, collection is refused, and the
+       runtime drops cleanly. The test fails with the unwind hook disabled.
+     - A read-only scheduler panic is detected by `readiness()`, and a later
+       evaluation fails loudly.
+     - A panic under settlement authority poisons the gate and marks the
+       runtime.
+
+     Poison wakes pass through the coordinator's profiled notification
+     boundary, under a new `RuntimePoison` mutation kind. The executor-drop
+     wake uses `ExecutorAvailability`. The RAII inventory classifies the
+     settlement guard's new destructor.
 5. **Call-site containment of client callbacks outside polls.**
 
 Each step lands with forced-panic regressions. The acceptance test: after a

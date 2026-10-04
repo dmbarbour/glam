@@ -66,6 +66,11 @@ pub enum RuntimeReadiness {
     MaintenanceFailed(RuntimeMaintenanceSnapshot),
     Ready(QuiescenceSnapshot),
     Deadlocked(DeadlockSnapshot),
+    /// A panic tore the runtime's scheduler, transaction, or settlement
+    /// state. That is a runtime implementation error, never Glam semantics.
+    /// The runtime accepts no further work, but dropping it remains safe, and
+    /// the client may build a new runtime.
+    Poisoned,
 }
 
 impl fmt::Debug for RuntimeReadiness {
@@ -84,6 +89,7 @@ impl fmt::Debug for RuntimeReadiness {
             Self::Deadlocked(snapshot) => {
                 formatter.debug_tuple("Deadlocked").field(snapshot).finish()
             }
+            Self::Poisoned => formatter.write_str("Poisoned"),
         }
     }
 }
@@ -205,6 +211,8 @@ pub enum RuntimeMaintenanceErrorKind {
     ActiveMutator,
     CollectorPanic,
     FinalizerPanic,
+    /// The managed heap or the runtime core is permanently poisoned by a
+    /// panic. The message says which.
     Poisoned,
 }
 

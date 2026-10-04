@@ -548,6 +548,13 @@ interruption:
   never replayed, and every later route re-raises the original report. A
   poisoned per-value cell holds torn progress; observing it is likewise a
   fault, never a failure.
+- A panic that tears runtime-core state poisons the whole runtime. Core state
+  means the scheduler, the transactions, or the settlement gate. The mutation
+  and settlement authorities detect it while unwinding, and the worker loop
+  catches scheduler panics that escape the poll boundaries. A poisoned
+  runtime wakes its parked threads, refuses further mutation and GC leases,
+  turns core-reaching destructors into no-ops, and reports
+  `RuntimeReadiness::Poisoned`.
 - The client API reports `ErrorKind::Panic`.
 
 All clones of a lazy value share one source/result cell. Workers clone a source

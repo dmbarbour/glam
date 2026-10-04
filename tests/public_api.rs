@@ -154,6 +154,7 @@ fn settle_ready_reasoning(assembler: &Assembler) -> QuiescenceReport {
             "reasoning unexpectedly deadlocked with {} unfinished work items",
             deadlock.unfinished().len()
         ),
+        RuntimeReadiness::Poisoned => panic!("reasoning unexpectedly poisoned its runtime"),
     }
 }
 

@@ -5698,7 +5698,8 @@ fn coordinator_terminal_policy_preserves_a_descendant_failure_before_root_return
                     maintenance.state()
                 ),
                 crate::api::RuntimeReadiness::Ready(snapshot) => break snapshot,
-                readiness @ crate::api::RuntimeReadiness::Deadlocked(_) => panic!(
+                readiness @ (crate::api::RuntimeReadiness::Deadlocked(_)
+                | crate::api::RuntimeReadiness::Poisoned) => panic!(
                     "a terminal logger root and retained child failure should be ready, got {readiness:?}"
                 ),
             }

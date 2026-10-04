@@ -207,10 +207,9 @@ impl ClientDemandHandle {
             return;
         }
         self.active = false;
-        let retired = self
-            .coordinator
-            .upgrade()
-            .is_some_and(|coordinator| coordinator.abandon_client_demand(self.work));
+        let retired = self.coordinator.upgrade().is_some_and(|coordinator| {
+            !coordinator.runtime_poisoned() && coordinator.abandon_client_demand(self.work)
+        });
         if !retired {
             let _ = self.cell.publish(ClientDemandResult::Abandoned);
         }

@@ -278,6 +278,11 @@ impl fmt::Debug for EvaluationSession {
 impl Drop for EvaluationSession {
     fn drop(&mut self) {
         self.demand.closed.store(true, Ordering::Release);
+        // A poisoned runtime's scheduler state is torn; closing a session
+        // there is moot and must not panic again.
+        if self.coordinator.runtime_poisoned() {
+            return;
+        }
         let mut closing = self.coordinator.close_session(self.demand.id);
         for work in std::mem::take(&mut closing.reflection) {
             let failure = evaluation_failure(if work.cancel {
@@ -1825,6 +1830,9 @@ impl EvalContext {
         let Some(coordinator) = self.coordinator() else {
             return;
         };
+        if coordinator.runtime_poisoned() {
+            return;
+        }
         let _ = coordinator.discard_reserved_reflection(handle.work);
     }
 
@@ -1858,6 +1866,9 @@ impl EvalContext {
         let Some(coordinator) = self.coordinator() else {
             return;
         };
+        if coordinator.runtime_poisoned() {
+            return;
+        }
         if coordinator.terminalize_reserved_reflection(handle.work) {
             coordinator.settle_terminal_work(
                 handle.work,

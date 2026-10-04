@@ -1,6 +1,7 @@
 //! Worker ownership and fair selection across one runtime's ready work.
 
 use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::thread;
@@ -116,7 +117,13 @@ impl Drop for EvaluationExecutor {
         self.inner.stopping.store(true, Ordering::Release);
         self.inner.worker_count.store(0, Ordering::Release);
         if let Some(coordinator) = self.inner.coordinator.upgrade() {
-            coordinator.executor_stopped();
+            if coordinator.runtime_poisoned() {
+                // The scheduler state is torn: wake parked workers directly so
+                // they observe `stopping` and exit.
+                coordinator.wake_parked_workers();
+            } else {
+                coordinator.executor_stopped();
+            }
         }
 
         // Dropping a JoinHandle detaches its thread. Idle workers observe the
@@ -131,6 +138,18 @@ impl Drop for EvaluationExecutor {
 
 fn evaluation_worker(inner: Arc<EvaluationExecutorInner>) {
     let _thread_cache_retirement = WorkerThreadCacheRetirement;
+    // Every poll runs behind its own panic boundary, so a panic that reaches
+    // here came from scheduler code. That tears runtime-core state: the
+    // runtime is poisoned and this worker exits.
+    let run = catch_unwind(AssertUnwindSafe(|| run_evaluation_worker(&inner)));
+    if run.is_err()
+        && let Some(coordinator) = inner.coordinator.upgrade()
+    {
+        coordinator.mark_runtime_poisoned();
+    }
+}
+
+fn run_evaluation_worker(inner: &EvaluationExecutorInner) {
     let mut released_from_wait = false;
     loop {
         if inner.stopping.load(Ordering::Acquire) {
@@ -139,6 +158,9 @@ fn evaluation_worker(inner: Arc<EvaluationExecutorInner>) {
         let Some(coordinator) = inner.coordinator.upgrade() else {
             return;
         };
+        if coordinator.runtime_poison_marked() {
+            return;
+        }
         let observed_generation = coordinator.work_generation();
         let work = coordinator.select_worker();
         if released_from_wait {

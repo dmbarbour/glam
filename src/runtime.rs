@@ -6,8 +6,10 @@
 
 use std::fmt;
 use std::num::NonZeroU64;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{
+    Arc, Condvar, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak,
+};
 
 use glam_gc::HeapMaintenanceSnapshot;
 
@@ -47,6 +49,10 @@ pub(crate) fn allocate_evaluation_runtime_id() -> EvaluationRuntimeId {
 pub(crate) struct RuntimeMutationAdmission {
     gate: RwLock<()>,
     activity: Arc<RuntimeActivityState>,
+    /// Set once a panic tears runtime-core state. See [`RuntimeCoreState`].
+    poisoned: AtomicBool,
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
+    cores: Mutex<Vec<Weak<dyn RuntimeCoreState>>>,
     /// Heap allocation count observed by the last aggressive pressure
     /// evaluation. See `gc_pressure_requested`.
     #[cfg(feature = "aggressive-gc-verification")]
@@ -58,6 +64,8 @@ impl RuntimeMutationAdmission {
         Arc::new(Self {
             gate: RwLock::new(()),
             activity: RuntimeActivityState::new(),
+            poisoned: AtomicBool::new(false),
+            cores: Mutex::new(Vec::new()),
             #[cfg(feature = "aggressive-gc-verification")]
             aggressive_promoted_allocations: AtomicU64::new(0),
         })
@@ -67,14 +75,19 @@ impl RuntimeMutationAdmission {
         self.activity.clone()
     }
 
+    /// Takes shared mutation admission.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the runtime is poisoned: a torn runtime core must not be
+    /// mutated further.
     pub(crate) fn mutation_guard(&self) -> RuntimeMutationGuard<'_> {
+        if self.poisoned.load(Ordering::Acquire) {
+            panic!("{RUNTIME_POISONED}");
+        }
         RuntimeMutationGuard {
-            guard: Some(
-                self.gate
-                    .read()
-                    .expect("runtime settlement gate should not be poisoned"),
-            ),
-            activity: &self.activity,
+            guard: Some(self.gate.read().expect(RUNTIME_POISONED)),
+            admission: self,
         }
     }
 
@@ -82,16 +95,70 @@ impl RuntimeMutationAdmission {
         self.gate
             .try_write()
             .ok()
-            .map(|guard| RuntimeSettlementGuard { _guard: guard })
+            .map(|guard| RuntimeSettlementGuard {
+                guard: Some(guard),
+                admission: self,
+            })
     }
 
     pub(crate) fn settlement_guard(&self) -> RuntimeSettlementGuard<'_> {
         RuntimeSettlementGuard {
-            _guard: self
-                .gate
-                .write()
-                .expect("runtime settlement gate should not be poisoned"),
+            guard: Some(self.gate.write().expect(RUNTIME_POISONED)),
+            admission: self,
         }
+    }
+
+    /// Registers runtime-core state whose poisoning faults the whole runtime.
+    pub(crate) fn register_core(&self, core: Weak<dyn RuntimeCoreState>) {
+        self.cores
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(core);
+    }
+
+    /// Whether a panic tore runtime-core state.
+    ///
+    /// This also detects poison that no unwinding authority has observed
+    /// yet, such as a panic in a read-only core critical section, and then
+    /// marks the runtime.
+    pub(crate) fn is_poisoned(&self) -> bool {
+        if self.poisoned.load(Ordering::Acquire) {
+            return true;
+        }
+        let torn = self.gate.is_poisoned()
+            || self
+                .cores
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .filter_map(Weak::upgrade)
+                .any(|core| core.core_poisoned());
+        if torn {
+            self.mark_poisoned();
+        }
+        torn
+    }
+
+    /// The set-once poison mark alone, without probing core state.
+    pub(crate) fn poison_marked(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
+    }
+
+    /// Marks the runtime poisoned and wakes every parked thread, so each
+    /// observes the fault instead of waiting for progress that cannot come.
+    pub(crate) fn mark_poisoned(&self) {
+        if self.poisoned.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let cores = self
+            .cores
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        for core in cores.iter().filter_map(Weak::upgrade) {
+            core.wake_parked();
+        }
+        self.activity.advance();
     }
 
     /// Registers one potentially collecting runtime operation before it may
@@ -213,11 +280,28 @@ impl RuntimeMutationAdmission {
 
 pub(crate) struct RuntimeMutationGuard<'a> {
     guard: Option<RwLockReadGuard<'a, ()>>,
-    activity: &'a RuntimeActivityState,
+    admission: &'a RuntimeMutationAdmission,
 }
 
 pub(crate) struct RuntimeSettlementGuard<'a> {
-    _guard: RwLockWriteGuard<'a, ()>,
+    guard: Option<RwLockWriteGuard<'a, ()>>,
+    admission: &'a RuntimeMutationAdmission,
+}
+
+const RUNTIME_POISONED: &str =
+    "evaluation runtime is poisoned: a panic tore its scheduler, transaction, or settlement state";
+
+/// Runtime-wide state whose poisoning faults the whole runtime.
+///
+/// A panic inside its critical section can leave it half-updated, and
+/// recovering it is unsound. Std mutexes record that poison themselves, so
+/// detection needs no instrumentation at the lock sites. Admission checks
+/// these states when an authority unwinds and when asked for readiness.
+pub(crate) trait RuntimeCoreState: Send + Sync {
+    /// Whether a panic tore this state.
+    fn core_poisoned(&self) -> bool;
+    /// Wakes every thread parked on this state, so it observes the fault.
+    fn wake_parked(&self);
 }
 
 /// Runtime-owned disposition of managed-heap maintenance.
@@ -307,7 +391,9 @@ impl RuntimeGcActivityLease {
 
 impl Drop for RuntimeGcActivityLease {
     fn drop(&mut self) {
-        if !self.active {
+        // A poisoned runtime admits no further mutation; its lease ledger no
+        // longer matters.
+        if !self.active || self.admission.is_poisoned() {
             return;
         }
         let mutation = self.admission.mutation_guard();
@@ -336,11 +422,27 @@ impl RuntimeMutationAuthority for RuntimeSettlementGuard<'_> {}
 impl Drop for RuntimeMutationGuard<'_> {
     fn drop(&mut self) {
         drop(self.guard.take());
+        // Every runtime-core mutation holds this authority, so a panic that
+        // tears core state unwinds through here. The check consults actual
+        // core poison: contained evaluation panics also unwind through
+        // mutation guards taken inside a poll.
+        if std::thread::panicking() {
+            let _ = self.admission.is_poisoned();
+        }
         // This is deliberately conservative: the activity generation is only
         // a parking aid, so an unchanged guarded pass may produce a harmless
         // extra wake. Semantic observation and readiness use their own
         // authoritative generations.
-        self.activity.advance();
+        self.admission.activity.advance();
+    }
+}
+
+impl Drop for RuntimeSettlementGuard<'_> {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        if std::thread::panicking() {
+            let _ = self.admission.is_poisoned();
+        }
     }
 }
 
