@@ -767,6 +767,10 @@ impl ClaimedLazyRoute {
         self.id
     }
 
+    pub(in crate::evaluation) fn lazy(&self) -> &ManagedLazyRoot {
+        &self.lazy
+    }
+
     /// The panic that interrupted the dependency this work last blocked on.
     pub(in crate::evaluation) fn prior_dependency_panic(&self) -> Option<EvaluationPanic> {
         self.prior_block

@@ -9,13 +9,13 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, TryLockError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, TryLockError};
 
 use glam_gc::{Gc, Root, Trace, UnsupportedLayout, Visitor};
 
 use crate::core::{
-    EvaluationFailure, LazyId, LazyResult, LazySource, LazyValue, PromiseId, PromisedValue,
-    RuntimeValueAccess, Value,
+    EvaluationFailure, EvaluationPanic, LazyId, LazyResult, LazySource, LazyValue, PromiseId,
+    PromisedValue, RuntimeValueAccess, Value,
 };
 use crate::core_net::{CoreOperator, CoreRuntimeNet, CoreSpecialization};
 use crate::eval::lazy_checkpoint::ManagedLazyCheckpointEdge;
@@ -57,6 +57,10 @@ pub(crate) struct ManagedLazyCell {
 enum ManagedLazyProducerState {
     Source(LazySource),
     Checkpoint(ManagedLazyCheckpointEdge),
+    /// The lazy's own evaluation was interrupted by a panic, or a panic tore
+    /// its progress. This is evaluation state, never a result: every later
+    /// observer halts with the report, and the work is never replayed.
+    Panicked(EvaluationPanic),
 }
 
 /// Synchronization-owning managed promise identity.
@@ -498,6 +502,18 @@ impl ManagedLazyRoot {
         ))
     }
 
+    /// Records that this lazy's own evaluation panicked. See
+    /// [`ManagedLazyAccess::enter_panicked`].
+    pub(crate) fn enter_panicked(
+        &self,
+        authority: &RuntimeValueAccess<'_>,
+        report: &EvaluationPanic,
+    ) -> bool {
+        self.access(authority)
+            .expect("lazy root and transition access must share one value domain")
+            .enter_panicked(report)
+    }
+
     /// Publishes one terminal result through this registered owner.
     ///
     /// The caller supplies a bounded matching-runtime access region. The root
@@ -711,7 +727,7 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
             .expect("an unresolved managed lazy must retain producer state")
         {
             ManagedLazyProducerState::Source(source) => Some(source.duplicate_in(self.authority)),
-            ManagedLazyProducerState::Checkpoint(_) => None,
+            ManagedLazyProducerState::Checkpoint(_) | ManagedLazyProducerState::Panicked(_) => None,
         }
     }
 
@@ -732,11 +748,78 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
             .as_ref()
             .expect("an unresolved managed lazy must retain producer state")
         {
-            ManagedLazyProducerState::Source(_) => None,
+            ManagedLazyProducerState::Source(_) | ManagedLazyProducerState::Panicked(_) => None,
             ManagedLazyProducerState::Checkpoint(checkpoint) => {
                 Some(checkpoint.duplicate_in(self.authority))
             }
         }
+    }
+
+    /// The panic recorded by this lazy's own interrupted evaluation, if any.
+    pub(crate) fn panic_report(&self) -> Option<EvaluationPanic> {
+        if self.cell.result.get().is_some() {
+            return None;
+        }
+        let producer = self
+            .cell
+            .producer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match producer.as_ref()? {
+            ManagedLazyProducerState::Panicked(report) => Some(report.clone()),
+            ManagedLazyProducerState::Source(_) | ManagedLazyProducerState::Checkpoint(_) => None,
+        }
+    }
+
+    /// Records that this lazy's own evaluation panicked, releasing its source
+    /// or checkpoint so the interrupted work is never replayed.
+    ///
+    /// Returns `false` when the lazy already has a result or a recorded
+    /// panic.
+    pub(crate) fn enter_panicked(&self, report: &EvaluationPanic) -> bool {
+        if self.cell.result.get().is_some() {
+            return false;
+        }
+        let producer = self
+            .cell
+            .producer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if self.cell.result.get().is_some()
+            || !matches!(
+                producer.as_ref(),
+                Some(ManagedLazyProducerState::Source(_) | ManagedLazyProducerState::Checkpoint(_))
+            )
+        {
+            return false;
+        }
+        let producer = RefCell::new(producer);
+        // SAFETY: the lazy cell belongs to this exact access region. The
+        // producer mutex excludes another transition. The leaving visitor
+        // reports every edge of the released producer, and the panicked state
+        // adds none.
+        unsafe {
+            self.authority.with_managed_edge_transition(
+                &self.owner.0,
+                |visitor| {
+                    trace_lazy_producer_state(
+                        producer
+                            .borrow()
+                            .as_ref()
+                            .expect("unresolved lazy must retain producer state"),
+                        visitor,
+                    );
+                },
+                |_| {},
+                || {
+                    let prior = producer
+                        .borrow_mut()
+                        .replace(ManagedLazyProducerState::Panicked(report.clone()));
+                    drop(prior);
+                },
+            )
+        }
+        true
     }
 
     pub(crate) fn install_checkpoint(
@@ -1196,6 +1279,8 @@ fn trace_lazy_producer_state(state: &ManagedLazyProducerState, visitor: &mut Vis
     match state {
         ManagedLazyProducerState::Source(source) => trace_lazy_source(source, visitor),
         ManagedLazyProducerState::Checkpoint(checkpoint) => checkpoint.trace(visitor),
+        // A panic report holds no managed edges.
+        ManagedLazyProducerState::Panicked(_) => {}
     }
 }
 

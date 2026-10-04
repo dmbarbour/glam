@@ -226,8 +226,8 @@ const INVENTORY: &[InventoryEntry] = &[
         "src/evaluation/pump.rs",
         0,
         0,
-        1,
-        "centralized client/spark evaluation and same-region exceptional lazy-cycle publication",
+        2,
+        "centralized client/spark evaluation and same-region exceptional lazy-cycle and panicked-route publication",
         "I3A.3/I3B.1b/I3B.2/I3C.2 scoped polling; I4F.1 outcomes; GCI11R-002D.2b.2e.3 nested-construction repair"
     ),
     entry!(
@@ -495,6 +495,7 @@ impl RootPublicationOccurrence {
                 | "src/eval/whnf.rs::regional_status_poll"
                 | "src/evaluation/access.rs::impl EvaluationValueAccess < 'scope >::root_value"
                 | "src/evaluation/pump.rs::poison_lazy_cycle"
+                | "src/evaluation/pump.rs::record_lazy_panic"
                 | "src/evaluation/session.rs::impl EvalContext::compose_builtin"
                 | "src/diagnostic.rs::diagnostic_object_root"
                 | "src/diagnostic.rs::conventional_summary_root"
@@ -825,10 +826,12 @@ fn every_runtime_root_publication_has_an_exact_disposition() {
     // lazy and its public value root within the same bounded access region.
     // D.2h.4c.2b.3 adds five rooted reflection fixtures for constant effects,
     // application checkpoints, metadata carriers, and reflection gates.
-    assert_eq!(actual.len(), 272, "runtime-root publication count drifted");
+    // Panic containment adds one same-region publication: a lazy route that
+    // panicked after caching its result settles with that cached result.
+    assert_eq!(actual.len(), 273, "runtime-root publication count drifted");
     assert_eq!(
         root_publication_fingerprint(&occurrences),
-        11_317_655_089_926_401_572,
+        292_970_567_950_687_913,
         "runtime-root publication source fingerprint drifted"
     );
 

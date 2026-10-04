@@ -167,7 +167,7 @@ fn aggregate_poll_exit_matrix_remains_explicit() {
     for fixture in [
         "external_boundary_publishes_the_complete_checkpoint_before_access_closes",
         "permanent_failure_is_rooted_inside_the_regional_poll",
-        "unwind_poison_is_reported_without_reentering_the_reducer",
+        "unwind_poison_faults_without_reentering_the_reducer",
         "dropping_a_suspended_computation_retires_its_complete_checkpoint",
         "collection_between_polls_preserves_only_the_installed_checkpoint",
     ] {

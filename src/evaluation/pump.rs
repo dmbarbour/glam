@@ -302,6 +302,7 @@ fn release_lazy_route(
     Option<ExactRouteRelease>,
 ) {
     let work = claimed.id();
+    let lazy = claimed.lazy().clone();
     let (work_poll, terminal) = match poll {
         EvaluationMachinePoll::Yielded => (DeferredWorkPoll::Yielded, None),
         EvaluationMachinePoll::ScheduleSpark(_) => {
@@ -318,9 +319,13 @@ fn release_lazy_route(
             Some(EvaluationWaitTerminal::Failed(error)),
         ),
         EvaluationMachinePoll::Cancelled => unreachable!("lazy route cannot be canceled as a task"),
-        EvaluationMachinePoll::Panicked { report, torn: _ } => (
+        EvaluationMachinePoll::Panicked { report, torn } => (
             DeferredWorkPoll::Terminal,
-            Some(EvaluationWaitTerminal::Panicked(report)),
+            Some(if torn {
+                record_lazy_panic(coordinator, &lazy, report)
+            } else {
+                EvaluationWaitTerminal::Panicked(report)
+            }),
         ),
     };
     let mut release = coordinator.release_lazy_route(claimed, work_poll);
@@ -876,6 +881,36 @@ fn release_deferred_task(
         }),
         route,
     )
+}
+
+/// Records a panic in a lazy's own evaluation and returns its route terminal.
+///
+/// The lazy enters the `Panicked` evaluation state, so later observers halt
+/// with this report and the work is never replayed. A lazy that cached its
+/// result before the panic keeps it, and the route settles with that result.
+fn record_lazy_panic(
+    coordinator: &Arc<EvaluationWorkCoordinator>,
+    lazy: &crate::core::ManagedLazyRoot,
+    report: EvaluationPanic,
+) -> EvaluationWaitTerminal {
+    let values = coordinator
+        .value_observer()
+        .upgrade()
+        .expect("a claimed lazy route must retain a live value domain");
+    values.with_runtime_value_access(|access| {
+        if lazy.enter_panicked(&access, &report) {
+            return EvaluationWaitTerminal::Panicked(report);
+        }
+        match lazy.access(&access).and_then(|lazy| lazy.cached()) {
+            Some(Ok(value)) => EvaluationWaitTerminal::Complete(
+                access.root_runtime_value(value.into_value_in(&access)),
+            ),
+            Some(Err(failure)) => EvaluationWaitTerminal::Failed(
+                crate::runtime::RuntimeFailureRoot::new(&values, failure),
+            ),
+            None => EvaluationWaitTerminal::Panicked(report),
+        }
+    })
 }
 
 fn poison_lazy_cycle(

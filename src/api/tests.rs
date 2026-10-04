@@ -2222,6 +2222,22 @@ fn panicking_evaluation_reports_a_panic_and_leaves_the_runtime_usable() {
         "waiters must halt instead of reinstalling the panicked work"
     );
 
+    // The panicking lazy keeps its panic as evaluation state: a later demand
+    // halts with the original report and never replays the work.
+    let again = assembler
+        .evaluator()
+        .eval(&panicking)
+        .expect_err("a panicked lazy must keep halting");
+    assert_eq!(again.kind(), ErrorKind::Panic);
+    assert!(
+        again
+            .panic_report()
+            .zip(error.panic_report())
+            .is_some_and(|(again, first)| again.same_panic(first)),
+        "later observers must see the original report"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
     // The same runtime keeps evaluating, settles, and collects.
     assert_eq!(value_i64(&assembler, &values.integer(7)), Some(7));
     let runtime = assembler.evaluation_runtime();
@@ -2230,6 +2246,37 @@ fn panicking_evaluation_reports_a_panic_and_leaves_the_runtime_usable() {
     runtime
         .service_managed_collection()
         .expect("collection must succeed after a contained panic");
+}
+
+#[test]
+fn panicking_host_call_is_never_replayed() {
+    let assembler = Assembler::new();
+    let core_values = assembler.core_values();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let lazy = LazyValue::host_call(&core_values, "panicking host call", move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        panic!("forced host callback panic");
+    });
+    let value = public_value(&core_values, CoreValue::Lazy(lazy));
+
+    let first = assembler
+        .evaluator()
+        .eval(&value)
+        .expect_err("a panicking host callback must interrupt the demand");
+    assert_eq!(first.kind(), ErrorKind::Panic);
+    assert_eq!(first.panic_message(), Some("forced host callback panic"));
+    let second = assembler
+        .evaluator()
+        .eval(&value)
+        .expect_err("an interrupted host call must keep halting");
+    assert_eq!(second.kind(), ErrorKind::Panic);
+    assert_eq!(second.panic_message(), Some("forced host callback panic"));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "an interrupted host callback must never be replayed"
+    );
 }
 
 #[test]

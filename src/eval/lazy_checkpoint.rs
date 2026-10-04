@@ -307,9 +307,9 @@ impl ManagedLazyCheckpointEdge {
         let mut state = match cell.state.lock() {
             Ok(state) => state,
             Err(_) => {
-                return RegionalObjectFixpointPoll::Failed(Arc::new(EvaluationFailure::message(
-                    "managed object-fixpoint state was poisoned by an earlier unwind",
-                )));
+                // A poisoned cell holds progress torn by an earlier panic. Observing it
+                // is a fault, never a failure: the poll boundary contains it.
+                panic!("managed object-fixpoint state was poisoned by an earlier panic");
             }
         };
         // SAFETY: the owning lazy retains this exact checkpoint edge. The
@@ -339,9 +339,9 @@ impl ManagedLazyCheckpointEdge {
         let mut state = match cell.state.lock() {
             Ok(state) => state,
             Err(_) => {
-                return RegionalListEffectPoll::Failed(Arc::new(EvaluationFailure::message(
-                    "managed list-effect state was poisoned by an earlier unwind",
-                )));
+                // A poisoned cell holds progress torn by an earlier panic. Observing it
+                // is a fault, never a failure: the poll boundary contains it.
+                panic!("managed list-effect state was poisoned by an earlier panic");
             }
         };
         // SAFETY: the owning lazy retains this exact checkpoint edge. The
@@ -371,9 +371,9 @@ impl ManagedLazyCheckpointEdge {
         let mut state = match cell.state.lock() {
             Ok(state) => state,
             Err(_) => {
-                return RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(
-                    "managed builtin state was poisoned by an earlier unwind",
-                )));
+                // A poisoned cell holds progress torn by an earlier panic. Observing it
+                // is a fault, never a failure: the poll boundary contains it.
+                panic!("managed builtin state was poisoned by an earlier panic");
             }
         };
         // SAFETY: the owning lazy retains this exact checkpoint edge. The

@@ -246,7 +246,16 @@ impl LazyTaskMachine {
 
     fn cached_poll(&self, context: &EvaluatorStepContext<'_>) -> EvaluationMachinePoll {
         let result = context.with_value_access(|access| access.lazy_root(&self.lazy).cached());
-        match result.expect("a released lazy source must have a terminal cache") {
+        let Some(result) = result else {
+            // A lazy whose own evaluation panicked released its source
+            // without a result. Re-raise that panic so the poll boundary halts
+            // this route with the original report; the work is never replayed.
+            let report = context
+                .with_value_access(|access| access.lazy_root(&self.lazy).panic_report())
+                .expect("a released lazy source must have a terminal cache");
+            report.resume();
+        };
+        match result {
             Ok(value) => EvaluationMachinePoll::Complete(
                 context.root_value(|access| value.into_value_in(access.values())),
             ),
@@ -332,12 +341,15 @@ impl LazyTaskMachine {
         });
 
         match transition {
-            Transition::Interrupted => self.fail(
-                context,
-                EvaluationHalt::new(
-                    "host callback was interrupted after invocation began; refusing to replay it",
-                ),
-            ),
+            // Only a panic interrupts an invocation. Replaying the callback
+            // could repeat its effects, and the interruption is a fault, never
+            // a semantic failure, so it re-raises to the poll boundary. The
+            // boundary records it on this lazy.
+            Transition::Interrupted => {
+                panic!(
+                    "host callback was interrupted after invocation began; refusing to replay it"
+                )
+            }
             Transition::Whnf => {
                 self.work = LazyTaskWork::WhnfCheckpoint;
                 EvaluationMachinePoll::Yielded

@@ -328,11 +328,9 @@ impl ManagedListFrontRoot {
         let mut state = match cell.state.lock() {
             Ok(state) => state,
             Err(_) => {
-                return DurableListFrontPoll::Failed(access.values().root_runtime_failure(
-                    Arc::new(EvaluationFailure::message(
-                        "managed list-front state was poisoned by an earlier unwind",
-                    )),
-                ));
+                // A poisoned cell holds progress torn by an earlier panic. Observing it
+                // is a fault, never a failure: the poll boundary contains it.
+                panic!("managed list-front state was poisoned by an earlier panic");
             }
         };
         // SAFETY: the registered wrapper root keeps `owner` live in this

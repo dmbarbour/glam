@@ -1341,10 +1341,12 @@ const EXPECTED_W7_UNAPPROVED_RECURSION: &[&str] = &[];
 // two deleted helper edges leave the resolved graph smaller without changing
 // its cycle set.
 // Panic containment adds six resolved edges: the poll boundary queries a
-// claim's prior-dependency panic and a blocked poll's dependency panic. None
-// of them recurses, so the cycle set stays empty.
+// claim's prior-dependency panic and a blocked poll's dependency panic. Its
+// lazy-state step replaces one WHNF poison-failure edge with a diverging
+// fault and adds a cached-poll panic lookup. None of them recurses, so the
+// cycle set stays empty.
 const EXPECTED_W7_RESOLVED_CALLS: usize = 1_144;
-const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 13_406_072_576_606_184_939;
+const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 9_203_715_114_783_025_642;
 const EXPECTED_W7_CYCLIC_FUNCTIONS: &[&str] = &[];
 const EXPECTED_W8_REMAINING_RETRYABLE_HALT_CALLS: &[&str] = &[
     "src/eval/net.rs::drive_net_semantic_action#1|HaltBlocked",

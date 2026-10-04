@@ -543,6 +543,11 @@ interruption:
 - No panic is ever cached as a lazy result, assigned to a promise, or turned
   into an `EvaluationFailure`. Any such conversion re-raises the panic to the
   enclosing boundary instead.
+- A lazy whose own route panicked records the panic as evaluation state,
+  never as a result. Its source or checkpoint is released, so the work is
+  never replayed, and every later route re-raises the original report. A
+  poisoned per-value cell holds torn progress; observing it is likewise a
+  fault, never a failure.
 - The client API reports `ErrorKind::Panic`.
 
 All clones of a lazy value share one source/result cell. Workers clone a source

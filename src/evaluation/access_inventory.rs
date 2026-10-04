@@ -518,7 +518,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
             });
     assert_eq!(
         gateway_totals,
-        GatewayCounts::new(536, 17),
+        GatewayCounts::new(537, 17),
         "managed gateway occurrence totals drifted",
     );
     assert_eq!(
@@ -562,7 +562,7 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     }
     assert_eq!(
         actual.len(),
-        540,
+        541,
         "managed mutator-introduction count drifted"
     );
     // D.2h.4c.2 adds two test-only bounded accesses: one constructs
@@ -581,10 +581,12 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     // Panic containment adds two test-only accesses. One poisons a net under
     // an open normalization batch, and one poisons a lazy producer; each
     // fixture then forces collection through the poisoned cell. A third
-    // test-only access compares the `panicked` task status with its key.
+    // test-only access compares the `panicked` task status with its key. One
+    // cold-path outer admission records a lazy's own panic when its route
+    // releases.
     assert_eq!(
         admission_occurrence_fingerprint(&occurrences),
-        7_621_047_425_223_049_381,
+        15_179_578_428_082_071_443,
         "managed mutator-introduction source fingerprint drifted"
     );
 
@@ -663,9 +665,10 @@ fn every_mutator_introduction_has_an_exact_disposition() {
         production_disposition_count(AdmissionDisposition::PendingRegionalReuse),
         0
     );
+    // Includes the cold-path admission that records a lazy's own panic.
     assert_eq!(
         production_disposition_count(AdmissionDisposition::OuterAdmission),
-        54
+        55
     );
 }
 

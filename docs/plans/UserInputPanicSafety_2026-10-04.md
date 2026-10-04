@@ -2,7 +2,8 @@
 
 Status: open. The parser and evaluation inspections are done: F1 is fixed,
 and no further panic was found. The poisoning audit is done, and its
-containment design is decided. Implementation is in progress.
+containment design is decided. Steps 1-3 are implemented; steps 4 and 5
+remain.
 
 This plan responds to the holistic pre-performance review, X4 and Maintainer
 Decision 1 ([review](../reviews/HolisticArchitecturePrePerformance_2026-10-03.md)).
@@ -373,12 +374,9 @@ The panic hook still prints every panic, so each one remains a visible bug.
    acyclic call edges.
 
    Known gaps:
-   - **Step 3.** After a route retires, a new demand reruns a lazy whose own
-     evaluation panicked. A host-call lazy interrupted mid-invocation still
-     becomes the `EvaluationFailure` "refusing to replay".
-   - **Panic after caching.** A panic after a lazy cached its result in the
-     same poll leaves the route `Panicked` although the lazy is cached.
-     Step 3's lazy-state work should check the cache in the own-panic arm.
+   - **Step 3, now resolved.** A new demand reran a lazy whose own evaluation
+     panicked, and an interrupted host call became the `EvaluationFailure`
+     "refusing to replay".
    - **Release paths can still panic** on coordinator assertions; this is
      step 4.
    - **Unobserved panics** are visible only through the panic hook and
@@ -387,7 +385,49 @@ The panic hook still prints every panic, so each one remains a visible bug.
      boundary.
 3. **The lazy `Panicked` evaluation state**, including torn checkpoints,
    interrupted host calls (which replaces "refusing to replay"), and poisoned
-   per-value cells.
+   per-value cells. Done on 2026-10-04.
+   - **Recording.** Every lazy is evaluated in its own route, confirmed by
+     probing: a direct demand and a dependent's demand both catch the panic
+     in the panicking lazy's route. So a route's own-panic release records
+     `Panicked` on exactly the lazy whose evaluation panicked, whatever the
+     scheduling.
+   - **What the state does.** It releases the source or checkpoint, so the
+     work is never replayed and its edges are reclaimed. A lazy that cached
+     its result before panicking keeps the result, and the route settles
+     with it.
+   - **Detection stays off the demand hot path.** Checking for the state when
+     a route is reserved would open an access region on every lazy demand. So
+     a demand of a panicked lazy installs an ordinary route instead. That
+     route's poll finds no source, checkpoint, or result, and re-raises the
+     recorded report from `cached_poll`. The boundary then halts it with the
+     original report. The extra route costs something only for lazies that
+     already panicked.
+   - **Torn progress is a fault.** The six cells that mapped poison to a
+     semantic `Failed` now panic: object fixpoint, list effect, builtin, list
+     front, key conversion, and WHNF state. The message is "poisoned by an
+     earlier panic", and the boundary contains it. A torn checkpoint is
+     normally released along with its panicked owner, so this path is
+     defensive.
+   - **Interrupted host calls are a fault.** An interrupted host invocation
+     re-raises "refusing to replay" instead of caching a failure. Every
+     production poll is behind the boundary, so the original panic has
+     already marked the lazy.
+   - **Tests adapted to the intended semantics:**
+     - the host-call replay test now expects that fault;
+     - the WHNF-poison test expects a fault instead of a rooted failure.
+   - **New regressions:**
+     - a re-demand of a panicked lazy halts with the same report and never
+       reruns its thunk;
+     - a panicking host callback is invoked exactly once across two demands.
+
+     Both fail with the recording disabled.
+   - **Inventories record:**
+     - one cold-path outer admission and one same-region root publication,
+       both in `record_lazy_panic`;
+     - the changed acyclic call-edge fingerprint.
+   - **Remaining limit.** A net shared by several lazies, once torn, faults
+     each later observer with "shared runtime net was poisoned", not the
+     original report.
 4. **Runtime-core fault handling.**
 5. **Call-site containment of client callbacks outside polls.**
 

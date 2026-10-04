@@ -135,7 +135,7 @@ fn permanent_failure_is_rooted_inside_the_regional_poll() {
 }
 
 #[test]
-fn unwind_poison_is_reported_without_reentering_the_reducer() {
+fn unwind_poison_faults_without_reentering_the_reducer() {
     let values = isolated_values();
     let context = EvalContext::isolated(values.clone());
     let poll = EvaluationPollContext::for_context(&context);
@@ -180,18 +180,19 @@ fn unwind_poison_is_reported_without_reentering_the_reducer() {
     assert!(unwind.is_err());
     assert!(!thread_has_runtime_value_access_for_test());
 
-    let mut resume_budget = WhnfStepBudget::new(1);
-    let resumed = poll.with_value_access(&context, |access| {
-        computation.poll_in(&access, &mut resume_budget, |_access, _work| {
-            panic!("a poisoned state must fail before reducer reentry")
-        })
-    });
-    let WhnfPoll::Failed(failure) = resumed else {
-        panic!("an unwind-poisoned managed state must report a rooted failure")
-    };
+    // Torn progress is a fault, never a semantic failure: observing it panics
+    // before the reducer runs again, and the poll boundary contains that.
+    let resumed = catch_unwind(AssertUnwindSafe(|| {
+        let mut resume_budget = WhnfStepBudget::new(1);
+        poll.with_value_access(&context, |access| {
+            computation.poll_in(&access, &mut resume_budget, |_access, _work| {
+                panic!("a poisoned state must fault before reducer reentry")
+            })
+        });
+    }));
+    let payload = resumed.expect_err("an unwind-poisoned managed state must fault");
     assert!(
-        failure
-            .to_string()
+        crate::core::panic_payload_message(payload.as_ref())
             .contains("managed WHNF evaluation state was poisoned")
     );
 }

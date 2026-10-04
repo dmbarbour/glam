@@ -1070,12 +1070,14 @@ fn interrupted_host_call_is_never_replayed_after_route_loss() {
         .values()
         .with_runtime_value_access(|access| LazyValue::from_root(&retained, &access));
     let mut resumed = lazy_machine(&context, retained);
-    let EvaluationMachinePoll::Failed(failure) =
-        resumed.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
-    else {
-        panic!("a later route must reject the interrupted host call")
-    };
-    assert!(failure.to_string().contains("refusing to replay"));
+    // An interrupted invocation is a fault, never a semantic failure. The
+    // later route refuses to replay it by re-raising; a scheduled poll's
+    // boundary would record that on the lazy.
+    let replay = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = resumed.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1));
+    }));
+    let payload = replay.expect_err("a later route must reject the interrupted host call");
+    assert!(crate::core::panic_payload_message(payload.as_ref()).contains("refusing to replay"));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 

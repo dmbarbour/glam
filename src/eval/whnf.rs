@@ -846,7 +846,7 @@ impl WhnfComputation {
         let (status, observed) = match drive_managed_state_in(&managed, access, budget, &mut reduce)
         {
             Ok(result) => result,
-            Err(error) => return managed_state_error_poll(access, error),
+            Err(error) => managed_state_error(error),
         };
         *observation = observed;
         regional_status_poll(access, status)
@@ -879,7 +879,7 @@ impl ManagedLazyCheckpointEdge {
         let mut reduce = reduce_semantic_shell;
         let (status, _) = match drive_managed_state_in(&managed, access, budget, &mut reduce) {
             Ok(result) => result,
-            Err(error) => return Some(managed_state_error_poll(access, error)),
+            Err(error) => managed_state_error(error),
         };
         Some(regional_status_poll(access, status))
     }
@@ -897,19 +897,15 @@ fn drive_managed_state_in(
     })
 }
 
-fn managed_state_error_poll(
-    access: &EvaluationValueAccess<'_>,
-    error: ManagedWhnfAccessError,
-) -> WhnfPoll {
+fn managed_state_error(error: ManagedWhnfAccessError) -> ! {
     match error {
         ManagedWhnfAccessError::RuntimeMismatch => {
             unreachable!("managed WHNF access was already provenance-checked")
         }
+        // A poisoned cell holds progress torn by an earlier panic. Observing it
+        // is a fault, never a failure: the poll boundary contains it.
         ManagedWhnfAccessError::Poisoned => {
-            let failure = Arc::new(EvaluationFailure::message(
-                "managed WHNF evaluation state was poisoned by an earlier unwind",
-            ));
-            WhnfPoll::Failed(access.values().root_runtime_failure(failure))
+            panic!("managed WHNF evaluation state was poisoned by an earlier panic")
         }
     }
 }
