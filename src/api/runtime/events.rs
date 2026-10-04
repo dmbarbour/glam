@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use rpds::RedBlackTreeMapSync;
 
@@ -220,7 +220,7 @@ impl RuntimeEventState {
         let observations = journal
             .observations
             .lock()
-            .expect("runtime input observation mutex should not be poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         observations
             .iter()
             .all(|(endpoint, cursor)| valid_input(endpoint, cursor))
@@ -372,6 +372,8 @@ pub struct RuntimeEventJournal {
     snapshot: RuntimeEventSnapshot,
     /// Monotone input observations shared by every alternative forked from
     /// this transaction. Input claims and output intents remain branch-local.
+    ///
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     observations: Arc<Mutex<BTreeMap<RuntimeInputEndpointId, RuntimeInputCursor>>>,
     cursors: BTreeMap<RuntimeInputEndpointId, RuntimeInputCursor>,
     outputs: Vec<RuntimeOutputIntent>,
@@ -427,7 +429,7 @@ impl RuntimeEventJournal {
         let mut observations = self
             .observations
             .lock()
-            .expect("runtime input observation mutex should not be poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         observations
             .entry(input.endpoint)
             .and_modify(|prior| {

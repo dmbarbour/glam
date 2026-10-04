@@ -274,12 +274,38 @@ The panic hook still prints every panic, so each one remains a visible bug.
 
 ### Implementation sequence
 
-1. **No-regret changes**, which every alternative needs:
-   - collector traces read through poison (the net cell and the lazy
-     producer);
-   - destructors never panic on poison;
-   - leaf lock classes recover;
-   - client values are dropped after glam locks are released.
+1. **No-regret changes**, which every alternative needs. Done on
+   2026-10-04, except for destructors that reach runtime-core locks:
+   - **Collector traces read through poison.** This covers the net cell and
+     the lazy producer.
+   - **Leaf lock classes recover.** Twenty-eight classes recover via
+     `into_inner` at every site. Each field's documentation now states the
+     invariant that makes recovery sound, so a future complex critical
+     section is a visible contract change.
+   - **Net cleanup tolerates poison.** Releasing or restoring a claim on a
+     poisoned net is skipped through `with_cleanup_mut_via` and its edge
+     form: restoring on a torn net is moot, and re-running a transition there
+     could panic during the unwind. Batch close reads through poison instead,
+     because its bookkeeping is independent of the topology and contenders
+     still need waking.
+   - **Client values are dropped after glam locks are released.** This
+     covers diagnostic subscribers and effect-token payloads. It also keeps
+     a client destructor that re-enters the bus from deadlocking.
+   - **Destructors that reach runtime-core locks are moved to step 4.** These
+     are the coordinator, the settlement gate, and the transaction state.
+     Their destructors run long call chains shared with normal operation, so
+     a no-op disposition needs the runtime-wide fault signal that step 4
+     introduces.
+
+   Regressions:
+   - A panic under the net lock with an open batch, which reproduces N1's
+     abort on the old code; collection then traces the rooted poisoned net.
+   - A cursor claim unwinding through a poisoned net.
+   - Collection through a poisoned lazy producer.
+   - A subscriber whose destructor panics.
+
+   Each regression fails with its fix reverted, except the subscriber test:
+   leaf recovery alone already keeps the bus usable.
 2. **Poll-boundary containment.** `catch_unwind` at `ClaimedTask::poll`,
    `poll_claimed_client_demand`, and `poll_claimed_spark` ends the claim as
    `Panicked` through the existing terminal path. Waiters halt, the client

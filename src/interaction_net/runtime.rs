@@ -3,7 +3,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, TryLockError};
 
 use super::model::*;
 
@@ -552,6 +552,7 @@ pub(crate) struct RuntimeNetDisturbance {
 
 struct RuntimeNetDisturbanceInner {
     changed: Condvar,
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     wait: Mutex<()>,
     epoch: AtomicU64,
     closed: AtomicBool,
@@ -940,7 +941,7 @@ impl RuntimeNetDisturbance {
             .inner
             .wait
             .lock()
-            .expect("runtime-net disturbance signal was poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         self.inner.epoch.fetch_add(1, Ordering::Relaxed);
         self.inner.changed.notify_all();
     }
@@ -950,7 +951,7 @@ impl RuntimeNetDisturbance {
             .inner
             .wait
             .lock()
-            .expect("runtime-net disturbance signal was poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         self.inner.closed.store(true, Ordering::Relaxed);
         self.inner.epoch.fetch_add(1, Ordering::Relaxed);
         self.inner.changed.notify_all();
@@ -967,7 +968,7 @@ impl RuntimeNetDisturbance {
             .inner
             .wait
             .lock()
-            .expect("runtime-net disturbance signal was poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         let mut before_block = Some(before_block);
         while self.epoch() == observed_epoch && !self.inner.closed.load(Ordering::Relaxed) {
             if let Some(before_block) = before_block.take() {
@@ -977,7 +978,7 @@ impl RuntimeNetDisturbance {
                 .inner
                 .changed
                 .wait(wait)
-                .expect("runtime-net disturbance signal was poisoned");
+                .unwrap_or_else(PoisonError::into_inner);
         }
         !self.inner.closed.load(Ordering::Relaxed)
     }
@@ -1042,11 +1043,13 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
         Ok(id)
     }
 
+    /// Closes one batch from its guard, including during an unwind.
+    ///
+    /// Batch bookkeeping is independent of the topology a panic may have
+    /// torn, so a poisoned net still closes its batch and wakes contenders.
+    /// Reading through poison leaves the poison itself set.
     fn close_normalization_batch(&self, id: u64) {
-        let mut state = self
-            .runtime
-            .lock()
-            .expect("shared runtime net was poisoned");
+        let mut state = self.runtime.lock().unwrap_or_else(PoisonError::into_inner);
         let publish = if state
             .batches
             .active
@@ -1104,15 +1107,20 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
     /// A managed cell's mutation gateways require a mutator, so collection's
     /// exclusive heap phase guarantees this lock is immediately available.
     /// Failing rather than blocking keeps an integration violation
-    /// recoverable by the collector's trace-panic protocol.
+    /// recoverable by the collector's trace-panic protocol. A poisoned net
+    /// still holds its edges, and tracing may not omit them, so poison is
+    /// read through.
     pub(crate) fn try_visit_logical_payloads(
         &self,
         visit: &mut impl FnMut(RuntimeNetPayload<'_, S>),
     ) {
-        let state = self
-            .runtime
-            .try_lock()
-            .expect("managed runtime net must be quiescent during tracing");
+        let state = match self.runtime.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                panic!("managed runtime net must be quiescent during tracing")
+            }
+        };
         state.runtime.visit_logical_payloads(visit);
     }
 
@@ -1214,6 +1222,37 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
             .runtime
             .lock()
             .expect("shared runtime net was poisoned");
+        self.apply_conditional_mut_via(&mut state, gateway, update)
+    }
+
+    /// Applies a claim release or restore unless a panic poisoned the net.
+    ///
+    /// A poisoned net may be torn mid-rewrite, so its evaluation is already
+    /// interrupted and restoring a claim on it is moot. Running the
+    /// transition anyway could panic again, which aborts the process when
+    /// the cleanup runs in a destructor during an unwind. Returns `None` for
+    /// a poisoned net.
+    pub(crate) fn with_cleanup_mut_via<Gateway, R>(
+        &self,
+        gateway: &Gateway,
+        update: impl FnOnce(&mut RuntimeNet<S>) -> RuntimeNetMutation<R>,
+    ) -> Option<R>
+    where
+        Gateway: RuntimeNetMutationGateway<S>,
+    {
+        let mut state = self.runtime.lock().ok()?;
+        Some(self.apply_conditional_mut_via(&mut state, gateway, update))
+    }
+
+    fn apply_conditional_mut_via<Gateway, R>(
+        &self,
+        state: &mut SharedRuntimeNetState<S>,
+        gateway: &Gateway,
+        update: impl FnOnce(&mut RuntimeNet<S>) -> RuntimeNetMutation<R>,
+    ) -> R
+    where
+        Gateway: RuntimeNetMutationGateway<S>,
+    {
         match gateway.transition(&mut state.runtime, update) {
             RuntimeNetMutation::Unchanged(result) => result,
             RuntimeNetMutation::Changed(result) => {
@@ -1236,6 +1275,33 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
             .runtime
             .lock()
             .expect("shared runtime net was poisoned");
+        self.apply_conditional_edge_mut_via(&mut state, gateway, edges, update)
+    }
+
+    /// Edge-transition form of [`Self::with_cleanup_mut_via`].
+    pub(crate) fn with_cleanup_edge_mut_via<Gateway, R>(
+        &self,
+        gateway: &Gateway,
+        edges: impl FnOnce(&RuntimeNet<S>) -> RuntimeNetEdgeTransition,
+        update: impl FnOnce(&mut RuntimeNet<S>) -> RuntimeNetMutation<R>,
+    ) -> Option<R>
+    where
+        Gateway: RuntimeNetMutationGateway<S>,
+    {
+        let mut state = self.runtime.lock().ok()?;
+        Some(self.apply_conditional_edge_mut_via(&mut state, gateway, edges, update))
+    }
+
+    fn apply_conditional_edge_mut_via<Gateway, R>(
+        &self,
+        state: &mut SharedRuntimeNetState<S>,
+        gateway: &Gateway,
+        edges: impl FnOnce(&RuntimeNet<S>) -> RuntimeNetEdgeTransition,
+        update: impl FnOnce(&mut RuntimeNet<S>) -> RuntimeNetMutation<R>,
+    ) -> R
+    where
+        Gateway: RuntimeNetMutationGateway<S>,
+    {
         let edges = edges(&state.runtime);
         match gateway.transition_edges(&mut state.runtime, edges, update) {
             RuntimeNetMutation::Unchanged(result) => result,
@@ -1935,24 +2001,28 @@ where
             CursorDisposition::Release => {
                 let restored = self.restore_fallback();
                 self.claim = None;
-                debug_assert!(restored, "released cursor claim must remain current");
+                debug_assert_ne!(
+                    restored,
+                    Some(false),
+                    "released cursor claim must remain current"
+                );
                 None
             }
         }
     }
 
-    fn restore_fallback(&self) -> bool {
+    /// Restores the claim, or returns `None` when a panic poisoned the net.
+    fn restore_fallback(&self) -> Option<bool> {
         let Some(claim) = self.claim.as_ref() else {
-            return true;
+            return Some(true);
         };
-        self.target
-            .with_conditional_mut_via(self.gateway, |target| {
-                if target.release_cursor_claim(claim) {
-                    RuntimeNetMutation::Changed(true)
-                } else {
-                    RuntimeNetMutation::Unchanged(false)
-                }
-            })
+        self.target.with_cleanup_mut_via(self.gateway, |target| {
+            if target.release_cursor_claim(claim) {
+                RuntimeNetMutation::Changed(true)
+            } else {
+                RuntimeNetMutation::Unchanged(false)
+            }
+        })
     }
 }
 

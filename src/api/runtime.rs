@@ -110,6 +110,7 @@ pub(super) struct RuntimeState {
     pub(super) executor: Arc<EvaluationExecutor>,
     pub(super) work: Arc<EvaluationWorkCoordinator>,
     pub(super) shared_resources: Arc<RuntimeSharedResources>,
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     pub(super) diagnostic_ingresses: Mutex<Vec<Arc<DiagnosticIngressInner>>>,
     #[cfg(test)]
     gc_outcome_publication_pause: Mutex<Option<RuntimeGcOutcomePublicationPause>>,

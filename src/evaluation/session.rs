@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicU8;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, PoisonError};
 
 use crate::core::{
     Builtin, CoreValueFactory, EvaluationFailure, ManagedLazyRoot, ManagedPromiseRoot,
@@ -112,6 +112,7 @@ struct ReflectionTaskActivation {
 
 pub(crate) struct ReflectionTaskActivationPermit {
     handle: EvaluationTaskHandle,
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     activation: Mutex<Option<ReflectionTaskActivation>>,
 }
 
@@ -162,7 +163,7 @@ impl ReflectionTaskActivationPermit {
             let mut slot = self
                 .activation
                 .lock()
-                .expect("reflection activation permit was poisoned");
+                .unwrap_or_else(PoisonError::into_inner);
             slot.take()
         };
         let Some(activation) = activation else {
@@ -190,7 +191,7 @@ impl Drop for ReflectionTaskActivationPermit {
         let abandoned = self
             .activation
             .get_mut()
-            .expect("reflection activation permit was poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .take();
         if let Some(abandoned) = abandoned {
             // Release the value root and demand context before coordinator

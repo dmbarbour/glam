@@ -1,6 +1,6 @@
 //! Runtime-owned pure client demand lifecycle.
 
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 
 #[cfg(test)]
 use crate::core::EvaluationFailure;
@@ -48,6 +48,7 @@ pub(crate) enum ClientDemandResult {
 }
 
 pub(crate) struct ClientDemandResultCell {
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     result: Mutex<Option<ClientDemandResult>>,
     changed: Condvar,
     #[cfg(test)]
@@ -78,10 +79,7 @@ impl ClientDemandResultCell {
         {
             probe();
         }
-        let mut current = self
-            .result
-            .lock()
-            .expect("client demand result cell was poisoned");
+        let mut current = self.result.lock().unwrap_or_else(PoisonError::into_inner);
         if current.is_some() {
             return false;
         }
@@ -119,15 +117,12 @@ impl ClientDemandResultCell {
     fn poll(&self) -> Option<ClientDemandResult> {
         self.result
             .lock()
-            .expect("client demand result cell was poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
 
     fn wait(&self) -> ClientDemandResult {
-        let mut result = self
-            .result
-            .lock()
-            .expect("client demand result cell was poisoned");
+        let mut result = self.result.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
             if let Some(result) = result.clone() {
                 return result;
@@ -135,7 +130,7 @@ impl ClientDemandResultCell {
             result = self
                 .changed
                 .wait(result)
-                .expect("client demand result cell was poisoned");
+                .unwrap_or_else(PoisonError::into_inner);
         }
     }
 }

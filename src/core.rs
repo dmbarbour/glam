@@ -5,7 +5,7 @@ use std::num::NonZeroU64;
 use std::sync::LazyLock;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use bytes::Bytes;
 use glam_gc::{CollectionPolicy, Heap};
@@ -311,6 +311,7 @@ const _: () = {
 #[derive(Clone)]
 pub(crate) struct CoreValueFactory {
     domain: Arc<RuntimeValueDomain>,
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     local_extensions: Option<SharedRuntimeCacheMap>,
 }
 
@@ -326,6 +327,7 @@ pub(crate) struct RuntimeValueDomain {
     ids: Arc<RuntimeIds>,
     heap: Heap,
     cache: RuntimeValueCache,
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     work_coordinator: Arc<Mutex<Weak<EvaluationWorkCoordinator>>>,
     external_owners: ExternalOwnerRegistry,
     #[cfg(test)]
@@ -356,6 +358,7 @@ impl CoreValues {
 /// concrete cached type.
 struct RuntimeValueCache {
     core: OnceLock<CoreValues>,
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     extensions: Mutex<RuntimeCacheMap>,
     #[cfg(test)]
     extension_lookups: AtomicUsize,
@@ -443,7 +446,7 @@ impl CoreValueFactory {
             .domain
             .work_coordinator
             .lock()
-            .expect("runtime work-coordinator binding was poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         if let Some(installed) = binding.upgrade() {
             assert!(
                 Arc::ptr_eq(&installed, coordinator),
@@ -458,7 +461,7 @@ impl CoreValueFactory {
         self.domain
             .work_coordinator
             .lock()
-            .expect("runtime work-coordinator binding was poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .upgrade()
     }
 
@@ -471,7 +474,7 @@ impl CoreValueFactory {
             .domain
             .work_coordinator
             .lock()
-            .expect("runtime work-coordinator binding was poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         if let Some(installed) = binding.upgrade() {
             installed
         } else {
@@ -543,7 +546,7 @@ impl CoreValueFactory {
         if let Some(entry) = self.local_extensions.as_ref().and_then(|extensions| {
             extensions
                 .lock()
-                .expect("local value-cache mutex should not be poisoned")
+                .unwrap_or_else(PoisonError::into_inner)
                 .get(&type_id)
                 .cloned()
         }) {
@@ -559,7 +562,7 @@ impl CoreValueFactory {
             .cache
             .extensions
             .lock()
-            .expect("runtime value-cache mutex should not be poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .get(&type_id)
             .cloned()
         {
@@ -581,7 +584,7 @@ impl CoreValueFactory {
                 .cache
                 .extensions
                 .lock()
-                .expect("runtime value-cache mutex should not be poisoned");
+                .unwrap_or_else(PoisonError::into_inner);
             values.entry(type_id).or_insert(candidate).clone()
         };
         let value = entry.get::<T>();
@@ -593,7 +596,7 @@ impl CoreValueFactory {
         if let Some(extensions) = &self.local_extensions {
             extensions
                 .lock()
-                .expect("local value-cache mutex should not be poisoned")
+                .unwrap_or_else(PoisonError::into_inner)
                 .entry(type_id)
                 .or_insert(entry);
         }

@@ -10,7 +10,7 @@ use std::num::NonZeroU64;
 use std::sync::MutexGuard;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 /// Runtime-wide semantic-state revision observed by retryable evaluation.
 ///
@@ -43,6 +43,7 @@ impl RuntimeObservationEpoch {
 }
 
 pub(crate) struct RuntimeObservationState {
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     epoch: Mutex<RuntimeObservationEpoch>,
     changed: Condvar,
     #[cfg(test)]
@@ -60,17 +61,11 @@ impl RuntimeObservationState {
     }
 
     pub(crate) fn current(&self) -> RuntimeObservationEpoch {
-        *self
-            .epoch
-            .lock()
-            .expect("runtime observation mutex should not be poisoned")
+        *self.epoch.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     pub(crate) fn advance(&self) -> RuntimeObservationEpoch {
-        let mut epoch = self
-            .epoch
-            .lock()
-            .expect("runtime observation mutex should not be poisoned");
+        let mut epoch = self.epoch.lock().unwrap_or_else(PoisonError::into_inner);
         *epoch = RuntimeObservationEpoch::from_raw(
             epoch
                 .get()
@@ -85,17 +80,14 @@ impl RuntimeObservationState {
     }
 
     pub(crate) fn wait_for_change(&self, observed: RuntimeObservationEpoch) {
-        let mut epoch = self
-            .epoch
-            .lock()
-            .expect("runtime observation mutex should not be poisoned");
+        let mut epoch = self.epoch.lock().unwrap_or_else(PoisonError::into_inner);
         while *epoch == observed {
             #[cfg(test)]
             self.waits.fetch_add(1, Ordering::Release);
             epoch = self
                 .changed
                 .wait(epoch)
-                .expect("runtime observation mutex should not be poisoned");
+                .unwrap_or_else(PoisonError::into_inner);
         }
     }
 
@@ -106,9 +98,7 @@ impl RuntimeObservationState {
 
     #[cfg(test)]
     pub(super) fn lock_epoch_for_test(&self) -> MutexGuard<'_, RuntimeObservationEpoch> {
-        self.epoch
-            .lock()
-            .expect("runtime observation mutex should not be poisoned")
+        self.epoch.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 

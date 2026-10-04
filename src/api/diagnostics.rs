@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::ops::Deref;
 use std::path::Path;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use super::runtime::{
     RuntimeDiagnosticRouteMode, RuntimeInputReader, RuntimeInputSender, RuntimeOutputWriter,
@@ -487,6 +487,7 @@ struct DiagnosticBusState {
 }
 
 struct DiagnosticBusInner {
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     state: Mutex<DiagnosticBusState>,
 }
 
@@ -533,7 +534,7 @@ impl DiagnosticBus {
             .inner
             .state
             .lock()
-            .expect("diagnostic bus mutex should not be poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         match state.runtime {
             Some(owner) if owner != runtime.id() => Err(Error::new(format!(
                 "diagnostic bus belongs to evaluation runtime {}, not {}",
@@ -562,7 +563,7 @@ impl DiagnosticBus {
             .inner
             .state
             .lock()
-            .expect("diagnostic bus mutex should not be poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         if state.runtime != Some(runtime.id()) {
             return Err(Error::new(
                 "diagnostic ingress runtime changed during setup",
@@ -599,7 +600,7 @@ impl DiagnosticBus {
             .state
             .diagnostic_ingresses
             .lock()
-            .expect("runtime diagnostic-ingress mutex should not be poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .push(ingress.inner.clone());
         Ok((ingress, reader))
     }
@@ -647,7 +648,7 @@ impl DiagnosticBus {
                 .inner
                 .state
                 .lock()
-                .expect("diagnostic bus mutex should not be poisoned");
+                .unwrap_or_else(PoisonError::into_inner);
             Self::validate_runtime_locked(&mut state, runtime)?;
             let ingress = state.ingress.as_ref().and_then(Weak::upgrade);
             let direct = ingress.is_none().then(|| {
@@ -722,7 +723,7 @@ impl DiagnosticBus {
         self.inner
             .state
             .lock()
-            .expect("diagnostic bus mutex should not be poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .counts
     }
 
@@ -742,7 +743,7 @@ impl DiagnosticBus {
                 .inner
                 .state
                 .lock()
-                .expect("diagnostic bus mutex should not be poisoned");
+                .unwrap_or_else(PoisonError::into_inner);
             let id = state.next_subscriber;
             state.next_subscriber = id
                 .checked_add(1)
@@ -802,10 +803,7 @@ impl DiagnosticIngressInner {
         // rearm boundary. Subscriber callbacks run only after it is dropped.
         let mutation = owner.mutation_admission.mutation_guard();
         let (event, subscribers) = {
-            let mut bus = bus
-                .state
-                .lock()
-                .expect("diagnostic bus mutex should not be poisoned");
+            let mut bus = bus.state.lock().unwrap_or_else(PoisonError::into_inner);
             DiagnosticBus::validate_runtime_locked(&mut bus, runtime)?;
             DiagnosticBus::record_event_locked(&mut bus, diagnostic)
         };
@@ -831,10 +829,7 @@ impl DiagnosticIngressInner {
         error: Error,
     ) -> Result<(DiagnosticEvent, Vec<Arc<dyn DiagnosticSubscriber>>), Error> {
         let event = {
-            let mut bus = bus
-                .state
-                .lock()
-                .expect("diagnostic bus mutex should not be poisoned");
+            let mut bus = bus.state.lock().unwrap_or_else(PoisonError::into_inner);
             DiagnosticBus::validate_runtime_locked(&mut bus, runtime)?;
             DiagnosticBus::record_event_locked(&mut bus, diagnostic)
         };
@@ -1008,11 +1003,15 @@ impl Drop for DiagnosticSubscriptionInner {
         let Some(bus) = self.bus.upgrade() else {
             return;
         };
-        bus.state
+        // The subscriber is client code whose destructor may panic, so it is
+        // dropped only after the bus lock is released.
+        let subscriber = bus
+            .state
             .lock()
-            .expect("diagnostic bus mutex should not be poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .subscribers
             .remove(&self.id);
+        drop(subscriber);
     }
 }
 

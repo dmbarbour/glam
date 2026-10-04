@@ -9,7 +9,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 
 use glam_gc::{Gc, Root, Trace, UnsupportedLayout, Visitor};
 
@@ -1202,10 +1202,15 @@ unsafe impl Trace for ManagedLazyCell {
             trace_lazy_result(result, visitor);
             return;
         }
-        let producer = self
-            .producer
-            .try_lock()
-            .expect("managed lazy must be quiescent during tracing");
+        // A poisoned producer still holds its edges, and tracing may not omit
+        // them, so poison is read through.
+        let producer = match self.producer.try_lock() {
+            Ok(producer) => producer,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                panic!("managed lazy must be quiescent during tracing")
+            }
+        };
         if let Some(result) = self.result.get() {
             drop(producer);
             trace_lazy_result(result, visitor);
@@ -2754,6 +2759,44 @@ mod tests {
         assert_eq!(collected.root_entries(), baseline.root_entries());
         assert_eq!(collected.marked_slots(), baseline.marked_slots());
         assert_eq!(collected.finalized_slots(), 3);
+    }
+
+    #[test]
+    fn poisoned_lazy_producer_remains_traceable() {
+        let values = new_values();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("the poisoned-producer fixture should start collectible");
+        let root = values.with_runtime_value_access(|access| {
+            let edge = access
+                .allocate_managed_lazy("poisoned producer", LazySource::Error)
+                .expect("the managed lazy cell should fit a run");
+            let root = access.root_managed_lazy(&edge);
+            // SAFETY: `edge` is live in this access region's exact heap and
+            // representation.
+            let cell = unsafe { access.scope.get_traced_edge(&edge.0) };
+            let poison = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _producer = cell
+                    .producer
+                    .lock()
+                    .expect("the fresh producer cell should not be poisoned");
+                panic!("forced panic under the lazy producer lock");
+            }));
+            assert!(poison.is_err());
+            assert!(cell.producer.is_poisoned());
+            root
+        });
+
+        let live = values
+            .collect_managed_for_test()
+            .expect("a poisoned lazy producer must remain traceable");
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+
+        drop(root);
+        let dead = values
+            .collect_managed_for_test()
+            .expect("a retired poisoned lazy should be reclaimed");
+        assert_eq!(dead.root_entries(), baseline.root_entries());
     }
 
     #[test]

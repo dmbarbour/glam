@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::PoisonError;
 
 use glam::reflection::EffectLifecycle;
 use glam::{
@@ -25,6 +26,7 @@ pub(crate) struct LoggerSupervisor {
     input: Arc<LogHost>,
     fallback_writer: RuntimeOutputWriter,
     pub(crate) fallback_delivery: RuntimeOutputDelivery<Diagnostic>,
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     state: std::sync::Mutex<LoggerSupervisorState>,
 }
 
@@ -87,10 +89,7 @@ impl LoggerSupervisor {
     }
 
     pub(crate) fn install(&self) -> Result<LoggerInstallation, Error> {
-        let mut state = self
-            .state
-            .lock()
-            .expect("logger supervisor mutex should not be poisoned");
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state
             .active
             .as_ref()
@@ -115,10 +114,7 @@ impl LoggerSupervisor {
     }
 
     pub(crate) fn finish(&self, installation: &LoggerInstallation) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("logger supervisor mutex should not be poisoned");
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state
             .active
             .as_ref()
@@ -209,7 +205,7 @@ impl LoggerSupervisor {
     pub(crate) fn active_status(&self) -> Option<glam::reflection::EffectLifecycleStatus> {
         self.state
             .lock()
-            .expect("logger supervisor mutex should not be poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .active
             .as_ref()
             .map(|active| active.lifecycle.status())

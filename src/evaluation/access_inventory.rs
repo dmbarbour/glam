@@ -518,7 +518,7 @@ fn all_managed_entries_have_bounded_mutator_regions() {
             });
     assert_eq!(
         gateway_totals,
-        GatewayCounts::new(533, 17),
+        GatewayCounts::new(535, 17),
         "managed gateway occurrence totals drifted",
     );
     assert_eq!(
@@ -562,7 +562,7 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     }
     assert_eq!(
         actual.len(),
-        537,
+        539,
         "managed mutator-introduction count drifted"
     );
     // D.2h.4c.2 adds two test-only bounded accesses: one constructs
@@ -578,9 +578,12 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     // I13D names the one private factory admission used by fixtures which
     // deliberately force collection; the process-wide shared test domain is
     // never a valid collection target.
+    // Panic containment adds two test-only accesses. One poisons a net under
+    // an open normalization batch, and one poisons a lazy producer; each
+    // fixture then forces collection through the poisoned cell.
     assert_eq!(
         admission_occurrence_fingerprint(&occurrences),
-        9_019_238_070_737_707_413,
+        7_788_572_284_650_500_953,
         "managed mutator-introduction source fingerprint drifted"
     );
 

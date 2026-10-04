@@ -3,7 +3,7 @@
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use rpds::RedBlackTreeMapSync;
 
@@ -257,6 +257,8 @@ struct TaskStatusPublisherInner {
     /// Last coordinator-assigned status order delivered through this
     /// publisher. The mutex also prevents an older nonterminal callback from
     /// completing after a newer terminal callback.
+    ///
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     published_order: Mutex<u64>,
 }
 
@@ -289,7 +291,7 @@ impl TaskStatusPublisher {
             .inner
             .published_order
             .lock()
-            .expect("task status publisher was poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         (self.inner.publish)(mutation, status)
     }
 
@@ -303,7 +305,7 @@ impl TaskStatusPublisher {
             .inner
             .published_order
             .lock()
-            .expect("task status publisher was poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         if update.order <= *published_order {
             return TaskStatusWake::new(|| {});
         }
@@ -631,6 +633,7 @@ struct LocalPromiseObligation {
 
 #[derive(Default)]
 pub(crate) struct LocalPromiseOwner {
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     obligations: Mutex<Vec<LocalPromiseObligation>>,
 }
 
@@ -643,7 +646,7 @@ impl std::fmt::Debug for LocalPromiseOwner {
                 &self
                     .obligations
                     .lock()
-                    .expect("local promise obligations were poisoned")
+                    .unwrap_or_else(PoisonError::into_inner)
                     .len(),
             )
             .finish()
@@ -654,7 +657,7 @@ impl LocalPromiseOwner {
     pub(crate) fn register(&self, root: ManagedPromiseRoot, wait: EvaluationWaitToken) {
         self.obligations
             .lock()
-            .expect("local promise obligations were poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .push(LocalPromiseObligation {
                 promise: root.id(),
                 wait,
@@ -665,7 +668,7 @@ impl LocalPromiseOwner {
     pub(crate) fn contains_wait(&self, wait: &EvaluationWaitToken) -> bool {
         self.obligations
             .lock()
-            .expect("local promise obligations were poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .iter()
             .any(|obligation| obligation.wait == *wait)
     }
@@ -678,7 +681,7 @@ impl LocalPromiseOwner {
         let mut obligations = self
             .obligations
             .lock()
-            .expect("local promise obligations were poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         let obligation = obligations
             .iter()
             .position(|obligation| obligation.promise == promise && obligation.wait == *wait)
@@ -691,7 +694,7 @@ impl LocalPromiseOwner {
         let obligations = self
             .obligations
             .lock()
-            .expect("local promise obligations were poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .clone();
         for obligation in obligations {
             let values = obligation

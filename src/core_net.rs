@@ -773,7 +773,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         state: crate::eval::whnf::NetWhnfState,
     ) -> Result<(), Box<crate::eval::whnf::NetWhnfState>> {
         let mut state = Some(Box::new(state));
-        self.runtime.cell().with_conditional_edge_mut_via(
+        let restored = self.runtime.cell().with_cleanup_edge_mut_via(
             &self.runtime,
             |runtime| runtime.publish_checkpoint_edge_transition(call),
             |runtime| match runtime.restore_claimed_callable_checkpoint(
@@ -785,7 +785,12 @@ impl CoreRuntimeNetAccess<'_, '_> {
                 Ok(()) => RuntimeNetMutation::Changed(Ok(())),
                 Err(state) => RuntimeNetMutation::Unchanged(Err(state)),
             },
-        )
+        );
+        restored.unwrap_or_else(|| {
+            Err(state
+                .take()
+                .expect("a skipped restore leaves its checkpoint input unconsumed"))
+        })
     }
 
     pub(crate) fn replace_claimed_callable_checkpoint(
@@ -942,13 +947,14 @@ impl CoreRuntimeNetAccess<'_, '_> {
     pub(crate) fn release_claimed_callable_checkpoint(&self, pair: ActivePairKey) -> bool {
         self.runtime
             .cell()
-            .with_conditional_mut_via(&self.runtime, |runtime| {
+            .with_cleanup_mut_via(&self.runtime, |runtime| {
                 if runtime.release_claimed_callable_checkpoint(pair) {
                     RuntimeNetMutation::Changed(true)
                 } else {
                     RuntimeNetMutation::Unchanged(false)
                 }
             })
+            .unwrap_or(false)
     }
 
     pub(crate) fn fail_claimed_callable_checkpoint(
@@ -1065,13 +1071,14 @@ impl CoreRuntimeNetAccess<'_, '_> {
     pub(crate) fn release_claimed_call(&self, call: crate::interaction_net::Call) -> bool {
         self.runtime
             .cell()
-            .with_conditional_mut_via(&self.runtime, |runtime| {
+            .with_cleanup_mut_via(&self.runtime, |runtime| {
                 if runtime.release_claimed_call(call) {
                     RuntimeNetMutation::Changed(true)
                 } else {
                     RuntimeNetMutation::Unchanged(false)
                 }
             })
+            .unwrap_or(false)
     }
 
     pub(crate) fn restore_blocked_call(
@@ -1081,13 +1088,14 @@ impl CoreRuntimeNetAccess<'_, '_> {
     ) -> bool {
         self.runtime
             .cell()
-            .with_conditional_mut_via(&self.runtime, |runtime| {
+            .with_cleanup_mut_via(&self.runtime, |runtime| {
                 if runtime.restore_blocked_call(call, wait) {
                     RuntimeNetMutation::Changed(true)
                 } else {
                     RuntimeNetMutation::Unchanged(false)
                 }
             })
+            .unwrap_or(false)
     }
 
     pub(crate) fn claim_operator_call(
@@ -1172,13 +1180,14 @@ impl CoreRuntimeNetAccess<'_, '_> {
     ) -> bool {
         self.runtime
             .cell()
-            .with_conditional_mut_via(&self.runtime, |runtime| {
+            .with_cleanup_mut_via(&self.runtime, |runtime| {
                 if runtime.release_claimed_operator_call(call) {
                     RuntimeNetMutation::Changed(true)
                 } else {
                     RuntimeNetMutation::Unchanged(false)
                 }
             })
+            .unwrap_or(false)
     }
 
     pub(crate) fn restore_blocked_operator_call(
@@ -1188,13 +1197,14 @@ impl CoreRuntimeNetAccess<'_, '_> {
     ) -> bool {
         self.runtime
             .cell()
-            .with_conditional_mut_via(&self.runtime, |runtime| {
+            .with_cleanup_mut_via(&self.runtime, |runtime| {
                 if runtime.restore_blocked_operator_call(call, wait) {
                     RuntimeNetMutation::Changed(true)
                 } else {
                     RuntimeNetMutation::Unchanged(false)
                 }
             })
+            .unwrap_or(false)
     }
 }
 
@@ -2504,6 +2514,33 @@ mod tests {
 
         assert!(unwind.is_err());
         assert_eq!(net.active_normalization_batch(&values), None);
+    }
+
+    #[test]
+    fn panic_under_the_net_lock_neither_aborts_nor_blocks_collection() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let public_values = crate::api::Values::from_core_factory(values.clone());
+        let net = values.instantiate_core_net(&closed_unit_template(&values));
+
+        // The batch guard unwinds through a net the panic just poisoned.
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            values.with_runtime_value_access(|values| {
+                let access = net.access(&values);
+                let _: Result<(), CoreNetContention> = access.with_normalization_batch(|_| {
+                    access.with_mut(|_| panic!("forced panic under the net lock"));
+                });
+            });
+        }));
+        assert!(unwind.is_err());
+
+        let owner = public_values.wrap(Value::Net(crate::core::NetValue::new(net)));
+        values
+            .collect_managed_for_test()
+            .expect("a rooted poisoned net must remain traceable");
+        drop(owner);
+        values
+            .collect_managed_for_test()
+            .expect("a retired poisoned net must collect");
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use crate::runtime::EvaluationRuntimeId;
 
@@ -33,6 +33,7 @@ struct ExternalOwnerEntry {
 pub(crate) struct ExternalOwnerRegistry {
     runtime: EvaluationRuntimeId,
     next_id: AtomicU64,
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     owners: Mutex<HashMap<NonZeroU64, ExternalOwnerEntry>>,
 }
 
@@ -55,7 +56,7 @@ impl ExternalOwnerRegistry {
         let previous = self
             .owners
             .lock()
-            .expect("external owner registry was poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .insert(
                 id,
                 ExternalOwnerEntry {
@@ -80,10 +81,7 @@ impl ExternalOwnerRegistry {
             handle.runtime, self.runtime,
             "an external owner handle must be opened by its matching runtime"
         );
-        let owners = self
-            .owners
-            .lock()
-            .expect("external owner registry was poisoned");
+        let owners = self.owners.lock().unwrap_or_else(PoisonError::into_inner);
         let entry = owners
             .get(&handle.id)
             .expect("a live external owner lease must retain its registry entry");
@@ -110,10 +108,7 @@ impl ExternalOwnerRegistry {
         if handle.runtime != self.runtime {
             return None;
         }
-        let owners = self
-            .owners
-            .lock()
-            .expect("external owner registry was poisoned");
+        let owners = self.owners.lock().unwrap_or_else(PoisonError::into_inner);
         let entry = owners.get(&handle.id)?;
         if !std::ptr::eq(entry.lease.as_ptr(), Arc::as_ptr(&handle.lease))
             || entry.family != TypeId::of::<T>()
@@ -134,10 +129,7 @@ impl ExternalOwnerRegistry {
     /// destructor order is not a semantic guarantee.
     pub(crate) fn drain_retired(&self) -> usize {
         let retired_ids = {
-            let owners = self
-                .owners
-                .lock()
-                .expect("external owner registry was poisoned");
+            let owners = self.owners.lock().unwrap_or_else(PoisonError::into_inner);
             let mut retired_ids = owners
                 .iter()
                 .filter_map(|(id, entry)| (entry.lease.strong_count() == 0).then_some(*id))
@@ -151,7 +143,7 @@ impl ExternalOwnerRegistry {
             let retired = self
                 .owners
                 .lock()
-                .expect("external owner registry was poisoned")
+                .unwrap_or_else(PoisonError::into_inner)
                 .remove(&id);
             let Some(retired) = retired else {
                 continue;
@@ -166,7 +158,7 @@ impl ExternalOwnerRegistry {
     pub(crate) fn len(&self) -> usize {
         self.owners
             .lock()
-            .expect("external owner registry was poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .len()
     }
 }

@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::thread;
 
 use super::EvaluationWorkCoordinator;
@@ -22,7 +22,9 @@ struct EvaluationExecutorInner {
 /// The executor owns only worker activation, shutdown, and thread handles.
 pub(crate) struct EvaluationExecutor {
     inner: Arc<EvaluationExecutorInner>,
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     workers: Mutex<Vec<thread::JoinHandle<()>>>,
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     activated: Mutex<bool>,
 }
 
@@ -72,7 +74,7 @@ impl EvaluationExecutor {
         let mut activated = self
             .activated
             .lock()
-            .expect("evaluation worker activation mutex was poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         if *activated {
             return Err(Arc::from("evaluation workers were already activated"));
         }
@@ -81,10 +83,7 @@ impl EvaluationExecutor {
             return Ok(());
         }
 
-        let mut workers = self
-            .workers
-            .lock()
-            .expect("evaluation worker registry was poisoned");
+        let mut workers = self.workers.lock().unwrap_or_else(PoisonError::into_inner);
         for index in 0..worker_count {
             let inner = self.inner.clone();
             let worker = thread::Builder::new()
@@ -125,7 +124,7 @@ impl Drop for EvaluationExecutor {
         // claimed record until it returns, preserving truthful busy state.
         self.workers
             .get_mut()
-            .expect("evaluation worker registry was poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .clear();
     }
 }

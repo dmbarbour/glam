@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use bytes::Bytes;
 
@@ -188,6 +188,7 @@ pub struct EffectTokenDomain<T> {
 
 pub(super) struct EffectTokenDomainState<T> {
     next_id: AtomicU64,
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     payloads: Mutex<HashMap<NonZeroU64, Arc<T>>>,
 }
 
@@ -254,7 +255,7 @@ where
             .state
             .payloads
             .lock()
-            .expect("effect token domain mutex should not be poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .insert(id, Arc::new(payload));
         assert!(replaced.is_none(), "effect token IDs remain unique");
         self.values.with_access(|access| {
@@ -296,7 +297,7 @@ where
             self.state
                 .payloads
                 .lock()
-                .expect("effect token domain mutex should not be poisoned")
+                .unwrap_or_else(PoisonError::into_inner)
                 .get(&token.id)
                 .cloned()
         })
@@ -308,11 +309,14 @@ impl<T> Drop for EffectToken<T> {
         let Some(domain) = self.domain.upgrade() else {
             return;
         };
-        domain
+        // The payload is client data whose destructor may panic, so it is
+        // dropped only after the domain lock is released.
+        let payload = domain
             .payloads
             .lock()
-            .expect("effect token domain mutex should not be poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .remove(&self.id);
+        drop(payload);
     }
 }
 

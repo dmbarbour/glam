@@ -70,6 +70,47 @@ fn diagnostic_bus_sequences_counts_and_delivers_only_to_current_subscribers() {
 }
 
 #[test]
+fn panicking_subscriber_destructor_leaves_the_bus_usable() {
+    struct PanicOnDrop;
+    impl DiagnosticSubscriber for PanicOnDrop {
+        fn receive(&self, _event: DiagnosticEvent) {}
+    }
+    impl Drop for PanicOnDrop {
+        fn drop(&mut self) {
+            panic!("forced subscriber destructor panic");
+        }
+    }
+
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let values = runtime.values();
+    let bus = DiagnosticBus::new();
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let observed = received.clone();
+    let _survivor = bus.subscribe(DiagnosticCallback(move |event| {
+        observed
+            .lock()
+            .expect("diagnostic collector should not be poisoned")
+            .push(event);
+    }));
+    let panicking = bus.subscribe(PanicOnDrop);
+
+    // The subscriber is dropped after the bus lock is released, so its
+    // panic reaches the client without poisoning the bus.
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(panicking)));
+    assert!(unwind.is_err());
+
+    let event = bus.publish_local(Diagnostic::new(&values, Severity::Info, "after"));
+    assert_eq!(event.sequence(), 1);
+    assert_eq!(
+        received
+            .lock()
+            .expect("diagnostic collector should not be poisoned")
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn diagnostic_events_retain_emission_and_origin_roots_until_retirement() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let domain = EffectTokenDomain::new(&runtime.values());

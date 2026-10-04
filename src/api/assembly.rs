@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use bytes::Bytes;
 
@@ -89,7 +89,7 @@ impl CompilationExecution {
             let diagnostic = macro_reflection_diagnostic(&diagnostic_values, event.diagnostic());
             build_diagnostics
                 .lock()
-                .expect("build diagnostic mutex should not be poisoned")
+                .unwrap_or_else(PoisonError::into_inner)
                 .push(diagnostic.clone());
             assembler_diagnostics.publish_local(diagnostic);
         }));
@@ -435,6 +435,7 @@ struct CompileSetup {
     final_defs: RuntimeValueRoot,
     module_loader: ModuleLoader,
     binary_loader: BinaryFileLoader,
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     session: Arc<Mutex<Vec<Diagnostic>>>,
     execution: Arc<CompilationExecution>,
 }
@@ -1152,7 +1153,7 @@ impl Assembler {
         let execution_failed = execution.drain();
         let diagnostics = session
             .lock()
-            .expect("build diagnostic mutex should not be poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .clone();
 
         match (result, execution_failed) {
@@ -1531,7 +1532,7 @@ impl Assembler {
                 Diagnostic::from_compile(assembler.values().core(), &trace, severity, &message);
             session
                 .lock()
-                .expect("build diagnostic mutex should not be poisoned")
+                .unwrap_or_else(PoisonError::into_inner)
                 .push(diagnostic.clone());
             assembler.record_diagnostic(diagnostic);
         })

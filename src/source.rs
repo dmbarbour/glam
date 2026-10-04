@@ -5,7 +5,7 @@ use std::env;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
@@ -376,6 +376,7 @@ pub fn check_local_manifest(path: &Path) -> Result<Vec<ManifestMismatch>, Source
 /// Local filesystem source system with per-instance consistency observations.
 #[derive(Clone, Default)]
 pub struct FileSourceSystem {
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     observed: Arc<Mutex<BTreeMap<PathBuf, ContentDigest>>>,
 }
 
@@ -391,10 +392,7 @@ impl FileSourceSystem {
         let bytes = Self::read_untracked(&path)?;
         let artifact = SourceArtifact::new(bytes, SourceIdentity::file(&path));
         let digest = artifact.digest();
-        let mut observed = self
-            .observed
-            .lock()
-            .expect("local source observation mutex should not be poisoned");
+        let mut observed = self.observed.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(previous) = observed.insert(path.clone(), digest)
             && previous != digest
         {
@@ -419,7 +417,7 @@ impl FileSourceSystem {
         let observed = self
             .observed
             .lock()
-            .expect("local source observation mutex should not be poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .clone();
         let mut changes = Vec::new();
         for (path, expected) in observed {
@@ -444,10 +442,7 @@ impl FileSourceSystem {
 
     pub fn write_manifest(&self, path: &Path) -> Result<(), SourceError> {
         let output = absolute_path(path)?;
-        let observed = self
-            .observed
-            .lock()
-            .expect("local source observation mutex should not be poisoned");
+        let observed = self.observed.lock().unwrap_or_else(PoisonError::into_inner);
         if observed.contains_key(&output) {
             return Err(SourceError::new(format!(
                 "manifest output `{}` is also an assembly input",

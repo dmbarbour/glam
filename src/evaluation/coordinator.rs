@@ -6,7 +6,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::num::NonZeroU64;
 #[cfg(test)]
 use std::sync::OnceLock;
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 #[cfg(test)]
@@ -744,6 +744,7 @@ pub(crate) struct EvaluationWorkCoordinator {
     ids: Arc<RuntimeIds>,
     admission: Arc<RuntimeMutationAdmission>,
     observations: Arc<RuntimeObservationState>,
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     background_demand: Mutex<Option<Arc<EvaluationDemandState>>>,
     state: Mutex<WorkCoordinatorState>,
     work_available: Condvar,
@@ -756,10 +757,13 @@ pub(crate) struct EvaluationWorkCoordinator {
     #[cfg(test)]
     reflection_release_status_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(any(test, feature = "interaction-net-profiling"))]
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     exact_route_profile: Mutex<ExactDemandRouteProfile>,
     #[cfg(any(test, feature = "interaction-net-profiling"))]
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     exact_route_mutation_profile: Mutex<ExactRouteMutationProfile>,
     #[cfg(any(test, feature = "interaction-net-profiling"))]
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     notification_profile: Mutex<CoordinatorNotificationProfile>,
     #[cfg(test)]
     exact_selection_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -1171,7 +1175,7 @@ impl EvaluationWorkCoordinator {
         let mut background = self
             .background_demand
             .lock()
-            .expect("evaluation background demand mutex was poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         if let Some(demand) = background.as_ref() {
             return demand.clone();
         }
@@ -1184,7 +1188,7 @@ impl EvaluationWorkCoordinator {
     pub(super) fn background_demand(&self) -> Option<Arc<EvaluationDemandState>> {
         self.background_demand
             .lock()
-            .expect("evaluation background demand mutex was poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
 
@@ -1198,7 +1202,7 @@ impl EvaluationWorkCoordinator {
         let demand = self
             .background_demand
             .lock()
-            .expect("evaluation background demand mutex was poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .take();
         drop(demand);
     }
@@ -1266,7 +1270,7 @@ impl EvaluationWorkCoordinator {
         let mut profile = self
             .exact_route_profile
             .lock()
-            .expect("exact demand route profile was poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         profile.complete_searches += 1;
         profile.edges_visited += depth;
         profile.maximum_depth = profile.maximum_depth.max(depth);
@@ -1276,7 +1280,7 @@ impl EvaluationWorkCoordinator {
     pub(super) fn record_exact_route_handoffs(&self, handoffs: usize) {
         self.exact_route_profile
             .lock()
-            .expect("exact demand route profile was poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .fast_handoffs += handoffs;
     }
 
@@ -1285,7 +1289,7 @@ impl EvaluationWorkCoordinator {
         let mut profile = self
             .exact_route_profile
             .lock()
-            .expect("exact demand route profile was poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         profile.checkpoint_invalidations += 1;
         profile.cold_fallbacks += 1;
         match reason {
@@ -1309,7 +1313,7 @@ impl EvaluationWorkCoordinator {
         *self
             .exact_route_profile
             .lock()
-            .expect("exact demand route profile was poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     #[cfg(any(test, feature = "interaction-net-profiling"))]
@@ -1317,7 +1321,7 @@ impl EvaluationWorkCoordinator {
         let mut profile = self
             .exact_route_mutation_profile
             .lock()
-            .expect("exact route mutation profile was poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         profile.moved_poll_windows = profile.moved_poll_windows.wrapping_add(1);
     }
 
@@ -1331,7 +1335,7 @@ impl EvaluationWorkCoordinator {
             let mut profile = self
                 .exact_route_mutation_profile
                 .lock()
-                .expect("exact route mutation profile was poisoned");
+                .unwrap_or_else(PoisonError::into_inner);
             match validation {
                 None if accepted => {
                     profile.o1_accepted_releases = profile.o1_accepted_releases.wrapping_add(1);
@@ -1354,7 +1358,7 @@ impl EvaluationWorkCoordinator {
             let mut route = self
                 .exact_route_profile
                 .lock()
-                .expect("exact demand route profile was poisoned");
+                .unwrap_or_else(PoisonError::into_inner);
             match validation {
                 None if accepted => route.o1_accepted_releases += 1,
                 Some(result) => {
@@ -1377,12 +1381,12 @@ impl EvaluationWorkCoordinator {
         let mut snapshot = self
             .exact_route_mutation_profile
             .lock()
-            .expect("exact route mutation profile was poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .snapshot();
         let route = self
             .exact_route_profile
             .lock()
-            .expect("exact demand route profile was poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         snapshot.complete_searches = route.complete_searches as u64;
         snapshot.records_visited = route.edges_visited as u64;
         snapshot.maximum_depth = route.maximum_depth as u64;
@@ -1404,7 +1408,7 @@ impl EvaluationWorkCoordinator {
     ) -> crate::interaction_net::profiling::CoordinatorNotificationProfileSnapshot {
         self.notification_profile
             .lock()
-            .expect("coordinator notification profile was poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .snapshot()
     }
 
@@ -1417,7 +1421,7 @@ impl EvaluationWorkCoordinator {
             let mut profile = self
                 .notification_profile
                 .lock()
-                .expect("coordinator notification profile was poisoned");
+                .unwrap_or_else(PoisonError::into_inner);
             let index = kind as usize;
             profile.notify_all[index] = profile.notify_all[index].wrapping_add(1);
         }
@@ -1432,7 +1436,7 @@ impl EvaluationWorkCoordinator {
             let mut profile = self
                 .notification_profile
                 .lock()
-                .expect("coordinator notification profile was poisoned");
+                .unwrap_or_else(PoisonError::into_inner);
             let index = class as usize;
             profile.released[index] = profile.released[index].wrapping_add(1);
         }
@@ -1450,7 +1454,7 @@ impl EvaluationWorkCoordinator {
             let mut profile = self
                 .notification_profile
                 .lock()
-                .expect("coordinator notification profile was poisoned");
+                .unwrap_or_else(PoisonError::into_inner);
             let counts = match outcome {
                 CoordinatorWaiterOutcome::Productive => &mut profile.productive,
                 CoordinatorWaiterOutcome::Relevant => &mut profile.relevant,

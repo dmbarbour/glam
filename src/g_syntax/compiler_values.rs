@@ -6,7 +6,7 @@
 //! lowered once, then cloned through its shared backing value.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::core::{RuntimeCacheFamily, RuntimeCacheFamilyRecord};
 use crate::runtime::RuntimeValueRoot;
@@ -44,6 +44,7 @@ struct GCompilerValues {
     defined_or: RuntimeValueRoot,
     require_defined: RuntimeValueRoot,
     macro_environment: RuntimeValueRoot,
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     effects: Mutex<HashMap<Key, RuntimeValueRoot>>,
 }
 
@@ -87,7 +88,7 @@ unsafe impl RuntimeCacheFamily for GCompilerValues {
         }
         let effect_roots = effects
             .lock()
-            .expect("g compiler effect-value cache must not be poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .values()
             .cloned()
             .collect::<Vec<_>>();
@@ -421,7 +422,7 @@ pub(in crate::g_syntax) fn run_pure_match_resolved(
     let error = cache
         .effects()
         .lock()
-        .expect("g compiler effect-value cache must not be poisoned")
+        .unwrap_or_else(PoisonError::into_inner)
         .entry(error_key)
         .or_insert(candidate)
         .clone();
@@ -519,7 +520,7 @@ fn effect_path_value_with_cache(
     if let Some(root) = cache
         .effects()
         .lock()
-        .expect("g compiler effect-value cache must not be poisoned")
+        .unwrap_or_else(PoisonError::into_inner)
         .get(&cache_key)
         .cloned()
     {
@@ -538,7 +539,7 @@ fn effect_path_value_with_cache(
     let root = cache
         .effects()
         .lock()
-        .expect("g compiler effect-value cache must not be poisoned")
+        .unwrap_or_else(PoisonError::into_inner)
         .entry(cache_key)
         .or_insert(candidate)
         .clone();

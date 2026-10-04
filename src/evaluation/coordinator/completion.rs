@@ -1,7 +1,7 @@
 //! Exact subscriptions to one-shot runtime completion sources.
 
 use std::num::NonZeroU64;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use crate::core::PromiseId;
 use crate::runtime::{EvaluationRuntimeId, RuntimeMutationAuthority};
@@ -39,6 +39,7 @@ pub(crate) struct CompletionSubscriptions {
     pub(super) runtime: EvaluationRuntimeId,
     pub(super) source: WorkDependencyKey,
     pub(super) coordinator: Arc<Mutex<Weak<EvaluationWorkCoordinator>>>,
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     registrations: Mutex<Vec<WakeRegistration>>,
 }
 
@@ -69,7 +70,7 @@ impl CompletionSubscriptions {
         let coordinator = self
             .coordinator
             .lock()
-            .expect("runtime work-coordinator binding was poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .clone();
         coordinator
             .upgrade()
@@ -129,7 +130,7 @@ impl CompletionSubscriptions {
             let result = publish_terminal()?;
             self.registrations
                 .lock()
-                .expect("completion subscriber set was poisoned")
+                .unwrap_or_else(PoisonError::into_inner)
                 .clear();
             return Ok(result);
         };
@@ -160,7 +161,7 @@ impl CompletionSubscriptions {
             &mut *self
                 .registrations
                 .lock()
-                .expect("completion subscriber set was poisoned"),
+                .unwrap_or_else(PoisonError::into_inner),
         );
         let changed = coordinator.wake_dependency_batch_guarded(
             mutation,
@@ -223,7 +224,7 @@ impl CompletionSubscriptions {
         let mut registrations = self
             .registrations
             .lock()
-            .expect("completion subscriber set was poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         if terminal() {
             return CompletionSubscriptionOutcome::AlreadyTerminal;
         }
@@ -236,7 +237,7 @@ impl CompletionSubscriptions {
         let mut registrations = self
             .registrations
             .lock()
-            .expect("completion subscriber set was poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         let Some(index) = registrations
             .iter()
             .position(|candidate| *candidate == registration)
@@ -250,7 +251,7 @@ impl CompletionSubscriptions {
     pub(crate) fn len(&self) -> usize {
         self.registrations
             .lock()
-            .expect("completion subscriber set was poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .len()
     }
 }

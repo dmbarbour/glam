@@ -1,4 +1,4 @@
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 
 use super::machine::{ContextualValueEffectTask, EffectTask, UnitEffectTask, ValueEffectTask};
 use super::protocol::{StandardEffects, TaskHalt, TaskHost, TaskOutcome, TaskSpecialization};
@@ -26,6 +26,7 @@ pub struct EffectLifecycle {
 }
 
 struct EffectLifecycleState {
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     status: Mutex<EffectLifecycleStatus>,
     changed: Condvar,
 }
@@ -121,7 +122,7 @@ impl EffectLifecycle {
         self.inner
             .status
             .lock()
-            .expect("effect lifecycle mutex should not be poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
 
@@ -130,13 +131,13 @@ impl EffectLifecycle {
             .inner
             .status
             .lock()
-            .expect("effect lifecycle mutex should not be poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         while !status.is_terminal() {
             status = self
                 .inner
                 .changed
                 .wait(status)
-                .expect("effect lifecycle mutex should not be poisoned");
+                .unwrap_or_else(PoisonError::into_inner);
         }
         status.clone()
     }
@@ -146,13 +147,13 @@ impl EffectLifecycle {
             .inner
             .status
             .lock()
-            .expect("effect lifecycle mutex should not be poisoned");
+            .unwrap_or_else(PoisonError::into_inner);
         while status.same_state(observed) {
             status = self
                 .inner
                 .changed
                 .wait(status)
-                .expect("effect lifecycle mutex should not be poisoned");
+                .unwrap_or_else(PoisonError::into_inner);
         }
         status.clone()
     }
@@ -180,14 +181,14 @@ impl EffectLifecycle {
             *lifecycle
                 .status
                 .lock()
-                .expect("effect lifecycle mutex should not be poisoned") = status;
+                .unwrap_or_else(PoisonError::into_inner) = status;
             let session = session.clone();
             TaskStatusWake::new(move || {
                 lifecycle.changed.notify_all();
                 if is_terminal && terminal_wake.is_some() {
                     let session = session
                         .lock()
-                        .expect("scheduled effect session mutex should not be poisoned")
+                        .unwrap_or_else(PoisonError::into_inner)
                         .take();
                     drop(session);
                 }
@@ -225,6 +226,7 @@ impl EffectLifecycleState {
 #[doc(hidden)]
 pub struct ScheduledEffectRun {
     context: EvalContext,
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     session: Arc<Mutex<Option<Arc<EvaluationSession>>>>,
     task: EvaluationTaskHandle,
 }
@@ -234,7 +236,7 @@ impl Drop for ScheduledEffectRun {
         let session = self
             .session
             .lock()
-            .expect("scheduled effect session mutex should not be poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .take();
         drop(session);
     }

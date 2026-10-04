@@ -1892,6 +1892,22 @@ fn cursor_claim_release_restores_both_owner_forms_to_ready() {
 }
 
 #[test]
+fn cursor_claim_unwinds_through_a_poisoned_net_without_restoring() {
+    let (net, cursor) = claimed_pairless_cursor_fixture();
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = net
+            .test_cursor_claim_guard(cursor)
+            .expect("claimed pairless cursor must issue its scoped guard");
+        net.with_mut(|_| panic!("forced panic under the net lock"));
+    }));
+
+    // Restoring the claim on a torn net is moot, so the guard skips it
+    // instead of panicking again during the unwind.
+    assert!(unwind.is_err());
+    assert!(net.cell().runtime.is_poisoned());
+}
+
+#[test]
 fn cursor_claim_unwind_restores_both_owner_forms_to_ready() {
     let (pairless, pairless_cursor) = claimed_pairless_cursor_fixture();
     let before_pairless = pairless.with_revisions(|_| ()).1;

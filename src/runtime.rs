@@ -7,7 +7,7 @@
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use glam_gc::HeapMaintenanceSnapshot;
 
@@ -351,6 +351,7 @@ impl Drop for RuntimeMutationGuard<'_> {
 /// rechecks authoritative state, then sleeps only while the snapshot remains
 /// current. Transactions and readiness must never validate this generation.
 pub(crate) struct RuntimeActivityState {
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     state: Mutex<RuntimeActivityData>,
     changed: Condvar,
     #[cfg(test)]
@@ -388,15 +389,12 @@ impl RuntimeActivityState {
     pub(crate) fn current(&self) -> u64 {
         self.state
             .lock()
-            .expect("runtime activity mutex should not be poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .generation
     }
 
     fn advance(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("runtime activity mutex should not be poisoned");
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.generation = state
             .generation
             .checked_add(1)
@@ -408,23 +406,17 @@ impl RuntimeActivityState {
     pub(crate) fn wait_for_change(&self, observed: u64) {
         #[cfg(test)]
         self.waits.fetch_add(1, Ordering::Relaxed);
-        let mut state = self
-            .state
-            .lock()
-            .expect("runtime activity mutex should not be poisoned");
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         while state.generation == observed {
             state = self
                 .changed
                 .wait(state)
-                .expect("runtime activity mutex should not be poisoned");
+                .unwrap_or_else(PoisonError::into_inner);
         }
     }
 
     fn begin_gc_activity(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("runtime activity mutex should not be poisoned");
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.gc.active_leases = state
             .gc
             .active_leases
@@ -434,10 +426,7 @@ impl RuntimeActivityState {
     }
 
     fn begin_gc_activity_for_snapshot(&self, revision: u64) -> bool {
-        let mut state = self
-            .state
-            .lock()
-            .expect("runtime activity mutex should not be poisoned");
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.gc.revision != revision
             || state.gc.active_leases != 0
             || !(state.gc.explicit_request
@@ -455,30 +444,21 @@ impl RuntimeActivityState {
     }
 
     fn finish_gc_activity(&self, outcome: RuntimeGcLeaseOutcome) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("runtime activity mutex should not be poisoned");
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.gc.retire_lease();
         state.gc.publish_outcome(outcome);
         state.gc.advance_revision();
     }
 
     fn abandon_gc_activity(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("runtime activity mutex should not be poisoned");
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.gc.retire_lease();
         state.gc.disposition = RuntimeGcMaintenanceDisposition::RetryRequired;
         state.gc.advance_revision();
     }
 
     fn record_gc_request(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("runtime activity mutex should not be poisoned");
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if !state.gc.explicit_request {
             state.gc.explicit_request = true;
             state.gc.advance_revision();
@@ -486,10 +466,7 @@ impl RuntimeActivityState {
     }
 
     fn promote_gc_pressure_request(&self) -> bool {
-        let mut state = self
-            .state
-            .lock()
-            .expect("runtime activity mutex should not be poisoned");
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.gc.active_leases != 0
             || state.gc.explicit_request
             || state.gc.disposition != RuntimeGcMaintenanceDisposition::Idle
@@ -502,10 +479,7 @@ impl RuntimeActivityState {
     }
 
     fn record_gc_request_failure(&self, outcome: RuntimeGcLeaseOutcome) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("runtime activity mutex should not be poisoned");
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.gc.explicit_request = true;
         state.gc.publish_outcome(outcome);
         state.gc.advance_revision();
@@ -518,10 +492,7 @@ impl RuntimeActivityState {
         Vec<RuntimeGcMaintenanceFailure>,
         u64,
     ) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("runtime activity mutex should not be poisoned");
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let pending = std::mem::take(&mut state.gc.pending_failure_reports);
         if !pending.is_empty() {
             state.gc.advance_revision();
@@ -530,10 +501,7 @@ impl RuntimeActivityState {
     }
 
     fn gc_maintenance_snapshot(&self) -> RuntimeGcMaintenanceSnapshot {
-        let state = self
-            .state
-            .lock()
-            .expect("runtime activity mutex should not be poisoned");
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.gc.snapshot()
     }
 
