@@ -251,9 +251,15 @@ Removed:
 - `enable_collection_before_outer_entry_for_test` and `_for_verification`;
 - the constructor call that enabled the hook.
 
-`glam-gc`'s `collect_before_outer_entry` stays. It is outside this
-`glam`-only remediation and `glam-gc`'s own tests still use it. It is now
-unused by `glam` and a candidate for separate `glam-gc` cleanup.
+`glam-gc`'s `Heap::enable_collection_before_outer_entry`, its
+`collect_before_outer_entry` flag, and the pre-entry collection block in
+`with_mutator_after_admission` were then also removed. With `glam` no longer
+using the API, it served only as a hidden public method of the
+`deterministic-test-hooks` feature, and the maintainer chose not to let it
+become an API compatibility contract. Two `glam-gc` tests existed solely to
+exercise that mechanism and were retired with it:
+`aggressive_debug_mode_collects_once_before_each_outer_entry` and
+`aggressive_debug_mode_defers_collection_during_cross_heap_entry`.
 
 ### D9 — The coverage tradeoff is accepted
 
@@ -346,8 +352,6 @@ over 60 seconds" in both modes. That is its known debug-build cost, not a hang.
 
 ## Follow-ups
 
-- Remove `collect_before_outer_entry` from `glam-gc` if no `glam-gc` test needs
-  it independently.
 - Keep D3's settlement review attached to concurrent collection.
 
 ## Cross-references

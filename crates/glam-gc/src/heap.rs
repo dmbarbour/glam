@@ -526,32 +526,9 @@ impl Heap {
         after_admission: impl FnOnce(),
         operation: impl for<'heap> FnOnce(&Mutator<'heap>) -> R,
     ) -> R {
-        #[cfg(any(test, feature = "deterministic-test-hooks"))]
-        let mut prepared =
-            ThreadHeapEntry::prepare(&self.inner, self.inner.current_allocation_lease_epoch());
-        #[cfg(not(any(test, feature = "deterministic-test-hooks")))]
         let prepared =
             ThreadHeapEntry::prepare(&self.inner, self.inner.current_allocation_lease_epoch());
         let outer = prepared.is_outer();
-        #[cfg(any(test, feature = "deterministic-test-hooks"))]
-        if outer
-            && self
-                .inner
-                .collect_before_outer_entry
-                .load(Ordering::Acquire)
-            && !thread_has_any_active_mutator()
-        {
-            // The inert prepared entry owns no admission or active TLS depth.
-            // Retire it before collection so the collector may discard this
-            // thread's inactive cache, then prepare against the new lease
-            // epoch before ordinary admission.
-            drop(prepared);
-            self.collect_full()
-                .expect("aggressive pre-entry collection must begin outside every mutator");
-            prepared =
-                ThreadHeapEntry::prepare(&self.inner, self.inner.current_allocation_lease_epoch());
-            assert!(prepared.is_outer());
-        }
         let (prepared, admission) = if outer {
             let (admission, collected) = self.inner.admit_outer_mutator();
             let prepared = if collected {
@@ -586,22 +563,6 @@ impl Heap {
     /// Panics if the heap is permanently poisoned.
     pub fn request_collection(&self) {
         self.inner.request_collection();
-    }
-
-    /// Enables forced full collection immediately before each later outer
-    /// mutator entry into this heap.
-    ///
-    /// This private-feature mode is intentionally aggressive verification,
-    /// not collection policy. It leaves [`CollectionPolicy::NoAuto`] intact,
-    /// does not affect recursive same-heap entry, and defers a forced
-    /// collection when the calling thread already mutates another heap. The
-    /// next eligible outer entry performs the collection.
-    #[cfg(any(test, feature = "deterministic-test-hooks"))]
-    #[doc(hidden)]
-    pub fn enable_collection_before_outer_entry(&self) {
-        self.inner
-            .collect_before_outer_entry
-            .store(true, Ordering::Release);
     }
 
     /// Returns a coherent snapshot of this heap's finalizer activity.
@@ -833,8 +794,6 @@ pub(crate) struct HeapInner {
     #[cfg(feature = "deterministic-test-hooks")]
     synchronous_collection_wait_probe: Mutex<Option<Arc<SynchronousCollectionWaitProbeState>>>,
     #[cfg(any(test, feature = "deterministic-test-hooks"))]
-    collect_before_outer_entry: AtomicBool,
-    #[cfg(any(test, feature = "deterministic-test-hooks"))]
     root_registrations: AtomicU64,
     #[cfg(test)]
     allocation_cursor_claims: std::sync::atomic::AtomicUsize,
@@ -916,8 +875,6 @@ impl HeapInner {
             finalizing_phase_probe: Mutex::new(None),
             #[cfg(feature = "deterministic-test-hooks")]
             synchronous_collection_wait_probe: Mutex::new(None),
-            #[cfg(any(test, feature = "deterministic-test-hooks"))]
-            collect_before_outer_entry: AtomicBool::new(false),
             #[cfg(any(test, feature = "deterministic-test-hooks"))]
             root_registrations: AtomicU64::new(0),
             #[cfg(test)]
@@ -5475,50 +5432,6 @@ mod tests {
                 .epoch(),
             1
         );
-    }
-
-    #[test]
-    fn aggressive_debug_mode_collects_once_before_each_outer_entry() {
-        let heap = Heap::new_with_policy(CollectionPolicy::NoAuto);
-        let baseline = heap.collect_full().unwrap();
-        heap.enable_collection_before_outer_entry();
-
-        heap.with_mutator(|_| {
-            heap.with_mutator(|_| {});
-        });
-
-        let after = heap.collect_full().unwrap();
-        assert_eq!(after.epoch(), baseline.epoch() + 2);
-        assert_eq!(heap.collection_policy(), CollectionPolicy::NoAuto);
-    }
-
-    #[test]
-    fn aggressive_debug_mode_defers_collection_during_cross_heap_entry() {
-        let outer = Heap::new_with_policy(CollectionPolicy::NoAuto);
-        let target = Heap::new_with_policy(CollectionPolicy::NoAuto);
-        let baseline = target.collect_full().unwrap();
-        target.enable_collection_before_outer_entry();
-
-        outer.with_mutator(|_| target.with_mutator(|_| {}));
-        assert_eq!(
-            target
-                .inner
-                .coordinator_snapshot()
-                .completed_collection_epoch,
-            baseline.epoch(),
-            "a cross-heap nested entry cannot synchronously collect its target"
-        );
-
-        target.with_mutator(|_| {});
-        assert_eq!(
-            target
-                .inner
-                .coordinator_snapshot()
-                .completed_collection_epoch,
-            baseline.epoch() + 1,
-            "the next eligible outer entry must perform the deferred aggressive collection"
-        );
-        assert_eq!(target.collection_policy(), CollectionPolicy::NoAuto);
     }
 
     #[test]
