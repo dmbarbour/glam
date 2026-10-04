@@ -1,0 +1,10 @@
+# An empty member between semicolons in a braced body is diagnosed, including
+# when it spans line breaks. Line breaks once panicked the `do` parser.
+error|3|braced do block contains an empty statement between semicolons
+error|5|braced do block contains an empty statement between semicolons
+error|8|braced do block contains an empty statement between semicolons
+error|12|`let` binding group contains an empty member between semicolons
+error|15|`where` binding group contains an empty member between semicolons
+error|19|`with` body contains an empty member between semicolons
+error|22|match body contains an empty member between semicolons
+error|25|`with` body contains an empty member between semicolons

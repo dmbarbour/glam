@@ -63,10 +63,12 @@ verify current bootstrap acceptance against tests and samples.
 
 - Prefer narrow, testable slices and focused regression tests.
 - Treat valid and invalid samples as executable syntax specifications.
-- Treat a panic as a bug; do not add unwind containment to recover from one.
-  Code that observes user input must detect invalid states before they can
-  panic: evaluation reports an `EvaluationFailure`, and parsing backtracks
-  while preserving closest-match diagnostics.
+- A panic is a bug. Code that observes user input must detect invalid states
+  before they can panic: evaluation reports an `EvaluationFailure`, and parsing
+  backtracks while preserving closest-match diagnostics. A panic must still not
+  poison runtime state unnecessarily: if a client catches it, the runtime
+  remains usable. Unwind handling around user-provided callbacks serves that
+  goal; it does not make the panic acceptable.
 - Use `rg`/`rg --files` for discovery and preserve unrelated worktree changes.
 - Keep implementation claims out of target-state design documents and
   chronological transition notes out of current architecture/invariant docs.

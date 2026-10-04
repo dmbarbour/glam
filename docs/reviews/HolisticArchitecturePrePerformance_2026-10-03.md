@@ -1253,6 +1253,12 @@ It runs before the "empty statement" check.
 *Recommendation:* delete the duplicate. Add multi-line `;\n;` regressions
 for `do`, `let`, `where`, and `with`.
 
+*Fixed 2026-10-04:* the duplicate `trim_layout` and `is_layout_empty` are
+deleted from `do_expr.rs` in favor of the shared helpers. The invalid sample
+`braced_empty_member` covers multi-line empty members for `do`, `let`,
+`where`, `with`, and `match`. The wider inspection is tracked in
+[`UserInputPanicSafety_2026-10-04.md`](../plans/UserInputPanicSafety_2026-10-04.md).
+
 **F2 — Medium — Duplicated parser helpers have drifted.** Reported.
 
 - **Repeated view and error helpers:** `view_between` ×4, `error_at_view`
@@ -1571,11 +1577,15 @@ findings that raise them are noted, and lower-confidence items are marked.
 
 1. **Panic policy.** Contain and terminalize records, or abort the process?
    (X4)
-   - *Maintainer decision, 2026-10-04:* abort. A panic is a bug and is not
-     contained. Evaluation must detect invalid states and report an
-     `EvaluationFailure`; parsing must backtrack while preserving
-     closest-match diagnostics. An overall inspection of panic sites that
-     observe user input is warranted.
+   - *Maintainer decision, 2026-10-04:* a panic is a bug. Code that observes
+     user input must detect invalid states first: evaluation reports an
+     `EvaluationFailure`, and parsing backtracks while preserving
+     closest-match diagnostics. A panic must still not poison runtime state
+     unnecessarily: if a client catches it, the runtime remains usable. That
+     is the purpose of the existing unwind handling around user-provided
+     callbacks. An overall inspection of panic sites that observe user input
+     is tracked in
+     [`UserInputPanicSafety_2026-10-04.md`](../plans/UserInputPanicSafety_2026-10-04.md).
 2. **Foreground GC during CLI assembly.** Add a bounded maintenance yield
    point to foreground demand, or keep `NoAuto` non-collecting until
    Concurrent GC? This affects every CLI benchmark. (X3)

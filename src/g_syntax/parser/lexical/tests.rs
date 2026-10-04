@@ -427,6 +427,7 @@ fn invalid_syntax_fixtures_have_explicit_lexical_classification() {
         "ambiguous_slash.g",
         "bad_asm_result.g",
         "bad_language_decl.g",
+        "braced_empty_member.g",
         "dedented_closer_suffix.g",
         "do_pattern_foundation.g",
         "let_where_syntax.g",

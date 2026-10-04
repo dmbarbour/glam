@@ -11,8 +11,12 @@ when their historical value no longer justifies keeping them.
 
 ## Active Plans
 
-No active implementation plan is promoted here at present. Preliminary and
-deferred plans below remain candidates for later work.
+- [`UserInputPanicSafety_2026-10-04.md`](UserInputPanicSafety_2026-10-04.md)
+  makes code that observes user input report diagnostics or evaluation
+  failures instead of panicking, and keeps a caught panic from poisoning the
+  runtime.
+
+Preliminary and deferred plans below remain candidates for later work.
 
 ## Recent Completed Plans
 

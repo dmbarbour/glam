@@ -12,7 +12,9 @@ use super::input::{TokenRange, TokenView};
 use super::layout::LayoutView;
 use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
 use super::pattern::parse_pattern;
-use super::structural::{parse_expression_in_context, single_reserved_keyword};
+use super::structural::{
+    is_layout_empty, parse_expression_in_context, single_reserved_keyword, trim_layout,
+};
 
 type ParseResult<T> = Result<T, Vec<Diagnostic>>;
 
@@ -494,27 +496,6 @@ fn local_name<'source>(view: TokenView<'_, 'source>) -> Option<&'source str> {
 
 fn token_is_name(token: &SpannedToken<'_>, expected: &str) -> bool {
     matches!(token.kind(), TokenKind::Name(name) if *name == expected)
-}
-
-fn trim_layout<'lex, 'source>(view: TokenView<'lex, 'source>) -> TokenView<'lex, 'source> {
-    let tokens = view.tokens();
-    let leading = tokens
-        .iter()
-        .take_while(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
-        .count();
-    let trailing = tokens
-        .iter()
-        .rev()
-        .take_while(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
-        .count();
-    view.slice(leading..tokens.len().saturating_sub(trailing))
-        .expect("trimming layout tokens preserves an ordered range")
-}
-
-fn is_layout_empty(view: TokenView<'_, '_>) -> bool {
-    view.tokens()
-        .iter()
-        .all(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
 }
 
 fn view_between<'lex, 'source>(
