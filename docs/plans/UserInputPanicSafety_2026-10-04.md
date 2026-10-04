@@ -39,6 +39,39 @@ Maintainer decision, 2026-10-04. The durable rule lives in
   `braced_empty_member` specifies empty-member diagnostics across line breaks
   for `do`, `let`, `where`, `with`, and `match`.
 
+## W1 findings (2026-10-04)
+
+All timings use a release build unless noted.
+
+- **Exponential parse time on nested parentheses and lists.** This is a hang
+  rather than a panic, and it is the largest input risk found so far.
+  - Nested parentheses cost about 3× per level: depth 13 takes 12 s and
+    depth 14 takes 38 s.
+  - Nested lists cost about 2× per level: depth 20 takes 11 s.
+  - Nested dictionaries stay linear.
+  - Cause: in `literal_atom` (`parser/expression.rs`), alternatives that open
+    with the same delimiter re-parse the whole inner expression before
+    failing. For example, `postfix_operator_section` parses `(expr` and then
+    expects an operator; `grouped_or_trailing_tuple` parses the same `(expr`
+    again. Each level therefore re-parses its contents several times.
+- **Stack overflow aborts on deep nesting.** An overflow cannot be unwound
+  or caught. The release-build thresholds, from parsing alone (`--parse`),
+  are:
+  - nested `if`: about 10,000;
+  - infix chains (`1 + 1 + …`): about 30,000 terms;
+  - nested dictionaries: about 30,000.
+
+  A debug build overflows sooner; nested `if` overflows at 1,000. Recursive
+  drop of deep syntax trees may contribute, alongside recursive descent.
+- **The lexer withstands hostile text.** Twenty-two probes covered non-ASCII
+  names, text, comments, and operators; a BOM; CRLF and lone CR; tabs;
+  zero-width and non-breaking spaces; invalid and truncated UTF-8; NUL bytes;
+  and unterminated literals. Every probe produced a diagnostic or was
+  accepted; none panicked or aborted.
+- **Duplicated parser helpers have not drifted further.** The copies of
+  `view_between`, `split_top_level`, and `error_at_view` are byte-identical.
+  F1 shows how such copies diverge, so deduplicating them remains worthwhile.
+
 ## Method
 
 Production modules contain about 3,900 panic-capable sites (`panic!`,
@@ -65,11 +98,11 @@ Entry surfaces:
 
 ## Workstreams
 
-- **W1 — Parser and lexer.** F1 is fixed. Sweep `g_syntax` for slicing,
-  indexing, and `expect` on token views and spans. Add a no-panic harness
-  that mutates samples from `samples/` (truncating, deleting, and
-  duplicating tokens and lines) and asserts that `inspect_g_source` returns
-  diagnostics without panicking.
+- **W1 — Parser and lexer.** F1 is fixed. Inspect `g_syntax` for slicing,
+  indexing, and `expect` on token views and spans. Also inspect byte-offset
+  arithmetic on source text (UTF-8 boundaries) and recursion depth on nested
+  input, which can overflow the stack and abort without unwinding. Each
+  finding becomes a deterministic regression, preferably an invalid sample.
 - **W2 — Lowering, builtins, and operators.** Find panics reachable from
   program-supplied values, such as arity, shape, and type mismatches, and
   convert them to `EvaluationFailure`.
@@ -91,10 +124,12 @@ delay can be fixed immediately when found.
 
 ## Decisions for the maintainer
 
-1. **No-panic harness.** `cargo-fuzz` needs a nightly toolchain, which the
-   project does not pin. The alternative is a deterministic stable-toolchain
-   mutation test inside `cargo test`. Recommendation: stable mutation test
-   first; revisit fuzzing when a nightly is pinned for Miri and sanitizers.
+1. **Discovery method — decided 2026-10-04.** Conventional inspection comes
+   first, guided by reasoning about where input reaches panics. Fuzzing is a
+   discovery tool, not a routine test. It is deferred until inspection stalls,
+   and its tooling (`cargo-fuzz` on a nightly toolchain) is obtained only
+   then. Every fuzzing finding becomes a deterministic regression; no fuzz run
+   joins `scripts/check.sh`.
 2. **Poison recovery.** Recover per lock class, or keep treating poisoning as
    terminal and instead make every panic-adjacent path avoid holding locks.
    Expected answer: per-class recovery, decided in W4.
@@ -103,7 +138,6 @@ delay can be fixed immediately when found.
 
 - Every class U site found by W1–W3 reports a diagnostic or
   `EvaluationFailure` and has a regression.
-- The no-panic harness runs in `scripts/check.sh` and passes.
 - W4's forced-panic tests show a runtime remains usable after a client
   catches a callback panic.
 - Remaining panics are class I, with invariant-stating messages.
