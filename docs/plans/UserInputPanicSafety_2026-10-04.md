@@ -2,7 +2,7 @@
 
 Status: open. The parser and evaluation inspections are done: F1 is fixed,
 and no further panic was found. The poisoning audit is done, and its
-containment design awaits maintainer decisions.
+containment design is decided. Implementation is in progress.
 
 This plan responds to the holistic pre-performance review, X4 and Maintainer
 Decision 1 ([review](../reviews/HolisticArchitecturePrePerformance_2026-10-03.md)).
@@ -177,55 +177,122 @@ of them map poison to `Failed`/`Poisoned`; the net cell, the access and
 net-WHNF checkpoints, the lazy producer, and the host-call checkpoint still
 `expect`.
 
-## Proposed containment design (2026-10-04)
+## Containment design (decided 2026-10-04)
 
-**Principle:** a panic fails the smallest unit that owns the interrupted
-work. The units, from smallest: value, demand or task, transaction, runtime.
-Poisoning a larger unit than that is "unnecessary" in the policy's sense.
+### Panics are faults, not semantics
 
-**No-regret changes.** Every option below needs these:
+Maintainer direction: a panic is never part of glam semantics. An
+`EvaluationFailure` is a normal semantic outcome, such as taking the head of
+an empty list. A panic means one of two things: a runtime implementation
+error, or a client that violated a contract.
 
-1. **Collector traces read through poison.** This affects the net cell and
-   the lazy producer, and matches the checkpoint traces.
-2. **Destructors never panic on poison.** Guard and handle drops skip their
-   restore when the lock is poisoned, because the owning unit has already
-   failed.
-3. **Leaf lock classes recover via `into_inner` everywhere.** Their poison
-   carries no information.
-4. **Client values are dropped after releasing glam locks.** This covers
-   subscribers and effect-token payloads.
-5. **Per-value cells that still `expect` adopt the `Failed`/`Poisoned`
-   disposition.** A poisoned net or checkpoint fails its value's demand and
-   no longer panics again.
+Consequences:
+- No panic is ever converted into an `EvaluationFailure` or cached as a lazy
+  result.
+- Backtracking (`.fail`, `.alt`) never sees a panic.
+- Reflection `.eval` never produces `ok:` or `err:` for one.
+- A panic never appears as a program diagnostic.
 
-**Design decisions, pending the maintainer:**
+Because a panic is not semantics, the runtime is free to handle it however is
+most robust. The one constraint is negligible overhead when no panic occurs.
 
-- **Poll-boundary containment.** Add `catch_unwind` at the claimed-poll
-  choke points: `ClaimedTask::poll`, `poll_claimed_client_demand`, and
-  `poll_claimed_spark`. Release the claim through the existing failure paths.
-  The recommended disposition fails the work with an internal-error
-  `EvaluationFailure` that carries the panic message. The failure is cached
-  on the lazy, following the host-call "refusing to replay" precedent. This
-  happens on every thread, so outcomes do not depend on which thread ran the
-  poll, and the worker survives. The panic hook still prints the bug.
-  Alternatives: re-raise on client threads after releasing; or release
-  without caching, which allows replay.
-- **Runtime-core poison.** A panic inside a coordinator, transaction, or
-  settlement critical section tears runtime-wide state. Recovery is unsound
-  there, so this stays a runtime failure: the poisoning is necessary. The
-  requirements are no abort and no hang:
+A panic is modelled as an *interruption*, akin to halting on an unfulfilled
+promise. It is task-layer state, never a lazy result. The scheduler already
+draws the matching distinction:
+- `EvaluationHalt::Blocked` and `UnassignedPromise` can be retried and are
+  never cached.
+- The wait-token terminals `Abandoned`, `Cancelled`, and `Killed` describe
+  the loss of a producer, not a failure of the awaited value.
+
+### Where the panic is recorded
+
+Three placements were compared:
+- **(1) Task terminal only:** a `Panicked` wait-token terminal; the lazy is
+  untouched.
+- **(2) Lazy evaluation state:** `Panicked(report)` beside `Source` and
+  `Checkpoint` in the lazy's producer slot; the result slot stays empty.
+- **(3) Lazy result:** a panicked case cached in the lazy's result
+  `OnceLock`.
+
+| | (1) Task terminal | (2) Lazy evaluation state | (3) Lazy result |
+| --- | --- | --- | --- |
+| Kept out of semantics | yes | yes: never in the result slot, so `.eval`'s demand halts | only if every result consumer special-cases it |
+| Current observers | waiters, through the wait token | every observer, through the producer slot read on the slow path | every observer, through the lock-free fast path |
+| Late observers | reinstall work and re-run the bug | halt with the original report and origin | same as (2) |
+| Stickiness | none (like `OnceLock`) | per lazy (like `LazyLock`) | permanent |
+| Torn or non-replayable progress | needs a second, per-value mechanism | the same `Panicked` state absorbs it | becomes results too |
+| A consumer forgets the case | fails loudly (hang or invariant panic) | fails safely: not mistakable for a value | fails silently into semantics through a generic `Err(failure)` arm |
+| Cost when unused | zero | zero | zero |
+
+(3) is the most convenient: propagation, wakeups, and result-before-retire
+ordering come for free. But it fails silently in the wrong direction, and
+closing that gap means auditing every consumer of
+`LazyResult = Result<_, Arc<EvaluationFailure>>`.
+
+**Decision: (2) for lazies, (1) for tasks.**
+- **Lazies.** A lazy whose own evaluation panicked, or whose progress a
+  panic tore, gets the `Panicked` evaluation state. This includes a host call
+  interrupted mid-invocation, which must not be replayed, and a net torn
+  mid-rewrite. Every later observer halts with the original report.
+- **Tasks.** Reflection tasks, client demands, sparks, and promise producers
+  end with a `Panicked` wait terminal.
+- **Waiters.** A waiter on a panicked producer halts and does not reinstall
+  work. Unlike `Abandoned`, reinstalling would just re-run the bug.
+- **Dependents.** A dependent of a panicked lazy halts at the task layer and
+  stays retryable. A retry halts again at the same lazy with the same report,
+  so stickiness never spreads past where the panic happened.
+- **Promises.** A task-owned promise whose producer panicked records the
+  panic on its producer obligation (task layer), not as an assignment.
+  Abandonment without a panic keeps its existing producer-abandoned failure.
+- **Clients.** The client API returns `Err` with a panicked kind. Reflection
+  semantics are implementation-dependent, so `.task.status` may report
+  `panicked`.
+
+The panic hook still prints every panic, so each one remains a visible bug.
+
+### Remaining dispositions
+
+- **Runtime core.** A panic inside a coordinator, transaction, or settlement
+  critical section tears runtime-wide state. Recovery there is unsound, so
+  the runtime faults as a whole, and the fault is permanent. Requirements:
+  - no abort and no hang;
   - destructors become no-ops;
   - later operations fail loudly instead of reporting `Busy` forever;
   - the client can drop the runtime and build another.
 
-  The alternative is to make those critical sections panic-free or
-  transactional so they could recover. That is larger work, deferred.
-- **Callbacks inside commits.** Catch client panics at the call site, under
-  the lock, so the panic never crosses a glam guard. Each callback then gets
-  a defined disposition:
-  - a panicking conflict index fails that validation with an error;
-  - a panicking subscriber is skipped for that event, and the remaining
-    subscribers still receive it.
+  Making these critical sections panic-free or transactional is deferred.
+- **Client callbacks outside polls.** These are caught at the call site,
+  under the lock, so the panic never crosses a glam guard. The operation that
+  invoked the callback is what gets interrupted:
+  - a panicking conflict index interrupts that validation, and the commit
+    returns `Err`;
+  - a panicking subscriber is skipped for that one event.
+- **Lock classes.** For leaf classes, poison carries no information, so they
+  recover via `into_inner`. A poisoned per-value cell means its progress is
+  torn: its lazy enters the `Panicked` state. The six cells that today map
+  poison to `Failed` change accordingly.
+
+### Implementation sequence
+
+1. **No-regret changes**, which every alternative needs:
+   - collector traces read through poison (the net cell and the lazy
+     producer);
+   - destructors never panic on poison;
+   - leaf lock classes recover;
+   - client values are dropped after glam locks are released.
+2. **Poll-boundary containment.** `catch_unwind` at `ClaimedTask::poll`,
+   `poll_claimed_client_demand`, and `poll_claimed_spark` ends the claim as
+   `Panicked` through the existing terminal path. Waiters halt, the client
+   API reports the panicked kind, and workers survive.
+3. **The lazy `Panicked` evaluation state**, including torn checkpoints,
+   interrupted host calls (which replaces "refusing to replay"), and poisoned
+   per-value cells.
+4. **Runtime-core fault handling.**
+5. **Call-site containment of client callbacks outside polls.**
+
+Each step lands with forced-panic regressions. The acceptance test: after a
+client catches a panic, the same runtime evaluates unrelated work, settles,
+and collects.
 
 ## Method
 
@@ -287,16 +354,22 @@ site that this ordering would delay can be fixed immediately when found.
    joins `scripts/check.sh`. Generated inputs stay shallow, and each run uses a
    per-input timeout, so the known exponential nesting cost does not block
    discovery. Fixing that performance issue is not a prerequisite.
-2. **Poison recovery.** Recover per lock class, or keep treating poisoning as
-   terminal and instead make every panic-adjacent path avoid holding locks.
-   Proposed: per-class recovery for leaf locks, value failure for per-value
-   cells, and runtime failure for the runtime core. See the proposed
-   containment design.
+2. **Poison recovery — decided 2026-10-04.** Leaf lock classes recover.
+   Poisoned per-value cells put their lazy into the `Panicked` evaluation
+   state. Runtime-core poison faults the whole runtime without aborting or
+   hanging. See the containment design.
+3. **Panic disposition — decided 2026-10-04.** A panic is a fault, never
+   semantics. It is modelled as a task-layer interruption: a `Panicked` wait
+   terminal for tasks and a `Panicked` evaluation state for lazies, never a
+   lazy result or `EvaluationFailure`. The containment design records the
+   comparison and reasoning.
 
 ## Acceptance
 
 - Every class U site found by the inspection reports a diagnostic or
   `EvaluationFailure` and has a regression.
 - The poisoning workstream's forced-panic tests show a runtime remains
-  usable after a client catches a callback panic.
+  usable after a client catches a panic. The same runtime evaluates
+  unrelated work, settles, and collects. No panic is observable as an
+  `EvaluationFailure`.
 - Remaining panics are class I, with invariant-stating messages.

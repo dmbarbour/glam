@@ -68,7 +68,10 @@ verify current bootstrap acceptance against tests and samples.
   backtracks while preserving closest-match diagnostics. A panic must still not
   poison runtime state unnecessarily: if a client catches it, the runtime
   remains usable. Unwind handling around user-provided callbacks serves that
-  goal; it does not make the panic acceptable.
+  goal; it does not make the panic acceptable. A panic is never semantics:
+  never convert it into an `EvaluationFailure` or cache it as a lazy result.
+  It is a task-layer interruption. See the
+  [panic-safety plan](plans/UserInputPanicSafety_2026-10-04.md).
 - Use `rg`/`rg --files` for discovery and preserve unrelated worktree changes.
 - Keep implementation claims out of target-state design documents and
   chronological transition notes out of current architecture/invariant docs.
