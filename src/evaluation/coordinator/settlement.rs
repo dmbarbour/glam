@@ -701,7 +701,7 @@ mod tests {
     use super::*;
 
     /// Compile-exhaustive ownership latch for the failure-bearing settlement
-    /// records migrated by I4F.1c.4.
+    /// records.
     fn assert_settlement_failure_boundary_inventory(
         snapshot: &RuntimeDeadlockWorkSnapshot,
         selected: &SelectedTaskSettlement,

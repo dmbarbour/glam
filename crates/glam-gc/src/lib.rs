@@ -1,24 +1,25 @@
 //! Runtime-local garbage collection support for Glam.
 //!
-//! C5D publishes successful scalar mark summaries atomically with their
-//! collection epochs after C5C's checked, recoverable graph traversal. C6A.2c
-//! reclaims wholly dead runs whose initialized payloads need no destructor,
-//! resets them to untyped arena storage, and prefers that heap-local pool for
-//! later typed-run publication. C6A.3a clears dead allocations from retained
-//! partial no-drop runs, and C6A.3b publishes exact lease masks, eligible class
-//! frontiers, and one final stale-cursor epoch. C6B.1 isolates exact
-//! drop-required identities in a durable, non-rootable finalization batch.
-//! C6B.2 drains that batch outside collector locks under the installed
-//! finalizer mutator, while C6B.3 restores completed-region allocator capacity.
-//! C6C.1 terminally retires each attempted allocation after `Drop` returns or
-//! unwinds, preserves untouched pending work for a later collection, and
-//! propagates the original panic without persistent exceptional state. C6C.2
-//! aligns activity, pressure, and successful reports with those durable
-//! commits. C6D selects restricted last-owner teardown without mutator
-//! authority and visits detached pending runs before ordinary attached class
-//! runs. C7 composes the lifetime and admission rules across shared workers
-//! and exposes cold-path collection reports plus an explicit operational
-//! tuning snapshot; neither metric surface participates in collector state.
+//! - **Marking.** A checked, recoverable graph traversal publishes each scalar
+//!   mark summary atomically with its collection epoch.
+//! - **Sweeping no-drop runs.** A wholly dead run whose payloads need no
+//!   destructor returns to untyped arena storage, which later typed-run
+//!   publication prefers. A retained partial run clears its dead allocations
+//!   and publishes exact lease masks, eligible class frontiers, and one final
+//!   stale-cursor epoch.
+//! - **Finalization.** Dead identities that need `Drop` move into a durable,
+//!   non-rootable finalization batch. It drains outside collector locks under
+//!   the installed finalizer mutator, and completed regions return allocator
+//!   capacity. Each attempted finalization retires terminally whether `Drop`
+//!   returns or unwinds; untouched pending work waits for a later collection,
+//!   and the original panic propagates without persistent exceptional state.
+//!   Activity, pressure, and reports follow those durable commits.
+//! - **Teardown.** Last-owner teardown runs without mutator authority and
+//!   visits detached pending runs before ordinary attached class runs.
+//! - **Workers and metrics.** The lifetime and admission rules compose across
+//!   shared workers. Cold-path collection reports and an explicit tuning
+//!   snapshot never participate in collector state.
+//!
 //! Run and arena geometry, worker-cache width, collection-pressure thresholds,
 //! and metric timing details remain implementation policy rather than runtime
 //! configuration or managed-program semantics. The bootstrap collector uses
@@ -27,24 +28,24 @@
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-#[expect(unsafe_code, reason = "reviewed C2A arena and run topology")]
+#[expect(unsafe_code, reason = "reviewed arena and run topology")]
 mod arena;
-#[expect(unsafe_code, reason = "reviewed C2B canonical metadata dispatch")]
+#[expect(unsafe_code, reason = "reviewed canonical metadata dispatch")]
 mod class;
-#[expect(unsafe_code, reason = "reviewed C5/C6 trace, sweep, and drop dispatch")]
+#[expect(unsafe_code, reason = "reviewed trace, sweep, and drop dispatch")]
 mod heap;
-#[expect(unsafe_code, reason = "reviewed C1C mutation boundary")]
+#[expect(unsafe_code, reason = "reviewed mutation boundary")]
 mod mutation;
-#[expect(unsafe_code, reason = "reviewed C1A allocation boundary")]
+#[expect(unsafe_code, reason = "reviewed allocation boundary")]
 mod mutator;
-#[expect(unsafe_code, reason = "reviewed C1A pointer boundary")]
+#[expect(unsafe_code, reason = "reviewed pointer boundary")]
 mod pointer;
-#[expect(unsafe_code, reason = "reviewed C4 root access boundary")]
+#[expect(unsafe_code, reason = "reviewed root access boundary")]
 mod root;
 mod run;
-#[expect(unsafe_code, reason = "reviewed C2C worker-local allocation")]
+#[expect(unsafe_code, reason = "reviewed worker-local allocation")]
 mod thread_cache;
-#[expect(unsafe_code, reason = "reviewed C1B trace boundary")]
+#[expect(unsafe_code, reason = "reviewed trace boundary")]
 mod trace;
 
 #[cfg(feature = "deterministic-test-hooks")]
@@ -69,7 +70,7 @@ pub use root::Root;
 pub use trace::{Trace, Visitor};
 
 #[cfg(test)]
-#[expect(unsafe_code, reason = "reviewed C1A boundary verification")]
+#[expect(unsafe_code, reason = "reviewed boundary verification")]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};

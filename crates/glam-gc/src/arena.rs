@@ -539,7 +539,7 @@ impl Arena {
             let retained = allocated & marked;
             // SAFETY: the same validated allocation word has no concurrent
             // writer under Exclusive. Release publishes the swept allocation
-            // state before C6A.3b makes rebuilt leases/frontiers visible.
+            // state before the sweep publishes the rebuilt leases and frontiers.
             unsafe { allocation.as_ref() }.store(retained, Ordering::Release);
         }
     }

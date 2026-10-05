@@ -64,7 +64,7 @@ fn evaluate_query_state(assembler: &Assembler, value: PublicValue) -> Option<Eva
         .expect("query state belongs to the fixture runtime")
 }
 
-/// Compile-exhaustive ownership latch for I4F.1d.1's durable reflection-store
+/// Compile-exhaustive ownership latch for the durable reflection-store
 /// state. Public values are compatibility roots; query identity, conflict
 /// metadata, and revision state are edge-free companions.
 fn assert_store_root_boundary_inventory(

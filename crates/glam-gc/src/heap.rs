@@ -4384,7 +4384,7 @@ fn allocation_cursor(
 }
 
 #[cfg(test)]
-#[expect(unsafe_code, reason = "reviewed C2B allocation-class fixtures")]
+#[expect(unsafe_code, reason = "reviewed allocation-class fixtures")]
 mod tests {
     use std::collections::HashSet;
     use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -5046,9 +5046,9 @@ mod tests {
     }
 
     // SAFETY: the holder reports its only represented managed edge. Individual
-    // C5C fixtures deliberately violate that edge's same-heap/live-slot
-    // invariant so checked discovery can prove it rejects the pointer before
-    // unsafe trace dispatch.
+    // fixtures deliberately violate that edge's same-heap/live-slot invariant
+    // so checked discovery can prove it rejects the pointer before unsafe
+    // trace dispatch.
     unsafe impl Trace for InvalidEdgeHolder {
         fn trace(&self, visitor: &mut Visitor<'_>) {
             self.traces.fetch_add(1, Ordering::Relaxed);
@@ -6906,7 +6906,7 @@ mod tests {
         )
         .unwrap();
         // SAFETY: this deliberately invalid handle is never dereferenced. The
-        // C5C fixture reports it only to prove collector discovery rejects a
+        // fixture reports it only to prove collector discovery rejects a
         // non-slot address before trace dispatch.
         let interior = unsafe { crate::Gc::<GraphNode>::from_raw(interior) };
         let non_slot_traces = Arc::new(AtomicUsize::new(0));
@@ -6949,7 +6949,7 @@ mod tests {
             .unwrap()
         };
         // SAFETY: this deliberately unallocated handle is never dereferenced.
-        // The C5C fixture reports it only to prove collector discovery checks
+        // The fixture reports it only to prove collector discovery checks
         // the allocation bitmap before trace dispatch.
         let edge = unsafe { crate::Gc::<GraphNode>::from_raw(pointer) };
         let holder_traces = Arc::new(AtomicUsize::new(0));
@@ -11314,7 +11314,8 @@ mod tests {
                 .iter()
                 .map(|value| {
                     // SAFETY: workers returned initialized `u64` allocations
-                    // from this heap, which cannot move or die in C2C.
+                    // from this heap, which never moves them, and nothing
+                    // collects during this test.
                     unsafe { *value.get_unchecked(mutator) }
                 })
                 .collect::<HashSet<_>>()

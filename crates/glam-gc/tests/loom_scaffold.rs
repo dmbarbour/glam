@@ -1,7 +1,7 @@
 //! Loom models for the current collector coordination surface.
 //!
 //! The heap-entry test remains an API smoke model. Abstract coordinator models
-//! cover the ordering edges of C3's stop-the-world state machine, while C2C.5's
+//! cover the ordering edges of the stop-the-world state machine, while the
 //! atomic lease-bit transition remains independent of the raw arena-pointer
 //! integration exercised by native forced schedules.
 

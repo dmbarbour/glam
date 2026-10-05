@@ -41,7 +41,7 @@ fn return_first_capture(
 fn assigned_promise_chain_value(context: &EvalContext, depth: usize) -> Value {
     let mut current = Value::Number(Number::from_usize(depth));
     for _ in 0..depth {
-        let promise = PromisedValue::new(context.values(), "W7C assigned promise alias");
+        let promise = PromisedValue::new(context.values(), "assigned promise alias");
         crate::core::set_test_promise(context.values(), &promise, current)
             .expect_without_debug("a fresh promise alias should accept its assignment");
         current = Value::Promised(promise);
@@ -61,7 +61,7 @@ fn checkpointed_promise_chain_root(context: &EvalContext, depth: usize) -> Runti
     context.values().construct_runtime_value_root(|access| {
         Value::Lazy(LazyValue::semantic_computation_in(
             access,
-            "W7C checkpointed promise chain",
+            "checkpointed promise chain",
             Arc::from([access.duplicate_value(&current)]),
             return_first_capture,
         ))
@@ -177,7 +177,7 @@ impl EvaluationTaskMachine for RecordPollOrder {
     ) -> EvaluationMachinePoll {
         self.polls
             .lock()
-            .expect("W7C poll trace was poisoned")
+            .expect("poll trace was poisoned")
             .push(self.label);
         if std::mem::take(&mut self.yield_once) {
             EvaluationMachinePoll::Yielded
@@ -203,7 +203,7 @@ fn reflection_budget_yields_requeue_fifo_without_subscriptions() {
                         yield_once: true,
                     }))
                 })
-                .expect("the W7C reflection fixture should schedule"),
+                .expect("the reflection fixture should schedule"),
         );
     }
 
@@ -244,10 +244,7 @@ fn reflection_budget_yields_requeue_fifo_without_subscriptions() {
         );
     }
     assert_eq!(
-        order
-            .lock()
-            .expect("W7C poll trace was poisoned")
-            .as_slice(),
+        order.lock().expect("poll trace was poisoned").as_slice(),
         [1, 2, 1, 2]
     );
     assert!(tasks.iter().all(|task| matches!(
@@ -265,7 +262,7 @@ fn client_budget_yields_requeue_fifo_without_subscriptions() {
     let clients = [11, 22].map(|_| {
         context
             .demand_whnf(assigned_promise_chain_root(&context, FIFO_CHECKPOINT_DEPTH))
-            .expect("the W7C client fixture should admit")
+            .expect("the client fixture should admit")
     });
 
     for expected in [0, 1, 0, 1] {

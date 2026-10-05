@@ -92,11 +92,11 @@ fn evaluation_step_budget_reports_exact_zero_one_and_many_spend() {
 }
 
 /// Compile-exhaustive ownership inventory for every value-bearing machine
-/// poll boundary established by I3A.4.
+/// poll boundary.
 ///
 /// The function need not execute: compiling its field and variant matches is
 /// the latch. Adding a new boundary payload requires assigning it an explicit
-/// root/edge policy here and in the adjacent checkpoint table.
+/// root/edge policy here.
 fn assert_evaluation_machine_poll_boundary_inventory(poll: &EvaluationMachinePoll) {
     match poll {
         EvaluationMachinePoll::Yielded | EvaluationMachinePoll::Cancelled => {}
@@ -150,35 +150,12 @@ fn assert_evaluation_machine_poll_boundary_inventory(poll: &EvaluationMachinePol
 
 #[test]
 fn evaluation_machine_poll_boundary_inventory_is_complete() {
-    const CHECKPOINTS: &[(&str, &str)] = &[
-        ("Complete(RuntimeValueRoot)", "I4F.2"),
-        ("Exit::Error(RuntimeValueRoot)", "I4F.2"),
-        ("Block::Wait terminal root", "I4F.2"),
-        ("Block::Promise task-owned cell", "I5B"),
-        ("Block::Promise resolver-owned cell", "I5C"),
-        (
-            "Block::error(RuntimeFailureRoot)",
-            "I4F.1c.2 / I6C interior",
-        ),
-        ("Failed(RuntimeFailureRoot)", "I4F.1c.2 / I6C interior"),
-        ("ScheduleSpark(RuntimeValueRoot)", "W6C.6"),
-        (
-            "Yielded/Cancelled/epoch/test dependency",
-            "no managed payload",
-        ),
-    ];
-
+    // Compiling the exhaustive match is the check.
     let _: fn(&EvaluationMachinePoll) = assert_evaluation_machine_poll_boundary_inventory;
-    assert_eq!(CHECKPOINTS.len(), 9);
-    assert!(
-        CHECKPOINTS
-            .iter()
-            .all(|(boundary, checkpoint)| !boundary.is_empty() && !checkpoint.is_empty())
-    );
 }
 
 /// Compile-exhaustive ownership latch for the cross-poll and terminal client
-/// demand boundaries migrated by I4F.1c.3.
+/// demand boundaries.
 fn assert_client_demand_boundary_inventory(poll: &ClientDemandPoll, result: &ClientDemandResult) {
     match poll {
         ClientDemandPoll::Complete(value) => {

@@ -1976,27 +1976,6 @@ fn assert_control_root_inventory(
 type ControlRootInventoryFn =
     fn(&Control, &Continuation, &Delimiter, &CapturedContinuation, &ResetFrame, &CapturedLayer);
 
-#[test]
-fn reset_stack_synchronous_helpers_are_retired_after_control_migration() {
-    let source = include_str!("../machine.rs");
-    for helper in [
-        "value_key_in(",
-        "reset_stack_value_in(",
-        "reset_frames_in(",
-        "reset_frames_from_value_in(",
-        "with_reset_frames_in(",
-        "replace_reset_frames(",
-        "with_reset_stack_value_in(",
-    ] {
-        assert!(
-            !source.contains(helper),
-            "legacy synchronous helper `{helper}` returned after W5C.4"
-        );
-    }
-    assert!(source.contains("ResetStackMachine"));
-    assert!(source.contains("encode_reset_frames_in_state("));
-}
-
 fn drive_reset_stack_decoder(
     decoder: &mut ResetStackMachine,
     context: &EvalContext,

@@ -328,7 +328,7 @@ fn production_collection_preserves_each_serial_boundary() {
 #[test]
 fn production_runtime_reclaims_each_recursive_identity_family() {
     assert_production_cycle_reclaimed("promise self-cycle", 2, |assembler| {
-        let (promise, resolver) = assembler.promise("I11B promise self-cycle");
+        let (promise, resolver) = assembler.promise("promise self-cycle");
         resolver
             .resolve(promise.clone())
             .expect("promise should accept its own semantic value");
@@ -337,7 +337,7 @@ fn production_runtime_reclaims_each_recursive_identity_family() {
 
     assert_production_cycle_reclaimed("lazy/promise cycle", 3, |assembler| {
         let values = assembler.values();
-        let (promise, resolver) = assembler.promise("I11B lazy/promise cycle");
+        let (promise, resolver) = assembler.promise("lazy/promise cycle");
         let lazy = values
             .access(&promise, values.atom_from_text("member"))
             .expect("ordinary access should construct a managed lazy");
@@ -349,7 +349,7 @@ fn production_runtime_reclaims_each_recursive_identity_family() {
     });
 
     assert_production_cycle_reclaimed("core-net/promise cycle", 3, |assembler| {
-        let (promise, resolver) = assembler.promise("I11B net/promise cycle");
+        let (promise, resolver) = assembler.promise("net/promise cycle");
         let net = assembler
             .net(|builder| builder.data(promise.clone()))
             .expect("production net should contain the promise");
@@ -365,7 +365,7 @@ fn production_runtime_reclaims_each_recursive_identity_family() {
 fn production_runtime_reclaims_compatibility_aggregate_cycles() {
     assert_production_cycle_reclaimed("list compatibility cycle", 2, |assembler| {
         let values = assembler.values();
-        let (promise, resolver) = assembler.promise("I11B list cycle");
+        let (promise, resolver) = assembler.promise("list cycle");
         let list = values
             .list([promise.clone()])
             .expect("list should contain the promise");
@@ -378,7 +378,7 @@ fn production_runtime_reclaims_compatibility_aggregate_cycles() {
 
     assert_production_cycle_reclaimed("dictionary compatibility cycle", 2, |assembler| {
         let values = assembler.values();
-        let (promise, resolver) = assembler.promise("I11B dictionary cycle");
+        let (promise, resolver) = assembler.promise("dictionary cycle");
         let dictionary = values
             .record([("self", promise.clone())])
             .expect("dictionary should contain the promise");
@@ -391,7 +391,7 @@ fn production_runtime_reclaims_compatibility_aggregate_cycles() {
 
     assert_production_cycle_reclaimed("application compatibility cycle", 3, |assembler| {
         let values = assembler.values();
-        let (promise, resolver) = assembler.promise("I11B application cycle");
+        let (promise, resolver) = assembler.promise("application cycle");
         let application = values
             .apply(&promise, [values.integer(1)])
             .expect("application should construct a managed lazy");
