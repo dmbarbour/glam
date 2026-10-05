@@ -77,9 +77,6 @@ Each line moves into a plan as soon as one owns it.
 
 ## Completed, Awaiting Extraction
 
-- [`GarbageCollectorOwnershipLedger_2026-08-20.md`](GarbageCollectorOwnershipLedger_2026-08-20.md)
-  retires once the code comments that cite "the ownership ledger" point at
-  [`../architecture/values.md`](../architecture/values.md) instead.
 - [`ResumableWhnfHolistic_2026-09-28.md`](../reviews/ResumableWhnfHolistic_2026-09-28.md)
   and [`ResumableWhnfW6G4_2026-09-23.md`](../reviews/ResumableWhnfW6G4_2026-09-23.md)
   hold measurement series and the Callgrind/DHAT recipe. They stay until the
@@ -152,3 +149,4 @@ Each line moves into a plan as soon as one owns it.
 | `reviews/GarbageCollectorI11D2DynamicToolMatrix_2026-10-01.md` | `c01e1437` | aggressive verification (`D.2…`, `I11D…`) |
 | `reviews/ResumableWhnfW6G1Design_2026-09-19.md` | `d959cfd1` | resumable WHNF (`W…`) |
 | `reviews/ResumableWhnfW7_2026-09-27.md` | `ca8548ca` | resumable WHNF (`W…`) |
+| `plans/GarbageCollectorOwnershipLedger_2026-08-20.md` | `8ad63790` | GC integration (`I…`) |

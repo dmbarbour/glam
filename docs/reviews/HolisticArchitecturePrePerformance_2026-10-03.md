@@ -1746,12 +1746,44 @@ cheaper. Items within a group are independent.
    - Delete stale allows and dead vocabulary (E10, N5).
    - Rename milestone tests.
    - Resolve "until <milestone>" comments.
+   - *Progress 2026-10-05.* The documentation cleanup's code wave replaced
+     step IDs in production comments and lint reasons with explanations. It
+     also removed 32 stale `dead_code` allowances on items production uses.
+     Candidates for deletion or `cfg(test)`, each still carrying an honest
+     reason:
+     - *Test-only:* `Builtin::InteractionNetFromNetlist`, since the runner
+       replays netlists directly. Also `FunctionCode::duplicate_in`, the
+       `WhnfFrame` fields `kind`/`cursor`, `NetWhnfDrive` and
+       `NetWhnfState::drive_in`, and `RegionalBoundaryRequest::{Dependency,
+       External}`.
+     - `WhnfDependency::{Wait, Promise}` are test-only too, which means
+       production never yields `WhnfPoll::Pending`.
+     - `RuntimeFailureRoot.value_roots` is read only by tests; production
+       holds it only to keep its values rooted.
+     - *Unused even by tests:* `WhnfFrameKind::{Application, KeyConversion}`
+       and `WhnfExternalBoundary::Net`.
+     - Still open: inventory step IDs (with inventory triage) and the test
+       modules and files named after step IDs.
 8. **Docs that perf work will rebase on (X8, R4).**
    - `architecture/values.md` and a definition of "compatibility".
    - Correct the fusion, saturation, and net-driver descriptions.
    - Refresh the VRR plan with a V-1 prework checkpoint (V1–V5) and refresh
      the PEAF premise.
    - Retention policy and plan status refresh.
+   - *Progress 2026-10-05,* from the documentation cleanup:
+     - **Done:**
+       - `values.md`, with a definition of "compatibility";
+       - the fusion and saturation corrections;
+       - the core-specialization and completion-promise corrections;
+       - the module-map gaps;
+       - the retention policy (deletion, recorded in `plans/README.md`);
+       - the plan status refresh.
+     - **Open:**
+       - an architecture description of the net driver and cursor-WHNF
+         control flow;
+       - the VRR V-1 checkpoint;
+       - rewriting PEAF's premise. Its status line now flags the premise as
+         stale.
 
 ### P2 — Remove structural overheads that would mask representation measurements
 
