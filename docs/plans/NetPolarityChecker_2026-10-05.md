@@ -1,7 +1,8 @@
 # Net Polarity Checker Plan — 2026-10-05
 
 Status: slices 1–3 done 2026-10-05: documentation, the test-only checker,
-and enforcement at `try_finish`. Slice 4, the runtime invariant, is next. This plan comes before N8's random closed-net generator and
+and enforcement at `try_finish`. Slice 4, a runtime polarity type stored in
+port links, is in progress; see "Slice 4 Design" below. This plan comes before N8's random closed-net generator and
 before any fuzzing of nets. It follows the crossed `Bind >< Bind` join that
 landed on 2026-10-05.
 
@@ -175,42 +176,55 @@ union-find arrays.
 6. **Fuzzing,** per the panic-safety plan's discovery policy, over polarized
    nets only.
 
-## Slice 4 Design Questions — Open, 2026-10-05
+## Slice 4 Design — Decided 2026-10-05
 
-Slice 4 guards against a rewrite rule, or cursor materialization, that
-miswires a net. Rewrites never consult signs, so a polarized net that
-reduces to an unpolarized one is a reduction bug. Three questions need the
-maintainer before it starts:
+Slice 4 tests polarity-type preservation (subject reduction): a polarized net
+stays polarized under every rewrite. Reducing to an unpolarized net would
+erase the type. Later rewrites will depend on signs, such as translating a
+positive eraser into error `Data` and adding GAL level nodes, so the runtime
+keeps a lightweight polarity type rather than re-solving signs.
 
-1. **Scope.**
-   - (a) Check only generic runtime nets, whose nodes are `Bind`, `Fan`,
-     `Erase`, `Data` and `Operator`. This tests the rewrite rules
-     themselves, in the generic runtime tests and in N8's generator.
-   - (b) Also check core runtime nets, which carry evaluator-only nodes:
-     - an interface anchor is `−`;
-     - a callable checkpoint provides `+`, as the application result it
-       replaces did;
-     - a remote cursor takes the sign of the port it stands for in another
-       net.
+**Decisions (maintainer, 2026-10-05):**
+- **Scope (b).** Every runtime node is signed, including the evaluator-only
+  nodes:
+  - an interface anchor's boundary port consumes;
+  - a callable checkpoint takes the sign of the result port it replaces;
+  - a remote cursor takes the sign of the remote port it stands for.
+- **No side tables.** The sign is one bit of each stored port link: two
+  bits for the port index, one for the sign, and the rest for the node.
+  Net performance must improve a lot later, so no new runtime tables.
 
-     A remote cursor's sign needs either a per-port sign table carried by
-     each copy source, or reading the source net. Reading the source must not
-     take nested runtime-net locks, a discipline the runtime tests guard.
-     Some signs are inherently undetermined, such as which bind of a
-     `Bind >< Bind` pair is the function, so a sign table needs a "free"
-     state. Leaving cursors free is simpler but weaker.
+**Design:**
+- **Local polarity.** Each port's slot records the port's own sign, and the
+  sign persists while the port is unwired. A node is created with its port
+  signs. `connect` checks, in debug builds, that the two ends have opposite
+  signs, so every rewrite is checked locally in O(1) per wire.
+- **Node rules.** Creating a node checks its own rules, again in debug
+  builds:
+  - `Bind` auxiliaries are `[−, +]`;
+  - `Data` is `+`;
+  - `Operator` is `[−, +]`;
+  - a `Fan`'s branches agree and oppose its principal.
+- **Rewrite rules.** Each rule derives its new nodes' signs from the pair's
+  stored signs. That makes each rule's typing explicit, and `connect`
+  verifies it.
+- **Templates carry orientation, not a table.** `try_finish` keeps the sign
+  solution and stores every template wire provider-first. Instantiation
+  reads signs from wire order, and the exposed port is `+`. A sign component
+  the constraints leave free, such as an isolated `Bind >< Bind` pair, is
+  oriented arbitrarily. Subject reduction holds for any valid typing.
+- **Logical copies.** Materialization copies a remote node's signs from its
+  source slots. It already reads that node under the source lock.
+- **Exempt fixtures.** A template from an `unpolarized_for_test` builder,
+  and its runtime nets, carry a test-only flag that skips the sign checks.
 
-   *Recommendation:* do (a) now and fold it into N8, slice 5. Take on (b)
-   only if a defect appears in cursor or checkpoint code.
-2. **Cost.** A full check after every rewrite is O(n), so quadratic over a
-   whole reduction.
-
-   *Recommendation:* check after every rewrite in N8's generated nets, which
-   are small by construction, and in the generic runtime tests. Never check
-   in scale or stress fixtures.
-3. **Exempt fixtures.** A runtime net instantiated from one of the four
-   unpolarized test templates must skip the invariant. This needs a
-   test-only flag carried from the template to its runtime net.
+**Follow-up slice, after slice 4: positive erasure becomes error `Data`.**
+Construction can translate a `+` eraser directly. Reduction also creates
+`+` erasers: erasing a function bind leaves one on its argument side,
+feeding the dead body, and erasing a copy fan or an operator with an error
+value does the same. Making `Erase` always `−` therefore needs those rules
+to emit error `Data`, through a specialization hook that builds an erased or
+error value. Slice 4's checks guard that change.
 
 ## Background: polarity, GAL, and Lafont
 
