@@ -8,9 +8,8 @@ shortcut for decoded `.seq`, `.r`, `.get`, and `.set` remains, and the
 forced-general-path test shares its decoder, so it is no independent oracle
 (holistic pre-performance review, finding R4). Rewrite those sections against
 the shortcut before starting.
-This plan was extracted from W6G.2 of the
-[resumable-WHNF plan](ResumableWhnfEvaluation_2026-09-12.md) so effect-fusion
-performance work does not block stack/budget closure or the remaining GC
+This plan was extracted from the resumable-WHNF plan (now retired; see
+[`README.md`](README.md) Retired History) so effect-fusion performance work does not block stack/budget closure or the remaining GC
 integration work.
 
 ## Purpose

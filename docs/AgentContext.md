@@ -95,6 +95,10 @@ verify current bootstrap acceptance against tests and samples.
   counts. At the transition's closing review, retire these tests and keep only
   the negative rules that remain durable. Do not use fingerprints or census
   totals as evidence of safety. Rust tests must not read plan or review prose.
+- Removing a trait or representation from a widely used type breaks every
+  implicit consumer at once. Partition such a removal from the start by
+  production seam, fixture seam, negative compiler contract, and dynamic
+  certification.
 - Plan and review step IDs (such as `W7B` or `GCI11R-002D.2e.4`) may appear in
   code and comments while their work is active. At the next cleanup, replace
   each one with a reference to its `Decisions.md` entry or with a short
@@ -108,7 +112,9 @@ automatically. The root `Cargo.toml` declares the matching `rust-version`, so
 older compilers fail with an explicit version error. Do not change the pin as
 part of unrelated work. Upgrade it at a plan boundary in a dedicated commit
 that updates both files and fixes any new lints. Record `rustc --version`
-alongside verification results in reviews.
+alongside verification results in reviews. When upgrading, or when running
+nightly tools, also check compiler future-compatibility warnings; nightly has
+warned about deep auto-trait recursion in the root crate.
 
 After Rust edits run `scripts/check.sh`, the workspace verification entry
 point. Its levels are cumulative:
@@ -136,6 +142,18 @@ ordinary suite and run only at `full`. The project pins a stable toolchain, so
 `crates/glam-gc/scripts/check-miri.sh` and
 `crates/glam-gc/scripts/check-sanitizer.sh {address,thread}` directly once a
 nightly is available. There is no CI yet; `scripts/check.sh` is the gate.
+
+Dynamic tools detect defects; they are not ordering evidence. A clean
+sanitizer run proves nothing about concurrency order, which still needs forced
+schedules. A target too slow for Miri is recorded as a performance exclusion
+with the matrix in `crates/glam-gc/VERIFY.md`, never counted as a pass.
+
+Aggressive-GC verification collects about once per stable settlement cycle,
+not at each entry or allocation, so a test that needs a collection at a
+specific boundary requests it explicitly. A test whose primary purpose is
+`NoAuto` behaviour does not run under the feature; if only its final
+assertion depends on `NoAuto`, gate just that tail. For scale, `full` took
+911 s on 2026-10-04 (rustc 1.99.0, 8 threads, no nightly tools).
 
 Add a focused regression before a broad fix when practical, then run the full
 suite. Documentation-only changes need link/path validation and

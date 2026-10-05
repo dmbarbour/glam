@@ -177,10 +177,18 @@ Fallback output is delivered through the ordinary outbox protocol, and work it
 admits causes another runtime pump before final exit.
 
 A stable deadlock may be explicitly killed and settled. Task failures, output
-delivery failures, exit errors, and killed work make the batch unsuccessful
-directly, even if their diagnostic presentation also fails. Valid assembly
-bytes may therefore be written to stdout before reasoning produces a nonzero
-exit status.
+delivery failures, exit errors, killed work, and collector maintenance
+failures make the batch unsuccessful directly, even if their diagnostic
+presentation also fails. Valid assembly bytes may therefore be written to
+stdout before reasoning produces a nonzero exit status.
+
+A maintenance failure from a usable heap renders as an error diagnostic with
+context `runtime:{op:'maintenance_failure, args:{failure:Id, kind:Kind}}`.
+`Kind` is `'collector_panic` for a recovered trace panic or `'finalizer_panic`
+when a panic left finalizer work pending; both leave a retry obligation. A
+`'poisoned` failure never reaches a settled report, because a poisoned heap
+reports `MaintenanceFailed` and stops settlement with host-text fallback (see
+[`assembly.md`](assembly.md) "Batch Lifecycle").
 
 ## Adjacent Owners
 

@@ -26,15 +26,59 @@ control-flow overview.
   host lifecycle locks, waiting, invoking user/loader/logger callbacks,
   delivering events, or sleeping a worker. The retained allocation scope in
   `RuntimeValueAccess` is intentional mutator authority, not redundant state.
+- Shared runtime mutation admission may be taken inside a managed-access
+  region; promise publication does. This cannot deadlock because settlement
+  never collects, and a pending collection blocks no mutator entry: the
+  collector takes heap exclusivity only after every mutator has left, and
+  holds no runtime gate while it collects. The converse is forbidden. No
+  allocation or value-domain entry may take the gate, a non-reentrant
+  `RwLock` that settlement holds exclusively while it constructs values.
 - Glam heaps use immutable `CollectionPolicy::NoAuto`. Allocation pressure is
   promoted only after the runtime pump reaches a revision-checked stable
   boundary, and explicit maintenance performs collection as runtime activity.
   If work never becomes stable, collection may be deferred indefinitely; do
   not “fix” that accepted baseline by collecting on ordinary mutator entry.
+- Collection is not a Glam semantic mutation. It never advances observation
+  epochs or changes values, transactions, diagnostics, or net topology, and
+  pure Glam cannot observe policy, pressure, revisions, collection counts, or
+  reports. Reflection-task scheduling and the arrival order of independent
+  diagnostics stay outside pure reproducibility either way.
 - Managed `Drop` is passive: it may release Rust shells but cannot observe or
   preserve dying managed edges, enter the heap/runtime, invoke callbacks, or
   perform active retirement. Put active cleanup in the external-owner registry
   with explicit registered roots instead.
+- Compatibility shells (lists, dictionaries, builtin arguments, metadata, lazy
+  sources, failures) stay immutable, and acyclic once lazies, promises, and
+  nets are removed. The compatibility walk recurses through shells and stops
+  only at those three identities, so never add interior mutability or
+  recursion to a shell.
+- A new managed family needs a private allocator; no constructor that opens
+  its own region and returns a fresh `Gc`, facade, or raw value; publication
+  before access ends, with a root only at a real handoff and never to bridge
+  adjacent statements; a forced collection across the former
+  allocation/publication gap; an exact trace; a layout latch; passive drop
+  with a `ManagedDropRecord`; and survival and reclamation tests. See
+  [`values.md`](../architecture/values.md) "Managed Families".
+- No user-controlled semantic recursion on the Rust stack. Permitted
+  recursion is bounded representation plumbing, balanced persistent-container
+  traversal with a logarithmic depth bound, or an owned worklist such as
+  cursor WHNF. Deep-structure tests use explicit depths on a small stack, and
+  the recursive control must fail by reporting a stack overflow, not by any
+  abnormal exit. The `.g` parser is not yet covered
+  (`no-semantic-recursion-on-rust-stack` in [`Decisions.md`](../Decisions.md)).
+- Ordinary non-suspending WHNF delegation changes evaluator control only. It
+  creates no lazy, promise, wait, task, cache entry, or root, and takes no lock
+  or scheduler admission. A retained computation registers one checkpoint root
+  at its first retained transition and none on later polls; root registration
+  that scales with semantic depth is a regression.
+- `map` and `list.concat` are structural and non-forcing: each step unfolds
+  one representation node. `map f (A ++ B)` is
+  `defer (map f A) ++ defer (map f B)`, a thunk gains one deferred map, and a
+  strict leaf becomes lazy item applications without new chunk boundaries.
+  The callable is not evaluated until an item is demanded. `list.concat`
+  likewise defers both halves of a source concatenation; for a strict outer
+  leaf it joins the visible segments pairwise to O(log n) depth without
+  inspecting them, and an invalid item becomes a deferred failing hole.
 - Production evaluation starts from closed `Value`s. The small fixture IR in
   `src/eval/test_support.rs` must lower to nets before evaluation; do not add a
   second expression interpreter or local environment.
@@ -352,6 +396,15 @@ control-flow overview.
   their own work generation before waking workers. They must not advance the
   semantic `RuntimeObservationEpoch`; otherwise ordinary scheduler churn can
   spuriously invalidate the state observations of the task being scheduled.
+- The coordinator's condition variable serves several waiter classes
+  (workers, exact clients, session drains, task observers), so never use
+  `notify_one`: it may wake only a waiter that cannot take the work. A host
+  wake may be suppressed only for mutation kinds that cannot enable a parked
+  waiter (`notifies_waiters`); the `work_generation` advance is never
+  suppressed, and a waiter rechecks it under the coordinator mutex.
+- The deterministic `TrustedWorkIdHasher` is only for bounded traversal sets
+  of runtime-allocated work IDs. Indexes keyed by user data, and persistent
+  coordinator indexes, keep randomized hashing.
 - Workers opportunistically poll reflection tasks and are the only consumers
   of sparks. Workers and the runtime background pump follow exact producer
   chains from permitted roots, not globally ready deferred work. An explicit
@@ -403,6 +456,20 @@ control-flow overview.
   hold unrooted compatibility values in that domain. Any test that forces GC
   must use `private_test_value_factory()` or another private runtime. A
   test-only assertion at the collection gateway latches this rule.
+- Representative sample outputs must be identical in every collection mode.
+  Collection counts and timing are profiling data, not semantics.
+- Test-only exact roots are real fixture ownership. A fixture that observes a
+  lazy or promise after cancellation, abandonment, settlement, or retirement
+  keeps that identity rooted from its construction region, and publishes its
+  graph in one access region. Reclamation fixtures assert liveness and
+  eventual collection, never which collection epoch reclaimed a slot.
+- Install one-shot collector probes last, after any setup that might itself
+  collect. Snapshot completed collection epochs immediately before the
+  disputed collection, and keep exact `+1` assertions inside that interval.
+- `EvaluationRuntime::readiness()` is an instantaneous observational probe; it
+  may see `Busy` while a worker briefly holds mutation admission to park.
+  Assert "no new work" with fixed scheduler inventories or terminal
+  observations, not an immediate readiness result.
 - For an order-dependent evaluator, coordinator, promise, reflection, or spark
   defect, place the participating operations explicitly on both sides of the
   disputed transition. Repeating an uncontrolled threaded test is only a

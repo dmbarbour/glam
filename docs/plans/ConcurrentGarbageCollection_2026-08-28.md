@@ -41,13 +41,13 @@ waiting for pins or eagerly recovering one newly empty run.
 
 Entry requires:
 
-- completion of
-  [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md),
-  including its final safety ledger;
-- completion of
-  [`GarbageCollectorIntegration_2026-08-19.md`](GarbageCollectorIntegration_2026-08-19.md)
-  through I13 and Gate G4, including exact production roots, mutation gateways,
-  and destruction inventories; and
+- completion of the collector implementation, including its final safety
+  ledger (done; see [`SAFETY.md`](../../crates/glam-gc/SAFETY.md) and
+  [`VERIFY.md`](../../crates/glam-gc/VERIFY.md) "Gate history");
+- completion of the GC integration through its final cleanup and
+  certification (done 2026-10-02; the result is described in
+  [`architecture/values.md`](../architecture/values.md)), including exact
+  production roots, mutation gateways, and destruction inventories; and
 - a dated post-integration review confirming that no migration adapter or
   conservative root accidentally became part of the permanent graph model.
   Gate G4 (2026-10-02) served as that review; see
@@ -659,6 +659,8 @@ it in [`Decisions.md`](../Decisions.md).
    including whether canonical root-adjacent `RootFrame<T>` state can provide
    barrier-free mutation under the stated SATB origin proof.
 2. SATB-only barriers versus initially shading both old and new edges.
+   Persistent-edge installation is not yet tied to the slot it writes; decide
+   here whether active barriers need a destination-aware mutation writer.
 3. Black allocation, birth epochs, or segregated runs for post-snapshot
    allocation.
 4. Atomic packing and synchronization of run state, generation, and active

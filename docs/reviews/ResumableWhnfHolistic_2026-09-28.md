@@ -12,16 +12,16 @@ claim that those parent GC gates are complete.
 ## Scope
 
 This review audits the complete implementation of
-[`ResumableWhnfEvaluation_2026-09-12.md`](../plans/ResumableWhnfEvaluation_2026-09-12.md)
+`ResumableWhnfEvaluation_2026-09-12.md`
 against its original purpose, selected architecture, twenty semantic/safety
 invariants, verification matrix, and eleven completion criteria. It also
 reconciles the result with:
 
 - GCI11R-002D.2c-D.2h and 002E-H in
-  [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](../plans/GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md);
+  `GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`;
   and
 - P3-P5 in
-  [`GarbageCollectorPersistentEdgeTraits_2026-09-12.md`](../plans/GarbageCollectorPersistentEdgeTraits_2026-09-12.md).
+  `GarbageCollectorPersistentEdgeTraits_2026-09-12.md`.
 
 The dependency relation is deliberately asymmetric. WHNF can be complete while
 the D.2c raw evaluator partition is closed, P3 remains open on downstream

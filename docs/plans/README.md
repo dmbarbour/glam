@@ -77,19 +77,13 @@ Each line moves into a plan as soon as one owns it.
 
 ## Completed, Awaiting Extraction
 
-These completed plans still hold content that has not yet moved into standing
-docs or `Decisions.md`. The disposition plan tracks each one.
-
-- [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md),
-  [`GarbageCollectorOwnershipLedger_2026-08-20.md`](GarbageCollectorOwnershipLedger_2026-08-20.md),
-  and [`GarbageCollectorIntegration_2026-08-19.md`](GarbageCollectorIntegration_2026-08-19.md):
-  the collector and its runtime integration.
-- [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md),
-  [`GarbageCollectorAggressiveVerificationRegression_2026-10-03.md`](GarbageCollectorAggressiveVerificationRegression_2026-10-03.md),
-  and [`GarbageCollectorPersistentEdgeTraits_2026-09-12.md`](GarbageCollectorPersistentEdgeTraits_2026-09-12.md):
-  aggressive verification and persistent edges.
-- [`ResumableWhnfEvaluation_2026-09-12.md`](ResumableWhnfEvaluation_2026-09-12.md):
-  bounded regional WHNF with durable checkpoints.
+- [`GarbageCollectorOwnershipLedger_2026-08-20.md`](GarbageCollectorOwnershipLedger_2026-08-20.md)
+  retires once the code comments that cite "the ownership ledger" point at
+  [`../architecture/values.md`](../architecture/values.md) instead.
+- [`ResumableWhnfHolistic_2026-09-28.md`](../reviews/ResumableWhnfHolistic_2026-09-28.md)
+  and [`ResumableWhnfW6G4_2026-09-23.md`](../reviews/ResumableWhnfW6G4_2026-09-23.md)
+  hold measurement series and the Callgrind/DHAT recipe. They stay until the
+  holistic review's performance harness (P1-5) gives those numbers a home.
 
 ## Retired History
 
@@ -132,3 +126,29 @@ docs or `Decisions.md`. The disposition plan tracks each one.
 | `reviews/GarbageCollectorC2C_2026-08-22.md` | `2d6eb2e4` | collector crate (`C2C…`, `GC2C-…`) |
 | `reviews/GarbageCollectorC6_2026-08-24.md` | `bb205d9b` | collector crate (`C6…`, `GC6-…`) |
 | `reviews/GarbageCollectorC8_2026-10-03.md` | `9e8d86fe` | collector crate (`C8…`) |
+| `plans/GarbageCollectorIntegration_2026-08-19.md` | `9e8d86fe` | GC integration (`I…`, `GCI…R-…`) |
+| `plans/GarbageCollectorImplementation_2026-08-19.md` | `9e8d86fe` | collector crate (`C…`, `GC…-…`) |
+| `plans/GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md` | `26c86f71` | aggressive remediation (`D.2…`, `GCI11R-002…`) |
+| `plans/GarbageCollectorAggressiveVerificationRegression_2026-10-03.md` | `94ce5952` | aggressive regression (decisions `D1`–`D11`) |
+| `plans/GarbageCollectorPersistentEdgeTraits_2026-09-12.md` | `26c86f71` | persistent edges (`P0`–`P5`) |
+| `plans/ResumableWhnfEvaluation_2026-09-12.md` | `8b1ace22` | resumable WHNF (`W…`) |
+| `reviews/GarbageCollectorIntegration_2026-08-25.md` | `6aaaaeec` | GC integration (`I…`, `GCI…R-…`) |
+| `reviews/GarbageCollectorGateG3_2026-10-02.md` | `26c86f71` | GC integration (`I…`, `GCI…R-…`) |
+| `reviews/GarbageCollectorGateG4_2026-10-02.md` | `8ad63790` | GC integration (`I…`, `GCI…R-…`) |
+| `reviews/GarbageCollectorReadinessIntegration_2026-10-02.md` | `6aaaaeec` | GC integration (`I…`, `GCI…R-…`) |
+| `reviews/GarbageCollectorRuntimePolicy_2026-10-02.md` | `cbfa4fa6` | GC integration (`I…`, `GCI…R-…`) |
+| `reviews/GarbageCollectorExplicitMaintenance_2026-10-02.md` | `cbfa4fa6` | GC integration (`I…`, `GCI…R-…`) |
+| `reviews/GarbageCollectorI13CleanupInventory_2026-10-02.md` | `06602491` | GC integration (`I…`, `GCI…R-…`) |
+| `reviews/GarbageCollectorIntegrationI5I10_2026-09-03.md` | `0840f7be` | GC integration (`I…`, `GCI…R-…`) |
+| `reviews/GarbageCollectorIntegrationI5_2026-09-07.md` | `d75adf0c` | GC integration (`I…`, `GCI…R-…`) |
+| `reviews/GarbageCollectorIntegrationI6I7_2026-09-10.md` | `9d17b2bc` | GC integration (`I…`, `GCI…R-…`) |
+| `reviews/GarbageCollectorIntegrationI8_2026-09-10.md` | `335e37d6` | GC integration (`I…`, `GCI…R-…`) |
+| `reviews/GarbageCollectorIntegrationI10_2026-09-11.md` | `4da38497` | GC integration (`I…`, `GCI…R-…`) |
+| `reviews/GarbageCollectorIntegrationI12_2026-10-02.md` | `242d47f1` | GC integration (`I…`, `GCI…R-…`) |
+| `reviews/GarbageCollectorOpaqueRepresentation_2026-09-11.md` | `c0015f1a` | GC integration (`I…`, `GCI…R-…`) |
+| `reviews/GarbageCollectorRawValueApiAudit_2026-09-11.md` | `1b35d44c` | GC integration (`I…`, `GCI…R-…`) |
+| `reviews/GarbageCollectorAggressiveD2h_2026-10-01.md` | `0a60ed34` | aggressive verification (`D.2…`, `I11D…`) |
+| `reviews/GarbageCollectorAggressiveVerificationClosure_2026-10-01.md` | `26c86f71` | aggressive verification (`D.2…`, `I11D…`) |
+| `reviews/GarbageCollectorI11D2DynamicToolMatrix_2026-10-01.md` | `c01e1437` | aggressive verification (`D.2…`, `I11D…`) |
+| `reviews/ResumableWhnfW6G1Design_2026-09-19.md` | `d959cfd1` | resumable WHNF (`W…`) |
+| `reviews/ResumableWhnfW7_2026-09-27.md` | `ca8548ca` | resumable WHNF (`W…`) |

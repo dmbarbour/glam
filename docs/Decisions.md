@@ -205,10 +205,16 @@ maps the short names used here to file names.
 `structural-lazy-map-and-concat` · 2026-09-17 · maintainer · accepted
 - **Context:** recursive list operators forced whole spines on the Rust
   stack.
-- **Decision:** `map f (A ++ B)` yields deferred halves. Strict leaves are
-  balanced to O(log n) depth. Invalid items become deferred failing holes.
+- **Decision:**
+  - Each step unfolds one representation node and forces nothing.
+  - `map f (A ++ B)` yields deferred halves, and `map` over a strict leaf
+    yields lazy item applications.
+  - `list.concat` defers both halves of a source concatenation. Over a
+    strict outer leaf it joins the segments pairwise to O(log n) depth, and
+    an invalid item becomes a deferred failing hole.
 - **Consequences:** laziness is user-visible: a failure appears only when its
   item is demanded.
+- **Rule lives in:** `agent_context/evaluation.md` "Values and Forcing".
 - **Recorded in:** resumable-WHNF plan W6D.4a and W6D.4b.
 
 ## Diagnostics
@@ -401,6 +407,7 @@ maps the short names used here to file names.
   - Parsing `.g` files is not yet covered: the parser still recurses on the
     Rust stack. The deep-nesting remedy belongs to the panic-safety plan.
   - Core-value drop depth is still open (holistic review V3).
+- **Rule lives in:** `agent_context/evaluation.md` "Values and Forcing".
 - **Recorded in:** resumable-WHNF plan W7A.1; W7 review; documentation
   disposition, maintainer answer 4.
 
@@ -443,7 +450,21 @@ maps the short names used here to file names.
   always advances.
 - **Consequences:** 33.6% fewer `notify_all` calls. Splitting the condvar
   waits for a profile with workers enabled.
+- **Rule lives in:** `agent_context/evaluation.md` "Sessions and Workers".
 - **Recorded in:** resumable-WHNF plan W9C.4 and W9D.4.
+
+### Deterministic hashing only for bounded runtime work-ID sets
+`trusted-hasher-scope` · 2026-09-28 · agent · accepted
+- **Context:** randomized hashing costs show up in hot scheduler
+  traversals, but deterministic hashing over user-influenced keys invites
+  pathological collisions.
+- **Decision:** `TrustedWorkIdHasher` is used only for bounded traversal sets
+  of runtime-allocated work IDs. Indexes keyed by user data, and persistent
+  coordinator indexes, keep randomized hashing.
+- **Consequences:** a new deterministic-hash use must show its keys are
+  runtime-allocated and its set is bounded.
+- **Rule lives in:** `agent_context/evaluation.md` "Sessions and Workers".
+- **Recorded in:** resumable-WHNF plan, exact-route work.
 
 ### A `TaskHalt` is only a failure or a panic
 `taskhalt-is-failure-or-panic` · 2026-10-05 · agent · accepted
@@ -536,6 +557,22 @@ maps the short names used here to file names.
 - **Rule lives in:** `architecture/evaluation.md` "WHNF Submachine Flow".
 - **Recorded in:** I5 review GCI5R-001 and GCI5R-001G; GC integration plan,
   "I6+ Regional Allocation Migration Rule".
+
+### Collector traversal is separate from mutator observation
+`collector-traversal-separate-from-observation` · 2026-09-11 · agent · accepted
+- **Context:** the bootstrap collector is stop-the-world, but concurrent or
+  moving collection must not have to unpick an API that assumes no mutator
+  is active.
+- **Decision:** tracing receives only a collector-created visitor and
+  delegates to each family's crate-private `trace_managed_edges`. Rooting and
+  observation use `RuntimeValueAccess`. Neither API encodes "no active
+  mutator". Canonical runtime values root only the initial metadata carrier;
+  edge-free atoms such as unit are built inside the caller's access, not held
+  as permanent roots.
+- **Consequences:** a future collector can supply its own visitor without
+  changing mutator code.
+- **Rule lives in:** `architecture/evaluation.md` "Collector Boundary".
+- **Recorded in:** aggressive-verification remediation plan.
 
 ### Owner-qualified edge-transition gateways are kept as no-op barrier sites
 `owner-qualified-edge-gateways` · 2026-09-10 · agent · accepted

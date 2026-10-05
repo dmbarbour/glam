@@ -229,14 +229,14 @@ folds singleton `List::concat`s into an N-deep left spine
 - **The aggressive-GC mode is compiled but never run.**
   `aggressive-gc-verification` is compiled by `clippy --all-features` and not
   executed. The last full aggressive workspace run is recorded at `d2d27211`
-  ([closure review](GarbageCollectorAggressiveVerificationClosure_2026-10-01.md));
+  (closure review);
   about 30 commits touching `src/` or `crates/` have landed since.
   - **Finding 2026-10-03:** executing the P0 aggressive pass (sequence step 1)
     confirmed the risk — the aggressive suite is broadly red and hangs partway.
     Bisected to `46dc1487` (I12A explicit GC maintenance), which panics on a
     supported value-domain-outlives-runtime lifecycle in a test/verification-only
     collecting-entry wrapper (production unaffected). Remediation tracked in
-    [`GarbageCollectorAggressiveVerificationRegression_2026-10-03.md`](../plans/GarbageCollectorAggressiveVerificationRegression_2026-10-03.md).
+    `GarbageCollectorAggressiveVerificationRegression_2026-10-03.md`.
 - **No pinned toolchain or CI.** There is no `rust-toolchain.toml`, no
   `rust-version`, and no CI config. The dev container installs unpinned
   stable Rust and no ripgrep. This review hit both problems: the build
@@ -562,7 +562,7 @@ those files.
   `glam-gc` denies both.
 - There is no main-crate counterpart to `audit-unsafe.sh` or `SAFETY.md`.
 - Main-crate Miri, ASan, and TSan runs used filters recorded only in
-  [I11D.2](GarbageCollectorI11D2DynamicToolMatrix_2026-10-01.md).
+  I11D.2.
 
 **Why it matters.** VRR rewrites exactly these `Trace` and `ManagedFamily`
 impls. Their exactness is what keeps the collector sound.
@@ -1729,6 +1729,10 @@ cheaper. Items within a group are independent.
 5. **Performance harness and counters (X3).** Corpus, release runner,
    runtime-profiling counters, and a binary `GLAM_STATS`. Capture and record
    the post-G4 baseline.
+   - Prior data point, from the retired runtime-policy review (2026-10-02):
+     in release mode, the direct-assembly Hello World sample produced the
+     same 166-byte ELF each run (SHA-256 `e18df1ef…1e01`), in 3.52–3.55 s
+     wall time over three warm runs. Descriptive only, not a threshold.
 6. **Independent oracles** to protect upcoming representation changes:
    - the budget-differential harness (E9);
    - a seeded alt/cut/get/set/heap model test (R8);

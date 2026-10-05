@@ -195,11 +195,19 @@ Foreground drivers retain a private, non-authoritative exact-demand zipper
 across bounded polls. Its current work ID and parent subscription
 epoch/dependency keys avoid rediscovering an unchanged producer chain; they do
 not own work or keep a demand session alive. Claim and validation occur under
-coordinator state. A generation change with valid frames continues locally,
-while changed dependencies, retirement, or an interrupted release discard the
-hint and invoke the complete guarded traversal from the original wait. Causal
-`.task.new` descendants are a separate helping route and never become zipper
-frames.
+coordinator state. Two revisions decide whether the hint survives. The broad
+`work_generation` advances for every scheduler-visible mutation; a private
+route-hazard revision advances only for the mutation kinds that can change a
+retained tip, ancestor, or projection (`affects_exact_route`). If the hazard
+revision is unchanged and the claimed tip matches, the release hands off in
+O(1) even though the generation moved. Otherwise the driver revalidates every
+frame under the coordinator lock and keeps the route if validation passes; a
+mismatch or an interrupted release falls back to the complete guarded
+traversal from the original wait. No descendant index or
+back-pointer is needed: a one-shot completion queues only registrations that
+still match its exact subscription epoch and dependency key, so completing the
+claimed tip can expose only its immediate parent. Causal `.task.new`
+descendants are a separate helping route and never become zipper frames.
 
 Ordinary worker quantums preserve their thread's inactive per-heap allocation
 cursors for reuse. Worker-thread termination is the stronger collector
@@ -278,6 +286,38 @@ eagerly sweeps ordinary runs, and finalizes reviewed passive-drop families.
 Recoverable trace/finalizer panics remain explicit maintenance state; permanent
 heap damage is reported without re-entering the value domain.
 
+Collector traversal is separate from mutator observation. Tracing receives
+only a collector-created visitor and delegates to each family's crate-private
+`trace_managed_edges`; rooting and observation use `RuntimeValueAccess`.
+Neither API encodes "no active mutator", so a future concurrent or moving
+collector can supply its own visitor. Canonical runtime values root only the
+initial metadata carrier; edge-free atoms such as unit are built inside the
+caller's access rather than held as permanent roots.
+
+### Maintenance Admission
+
+The runtime mutation-admission gate is a non-reentrant `RwLock`. Ordinary
+publication takes it shared; readiness, settlement, and pressure promotion
+take it exclusively. Settlement holds it exclusively while it constructs
+managed values (kill failures and report roots), so no allocation or
+value-domain entry may take the gate: settlement would deadlock on its own
+thread. Collection obeys this. A service publishes its GC lease under shared
+admission, releases the gate, collects, and publishes the outcome under shared
+admission again.
+
+Pressure is sampled at a stable pump under exclusive admission. Every
+collection first publishes a lease, and the stable predicate requires zero
+leases, so no collection can race that sample. Allocation can race it, since
+allocation never collects: pressure arriving after the sample stays in the
+collector's latch, and an older outcome clears only the request it serviced.
+A race can therefore cause one redundant collection but never loses a request.
+
+Under `aggressive-gc-verification`, pressure means "allocated since the
+previous evaluation" (the heap's class-cache hits plus misses). A constant
+`true` would livelock any client loop shaped like the CLI's settlement loop,
+because each pump after a service would promote again. Rejected alternatives
+are in `aggressive-gc-via-stable-pump` in [`Decisions.md`](../Decisions.md).
+
 ## WHNF Submachine Flow
 
 Every durable whole-value owner carries one `WhnfComputation`. It begins with a
@@ -286,7 +326,11 @@ one `ManagedWhnfRoot`. The canonical managed state retains the current focus,
 continuation frames, followed lazy and promise identities, and the optional
 source-owner and cycle-promise state needed by the owning machine. Resuming the
 same computation therefore continues from its last transition rather than
-restarting demand from the original value.
+restarting demand from the original value. Two lighter designs were rejected:
+adding lazy and promise cases to `EvaluationHalt`, and restarting the outer
+machine once its dependency completes. Both lose the continuation that
+consumes the result, so a step that builds an intermediate lazy rebuilds it and
+suspends again without bound.
 
 A bounded poll returns one of five kinds of outcome: a rooted ready value, an
 exact semantic dependency, an exhausted shared step budget, an explicit
@@ -325,14 +369,15 @@ access. Code which must wait, invoke a host callback, enter coordinator state,
 or cross another orchestration boundary instead retains the factory and opens
 a later access around its next bounded operation.
 
-The current recursive managed families use four owner-handoff shapes. Pure
-regional builders retain owner-neutral facades only until a containing value is
-rooted; evaluator steps acquire a family root into their publication nursery
-before ending a smaller access region; genuine orchestration handoffs carry an
-explicit promise or core-net family root; and nested semantic builders may pass
-facades through ordinary values and containers only while the whole
-unpublished graph remains inside one access region. None of those facades is a
-durable owner by itself.
+The current recursive managed families use three production owner-handoff
+shapes. Pure regional builders retain owner-neutral facades only until a
+containing value is rooted; genuine orchestration handoffs carry an explicit
+promise or core-net family root; and nested semantic builders may pass facades
+through ordinary values and containers only while the whole unpublished graph
+remains inside one access region. None of those facades is a durable owner by
+itself. `EvaluatorStepContext` also has a publication nursery, which holds
+temporary family roots until the step publishes, but only test constructors
+use it.
 
 `LazyValue` and `PromisedValue` are one-pointer, edge-only semantic facades;
 their registered roots carry only reviewed scheduler, diagnostic, and
@@ -350,7 +395,10 @@ The persistent-edge migration
 removed their ordinary copy, equality, and formatting traits. Persistent edge
 duplication and allocation identity are explicit matching-access operations;
 ordinary cloning remains only on registered roots and public rooted value
-handles. Glam's managed facades expose no unqualified pointer-copy or address-
+handles. Those clones share one root registration and gain no equality,
+ordering, or hash. Duplicating an edge never registers a temporary root, which
+would be correct but far too costly; the collector's release code-generation
+check keeps duplication one pointer load. Glam's managed facades expose no unqualified pointer-copy or address-
 comparison surface. Lifetime-branded temporary pointer views remain a deferred
 safety enhancement rather than a claim of the current non-moving boundary.
 
@@ -363,7 +411,12 @@ held in the runtime registry. `OpaqueValue` similarly stores only a passive
 `ExternalOwnerHandle`; its four admitted production families are source-
 inventoried as either edge-free data or explicit external capabilities. No
 managed node can reach a strong value-domain/runtime authority or a registered
-root through those handles.
+root through those handles. Opaque access returns an owning `Arc<T>`, sound
+only because every opaque payload is an external owner. Collection never
+retires an external owner; an explicit drain destroys retired owners outside
+the registry lock, catching a panicking destructor and continuing. Destructor
+order across concurrent drains is not semantic. [`values.md`](values.md)
+"Opaque Values and Host Calls" owns the details.
 
 Post-publication changes to those families use the same bounded value-access
 authority. The lazy cache reports its deferred source as leaving and its
@@ -777,6 +830,16 @@ duplicate focus or continuation: semantic progress is read from the managed
 lazy checkpoint. The route is session-neutral and retires when its demand
 count reaches zero unless a claim is still completing.
 
+Work that must survive route loss falls into three ownership classes.
+Demand-driven resumable state (WHNF, access, object, list, builtin, and
+net-WHNF progress) lives in traced managed checkpoints beneath the lazy.
+Autonomous root work, a started reflection task, stays a coordinator
+background root and publishes through a managed completion promise; its
+continuation never moves into the lazy. Post-access orchestration happens
+after managed access closes: a host call checkpoints before and after its
+callback because nothing else would continue it, while a best-effort spark
+needs only an at-most-once scalar admission phase in its enclosing checkpoint.
+
 Direct observation before assignment fails without filling the cell. An
 enclosing lazy task instead records a scheduler-visible promise dependency and
 stays uncached, so later assignment can satisfy a new demand. Assigned promises
@@ -892,7 +955,11 @@ One `EvaluationRuntime` owns its attached `EvaluationExecutor`; assembler,
 logger, macro, and future IDE demand sessions share that runtime rather than
 registering independent worker pools. The fixed workers begin at activated
 reflection tasks or admitted sparks and follow their exact deferred producer
-chains; they do not claim unrelated ready deferred work. The runtime background
+chains; they do not claim unrelated ready deferred work. For fairness, a
+worker alternates between task roots and spark roots when both can yield a
+claim, and a root that yields one rotates to the back of the background-root
+list. A poll that exhausts its budget releases the same work record without
+publishing a dependency. The runtime background
 pump follows reflection roots but excludes sparks. An exact serial demand
 driver remains available for foreground dependencies and explicit batch
 draining. It selects by demand ID through the coordinator and does not require

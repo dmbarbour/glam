@@ -79,7 +79,9 @@ configuration live in [`../CLI.md`](../CLI.md).
 - Report rendering may admit more runtime work. Pump and settle again until the
   fallback path and runtime are both stable.
 - Assembler and logger error counts are read separately. Retained task,
-  delivery, exit, and killed-work reports independently make the batch fail.
+  delivery, exit, killed-work, and managed-maintenance failure reports each
+  make the batch fail on their own. A maintenance failure fails the batch even
+  if a later service succeeds.
 - Valid stdout may accompany a failing exit status when later reasoning or
   diagnostics fail.
 

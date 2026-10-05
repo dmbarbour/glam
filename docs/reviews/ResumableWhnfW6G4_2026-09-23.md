@@ -15,7 +15,7 @@ dated W9 review.
 ## Scope
 
 This investigation follows W6G.4 in
-[`ResumableWhnfEvaluation_2026-09-12.md`](../plans/ResumableWhnfEvaluation_2026-09-12.md).
+`ResumableWhnfEvaluation_2026-09-12.md`.
 It profiles the exact source-shaped duplicate-symbol fixture from
 `direct_assembly_rejects_duplicate_symbol_publication`, localizes the residual
 regression by implementation phase, and identifies the first repair boundary.
@@ -722,7 +722,7 @@ generation mismatch, and do not add a global descendant index to repair this
 local accounting boundary.
 
 Phase W9 in
-[`ResumableWhnfEvaluation_2026-09-12.md`](../plans/ResumableWhnfEvaluation_2026-09-12.md)
+`ResumableWhnfEvaluation_2026-09-12.md`
 implemented the complete follow-up. On the same exact fixture it converts all
 9,356 moved poll windows to O(1) acceptance, performs 18 complete searches
 visiting 18 records, and records zero cold fallbacks. Callgrind falls from
@@ -730,7 +730,7 @@ visiting 18 records, and records zero cold fallbacks. Callgrind falls from
 reduction/driver signature and structured diagnostic remain bit-for-bit
 unchanged. Forced hazard orderings cover the guarded slow validation and
 concrete invalidation paths which the source fixture does not exercise. See
-[`ResumableWhnfW9_2026-09-28.md`](ResumableWhnfW9_2026-09-28.md) for the full
+`ResumableWhnfW9_2026-09-28.md` for the full
 measurement and verification record.
 
 ## Verification required by the repair

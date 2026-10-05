@@ -280,6 +280,13 @@ and every unsafe function, implementation, and block are checked into
 
 ## Managed Pointer and Access Invariants
 
+- Do not add heap or domain tokens to `Gc<T>`, or turn release-build access
+  into a global allocation lookup, to diagnose ownership. Ownership defects
+  are found by matching-mutator APIs, debug validation, and forced
+  collection fixtures, not by widening the pointer.
+- No hook forces collection before an outer entry. The former
+  `Heap::enable_collection_before_outer_entry` was removed so it cannot become
+  an API contract; under the runtime's `NoAuto` policy, entry never collects.
 - `Gc<T>` is transparent over exactly one `NonNull<T>`. An unconditional const
   assertion latches its one-pointer width. It carries no heap, domain, class,
   allocation-record, or debug field and is not a root. It implements none of
@@ -669,7 +676,9 @@ sharing `Gc<T>` does not grant access: dereference still requires a non-`Send`,
 non-`Sync`, heap-qualified mutator. `T: Sync` permits the resulting shared
 reference on another thread; `T: Send` permits eventual collector-thread
 destruction. The cross-thread test moves a `Gc<u64>` and accesses it
-only after entering its owner heap on that thread.
+only after entering its owner heap on that thread. Whether `Gc<T>` stays
+`Send` and `Sync` is reopened at value-representation refinement's
+scoped-view review.
 
 ### `mutator::Allocator::alloc`
 

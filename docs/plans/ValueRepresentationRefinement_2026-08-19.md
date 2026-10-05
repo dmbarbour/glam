@@ -58,7 +58,9 @@ managed edges are already move-only and duplicate explicitly under matching
 access after the completed D.2h/P4 cutover. Review only the additional scoped
 working-view model alongside the final internal `Value` copy policy before
 V2-V4; do not migrate today's compatibility representation merely to pre-empt
-that decision.
+that decision. The same review decides whether `Gc<T>` stays `Send` and
+`Sync`, once scoped working views and real cross-thread persistent owners are
+inventoried.
 
 ## Current Pressure
 

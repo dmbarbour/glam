@@ -1,7 +1,7 @@
 # Garbage-Collector Scoped Pointer Safety Plan — 2026-09-09
 
 Status: deferred lifetime-branding safety enhancement. The completed
-[`GarbageCollectorPersistentEdgeTraits_2026-09-12.md`](GarbageCollectorPersistentEdgeTraits_2026-09-12.md)
+`GarbageCollectorPersistentEdgeTraits_2026-09-12.md`
 plan removed implicit traits from persistent `Gc<T>` during GCI11R-002D. That
 prerequisite has settled. This plan remains deliberately deferred until after
 Gate G3 and a fresh review coordinates `ScopedGc` with Value Representation
@@ -42,16 +42,16 @@ roots and exact tracing.
 
 ## Relationship to Existing Plans
 
-- [GarbageCollectorImplementation_2026-08-19.md](GarbageCollectorImplementation_2026-08-19.md)
+- The collector implementation (now retired; see [`README.md`](README.md)
+  Retired History, and [`SAFETY.md`](../../crates/glam-gc/SAFETY.md))
   established pointer-sized `Gc<T>` storage. The later persistent-edge
   cutover made durable duplication explicit while retaining the intended
   pointer-only release cost. This plan revisits only the temporary admitted
   working view after the initial collector is certified end to end.
-- [GarbageCollectorIntegration_2026-08-19.md](GarbageCollectorIntegration_2026-08-19.md)
-  now delegates its Gate G3 persistent-edge trait cutover to
-  [GarbageCollectorPersistentEdgeTraits_2026-09-12.md](GarbageCollectorPersistentEdgeTraits_2026-09-12.md).
-  That transition deliberately stops short of this plan's lifetime-branded
-  working view.
+- The GC integration delegated its Gate G3 persistent-edge trait cutover to
+  a separate migration (both now retired; see the `persistent-edges-move-only`
+  entry in [`Decisions.md`](../Decisions.md)). That transition deliberately
+  stopped short of this plan's lifetime-branded working view.
 - [ValueRepresentationRefinement_2026-08-19.md](ValueRepresentationRefinement_2026-08-19.md)
   will substantially change where managed edges reside and how internal values
   are copied. A full scoped-pointer migration should normally follow or be

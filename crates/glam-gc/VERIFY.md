@@ -1102,3 +1102,35 @@ models, and eight doc and compile-fail tests. Strict Miri passed 212 with
 three deliberate exclusions. ASan passed 213 and TSan 214, each with the two
 scale fixtures ignored. The intentional leak fixture passed separately under
 Miri and ASan with only leak checking disabled.
+
+## Production-runtime dynamic matrix
+
+`scripts/check.sh full` runs Miri and the sanitizers over `glam-gc` only. The
+production runtime's matrix is run by hand with a nightly toolchain. It last
+passed on 2026-10-01 with nightly 1.101.
+
+Miri, strict provenance, `cargo test --lib` targets:
+
+- `core::managed::value_node::tests::prepared_root_projection_nests_inside_one_runtime_access_region`
+- `core::managed::tests::runtime_value_access_routes_borrowed_edge_sets_to_the_collector_gateway`
+- `api::tests::managed_collection_tests::production_runtime_reclaims_each_recursive_identity_family`
+- `api::tests::managed_collection_tests::runtime_retirement_before_collection_leaves_public_value_inert`
+- `api::tests::managed_collection_tests::passive_finalization_produces_no_runtime_work`
+- `api::tests::managed_collection_tests::collection_interleaves_with_worker_quantum_without_lost_work`
+- `api::tests::managed_collection_tests::external_request_during_finalization_is_coalesced`
+- with `--features aggressive-gc-verification`:
+  `api::tests::managed_collection_tests::repository_aggressive_mode_services_new_allocations_at_each_stable_pump`
+  (renamed since the last pass)
+
+`api::tests::managed_collection_tests::production_collection_preserves_each_serial_boundary`
+is a Miri *performance exclusion*, not a pass: it ran more than fifteen
+CPU-minutes inside ordinary net reduction without a diagnostic. Its component
+paths pass separately under Miri, and it passes natively and under both
+sanitizers.
+
+AddressSanitizer and ThreadSanitizer filters: `value_node::tests::prepared_root`,
+`managed::tests::runtime_value_access`, and `api::tests::managed_collection_tests::`
+(23 tests now; 9 at the last recorded pass).
+
+`checked_nonrecursive_marking_handles_wide_shared_spines` uses width 64 only
+under `cfg(miri)`; the native 2,048-wide proof is unchanged.

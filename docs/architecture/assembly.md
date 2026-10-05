@@ -138,6 +138,7 @@ construct one dormant assembler and compile configuration
   -> evaluate and write valid asm.result bytes
   -> recheck observed local files and write optional manifest
   -> pump all runtime work to a stable readiness or deadlock
+  -> service any MaintenanceRequired collection, then pump again
   -> settle exit votes, or explicitly kill and settle a stable deadlock
   -> render retained task, delivery, exit, and killed-work reports via fallback
   -> repump if rendering admitted work, then drain fallback output
@@ -150,6 +151,17 @@ diagnostics report an error. Retained runtime failures establish failure before
 rendering, so a failed fallback adapter cannot turn an unsuccessful batch into
 a successful one. Main checks the assembler and logger bus error counts
 independently; both are independent of queue retention, reads, and rendering.
+
+The settlement loop is the CLI's only collection point. A stable pump may
+promote collector pressure to `MaintenanceRequired`; the loop services it and
+pumps again. A failed service other than a stale snapshot fails the batch, and
+so does any maintenance failure in a settled report, even if a later retry
+succeeded, because the report keeps the durable failure history. Readiness
+`MaintenanceFailed` (heap poison) or `Poisoned` (runtime-core poison) ends
+settlement at once: the batch writes plain host text to stderr, without
+entering the value domain, and fails. Because `asm.result` is written before
+the first settlement pump, assembly itself never collects, so peak memory
+equals total allocation (see [`values.md`](values.md)).
 
 Standalone `--parse` inspects one built-in `.g` source through the narrow
 library report without constructing an assembler or loading imports. Its
