@@ -28,8 +28,8 @@ control-flow overview.
   `RuntimeValueAccess` is intentional mutator authority, not redundant state.
   Known exception, not a pattern to copy:
   `PromiseProducerObligation::publish_assignment_guarded` runs inside a
-  promise's managed edge transition, under settlement's exclusive admission,
-  and locks the coordinator there to retire the producer and publish the wait
+  promise's managed edge transition, under shared mutation admission, and
+  locks the coordinator there to retire the producer and publish the wait
   terminal. There is no lock-order table yet; moving that coordinator work
   after access closes is a concurrent-GC prerequisite.
 - Shared runtime mutation admission may be taken inside a managed-access
