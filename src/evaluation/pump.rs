@@ -531,20 +531,24 @@ pub(super) fn pump_demand(
     target: &EvaluationWaitToken,
     reservation_allowance: usize,
 ) -> EvaluationPumpOutcome {
+    let mut reservation_allowance = reservation_allowance;
     pump_demand_on_route(
         coordinator,
         context,
         target,
-        reservation_allowance,
+        &mut reservation_allowance,
         &mut ExactDemandRoute::default(),
     )
 }
 
+/// Pumps work toward `target`, drawing whole poll quanta from
+/// `reservation_allowance`. On return the allowance holds what remains, so
+/// the caller can charge the reserved steps to its own budget.
 pub(super) fn pump_demand_on_route(
     coordinator: &Arc<EvaluationWorkCoordinator>,
     context: &EvalContext,
     target: &EvaluationWaitToken,
-    mut reservation_allowance: usize,
+    reservation_allowance: &mut usize,
     route: &mut ExactDemandRoute,
 ) -> EvaluationPumpOutcome {
     if target.terminal_poll().is_some() {
@@ -558,7 +562,7 @@ pub(super) fn pump_demand_on_route(
         if !matches!(context.poll_wait(target), EvaluationWaitPoll::Pending(_)) {
             return EvaluationPumpOutcome::TargetReady;
         }
-        if reservation_allowance == 0 {
+        if *reservation_allowance == 0 {
             return EvaluationPumpOutcome::BudgetExhausted;
         }
 
@@ -597,8 +601,8 @@ pub(super) fn pump_demand_on_route(
 
         let work_id = work.id();
         let mut claimed = ClaimedTask::new(coordinator.clone(), work);
-        let quantum = reservation_allowance.min(TASK_POLL_QUANTUM);
-        reservation_allowance -= quantum;
+        let quantum = (*reservation_allowance).min(TASK_POLL_QUANTUM);
+        *reservation_allowance -= quantum;
         let mut budget = super::EvaluationStepBudget::new(quantum);
         let poll = claimed.poll(&mut budget);
         debug_assert_eq!(budget.spent() + budget.remaining(), budget.granted());

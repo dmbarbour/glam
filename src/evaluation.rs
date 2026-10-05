@@ -98,6 +98,15 @@ impl EvaluationStepBudget {
         self.granted - self.remaining
     }
 
+    /// Charges work done on this budget's behalf elsewhere, such as a pump's
+    /// reserved allowance.
+    pub(crate) fn consume(&mut self, steps: usize) {
+        self.remaining = self
+            .remaining
+            .checked_sub(steps)
+            .expect("delegated work must stay within its granted budget");
+    }
+
     /// Charges one administrative transition only when delegated work did
     /// not already consume from this same budget.
     pub(crate) fn charge_if_unchanged(&mut self, previous_remaining: usize) {

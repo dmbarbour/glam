@@ -606,11 +606,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
     }
 
+    /// Polls this task within one total budget of `steps`, including the work
+    /// it pumps while waiting. Each pass charges at least one step, so a call
+    /// never spends more than `steps`.
     pub(super) fn poll(&mut self, steps: usize) -> EffectTaskPoll {
         let context = EvaluationPollContext::for_context(&self.eval_context);
-        for _ in 0..steps.max(1) {
-            let mut budget = crate::evaluation::EvaluationStepBudget::new(steps.max(1));
+        let mut budget = crate::evaluation::EvaluationStepBudget::new(steps.max(1));
+        while budget.remaining() != 0 {
+            let before = budget.remaining();
             let poll = self.poll_with_context(&context, &mut budget);
+            budget.charge_if_unchanged(before);
             let EffectTaskPoll::Blocked(blocked) = &poll else {
                 return poll;
             };
@@ -626,9 +631,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
             let Some(WorkDependency::Wait(wait)) = &blocked.dependency else {
                 return poll;
             };
-            match self.eval_context.pump_wait_on_route(
+            match self.eval_context.pump_wait_on_route_within(
                 wait,
-                steps.max(1),
+                &mut budget,
                 &mut self.exact_demand_route,
             ) {
                 EvaluationPumpOutcome::TargetReady => {}

@@ -3649,6 +3649,33 @@ fn every_poll_outcome_releases_managed_access_before_publication() {
 }
 
 #[test]
+fn budgeted_route_pump_charges_its_reserved_quantum() {
+    let context = EvalContext::standalone();
+    let task = context
+        .schedule_task(|_| Ok(Box::new(Complete)))
+        .expect("task should schedule");
+    let mut route = ExactDemandRoute::default();
+    let mut budget = crate::evaluation::EvaluationStepBudget::new(1_000);
+
+    assert_eq!(
+        context.pump_wait_on_route_within(&task.wait, &mut budget, &mut route),
+        EvaluationPumpOutcome::TargetReady
+    );
+    // The pump reserved one poll quantum for the task and charged it to the
+    // caller, so a caller's total budget bounds everything it pumps.
+    assert!(budget.remaining() < 1_000);
+
+    let mut exhausted = crate::evaluation::EvaluationStepBudget::new(0);
+    let pending = context
+        .schedule_task(|_| Ok(Box::new(Complete)))
+        .expect("task should schedule");
+    assert_eq!(
+        context.pump_wait_on_route_within(&pending.wait, &mut exhausted, &mut route),
+        EvaluationPumpOutcome::BudgetExhausted
+    );
+}
+
+#[test]
 fn pump_follows_a_lazy_dependency_to_its_producer() {
     let context = EvalContext::standalone();
     let dependency = context

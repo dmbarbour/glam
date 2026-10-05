@@ -2135,7 +2135,30 @@ impl EvalContext {
                 EvaluationPumpOutcome::NoProgress
             };
         };
-        pump_demand_on_route(&coordinator, self, wait, reservation_allowance, route)
+        let mut reservation_allowance = reservation_allowance;
+        pump_demand_on_route(&coordinator, self, wait, &mut reservation_allowance, route)
+    }
+
+    /// Pumps toward `wait` within `budget`, charging it for every poll
+    /// quantum the pump reserves.
+    pub(crate) fn pump_wait_on_route_within(
+        &self,
+        wait: &EvaluationWaitToken,
+        budget: &mut super::EvaluationStepBudget,
+        route: &mut ExactDemandRoute,
+    ) -> EvaluationPumpOutcome {
+        let Some(coordinator) = self.coordinator() else {
+            return if wait.terminal_poll().is_some() {
+                EvaluationPumpOutcome::TargetReady
+            } else {
+                EvaluationPumpOutcome::NoProgress
+            };
+        };
+        let granted = budget.remaining();
+        let mut allowance = granted;
+        let outcome = pump_demand_on_route(&coordinator, self, wait, &mut allowance, route);
+        budget.consume(granted - allowance);
+        outcome
     }
 
     /// Runs every executable task until all are terminal or one complete pass

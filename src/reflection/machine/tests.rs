@@ -7889,9 +7889,15 @@ fn polling_reports_state_block_without_waiting_in_the_machine() {
     )
     .unwrap();
 
-    let EffectTaskPoll::Blocked(blocked) = task.poll(256) else {
-        panic!("empty queue should suspend the task")
-    };
+    // One poll spends at most its budget, including pumped work, so reaching
+    // the state block may take more than one call.
+    let blocked = (0..16)
+        .find_map(|_| match task.poll(256) {
+            EffectTaskPoll::Yielded => None,
+            EffectTaskPoll::Blocked(blocked) => Some(blocked),
+            _ => panic!("empty queue should suspend the task"),
+        })
+        .expect("the task should reach its state block within a few budgets");
     assert!(blocked.dependency.is_none());
     assert!(blocked.observed_generation.is_some());
     assert_eq!(host.wait_count(), 0);
@@ -7901,7 +7907,11 @@ fn polling_reports_state_block_without_waiting_in_the_machine() {
         crate::diagnostic::Severity::Info,
         "available now",
     ));
-    assert!(matches!(task.poll(256), EffectTaskPoll::Complete(_)));
+    let completed = (0..16).find_map(|_| match task.poll(256) {
+        EffectTaskPoll::Yielded => None,
+        poll => Some(poll),
+    });
+    assert!(matches!(completed, Some(EffectTaskPoll::Complete(_))));
     assert_eq!(host.wait_count(), 0);
 }
 

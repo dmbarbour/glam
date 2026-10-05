@@ -760,6 +760,7 @@ fn method_signal(path: &Path, name: &str) -> Option<Signal> {
         "poll_wait"
         | "pump_wait"
         | "pump_wait_on_route"
+        | "pump_wait_on_route_within"
         | "wait_for_claimed_task"
         | "wait_for_claimed_task_on_route"
         | "wait_for_observed_dependency_progress"
@@ -1344,10 +1345,11 @@ const EXPECTED_W7_UNAPPROVED_RECURSION: &[&str] = &[];
 // claim's prior-dependency panic and a blocked poll's dependency panic. Its
 // lazy-state step replaces one WHNF poison-failure edge with a diverging
 // fault and adds a cached-poll panic lookup. Client-callback containment
-// moves the reflection launcher call inside an unwind boundary. None of them
-// recurses, so the cycle set stays empty.
-const EXPECTED_W7_RESOLVED_CALLS: usize = 1_144;
-const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 9_144_175_055_285_814_940;
+// moves the reflection launcher call inside an unwind boundary. R3's single
+// effect-poll budget pumps through `pump_wait_on_route_within`, adding one
+// edge. None of them recurses, so the cycle set stays empty.
+const EXPECTED_W7_RESOLVED_CALLS: usize = 1_145;
+const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 8_060_155_174_205_777_086;
 const EXPECTED_W7_CYCLIC_FUNCTIONS: &[&str] = &[];
 const EXPECTED_W8_REMAINING_RETRYABLE_HALT_CALLS: &[&str] = &[
     "src/eval/net.rs::drive_net_semantic_action#1|HaltBlocked",

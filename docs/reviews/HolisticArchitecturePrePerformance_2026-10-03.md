@@ -1096,7 +1096,8 @@ readback across random pair orders.
 *Prerequisite, done 2026-10-05:* the maintainer's net polarity change
 landed first, so the generator exercises final semantics. `Bind >< Bind`
 joins crossed (`B.1-C.2`, `B.2-C.1`), and function-role binds list
-`[result, argument]`.
+`[result, argument]`. A polarity checker comes next, before this generator:
+see [the net polarity checker plan](../plans/NetPolarityChecker_2026-10-05.md).
 
 ### Reflection (R)
 
@@ -1166,6 +1167,17 @@ drivers, and control families, with an illegal-state-permitting
   following the existing `reset_stack.rs`.
 - Move `run()` and pumping into `lifecycle` and `search`.
 - Honor one total budget.
+
+*Budget resolved 2026-10-05; structure open.*
+- `EffectTask::poll(steps)` keeps one budget for the whole call and charges
+  at least one step per pass.
+- It pumps waits through `pump_wait_on_route_within`, which charges the
+  caller for every poll quantum the route pump reserves, so a call spends at
+  most `steps`.
+- A regression checks the charging. One test that assumed a single
+  `poll(256)` reaches a state block now polls until the task stops yielding.
+
+The structural recommendations above remain open.
 
 **R4 — Medium — Docs and the PEAF plan describe "bounded standard-effect
 fusion" that no longer exists.** Reported.
