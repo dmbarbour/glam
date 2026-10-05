@@ -48,6 +48,67 @@ fn configuration_environment_failure_reports_its_entry_and_path() {
 }
 
 #[test]
+fn configured_completion_script_failure_is_reported_not_replaced() {
+    let dir = unique_temp_dir("glam-conf-completion-failure");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|error| panic!("failed to create {}: {error}", dir.display()));
+    let config = dir.join("conf.g");
+    fs::write(
+        &config,
+        "language g0\nimport 'std as std\nobject conf.env\nconf.completion_script = {bash:std.anno 'error \"completion script failed\"}\n",
+    )
+    .unwrap_or_else(|error| panic!("failed to write {}: {error}", config.display()));
+
+    let output = glam_command()
+        .env("GLAM_CONF", &config)
+        .arg("--completion_script")
+        .arg("bash")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "a failing configured script must not fall back to the built-in one"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error: completion script failed")
+            && stderr.contains("conf: entry `completion_script`")
+            && stderr.contains("eval: path lookup `conf.completion_script.bash`"),
+        "completion script failure context was not rendered:\\n{stderr}"
+    );
+}
+
+#[test]
+fn configured_cli_failure_reports_its_entry_and_path() {
+    let dir = unique_temp_dir("glam-conf-cli-failure");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|error| panic!("failed to create {}: {error}", dir.display()));
+    let config = dir.join("conf.g");
+    fs::write(
+        &config,
+        "language g0\nimport 'std as std\nobject conf.env\nconf.cli = std.anno 'error \"cli failed\"\n",
+    )
+    .unwrap_or_else(|error| panic!("failed to write {}: {error}", config.display()));
+
+    let output = glam_command()
+        .env("GLAM_CONF", &config)
+        .arg("deploy")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error: cli failed")
+            && stderr.contains("conf: entry `cli`")
+            && stderr.contains("eval: path lookup `conf.cli`"),
+        "cli failure context was not rendered:\\n{stderr}"
+    );
+}
+
+#[test]
 fn manifest_records_local_sources_and_binary_imports() {
     let dir = unique_temp_dir("glam-manifest");
     fs::create_dir_all(&dir)

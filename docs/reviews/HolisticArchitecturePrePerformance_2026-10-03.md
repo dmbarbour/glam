@@ -1438,6 +1438,21 @@ boundaries, and one path swallows errors.** Verified (`.ok()`), Reported
 publish completion-script failures, add the context frames, and add failing
 `conf.cli` and `conf.completion_script` tests.
 
+*Partly resolved 2026-10-05.*
+- **Completion script.** An evaluation failure in a configured
+  `conf.completion_script.NAME` is now published with a
+  `{conf:{entry:"completion_script"}}` frame, and the command fails. Only an
+  undefined binding falls back to the built-in script.
+- **`conf.cli`.** Failed and blocked searches keep the effect's structured
+  `TaskHalt::diagnostic` instead of formatting it into a message. The
+  rendered error therefore shows the original message, the path-lookup
+  frame, and the existing `cli` entry frame.
+- **Regressions.** Failing `conf.completion_script` and `conf.cli` CLI tests
+  were added.
+
+*Still open:* macro task failures, killed-work reports, and logger-transport
+failures are still converted to text.
+
 **A4 — Medium — Public-contract verification gaps.** Reported.
 
 - Runtime endpoints, `DiagnosticIngress`, maintenance, and `pump_background`

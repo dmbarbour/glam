@@ -156,9 +156,13 @@ fn run_search(
         match search.poll(SEARCH_STEP_BUDGET) {
             IsolatedSearchPoll::Yielded => {}
             IsolatedSearchPoll::Blocked(blocked) => {
-                let detail = if let Some(error) = blocked.error() {
-                    format!(": {error}")
-                } else if blocked.waiting_on_dependency() {
+                if let Some(error) = blocked.error() {
+                    return Err(CliError::from_failure(
+                        format!("configured CLI became blocked: {error}"),
+                        error.diagnostic(&assembler.values()),
+                    ));
+                }
+                let detail = if blocked.waiting_on_dependency() {
                     ": it is waiting on an unavailable lazy dependency".to_owned()
                 } else {
                     ": it is waiting on state unavailable to the isolated CLI session".to_owned()
@@ -171,7 +175,10 @@ fn run_search(
                 return Ok(branches);
             }
             IsolatedSearchPoll::Failed(error) => {
-                return Err(CliError::new(format!("configured CLI failed: {error}")));
+                return Err(CliError::from_failure(
+                    format!("configured CLI failed: {error}"),
+                    error.diagnostic(&assembler.values()),
+                ));
             }
             IsolatedSearchPoll::Cancelled => {
                 return Err(CliError::new("configured CLI was cancelled"));

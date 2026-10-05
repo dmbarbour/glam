@@ -11,6 +11,9 @@ use super::completion::{CliCaseExplanation, CompletionRequest};
 pub(crate) struct CliError {
     message: String,
     cause: Option<Box<Error>>,
+    /// A structured failure from the configured effect, kept rather than
+    /// flattened to text at this host boundary.
+    failure: Option<Box<Diagnostic>>,
     diagnostics: Vec<Diagnostic>,
     explanations: Vec<CliCaseExplanation>,
 }
@@ -20,6 +23,7 @@ impl CliError {
         Self {
             message: message.into(),
             cause: None,
+            failure: None,
             diagnostics: Vec::new(),
             explanations: Vec::new(),
         }
@@ -30,8 +34,17 @@ impl CliError {
         Self {
             message: error.to_string(),
             cause: Some(Box::new(error)),
+            failure: None,
             diagnostics,
             explanations: Vec::new(),
+        }
+    }
+
+    /// Retains a configured effect's structured failure diagnostic.
+    pub(super) fn from_failure(message: impl Into<String>, failure: Diagnostic) -> Self {
+        Self {
+            failure: Some(Box::new(failure)),
+            ..Self::new(message)
         }
     }
 
@@ -66,6 +79,12 @@ impl CliError {
         if let Some(cause) = &self.cause {
             return cause
                 .diagnostic(values)?
+                .with_context(values, configuration_entry_context(values)?);
+        }
+        if let Some(failure) = &self.failure {
+            return failure
+                .as_ref()
+                .clone()
                 .with_context(values, configuration_entry_context(values)?);
         }
         let mut entries = vec![(

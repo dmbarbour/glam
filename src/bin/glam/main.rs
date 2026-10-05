@@ -162,7 +162,7 @@ fn completion_script_command(name: &std::ffi::OsStr, cli_arguments: CliArguments
         Err(exit) => return exit,
     };
     let values = prepared.assembler.values();
-    let configured = values
+    let selected = values
         .access_names(
             &prepared.configuration.value,
             ["conf", "completion_script", name],
@@ -177,17 +177,33 @@ fn completion_script_command(name: &std::ffi::OsStr, cli_arguments: CliArguments
         .and_then(|candidate| {
             values.apply(&values.defined_or_function(), [values.list([])?, candidate])
         })
-        .and_then(|selected| prepared.assembler.evaluator().eval(&selected))
-        .ok()
-        .and_then(|selected| {
-            selected
-                .array_items()
-                .ok()
-                .flatten()
-                .filter(Vec::is_empty)
-                .map(|_| None)
-                .unwrap_or_else(|| Some(selected.into_value()))
-        });
+        .and_then(|selected| prepared.assembler.evaluator().eval(&selected));
+    // An undefined binding falls back to the built-in script. A configured
+    // binding that fails to evaluate is reported, never silently replaced.
+    let configured = match selected {
+        Ok(selected) => selected
+            .array_items()
+            .ok()
+            .flatten()
+            .filter(Vec::is_empty)
+            .map(|_| None)
+            .unwrap_or_else(|| Some(selected.into_value())),
+        Err(error) => {
+            let diagnostic = error
+                .with_context(
+                    &values,
+                    configuration::entry_context(&values, "completion_script")
+                        .expect("configuration context is local"),
+                )
+                .and_then(|error| error.diagnostic(&values))
+                .expect("configuration context is local");
+            prepared
+                .assembler
+                .diagnostic_bus()
+                .publish_local(diagnostic);
+            return finish_without_logger(prepared, None, true);
+        }
+    };
     let output: Result<Vec<u8>, String> = match configured {
         Some(function) => configured_completion_script(&prepared.assembler, &function),
         None => builtin_completion_script(name)
