@@ -1244,6 +1244,26 @@ yet `handle_step_error` and the macro runner still branch on it.
 *Recommendation:* remove the `From` impl, let the compiler confirm, then
 delete the variant and its branches.
 
+*Resolved 2026-10-05.* Production never produced the variant.
+- **Only producer.** `From<EvaluationHalt>`, through `task_eval_error`. Its
+  only callers were two tests, and both passed failures.
+- **Waits.** Reflection machines absorb evaluator waits as
+  `WorkDependency::Wait` before any halt is built.
+- **Macro runner.** It branches on `EvaluationHalt::blocked_on`, not on the
+  task halt, so it is unaffected. That part of the finding was inaccurate.
+
+Removed:
+- the `From` impl and `task_eval_error`, which also removes the inverted
+  `protocol` → `machine` import;
+- `TaskHaltKind::Blocked`, `TaskHalt::blocked` and `blocked_on`, and their
+  panicking arms;
+- `handle_step_error`'s blocked branch, its assertion, and the helper that
+  only that branch used.
+
+A `TaskHalt` is now a failure or a panic, and production reflection code no
+longer names `EvaluationHalt`. The two tests now build their failure with
+`TaskHalt::failure`. `agent_context/reflection.md` now states the contract.
+
 **R8 — Medium — Control semantics are tested only by example.** Reported.
 
 - About ten `.shift` programs exist, all single-shot with one prompt key.

@@ -3,7 +3,6 @@ use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
-use super::machine::task_eval_error;
 use super::requests::{
     ReflectionHost, ReflectionJournal, ReflectionRequest, ReflectionRequestWork,
     reflection_request_specs,
@@ -12,8 +11,8 @@ use super::search::IsolatedEffectSearch;
 use super::store::{StoreJournal, StoreSnapshot, VolumeId};
 use crate::api::{Diagnostic, Error as ApiError, EvaluatedValue, Value as PublicValue, Values};
 use crate::core::{
-    CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, EvaluationPanic, Key, List,
-    RuntimeValueAccess, Value,
+    CoreValueFactory, Dict, EvaluationFailure, EvaluationPanic, Key, List, RuntimeValueAccess,
+    Value,
 };
 use crate::diagnostic::Severity;
 use crate::eval;
@@ -468,7 +467,6 @@ pub struct TaskHalt(TaskHaltKind);
 #[derive(Clone)]
 enum TaskHaltKind {
     Failure(TaskFailure),
-    Blocked(EvaluationWaitToken),
     /// Scheduled work was interrupted by a panic. This is never a task
     /// failure: converting it into one re-raises the panic.
     Panicked(EvaluationPanic),
@@ -535,7 +533,6 @@ impl TaskHalt {
                 debug_assert_eq!(failure.runtime_id(), Some(values.runtime_id()));
                 Self(TaskHaltKind::Failure(failure))
             }
-            TaskHaltKind::Blocked(wait) => Self::blocked(wait),
             TaskHaltKind::Panicked(report) => Self::panicked(report),
         }
     }
@@ -549,7 +546,7 @@ impl TaskHalt {
     pub fn panic_message(&self) -> Option<&str> {
         match &self.0 {
             TaskHaltKind::Panicked(report) => Some(report.message()),
-            TaskHaltKind::Failure(_) | TaskHaltKind::Blocked(_) => None,
+            TaskHaltKind::Failure(_) => None,
         }
     }
 
@@ -564,9 +561,6 @@ impl TaskHalt {
             TaskHaltKind::Failure(TaskFailure::Rooted(failure)) => {
                 debug_assert_eq!(failure.runtime_id(), values.runtime_id());
                 failure
-            }
-            TaskHaltKind::Blocked(_) => {
-                panic!("a blocked task halt cannot become a permanent failure root")
             }
             TaskHaltKind::Panicked(report) => report.resume(),
         }
@@ -591,7 +585,6 @@ impl TaskHalt {
                     None => Self::failure(failure),
                 }
             }
-            TaskHaltKind::Blocked(wait) => Self::blocked(wait),
             TaskHaltKind::Panicked(report) => Self::panicked(report),
         }
     }
@@ -634,7 +627,7 @@ impl TaskHalt {
         }
         let failure = self
             .permanent_failure()
-            .expect("a blocked task halt has no failure diagnostic");
+            .expect("a task halt that did not panic is a failure");
         Diagnostic::from_parts(
             values,
             None,
@@ -650,9 +643,6 @@ impl TaskHalt {
     pub(super) fn into_failure(self) -> Arc<EvaluationFailure> {
         match self.0 {
             TaskHaltKind::Failure(failure) => failure.into_failure(),
-            TaskHaltKind::Blocked(_) => {
-                panic!("a blocked task halt cannot become a permanent evaluation failure")
-            }
             TaskHaltKind::Panicked(report) => report.resume(),
         }
     }
@@ -660,27 +650,14 @@ impl TaskHalt {
     pub(super) fn permanent_failure(&self) -> Option<&Arc<EvaluationFailure>> {
         match &self.0 {
             TaskHaltKind::Failure(failure) => Some(failure.as_failure()),
-            TaskHaltKind::Blocked(_) | TaskHaltKind::Panicked(_) => None,
-        }
-    }
-
-    pub(super) fn blocked(wait: EvaluationWaitToken) -> Self {
-        Self(TaskHaltKind::Blocked(wait))
-    }
-
-    pub(super) fn blocked_on(&self) -> Option<&EvaluationWaitToken> {
-        match &self.0 {
-            TaskHaltKind::Blocked(wait) => Some(wait),
-            TaskHaltKind::Failure(_) | TaskHaltKind::Panicked(_) => None,
+            TaskHaltKind::Panicked(_) => None,
         }
     }
 
     pub(super) fn failure_root(&self) -> Option<&RuntimeFailureRoot> {
         match &self.0 {
             TaskHaltKind::Failure(TaskFailure::Rooted(failure)) => Some(failure),
-            TaskHaltKind::Failure(TaskFailure::EdgeFree(_))
-            | TaskHaltKind::Blocked(_)
-            | TaskHaltKind::Panicked(_) => None,
+            TaskHaltKind::Failure(TaskFailure::EdgeFree(_)) | TaskHaltKind::Panicked(_) => None,
         }
     }
 }
@@ -689,13 +666,6 @@ impl fmt::Display for TaskHalt {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.0 {
             TaskHaltKind::Failure(failure) => failure.as_failure().fmt(formatter),
-            TaskHaltKind::Blocked(wait) => {
-                write!(
-                    formatter,
-                    "reflection task blocked on wait token {}",
-                    wait.get()
-                )
-            }
             TaskHaltKind::Panicked(report) => report.fmt(formatter),
         }
     }
@@ -708,12 +678,6 @@ impl fmt::Debug for TaskHalt {
 }
 
 impl std::error::Error for TaskHalt {}
-
-impl From<EvaluationHalt> for TaskHalt {
-    fn from(error: EvaluationHalt) -> Self {
-        task_eval_error(error)
-    }
-}
 
 impl From<ApiError> for TaskHalt {
     /// A panicked error is never a task failure, so it re-raises to the
@@ -877,6 +841,7 @@ pub(super) fn request_value(
 mod root_inventory_tests {
     use super::*;
     use crate::api::EffectTokenDomain;
+    use crate::core::EvaluationHalt;
     use crate::number::Number;
     use crate::reflection::{ExactConflictAnalysis, ReflectionStore};
     use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
@@ -1049,9 +1014,6 @@ mod root_inventory_tests {
             }
             TaskHaltKind::Failure(TaskFailure::Rooted(failure)) => {
                 let _: &RuntimeFailureRoot = failure;
-            }
-            TaskHaltKind::Blocked(wait) => {
-                let _: &EvaluationWaitToken = wait;
             }
             // A panic report holds no managed edges.
             TaskHaltKind::Panicked(report) => {
@@ -1229,13 +1191,12 @@ mod root_inventory_tests {
         let public_values = Values::from_core_factory(values.clone());
         let emission = Value::Number(Number::integer(41));
         let context = public_values.integer(42);
-        let halt = TaskHalt::from(
-            values
-                .with_runtime_value_access(|access| EvaluationHalt::from_value(&access, emission)),
-        );
+        let halt = TaskHalt::failure(values.with_runtime_value_access(|access| {
+            EvaluationHalt::from_value(&access, emission).into_permanent_failure()
+        }));
         assert!(
             halt.failure_root().is_none(),
-            "the evaluator conversion remains bounded until publication"
+            "an evaluator failure remains bounded until publication"
         );
 
         let halt = halt.with_context(&public_values, context);

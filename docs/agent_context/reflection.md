@@ -12,9 +12,12 @@ and control flow.
   abstract-global atoms; they do not perform host work themselves.
 - A specialization's owned request work reports demanded-value failures as a
   rooted `SpecializationRequestInput::Failed`; it does not reconstruct an
-  evaluator failure after suspension. Other bounded evaluator/interpreter
-  seams may still use `TaskHalt::from(EvaluationHalt)` until W8, and public
-  facade failures use `TaskHalt::from(Error)`. A failure is rooted before it
+  evaluator failure after suspension. A `TaskHalt` is only a permanent
+  failure or a panic: reflection machines report evaluator waits as
+  `WorkDependency` values, never as halts, so there is no conversion from
+  `EvaluationHalt`. A bounded evaluator failure enters through
+  `TaskHalt::failure`, and public facade failures use
+  `TaskHalt::from(Error)`. A failure is rooted before it
   enters a lifecycle or direct `EffectRun` result; converting an existing
   coordinator terminal must preserve its `RuntimeFailureRoot` rather than
   reconstructing it from the raw failure. Isolated-search publication remains

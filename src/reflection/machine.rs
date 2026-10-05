@@ -13,8 +13,8 @@ use super::search::{IsolatedSearchBranch, SearchPolicy};
 use super::store::{StoreJournal, VolumeId};
 use crate::api::{EvaluatedValue, Value as PublicValue, Values};
 use crate::core::{
-    Atom, Builtin, CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, FunctionValue, Key,
-    LazyValue, List, NetValue, PromisedValue, RuntimeValueAccess, Value, keys,
+    Atom, Builtin, CoreValueFactory, Dict, EvaluationFailure, FunctionValue, Key, LazyValue, List,
+    NetValue, PromisedValue, RuntimeValueAccess, Value, keys,
 };
 use crate::core_net::{CoreDataKey, CoreSpecialization};
 use crate::eval;
@@ -892,12 +892,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
     }
 
     fn handle_step_error(&mut self, error: TaskHalt) -> EffectTaskPoll {
-        if let Some(wait) = error.blocked_on() {
-            let blocked = self.waiting_block(WorkDependency::Wait(wait.clone()));
-            return self
-                .install_blocked(blocked)
-                .unwrap_or(EffectTaskPoll::Yielded);
-        }
         if let Some(retry) = self.retry_wake() {
             let blocked =
                 BlockedExecution::evaluation_error(error, retry, self.eval_context.values());
@@ -3134,10 +3128,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
         )
     }
 
-    fn waiting_block(&self, dependency: WorkDependency) -> BlockedExecution<S> {
-        BlockedExecution::waiting_on(dependency, self.retry_wake())
-    }
-
     fn retry_wake(&self) -> Option<RetryWake<S>> {
         if let Some(index) = self
             .execution
@@ -4660,10 +4650,6 @@ impl<S: TaskSpecialization> BlockedExecution<S> {
     }
 
     fn evaluation_error(error: TaskHalt, retry: RetryWake<S>, values: &CoreValueFactory) -> Self {
-        assert!(
-            error.blocked_on().is_none(),
-            "a blocked task error belongs in the wait dependency field"
-        );
         Self {
             reason: BlockReason::EvaluationError(error.root_for_values(values)),
             retry: Some(retry),
@@ -5657,13 +5643,6 @@ fn alternative_returns_root(
             })
             .expect("alternative return construction requires at least two values"),
     )
-}
-
-pub(crate) fn task_eval_error(error: EvaluationHalt) -> TaskHalt {
-    match error.blocked_on() {
-        Some(wait) => TaskHalt::blocked(wait.0),
-        None => TaskHalt::failure(error.into_permanent_failure()),
-    }
 }
 
 fn missing_volume_error(volume: VolumeId) -> TaskHalt {

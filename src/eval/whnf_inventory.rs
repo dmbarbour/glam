@@ -746,9 +746,7 @@ fn function_signal(full: &str, name: &str) -> Option<Signal> {
         "apply_value_in" => Some(Signal::ApplyValue),
         "apply_values_in" => Some(Signal::ApplyValues),
         "evaluate_in" => Some(Signal::ReflectionEvaluate),
-        "task_eval_error" | "client_demand_halt_poll" | "client_demand_halt" => {
-            Some(Signal::DependencyTranslation)
-        }
+        "client_demand_halt_poll" | "client_demand_halt" => Some(Signal::DependencyTranslation),
         "blocked" if full.contains("EvaluationHalt") => Some(Signal::RetryableWait),
         "unassigned_root" if full.contains("EvaluationHalt") => Some(Signal::UnassignedPromise),
         _ => None,
@@ -1299,14 +1297,17 @@ fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
 // the generic coordinator wait after observing a claimed exact producer. It
 // now delegates that case to the existing exact-route wait, adding one
 // reviewed coordinator/orchestration boundary without adding recursion.
-const EXPECTED_OCCURRENCES: usize = 140;
+// R7 deletes `task_eval_error`, the reflection protocol's translation of an
+// evaluator wait into a blocked task halt. Production never reached it;
+// reflection machines report waits as `WorkDependency` values.
+const EXPECTED_OCCURRENCES: usize = 139;
 // W6G.1f.2b moves lazy producer orchestration behind a machine-free route;
 // the retained test-only lazy-task helper is no longer a production boundary.
-const EXPECTED_FINGERPRINT: u64 = 1_610_920_067_487_280_071;
+const EXPECTED_FINGERPRINT: u64 = 16_032_121_824_215_579_295;
 const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
     (Signal::RetryableWait, 4),
     (Signal::UnassignedPromise, 1),
-    (Signal::DependencyTranslation, 2),
+    (Signal::DependencyTranslation, 1),
     (Signal::CoordinatorBoundary, 14),
     (Signal::ReflectionBoundary, 6),
     (Signal::HostBoundary, 21),
@@ -1320,13 +1321,13 @@ const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
     (WorkShape::KeyConversion, 2),
     (WorkShape::AccessPath, 8),
     (WorkShape::DiagnosticContext, 1),
-    (WorkShape::OrchestrationHandoff, 44),
+    (WorkShape::OrchestrationHandoff, 43),
 ];
 
-const EXPECTED_W7_DISPOSITION_FINGERPRINT: u64 = 6_488_633_449_337_451_583;
+const EXPECTED_W7_DISPOSITION_FINGERPRINT: u64 = 8_860_955_152_160_050_346;
 const EXPECTED_W7_DISPOSITION_COUNTS: &[(W7Disposition, usize)] = &[
     (W7Disposition::ExplicitIteration, 91),
-    (W7Disposition::Orchestration, 49),
+    (W7Disposition::Orchestration, 48),
 ];
 
 const EXPECTED_W7_UNAPPROVED_RECURSION: &[&str] = &[];
@@ -1348,9 +1349,11 @@ const EXPECTED_W7_UNAPPROVED_RECURSION: &[&str] = &[];
 // moves the reflection launcher call inside an unwind boundary. R3's single
 // effect-poll budget pumps through `pump_wait_on_route_within`, adding one
 // edge. E7 replaces the annotation machine's stderr helper with a ledger
-// record, removing one. None of them recurses, so the cycle set stays empty.
-const EXPECTED_W7_RESOLVED_CALLS: usize = 1_144;
-const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 5_949_764_167_448_106_331;
+// record, removing one. R7 removes six: the blocked-halt translation, its
+// `From` impl, and the effect task's blocked-halt branch and assertion.
+// None of them recurses, so the cycle set stays empty.
+const EXPECTED_W7_RESOLVED_CALLS: usize = 1_138;
+const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 9_346_311_223_319_165_447;
 const EXPECTED_W7_CYCLIC_FUNCTIONS: &[&str] = &[];
 const EXPECTED_W8_REMAINING_RETRYABLE_HALT_CALLS: &[&str] = &[
     "src/eval/net.rs::drive_net_semantic_action#1|HaltBlocked",

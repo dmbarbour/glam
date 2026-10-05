@@ -10,7 +10,7 @@ use crate::api::{
     Assembler, Diagnostic, EffectTokenDomain, Error as ApiError, EvaluatedValue, EvaluationRuntime,
     PromiseResolver, TestValueFacade, Values,
 };
-use crate::core::ManagedPromiseRoot;
+use crate::core::{EvaluationHalt, ManagedPromiseRoot};
 use crate::evaluation::{
     EvaluationSessionRun, EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskStatus,
     ReflectionTaskLauncher, ReflectionTaskProfile, ReflectionTaskResultPolicy, TaskStatusPublisher,
@@ -7565,7 +7565,7 @@ fn task_halt_conversions_preserve_evaluation_and_public_error_structure() {
         )
     });
 
-    let evaluation_halt = TaskHalt::from(EvaluationHalt::failure(failure.clone()));
+    let evaluation_halt = TaskHalt::failure(failure.clone());
     let evaluation_diagnostic = evaluation_halt.diagnostic(&assembler.values());
     assert_eq!(evaluation_diagnostic.message(), "converted failure");
     assembler.core_values().assert_same_representation_for_test(
