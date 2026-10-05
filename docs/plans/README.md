@@ -17,6 +17,10 @@ Recover a retired doc with `git show <commit>:<path>`.
 
 ## Active Plans
 
+- [`PerformanceRoadmap_2026-10-05.md`](PerformanceRoadmap_2026-10-05.md):
+  the umbrella for performance work, covering shared measurement, how
+  budgets treat batching, and the order of the parser, evaluator,
+  representation, and batching tracks.
 - [`NetPolarityChecker_2026-10-05.md`](NetPolarityChecker_2026-10-05.md)
   requires every interaction net to be polarized, with a `+` exposed port,
   and checks it before N8 and net fuzzing.

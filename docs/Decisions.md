@@ -488,6 +488,10 @@ maps the short names used here to file names.
     nets report it at once.
   - Budgets stay simple heuristics rather than cost models: one step may
     still do work proportional to its data.
+  - Batches, once they exist, are admitted while a unit remains and may
+    finish past the budget, with the overrun forgiven (maintainer,
+    2026-10-05). Exact reduction counts come from profiling counters, not
+    budgets. See the performance roadmap.
 - **Rule lives in:** `architecture/evaluation.md` "Context and Session";
   `agent_context/interaction_nets.md` "Reduction and External Work".
 - **Recorded in:** holistic review N9 and its budget consistency audit.
