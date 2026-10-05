@@ -1642,13 +1642,18 @@ mod tests {
                 let left = builder.bind();
                 let right = builder.bind();
                 builder.wire(left[0], right[0]);
-                for auxiliary in [left[1], left[2], right[1], right[2]] {
+                // Each bind's consuming auxiliary takes data and its providing
+                // one is erased, so every pair is a polarized application.
+                for [consumes, provides] in [[left[1], left[2]], [right[1], right[2]]] {
                     let data = builder.data(access.unit());
-                    builder.wire(auxiliary, data);
+                    builder.wire(consumes, data);
+                    let erase = builder.copy(0).input;
+                    builder.wire(provides, erase);
                 }
             }
             let exposed = builder.data(access.unit());
-            builder.finish(exposed)
+            // The two join pairs are independent work beside the exposed value.
+            builder.disconnected_for_test().finish(exposed)
         })
     }
 
@@ -1735,7 +1740,8 @@ mod tests {
             builder.wire(output, discard);
         }
         let exposed = builder.data(values.with_runtime_value_access(|access| access.unit()));
-        values.instantiate_core_net(&builder.finish(exposed))
+        // The duplication pair is independent work beside the exposed value.
+        values.instantiate_core_net(&builder.disconnected_for_test().finish(exposed))
     }
 
     #[test]

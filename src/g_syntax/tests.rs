@@ -6262,7 +6262,7 @@ fn interaction_net_construction_is_memoized_and_preserves_initial_active_pairs()
         parse(concat!(
             "language g0\n",
             "import 'std\n",
-            "raw = interaction_net (.bind >>= (\\bind -> .data 0 >>= (\\data -> .copy 0 >>= (\\erase -> .wire (list.head bind) (list.head data) =>> .wire (list.head (list.tail (list.tail bind))) (list.head erase) =>> .r (list.head (list.tail bind))))))\n",
+            "raw = interaction_net (.bind >>= (\\bind -> .data 0 >>= (\\data -> .copy 0 >>= (\\erase -> .wire (list.head bind) (list.head data) =>> .wire (list.head (list.tail bind)) (list.head erase) =>> .r (list.head (list.tail (list.tail bind)))))))\n",
         )),
         &context,
     );

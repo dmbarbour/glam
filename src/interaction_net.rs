@@ -6,6 +6,8 @@
 
 mod builder;
 mod model;
+#[cfg(test)]
+pub(crate) mod polarity;
 #[cfg(any(test, feature = "interaction-net-profiling"))]
 #[cfg_attr(
     all(test, not(feature = "interaction-net-profiling")),

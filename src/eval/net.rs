@@ -2153,8 +2153,8 @@ mod driver_tests {
         let data = net.data(callable);
         let erase = net.push(crate::interaction_net::Node::Erase);
         net.wire(Port::principal(bind), data);
-        net.wire(Port::auxiliary(bind, 2), Port::principal(erase));
-        let runtime = values.instantiate_core_net(&net.finish(Port::auxiliary(bind, 1)));
+        net.wire(Port::auxiliary(bind, 1), Port::principal(erase));
+        let runtime = values.instantiate_core_net(&net.finish(Port::auxiliary(bind, 2)));
         let pair = runtime.test_with(values, |net| net.active_pairs().next().unwrap());
         let reduction = runtime
             .test_reduce_pair(values, pair)
@@ -2678,7 +2678,12 @@ mod driver_tests {
         let left = disconnected.push(crate::interaction_net::Node::Erase);
         let right = disconnected.push(crate::interaction_net::Node::Erase);
         disconnected.wire(Port::principal(left), Port::principal(right));
-        let disconnected = instantiate(disconnected.finish(Port::principal(root)));
+        // Disconnected work is what this fixture tests.
+        let disconnected = instantiate(
+            disconnected
+                .disconnected_for_test()
+                .finish(Port::principal(root)),
+        );
         let disconnected_interface =
             disconnected.test_with(&test_value_factory(), |net| net.exposed());
         let before = disconnected.test_with(&test_value_factory(), |net| {
@@ -2704,7 +2709,14 @@ mod driver_tests {
         branched.wire(Port::auxiliary(root, 1), Port::auxiliary(active, 1));
         branched.wire(Port::auxiliary(root, 2), Port::auxiliary(active, 2));
         branched.wire(Port::principal(active), Port::principal(erase));
-        let branched = instantiate(branched.finish(Port::principal(root)));
+        // One fan feeding both auxiliaries of one bind has no polarization:
+        // the branches share a sign and the auxiliaries do not. The fixture
+        // keeps it to put undemanded ready work behind the root.
+        let branched = instantiate(
+            branched
+                .unpolarized_for_test()
+                .finish(Port::principal(root)),
+        );
         let branched_interface = branched.test_with(&test_value_factory(), |net| net.exposed());
         let before = branched.test_with(&test_value_factory(), |net| {
             net.active_pairs().collect::<Vec<_>>()
@@ -2727,17 +2739,19 @@ mod driver_tests {
     fn demanded_ready_pair_runs_before_root_completion() {
         let value = test_value_factory().with_runtime_value_access(|access| access.unit());
         let mut net = NetBuilder::<CoreSpecialization>::new();
-        let left = net.push(crate::interaction_net::Node::Bind);
-        let right = net.push(crate::interaction_net::Node::Bind);
+        // (\_ -> body) argument: the join hands the body to the interface and
+        // erases the argument.
+        let [function, argument_port, body_port] = net.function_bind();
+        let [application, applied, result] = net.bind();
         let values = test_value_factory();
-        let left_result = net.data(value.duplicate_for_test(&values));
-        let exposed_result = net.data(value.duplicate_for_test(&values));
-        let right_result = net.data(value);
-        net.wire(Port::principal(left), Port::principal(right));
-        net.wire(Port::auxiliary(left, 2), left_result);
-        net.wire(Port::auxiliary(right, 1), exposed_result);
-        net.wire(Port::auxiliary(right, 2), right_result);
-        let runtime = instantiate(net.finish(Port::auxiliary(left, 1)));
+        let body = net.data(value.duplicate_for_test(&values));
+        let argument = net.data(value);
+        let discard = net.copy(0).input;
+        net.wire(function, application);
+        net.wire(body_port, body);
+        net.wire(argument_port, discard);
+        net.wire(applied, argument);
+        let runtime = instantiate(net.finish(result));
         let interface = runtime.test_with(&test_value_factory(), |net| net.exposed());
         let demanded = runtime.test_with(&test_value_factory(), |net| {
             let pairs = net.active_pairs().collect::<Vec<_>>();
@@ -2767,7 +2781,12 @@ mod driver_tests {
         claimed.wire(Port::principal(bind), data);
         claimed.wire(Port::auxiliary(bind, 1), Port::principal(erase_left));
         claimed.wire(Port::auxiliary(bind, 2), Port::principal(erase_right));
-        let claimed = instantiate(claimed.finish(Port::principal(root)));
+        // The claimed call is unrelated work, disconnected from the root.
+        let claimed = instantiate(
+            claimed
+                .disconnected_for_test()
+                .finish(Port::principal(root)),
+        );
         let interface = claimed.test_with(&test_value_factory(), |net| net.exposed());
         let pair = claimed.test_with(&test_value_factory(), |net| {
             net.active_pairs().next().unwrap()
@@ -2815,7 +2834,9 @@ mod driver_tests {
         let right =
             stuck.data(test_value_factory().with_runtime_value_access(|access| access.unit()));
         stuck.wire(left, right);
-        let stuck = instantiate(stuck.finish(Port::principal(root)));
+        // Data meets data only in an unpolarized net. The stable root must
+        // still ignore such a stuck pair.
+        let stuck = instantiate(stuck.unpolarized_for_test().finish(Port::principal(root)));
         let interface = stuck.test_with(&test_value_factory(), |net| net.exposed());
         let pair = stuck.test_with(&test_value_factory(), |net| {
             net.active_pairs().next().unwrap()
@@ -3356,8 +3377,8 @@ mod driver_tests {
         let data = net.data(value);
         let erase = net.push(crate::interaction_net::Node::Erase);
         net.wire(Port::principal(bind), data);
-        net.wire(Port::auxiliary(bind, 2), Port::principal(erase));
-        let runtime = instantiate(net.finish(Port::auxiliary(bind, 1)));
+        net.wire(Port::auxiliary(bind, 1), Port::principal(erase));
+        let runtime = instantiate(net.finish(Port::auxiliary(bind, 2)));
         let interface = runtime.test_with(&test_value_factory(), |net| net.exposed());
         let pair = runtime.test_with(&test_value_factory(), |net| {
             net.active_pairs().next().unwrap()
@@ -3392,8 +3413,8 @@ mod driver_tests {
         let data = net.data(Value::Builtin(Builtin::Add));
         let erase = net.push(crate::interaction_net::Node::Erase);
         net.wire(Port::principal(bind), data);
-        net.wire(Port::auxiliary(bind, 2), Port::principal(erase));
-        let runtime = instantiate(net.finish(Port::auxiliary(bind, 1)));
+        net.wire(Port::auxiliary(bind, 1), Port::principal(erase));
+        let runtime = instantiate(net.finish(Port::auxiliary(bind, 2)));
         let pair = runtime.test_with(&test_value_factory(), |net| {
             net.active_pairs().next().unwrap()
         });
@@ -4400,9 +4421,9 @@ mod driver_tests {
         let mut source = NetBuilder::<CoreSpecialization>::new();
         let failed_bind = source.push(crate::interaction_net::Node::Bind);
         let failed_data = source.data(value.duplicate_for_test(&values));
-        let failed_result = source.data(value.duplicate_for_test(&values));
+        let failed_argument = source.data(value.duplicate_for_test(&values));
         source.wire(Port::principal(failed_bind), failed_data);
-        source.wire(Port::auxiliary(failed_bind, 2), failed_result);
+        source.wire(Port::auxiliary(failed_bind, 1), failed_argument);
 
         let unrelated_left = source.push(crate::interaction_net::Node::Bind);
         let unrelated_right = source.push(crate::interaction_net::Node::Bind);
@@ -4410,13 +4431,20 @@ mod driver_tests {
             Port::principal(unrelated_left),
             Port::principal(unrelated_right),
         );
-        for auxiliary in 1..=2 {
-            let left_data = source.data(value.duplicate_for_test(&values));
-            let right_data = source.data(value.duplicate_for_test(&values));
-            source.wire(Port::auxiliary(unrelated_left, auxiliary), left_data);
-            source.wire(Port::auxiliary(unrelated_right, auxiliary), right_data);
+        // Each bind's consuming auxiliary takes data and its providing one is
+        // erased, so the pair is a polarized function application.
+        for bind in [unrelated_left, unrelated_right] {
+            let data = source.data(value.duplicate_for_test(&values));
+            let erase = source.copy(0).input;
+            source.wire(Port::auxiliary(bind, 1), data);
+            source.wire(Port::auxiliary(bind, 2), erase);
         }
-        let source = instantiate(source.finish(Port::auxiliary(failed_bind, 1)));
+        // The unrelated pair is disconnected from the failed call on purpose.
+        let source = instantiate(
+            source
+                .disconnected_for_test()
+                .finish(Port::auxiliary(failed_bind, 2)),
+        );
         let (failed_pair, unrelated_pair) = source.test_with(&test_value_factory(), |net| {
             let pairs = net.active_pairs().collect::<Vec<_>>();
             let failed_pair = pairs

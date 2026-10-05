@@ -111,6 +111,10 @@ will enforce it at `NetBuilder::try_finish`.
   net.
 - **Construction.** A constructed net whose component is unreachable from the
   exposed port is miswired. Reduction may still leave disconnected garbage.
+- **Test builds.** `NetBuilder::try_finish` checks every template's signs and
+  connectivity in test builds (`interaction_net/polarity.rs`). A fixture that
+  is deliberately unpolarized or disconnected opts out with
+  `unpolarized_for_test` or `disconnected_for_test`, and states why.
 
 ## Runtime Identity and Graph State
 

@@ -8,6 +8,10 @@ pub struct NetBuilder<S: NetSpecialization> {
     nodes: Vec<BuilderNode<S>>,
     wires: Vec<Wire>,
     next_fan_site: u64,
+    /// Test builds check every finished template's polarity and
+    /// connectivity unless a test deliberately builds a net without them.
+    #[cfg(test)]
+    checks: super::polarity::TemplateChecks,
 }
 
 enum BuilderNode<S: NetSpecialization> {
@@ -100,7 +104,26 @@ impl<S: NetSpecialization> NetBuilder<S> {
             nodes: Vec::new(),
             wires: Vec::new(),
             next_fan_site: 0,
+            #[cfg(test)]
+            checks: super::polarity::TemplateChecks::ALL,
         }
+    }
+
+    /// Exempts this template from the test-build template checks, for a test
+    /// that builds an unpolarized net on purpose.
+    #[cfg(test)]
+    pub fn unpolarized_for_test(mut self) -> Self {
+        self.checks.signs = false;
+        self.checks.connected = false;
+        self
+    }
+
+    /// Exempts this template from the test-build connectivity check only, for
+    /// a test that models disconnected work, which reduction can leave behind.
+    #[cfg(test)]
+    pub fn disconnected_for_test(mut self) -> Self {
+        self.checks.connected = false;
+        self
     }
 
     pub fn push(&mut self, node: Node<S>) -> NodeId {
@@ -259,7 +282,12 @@ impl<S: NetSpecialization> NetBuilder<S> {
 
     pub fn try_finish(self, exposed: Port) -> Result<InteractionNet<S>, NetBuildError> {
         self.validate(exposed)?;
-        self.normalize(exposed)
+        #[cfg(test)]
+        let checks = self.checks;
+        let net = self.normalize(exposed)?;
+        #[cfg(test)]
+        super::polarity::assert_template_for_test(&net, checks);
+        Ok(net)
     }
 
     fn normalize(self, exposed: Port) -> Result<InteractionNet<S>, NetBuildError> {

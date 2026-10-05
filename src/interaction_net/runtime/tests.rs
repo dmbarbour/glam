@@ -944,7 +944,9 @@ fn duplicated_argument_template() -> InteractionNet<()> {
     net.wire(Port::auxiliary(fan, 1), Port::principal(left));
     net.wire(Port::auxiliary(fan, 2), Port::principal(right));
     net.wire(Port::auxiliary(bind, 2), Port::principal(result));
-    net.finish(Port::principal(bind))
+    // Predates polarity: its argument port meets data. The generic runtime
+    // reduces by topology alone, so these cursor tests keep the shape.
+    net.unpolarized_for_test().finish(Port::principal(bind))
 }
 
 #[test]
@@ -2712,7 +2714,9 @@ fn source_requiring_one_reduction() -> InteractionNet<&'static str> {
     net.wire(Port::auxiliary(left, 2), Port::principal(left_result));
     net.wire(Port::auxiliary(right, 1), Port::principal(exposed_result));
     net.wire(Port::auxiliary(right, 2), Port::principal(right_result));
-    net.finish(Port::auxiliary(left, 1))
+    // Predates polarity: the join leaves data meeting data, which these
+    // generic runtime tests use as a stuck pair. Reduction ignores signs.
+    net.unpolarized_for_test().finish(Port::auxiliary(left, 1))
 }
 
 fn target_waiting_on(source: SharedRuntimeNet<&'static str>) -> RuntimeNet<&'static str> {

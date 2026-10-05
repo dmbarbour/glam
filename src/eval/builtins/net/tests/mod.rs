@@ -76,10 +76,13 @@ fn valid_all_operations(access: &RuntimeValueAccess<'_>) -> Value {
             encode_data(access, access.unit()),
             encode_copy(access, 2),
         ],
+        // `data` applied to one copy of its own result; the other copy is
+        // exposed. The bind's consuming argument takes a copy's output and its
+        // providing result feeds the copy, so every wire is polarized.
         vec![
             encode_wire(access, port(1), port(4)),
-            encode_wire(access, port(2), port(5)),
-            encode_wire(access, port(3), port(6)),
+            encode_wire(access, port(2), port(6)),
+            encode_wire(access, port(3), port(5)),
         ],
         port(7),
     )
@@ -1033,13 +1036,15 @@ fn hidden_builder_copy_and_wire_complete_one_replayable_compact_netlist() {
             duplicate(&context, &bind_ports[0]),
             duplicate(&context, &data_ports[0]),
         ),
+        // The bind's result feeds the copy and one copy returns as its
+        // argument, so every wire is polarized.
         (
             duplicate(&context, &bind_ports[1]),
-            duplicate(&context, &copy_ports[0]),
+            duplicate(&context, &copy_ports[1]),
         ),
         (
             duplicate(&context, &bind_ports[2]),
-            duplicate(&context, &copy_ports[1]),
+            duplicate(&context, &copy_ports[0]),
         ),
     ] {
         let wire = with_access(&context, |access| {

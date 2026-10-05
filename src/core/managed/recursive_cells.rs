@@ -2582,9 +2582,13 @@ mod tests {
             let data = builder.data(Value::Lazy(LazyValue::from_root(&lazy_root, &access)));
             builder.wire(erase, data);
             let exposed = builder.data(Value::Number(97.into()));
+            // The erasure pair is independent work beside the exposed value.
             let net_root = access
                 .construct_rooted_managed_core_net(
-                    builder.finish(exposed).instantiate_with(&access),
+                    builder
+                        .disconnected_for_test()
+                        .finish(exposed)
+                        .instantiate_with(&access),
                 )
                 .expect("the managed core net should fit one collector slot");
             (lazy_root, net_root)

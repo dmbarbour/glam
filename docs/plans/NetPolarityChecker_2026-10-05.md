@@ -1,7 +1,7 @@
 # Net Polarity Checker Plan — 2026-10-05
 
-Status: slice 1 (documentation) done 2026-10-05; slice 2, the test-only
-checker, is next. This plan comes before N8's random closed-net generator and
+Status: slices 1 (documentation) and 2 (test-only checker) done
+2026-10-05; slice 3, enforcement at `try_finish`, is next. This plan comes before N8's random closed-net generator and
 before any fuzzing of nets. It follows the crossed `Bind >< Bind` join that
 landed on 2026-10-05.
 
@@ -68,7 +68,7 @@ Signs below are listed in each node's own port order, principal first.
 | `Fan`, either | `[p, l, r]` | `[¬s, s, s]` | One variable per fan. |
 | `Erase` | `[input]` | `[s]` | Free: `−` discards a value, `+` is an error value (`void`). |
 | Builder tunnel (`.copy 1`) | `[input, output]` | `[¬s, s]` | A wire splice. |
-| Exposed interface | the exposed port's peer | `+` | Fixed by fiat. |
+| Exposed interface | the exposed port | `+` | Fixed by fiat; whatever plugs into it consumes. |
 
 Every rewrite preserves polarity on a polarized active pair. This includes the
 crossed bind join, the positional fan join, fan commutation, fan duplication
@@ -115,6 +115,38 @@ union-find arrays.
    core and test template, and the sample nets. Expect all to be polarizable
    today. Fix any glam constructor that is not; the constant-effect template
    is a reminder that hand-built function binds can drift.
+
+   *Done 2026-10-05.*
+   - **Checker and hook.** `interaction_net/polarity.rs` checks signs with a
+     union-find over ports, plus connectivity to the exposed port. Test
+     builds run both in `NetBuilder::try_finish`, so every template built
+     anywhere in the library suite is checked. That includes `.g` lowering,
+     core and operator templates, and user netlists. A new test also
+     assembles every hello sample and the layered assembly sample under the
+     hook.
+   - **Production.** No production constructor violates either check.
+   - **Fixtures.** Hand-built test fixtures that predate polarity broke 41
+     tests. They were handled as follows:
+     - *Rewritten as polarized equivalents that keep their tests' purpose:*
+       - five call fixtures that exposed a bind's consuming argument port
+         and erased its result now erase the argument and expose the result;
+       - the demanded-pair and nested-failure driver fixtures;
+       - two netlist replay fixtures that exposed a merge branch;
+       - one `.g` net test.
+     - *Exempt from connectivity only (`disconnected_for_test`).* Five
+       fixtures model unrelated or disconnected work, which reduction can
+       leave behind. They are still polarized. One of them, the
+       profiling-feature join fixture, was also rewritten to be polarized.
+     - *Exempt from both checks (`unpolarized_for_test`).* Four fixtures, each
+       with its reason:
+       - two generic runtime fixtures whose cursor and stuck-pair tests rely
+         on data meeting data;
+       - a driver fixture whose fan feeds both auxiliaries of one bind, which
+         has no polarization;
+       - a driver fixture whose deliberate `Data >< Data` stuck pair is the
+         point of the test.
+   - **Slice 4 follow-up.** The runtime invariant must skip nets
+     instantiated from the four unpolarized fixtures.
 3. **Enforce at `try_finish`.** Add the error variant, user-facing
    diagnostics, and invalid samples for each rejection shape:
    - a same-sign wire, such as data wired to data;

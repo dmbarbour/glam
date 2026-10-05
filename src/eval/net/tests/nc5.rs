@@ -313,8 +313,8 @@ fn block_task_promise(
     let data = net.data(Value::Promised(promise));
     let erase = net.push(crate::interaction_net::Node::Erase);
     net.wire(Port::principal(bind), data);
-    net.wire(Port::auxiliary(bind, 2), Port::principal(erase));
-    let template = net.finish(Port::auxiliary(bind, 1));
+    net.wire(Port::auxiliary(bind, 1), Port::principal(erase));
+    let template = net.finish(Port::auxiliary(bind, 2));
     let (root, runtime, call) = observer.values().with_runtime_value_access(|access| {
         let runtime = access
             .construct_managed_core_net(template.instantiate_with(&access))
@@ -556,8 +556,8 @@ fn rooted_claimed_core_call_in(
     let data = net.data(values.with_runtime_value_access(|access| access.unit()));
     let erase = net.push(crate::interaction_net::Node::Erase);
     net.wire(Port::principal(bind), data);
-    net.wire(Port::auxiliary(bind, 2), Port::principal(erase));
-    let template = net.finish(Port::auxiliary(bind, 1));
+    net.wire(Port::auxiliary(bind, 1), Port::principal(erase));
+    let template = net.finish(Port::auxiliary(bind, 2));
 
     values.with_runtime_value_access(|access| {
         let root = access
