@@ -746,6 +746,11 @@ maps the short names used here to file names.
 - **Consequences:** ordinary entry never collects. A busy runtime or the CLI
   may never collect, an accepted limit owned by the concurrent-GC plan. Any
   change must come as a new construction contract.
+  - *Revisited 2026-10-05:* the maintainer requires collection during
+    foreground work, including CLI assembly. The candidate keeps `NoAuto`
+    and ordinary entry non-collecting, and services maintenance between a
+    foreground demand's poll quanta (performance roadmap, track 2). This
+    entry is superseded once that design is accepted.
 - **Rule lives in:** `architecture/evaluation.md` "Context and Session".
 - **Recorded in:** RuntimePolicy review; GC integration plan I1A; 2026-08-25
   integration review GCI-001 and GCI-015.

@@ -1,6 +1,7 @@
 # Performance Roadmap — 2026-10-05
 
-Status: agreed with the maintainer on 2026-10-05; nothing started. This is
+Status: agreed with the maintainer on 2026-10-05, including the harness
+questions; nothing started. This is
 the umbrella for performance work. Each track gets its own plan when it
 starts; the existing plans it names stay the detailed records.
 
@@ -33,15 +34,14 @@ shared measurement design first, then orders the tracks.
 
 ### Profiling builds
 
-- **An explicit profiling build mode.** A cargo feature compiles counters
-  and phase timers in; ordinary builds pay nothing. It absorbs today's
-  `interaction-net-profiling` feature.
+- **An explicit profiling build mode,** the cargo feature `glam-prof`. It
+  compiles counters and phase timers in, and ordinary builds pay nothing.
+  It absorbs today's `interaction-net-profiling` feature.
 - **A production-representative binary.** Test binaries carry the
   collector's deterministic hooks, so their timings do not represent
-  production. Measurements use a release binary built with the profiling
-  feature.
-- **A report.** The binary prints the counters and timers on request, such
-  as with a `--stats` flag in profiling builds.
+  production. Measurements use a release binary built with `glam-prof`.
+- **A JSON report.** A `glam-prof` binary prints the counters and timers as
+  JSON on request.
 
 ### What to count
 
@@ -66,7 +66,14 @@ shared measurement design first, then orders the tracks.
 ### Profiling suite
 
 A suite separate from the correctness tests: workloads built to be measured
-rather than to pass or fail.
+rather than to pass or fail. It lives wherever is most convenient, provided
+normal builds exclude it.
+
+- Workloads mix generated and hand-written sources during development. A
+  workload worth keeping goes into a profiling-only test or a samples
+  file.
+- Baselines live in the track's plan or in a performance review. They are
+  working data and need no long-term retention.
 
 - Each workload records its counters exactly and its timings as trends.
 - A counter change is a reviewed baseline update, never noise.
@@ -103,7 +110,18 @@ gains this consequence when it lands.
 1. **Profiling harness.** The build mode, counters, report, suite, and a
    recorded baseline for Hello World and the first microbenchmarks.
    Everything after this measures against it.
-2. **Parser.**
+2. **Collection during foreground work.** Maintainer decision, 2026-10-05:
+   long evaluation must collect, including CLI assembly. Today
+   `noauto-runtime-collection-policy` acts on pressure only when the pump is
+   stable, so the CLI collects nothing until `asm.result` is written.
+   - **Candidate design:** service maintenance between a foreground demand's
+     poll quanta when pressure exceeds its target. Those gaps are already
+     safepoints: no access region is open and in-flight state is rooted. So
+     ordinary entry still never collects.
+   - **Open:** how the collection waits for other workers to leave the heap.
+   - Until this lands, CLI memory figures measure total allocation, not
+     peak live memory.
+3. **Parser.**
    - Apply the constant-time lookahead fix from
      [Parser Backtracking Performance](ParserBacktrackingPerformance_2026-10-04.md);
      today parse time is exponential in nesting depth.
@@ -112,16 +130,16 @@ gains this consequence when it lands.
      This closes the parser exception in
      `no-semantic-recursion-on-rust-stack`.
    - This track is small, independent, and validates the harness.
-3. **Evaluation recursion cost.** Diagnose
+4. **Evaluation recursion cost.** Diagnose
    [Evaluation Recursion Performance](EvaluationRecursionPerformance_2026-10-04.md)
    before any representation work: a simple countdown costs tens of
    milliseconds per call and grows roughly quadratically, which would swamp
    every other measurement.
-4. **Structural overheads.** The holistic pre-performance review's P2:
+5. **Structural overheads.** The holistic pre-performance review's P2:
    scheduler round trips, the allocation and rooting path, the reflection
    branch clone, and obvious algorithmic defects. These would otherwise mask
    representation measurements.
-5. **Representations, two parallel tracks:**
+6. **Representations, two parallel tracks:**
    - **Values:**
      [Value Representation Refinement](ValueRepresentationRefinement_2026-08-19.md),
      with special focus on lists and dicts and on list processing:
@@ -137,7 +155,7 @@ gains this consequence when it lands.
        histories. The compact node needs those levels, so GAL comes first
        or alongside. It also takes on the deferred positive-erasure
        translation.
-6. **Normal forms and batching:**
+7. **Normal forms and batching:**
    - **Normal forms at construction.** These make hashing and memoization
      possible later, and simplify bulk materialization and multi-step
      evaluation without explicit materialization. Pure nets can diverge,
@@ -152,14 +170,14 @@ gains this consequence when it lands.
 
 **Deferred:** JIT compilation. There is much to gain without it.
 
-## Open Questions
+## Settled Harness Questions
 
-- **The profiling feature's name and report format.** These are settled in
-  the harness plan.
-- **Corpus storage.** Generated microbenchmarks or committed sources, and
-  where baselines live.
-- **Profiling-suite location.** A `benches/` target, a separate crate, or
-  scripts over the release binary.
-- **Garbage collection during CLI assembly.** The holistic review's open
-  decision 2. Until it is resolved, CLI memory figures measure total
-  allocation, not peak live memory.
+Maintainer answers, 2026-10-05:
+- **Feature name:** `glam-prof`.
+- **Report format:** JSON.
+- **Workloads:** a mix during development. Keepers go into profiling-only
+  tests or samples files.
+- **Baselines:** in the track's plan or a performance review, not kept long
+  term.
+- **Suite location:** wherever is convenient, excluded from normal builds.
+- **Collection during CLI assembly:** required; see track 2.

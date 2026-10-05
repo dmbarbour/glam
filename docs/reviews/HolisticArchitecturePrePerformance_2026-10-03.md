@@ -2037,6 +2037,9 @@ findings that raise them are noted, and lower-confidence items are marked.
 2. **Foreground GC during CLI assembly.** Add a bounded maintenance yield
    point to foreground demand, or keep `NoAuto` non-collecting until
    Concurrent GC? This affects every CLI benchmark. (X3)
+   - *Maintainer decision, 2026-10-05:* collect during foreground work,
+     including CLI assembly. The design is track 2 of the
+     [performance roadmap](../plans/PerformanceRoadmap_2026-10-05.md).
 3. **Inline-first lazy forcing.** It would change the "every uncached lazy
    is a coordinator route" invariant and exact-dependency routing.
    (S1, E2; size of the win unknown until measured)
