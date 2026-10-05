@@ -1674,9 +1674,10 @@ promise, the headline keeps the reason text.
 
 *Docs progress 2026-10-05.* `CLI.md` now documents the short flags and an
 exit-status table: 1 for a command that ran and failed, including configured
-usage errors, and 2 for an invalid bootstrap command line. The script
+usage errors, and 2 for an invalid bootstrap command line.
+`architecture/diagnostics.md` now documents the `viewer` record. The script
 extension is decision 7 below. The settle driver, conf-entry idiom, default
-builder, binary test placement, and viewer schema remain open.
+builder, and binary test placement remain open.
 
 ---
 

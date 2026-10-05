@@ -154,6 +154,33 @@ context tags receive compact summaries. A frame with a `msg` interface is
 recursively enriched and formatted as a nested diagnostic-style view, but is
 not republished and does not affect bus counts.
 
+### The `viewer` record
+
+The terminal client (`src/bin/glam/rendering.rs`) enriches each diagnostic
+with one `viewer` record before calling the formatter
+(`src/g_syntax/diagnostic_formatter.rs`). That record is the whole contract
+between them:
+
+| Field | Value | Read by the default formatter |
+| --- | --- | --- |
+| `header` | Text placed before the first message line: location plus severity wording for a top-level diagnostic; `msg: ` or a severity header for a nested frame. | yes |
+| `indent` | Spaces placed before each continuation line of `msg.text`. | yes |
+| `context_lines` | The pre-rendered `context:` block, one text per line. The client fills it after enrichment, recursing into nested `msg` frames. | yes |
+| `anchor_indent` | Spaces before the `context:` header. | no (the client uses it) |
+| `auto_indent` | The continuation depth as an integer, currently 4. | no |
+| `kind` | `"terminal"`. | no |
+| `columns` | Terminal width from `COLUMNS`, default 80. | no |
+| `color` | `none`, `ansi16`, `ansi256`, or `truecolor`; color is already applied inside `header`. | no |
+| `location` | The location text alone. | no |
+| `term`, `lang` | `TERM` and the first non-empty `LC_ALL`, `LC_MESSAGES`, or `LANG`; present only when set. | no |
+| `source.file` | The display path of an absolute source; present only then. | no |
+
+The default formatter returns, as binary,
+`header ++ first line ++ ("\n" ++ indent ++ line)* ++ ("\n" ++ context line)* ++ "\n"`,
+where the lines come from `msg.text`. The unread fields exist so a
+configured formatter can make its own layout and color decisions without
+privileged inspection.
+
 Formatting failure uses a minimal Rust renderer. That fallback is a last-mile
 presentation path; it does not replace or acknowledge the authoritative task,
 delivery, exit, or killed-work failure which caused the message.
