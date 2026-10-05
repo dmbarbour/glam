@@ -339,10 +339,10 @@ machine once its dependency completes. Both lose the continuation that
 consumes the result, so a step that builds an intermediate lazy rebuilds it and
 suspends again without bound.
 
-A bounded poll returns one of five kinds of outcome: a rooted ready value, an
-exact semantic dependency, an exhausted shared step budget, an explicit
-external boundary, or a rooted permanent failure. The access region closes
-before the outer machine translates a dependency into coordinator work, waits,
+A bounded poll returns one of four kinds of outcome: a rooted ready value, a
+deferred lazy or promise shell to settle outside access, an exhausted shared
+step budget, or a rooted permanent failure. The access region closes before
+the outer machine translates a deferred shell into coordinator work, waits,
 invokes a callback, or publishes a result. Nested WHNF work borrows the same
 mutable `EvaluationStepBudget`; it never manufactures a fresh allowance.
 

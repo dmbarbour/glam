@@ -531,11 +531,6 @@ impl ManagedPromiseRoot {
         ManagedPromiseEdge(authority.project_root(&self.root))
     }
 
-    #[cfg(test)]
-    pub(crate) fn same_promise(&self, other: &Self) -> bool {
-        self.root.ptr_eq(&other.root)
-    }
-
     pub(crate) fn runtime_id(&self) -> crate::runtime::EvaluationRuntimeId {
         self.completion.runtime_id()
     }

@@ -67,9 +67,6 @@ impl StrategyDemandMachine {
             WhnfOwnerPoll::Pending(dependency) => return StrategyDemandPoll::Pending(dependency),
             WhnfOwnerPoll::Yielded => return StrategyDemandPoll::Yielded,
             WhnfOwnerPoll::Failed(_) => return StrategyDemandPoll::Failed,
-            WhnfOwnerPoll::External(boundary) => {
-                unreachable!("strategy demand produced an external {boundary:?} boundary")
-            }
         };
 
         if matches!(self.phase, StrategyDemandPhase::Value) {

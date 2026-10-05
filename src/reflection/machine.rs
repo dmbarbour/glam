@@ -957,16 +957,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 EffectDecodeStep::Blocked(decoding, dependency)
             }
             WhnfOwnerPoll::Yielded => EffectDecodeStep::Yielded(decoding),
-            WhnfOwnerPoll::External(boundary) => {
-                let error = decoding.contextualize(
-                    TaskHalt::new(format!(
-                        "reflection effect decoding reached an unsupported {boundary:?} boundary"
-                    )),
-                    context,
-                    &self.eval_context,
-                );
-                EffectDecodeStep::Failed(decoding, error)
-            }
             WhnfOwnerPoll::Failed(failure) => {
                 let error = decoding.contextualize(
                     TaskHalt::rooted_failure(failure),
@@ -1009,11 +999,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
                 WhnfOwnerPoll::Failed(failure) => {
                     SpecializationRequestInput::Failed(TaskHalt::rooted_failure(failure))
-                }
-                WhnfOwnerPoll::External(boundary) => {
-                    SpecializationRequestInput::Failed(TaskHalt::new(format!(
-                        "specialized reflection request reached an unsupported {boundary:?} boundary"
-                    )))
                 }
             };
             specializing.demand = None;
@@ -1091,14 +1076,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
             WhnfOwnerPoll::Yielded => return ScalarDemandStep::Yielded(demanding),
             WhnfOwnerPoll::Failed(failure) => {
                 return ScalarDemandStep::Failed(demanding, TaskHalt::rooted_failure(failure));
-            }
-            WhnfOwnerPoll::External(boundary) => {
-                return ScalarDemandStep::Failed(
-                    demanding,
-                    TaskHalt::new(format!(
-                        "reflection scalar demand reached an unsupported {boundary:?} boundary"
-                    )),
-                );
             }
         };
         let ScalarDemandWork {
@@ -1918,12 +1895,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 WhnfOwnerPoll::Failed(failure) => {
                     StatePathStep::Failed(pathing, TaskHalt::rooted_failure(failure))
                 }
-                WhnfOwnerPoll::External(boundary) => StatePathStep::Failed(
-                    pathing,
-                    TaskHalt::new(format!(
-                        "reflection state path reached an unsupported {boundary:?} boundary"
-                    )),
-                ),
             },
             StatePathOperation::SetUpdate(computation) => {
                 match poll_whnf_computation(computation, context, &self.eval_context, step_budget) {
@@ -1948,12 +1919,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     WhnfOwnerPoll::Failed(failure) => {
                         StatePathStep::Failed(pathing, TaskHalt::rooted_failure(failure))
                     }
-                    WhnfOwnerPoll::External(boundary) => StatePathStep::Failed(
-                        pathing,
-                        TaskHalt::new(format!(
-                            "reflection state update reached an unsupported {boundary:?} boundary"
-                        )),
-                    ),
                 }
             }
             StatePathOperation::Poisoned => {
@@ -4387,11 +4352,6 @@ impl ValuePathMachine {
             WhnfOwnerPoll::Failed(failure) => {
                 return ValuePathPoll::Failed(TaskHalt::rooted_failure(failure));
             }
-            WhnfOwnerPoll::External(boundary) => {
-                return ValuePathPoll::Failed(TaskHalt::new(format!(
-                    "reflection value path reached an unsupported {boundary:?} boundary"
-                )));
-            }
         };
         let key = &self.path[self.next];
         let selected = poll_context.evaluate(context, |evaluator| {
@@ -5081,26 +5041,17 @@ impl<R: Clone> RequestDecodeWork<R> {
                 }
             }
             RequestDecodeState::PayloadWhnf { selection, demand } => {
-                let payload = match poll_whnf_computation(
-                    demand,
-                    poll_context,
-                    context,
-                    step_budget,
-                ) {
-                    WhnfOwnerPoll::Ready(payload) => payload,
-                    WhnfOwnerPoll::Pending(dependency) => {
-                        return RequestDecodePoll::Pending(dependency);
-                    }
-                    WhnfOwnerPoll::Yielded => return RequestDecodePoll::Yielded,
-                    WhnfOwnerPoll::Failed(failure) => {
-                        return RequestDecodePoll::Failed(TaskHalt::rooted_failure(failure));
-                    }
-                    WhnfOwnerPoll::External(boundary) => {
-                        return RequestDecodePoll::Failed(TaskHalt::new(format!(
-                            "request payload decoding reached an unsupported {boundary:?} boundary"
-                        )));
-                    }
-                };
+                let payload =
+                    match poll_whnf_computation(demand, poll_context, context, step_budget) {
+                        WhnfOwnerPoll::Ready(payload) => payload,
+                        WhnfOwnerPoll::Pending(dependency) => {
+                            return RequestDecodePoll::Pending(dependency);
+                        }
+                        WhnfOwnerPoll::Yielded => return RequestDecodePoll::Yielded,
+                        WhnfOwnerPoll::Failed(failure) => {
+                            return RequestDecodePoll::Failed(TaskHalt::rooted_failure(failure));
+                        }
+                    };
                 let is_list = poll_context.evaluate(context, |evaluator| {
                     evaluator.project_root(&payload, |_, payload| matches!(payload, Value::List(_)))
                 });
@@ -5237,11 +5188,6 @@ fn poll_request_id(
         WhnfOwnerPoll::Yielded => return RequestIdPoll::Yielded,
         WhnfOwnerPoll::Failed(failure) => {
             return RequestIdPoll::Failed(TaskHalt::rooted_failure(failure));
-        }
-        WhnfOwnerPoll::External(boundary) => {
-            return RequestIdPoll::Failed(TaskHalt::new(format!(
-                "request ID decoding reached an unsupported {boundary:?} boundary"
-            )));
         }
     };
     poll_context.evaluate(context, |evaluator| {

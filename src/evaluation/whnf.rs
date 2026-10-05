@@ -7,24 +7,14 @@ use super::{EvalContext, EvaluationPollContext, WorkDependency};
 #[cfg(test)]
 use crate::core::thread_has_runtime_value_access_for_test;
 use crate::core::{EvaluationFailure, ManagedLazyRoot};
-use crate::eval::whnf::{
-    WhnfComputation, WhnfDeferredRequest, WhnfDependency, WhnfExternalBoundary, WhnfPoll,
-};
+use crate::eval::whnf::{WhnfComputation, WhnfDeferredRequest, WhnfPoll};
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 pub(crate) enum WhnfOwnerPoll {
     Ready(RuntimeValueRoot),
     Pending(WorkDependency),
-    External(WhnfExternalBoundary),
     Yielded,
     Failed(RuntimeFailureRoot),
-}
-
-pub(super) fn work_dependency(dependency: WhnfDependency) -> WorkDependency {
-    match dependency {
-        WhnfDependency::Wait(wait) => WorkDependency::Wait(wait.0),
-        WhnfDependency::Promise(promise) => WorkDependency::Promise(promise),
-    }
 }
 
 /// Polls semantic WHNF work, then interprets its deferred-shell request only
@@ -72,7 +62,6 @@ pub(crate) fn poll_lazy_checkpoint(
 pub(crate) fn interpret_poll(poll: WhnfPoll, context: &EvalContext) -> WhnfOwnerPoll {
     match poll {
         WhnfPoll::Ready(value) => WhnfOwnerPoll::Ready(value),
-        WhnfPoll::Pending(dependency) => WhnfOwnerPoll::Pending(work_dependency(dependency)),
         WhnfPoll::Deferred(WhnfDeferredRequest::Lazy(lazy)) => {
             match crate::eval::lazy_root_wait(context, &lazy) {
                 Ok(wait) => WhnfOwnerPoll::Pending(WorkDependency::Wait(wait)),
@@ -106,7 +95,6 @@ pub(crate) fn interpret_poll(poll: WhnfPoll, context: &EvalContext) -> WhnfOwner
                 )),
             }
         }
-        WhnfPoll::External(boundary) => WhnfOwnerPoll::External(boundary),
         WhnfPoll::Yielded => WhnfOwnerPoll::Yielded,
         WhnfPoll::Failed(failure) => WhnfOwnerPoll::Failed(failure),
     }
@@ -114,32 +102,10 @@ pub(crate) fn interpret_poll(poll: WhnfPoll, context: &EvalContext) -> WhnfOwner
 
 #[cfg(test)]
 mod tests {
-    use crate::core::{LazyValue, ManagedPromiseRoot, PromisedValue, Value};
-    use crate::core_net::CoreWaitToken;
+    use crate::core::{LazyValue, PromisedValue, Value};
     use crate::evaluation::{EvalContext, EvaluationPollContext};
 
     use super::*;
-
-    #[test]
-    fn whnf_dependencies_translate_only_at_the_evaluation_boundary() {
-        let context = EvalContext::isolated(crate::core::CoreValueFactory::new(
-            crate::runtime::allocate_evaluation_runtime_id(),
-            crate::runtime::RuntimeIds::new(),
-        ));
-        let (_, task, _) = context
-            .task_owned_promise("WHNF dependency translation")
-            .expect("test promise should register");
-        let wait = work_dependency(WhnfDependency::Wait(CoreWaitToken(task.wait().clone())));
-        assert!(matches!(wait, WorkDependency::Wait(_)));
-
-        let promise = PromisedValue::new(context.values(), "WHNF unassigned promise");
-        let promise = promise.root(context.values());
-        let dependency = work_dependency(WhnfDependency::Promise(promise.clone()));
-        let WorkDependency::Promise(translated) = dependency else {
-            panic!("WHNF promise must remain a promise dependency")
-        };
-        assert!(ManagedPromiseRoot::same_promise(&translated, &promise));
-    }
 
     #[test]
     fn uncached_lazy_admission_occurs_after_regional_access_closes() {

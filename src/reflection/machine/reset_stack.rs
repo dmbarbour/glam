@@ -128,12 +128,6 @@ impl ResetStackMachine {
                         self.state = ResetStackState::StackWhnf(demand);
                         ResetStackPoll::Failed(TaskHalt::rooted_failure(failure))
                     }
-                    WhnfOwnerPoll::External(boundary) => {
-                        self.state = ResetStackState::StackWhnf(demand);
-                        ResetStackPoll::Failed(TaskHalt::new(format!(
-                            "reflection reset stack reached an unsupported {boundary:?} boundary"
-                        )))
-                    }
                 }
             }
             ResetStackState::Frames(mut front) => {
@@ -248,12 +242,6 @@ impl ResetFrameMachine {
                     WhnfOwnerPoll::Failed(failure) => {
                         self.state = ResetFrameState::FrameWhnf(demand);
                         ResetFramePoll::Failed(TaskHalt::rooted_failure(failure))
-                    }
-                    WhnfOwnerPoll::External(boundary) => {
-                        self.state = ResetFrameState::FrameWhnf(demand);
-                        ResetFramePoll::Failed(TaskHalt::new(format!(
-                            "reflection continuation frame reached an unsupported {boundary:?} boundary"
-                        )))
                     }
                 }
             }
@@ -471,11 +459,6 @@ fn poll_usize(
         WhnfOwnerPoll::Yielded => return UsizePoll::Yielded,
         WhnfOwnerPoll::Failed(failure) => {
             return UsizePoll::Failed(TaskHalt::rooted_failure(failure));
-        }
-        WhnfOwnerPoll::External(boundary) => {
-            return UsizePoll::Failed(TaskHalt::new(format!(
-                "reflection continuation frame {field} reached an unsupported {boundary:?} boundary"
-            )));
         }
     };
     poll_context.evaluate(context, |evaluator| {

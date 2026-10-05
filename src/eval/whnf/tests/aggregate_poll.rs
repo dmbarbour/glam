@@ -1,13 +1,7 @@
-use std::sync::{Arc, Mutex, Weak};
-
 use glam_gc::EdgeTransitionObservation;
 
 use crate::core::{CoreValueFactory, Value};
-use crate::core_net::CoreWaitToken;
-use crate::evaluation::{
-    CompletionSubscriptions, EvalContext, EvaluationPollContext, EvaluationWaitToken,
-    EvaluationWorkCoordinator,
-};
+use crate::evaluation::{EvalContext, EvaluationPollContext};
 use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
 use super::*;
@@ -19,17 +13,6 @@ fn context() -> crate::evaluation::OwnedEvalContext {
     ))
 }
 
-fn wait(context: &EvalContext) -> CoreWaitToken {
-    let values = context.values();
-    let wait = values
-        .ids()
-        .evaluation_wait()
-        .expect("aggregate-poll wait identity should allocate");
-    let coordinator = Arc::new(Mutex::new(Weak::<EvaluationWorkCoordinator>::new()));
-    let completion = CompletionSubscriptions::for_wait(values.runtime_id(), wait, coordinator);
-    CoreWaitToken(EvaluationWaitToken::new(wait, values, completion))
-}
-
 #[test]
 fn one_poll_aggregates_every_focus_and_frame_edit_into_one_edge_transition() {
     let context = context();
@@ -38,7 +21,7 @@ fn one_poll_aggregates_every_focus_and_frame_edit_into_one_edge_transition() {
     let (new_root, new) = values.rooted_error_lazy_for_test("aggregate-poll new edge");
     let focus = values.construct_runtime_value_root(|access| Value::Lazy(old.duplicate_in(access)));
     let mut computation = WhnfComputation::from_root(focus);
-    let expected = wait(&context);
+    let expected = new_root.clone();
     let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
     let poll = EvaluationPollContext::for_context(&context);
 
@@ -49,38 +32,33 @@ fn one_poll_aggregates_every_focus_and_frame_edit_into_one_edge_transition() {
             transition += 1;
             match transition {
                 1 => {
-                    work.frames.push(
-                        WhnfFrame {
-                            kind: WhnfFrameKind::CollectionWalk,
-                            cursor: 0,
-                            retained: vec![Value::Lazy(old.duplicate_in(access.values()))],
-                        }
-                        .into(),
-                    );
+                    work.frames.push(WhnfContinuation::Application {
+                        arguments: vec![Value::Lazy(old.duplicate_in(access.values()))],
+                        next: 0,
+                    });
                     RegionalWhnfStep::Delegate(Value::Lazy(new.duplicate_in(access.values())))
                 }
                 2 => {
-                    let WhnfContinuation::Generic(frame) = &mut work.frames[0] else {
-                        panic!("aggregate poll must retain its installed generic frame")
+                    let WhnfContinuation::Application { arguments, next } = &mut work.frames[0]
+                    else {
+                        panic!("aggregate poll must retain its installed application frame")
                     };
-                    frame.cursor = 1;
-                    frame
-                        .retained
-                        .push(Value::Lazy(new.duplicate_in(access.values())));
+                    *next = 1;
+                    arguments.push(Value::Lazy(new.duplicate_in(access.values())));
                     RegionalWhnfStep::Delegate(Value::Lazy(old.duplicate_in(access.values())))
                 }
-                3 => RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Dependency(
-                    WhnfDependency::Wait(expected.clone()),
+                3 => RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Deferred(
+                    WhnfDeferredRequest::Lazy(expected.clone()),
                 )),
-                _ => panic!("the exact dependency must stop the aggregate quantum"),
+                _ => panic!("the exact deferred request must stop the aggregate quantum"),
             }
         })
     });
 
-    let WhnfPoll::Pending(WhnfDependency::Wait(observed)) = outcome else {
-        panic!("the aggregate quantum must retain its exact dependency")
+    let WhnfPoll::Deferred(WhnfDeferredRequest::Lazy(observed)) = outcome else {
+        panic!("the aggregate quantum must retain its exact deferred request")
     };
-    assert_eq!(observed, expected);
+    assert_eq!(observed.id(), expected.id());
     assert_eq!(transition, 3);
     assert_eq!((budget.spent(), budget.remaining()), (3, 1));
 
@@ -92,7 +70,7 @@ fn one_poll_aggregates_every_focus_and_frame_edit_into_one_edge_transition() {
     );
     assert_eq!(records[0].leaving_edges(), 1);
     assert_eq!(records[0].adding_edges(), 3);
-    drop((old_root, new_root));
+    drop((old_root, new_root, expected, observed));
 }
 
 #[test]
@@ -109,14 +87,10 @@ fn managed_checkpoint_resumes_on_another_worker_after_collection() {
             access
                 .values()
                 .assert_same_representation_for_test(&work.focus, &Value::Number(1.into()));
-            work.frames.push(
-                WhnfFrame {
-                    kind: WhnfFrameKind::DiagnosticContext,
-                    cursor: 17,
-                    retained: vec![Value::Number(2.into())],
-                }
-                .into(),
-            );
+            work.frames.push(WhnfContinuation::Application {
+                arguments: vec![Value::Number(2.into())],
+                next: 0,
+            });
             RegionalWhnfStep::Delegate(Value::Number(3.into()))
         })
     });
@@ -134,17 +108,13 @@ fn managed_checkpoint_resumes_on_another_worker_after_collection() {
                 access
                     .values()
                     .assert_same_representation_for_test(&work.focus, &Value::Number(3.into()));
-                let WhnfContinuation::Generic(frame) = &work.frames[0] else {
+                let WhnfContinuation::Application { arguments, next } = &work.frames[0] else {
                     panic!("cross-worker resumption must retain its exact frame")
                 };
-                assert_eq!(
-                    (frame.kind, frame.cursor),
-                    (WhnfFrameKind::DiagnosticContext, 17)
-                );
-                access.values().assert_same_representation_for_test(
-                    &frame.retained,
-                    &[Value::Number(2.into())],
-                );
+                assert_eq!(*next, 0);
+                access
+                    .values()
+                    .assert_same_representation_for_test(arguments, &[Value::Number(2.into())]);
                 RegionalWhnfStep::Ready(Value::Number(5.into()))
             })
         });
@@ -165,7 +135,7 @@ fn managed_checkpoint_resumes_on_another_worker_after_collection() {
 fn aggregate_poll_exit_matrix_remains_explicit() {
     let publication = include_str!("checkpoint_publication.rs");
     for fixture in [
-        "external_boundary_publishes_the_complete_checkpoint_before_access_closes",
+        "boundary_publishes_the_complete_checkpoint_before_access_closes",
         "permanent_failure_is_rooted_inside_the_regional_poll",
         "unwind_poison_faults_without_reentering_the_reducer",
         "dropping_a_suspended_computation_retires_its_complete_checkpoint",

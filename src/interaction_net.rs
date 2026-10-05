@@ -10,7 +10,10 @@ pub(crate) mod polarity;
 #[cfg(any(test, feature = "interaction-net-profiling"))]
 #[cfg_attr(
     all(test, not(feature = "interaction-net-profiling")),
-    allow(dead_code)
+    expect(
+        dead_code,
+        reason = "without the profiling feature, tests compile this module only for the coordinator snapshot types; its rewrite and driver counters stay unused"
+    )
 )]
 pub(crate) mod profiling;
 mod runtime;
@@ -22,13 +25,12 @@ pub(crate) use model::{
     ActivePairKey, InteractionNet, NetSpecialization, NodeId, OperatorYield, Port,
 };
 pub(crate) use runtime::{
-    ActivePairStep, BlockedCall, BlockedCallableCheckpoint, BlockedOperatorCall, Call,
-    CallableCheckpointCall, CheckpointBlockResult, CursorDependency, CursorDependencyDisposition,
-    CursorDependencyResolution, CursorProgress, CursorStep, DemandEndpoint, FrontierObservation,
-    InterfaceDemand, NetContention, OperatorCall, PreparedCopySource, Reduction, ReductionKind,
-    RuntimeNet, RuntimeNetCell, RuntimeNetEdgeTransition, RuntimeNetMutation,
-    RuntimeNetMutationGateway, RuntimeNetPayload, RuntimeNetPayloadDuplicator, SourceFrontier,
-    StuckReason,
+    ActivePairStep, BlockedCallableCheckpoint, Call, CallableCheckpointCall, CheckpointBlockResult,
+    CursorDependency, CursorDependencyDisposition, CursorDependencyResolution, CursorProgress,
+    CursorStep, DemandEndpoint, FrontierObservation, InterfaceDemand, NetContention, OperatorCall,
+    PreparedCopySource, Reduction, ReductionKind, RuntimeNet, RuntimeNetCell,
+    RuntimeNetEdgeTransition, RuntimeNetMutation, RuntimeNetMutationGateway, RuntimeNetPayload,
+    RuntimeNetPayloadDuplicator, SourceFrontier, StuckReason,
 };
 #[cfg(test)]
 pub(crate) use runtime::{RuntimeNetRevisions, SharedRuntimeNet};

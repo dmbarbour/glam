@@ -15,11 +15,11 @@ use crate::interaction_net::ReductionKind;
 #[cfg(test)]
 use crate::interaction_net::RuntimeNetRevisions;
 use crate::interaction_net::{
-    ActivePairKey, ActivePairStep, BlockedCall, BlockedOperatorCall, CursorDependency,
-    CursorDependencyDisposition, CursorDependencyResolution, CursorProgress, CursorStep,
-    DemandEndpoint, FrontierObservation, InteractionNet, InterfaceDemand, NetContention, NodeId,
-    OperatorYield, Port, PreparedCopySource, Reduction, RuntimeNet, RuntimeNetMutation,
-    RuntimeNetPayloadDuplicator, SourceFrontier,
+    ActivePairKey, ActivePairStep, CursorDependency, CursorDependencyDisposition,
+    CursorDependencyResolution, CursorProgress, CursorStep, DemandEndpoint, FrontierObservation,
+    InteractionNet, InterfaceDemand, NetContention, NodeId, OperatorYield, Port,
+    PreparedCopySource, Reduction, RuntimeNet, RuntimeNetMutation, RuntimeNetPayloadDuplicator,
+    SourceFrontier,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1019,26 +1019,6 @@ impl CoreRuntimeNetAccess<'_, '_> {
         result
     }
 
-    pub(crate) fn reclaim_blocked_call(
-        &self,
-        blocked: &BlockedCall<CoreWaitToken>,
-    ) -> Option<(crate::interaction_net::Call, Value)> {
-        self.runtime
-            .cell()
-            .with_conditional_mut_via(&self.runtime, |runtime| {
-                let Some(call) = runtime.call(blocked.pair) else {
-                    return RuntimeNetMutation::Unchanged(None);
-                };
-                if !runtime.retry_blocked_call(call, &blocked.wait) {
-                    return RuntimeNetMutation::Unchanged(None);
-                }
-                let callable = runtime
-                    .claim_call(call, self)
-                    .expect("reclaimed call must expose its callable data");
-                RuntimeNetMutation::Changed(Some((call, callable)))
-            })
-    }
-
     pub(crate) fn resume_claimed_call_with_operator(
         &self,
         call: crate::interaction_net::Call,
@@ -1081,23 +1061,6 @@ impl CoreRuntimeNetAccess<'_, '_> {
             .unwrap_or(false)
     }
 
-    pub(crate) fn restore_blocked_call(
-        &self,
-        call: crate::interaction_net::Call,
-        wait: CoreWaitToken,
-    ) -> bool {
-        self.runtime
-            .cell()
-            .with_cleanup_mut_via(&self.runtime, |runtime| {
-                if runtime.restore_blocked_call(call, wait) {
-                    RuntimeNetMutation::Changed(true)
-                } else {
-                    RuntimeNetMutation::Unchanged(false)
-                }
-            })
-            .unwrap_or(false)
-    }
-
     pub(crate) fn claim_operator_call(
         &self,
         call: crate::interaction_net::OperatorCall,
@@ -1105,26 +1068,6 @@ impl CoreRuntimeNetAccess<'_, '_> {
         self.runtime
             .cell()
             .with(|runtime| runtime.claim_operator_call(call, self))
-    }
-
-    pub(crate) fn reclaim_blocked_operator_call(
-        &self,
-        blocked: &BlockedOperatorCall<CoreWaitToken>,
-    ) -> Option<(crate::interaction_net::OperatorCall, CoreOperator, Value)> {
-        self.runtime
-            .cell()
-            .with_conditional_mut_via(&self.runtime, |runtime| {
-                let Some(call) = runtime.operator_call(blocked.pair) else {
-                    return RuntimeNetMutation::Unchanged(None);
-                };
-                if !runtime.retry_blocked_operator_call(call, &blocked.wait) {
-                    return RuntimeNetMutation::Unchanged(None);
-                }
-                let (operator, data) = runtime
-                    .claim_operator_call(call, self)
-                    .expect("reclaimed operator call must expose its payloads");
-                RuntimeNetMutation::Changed(Some((call, operator, data)))
-            })
     }
 
     pub(crate) fn complete_claimed_operator_call(
@@ -1143,23 +1086,6 @@ impl CoreRuntimeNetAccess<'_, '_> {
             .values()
             .interaction_net_profile()
             .record_reduction(crate::interaction_net::profiling::ReductionEvent::OperatorCall);
-    }
-
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "core operator execution now emits suspendable WHNF work; the generic blocked-pair protocol remains available for exact compatibility fixtures"
-        )
-    )]
-    pub(crate) fn block_claimed_operator_call(
-        &self,
-        call: crate::interaction_net::OperatorCall,
-        wait: CoreWaitToken,
-    ) {
-        self.runtime.cell().with_mut_via(&self.runtime, |runtime| {
-            runtime.block_claimed_operator_call(call, wait)
-        });
     }
 
     pub(crate) fn fail_claimed_operator_call(
@@ -1182,23 +1108,6 @@ impl CoreRuntimeNetAccess<'_, '_> {
             .cell()
             .with_cleanup_mut_via(&self.runtime, |runtime| {
                 if runtime.release_claimed_operator_call(call) {
-                    RuntimeNetMutation::Changed(true)
-                } else {
-                    RuntimeNetMutation::Unchanged(false)
-                }
-            })
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn restore_blocked_operator_call(
-        &self,
-        call: crate::interaction_net::OperatorCall,
-        wait: CoreWaitToken,
-    ) -> bool {
-        self.runtime
-            .cell()
-            .with_cleanup_mut_via(&self.runtime, |runtime| {
-                if runtime.restore_blocked_operator_call(call, wait) {
                     RuntimeNetMutation::Changed(true)
                 } else {
                     RuntimeNetMutation::Unchanged(false)
@@ -1427,9 +1336,7 @@ impl CoreCursorStep {
 pub(crate) enum CoreActivePairStep {
     Reduction(Reduction),
     Cursor(NodeId),
-    BlockedCall(BlockedCall<CoreWaitToken>),
     BlockedCallableCheckpoint(crate::interaction_net::BlockedCallableCheckpoint<CoreWaitToken>),
-    BlockedOperatorCall(BlockedOperatorCall<CoreWaitToken>),
     Stuck,
     Contended(CoreNetContention),
     Disturbed,
@@ -1449,11 +1356,9 @@ impl CoreActivePairStep {
             }) => panic!("a live cursor claim cannot cross the core-net facade"),
             ActivePairStep::Reduction(reduction) => Self::Reduction(reduction),
             ActivePairStep::Cursor(cursor) => Self::Cursor(cursor),
-            ActivePairStep::BlockedCall(blocked) => Self::BlockedCall(blocked),
             ActivePairStep::BlockedCallableCheckpoint(blocked) => {
                 Self::BlockedCallableCheckpoint(blocked)
             }
-            ActivePairStep::BlockedOperatorCall(blocked) => Self::BlockedOperatorCall(blocked),
             ActivePairStep::Stuck(_) => Self::Stuck,
             ActivePairStep::Contended(contention) => {
                 Self::Contended(CoreNetContention::new(contention))

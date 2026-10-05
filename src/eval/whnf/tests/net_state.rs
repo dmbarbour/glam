@@ -28,7 +28,6 @@ fn retained_values(work: &WhnfState) -> Vec<&Value> {
     let mut values = vec![&work.focus];
     for frame in &work.frames {
         match frame {
-            WhnfContinuation::Generic(frame) => values.extend(&frame.retained),
             WhnfContinuation::Application { arguments, .. } => values.extend(arguments),
             WhnfContinuation::DictionaryApplication {
                 effect_payload,
@@ -88,12 +87,6 @@ fn container_identities(work: &WhnfState) -> Vec<(&'static str, usize, usize, us
     )];
     for frame in &work.frames {
         match frame {
-            WhnfContinuation::Generic(frame) => identities.push((
-                "generic retained",
-                frame.retained.as_ptr() as usize,
-                frame.retained.len(),
-                frame.retained.capacity(),
-            )),
             WhnfContinuation::Application { arguments, .. } => identities.push((
                 "application arguments",
                 arguments.as_ptr() as usize,
@@ -153,11 +146,6 @@ fn regional_net_role_handoffs_preserve_every_container_allocation() {
             None,
         );
         regional.frames.extend([
-            WhnfContinuation::Generic(WhnfFrame {
-                kind: WhnfFrameKind::OrderedOperands,
-                cursor: 1,
-                retained: Vec::with_capacity(3),
-            }),
             WhnfContinuation::Application {
                 arguments: Vec::with_capacity(4),
                 next: 0,
@@ -204,7 +192,7 @@ fn regional_net_role_handoffs_preserve_every_container_allocation() {
     let claim = source_section(
         source,
         "pub(crate) fn into_regional(",
-        "/// Drives one bounded callback-free quantum",
+        "fn application_checkpoint_for_test(",
     );
     for handoff in [publish, claim] {
         for forbidden in [".iter()", ".map(", ".collect(", "duplicate_value", "clone("] {
@@ -234,7 +222,6 @@ fn net_state_trace_retains_every_value_position_through_collection() {
             };
 
             let focus = make();
-            let generic = vec![make(), make()];
             let application = vec![make(), make()];
             let effect_payload = make();
             let remaining_effect_values = vec![make(), make()];
@@ -243,7 +230,6 @@ fn net_state_trace_retains_every_value_position_through_collection() {
             let second_ancestor = vec![make(), make()];
             let expected_lazy_ids = [
                 std::slice::from_ref(&focus),
-                generic.as_slice(),
                 application.as_slice(),
                 std::slice::from_ref(&effect_payload),
                 remaining_effect_values.as_slice(),
@@ -270,11 +256,6 @@ fn net_state_trace_retains_every_value_position_through_collection() {
                 &access,
                 focus,
                 vec![
-                    WhnfContinuation::Generic(WhnfFrame {
-                        kind: WhnfFrameKind::OrderedOperands,
-                        cursor: 2,
-                        retained: generic,
-                    }),
                     WhnfContinuation::Application {
                         arguments: application,
                         next: 1,
@@ -339,7 +320,7 @@ fn net_state_trace_retains_every_value_position_through_collection() {
             .map(|value| lazy_id(&access, value))
             .collect::<Vec<_>>();
         assert_eq!(actual_lazy_ids, expected_lazy_ids);
-        assert_eq!(state.0.frames.len(), 5);
+        assert_eq!(state.0.frames.len(), 4);
         assert_eq!(state.0.source_owner, Some(source_owner));
         assert_eq!(
             state
@@ -375,6 +356,20 @@ fn shell_work(access: &EvaluationValueAccess<'_>) -> NetWhnfState {
     )
 }
 
+/// Drives net-owned state the way a claimed callable checkpoint does: claim
+/// the complete state for regional work, drive it in place, then publish the
+/// complete successor back into net-owned storage.
+fn drive_net_state(
+    access: &EvaluationValueAccess<'_>,
+    state: NetWhnfState,
+    budget: &mut WhnfStepBudget,
+    reduce: impl FnMut(&EvaluationValueAccess<'_>, &mut RegionalWhnfState<'_>) -> RegionalWhnfStep,
+) -> (RegionalWhnfStatus, NetWhnfState) {
+    let mut work = state.into_regional(access);
+    let status = drive_regional_in_place(access, &mut work, budget, reduce);
+    (status, NetWhnfState::from_regional(access, work))
+}
+
 fn reduce_shell(
     access: &EvaluationValueAccess<'_>,
     work: &mut RegionalWhnfState<'_>,
@@ -402,9 +397,12 @@ fn net_state_and_durable_work_share_exact_budget_split_semantics() {
 
     poll.with_value_access(&context, |access| {
         let mut uninterrupted_budget = WhnfStepBudget::new(4);
-        let NetWhnfDrive::Ready(uninterrupted) =
-            shell_work(&access).drive_in(&access, &mut uninterrupted_budget, reduce_shell)
-        else {
+        let (RegionalWhnfStatus::Ready(uninterrupted), _) = drive_net_state(
+            &access,
+            shell_work(&access),
+            &mut uninterrupted_budget,
+            reduce_shell,
+        ) else {
             panic!("uninterrupted shell chain must complete")
         };
         access
@@ -414,12 +412,16 @@ fn net_state_and_durable_work_share_exact_budget_split_semantics() {
         assert_eq!(uninterrupted_budget.remaining(), 1);
 
         for first_quantum in 0..=3 {
-            let mut state = shell_work(&access);
             let mut first_budget = WhnfStepBudget::new(first_quantum);
-            let first = state.drive_in(&access, &mut first_budget, reduce_shell);
+            let (first, state) = drive_net_state(
+                &access,
+                shell_work(&access),
+                &mut first_budget,
+                reduce_shell,
+            );
             assert_eq!(first_budget.spent(), first_quantum.min(3));
             if first_quantum == 3 {
-                let NetWhnfDrive::Ready(value) = first else {
+                let RegionalWhnfStatus::Ready(value) = first else {
                     panic!("three transitions must complete the shell chain")
                 };
                 access
@@ -427,13 +429,12 @@ fn net_state_and_durable_work_share_exact_budget_split_semantics() {
                     .assert_same_representation_for_test(&value, &uninterrupted);
                 continue;
             }
-            let NetWhnfDrive::Yielded(next) = first else {
+            let RegionalWhnfStatus::Yielded = first else {
                 panic!("a split before completion must preserve a successor")
             };
-            state = next;
             let mut rest_budget = WhnfStepBudget::new(3 - first_quantum);
-            let NetWhnfDrive::Ready(value) =
-                state.drive_in(&access, &mut rest_budget, reduce_shell)
+            let (RegionalWhnfStatus::Ready(value), _) =
+                drive_net_state(&access, state, &mut rest_budget, reduce_shell)
             else {
                 panic!("the remaining exact allowance must complete the shell chain")
             };
@@ -449,6 +450,7 @@ fn net_state_and_durable_work_share_exact_budget_split_semantics() {
 #[test]
 fn net_driver_retains_frame_state_on_yield_boundary_and_failure() {
     let values = isolated_values();
+    let (deferred, _) = values.rooted_error_lazy_for_test("net-state boundary");
     let context = EvalContext::isolated(values);
     let poll = EvaluationPollContext::for_context(&context);
 
@@ -479,8 +481,8 @@ fn net_driver_retains_frame_state_on_yield_boundary_and_failure() {
         };
 
         let mut zero = WhnfStepBudget::new(0);
-        let NetWhnfDrive::Yielded(unchanged) =
-            make_state().drive_in(&access, &mut zero, advance_frame)
+        let (RegionalWhnfStatus::Yielded, unchanged) =
+            drive_net_state(&access, make_state(), &mut zero, advance_frame)
         else {
             panic!("zero allowance must yield before frame mutation")
         };
@@ -495,8 +497,8 @@ fn net_driver_retains_frame_state_on_yield_boundary_and_failure() {
         );
 
         let mut one = WhnfStepBudget::new(1);
-        let NetWhnfDrive::Yielded(advanced) =
-            make_state().drive_in(&access, &mut one, advance_frame)
+        let (RegionalWhnfStatus::Yielded, advanced) =
+            drive_net_state(&access, make_state(), &mut one, advance_frame)
         else {
             panic!("one completed transition must yield its complete successor")
         };
@@ -520,20 +522,24 @@ fn net_driver_retains_frame_state_on_yield_boundary_and_failure() {
             };
             *next = 1;
             work.focus = Value::Number(1.into());
-            RegionalWhnfStep::Boundary(RegionalBoundaryRequest::External(
-                WhnfExternalBoundary::Reflection,
+            RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Deferred(
+                WhnfDeferredRequest::Lazy(deferred.clone()),
             ))
         };
         let mut boundary_budget = WhnfStepBudget::new(1);
-        let NetWhnfDrive::Boundary { state, request } =
-            make_state().drive_in(&access, &mut boundary_budget, boundary_reducer)
-        else {
+        let (RegionalWhnfStatus::Boundary(request), state) = drive_net_state(
+            &access,
+            make_state(),
+            &mut boundary_budget,
+            boundary_reducer,
+        ) else {
             panic!("boundary transition must publish its complete successor")
         };
-        assert!(matches!(
-            request,
-            RegionalBoundaryRequest::External(WhnfExternalBoundary::Reflection)
-        ));
+        let RegionalBoundaryRequest::Deferred(WhnfDeferredRequest::Lazy(requested)) = request
+        else {
+            panic!("boundary transition must retain its exact deferred request")
+        };
+        assert_eq!(requested.id(), deferred.id());
         let state = state.into_regional(&access);
         access
             .values()
@@ -549,11 +555,12 @@ fn net_driver_retains_frame_state_on_yield_boundary_and_failure() {
 
         let expected = Arc::new(crate::core::EvaluationFailure::message("NC1B failure"));
         let mut failed_budget = WhnfStepBudget::new(1);
-        let NetWhnfDrive::Failed(actual) =
-            make_state().drive_in(&access, &mut failed_budget, |_access, _work| {
-                RegionalWhnfStep::Failed(Arc::clone(&expected))
-            })
-        else {
+        let (RegionalWhnfStatus::Failed(actual), _) = drive_net_state(
+            &access,
+            make_state(),
+            &mut failed_budget,
+            |_access, _work| RegionalWhnfStep::Failed(Arc::clone(&expected)),
+        ) else {
             panic!("failure transition must remain terminal")
         };
         assert!(Arc::ptr_eq(&actual, &expected));

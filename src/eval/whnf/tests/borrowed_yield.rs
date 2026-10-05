@@ -1,12 +1,7 @@
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex, Weak};
 
 use crate::core::{CoreValueFactory, Value};
-use crate::core_net::CoreWaitToken;
-use crate::evaluation::{
-    CompletionSubscriptions, EvalContext, EvaluationPollContext, EvaluationWaitToken,
-    EvaluationWorkCoordinator,
-};
+use crate::evaluation::{EvalContext, EvaluationPollContext};
 use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
 use super::*;
@@ -18,27 +13,17 @@ fn context() -> crate::evaluation::OwnedEvalContext {
     ))
 }
 
-fn wait(context: &EvalContext) -> CoreWaitToken {
-    let values = context.values();
-    let wait = values
-        .ids()
-        .evaluation_wait()
-        .expect("borrowed-driver wait identity should allocate");
-    let coordinator = Arc::new(Mutex::new(Weak::<EvaluationWorkCoordinator>::new()));
-    let completion = CompletionSubscriptions::for_wait(values.runtime_id(), wait, coordinator);
-    CoreWaitToken(EvaluationWaitToken::new(wait, values, completion))
-}
-
 fn multi_frame_work(access: &EvaluationValueAccess<'_>) -> RegionalWhnfWork {
     RegionalWhnfWork::from_parts(
         access,
         Value::Number(0.into()),
         vec![
-            WhnfContinuation::Generic(WhnfFrame {
-                kind: WhnfFrameKind::CollectionWalk,
-                cursor: 0,
-                retained: vec![Value::Number(10.into()), Value::Number(11.into())],
-            }),
+            WhnfContinuation::DictionaryApplication {
+                effect_payload: Value::Number(9.into()),
+                remaining_effect_values: vec![Value::Number(10.into()), Value::Number(11.into())],
+                next_effect_value: 0,
+                apply_member: None,
+            },
             WhnfContinuation::Application {
                 arguments: vec![Value::Number(20.into()), Value::Number(21.into())],
                 next: 0,
@@ -70,10 +55,13 @@ fn borrowed_multi_frame_yield_preserves_containers_without_projection_or_roots()
         let identities = work.container_identities_for_test();
         let mut budget = WhnfStepBudget::new(1);
         let status = drive_regional_in_place(&access, &mut work, &mut budget, |_access, state| {
-            let WhnfContinuation::Generic(frame) = &mut state.frames[0] else {
+            let WhnfContinuation::DictionaryApplication {
+                next_effect_value, ..
+            } = &mut state.frames[0]
+            else {
                 unreachable!()
             };
-            frame.cursor = 1;
+            *next_effect_value = 1;
             let WhnfContinuation::Application { next, .. } = &mut state.frames[1] else {
                 unreachable!()
             };
@@ -98,20 +86,22 @@ fn borrowed_multi_frame_yield_preserves_containers_without_projection_or_roots()
 #[test]
 fn owned_and_borrowed_drivers_preserve_boundary_identity_and_budget() {
     let context = context();
-    let expected = wait(&context);
+    let (expected, _) = context
+        .values()
+        .rooted_error_lazy_for_test("borrowed-driver boundary");
     let poll = EvaluationPollContext::for_context(&context);
 
     poll.with_value_access(&context, |access| {
         let boundary = |_access: &EvaluationValueAccess<'_>, _state: &mut RegionalWhnfState<'_>| {
-            RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Dependency(WhnfDependency::Wait(
-                expected.clone(),
-            )))
+            RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Deferred(
+                WhnfDeferredRequest::Lazy(expected.clone()),
+            ))
         };
 
         let mut borrowed = multi_frame_work(&access);
         let mut borrowed_budget = WhnfStepBudget::new(1);
-        let RegionalWhnfStatus::Boundary(RegionalBoundaryRequest::Dependency(
-            WhnfDependency::Wait(borrowed_wait),
+        let RegionalWhnfStatus::Boundary(RegionalBoundaryRequest::Deferred(
+            WhnfDeferredRequest::Lazy(borrowed_request),
         )) = drive_regional_in_place(&access, &mut borrowed, &mut borrowed_budget, boundary)
         else {
             panic!("borrowed driver must preserve its exact boundary")
@@ -120,7 +110,7 @@ fn owned_and_borrowed_drivers_preserve_boundary_identity_and_budget() {
         let mut owned_budget = WhnfStepBudget::new(1);
         let RegionalWhnfDrive::Boundary {
             work: owned,
-            request: RegionalBoundaryRequest::Dependency(WhnfDependency::Wait(owned_wait)),
+            request: RegionalBoundaryRequest::Deferred(WhnfDeferredRequest::Lazy(owned_request)),
         } = drive_regional(
             &access,
             multi_frame_work(&access),
@@ -131,8 +121,8 @@ fn owned_and_borrowed_drivers_preserve_boundary_identity_and_budget() {
             panic!("owned adapter must preserve its exact boundary")
         };
 
-        assert_eq!(borrowed_wait, expected);
-        assert_eq!(owned_wait, expected);
+        assert_eq!(borrowed_request.id(), expected.id());
+        assert_eq!(owned_request.id(), expected.id());
         assert_eq!(borrowed.container_identities_for_test().len(), 5);
         assert_eq!(owned.container_identities_for_test().len(), 5);
         assert_eq!(borrowed_budget.spent(), owned_budget.spent());

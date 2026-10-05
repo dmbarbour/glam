@@ -1091,6 +1091,13 @@ the `#[expect]` classification.
 - The doc comment calls `Seed` "protocol fixture only", but it is the
   production entry.
 
+*Resolved 2026-10-05.* Deleted `WhnfFrame`, `WhnfFrameKind` and the generic
+continuation; the external-boundary family and its 20 consumer arms;
+`WhnfDependency` and `WhnfPoll::Pending`; `NetWhnfDrive` and `drive_in`; and
+`Seed.source_owner`. `Seed` is documented as the production entry. Tests
+that exercised only the deleted shapes were deleted; the rest now use live
+frames and deferred-lazy boundaries.
+
 ### Interaction nets (N)
 
 **N1 — High — Rewrite rules panic on aux–aux links inside an active pair.**
@@ -1180,6 +1187,14 @@ no timing and no CLI dump.
 *Recommendation:* delete both, reducing `ActivePairState` from 7 variants to
 5.
 
+*Resolved 2026-10-05.* Both states are deleted, with `block_claimed_call`,
+`OperatorDisposition::Blocked`, and the retry paths in the call and operator
+claims. `ActivePairState` has 5 variants. The deletion exposed a separate,
+pre-existing defect: budget denial on a blocked callable checkpoint's retry
+reached `unreachable!`, because release had no-op arms only for the deleted
+states. The N9 change fixes it, since polling a blocked wait is observation
+and is not charged.
+
 **N6 — Medium — Four wrapper layers around one graph.** Reported.
 
 The layers are `RuntimeNet`, 12 `RuntimeNetCell::with_*` variants, 80
@@ -1247,10 +1262,21 @@ reading the code; added 2026-10-05 while writing
   (`driver_work_item_limit_reached`, `ProbeBudgetExhausted`) stops a batch
   between items and resumes from the worklist.
 
-*Recommendation:* charge the shared step budget per driver work item and
-yield through the probe's existing path, which becomes the production
-`BudgetExhausted` outcome. Test with a long pure chain under a one-unit
-budget, and a divergent net that must yield.
+*Recommendation:* charge one budget unit for every net reduction and yield
+when none remains, through the test probe's existing path. Test with a long
+pure chain under a one-unit budget, and a divergent net that must yield.
+
+*Maintainer decision, 2026-10-05:* keep the rule simple: every reduction
+costs one unit, and observation is free.
+- **Charged:** pure rewrites, the remote-cursor rule (materialize or join),
+  and semantic handoffs, which already pay one unit.
+- **Free:** interface polls, principal-chain walks, dependency resolution,
+  and finding the next pair.
+- **Why free observation is safe:** a poll that performs no reduction ends
+  in a result, a handoff, contention, or a block, so it cannot loop on
+  observation alone.
+- **The check runs before the claim.** With no budget left, the item goes
+  back on the worklist and the poll yields.
 
 ### Reflection (R)
 
@@ -1848,7 +1874,10 @@ cheaper. Items within a group are independent.
 7. **Scaffolding retirement (X5, V4).**
    - Inventory triage.
    - `#[expect]` everywhere.
-   - Delete stale allows and dead vocabulary (E10, N5).
+   - Delete stale allows and dead vocabulary (E10, N5). *Done 2026-10-05:*
+     no `allow(dead_code)` remains. Each site was deleted, moved under
+     `cfg(test)`, or became an `expect` with a reason; items used only by
+     tests use `cfg_attr(not(test), expect(..))`.
    - Rename milestone tests.
    - Resolve "until <milestone>" comments.
    - *Progress 2026-10-05.* The documentation cleanup's code wave replaced

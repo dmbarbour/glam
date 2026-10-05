@@ -186,10 +186,6 @@ pub(crate) fn max_runtime_value_access_depth_for_test() -> usize {
 /// Glam's collector gateway; see `docs/architecture/values.md` "Managed
 /// Families".
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "managed drop records are compile-time admission evidence, inspected by family audits"
-)]
 pub(crate) struct ManagedDropRecord {
     family: &'static str,
     source: &'static str,
@@ -342,10 +338,6 @@ unsafe impl ManagedFamily for ClosedCompatibilityValue {
 /// instead needs managed edges or managed destructor authority requires a new
 /// representation review.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "opaque records are compile-time admission evidence, read only by tests"
-)]
 pub(crate) struct OpaquePayloadRecord {
     family: &'static str,
     source: &'static str,

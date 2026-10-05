@@ -157,7 +157,13 @@ impl Drop for EvaluationQueryHandle {
 pub(crate) enum EvaluationQueryPoll {
     State {
         value: PublicValue,
-        #[cfg_attr(not(test), allow(dead_code))]
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "production callers ignore whether polling observed the query; tests check it"
+            )
+        )]
         observed: bool,
     },
     ForeignQueryDomain,

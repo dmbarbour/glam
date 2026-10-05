@@ -206,9 +206,7 @@ pub enum CursorStep<S: NetSpecialization> {
 pub enum ActivePairStep<S: NetSpecialization> {
     Reduction(Reduction),
     Cursor(NodeId),
-    BlockedCall(BlockedCall<S::WaitToken>),
     BlockedCallableCheckpoint(BlockedCallableCheckpoint<S::WaitToken>),
-    BlockedOperatorCall(BlockedOperatorCall<S::WaitToken>),
     Stuck(StuckPair<S::StuckReason>),
     Contended(NetContention),
     Disturbed,
@@ -453,12 +451,6 @@ pub struct StuckPair<R> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BlockedCall<W> {
-    pub pair: ActivePairKey,
-    pub wait: W,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockedCallableCheckpoint<W> {
     pub call: CallableCheckpointCall,
     pub wait: W,
@@ -468,12 +460,6 @@ pub struct BlockedCallableCheckpoint<W> {
 pub enum CheckpointBlockResult {
     Blocked,
     Disturbed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BlockedOperatorCall<W> {
-    pub pair: ActivePairKey,
-    pub wait: W,
 }
 
 #[cfg(test)]
@@ -487,14 +473,8 @@ pub struct BlockedCursor {
 pub(super) enum ActivePairState<S: NetSpecialization> {
     Ready,
     Claimed,
-    BlockedCall {
-        wait: S::WaitToken,
-    },
     BlockedCallableCheckpoint {
         generation: u64,
-        wait: S::WaitToken,
-    },
-    BlockedOperatorCall {
         wait: S::WaitToken,
     },
     BlockedCursor {
@@ -514,13 +494,7 @@ impl<S: NetSpecialization> ActivePairState<S> {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the generic shared-net facade remains as the non-core runtime test specialization"
-    )
-)]
+#[cfg(test)]
 pub struct SharedRuntimeNet<S: NetSpecialization> {
     inner: Arc<RuntimeNetCell<S>>,
 }
@@ -766,9 +740,7 @@ fn visit_active_pair_payload<'payload, S: NetSpecialization>(
         }
         ActivePairState::Ready
         | ActivePairState::Claimed
-        | ActivePairState::BlockedCall { .. }
         | ActivePairState::BlockedCallableCheckpoint { .. }
-        | ActivePairState::BlockedOperatorCall { .. }
         | ActivePairState::BlockedCursor {
             blockage: CursorBlockage::Stable,
             ..
@@ -805,13 +777,13 @@ impl RuntimeNetEdgeTransition {
     }
 }
 
+/// Applies generic-runtime mutations unchanged, for the non-core test
+/// specialization.
+#[cfg(test)]
 #[derive(Clone, Copy)]
-#[allow(
-    dead_code,
-    reason = "the direct gateway serves the generic non-core test specialization"
-)]
 struct DirectRuntimeNetMutationGateway;
 
+#[cfg(test)]
 impl<S> RuntimeNetPayloadDuplicator<S> for DirectRuntimeNetMutationGateway
 where
     S: NetSpecialization,
@@ -829,6 +801,7 @@ where
     }
 }
 
+#[cfg(test)]
 impl<S> RuntimeNetMutationGateway<S> for DirectRuntimeNetMutationGateway
 where
     S: NetSpecialization,
@@ -860,10 +833,7 @@ where
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "the direct gateway serves the generic non-core test specialization"
-)]
+#[cfg(test)]
 const DIRECT_RUNTIME_NET_MUTATION_GATEWAY: DirectRuntimeNetMutationGateway =
     DirectRuntimeNetMutationGateway;
 
@@ -1127,10 +1097,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
         state.runtime.visit_logical_payloads(visit);
     }
 
-    #[allow(
-        dead_code,
-        reason = "the direct gateway serves the generic non-core test specialization"
-    )]
+    #[cfg(test)]
     pub(crate) fn with_mut<R>(&self, update: impl FnOnce(&mut RuntimeNet<S>) -> R) -> R
     where
         S::Data: Clone,
@@ -1140,6 +1107,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
         self.with_mut_via(&DIRECT_RUNTIME_NET_MUTATION_GATEWAY, update)
     }
 
+    #[cfg(test)]
     pub(crate) fn with_mut_via<Gateway, R>(
         &self,
         gateway: &Gateway,
@@ -1197,10 +1165,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
         result
     }
 
-    #[allow(
-        dead_code,
-        reason = "the direct gateway serves the generic non-core test specialization"
-    )]
+    #[cfg(test)]
     pub(crate) fn with_conditional_mut<R>(
         &self,
         update: impl FnOnce(&mut RuntimeNet<S>) -> RuntimeNetMutation<R>,
@@ -1343,10 +1308,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
         })
     }
 
-    #[allow(
-        dead_code,
-        reason = "the direct gateway serves the generic non-core test specialization"
-    )]
+    #[cfg(test)]
     pub(crate) fn poll_interface_demand(&self, interface: Port) -> InterfaceDemand
     where
         S::Data: Clone,
@@ -1356,10 +1318,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
         self.with_conditional_mut(|runtime| runtime.poll_interface_demand(interface))
     }
 
-    #[allow(
-        dead_code,
-        reason = "the direct gateway serves the generic non-core test specialization"
-    )]
+    #[cfg(test)]
     pub(crate) fn resolve_cursor_dependency(
         &self,
         cursor: NodeId,
@@ -1413,10 +1372,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
             .map(|active| (active.id, active.contended))
     }
 
-    #[allow(
-        dead_code,
-        reason = "the direct gateway serves the generic non-core test specialization"
-    )]
+    #[cfg(test)]
     pub(crate) fn step_active_pair_with(
         &self,
         pair: ActivePairKey,
@@ -1492,13 +1448,6 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
                 Some(ActivePairState::BlockedCursor { cursor, .. }) => {
                     (ActivePairStep::Cursor(*cursor), false)
                 }
-                Some(ActivePairState::BlockedCall { wait }) => (
-                    ActivePairStep::BlockedCall(BlockedCall {
-                        pair,
-                        wait: wait.clone(),
-                    }),
-                    false,
-                ),
                 Some(ActivePairState::BlockedCallableCheckpoint { generation, wait }) => {
                     let call = state
                         .runtime
@@ -1513,13 +1462,6 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
                         false,
                     )
                 }
-                Some(ActivePairState::BlockedOperatorCall { wait }) => (
-                    ActivePairStep::BlockedOperatorCall(BlockedOperatorCall {
-                        pair,
-                        wait: wait.clone(),
-                    }),
-                    false,
-                ),
                 Some(ActivePairState::Stuck(reason)) => (
                     ActivePairStep::Stuck(StuckPair {
                         pair,
@@ -1556,10 +1498,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
         outcome
     }
 
-    #[allow(
-        dead_code,
-        reason = "the direct gateway serves the generic non-core test specialization"
-    )]
+    #[cfg(test)]
     pub(crate) fn step_cursor_with(
         &self,
         cursor: NodeId,
@@ -1668,13 +1607,7 @@ pub(crate) enum RuntimeNetMutation<R> {
     Changed(R),
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the generic shared-net facade remains as the non-core runtime test specialization"
-    )
-)]
+#[cfg(test)]
 impl<S: NetSpecialization> SharedRuntimeNet<S> {
     pub fn new(runtime: RuntimeNet<S>) -> Self {
         Self {
@@ -1878,13 +1811,7 @@ where
     }
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the generic shared-net facade remains as the non-core runtime test specialization"
-    )
-)]
+#[cfg(test)]
 impl<S: NetSpecialization> SharedRuntimeNet<S> {
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
@@ -1895,6 +1822,7 @@ impl<S: NetSpecialization> SharedRuntimeNet<S> {
     }
 }
 
+#[cfg(test)]
 impl<S: NetSpecialization> Clone for SharedRuntimeNet<S> {
     fn clone(&self) -> Self {
         Self {
@@ -1903,6 +1831,7 @@ impl<S: NetSpecialization> Clone for SharedRuntimeNet<S> {
     }
 }
 
+#[cfg(test)]
 impl<S: NetSpecialization> fmt::Debug for SharedRuntimeNet<S> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1912,12 +1841,14 @@ impl<S: NetSpecialization> fmt::Debug for SharedRuntimeNet<S> {
     }
 }
 
+#[cfg(test)]
 impl<S: NetSpecialization> PartialEq for SharedRuntimeNet<S> {
     fn eq(&self, other: &Self) -> bool {
         self.ptr_eq(other)
     }
 }
 
+#[cfg(test)]
 impl<S: NetSpecialization> Eq for SharedRuntimeNet<S> {}
 
 struct CopyState<S: NetSpecialization> {
@@ -1936,10 +1867,7 @@ struct CursorClaim<S: NetSpecialization> {
 
 enum CursorDisposition<S: NetSpecialization> {
     Advance(SourceFrontier<S>),
-    #[allow(
-        dead_code,
-        reason = "the explicit release disposition is exercised by claim-protocol tests"
-    )]
+    #[cfg(test)]
     Release,
 }
 
@@ -2001,6 +1929,7 @@ where
                     |target, (claim, frontier)| target.finish_cursor_claim(claim, frontier),
                 ))
             }
+            #[cfg(test)]
             CursorDisposition::Release => {
                 let restored = self.restore_fallback();
                 self.claim = None;
@@ -2236,9 +2165,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 }
                 ActivePairState::Ready
                 | ActivePairState::Claimed
-                | ActivePairState::BlockedCall { .. }
                 | ActivePairState::BlockedCallableCheckpoint { .. }
-                | ActivePairState::BlockedOperatorCall { .. }
                 | ActivePairState::BlockedCursor {
                     blockage: CursorBlockage::Stable,
                     ..
@@ -2719,28 +2646,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     }
 
     #[cfg(test)]
-    pub fn blocked_calls(&self) -> impl Iterator<Item = BlockedCall<S::WaitToken>> + '_ {
-        self.active.iter().filter_map(|(pair, state)| match state {
-            ActivePairState::BlockedCall { wait } => Some(BlockedCall {
-                pair: *pair,
-                wait: wait.clone(),
-            }),
-            _ => None,
-        })
-    }
-
-    #[cfg(test)]
-    pub fn blocked_call(&self, pair: ActivePairKey) -> Option<BlockedCall<S::WaitToken>> {
-        match self.active.get(&pair) {
-            Some(ActivePairState::BlockedCall { wait }) => Some(BlockedCall {
-                pair,
-                wait: wait.clone(),
-            }),
-            _ => None,
-        }
-    }
-
-    #[cfg(test)]
     pub fn blocked_callable_checkpoint(
         &self,
         pair: ActivePairKey,
@@ -2759,23 +2664,9 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
     }
 
-    #[cfg(test)]
-    pub fn blocked_operator_call(
-        &self,
-        pair: ActivePairKey,
-    ) -> Option<BlockedOperatorCall<S::WaitToken>> {
-        match self.active.get(&pair) {
-            Some(ActivePairState::BlockedOperatorCall { wait }) => Some(BlockedOperatorCall {
-                pair,
-                wait: wait.clone(),
-            }),
-            _ => None,
-        }
-    }
-
     /// Recovers the structural call represented by a principal `Bind >< Data`
-    /// pair. Pair state is deliberately irrelevant so a blocked call can be
-    /// reclaimed after its exact wait completes.
+    /// pair, whatever the pair's state.
+    #[cfg(test)]
     pub fn call(&self, pair: ActivePairKey) -> Option<Call> {
         let (left, right) = self.active_pair_nodes(pair)?;
         match (self.node(left), self.node(right)) {
@@ -3188,33 +3079,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         );
     }
 
-    /// Suspends an exact claimed call on specialization-owned external work.
-    #[allow(
-        dead_code,
-        reason = "generic blocked-call compatibility remains covered by direct runtime fixtures while core callable waits use checkpoints"
-    )]
-    pub fn block_claimed_call(&mut self, call: Call, wait: S::WaitToken) {
-        let previous = self
-            .active
-            .insert(call.pair, ActivePairState::BlockedCall { wait });
-        assert!(
-            matches!(previous, Some(ActivePairState::Claimed)),
-            "blocked call must still be claimed"
-        );
-    }
-
-    /// Claims a blocked call only when the wakeup identifies its current wait.
-    pub fn retry_blocked_call(&mut self, call: Call, wait: &S::WaitToken) -> bool {
-        if !matches!(
-            self.active.get(&call.pair),
-            Some(ActivePairState::BlockedCall { wait: current }) if current == wait
-        ) {
-            return false;
-        }
-        self.active.insert(call.pair, ActivePairState::Claimed);
-        true
-    }
-
     /// Releases a freshly claimed call back to the ready worklist.
     pub fn release_claimed_call(&mut self, call: Call) -> bool {
         if !self
@@ -3225,20 +3089,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             return false;
         }
         self.active.insert(call.pair, ActivePairState::Ready);
-        true
-    }
-
-    /// Restores an exact retried call to the wait it held before reclamation.
-    pub fn restore_blocked_call(&mut self, call: Call, wait: S::WaitToken) -> bool {
-        if !self
-            .active
-            .get(&call.pair)
-            .is_some_and(ActivePairState::is_claimed)
-        {
-            return false;
-        }
-        self.active
-            .insert(call.pair, ActivePairState::BlockedCall { wait });
         true
     }
 
@@ -3280,8 +3130,8 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     }
 
     /// Recovers the structural operator call represented by a principal
-    /// `Operator >< Data` pair. Pair state is deliberately irrelevant so a
-    /// blocked operation can be reclaimed after its exact wait completes.
+    /// `Operator >< Data` pair, whatever the pair's state.
+    #[cfg(test)]
     pub fn operator_call(&self, pair: ActivePairKey) -> Option<OperatorCall> {
         let (left, right) = self.active_pair_nodes(pair)?;
         match (self.node(left), self.node(right)) {
@@ -3299,31 +3149,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
     }
 
-    /// Suspends an exact claimed operator call on specialization-owned
-    /// external work.
-    pub fn block_claimed_operator_call(&mut self, call: OperatorCall, wait: S::WaitToken) {
-        let previous = self
-            .active
-            .insert(call.pair, ActivePairState::BlockedOperatorCall { wait });
-        assert!(
-            matches!(previous, Some(ActivePairState::Claimed)),
-            "blocked operator call must still be claimed"
-        );
-    }
-
-    /// Claims a blocked operator call only when the wakeup identifies its
-    /// current wait.
-    pub fn retry_blocked_operator_call(&mut self, call: OperatorCall, wait: &S::WaitToken) -> bool {
-        if !matches!(
-            self.active.get(&call.pair),
-            Some(ActivePairState::BlockedOperatorCall { wait: current }) if current == wait
-        ) {
-            return false;
-        }
-        self.active.insert(call.pair, ActivePairState::Claimed);
-        true
-    }
-
     /// Releases a freshly claimed operator call back to the ready worklist.
     pub fn release_claimed_operator_call(&mut self, call: OperatorCall) -> bool {
         if !self
@@ -3334,24 +3159,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             return false;
         }
         self.active.insert(call.pair, ActivePairState::Ready);
-        true
-    }
-
-    /// Restores an exact retried operator call to its prior blocked wait.
-    pub fn restore_blocked_operator_call(
-        &mut self,
-        call: OperatorCall,
-        wait: S::WaitToken,
-    ) -> bool {
-        if !self
-            .active
-            .get(&call.pair)
-            .is_some_and(ActivePairState::is_claimed)
-        {
-            return false;
-        }
-        self.active
-            .insert(call.pair, ActivePairState::BlockedOperatorCall { wait });
         true
     }
 
@@ -3574,10 +3381,9 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         CursorDependencyResolution::Resolved
     }
 
-    /// Reduces one arbitrary ready pair. Cursor-WHNF evaluation deliberately
-    /// uses exact demand endpoints instead; this remains the generic runtime's
-    /// ordinary reducer and a low-level test utility.
-    #[allow(dead_code)]
+    /// Reduces one arbitrary ready pair, as a low-level test utility.
+    /// Cursor-WHNF evaluation deliberately uses exact demand endpoints instead.
+    #[cfg(test)]
     pub fn reduce_next(&mut self) -> Option<Reduction>
     where
         S::Data: Clone,
@@ -3587,14 +3393,17 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         self.reduce_pair(pair)
     }
 
+    #[cfg(test)]
     pub(crate) fn next_ready_pair(&self) -> Option<ActivePairKey> {
         self.active
             .iter()
             .find_map(|(pair, state)| matches!(state, ActivePairState::Ready).then_some(*pair))
     }
 
-    /// Reduces one exact ready pair. Cursor demand uses this to make progress
-    /// in the source runtime without searching or sweeping unrelated work.
+    /// Reduces one exact ready pair through the direct gateway, as a
+    /// low-level test utility. Evaluation reduces through its specialization's
+    /// gateway with `reduce_pair_with_gateway`.
+    #[cfg(test)]
     pub fn reduce_pair(&mut self, pair: ActivePairKey) -> Option<Reduction>
     where
         S::Data: Clone,

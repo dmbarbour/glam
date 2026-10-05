@@ -17,10 +17,6 @@ use crate::runtime::EvaluationRuntimeId;
 pub(crate) struct ExternalOwnerHandle {
     runtime: EvaluationRuntimeId,
     id: NonZeroU64,
-    #[allow(
-        dead_code,
-        reason = "retaining the lease is the handle's semantic ownership operation"
-    )]
     lease: Arc<()>,
 }
 

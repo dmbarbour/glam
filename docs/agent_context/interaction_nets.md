@@ -302,15 +302,13 @@ borrow. Source and target copy steps therefore open separate checked regions,
 never one region spanning both nets.
 
 Core `Bind >< Data` semantic work is owned by a private, thread-bound callable
-claim guard. Initial acquisition succeeds only while the reduction's exact
-pair remains claimed. A blocked retry atomically verifies and reclaims its
-exact wait before issuing the guard. The guard is consumed by one exhaustive
-disposition: copied net, operator, installed callable checkpoint (see Core
-Specialization), permanent structured failure, or release. It cannot enter a
-worklist or poll result. Release and unwind publish a replayable state: a
-fresh claim becomes ready, while a retried claim restores the same blocked
-wait. Stale acquisition and wait mismatch are quiet non-acquisitions, not
-terminal claim outcomes.
+claim guard. Acquisition succeeds only while the reduction's exact pair
+remains claimed. The guard is consumed by one exhaustive disposition: copied
+net, operator, installed callable checkpoint (see Core Specialization),
+permanent structured failure, or release. It cannot enter a worklist or poll
+result. Release and unwind make the pair ready again. A callable that must
+wait does so as a blocked callable checkpoint, never as a blocked call. Stale
+acquisition is a quiet non-acquisition, not a terminal claim outcome.
 
 Profiling counts outcomes at the mutation boundary. With
 `interaction-net-profiling`, reduction and callable-checkpoint counters are
@@ -467,9 +465,8 @@ mutex.
   `Operator`; a returned operator is bind-wrapped for the next argument.
   Operators only construct: saturated application, builtin, access, and
   computation operators yield lazy `Data` instead of evaluating inside the
-  claim, so a core operator never waits. The generic `BlockedOperatorCall`
-  state is exercised only by tests. An error leaves the pair stuck with that
-  `EvaluationHalt`.
+  claim, so a core operator never waits, and no blocked operator state
+  exists. An error leaves the pair stuck with that `EvaluationHalt`.
 - Core uses explicit `CoreOperator` enum values rather than opaque Rust
   closures. There is no error operator: a permanent failure is the stuck
   pair's `StuckReason`.

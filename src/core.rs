@@ -1382,11 +1382,8 @@ impl FunctionCode {
     }
 
     /// Duplicates this immutable function-code shell inside matching access.
+    #[cfg(test)]
     #[inline(always)]
-    #[allow(
-        dead_code,
-        reason = "no production caller copies a whole function-code shell; fixtures use it"
-    )]
     pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
         Self::new(
             self.duplicate_runtime_in(access),
@@ -2002,9 +1999,12 @@ pub enum Builtin {
     InteractionNet,
     /// Evaluator-private checked replay of one selected strict semantic
     /// interaction-net record. The built-in module never binds this value.
-    #[allow(
-        dead_code,
-        reason = "the pure builder runner replays netlists directly; only fixtures construct this builtin"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the pure builder runner replays netlists directly; only fixtures construct this builtin"
+        )
     )]
     InteractionNetFromNetlist,
     /// Evaluator-private state-over-list composition used while lowering
@@ -3746,7 +3746,10 @@ mod tests {
 
     #[test]
     fn boxed_reflection_computation_does_not_enlarge_lazy_source() {
-        #[allow(dead_code)]
+        #[expect(
+            dead_code,
+            reason = "a size-only layout probe whose variants are never constructed"
+        )]
         enum LazySourceWithoutReflection {
             Error,
             ComputedFixpoint(Arc<FixpointComputation>),

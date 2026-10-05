@@ -288,11 +288,6 @@ impl LazyTaskMachine {
             WhnfOwnerPoll::Failed(failure) => {
                 self.fail(context, EvaluationHalt::failure(failure.into_failure()))
             }
-            WhnfOwnerPoll::External(_) => {
-                unreachable!(
-                    "external sources run as explicit lazy-task modes, not WHNF boundaries"
-                )
-            }
         }
     }
 
@@ -454,17 +449,8 @@ impl LazyTaskMachine {
                 EvaluationMachinePoll::Yielded
             }
             Transition::Boundary(request) => {
-                let poll = match request {
-                    super::whnf::RegionalBoundaryRequest::Dependency(dependency) => {
-                        super::whnf::WhnfPoll::Pending(dependency)
-                    }
-                    super::whnf::RegionalBoundaryRequest::Deferred(deferred) => {
-                        super::whnf::WhnfPoll::Deferred(deferred)
-                    }
-                    super::whnf::RegionalBoundaryRequest::External(boundary) => {
-                        super::whnf::WhnfPoll::External(boundary)
-                    }
-                };
+                let super::whnf::RegionalBoundaryRequest::Deferred(deferred) = request;
+                let poll = super::whnf::WhnfPoll::Deferred(deferred);
                 match interpret_whnf_poll(poll, context.context()) {
                     WhnfOwnerPoll::Pending(dependency) => {
                         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
@@ -475,9 +461,6 @@ impl LazyTaskMachine {
                     }
                     WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
                     WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
-                    WhnfOwnerPoll::External(boundary) => {
-                        unreachable!("computed access produced an external {boundary:?} boundary")
-                    }
                     WhnfOwnerPoll::Ready(_) => {
                         unreachable!("an access boundary cannot produce an immediate value")
                     }
@@ -548,17 +531,8 @@ impl LazyTaskMachine {
                 EvaluationMachinePoll::Yielded
             }
             Transition::Boundary(request) => {
-                let poll = match request {
-                    super::whnf::RegionalBoundaryRequest::Dependency(dependency) => {
-                        super::whnf::WhnfPoll::Pending(dependency)
-                    }
-                    super::whnf::RegionalBoundaryRequest::Deferred(deferred) => {
-                        super::whnf::WhnfPoll::Deferred(deferred)
-                    }
-                    super::whnf::RegionalBoundaryRequest::External(boundary) => {
-                        super::whnf::WhnfPoll::External(boundary)
-                    }
-                };
+                let super::whnf::RegionalBoundaryRequest::Deferred(deferred) = request;
+                let poll = super::whnf::WhnfPoll::Deferred(deferred);
                 match interpret_whnf_poll(poll, context.context()) {
                     WhnfOwnerPoll::Pending(dependency) => {
                         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
@@ -569,9 +543,6 @@ impl LazyTaskMachine {
                     }
                     WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
                     WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
-                    WhnfOwnerPoll::External(boundary) => {
-                        unreachable!("object fixpoint produced an external {boundary:?} boundary")
-                    }
                     WhnfOwnerPoll::Ready(_) => {
                         unreachable!("an object boundary cannot produce an immediate value")
                     }
@@ -664,17 +635,8 @@ impl LazyTaskMachine {
                 EvaluationMachinePoll::Yielded
             }
             Transition::Boundary(request) => {
-                let poll = match request {
-                    super::whnf::RegionalBoundaryRequest::Dependency(dependency) => {
-                        super::whnf::WhnfPoll::Pending(dependency)
-                    }
-                    super::whnf::RegionalBoundaryRequest::Deferred(deferred) => {
-                        super::whnf::WhnfPoll::Deferred(deferred)
-                    }
-                    super::whnf::RegionalBoundaryRequest::External(boundary) => {
-                        super::whnf::WhnfPoll::External(boundary)
-                    }
-                };
+                let super::whnf::RegionalBoundaryRequest::Deferred(deferred) = request;
+                let poll = super::whnf::WhnfPoll::Deferred(deferred);
                 match interpret_whnf_poll(poll, context.context()) {
                     WhnfOwnerPoll::Pending(dependency) => {
                         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
@@ -685,9 +647,6 @@ impl LazyTaskMachine {
                     }
                     WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
                     WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
-                    WhnfOwnerPoll::External(boundary) => {
-                        unreachable!("list effect produced an external {boundary:?} boundary")
-                    }
                     WhnfOwnerPoll::Ready(_) => {
                         unreachable!("a list-effect boundary cannot produce an immediate value")
                     }
@@ -771,17 +730,8 @@ impl LazyTaskMachine {
                 EvaluationMachinePoll::Yielded
             }
             Transition::Boundary(request) => {
-                let poll = match request {
-                    super::whnf::RegionalBoundaryRequest::Dependency(dependency) => {
-                        super::whnf::WhnfPoll::Pending(dependency)
-                    }
-                    super::whnf::RegionalBoundaryRequest::Deferred(deferred) => {
-                        super::whnf::WhnfPoll::Deferred(deferred)
-                    }
-                    super::whnf::RegionalBoundaryRequest::External(boundary) => {
-                        super::whnf::WhnfPoll::External(boundary)
-                    }
-                };
+                let super::whnf::RegionalBoundaryRequest::Deferred(deferred) = request;
+                let poll = super::whnf::WhnfPoll::Deferred(deferred);
                 match interpret_whnf_poll(poll, context.context()) {
                     WhnfOwnerPoll::Pending(dependency) => {
                         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
@@ -792,9 +742,6 @@ impl LazyTaskMachine {
                     }
                     WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
                     WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
-                    WhnfOwnerPoll::External(boundary) => {
-                        unreachable!("builtin operand produced an external {boundary:?} boundary")
-                    }
                     WhnfOwnerPoll::Ready(_) => {
                         unreachable!("a builtin boundary cannot produce an immediate value")
                     }
@@ -1524,9 +1471,6 @@ impl EvaluationTaskMachine for PromiseFollower {
             }
             WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
             WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
-            WhnfOwnerPoll::External(boundary) => {
-                unreachable!("promise follower produced an external {boundary:?} boundary")
-            }
         }
     }
 }

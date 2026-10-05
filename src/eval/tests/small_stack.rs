@@ -147,9 +147,6 @@ impl EvaluationTaskMachine for WhnfReflectionTask {
             }
             WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
             WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
-            WhnfOwnerPoll::External(boundary) => {
-                unreachable!("the W7B reflection fixture reached external {boundary:?}")
-            }
         }
     }
 }

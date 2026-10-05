@@ -370,18 +370,11 @@ fn interpret_durable_list_front(
     match result {
         DurableListFrontPoll::Ready(value) => ListFrontPoll::Ready(value),
         DurableListFrontPoll::Boundary(request) => {
-            let poll = match request {
-                RegionalBoundaryRequest::Dependency(dependency) => WhnfPoll::Pending(dependency),
-                RegionalBoundaryRequest::Deferred(deferred) => WhnfPoll::Deferred(deferred),
-                RegionalBoundaryRequest::External(boundary) => WhnfPoll::External(boundary),
-            };
-            match interpret_whnf_poll(poll, context) {
+            let RegionalBoundaryRequest::Deferred(deferred) = request;
+            match interpret_whnf_poll(WhnfPoll::Deferred(deferred), context) {
                 WhnfOwnerPoll::Pending(dependency) => ListFrontPoll::Pending(dependency),
                 WhnfOwnerPoll::Yielded => ListFrontPoll::Yielded,
                 WhnfOwnerPoll::Failed(failure) => ListFrontPoll::Failed(failure),
-                WhnfOwnerPoll::External(boundary) => {
-                    unreachable!("lazy list chunk produced an external {boundary:?} boundary")
-                }
                 WhnfOwnerPoll::Ready(_) => {
                     unreachable!("a semantic boundary cannot produce an immediate value")
                 }

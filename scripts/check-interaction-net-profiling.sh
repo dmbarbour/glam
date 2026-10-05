@@ -17,7 +17,7 @@ tests=(
   eval::net::driver_tests::callable_profile_keeps_immediate_and_cached_paths_checkpoint_free
   eval::net::driver_tests::callable_profile_records_checkpoint_install_resume_replace_and_terminalize
   eval::net::driver_tests::callable_profile_records_exact_dependency_retry_and_stale_admission
-  eval::net::driver_tests::unsupported_checkpoint_boundary_terminalizes_the_exact_generation
+  eval::net::driver_tests::unwaitable_checkpoint_boundary_terminalizes_the_exact_generation
   eval::value::lazy_checkpoint_tests::object_checkpoint_does_not_replay_mixin_stages_after_route_loss
   eval::value::lazy_checkpoint_tests::public_pure_construction_survives_route_loss_without_repeating_effect_or_continuation
   eval::value::lazy_checkpoint_tests::public_pure_construction_retains_both_selector_observations_across_route_loss

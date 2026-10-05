@@ -7,8 +7,8 @@ use crate::core_net::{
     CoreRuntimeNetAccess,
 };
 use crate::interaction_net::{
-    BlockedCall, BlockedOperatorCall, CursorDependencyDisposition, CursorDependencyResolution,
-    DemandEndpoint, InterfaceDemand, RuntimeNet,
+    CursorDependencyDisposition, CursorDependencyResolution, DemandEndpoint, InterfaceDemand,
+    RuntimeNet,
 };
 #[cfg(test)]
 use crate::test_support::ResultTestExt as _;
@@ -574,8 +574,7 @@ fn drive_net_driver_work_with_budget_access(
 /// Budget admission happens after the normalization batch closes because the
 /// semantic callback itself must run outside that batch. A call reduction is
 /// already claimed by then, so a denied budget must explicitly return it to
-/// the runtime before retaining ordinary active-pair work. Blocked retries
-/// have not yet been reclaimed and need no mutation.
+/// the runtime before retaining ordinary active-pair work.
 fn release_unstarted_semantic_step(
     access: &crate::evaluation::EvaluationValueAccess<'_>,
     root: &CoreRuntimeNet,
@@ -615,7 +614,6 @@ fn release_unstarted_semantic_step(
             }
             _ => unreachable!("only semantic reductions leave a normalization batch"),
         },
-        ActivePairStep::BlockedCall(_) | ActivePairStep::BlockedOperatorCall(_) => {}
         _ => unreachable!("only semantic work reaches budget admission"),
     }
 }
@@ -874,9 +872,7 @@ fn prepare_active_pair_step(
         ActivePairStep::Cursor(cursor) => {
             driver.worklist.push(NetDriverWork::Cursor { root, cursor });
         }
-        step @ (ActivePairStep::BlockedCall(_)
-        | ActivePairStep::BlockedCallableCheckpoint(_)
-        | ActivePairStep::BlockedOperatorCall(_)) => {
+        step @ ActivePairStep::BlockedCallableCheckpoint(_) => {
             return Ok(Some(NetBatchOutcome::Semantic { root, pair, step }));
         }
         ActivePairStep::Stuck => return Err(stuck_pair_error_in(access, pair)),
@@ -939,32 +935,6 @@ pub(in crate::eval) fn drive_net_semantic_action(
             }
             _ => unreachable!("only semantic reductions leave a normalization batch"),
         },
-        ActivePairStep::BlockedCall(blocked) => {
-            #[cfg(feature = "interaction-net-profiling")]
-            context
-                .context()
-                .values()
-                .record_net_driver(crate::interaction_net::profiling::DriverEvent::BlockedRetry);
-            match context.context().poll_wait(&blocked.wait.0) {
-                // A panicked dependency stays blocked here; the scheduler's
-                // poll boundary halts this work instead of retrying it.
-                crate::evaluation::EvaluationWaitPoll::Pending(_)
-                | crate::evaluation::EvaluationWaitPoll::Panicked(_) => {
-                    return Err(EvaluationHalt::blocked(blocked.wait));
-                }
-                crate::evaluation::EvaluationWaitPoll::Complete(_)
-                | crate::evaluation::EvaluationWaitPoll::Failed(_)
-                | crate::evaluation::EvaluationWaitPoll::Cancelled
-                | crate::evaluation::EvaluationWaitPoll::Abandoned
-                | crate::evaluation::EvaluationWaitPoll::Exited
-                | crate::evaluation::EvaluationWaitPoll::Killed(_) => {}
-            }
-            if !progress_retried_core_call_in(context, &runtime, blocked, step_budget)? {
-                return Err(EvaluationHalt::new(
-                    "interaction-net call released its retry",
-                ));
-            }
-        }
         ActivePairStep::BlockedCallableCheckpoint(blocked) => {
             #[cfg(feature = "interaction-net-profiling")]
             context
@@ -993,40 +963,6 @@ pub(in crate::eval) fn drive_net_semantic_action(
             if !retried {
                 return Err(EvaluationHalt::new(
                     "interaction-net checkpoint lost its exact blocked generation",
-                ));
-            }
-        }
-        ActivePairStep::BlockedOperatorCall(blocked) => {
-            #[cfg(feature = "interaction-net-profiling")]
-            context
-                .context()
-                .values()
-                .record_net_driver(crate::interaction_net::profiling::DriverEvent::BlockedRetry);
-            match context.context().poll_wait(&blocked.wait.0) {
-                // A panicked dependency stays blocked here; the scheduler's
-                // poll boundary halts this work instead of retrying it.
-                crate::evaluation::EvaluationWaitPoll::Pending(_)
-                | crate::evaluation::EvaluationWaitPoll::Panicked(_) => {
-                    return Err(EvaluationHalt::blocked(blocked.wait));
-                }
-                crate::evaluation::EvaluationWaitPoll::Complete(_)
-                | crate::evaluation::EvaluationWaitPoll::Failed(_)
-                | crate::evaluation::EvaluationWaitPoll::Cancelled
-                | crate::evaluation::EvaluationWaitPoll::Abandoned
-                | crate::evaluation::EvaluationWaitPoll::Exited
-                | crate::evaluation::EvaluationWaitPoll::Killed(_) => {}
-            }
-            let progressed = context.with_value_access(|access| {
-                let Some(claim) = CoreOperatorClaim::retry(&access, &runtime, blocked) else {
-                    return Err(EvaluationHalt::new(
-                        "interaction-net operator call lost its exact blocked claim",
-                    ));
-                };
-                progress_core_operator_claim(&access, claim)
-            })?;
-            if !progressed {
-                return Err(EvaluationHalt::new(
-                    "interaction-net operator call released its retry",
                 ));
             }
         }
@@ -1182,29 +1118,21 @@ enum CallDisposition {
     Copy(CorePreparedCopySource),
     Operator(CoreOperator),
     Failed(EvaluationHalt),
-    #[allow(
-        dead_code,
-        reason = "the explicit release disposition is exercised by claim-protocol tests"
-    )]
+    #[cfg(test)]
     Release,
 }
 
-#[derive(Clone)]
-enum CallFallback {
-    Ready,
-    Blocked(crate::core_net::CoreWaitToken),
-}
-
-/// One access-bound callable claim. It owns the callable clone and the exact
-/// state restored by release or unwind beneath the caller's existing mutator
-/// region.
+/// One access-bound callable claim. It owns the callable clone beneath the
+/// caller's existing mutator region; release or unwind returns the pair to
+/// `Ready`.
 #[must_use = "a callable claim must be terminalized or released"]
 struct CoreCallClaim<'claim, 'scope> {
     access: &'claim crate::evaluation::EvaluationValueAccess<'scope>,
     runtime: &'claim CoreRuntimeNet,
     call: Call,
     callable: Value,
-    fallback: Option<CallFallback>,
+    /// Whether release or unwind must still return the pair to `Ready`.
+    held: bool,
     _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
@@ -1220,24 +1148,7 @@ impl<'claim, 'scope> CoreCallClaim<'claim, 'scope> {
             runtime,
             call,
             callable,
-            fallback: Some(CallFallback::Ready),
-            _thread_bound: std::marker::PhantomData,
-        })
-    }
-
-    fn retry(
-        access: &'claim crate::evaluation::EvaluationValueAccess<'scope>,
-        runtime: &'claim CoreRuntimeNet,
-        blocked: BlockedCall<crate::core_net::CoreWaitToken>,
-    ) -> Option<Self> {
-        let fallback = CallFallback::Blocked(blocked.wait.clone());
-        let (call, callable) = access.net(runtime).reclaim_blocked_call(&blocked)?;
-        Some(Self {
-            access,
-            runtime,
-            call,
-            callable,
-            fallback: Some(fallback),
+            held: true,
             _thread_bound: std::marker::PhantomData,
         })
     }
@@ -1254,7 +1165,7 @@ impl<'claim, 'scope> CoreCallClaim<'claim, 'scope> {
         let runtime = access.net(self.runtime);
         match runtime.install_claimed_call_checkpoint(self.call, state) {
             Ok(call) => {
-                self.fallback = None;
+                self.held = false;
                 Ok(call)
             }
             Err(_state) => Err(EvaluationHalt::new(
@@ -1283,32 +1194,30 @@ impl<'claim, 'scope> CoreCallClaim<'claim, 'scope> {
                     .fail_claimed_call(self.call, error.clone());
                 Err(error)
             }
+            #[cfg(test)]
             CallDisposition::Release => {
-                let restored = self.restore_fallback();
+                let restored = self.release();
                 debug_assert!(restored, "released callable claim must remain current");
                 Ok(false)
             }
         };
-        self.fallback = None;
+        self.held = false;
         result
     }
 
-    fn restore_fallback(&self) -> bool {
-        let Some(fallback) = self.fallback.clone() else {
-            return true;
-        };
-        let runtime = self.access.net(self.runtime);
-        match fallback {
-            CallFallback::Ready => runtime.release_claimed_call(self.call),
-            CallFallback::Blocked(wait) => runtime.restore_blocked_call(self.call, wait),
-        }
+    fn release(&self) -> bool {
+        !self.held
+            || self
+                .access
+                .net(self.runtime)
+                .release_claimed_call(self.call)
     }
 }
 
 impl Drop for CoreCallClaim<'_, '_> {
     fn drop(&mut self) {
-        if self.fallback.is_some() {
-            let _ = self.restore_fallback();
+        if self.held {
+            let _ = self.release();
         }
     }
 }
@@ -1413,24 +1322,14 @@ impl Drop for CoreCheckpointClaim<'_, '_> {
 
 enum OperatorDisposition {
     Yield(OperatorYield<CoreSpecialization>),
-    #[cfg(test)]
-    Blocked(crate::core_net::CoreWaitToken),
     Failed(EvaluationHalt),
-    #[allow(
-        dead_code,
-        reason = "the explicit release disposition is exercised by claim-protocol tests"
-    )]
+    #[cfg(test)]
     Release,
 }
 
-#[derive(Clone)]
-enum OperatorFallback {
-    Ready,
-    Blocked(crate::core_net::CoreWaitToken),
-}
-
-/// One access-bound operator claim. It owns the semantic payload clones and
-/// exact replay fallback beneath the caller's existing mutator region.
+/// One access-bound operator claim. It owns the semantic payload clones
+/// beneath the caller's existing mutator region; release or unwind returns
+/// the pair to `Ready`.
 #[must_use = "an operator claim must be terminalized or released"]
 struct CoreOperatorClaim<'claim, 'scope> {
     access: &'claim crate::evaluation::EvaluationValueAccess<'scope>,
@@ -1438,7 +1337,8 @@ struct CoreOperatorClaim<'claim, 'scope> {
     call: OperatorCall,
     operator: CoreOperator,
     data: Value,
-    fallback: Option<OperatorFallback>,
+    /// Whether release or unwind must still return the pair to `Ready`.
+    held: bool,
     _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
@@ -1455,27 +1355,7 @@ impl<'claim, 'scope> CoreOperatorClaim<'claim, 'scope> {
             call,
             operator,
             data,
-            fallback: Some(OperatorFallback::Ready),
-            _thread_bound: std::marker::PhantomData,
-        })
-    }
-
-    fn retry(
-        access: &'claim crate::evaluation::EvaluationValueAccess<'scope>,
-        runtime: &'claim CoreRuntimeNet,
-        blocked: BlockedOperatorCall<crate::core_net::CoreWaitToken>,
-    ) -> Option<Self> {
-        let fallback = OperatorFallback::Blocked(blocked.wait.clone());
-        let (call, operator, data) = access
-            .net(runtime)
-            .reclaim_blocked_operator_call(&blocked)?;
-        Some(Self {
-            access,
-            runtime,
-            call,
-            operator,
-            data,
-            fallback: Some(fallback),
+            held: true,
             _thread_bound: std::marker::PhantomData,
         })
     }
@@ -1505,47 +1385,36 @@ impl<'claim, 'scope> CoreOperatorClaim<'claim, 'scope> {
                     .complete_claimed_operator_call(self.call, result);
                 Ok(true)
             }
-            #[cfg(test)]
-            OperatorDisposition::Blocked(wait) => {
-                access
-                    .net(self.runtime)
-                    .block_claimed_operator_call(self.call, wait);
-                Ok(true)
-            }
             OperatorDisposition::Failed(error) => {
                 access
                     .net(self.runtime)
                     .fail_claimed_operator_call(self.call, error.clone());
                 Err(error)
             }
+            #[cfg(test)]
             OperatorDisposition::Release => {
-                let restored = self.restore_fallback();
+                let restored = self.release();
                 debug_assert!(restored, "released operator claim must remain current");
                 Ok(false)
             }
         };
-        self.fallback = None;
+        self.held = false;
         result
     }
 
-    fn restore_fallback(&self) -> bool {
-        let Some(fallback) = self.fallback.clone() else {
-            return true;
-        };
-        let runtime = self.access.net(self.runtime);
-        match fallback {
-            OperatorFallback::Ready => runtime.release_claimed_operator_call(self.call),
-            OperatorFallback::Blocked(wait) => {
-                runtime.restore_blocked_operator_call(self.call, wait)
-            }
-        }
+    fn release(&self) -> bool {
+        !self.held
+            || self
+                .access
+                .net(self.runtime)
+                .release_claimed_operator_call(self.call)
     }
 }
 
 impl Drop for CoreOperatorClaim<'_, '_> {
     fn drop(&mut self) {
-        if self.fallback.is_some() {
-            let _ = self.restore_fallback();
+        if self.held {
+            let _ = self.release();
         }
     }
 }
@@ -1701,23 +1570,6 @@ fn progress_exact_core_call_in(
     finish_core_call_progress(context, runtime, progress, || {})
 }
 
-fn progress_retried_core_call_in(
-    context: &EvaluatorStepContext<'_>,
-    runtime: &CoreRuntimeNet,
-    blocked: BlockedCall<crate::core_net::CoreWaitToken>,
-    step_budget: &mut crate::evaluation::EvaluationStepBudget,
-) -> Result<bool, EvaluationHalt> {
-    let progress = context.with_value_access(|access| {
-        let Some(claim) = CoreCallClaim::retry(&access, runtime, blocked) else {
-            return Err(EvaluationHalt::new(
-                "interaction-net call lost its exact blocked claim",
-            ));
-        };
-        progress_core_call_claim_access(context, &access, claim, step_budget)
-    })?;
-    finish_core_call_progress(context, runtime, progress, || {})
-}
-
 fn finish_core_call_progress(
     context: &EvaluatorStepContext<'_>,
     runtime: &CoreRuntimeNet,
@@ -1772,18 +1624,13 @@ fn callable_boundary_wait(
     context: &EvalContext,
     request: crate::eval::whnf::RegionalBoundaryRequest,
 ) -> Result<crate::core_net::CoreWaitToken, EvaluationHalt> {
-    use crate::eval::whnf::{RegionalBoundaryRequest, WhnfDeferredRequest, WhnfDependency};
+    use crate::eval::whnf::{RegionalBoundaryRequest, WhnfDeferredRequest};
 
+    let RegionalBoundaryRequest::Deferred(request) = request;
     let wait = match request {
-        RegionalBoundaryRequest::Dependency(WhnfDependency::Wait(wait)) => return Ok(wait),
-        RegionalBoundaryRequest::Dependency(WhnfDependency::Promise(promise))
-        | RegionalBoundaryRequest::Deferred(WhnfDeferredRequest::PromiseFollow(promise)) => {
-            promise_root_wait(context, &promise)
-        }
-        RegionalBoundaryRequest::Deferred(WhnfDeferredRequest::Lazy(lazy)) => {
-            lazy_root_wait(context, &lazy)
-        }
-        RegionalBoundaryRequest::Deferred(WhnfDeferredRequest::Promise(promise)) => {
+        WhnfDeferredRequest::PromiseFollow(promise) => promise_root_wait(context, &promise),
+        WhnfDeferredRequest::Lazy(lazy) => lazy_root_wait(context, &lazy),
+        WhnfDeferredRequest::Promise(promise) => {
             if let Some(producer) = promise.producer()
                 && context.observes_as_task(producer.owner())
             {
@@ -1794,11 +1641,6 @@ fn callable_boundary_wait(
                 )));
             }
             promise_root_wait(context, &promise)
-        }
-        RegionalBoundaryRequest::External(_) => {
-            return Err(EvaluationHalt::new(
-                "callable WHNF reached an unsupported external boundary",
-            ));
         }
     };
     wait.map(crate::core_net::CoreWaitToken)
@@ -2187,9 +2029,6 @@ mod driver_tests {
         call: Call,
     ) -> CurrentCallablePath {
         runtime.test_with(values, |net| {
-            if net.blocked_call(call.pair).is_some() {
-                return CurrentCallablePath::BlockedDependency;
-            }
             if net.blocked_callable_checkpoint(call.pair).is_some() {
                 return CurrentCallablePath::BlockedDependency;
             }
@@ -3908,50 +3747,45 @@ mod driver_tests {
     }
 
     #[test]
-    fn unsupported_checkpoint_boundary_terminalizes_the_exact_generation() {
+    fn unwaitable_checkpoint_boundary_terminalizes_the_exact_generation() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
         let context = EvalContext::isolated(values.clone());
+        // A task that observes its own promise cannot wait on it, so forming
+        // the checkpoint's wait fails.
+        let (promise, _task, owner) = context
+            .task_owned_promise("self-observed checkpoint dependency")
+            .expect("test task should own its promise");
         let unit = context
             .values()
             .with_runtime_value_access(|access| access.unit());
         let (runtime, call) = claimed_core_call_in(&values, unit);
-        let checkpoint =
-            crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
-                evaluator.with_value_access(|access| {
-                    let state = crate::eval::whnf::NetWhnfState::from_regional(
+        let checkpoint = crate::evaluation::EvalContext::evaluate_test_step(&owner, |evaluator| {
+            evaluator.with_value_access(|access| {
+                let state = crate::eval::whnf::NetWhnfState::from_regional(
+                    &access,
+                    crate::eval::whnf::RegionalWhnfWork::from_focus(
                         &access,
-                        crate::eval::whnf::RegionalWhnfWork::from_focus(
-                            &access,
-                            Value::Builtin(Builtin::Add),
-                        ),
-                    );
-                    let Ok(checkpoint) = access
-                        .net(&runtime)
-                        .install_claimed_call_checkpoint(call, state)
-                    else {
-                        panic!("claimed call accepts one checkpoint")
-                    };
-                    checkpoint
-                })
-            });
+                        Value::Builtin(Builtin::Add),
+                    ),
+                );
+                let Ok(checkpoint) = access
+                    .net(&runtime)
+                    .install_claimed_call_checkpoint(call, state)
+                else {
+                    panic!("claimed call accepts one checkpoint")
+                };
+                checkpoint
+            })
+        });
 
-        let failure = crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
-            settle_callable_checkpoint_boundary(
-                evaluator,
-                &runtime,
-                checkpoint,
-                crate::eval::whnf::RegionalBoundaryRequest::External(
-                    crate::eval::whnf::WhnfExternalBoundary::Reflection,
-                ),
-                || {},
-            )
-        })
-        .expect_err_without_debug("unsupported external boundary must fail the exact checkpoint");
-        assert!(
-            failure
-                .to_string()
-                .contains("unsupported external boundary")
+        let request = crate::eval::whnf::RegionalBoundaryRequest::Deferred(
+            crate::eval::whnf::WhnfDeferredRequest::Promise(promise.root(owner.values())),
         );
+        let failure = crate::evaluation::EvalContext::evaluate_test_step(&owner, |evaluator| {
+            settle_callable_checkpoint_boundary(evaluator, &runtime, checkpoint, request, || {})
+        })
+        .expect_err_without_debug("an unwaitable boundary must fail the exact checkpoint");
+        assert!(failure.to_string().contains("recursively observed itself"));
         assert_eq!(
             observe_current_callable_path_in(&runtime, &values, call),
             CurrentCallablePath::Failed
@@ -4181,159 +4015,6 @@ mod driver_tests {
         assert_eq!(
             runtime.test_with_revisions(&test_value_factory(), |_| ()).1,
             before
-        );
-    }
-
-    #[test]
-    fn retried_operator_claim_release_restores_the_exact_wait() {
-        let context = test_context();
-        let promise = PromisedValue::new(context.values(), "operator-claim wait");
-        let wait = crate::core_net::CoreWaitToken(
-            promise_wait(&context, &promise).expect("test promise must allocate a wait"),
-        );
-        let operator = context.values().with_runtime_value_access(|access| {
-            builtin_operator(&access, BuiltinCall::new(Builtin::Add))
-        });
-        let unit = context
-            .values()
-            .with_runtime_value_access(|access| access.unit());
-        let (runtime, call) = claimed_core_operator_call(operator, unit);
-        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
-            evaluator.with_value_access(|access| {
-                CoreOperatorClaim::fresh(&access, &runtime, call)
-                    .expect("ready operator call must be claimable")
-                    .finish(OperatorDisposition::Blocked(wait.clone()))
-                    .unwrap();
-            });
-        });
-        let blocked = runtime
-            .test_with(&test_value_factory(), |net| {
-                net.blocked_operator_call(call.pair)
-            })
-            .expect("unassigned operator promise must block the call");
-        let before = runtime.test_with_revisions(&test_value_factory(), |_| ()).1;
-
-        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
-            evaluator.with_value_access(|access| {
-                let claim = CoreOperatorClaim::retry(&access, &runtime, blocked.clone())
-                    .expect("the exact blocked operator wait must be reclaimable");
-                assert!(!claim.finish(OperatorDisposition::Release).unwrap());
-            });
-        });
-
-        let restored = runtime
-            .test_with(&test_value_factory(), |net| {
-                net.blocked_operator_call(call.pair)
-            })
-            .expect("release must restore the prior blocked operator call");
-        assert_eq!(restored.wait, blocked.wait);
-        let after = runtime.test_with_revisions(&test_value_factory(), |_| ()).1;
-        assert_eq!(after.topology_revision(), before.topology_revision() + 2);
-        assert_eq!(after.disturbance_epoch(), before.disturbance_epoch() + 2);
-    }
-
-    #[test]
-    fn retried_operator_claim_unwind_restores_the_exact_wait() {
-        let context = test_context();
-        let promise = PromisedValue::new(context.values(), "unwound operator-claim wait");
-        let wait = crate::core_net::CoreWaitToken(
-            promise_wait(&context, &promise).expect("test promise must allocate a wait"),
-        );
-        let operator = context.values().with_runtime_value_access(|access| {
-            builtin_operator(&access, BuiltinCall::new(Builtin::Add))
-        });
-        let unit = context
-            .values()
-            .with_runtime_value_access(|access| access.unit());
-        let (runtime, call) = claimed_core_operator_call(operator, unit);
-        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
-            evaluator.with_value_access(|access| {
-                CoreOperatorClaim::fresh(&access, &runtime, call)
-                    .expect("ready operator call must be claimable")
-                    .finish(OperatorDisposition::Blocked(wait.clone()))
-                    .unwrap();
-            });
-        });
-        let blocked = runtime
-            .test_with(&test_value_factory(), |net| {
-                net.blocked_operator_call(call.pair)
-            })
-            .expect("unassigned operator promise must block the call");
-
-        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
-                evaluator.with_value_access(|access| {
-                    let _claim = CoreOperatorClaim::retry(&access, &runtime, blocked.clone())
-                        .expect("the exact blocked operator wait must be reclaimable");
-                    panic!("forced retried-operator unwind");
-                });
-            });
-        }));
-
-        assert!(unwind.is_err());
-        let restored = runtime
-            .test_with(&test_value_factory(), |net| {
-                net.blocked_operator_call(call.pair)
-            })
-            .expect("unwind must restore the prior blocked operator call");
-        assert_eq!(restored.wait, blocked.wait);
-    }
-
-    #[test]
-    fn mismatched_blocked_operator_retry_fails_quietly_before_guard_issuance() {
-        let context = test_context();
-        let promise = PromisedValue::new(context.values(), "current operator wait");
-        let wait = crate::core_net::CoreWaitToken(
-            promise_wait(&context, &promise).expect("test promise must allocate a wait"),
-        );
-        let operator = context.values().with_runtime_value_access(|access| {
-            builtin_operator(&access, BuiltinCall::new(Builtin::Add))
-        });
-        let unit = context
-            .values()
-            .with_runtime_value_access(|access| access.unit());
-        let (runtime, call) = claimed_core_operator_call(operator, unit);
-        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
-            evaluator.with_value_access(|access| {
-                CoreOperatorClaim::fresh(&access, &runtime, call)
-                    .expect("ready operator call must be claimable")
-                    .finish(OperatorDisposition::Blocked(wait.clone()))
-                    .unwrap();
-            });
-        });
-        let blocked = runtime
-            .test_with(&test_value_factory(), |net| {
-                net.blocked_operator_call(call.pair)
-            })
-            .expect("unassigned operator promise must block the call");
-        let other = PromisedValue::new(context.values(), "unrelated operator wait");
-        let wrong_wait = crate::core_net::CoreWaitToken(
-            promise_wait(&context, &other).expect("unrelated wait must allocate"),
-        );
-        assert_ne!(wrong_wait, blocked.wait);
-        let before = runtime.test_with_revisions(&test_value_factory(), |_| ()).1;
-
-        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
-            let mismatch = BlockedOperatorCall {
-                pair: blocked.pair,
-                wait: wrong_wait,
-            };
-            evaluator.with_value_access(|access| {
-                assert!(CoreOperatorClaim::retry(&access, &runtime, mismatch).is_none());
-            });
-        });
-
-        assert_eq!(
-            runtime.test_with_revisions(&test_value_factory(), |_| ()).1,
-            before
-        );
-        assert_eq!(
-            runtime
-                .test_with(&test_value_factory(), |net| net
-                    .blocked_operator_call(call.pair))
-                .expect("mismatched retry must preserve the current operator wait")
-                .wait,
-            blocked.wait
         );
     }
 

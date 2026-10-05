@@ -991,18 +991,11 @@ fn interpret_durable_conversion<T>(
     match result {
         DurableConversionPoll::Ready(value) => ConversionPoll::Ready(value),
         DurableConversionPoll::Boundary(request) => {
-            let poll = match request {
-                RegionalBoundaryRequest::Dependency(dependency) => WhnfPoll::Pending(dependency),
-                RegionalBoundaryRequest::Deferred(deferred) => WhnfPoll::Deferred(deferred),
-                RegionalBoundaryRequest::External(boundary) => WhnfPoll::External(boundary),
-            };
-            match interpret_whnf_poll(poll, context) {
+            let RegionalBoundaryRequest::Deferred(deferred) = request;
+            match interpret_whnf_poll(WhnfPoll::Deferred(deferred), context) {
                 WhnfOwnerPoll::Pending(dependency) => ConversionPoll::Pending(dependency),
                 WhnfOwnerPoll::Yielded => ConversionPoll::Yielded,
                 WhnfOwnerPoll::Failed(failure) => ConversionPoll::Failed(failure),
-                WhnfOwnerPoll::External(boundary) => {
-                    unreachable!("key conversion produced an external {boundary:?} boundary")
-                }
                 WhnfOwnerPoll::Ready(_) => {
                     unreachable!("a semantic boundary cannot produce an immediate value")
                 }

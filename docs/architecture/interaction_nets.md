@@ -53,7 +53,6 @@ only through `CoreRuntimeNetAccess`, which borrows a matching
 | `Claimed` | one evaluator owns the transition | rewrite, block, stuck, or release |
 | `BlockedCallableCheckpoint { generation, wait }` | callable WHNF waits on `wait` | exact retry → `Ready`; dependency failure → `Stuck` |
 | `BlockedCursor { cursor, blockage }` | cursor waits on a dependency, or is `Stable` | dependency resolution, or a join by its peer cursor |
-| `BlockedCall`, `BlockedOperatorCall` | generic external waits | exact retry; core produces them only in tests |
 | `Stuck(reason)` | `NoRule` or a specialization `EvaluationHalt` | never; kept for diagnostics |
 
 - **Claim.** `reduce_pair_with_gateway` writes `Ready → Claimed` in place
@@ -63,9 +62,9 @@ only through `CoreRuntimeNetAccess`, which borrows a matching
   `CallableCheckpointCall` with its generation, or the cursor's copy and
   remote. A stale holder fails quietly.
 - **Release and unwind.** `CoreCallClaim`, `CoreOperatorClaim`,
-  `CoreCheckpointClaim` and `CursorClaimGuard` restore on drop. A fresh claim
-  becomes `Ready`, a retried claim returns to its exact wait, and a taken
-  checkpoint state goes back into its node. A poisoned net is skipped.
+  `CoreCheckpointClaim` and `CursorClaimGuard` restore on drop. A held claim
+  becomes `Ready` again, and a taken checkpoint state goes back into its
+  node. A poisoned net is skipped.
 
 ## Rewrite Rules
 

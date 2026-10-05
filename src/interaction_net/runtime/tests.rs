@@ -326,9 +326,7 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
 
     match active_state {
         ActivePairState::Ready | ActivePairState::Claimed => {}
-        ActivePairState::BlockedCall { wait }
-        | ActivePairState::BlockedCallableCheckpoint { wait, .. }
-        | ActivePairState::BlockedOperatorCall { wait } => {
+        ActivePairState::BlockedCallableCheckpoint { wait, .. } => {
             let _: &S::WaitToken = wait;
         }
         ActivePairState::BlockedCursor { cursor, blockage } => {
@@ -351,9 +349,7 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
         ActivePairState::Stuck(StuckReason::Specialization(_)) => I8_SPECIALIZATION_STUCK_CYCLE,
         ActivePairState::Ready
         | ActivePairState::Claimed
-        | ActivePairState::BlockedCall { .. }
         | ActivePairState::BlockedCallableCheckpoint { .. }
-        | ActivePairState::BlockedOperatorCall { .. }
         | ActivePairState::BlockedCursor {
             blockage: CursorBlockage::Stable,
             ..
@@ -1618,10 +1614,16 @@ fn active_pair_steps_report_reduction_contention_blockage_stuck_and_gone() {
         call_net.step_active_pair(pair),
         ActivePairStep::Contended(_)
     ));
-    call_net.with_mut(|runtime| runtime.block_claimed_call(call, 17));
+    let blockage = call_net.with_mut(|runtime| {
+        let checkpoint = runtime
+            .install_claimed_call_checkpoint(call, ())
+            .expect("the claimed call accepts one checkpoint");
+        runtime.block_callable_checkpoint(checkpoint, 17)
+    });
+    assert_eq!(blockage, CheckpointBlockResult::Blocked);
     assert!(matches!(
         call_net.step_active_pair(pair),
-        ActivePairStep::BlockedCall(BlockedCall { wait: 17, .. })
+        ActivePairStep::BlockedCallableCheckpoint(BlockedCallableCheckpoint { wait: 17, .. })
     ));
 
     let mut operator_net = RuntimeNet::<()>::empty();
@@ -1633,21 +1635,16 @@ fn active_pair_steps_report_reduction_contention_blockage_stuck_and_gone() {
     operator_net.connect(Port::principal(operator), Port::principal(data));
     let operator_pair = ActivePairKey::new(operator, data);
     let operator_net = SharedRuntimeNet::new(operator_net);
-    let call = match operator_net.step_active_pair(operator_pair) {
-        ActivePairStep::Reduction(Reduction {
-            kind: ReductionKind::OperatorCall { operator, data },
-            ..
-        }) => OperatorCall {
-            pair: operator_pair,
-            operator,
-            data,
-        },
-        other => panic!("ready operator call should produce a reduction, received {other:?}"),
-    };
-    operator_net.with_mut(|runtime| runtime.block_claimed_operator_call(call, 23));
     assert!(matches!(
         operator_net.step_active_pair(operator_pair),
-        ActivePairStep::BlockedOperatorCall(BlockedOperatorCall { wait: 23, .. })
+        ActivePairStep::Reduction(Reduction {
+            kind: ReductionKind::OperatorCall { .. },
+            ..
+        })
+    ));
+    assert!(matches!(
+        operator_net.step_active_pair(operator_pair),
+        ActivePairStep::Contended(_)
     ));
 
     let mut stuck_net = RuntimeNet::<()>::empty();
@@ -2091,49 +2088,7 @@ fn connecting_a_cursor_rejects_transfer_of_a_claimed_obligation() {
 }
 
 #[test]
-fn blocked_call_requires_its_current_wait_token_to_be_reclaimed() {
-    let mut net = RuntimeNet::<()>::empty();
-    let bind = net.add_node(RuntimeNode::Bind);
-    let data = net.add_node(RuntimeNode::Data(()));
-    net.connect(Port::principal(bind), Port::principal(data));
-    let pair = ActivePairKey::new(bind, data);
-    let reduction = net.reduce_next().expect("bind-data must claim a call");
-    let ReductionKind::Call { bind, data } = reduction.kind else {
-        panic!("expected a claimed call");
-    };
-    let call = Call { pair, bind, data };
-
-    net.block_claimed_call(call, 17);
-
-    assert_eq!(net.blocked_call(pair), Some(BlockedCall { pair, wait: 17 }));
-    assert_eq!(
-        net.blocked_calls().collect::<Vec<_>>(),
-        vec![BlockedCall { pair, wait: 17 }]
-    );
-    assert!(!net.retry_blocked_call(call, &16));
-    assert_eq!(net.blocked_call(pair).unwrap().wait, 17);
-    assert!(net.retry_blocked_call(call, &17));
-    assert_eq!(
-        net.claim_call(call, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY),
-        Some(())
-    );
-    assert!(net.principals_connect(pair));
-
-    assert!(net.restore_blocked_call(call, 17));
-    assert_eq!(net.blocked_call(pair), Some(BlockedCall { pair, wait: 17 }));
-    assert!(net.retry_blocked_call(call, &17));
-    assert!(net.release_claimed_call(call));
-    assert!(matches!(
-        net.reduce_pair(pair),
-        Some(Reduction {
-            kind: ReductionKind::Call { .. },
-            ..
-        })
-    ));
-}
-
-#[test]
-fn call_release_and_restore_reject_non_claimed_pairs_without_mutation() {
+fn call_release_rejects_non_claimed_pairs_without_mutation() {
     let mut net = RuntimeNet::<()>::empty();
     let bind = net.add_node(RuntimeNode::Bind);
     let data = net.add_node(RuntimeNode::Data(()));
@@ -2142,7 +2097,6 @@ fn call_release_and_restore_reject_non_claimed_pairs_without_mutation() {
     let call = Call { pair, bind, data };
 
     assert!(!net.release_claimed_call(call));
-    assert!(!net.restore_blocked_call(call, 17));
     assert!(matches!(
         net.reduce_pair(pair),
         Some(Reduction {
@@ -2150,14 +2104,16 @@ fn call_release_and_restore_reject_non_claimed_pairs_without_mutation() {
             ..
         })
     ));
-    net.block_claimed_call(call, 17);
+    net.fail_claimed_call(call, Arc::from("not callable"));
     assert!(!net.release_claimed_call(call));
-    assert!(!net.restore_blocked_call(call, 18));
-    assert_eq!(net.blocked_call(pair), Some(BlockedCall { pair, wait: 17 }));
+    assert_eq!(
+        net.stuck_reason(pair).cloned(),
+        Some(StuckReason::Specialization(Arc::from("not callable")))
+    );
 }
 
 #[test]
-fn claimed_call_reads_are_quiet_while_block_and_failure_publish() {
+fn claimed_call_reads_are_quiet_while_release_and_failure_publish() {
     let claim = |data| {
         let mut net = RuntimeNet::<i32>::empty();
         let bind = net.add_node(RuntimeNode::Bind);
@@ -2180,21 +2136,21 @@ fn claimed_call_reads_are_quiet_while_block_and_failure_publish() {
         )
     };
 
-    let (blocked, blocked_call) = claim(7);
-    let before_read = blocked.with_revisions(|_| ()).1;
+    let (released, released_call) = claim(7);
+    let before_read = released.with_revisions(|_| ()).1;
     assert_eq!(
-        blocked.with(|net| net.claim_call(blocked_call, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY)),
+        released.with(|net| net.claim_call(released_call, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY)),
         Some(7)
     );
-    assert_eq!(blocked.with_revisions(|_| ()).1, before_read);
-    blocked.with_mut(|net| net.block_claimed_call(blocked_call, 17));
-    let after_block = blocked.with_revisions(|_| ()).1;
+    assert_eq!(released.with_revisions(|_| ()).1, before_read);
+    assert!(released.with_mut(|net| net.release_claimed_call(released_call)));
+    let after_release = released.with_revisions(|_| ()).1;
     assert_eq!(
-        after_block.topology_revision(),
+        after_release.topology_revision(),
         before_read.topology_revision() + 1
     );
     assert_eq!(
-        after_block.disturbance_epoch(),
+        after_release.disturbance_epoch(),
         before_read.disturbance_epoch() + 1
     );
 
@@ -2483,56 +2439,13 @@ fn operator_call_net(
 }
 
 #[test]
-fn blocked_operator_call_requires_its_current_wait_token_to_be_reclaimed() {
-    let (mut net, call, _) = operator_call_net(
-        TestOperator::new("blocked", |value| Ok(OperatorYield::Data(*value))),
-        42,
-    );
-
-    net.block_claimed_operator_call(call, 17);
-
-    assert_eq!(
-        net.blocked_operator_call(call.pair),
-        Some(BlockedOperatorCall {
-            pair: call.pair,
-            wait: 17,
-        })
-    );
-    assert!(!net.retry_blocked_operator_call(call, &16));
-    assert_eq!(net.blocked_operator_call(call.pair).unwrap().wait, 17);
-    assert!(net.retry_blocked_operator_call(call, &17));
-    let (operator, data) = net.operator_call_parts(call);
-    assert_eq!(operator.apply(&data).unwrap(), OperatorYield::Data(42));
-    assert!(net.principals_connect(call.pair));
-
-    assert!(net.restore_blocked_operator_call(call, 17));
-    assert_eq!(
-        net.blocked_operator_call(call.pair),
-        Some(BlockedOperatorCall {
-            pair: call.pair,
-            wait: 17,
-        })
-    );
-    assert!(net.retry_blocked_operator_call(call, &17));
-    assert!(net.release_claimed_operator_call(call));
-    assert!(matches!(
-        net.reduce_pair(call.pair),
-        Some(Reduction {
-            kind: ReductionKind::OperatorCall { .. },
-            ..
-        })
-    ));
-}
-
-#[test]
-fn operator_release_and_restore_reject_non_claimed_pairs_without_mutation() {
+fn operator_release_rejects_non_claimed_pairs_without_mutation() {
     let (mut net, call, _) = operator_call_net(
         TestOperator::new("identity", |value| Ok(OperatorYield::Data(*value))),
         42,
     );
     assert!(net.release_claimed_operator_call(call));
     assert!(!net.release_claimed_operator_call(call));
-    assert!(!net.restore_blocked_operator_call(call, 17));
     assert!(matches!(
         net.reduce_pair(call.pair),
         Some(Reduction {
@@ -2540,15 +2453,11 @@ fn operator_release_and_restore_reject_non_claimed_pairs_without_mutation() {
             ..
         })
     ));
-    net.block_claimed_operator_call(call, 17);
+    net.fail_operator_call(call, Arc::from("operator failed"));
     assert!(!net.release_claimed_operator_call(call));
-    assert!(!net.restore_blocked_operator_call(call, 18));
     assert_eq!(
-        net.blocked_operator_call(call.pair),
-        Some(BlockedOperatorCall {
-            pair: call.pair,
-            wait: 17,
-        })
+        net.stuck_reason(call.pair).cloned(),
+        Some(StuckReason::Specialization(Arc::from("operator failed")))
     );
 }
 

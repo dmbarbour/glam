@@ -179,7 +179,13 @@ impl CliCaseExplanation {
 #[derive(Debug, Clone)]
 pub(crate) struct CliCompletion {
     candidates: Vec<CompletionCandidate>,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "completion output renders only candidates and diagnostics; tests inspect the expected arguments"
+        )
+    )]
     expectations: Vec<CompletionExpectation>,
     diagnostics: Vec<Diagnostic>,
 }

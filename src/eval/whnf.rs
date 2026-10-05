@@ -14,7 +14,6 @@ use crate::core::{
     CoreValueFactory, DeferredValueId, EvaluationFailure, FunctionValue, LazyId, LazyValue,
     ManagedLazyRoot, ManagedPromiseRoot, PromisedValue, Value,
 };
-use crate::core_net::CoreWaitToken;
 use crate::evaluation::{EvaluationStepBudget, EvaluationValueAccess};
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
@@ -34,16 +33,15 @@ pub(crate) struct WhnfComputation {
 
 /// Durable entry mode for one WHNF request.
 ///
-/// A lazy producer begins with the exact lazy identity whose source it owns.
-/// Once that source has produced a value, the same computation installs the
-/// ordinary rooted demand checkpoint and never reconstructs the source result.
+/// A rooted seed is the production entry for client demand, promise
+/// following, and reflection requests. Its first poll promotes it to the
+/// canonical managed demand state under that poll's access. Structured
+/// constructors, such as application checkpoints, start in managed demand
+/// state. Lazy sources do not use this entry: they install their checkpoint
+/// beneath the owning lazy during the same source poll.
 enum DurableWhnfCheckpoint {
-    /// Protocol fixture only: production lazy sources now install their
-    /// checkpoint beneath the lazy during the same source poll.
-    Seed {
-        focus: RuntimeValueRoot,
-        source_owner: Option<LazyId>,
-    },
+    /// A rooted focus awaiting the first poll that promotes it.
+    Seed { focus: RuntimeValueRoot },
     ManagedDemand {
         state: ManagedWhnfRoot,
         observation: WhnfPollObservation,
@@ -101,23 +99,7 @@ pub(crate) struct NetWhnfObservation {
     pub(crate) cycle_promise: Option<crate::core::PromiseId>,
 }
 
-/// One generic frame inside the canonical traced WHNF state.
-pub(crate) struct WhnfFrame {
-    #[allow(
-        dead_code,
-        reason = "production never builds generic frames; only fixtures read these fields"
-    )]
-    kind: WhnfFrameKind,
-    #[allow(
-        dead_code,
-        reason = "production never builds generic frames; only fixtures read these fields"
-    )]
-    cursor: usize,
-    retained: Vec<Value>,
-}
-
 enum WhnfContinuation {
-    Generic(WhnfFrame),
     Application {
         arguments: Vec<Value>,
         next: usize,
@@ -154,12 +136,6 @@ enum UndefinedPurpose {
 enum UndefinedPhase {
     Inspect,
     ReturnTrue,
-}
-
-impl From<WhnfFrame> for WhnfContinuation {
-    fn from(frame: WhnfFrame) -> Self {
-        Self::Generic(frame)
-    }
 }
 
 impl RegionalWhnfWork {
@@ -300,23 +276,6 @@ impl std::ops::DerefMut for RegionalWhnfWork {
     }
 }
 
-/// Shared resumption shapes: most demand sites inspect the result, so frames
-/// share one continuation vocabulary.
-#[allow(
-    dead_code,
-    reason = "production never builds generic frames; fixtures build only some kinds"
-)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum WhnfFrameKind {
-    DemandThenInspect,
-    OrderedOperands,
-    CollectionWalk,
-    Application,
-    KeyConversion,
-    AccessPath,
-    DiagnosticContext,
-}
-
 /// One callback-free regional evaluator transition.
 ///
 /// `Delegate` replaces the current focus without pushing a frame. `Boundary`
@@ -349,25 +308,6 @@ pub(crate) enum RegionalWhnfStatus {
     Ready(Value),
     Boundary(RegionalBoundaryRequest),
     Yielded,
-    Failed(Arc<EvaluationFailure>),
-}
-
-/// Net-owned counterpart of [`RegionalWhnfDrive`].
-///
-/// Yield and boundary outcomes contain the complete replacement state. Ready
-/// and failed outcomes are consumed by the caller while matching access is
-/// still active and therefore need no intermediate roots.
-#[allow(
-    dead_code,
-    reason = "production drives net checkpoints in place so unwind can restore them; only fixtures use this consuming form"
-)]
-pub(crate) enum NetWhnfDrive {
-    Ready(Value),
-    Boundary {
-        state: NetWhnfState,
-        request: RegionalBoundaryRequest,
-    },
-    Yielded(NetWhnfState),
     Failed(Arc<EvaluationFailure>),
 }
 
@@ -430,14 +370,8 @@ fn drive_regional_state_in_place<'scope>(
 }
 
 /// A regional result which requires orchestration outside managed access.
-#[allow(
-    dead_code,
-    reason = "the semantic reducer emits only deferred requests; fixtures build the other forms"
-)]
 pub(crate) enum RegionalBoundaryRequest {
-    Dependency(WhnfDependency),
     Deferred(WhnfDeferredRequest),
-    External(WhnfExternalBoundary),
 }
 
 /// One unresolved semantic shell requiring policy outside managed access.
@@ -451,43 +385,13 @@ pub(crate) enum WhnfDeferredRequest {
     PromiseFollow(ManagedPromiseRoot),
 }
 
-/// External boundary family. A source-specific durable payload is added only
-/// when a production reducer yields that boundary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "no production reducer yields an external boundary; fixtures build some families"
-)]
-pub(crate) enum WhnfExternalBoundary {
-    Reflection,
-    Host,
-    Net,
-}
-
-/// Exact completion source which can block a resumable WHNF computation.
-///
-/// This semantic/control type deliberately does not depend on the scheduler's
-/// broader `WorkDependency` vocabulary. The evaluation boundary owns that
-/// translation.
-#[derive(Clone)]
-#[allow(
-    dead_code,
-    reason = "the semantic reducer emits only deferred requests; fixtures build dependencies"
-)]
-pub(crate) enum WhnfDependency {
-    Wait(CoreWaitToken),
-    Promise(ManagedPromiseRoot),
-}
-
 /// Result of one bounded poll of a [`WhnfComputation`].
 ///
-/// `Pending` and `Yielded` never consume the computation's exact checkpoint;
+/// `Deferred` and `Yielded` never consume the computation's exact checkpoint;
 /// the outer owner polls the same instance again.
 pub(crate) enum WhnfPoll {
     Ready(RuntimeValueRoot),
-    Pending(WhnfDependency),
     Deferred(WhnfDeferredRequest),
-    External(WhnfExternalBoundary),
     Yielded,
     Failed(RuntimeFailureRoot),
 }
@@ -542,31 +446,6 @@ impl NetWhnfState {
     ) -> NetWhnfObservation {
         self.0.observation_for_test(access)
     }
-
-    /// Drives one bounded callback-free quantum using the same regional
-    /// transition loop as ordinary WHNF computation.
-    #[allow(
-        dead_code,
-        reason = "production drives net checkpoints in place so unwind can restore them; only fixtures use this consuming adapter"
-    )]
-    pub(crate) fn drive_in(
-        self,
-        access: &EvaluationValueAccess<'_>,
-        budget: &mut WhnfStepBudget,
-        reduce: impl FnMut(&EvaluationValueAccess<'_>, &mut RegionalWhnfState<'_>) -> RegionalWhnfStep,
-    ) -> NetWhnfDrive {
-        match drive_regional(access, self.into_regional(access), budget, reduce) {
-            RegionalWhnfDrive::Ready(value) => NetWhnfDrive::Ready(value),
-            RegionalWhnfDrive::Boundary { work, request } => NetWhnfDrive::Boundary {
-                state: Self::from_regional(access, work),
-                request,
-            },
-            RegionalWhnfDrive::Yielded(work) => {
-                NetWhnfDrive::Yielded(Self::from_regional(access, work))
-            }
-            RegionalWhnfDrive::Failed(failure) => NetWhnfDrive::Failed(failure),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -600,11 +479,6 @@ impl WhnfState {
         )];
         for frame in &self.frames {
             match frame {
-                WhnfContinuation::Generic(frame) => identities.push((
-                    frame.retained.as_ptr() as usize,
-                    frame.retained.len(),
-                    frame.retained.capacity(),
-                )),
                 WhnfContinuation::Application { arguments, .. } => identities.push((
                     arguments.as_ptr() as usize,
                     arguments.len(),
@@ -654,7 +528,6 @@ impl WhnfState {
 impl WhnfContinuation {
     fn trace_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
         match self {
-            Self::Generic(frame) => trace_whnf_values(&frame.retained, visitor),
             Self::Application { arguments, .. } => trace_whnf_values(arguments, visitor),
             Self::DictionaryApplication {
                 effect_payload,
@@ -714,10 +587,7 @@ unsafe impl crate::core::ManagedFamily for NetWhnfState {
 impl WhnfComputation {
     pub(crate) fn from_root(focus: RuntimeValueRoot) -> Self {
         Self {
-            checkpoint: DurableWhnfCheckpoint::Seed {
-                focus,
-                source_owner: None,
-            },
+            checkpoint: DurableWhnfCheckpoint::Seed { focus },
         }
     }
 
@@ -789,15 +659,12 @@ impl WhnfComputation {
 
     fn promote_seed_in(&mut self, access: &EvaluationValueAccess<'_>) {
         let work = match &self.checkpoint {
-            DurableWhnfCheckpoint::Seed {
-                focus,
-                source_owner,
-            } => Some(RegionalWhnfWork::from_parts(
+            DurableWhnfCheckpoint::Seed { focus } => Some(RegionalWhnfWork::from_parts(
                 access,
                 access.clone_root(focus),
                 Vec::new(),
                 BTreeSet::new(),
-                *source_owner,
+                None,
                 None,
             )),
             DurableWhnfCheckpoint::ManagedDemand { .. } => None,
@@ -917,11 +784,9 @@ fn regional_status_poll(
         RegionalWhnfStatus::Ready(value) => {
             WhnfPoll::Ready(access.values().root_runtime_value(value))
         }
-        RegionalWhnfStatus::Boundary(request) => match request {
-            RegionalBoundaryRequest::Dependency(dependency) => WhnfPoll::Pending(dependency),
-            RegionalBoundaryRequest::Deferred(deferred) => WhnfPoll::Deferred(deferred),
-            RegionalBoundaryRequest::External(boundary) => WhnfPoll::External(boundary),
-        },
+        RegionalWhnfStatus::Boundary(RegionalBoundaryRequest::Deferred(deferred)) => {
+            WhnfPoll::Deferred(deferred)
+        }
         RegionalWhnfStatus::Yielded => WhnfPoll::Yielded,
         RegionalWhnfStatus::Failed(failure) => {
             WhnfPoll::Failed(access.values().root_runtime_failure(failure))
@@ -1003,9 +868,6 @@ fn resume_semantic_frame(
         }
         Some(WhnfContinuation::StaticAccess { .. }) => {
             return resume_static_access(access, work);
-        }
-        Some(WhnfContinuation::Generic(_)) => {
-            unreachable!("the semantic reducer never resumes a generic frame")
         }
         None => unreachable!("a semantic frame resume requires one frame"),
     }
@@ -1360,13 +1222,19 @@ mod tests {
 
     assert_does_not_implement!(whnf_computation_is_not_clone, WhnfComputation, Clone);
 
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "a size-only layout prototype whose variants are never constructed"
+    )]
     enum UnboxedCallableCheckpointPrototype {
         Existing(crate::interaction_net::RuntimeNode<crate::core_net::CoreSpecialization>),
         CallableCheckpoint(NetWhnfState),
     }
 
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "a size-only layout prototype whose variants are never constructed"
+    )]
     enum BoxedCallableCheckpointPrototype {
         Existing(crate::interaction_net::RuntimeNode<crate::core_net::CoreSpecialization>),
         CallableCheckpoint(Box<NetWhnfState>),
@@ -1381,11 +1249,6 @@ mod tests {
         assert_send::<BoxedCallableCheckpointPrototype>();
 
         let continuation_families = [
-            WhnfContinuation::Generic(WhnfFrame {
-                kind: WhnfFrameKind::DemandThenInspect,
-                cursor: 0,
-                retained: Vec::new(),
-            }),
             WhnfContinuation::Application {
                 arguments: Vec::new(),
                 next: 0,
@@ -1434,7 +1297,6 @@ mod tests {
         #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
         {
             assert_eq!(std::mem::size_of::<Value>(), 64);
-            assert_eq!(std::mem::size_of::<WhnfFrame>(), 40);
             assert_eq!(std::mem::size_of::<WhnfUndefinedDictionary>(), 32);
             assert_eq!(std::mem::size_of::<WhnfContinuation>(), 160);
             assert_eq!(std::mem::size_of::<WhnfState>(), 128);
@@ -1476,8 +1338,8 @@ mod tests {
         let source = include_str!("whnf.rs");
         for declaration in [
             "pub(crate) struct WhnfComputation",
-            "pub(crate) enum WhnfFrameKind",
-            "pub(crate) enum WhnfDependency",
+            "pub(crate) enum RegionalBoundaryRequest",
+            "pub(crate) enum WhnfDeferredRequest",
             "pub(crate) enum WhnfPoll",
         ] {
             assert!(
@@ -1510,23 +1372,6 @@ mod tests {
             reflection.contains("computation: WhnfComputation"),
             "W5 reflection decoding must own its resumable WHNF computation"
         );
-    }
-
-    #[test]
-    fn selected_frame_protocol_is_compile_exhaustive() {
-        fn classify(kind: WhnfFrameKind) -> usize {
-            match kind {
-                WhnfFrameKind::DemandThenInspect => 0,
-                WhnfFrameKind::OrderedOperands => 1,
-                WhnfFrameKind::CollectionWalk => 2,
-                WhnfFrameKind::Application => 3,
-                WhnfFrameKind::KeyConversion => 4,
-                WhnfFrameKind::AccessPath => 5,
-                WhnfFrameKind::DiagnosticContext => 6,
-            }
-        }
-
-        assert_eq!(classify(WhnfFrameKind::DiagnosticContext), 6);
     }
 }
 

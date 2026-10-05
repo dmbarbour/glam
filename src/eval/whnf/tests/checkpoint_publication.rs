@@ -23,11 +23,12 @@ fn text(value: &'static str) -> Value {
 }
 
 #[test]
-fn external_boundary_publishes_the_complete_checkpoint_before_access_closes() {
+fn boundary_publishes_the_complete_checkpoint_before_access_closes() {
     let values = isolated_values();
     let context = EvalContext::isolated(values.clone());
     let poll = EvaluationPollContext::for_context(&context);
     let mut computation = WhnfComputation::from_root(root(&values, text("initial")));
+    let (deferred, _) = values.rooted_error_lazy_for_test("published-checkpoint boundary");
     let registrations_before = values.managed_root_registrations_for_test();
 
     let mut budget = WhnfStepBudget::new(1);
@@ -38,16 +39,12 @@ fn external_boundary_publishes_the_complete_checkpoint_before_access_closes() {
                 .assert_same_representation_for_test(&work.focus, &text("initial"));
             assert!(work.frames.is_empty());
             work.focus = text("replacement");
-            work.frames.push(
-                WhnfFrame {
-                    kind: WhnfFrameKind::OrderedOperands,
-                    cursor: 7,
-                    retained: vec![text("left"), text("right")],
-                }
-                .into(),
-            );
-            RegionalWhnfStep::Boundary(RegionalBoundaryRequest::External(
-                WhnfExternalBoundary::Reflection,
+            work.frames.push(WhnfContinuation::Application {
+                arguments: vec![text("left"), text("right")],
+                next: 1,
+            });
+            RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Deferred(
+                WhnfDeferredRequest::Lazy(deferred.clone()),
             ))
         });
 
@@ -61,10 +58,10 @@ fn external_boundary_publishes_the_complete_checkpoint_before_access_closes() {
     });
 
     assert!(!thread_has_runtime_value_access_for_test());
-    assert!(matches!(
-        outcome,
-        WhnfPoll::External(WhnfExternalBoundary::Reflection)
-    ));
+    let WhnfPoll::Deferred(WhnfDeferredRequest::Lazy(requested)) = outcome else {
+        panic!("the boundary must leave as its exact deferred request")
+    };
+    assert_eq!(requested.id(), deferred.id());
 
     let mut callback_ran = false;
     let mut callback = || {
@@ -81,15 +78,13 @@ fn external_boundary_publishes_the_complete_checkpoint_before_access_closes() {
                 .values()
                 .assert_same_representation_for_test(&work.focus, &text("replacement"));
             assert_eq!(work.frames.len(), 1);
-            let WhnfContinuation::Generic(frame) = &work.frames[0] else {
-                panic!("expected a generic ordered-operands frame")
+            let WhnfContinuation::Application { arguments, next } = &work.frames[0] else {
+                panic!("expected the published application frame")
             };
-            assert_eq!(frame.kind, WhnfFrameKind::OrderedOperands);
-            assert_eq!(frame.cursor, 7);
-            access.values().assert_same_representation_for_test(
-                &frame.retained,
-                &[text("left"), text("right")],
-            );
+            assert_eq!(*next, 1);
+            access
+                .values()
+                .assert_same_representation_for_test(arguments, &[text("left"), text("right")]);
             RegionalWhnfStep::Ready(Value::Number(42.into()))
         })
     });
@@ -144,24 +139,14 @@ fn unwind_poison_faults_without_reentering_the_reducer() {
     let mut install_budget = WhnfStepBudget::new(1);
     let installed = poll.with_value_access(&context, |access| {
         computation.poll_in(&access, &mut install_budget, |_access, work| {
-            work.focus = text("prior");
-            work.frames.push(
-                WhnfFrame {
-                    kind: WhnfFrameKind::AccessPath,
-                    cursor: 11,
-                    retained: vec![text("retained")],
-                }
-                .into(),
-            );
-            RegionalWhnfStep::Boundary(RegionalBoundaryRequest::External(
-                WhnfExternalBoundary::Host,
-            ))
+            work.frames.push(WhnfContinuation::Application {
+                arguments: vec![text("retained")],
+                next: 0,
+            });
+            RegionalWhnfStep::Delegate(text("prior"))
         })
     });
-    assert!(matches!(
-        installed,
-        WhnfPoll::External(WhnfExternalBoundary::Host)
-    ));
+    assert!(matches!(installed, WhnfPoll::Yielded));
 
     let unwind = catch_unwind(AssertUnwindSafe(|| {
         let mut panic_budget = WhnfStepBudget::new(1);
@@ -210,14 +195,10 @@ fn dropping_a_suspended_computation_retires_its_complete_checkpoint() {
     let mut budget = WhnfStepBudget::new(1);
     let yielded = poll.with_value_access(&context, |access| {
         computation.poll_in(&access, &mut budget, |_access, work| {
-            work.frames = vec![
-                WhnfFrame {
-                    kind: WhnfFrameKind::CollectionWalk,
-                    cursor: 3,
-                    retained: vec![text("first"), text("second")],
-                }
-                .into(),
-            ];
+            work.frames = vec![WhnfContinuation::Application {
+                arguments: vec![text("first"), text("second")],
+                next: 1,
+            }];
             RegionalWhnfStep::Delegate(text("replacement"))
         })
     });

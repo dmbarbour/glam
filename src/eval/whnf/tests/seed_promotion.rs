@@ -1,14 +1,10 @@
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::Arc;
 
 use crate::core::{
     CoreValueFactory, LazyValue, Value, max_runtime_value_access_depth_for_test,
     reset_runtime_value_access_depth_for_test,
 };
-use crate::core_net::CoreWaitToken;
-use crate::evaluation::{
-    CompletionSubscriptions, EvalContext, EvaluationPollContext, EvaluationWaitToken,
-    EvaluationWorkCoordinator,
-};
+use crate::evaluation::{EvalContext, EvaluationPollContext};
 use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
 use super::*;
@@ -22,17 +18,6 @@ fn context() -> crate::evaluation::OwnedEvalContext {
 
 fn text(value: impl AsRef<str>) -> Value {
     Value::binary_from_text(value.as_ref())
-}
-
-fn synthetic_wait(context: &EvalContext) -> CoreWaitToken {
-    let values = context.values();
-    let wait = values
-        .ids()
-        .evaluation_wait()
-        .expect("baseline wait identity should allocate");
-    let coordinator = Arc::new(Mutex::new(Weak::<EvaluationWorkCoordinator>::new()));
-    let completion = CompletionSubscriptions::for_wait(values.runtime_id(), wait, coordinator);
-    CoreWaitToken(EvaluationWaitToken::new(wait, values, completion))
 }
 
 fn root(context: &EvalContext, value: Value) -> crate::runtime::RuntimeValueRoot {
@@ -53,11 +38,11 @@ fn poll_with(
     })
 }
 
-fn assert_wait(outcome: WhnfPoll, expected: &CoreWaitToken) {
-    let WhnfPoll::Pending(WhnfDependency::Wait(observed)) = outcome else {
-        panic!("baseline poll must retain its exact wait dependency")
+fn assert_deferred(outcome: WhnfPoll, expected: &ManagedLazyRoot) {
+    let WhnfPoll::Deferred(WhnfDeferredRequest::Lazy(observed)) = outcome else {
+        panic!("baseline poll must retain its exact deferred request")
     };
-    assert_eq!(&observed, expected);
+    assert_eq!(observed.id(), expected.id());
 }
 
 fn managed_seed_promotion(frame_count: usize) {
@@ -66,7 +51,7 @@ fn managed_seed_promotion(frame_count: usize) {
     let empty = values
         .collect_managed_for_test()
         .expect("baseline heap should collect before construction");
-    let wait = synthetic_wait(&context);
+    let (deferred, _) = values.rooted_error_lazy_for_test("seed-promotion boundary");
     let mut computation = WhnfComputation::from_root(root(&context, text("initial")));
     let registrations_before = values.managed_root_registrations_for_test();
     let mut access_entries = 0;
@@ -80,24 +65,20 @@ fn managed_seed_promotion(frame_count: usize) {
         |_access, work| {
             work.focus = text("focus");
             work.frames = (0..frame_count)
-                .map(|index| {
-                    WhnfFrame {
-                        kind: WhnfFrameKind::CollectionWalk,
-                        cursor: index,
-                        retained: vec![
-                            text(format!("left-{index}")),
-                            text(format!("right-{index}")),
-                        ],
-                    }
-                    .into()
+                .map(|index| WhnfContinuation::Application {
+                    arguments: vec![
+                        text(format!("left-{index}")),
+                        text(format!("right-{index}")),
+                    ],
+                    next: 0,
                 })
                 .collect();
-            RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Dependency(WhnfDependency::Wait(
-                wait.clone(),
-            )))
+            RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Deferred(
+                WhnfDeferredRequest::Lazy(deferred.clone()),
+            ))
         },
     );
-    assert_wait(installed, &wait);
+    assert_deferred(installed, &deferred);
     assert_eq!((install_budget.spent(), install_budget.remaining()), (1, 0));
     assert_eq!(
         values.managed_root_registrations_for_test() - registrations_before,
@@ -132,12 +113,12 @@ fn managed_seed_promotion(frame_count: usize) {
         &mut dependency_budget,
         &mut access_entries,
         |_access, _work| {
-            RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Dependency(WhnfDependency::Wait(
-                wait.clone(),
-            )))
+            RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Deferred(
+                WhnfDeferredRequest::Lazy(deferred.clone()),
+            ))
         },
     );
-    assert_wait(pending, &wait);
+    assert_deferred(pending, &deferred);
     assert_eq!(
         (dependency_budget.spent(), dependency_budget.remaining()),
         (1, 0)
@@ -145,7 +126,7 @@ fn managed_seed_promotion(frame_count: usize) {
     assert_eq!(
         values.managed_root_registrations_for_test() - registrations_after_yield,
         0,
-        "an unchanged dependency boundary must retain the same managed state root"
+        "an unchanged deferred boundary must retain the same managed state root"
     );
 
     let registrations_before_ready = values.managed_root_registrations_for_test();
@@ -171,7 +152,7 @@ fn managed_seed_promotion(frame_count: usize) {
         "the direct baseline opens one managed-access region per demand poll"
     );
 
-    drop(ready);
+    drop((ready, deferred));
     let retained = values
         .collect_managed_for_test()
         .expect("the installed checkpoint should remain collectible");

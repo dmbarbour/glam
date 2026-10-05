@@ -46,9 +46,6 @@ impl ClientDemandOperation {
             super::whnf::WhnfOwnerPoll::Failed(failure) => {
                 coordinator::ClientDemandPoll::Failed(failure)
             }
-            super::whnf::WhnfOwnerPoll::External(boundary) => {
-                unreachable!("client demand produced an external {boundary:?} boundary")
-            }
         }
     }
 }

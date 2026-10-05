@@ -172,8 +172,7 @@ nested WHNF polls borrow the same `EvaluationStepBudget`. `Pending` retains the
 exact dependency and `Yielded` retains the exact decoder state, so neither
 outcome repeats tag selection, list traversal, or continuation construction.
 Host dispatch begins only after decoding is complete and evaluator access has
-closed. An unsupported external boundary becomes a structured task halt rather
-than invoking host code under evaluator access. Scalar and specialization
+closed. Scalar and specialization
 demands follow the same rule; a specialization callback receives an evaluated
 public value only after its owned WHNF computation completes.
 

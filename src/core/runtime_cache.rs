@@ -28,9 +28,12 @@ pub(crate) struct RuntimeCacheFamilyRecord {
 }
 
 impl RuntimeCacheFamilyRecord {
-    #[allow(
-        dead_code,
-        reason = "the initial production cache families retain roots; value-free admission is exercised by the boundary fixture"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "every production cache family retains roots; only the boundary fixture admits a value-free family"
+        )
     )]
     pub(crate) const fn value_free(family: &'static str, source: &'static str) -> Self {
         Self::reviewed(family, source, RuntimeCacheRootPolicy::ValueFree)

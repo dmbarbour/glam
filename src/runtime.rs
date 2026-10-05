@@ -845,9 +845,12 @@ impl Eq for RuntimeFailureRoot {}
 struct RuntimeFailureRootInner {
     values: crate::core::RuntimeValueObserver,
     failure: Arc<EvaluationFailure>,
-    #[allow(
-        dead_code,
-        reason = "held only to keep the failure's direct values rooted for its external owner; only tests read it"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "held to keep the failure's direct values rooted for its external owner; only tests read it"
+        )
     )]
     value_roots: Box<[RuntimeValueRoot]>,
 }

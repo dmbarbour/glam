@@ -58,7 +58,7 @@ enum EvaluatorStepAdmission<'step> {
 /// This is deliberately family-specific rather than a general value owner:
 /// existing semantic values do not acquire another root merely by passing
 /// through evaluation.
-#[allow(
+#[expect(
     dead_code,
     reason = "variant payloads are retained solely as exact temporary owners until evaluator-step publication"
 )]

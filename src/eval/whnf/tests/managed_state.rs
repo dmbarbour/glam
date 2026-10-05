@@ -21,11 +21,10 @@ fn work(access: &EvaluationValueAccess<'_>, focus: Value) -> RegionalWhnfWork {
     RegionalWhnfWork::from_parts(
         access,
         focus,
-        vec![WhnfContinuation::Generic(WhnfFrame {
-            kind: WhnfFrameKind::CollectionWalk,
-            cursor: 0,
-            retained: vec![Value::Number(1.into())],
-        })],
+        vec![WhnfContinuation::Application {
+            arguments: vec![Value::Number(1.into())],
+            next: 0,
+        }],
         BTreeSet::new(),
         None,
         None,
