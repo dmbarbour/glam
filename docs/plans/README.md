@@ -1,92 +1,127 @@
-# Implementation Plans
+# Plans and Reviews
 
-This directory retains substantial transition and implementation plans as
-project history. Each plan states its own status and records completion as its
-checkpoints land.
+This directory and [`../reviews/`](../reviews/) hold history: implementation
+plans and the reviews that checked them. They explain how the implementation
+moved between designs. Current behavior is documented in the standing docs
+(`docs/architecture/`, `docs/agent_context/`, `docs/AgentContext.md`, the
+design docs, and the collector's `SAFETY.md` and `VERIFY.md`), and those win
+when they disagree with a plan. The reasons behind significant decisions live
+in [`../Decisions.md`](../Decisions.md).
 
-Plans explain how the implementation moved between designs; current semantic
-and architectural documentation remains authoritative when an old plan and
-the implemented system differ. Completed or abandoned plans may be deleted
-when their historical value no longer justifies keeping them.
+**Retention rule.** A plan or review is deleted, with git as the archive, once:
+1. its durable decisions live in standing docs or `Decisions.md`;
+2. no code, test, or current doc references it; and
+3. its last commit is listed under [Retired History](#retired-history).
+
+Recover a retired doc with `git show <commit>:<path>`.
 
 ## Active Plans
 
-- [`UserInputPanicSafety_2026-10-04.md`](UserInputPanicSafety_2026-10-04.md)
-  makes code that observes user input report diagnostics or evaluation
-  failures instead of panicking, and keeps a caught panic from poisoning the
-  runtime.
 - [`NetPolarityChecker_2026-10-05.md`](NetPolarityChecker_2026-10-05.md)
-  requires every interaction net to be polarized, with a `+` output edge by
-  fiat. A linear-time checker enforces this before N8 and net fuzzing.
+  requires every interaction net to be polarized, with a `+` exposed port,
+  and checks it before N8 and net fuzzing.
+- [`UserInputPanicSafety_2026-10-04.md`](UserInputPanicSafety_2026-10-04.md)
+  keeps code that observes user input from panicking, and keeps a caught panic
+  from poisoning the runtime. Interaction-net inspection remains.
+- [`DocumentationDisposition_2026-10-05.md`](DocumentationDisposition_2026-10-05.md)
+  is the working plan for retiring this pile; it retires itself when done.
 
-Preliminary and deferred plans below remain candidates for later work.
+## Active Reviews
 
-## Recent Completed Plans
+- [`HolisticArchitecturePrePerformance_2026-10-03.md`](../reviews/HolisticArchitecturePrePerformance_2026-10-03.md)
+  is the pre-performance backlog: its P1 and P2 sequences and open maintainer
+  decisions.
+- [`ArchitectureAndVerification_2026-10-03.md`](../reviews/ArchitectureAndVerification_2026-10-03.md)
+  is the parallel review; its remaining findings are mirrored in the holistic
+  review's cross-reference.
 
-- [`GarbageCollectorAggressiveVerificationRegression_2026-10-03.md`](GarbageCollectorAggressiveVerificationRegression_2026-10-03.md)
-  restored the aggressive-GC verification mode, broken since I12A, by reusing
-  the NoAuto stable-pump maintenance decision, and recorded the settlement
-  semantics decided along the way.
-- [`GarbageCollectionRoadmap_2026-08-19.md`](GarbageCollectionRoadmap_2026-08-19.md)
-  completed the non-moving stop-the-world collector and its runtime
-  integration through C8 and Gate G4.
-- [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md)
-  completed and verified the standalone collector subcrate through its C8
-  tuning, safety, and dynamic-tool audit.
-- [`GarbageCollectorIntegration_2026-08-19.md`](GarbageCollectorIntegration_2026-08-19.md)
-  completed the I0-I13 migration of Glam values, roots, workers, reflection,
-  interaction nets, and explicit runtime maintenance, passing Gate G4.
-- [`GarbageCollectorPersistentEdgeTraits_2026-09-12.md`](GarbageCollectorPersistentEdgeTraits_2026-09-12.md)
-  completed the explicit managed-edge ownership migration and closed its
-  dynamic and release-cost verification under collector-integration I11D.2.
-- [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md)
-  closed the regional ownership, fixture, schedule, exact-inventory, and full
-  ordinary/aggressive workspace issues exposed by I11D.1.
-- [`ResumableWhnfEvaluation_2026-09-12.md`](ResumableWhnfEvaluation_2026-09-12.md)
-  replaced recursive and replaying WHNF demand with bounded regional work and
-  durable owner checkpoints.
+## Deferred Plans
+
+- [`EvaluationRecursionPerformance_2026-10-04.md`](EvaluationRecursionPerformance_2026-10-04.md):
+  evaluation time grows roughly quadratically with recursion depth.
+- [`ParserBacktrackingPerformance_2026-10-04.md`](ParserBacktrackingPerformance_2026-10-04.md):
+  exponential parse time on nested groups, and a constant-time lookahead fix.
+- [`ConcurrentGarbageCollection_2026-08-28.md`](ConcurrentGarbageCollection_2026-08-28.md):
+  concurrent marking, delayed logical sweep, and epoch-safe run recycling.
+- [`ValueRepresentationRefinement_2026-08-19.md`](ValueRepresentationRefinement_2026-08-19.md):
+  compact tagged values and representation splitting.
+- [`GarbageCollectorScopedPointerSafety_2026-09-09.md`](GarbageCollectorScopedPointerSafety_2026-09-09.md):
+  the lifetime-branded `ScopedGc` experiment, deferred until a defect demands
+  it.
+- [`PureEffectAccessFusion_2026-09-23.md`](PureEffectAccessFusion_2026-09-23.md):
+  regional fusion for pure standard-effect chains, after value-representation
+  refinement.
+- [`PublicResumableEvaluation_2026-09-23.md`](PublicResumableEvaluation_2026-09-23.md):
+  a library API to retain, advance, and resume one foreground evaluation.
+
+## Open Items Without a Plan
+
+Each line moves into a plan as soon as one owns it.
+
+- **Public diagnostic projection.** Review the transitional
+  `Diagnostic::from_parts` policy, which caches shallow `message` and `line`
+  views beside the structured emission, and decide which conveniences stay.
+- **`.read.token` dependencies.** It turns an unavailable dependency into a
+  parser error, and nested search does not suspend.
+- **Net callable performance.** Small-set followed identity, batched pure pair
+  steps, annotated normalization, and a measured specialized checkpoint. Owner
+  once it exists: a net performance plan (holistic N3).
+- **Net construction performance.** Budgeted or incremental replay of large
+  netlists, batching, and split counters. Indexed list-fix reevaluation is
+  potentially quadratic and unmeasured. Columnar descriptors belong to
+  value-representation refinement.
+- **History-coupling guard scope.** `tests/source_doc_coupling.rs` scans
+  `src/` only; extend it to `tests/` and `crates/`.
+
+## Completed, Awaiting Extraction
+
+These completed plans still hold content that has not yet moved into standing
+docs or `Decisions.md`. The disposition plan tracks each one.
+
+- [`GarbageCollectionRoadmap_2026-08-19.md`](GarbageCollectionRoadmap_2026-08-19.md),
+  [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md),
+  [`GarbageCollectionGateG0Baseline_2026-08-20.md`](GarbageCollectionGateG0Baseline_2026-08-20.md),
+  [`GarbageCollectorOwnershipLedger_2026-08-20.md`](GarbageCollectorOwnershipLedger_2026-08-20.md),
+  and [`GarbageCollectorIntegration_2026-08-19.md`](GarbageCollectorIntegration_2026-08-19.md):
+  the collector and its runtime integration.
+- [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md),
+  [`GarbageCollectorAggressiveVerificationRegression_2026-10-03.md`](GarbageCollectorAggressiveVerificationRegression_2026-10-03.md),
+  and [`GarbageCollectorPersistentEdgeTraits_2026-09-12.md`](GarbageCollectorPersistentEdgeTraits_2026-09-12.md):
+  aggressive verification and persistent edges.
+- [`ResumableWhnfEvaluation_2026-09-12.md`](ResumableWhnfEvaluation_2026-09-12.md):
+  bounded regional WHNF with durable checkpoints.
 - [`InteractionNetCallableWhnfSpill_2026-09-16.md`](InteractionNetCallableWhnfSpill_2026-09-16.md)
-  completed inline-first callable evaluation and managed-net linear
-  `CallableCheckpoint(NetWhnfState)` topology only when a quantum suspends.
-- [`PureInteractionNetConstruction_2026-09-20.md`](PureInteractionNetConstruction_2026-09-20.md)
-  replaced generic isolated reflection search with pure builder state over the
-  existing `ListEffect` choice/cut machinery and one hidden strict-netlist
-  replay primitive.
+  and [`PureInteractionNetConstruction_2026-09-20.md`](PureInteractionNetConstruction_2026-09-20.md):
+  net callables and pure construction.
 
-## Preliminary and Deferred Plans
+## Retired History
 
-- [`EvaluationRecursionPerformance_2026-10-04.md`](EvaluationRecursionPerformance_2026-10-04.md)
-  records evaluation time growing roughly quadratically with recursion depth
-  (a release-build countdown of 800 takes 30 s), with hypotheses and first
-  profiling steps.
-- [`ParserBacktrackingPerformance_2026-10-04.md`](ParserBacktrackingPerformance_2026-10-04.md)
-  records exponential parse time on nested parentheses and lists, caused by
-  alternatives that re-parse a whole group, and a constant-time lookahead
-  guard to make it linear.
-- [`ConcurrentGarbageCollection_2026-08-28.md`](ConcurrentGarbageCollection_2026-08-28.md)
-  records the post-integration transition from idle-only stop-the-world
-  election to concurrent marking, delayed logical sweep, and epoch-safe run
-  recycling across arbitrarily nested runtime heaps.
-- [`ValueRepresentationRefinement_2026-08-19.md`](ValueRepresentationRefinement_2026-08-19.md)
-  records the compact tagged-value and representation-splitting transition to
-  pursue after the initial collector boundary works. It is deliberately not a
-  prerequisite for the current GC plans.
-- [`PureEffectAccessFusion_2026-09-23.md`](PureEffectAccessFusion_2026-09-23.md)
-  retains the extracted W6G.2 measurement and regional-fusion investigation
-  for pure standard-effect chains. It is deliberately sequenced after Value
-  Representation Refinement and does not block resumable-WHNF closure.
-- [`PublicResumableEvaluation_2026-09-23.md`](PublicResumableEvaluation_2026-09-23.md)
-  consolidates the deferred library API for retaining, boundedly advancing,
-  waiting on, and resuming one foreground evaluation without replaying its
-  semantic work or exact producer route.
-- [`GarbageCollectorScopedPointerSafety_2026-09-09.md`](GarbageCollectorScopedPointerSafety_2026-09-09.md)
-  retains the deferred lifetime-branded `ScopedGc` experiment after the active
-  persistent-edge trait migration establishes move-only stored edges.
-- **Public diagnostic projection cleanup (deferred).** Review the transitional
-  `Diagnostic::from_parts` policy which eagerly caches shallow conventional
-  `message` and `line` views beside the authoritative structured emission.
-  Decide which embedding conveniences remain explicit projections, and keep
-  enrichment, viewer selection, viewport data, and final rendering in the
-  configured logger or other last-moment policy boundary. This is not a
-  prerequisite for collector integration; pull it forward only if the cached
-  projections obstruct a GC ownership or access boundary.
+| Doc | Last commit | Step-ID family |
+| --- | --- | --- |
+| `plans/GarbageCollectorPublicValueAccessInventory_2026-08-28.md` | `1a84ca39` | GC integration (`I…`) |
+| `plans/ResumableWhnfHolisticReviewPlan_2026-09-28.md` | `5b8a27f3` | resumable WHNF (`W…`, `WHNFHR-…`) |
+| `reviews/GarbageCollectorGateG1_2026-08-25.md` | `bb205d9b` | collector gates (`G0`–`G4`), collector crate (`C…`) |
+| `reviews/GarbageCollectorGateG2_2026-09-11.md` | `585cfec3` | collector gates |
+| `reviews/GarbageCollectorIntegrationI1_2026-08-28.md` | `2c54459c` | GC integration (`I1…`, `GCI1R-…`) |
+| `reviews/GarbageCollectorIntegrationI2_2026-08-28.md` | `45635ead` | GC integration (`I2…`) |
+| `reviews/GarbageCollectorIntegrationI3_2026-09-02.md` | `5165f2bc` | GC integration (`I3…`) |
+| `reviews/GarbageCollectorIntegrationI4_2026-09-03.md` | `6c9581ef` | GC integration (`I4…`) |
+| `reviews/GarbageCollectorIntegrationI9_2026-09-11.md` | `26a422d9` | GC integration (`I9…`) |
+| `reviews/GarbageCollectorIntegrationI11_2026-09-11.md` | `26c86f71` | GC integration (`I11…`, `GCI11R-…`) |
+| `reviews/GarbageCollectorProductionCollectionI11B_2026-09-11.md` | `03aec8ca` | GC integration (`I11B…`) |
+| `reviews/GarbageCollectorWorkerFinalizationI11C_2026-09-11.md` | `56968706` | GC integration (`I11C…`) |
+| `reviews/GarbageCollectorGCI11R002Holistic_2026-10-01.md` | `26c86f71` | aggressive remediation (`GCI11R-002…`, `GCI2HR-…`) |
+| `reviews/GarbageCollectorI11D2PersistentEdgeCost_2026-10-02.md` | `26c86f71` | persistent edges (`I11D.2…`, `P…`) |
+| `reviews/GarbageCollectorI11D3StaticClosure_2026-10-02.md` | `26c86f71` | GC integration (`I11D.3…`) |
+| `reviews/ResumableWhnfW3_2026-09-13.md` | `37775f5d` | resumable WHNF (`W3…`) |
+| `reviews/ResumableWhnfW4_2026-09-13.md` | `66c2a3c4` | resumable WHNF (`W4…`) |
+| `reviews/ResumableWhnfW4E_2026-09-14.md` | `be4bedf4` | resumable WHNF (`W4E…`) |
+| `reviews/ResumableWhnfW5_2026-09-15.md` | `d8d44e0c` | resumable WHNF (`W5…`) |
+| `reviews/ResumableWhnfW6F_2026-09-18.md` | `05b7d368` | resumable WHNF (`W6F…`) |
+| `reviews/ResumableWhnfW6G1Baseline_2026-09-18.md` | `c6288431` | resumable WHNF (`W6G.1…`) |
+| `reviews/ResumableWhnfW6GInterim_2026-09-21.md` | `d8d44e0c` | resumable WHNF (`W6G…`) |
+| `reviews/ResumableWhnfW6GRemainingPlan_2026-09-21.md` | `d8d44e0c` | resumable WHNF (`W6G…`) |
+| `reviews/ResumableWhnfW6G_2026-09-24.md` | `cd7773e9` | resumable WHNF (`W6G…`) |
+| `reviews/ResumableWhnfW8_2026-09-27.md` | `672845d5` | resumable WHNF (`W8…`) |
+| `reviews/ResumableWhnfW9_2026-09-28.md` | `8c611ae0` | resumable WHNF (`W9…`) |
+| `reviews/InteractionNetCallableWhnfSpill_2026-09-16.md` | `fd574a05` | net callable spill (`NC…`) |

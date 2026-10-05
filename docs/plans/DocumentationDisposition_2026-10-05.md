@@ -1212,6 +1212,13 @@ Options rejected:
 
 ## 9. Execution Waves (updated after §8)
 
+Progress:
+- Waves 1–3 landed in `8b1ace22`: standing-doc corrections, `Decisions.md`,
+  and `values.md`. The §3 extractions are still pending.
+- Wave 4: `plans/README.md` is now the index.
+- Wave 5, first batch: the 27 RETIRE docs are deleted and listed in the
+  README's Retired History.
+
 1. **Outdated standing docs** (§5.1 items 1–8, 12 and 13), plus the panic
    plan's disconnected-subnet wording. Items 9, 10 and 11 wait on Decision
    7, polarity slice 3, and wave 6 respectively.

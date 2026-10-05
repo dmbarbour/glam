@@ -931,9 +931,9 @@ another traced owner ceases to prove liveness.
 
 ## Gate G1 Certification
 
-C6D.3 certified the isolated collector on 2026-08-25. The review is recorded in
-[`GarbageCollectorGateG1_2026-08-25.md`](../../docs/reviews/GarbageCollectorGateG1_2026-08-25.md).
-The gate combines:
+C6D.3 certified the isolated collector on 2026-08-25. Its review document has
+been retired; [`docs/plans/README.md`](../../docs/plans/README.md) lists the
+commit that holds it. The gate combines:
 
 ```sh
 crates/glam-gc/scripts/check.sh
