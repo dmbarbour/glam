@@ -202,9 +202,13 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         call: CallableCheckpointCall,
         source: PreparedCopySource<S>,
     ) -> NodeId {
+        // The copy stands where the checkpoint stood, facing the bind.
+        let bind = self
+            .signed(Port::principal(call.bind))
+            .expect("a claimed checkpoint call keeps its bind wired");
         assert!(self.take_empty_claimed_checkpoint(call));
         let cursor = self.begin_copy(source);
-        self.connect(Port::principal(call.bind), Port::principal(cursor));
+        self.bind_reference(Port::principal(cursor), bind);
         cursor
     }
 
@@ -219,13 +223,17 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 .is_some_and(|state| state.is_claimed()),
             "resumed interaction-net call must still be claimed",
         );
+        // The copy stands where the callable data stood, facing the bind.
+        let bind = self
+            .signed(Port::principal(call.bind))
+            .expect("a claimed call keeps its bind wired");
         assert_eq!(
             self.disconnect(Port::principal(call.bind)),
             Some(Port::principal(call.data))
         );
         assert!(matches!(self.remove_node(call.data), RuntimeNode::Data(_)));
         let cursor = self.begin_copy(source);
-        self.connect(Port::principal(call.bind), Port::principal(cursor));
+        self.bind_reference(Port::principal(cursor), bind);
         cursor
     }
 
@@ -279,6 +287,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 BoundaryReplacement::Port(Port::auxiliary(operator, 1)),
             ],
         );
+        self.debug_check_node_polarity(operator);
         operator
     }
 
@@ -311,14 +320,14 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     pub(in crate::interaction_net::runtime) fn take_operator_call(
         &mut self,
         call: OperatorCall,
-    ) -> Port {
+    ) -> SignedPort {
         self.remove_pending_operator_call(call);
         assert_eq!(
             self.disconnect(Port::principal(call.operator)),
             Some(Port::principal(call.data))
         );
         let target = self
-            .disconnect(Port::auxiliary(call.operator, 1))
+            .take_reference(Port::auxiliary(call.operator, 1))
             .expect("operator result must remain wired");
         assert!(matches!(
             self.remove_node(call.operator),
@@ -692,13 +701,17 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         };
 
         let local = self
-            .disconnect(Port::principal(cursor))
+            .take_reference(Port::principal(cursor))
             .expect("active remote cursor must face the local net");
         self.remove_node(cursor);
         assert_eq!(state.frontiers.remove(&remote), Some(cursor));
 
+        // The materialized node stands where the cursor stood. Its auxiliary
+        // signs follow its own rule, and each new cursor stands for the
+        // source port across that auxiliary's link.
         let target = self.add_node(node);
-        self.connect(Port::principal(target), local);
+        self.bind_reference(Port::principal(target), local);
+        let principal = local.sign.opposite();
         for index in 1..=auxiliaries {
             let source_anchor = Port::auxiliary(source_node, index);
             let next = self.add_node(RuntimeNode::RemoteCursor {
@@ -706,8 +719,16 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 remote: source_anchor,
             });
             assert!(state.frontiers.insert(source_anchor, next).is_none());
-            self.connect(Port::auxiliary(target, index), Port::principal(next));
+            let sign = self
+                .node(target)
+                .expect("the materialized node exists")
+                .auxiliary_sign(principal, index);
+            self.wire(
+                SignedPort::new(Port::auxiliary(target, index), sign),
+                SignedPort::new(Port::principal(next), sign.opposite()),
+            );
         }
+        self.debug_check_node_polarity(target);
         self.copies.insert(copy, state);
         CursorProgress::Materialized { node: target }
     }
@@ -750,15 +771,17 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         );
 
         let left = self
-            .disconnect(Port::principal(cursor))
+            .take_reference(Port::principal(cursor))
             .expect("remote cursor must face the local net");
         self.unschedule_node(peer);
         let right = self
-            .disconnect(Port::principal(peer))
+            .take_reference(Port::principal(peer))
             .expect("peer remote cursor must face the local net");
         self.remove_node(cursor);
         self.remove_node(peer);
-        self.connect(left, right);
+        // The two cursors stood for the two ends of one source wire, so the
+        // local ports they faced must have opposite signs.
+        self.wire(left, right);
         if copy_finished {
             self.copies.remove(&copy);
         }

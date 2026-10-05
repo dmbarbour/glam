@@ -3,7 +3,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use super::model::*;
-use super::polarity::{PolarityViolation, Shape, TemplateChecks, Topology};
+use super::polarity::{PolarityViolation, Shape, TemplateChecks, Topology, solved_sign};
 
 pub struct NetBuilder<S: NetSpecialization> {
     nodes: Vec<BuilderNode<S>>,
@@ -287,8 +287,8 @@ impl<S: NetSpecialization> NetBuilder<S> {
 
     pub fn try_finish(self, exposed: Port) -> Result<InteractionNet<S>, NetBuildError> {
         self.validate(exposed)?;
-        self.check_polarity(exposed)?;
-        self.normalize(exposed)
+        let signs = self.check_polarity(exposed)?;
+        self.normalize(exposed, signs.as_deref())
     }
 
     /// The number of nodes constructed so far, including builder tunnels.
@@ -298,7 +298,7 @@ impl<S: NetSpecialization> NetBuilder<S> {
 
     /// Checks the builder's own topology before tunnels are spliced out, so
     /// a violation names the ports the caller constructed.
-    fn check_polarity(&self, exposed: Port) -> Result<(), NetBuildError> {
+    fn check_polarity(&self, exposed: Port) -> Result<Option<Vec<Sign>>, NetBuildError> {
         #[cfg(test)]
         let checks = self.checks;
         #[cfg(not(test))]
@@ -320,7 +320,13 @@ impl<S: NetSpecialization> NetBuilder<S> {
         .map_err(NetBuildError::Polarity)
     }
 
-    fn normalize(self, exposed: Port) -> Result<InteractionNet<S>, NetBuildError> {
+    /// Splices out tunnels and renumbers nodes. With solved `signs`, each
+    /// wire is stored provider-first, so instantiation can type every link.
+    fn normalize(
+        self,
+        exposed: Port,
+        signs: Option<&[Sign]>,
+    ) -> Result<InteractionNet<S>, NetBuildError> {
         let is_tunnel = self
             .nodes
             .iter()
@@ -373,7 +379,13 @@ impl<S: NetSpecialization> NetBuilder<S> {
                 if local == remote {
                     return Err(NetBuildError::SelfWire(local));
                 }
-                if local < remote {
+                // Each wire is visited from both ends; keep it once, from its
+                // providing end. Without signs, the orientation is arbitrary.
+                let keep = match signs {
+                    Some(signs) => solved_sign(signs, old) == Sign::Provides,
+                    None => local < remote,
+                };
+                if keep {
                     runtime_wires.push(Wire {
                         left: local,
                         right: remote,
@@ -389,6 +401,8 @@ impl<S: NetSpecialization> NetBuilder<S> {
             nodes: Arc::from(runtime_nodes),
             wires: Arc::from(runtime_wires),
             exposed: exposed_runtime,
+            #[cfg(test)]
+            polarized: signs.is_some(),
         })
     }
 

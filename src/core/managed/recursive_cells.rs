@@ -1421,7 +1421,8 @@ const _: () = {
     assert!(std::mem::align_of::<ManagedLazyCell>() == 8);
     assert!(std::mem::size_of::<ManagedPromiseCell>() == 104);
     assert!(std::mem::align_of::<ManagedPromiseCell>() == 8);
-    assert!(std::mem::size_of::<ManagedCoreNetCell>() == 248);
+    // Test builds add the runtime net's polarity-check flag.
+    assert!(std::mem::size_of::<ManagedCoreNetCell>() == 248 + if cfg!(test) { 8 } else { 0 });
     assert!(std::mem::align_of::<ManagedCoreNetCell>() == 8);
     assert!(std::mem::size_of::<ManagedLazyRoot>() == 32);
     assert!(std::mem::align_of::<ManagedLazyRoot>() == 8);
@@ -2183,7 +2184,9 @@ mod tests {
                 ManagedPromiseCell,
             >())
         );
-        assert_eq!(std::mem::size_of::<ManagedCoreNetCell>(), 248);
+        // 248 bytes in production; test builds add the runtime net's
+        // polarity-check flag.
+        assert_eq!(std::mem::size_of::<ManagedCoreNetCell>(), 256);
         assert_eq!(std::mem::align_of::<ManagedCoreNetCell>(), 8);
         assert_eq!(
             <ManagedCoreNetCell as Trace>::REQUESTED_SLOT_SIZE,

@@ -2,10 +2,10 @@
 //!
 //! Every port carries a sign: `+` provides a value and `−` consumes one. Each
 //! wire joins a `+` port to a `−` port, and a template's exposed port is `+`
-//! by fiat, like `Data`. Signs are a construction contract, not runtime state:
-//! nodes store none and rewrite rules ignore them. See
-//! `docs/agent_context/interaction_nets.md` for the table this checker
-//! implements.
+//! by fiat, like `Data`. This module checks templates; at runtime each
+//! stored link carries its peer's sign, and debug builds check that rewrites
+//! preserve it. See `docs/agent_context/interaction_nets.md` for the table
+//! this checker implements.
 //!
 //! The checker solves sign equations with a union-find over ports that records
 //! each port's parity relative to its root, so it runs in near-linear time and
@@ -19,7 +19,7 @@ use std::fmt;
 
 #[cfg(test)]
 use super::model::InteractionNet;
-use super::model::{NetSpecialization, Node, NodeId, Port, Wire};
+use super::model::{NetSpecialization, Node, NodeId, Port, Sign, Wire};
 
 /// Why a template is not polarized or not connected.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +95,11 @@ impl TemplateChecks {
         signs: true,
         connected: true,
     };
+}
+
+/// The solved sign of one port, from [`Topology::check`]'s solution.
+pub(crate) fn solved_sign(signs: &[Sign], port: Port) -> Sign {
+    signs[port.node().index() * 3 + port.index() as usize]
 }
 
 impl PolarityViolation {
@@ -204,6 +209,7 @@ pub(crate) fn check_template<S: NetSpecialization>(
         exposed: net.exposed,
     }
     .check(TemplateChecks::ALL)
+    .map(|_| ())
 }
 
 /// One sign equation between two slots: a port, or the constant `+` anchor.
@@ -217,14 +223,21 @@ struct Constraint {
 }
 
 impl Topology<'_> {
-    pub(crate) fn check(&self, checks: TemplateChecks) -> Result<(), PolarityViolation> {
-        if checks.signs {
-            self.check_signs()?;
-        }
+    /// Applies the requested checks. When signs are checked, returns their
+    /// solution, one per port slot.
+    pub(crate) fn check(
+        &self,
+        checks: TemplateChecks,
+    ) -> Result<Option<Vec<Sign>>, PolarityViolation> {
+        let signs = if checks.signs {
+            Some(self.check_signs()?)
+        } else {
+            None
+        };
         if checks.connected {
             self.check_connected()?;
         }
-        Ok(())
+        Ok(signs)
     }
 
     /// Every sign equation, in a fixed order: node rules, then wires, then
@@ -323,7 +336,10 @@ impl Topology<'_> {
         })
     }
 
-    fn check_signs(&self) -> Result<(), PolarityViolation> {
+    /// Solves the signs, returning one per port slot. A component the
+    /// constraints leave unanchored, such as an isolated `Bind >< Bind` pair,
+    /// is oriented arbitrarily: any valid typing serves.
+    fn check_signs(&self) -> Result<Vec<Sign>, PolarityViolation> {
         let mut signs = Signs::new(self.anchor() + 1);
         for (index, constraint) in self.constraints().enumerate() {
             let left = self.slot(Some(constraint.left));
@@ -335,7 +351,19 @@ impl Topology<'_> {
                 });
             }
         }
-        Ok(())
+        let (anchor_root, anchor_flipped) = signs.find(self.anchor());
+        Ok((0..self.anchor())
+            .map(|slot| {
+                let (root, flipped) = signs.find(slot);
+                // The anchor is `+`, so its root has the anchor's parity.
+                let root_consumes = root == anchor_root && anchor_flipped;
+                if root_consumes ^ flipped {
+                    Sign::Consumes
+                } else {
+                    Sign::Provides
+                }
+            })
+            .collect())
     }
 
     /// Finds the earlier rules that forced the conflict closed by constraint

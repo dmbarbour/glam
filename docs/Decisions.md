@@ -300,8 +300,8 @@ maps the short names used here to file names.
   auxiliaries no fixed signs.
 - **Decision:**
   - Every wire joins a `+` (providing) port to a `−` (consuming) port.
-    Polarity is a construction contract, not stored on nodes; reduction
-    rules are unchanged.
+    Reduction rules are unchanged; runtime links carry the polarity type
+    (see `remote-polarity-runtime-type`).
   - `Bind >< Bind` joins crossed, as Lafont's γγ rule does. A function bind
     lists `[result, argument]` and an application `[argument, result]`. Fans
     still join positionally.
@@ -319,6 +319,32 @@ maps the short names used here to file names.
   "Templates and Construction"; `Design.md` "Interaction Nets".
 - **Recorded in:** polarity plan, "Decisions"; holistic review N8; commits
   `d5cf8c6f`, `13082fe1`, `0ccdf59e`.
+
+### Runtime nets carry a remote-polarity type in their link words
+`remote-polarity-runtime-type` · 2026-10-05 · maintainer · accepted
+- **Context:** slice 4 tests polarity-type preservation (subject reduction).
+  Later rewrites will depend on signs: translating positive erasure into
+  error data, and GAL level nodes. Net performance must improve a lot, so
+  no new runtime side tables.
+- **Decision:**
+  - Each stored link packs the peer's sign into a reserved port bit.
+  - Remote polarity was chosen over storing each port's own sign: a wired
+    port carries the same information, inverted. Rewrites mostly move typed
+    references, and a new node binds to a remote port without any rule
+    assigning its signs.
+  - Every runtime node is typed, including interface anchors, callable
+    checkpoints and remote cursors.
+  - Only debug builds check: every wire joins opposite signs, and each
+    created node satisfies its rule as an expected peer type.
+- **Consequences:**
+  - Template wires are stored provider-first.
+  - The entire test suite is a preservation test; in its first run, the
+    only violation was an unpolarized hand-built test fixture.
+  - Test builds add one flag to each runtime net, so the core-net cell's
+    test layout is 8 bytes larger.
+- **Rule lives in:** `agent_context/interaction_nets.md` "Runtime Polarity
+  Type".
+- **Recorded in:** polarity plan, "Slice 4 Design".
 
 ### Callable WHNF runs inline first and spills to a linear checkpoint node only on suspension
 `inline-first-callable-spill` · 2026-09-16 · agent · accepted

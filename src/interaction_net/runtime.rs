@@ -2068,7 +2068,8 @@ enum SourcePrincipalNode<S: NetSpecialization> {
 
 struct RuntimeEntry<S: NetSpecialization> {
     node: RuntimeNode<S>,
-    links: [Option<Port>; 3],
+    /// Each wired port's typed reference to its peer.
+    links: [Option<Link>; 3],
 }
 
 /// One semantic payload held directly by an instantiated runtime net.
@@ -2110,6 +2111,11 @@ pub struct RuntimeNet<S: NetSpecialization> {
     // then completes as a rewrite, a blocked call or cursor, or a permanent
     // stuck reason.
     pub(super) active: BTreeMap<ActivePairKey, ActivePairState<S>>,
+
+    /// Whether debug checks of the polarity type apply. A test net built by
+    /// hand, or from a deliberately unpolarized template, opts out.
+    #[cfg(test)]
+    polarity_checked: bool,
 }
 
 impl<S: NetSpecialization> RuntimeNet<S> {
@@ -2156,12 +2162,18 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             copies: HashMap::new(),
             cursor_obligations: HashMap::new(),
             active: BTreeMap::new(),
+            #[cfg(test)]
+            polarity_checked: net.polarized,
         };
+        // Template wires are stored provider-first.
         for wire in net.wires.iter() {
-            runtime.connect(wire.left, wire.right);
+            runtime.connect_provider(wire.left, wire.right);
         }
         let exposed = runtime.add_interface(net.exposed);
         runtime.exposed = Some(exposed);
+        for index in 0..net.nodes.len() {
+            runtime.debug_check_node_polarity(NodeId::from_index(index));
+        }
         runtime
     }
 
@@ -2451,6 +2463,8 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             copies: HashMap::new(),
             cursor_obligations: HashMap::new(),
             active: BTreeMap::new(),
+            #[cfg(test)]
+            polarity_checked: true,
         }
     }
 
@@ -3347,7 +3361,8 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         match result {
             OperatorYield::Data(data) => {
                 let node = self.add_node(RuntimeNode::Data(data));
-                self.connect(Port::principal(node), target);
+                self.bind_reference(Port::principal(node), target);
+                self.debug_check_node_polarity(node);
                 node
             }
             OperatorYield::Operator(operator) => {
@@ -3355,9 +3370,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 // argument. A function bind lists `[result, argument]`.
                 let bind = self.add_node(RuntimeNode::Bind);
                 let operator = self.add_node(RuntimeNode::Operator(operator));
-                self.connect(Port::principal(bind), target);
-                self.connect(Port::auxiliary(bind, 2), Port::principal(operator));
-                self.connect(Port::auxiliary(bind, 1), Port::auxiliary(operator, 1));
+                self.bind_reference(Port::principal(bind), target);
+                self.connect_provider(Port::auxiliary(bind, 2), Port::principal(operator));
+                self.connect_provider(Port::auxiliary(operator, 1), Port::auxiliary(bind, 1));
+                self.debug_check_node_polarity(bind);
+                self.debug_check_node_polarity(operator);
                 bind
             }
         }

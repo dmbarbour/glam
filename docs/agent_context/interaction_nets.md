@@ -126,9 +126,9 @@ not route construction through a reflection or task machine again
 
 Every port has a sign: `+` provides a value and `−` consumes one. Each wire
 joins a `+` port to a `−` port, and a net's exposed port is `+` by fiat, like
-`Data`. Polarity is a construction contract, not a runtime tag: nodes store no
-sign and rewrite rules ignore it. `NetBuilder::try_finish` enforces it
-(`interaction_net/polarity.rs`); see "Enforcement" below.
+`Data`. `NetBuilder::try_finish` enforces it on templates
+(`interaction_net/polarity.rs`), and runtime nets carry it as a lightweight
+polarity type; see "Enforcement" and "Runtime Polarity Type" below.
 
 | Node | Ports | Signs |
 | --- | --- | --- |
@@ -149,7 +149,7 @@ sign and rewrite rules ignore it. `NetBuilder::try_finish` enforces it
 - **Erase.** Its sign is free. In `−` position it discards a value. In `+`
   position it is an error value, the analog of `void`.
 - **Rewrites.** Every rewrite of a polarized active pair yields a polarized
-  net.
+  net (polarity-type preservation). Debug builds check it on every rewrite.
 - **Construction.** A constructed net whose component is unreachable from the
   exposed port is miswired. Reduction may still leave disconnected garbage.
 - **Enforcement.** `NetBuilder::try_finish` checks signs and connectivity in
@@ -166,6 +166,39 @@ sign and rewrite rules ignore it. `NetBuilder::try_finish` enforces it
     "output 1 of `.copy 2` #1".
   - A test fixture that is deliberately unpolarized or disconnected opts out
     with `unpolarized_for_test` or `disconnected_for_test`, and states why.
+
+## Runtime Polarity Type
+
+- **Remote polarity.** Each stored link is a typed reference: the peer port
+  plus the peer's sign, packed into the link word's reserved bit at no extra
+  space. An unwired port has no sign.
+- **Moving references.** Rewrites mostly move references:
+  - fusing two sockets writes the two references verbatim;
+  - a new port that stands in for a detached socket takes that socket's sign;
+  - a port that binds to an existing reference takes the opposite sign.
+
+  Internal wires between new nodes take the sign of the old port each copy
+  replaces. Node rules never assign signs from a table.
+- **Debug checks.** Release builds only move bits. Debug builds check two
+  things:
+  - every wire joins opposite signs;
+  - each created node satisfies its rule as an expected peer type:
+    - a `Bind`'s first auxiliary references a provider and its second a
+      consumer;
+    - `Data` references a consumer;
+    - an `Operator`'s input references a provider and its result a consumer;
+    - a `Fan`'s branch references agree and oppose its principal's;
+    - an interface anchor references a provider.
+- **Templates.** Template wires are stored provider-first, from
+  `try_finish`'s sign solution. A sign component the constraints leave free,
+  such as an isolated `Bind >< Bind` pair, is oriented arbitrarily, because
+  preservation holds for any valid typing.
+- **Logical copies.** Materialization binds the copied node where its cursor
+  stood. The node's auxiliary signs follow its rule, and each new cursor
+  stands for the source port across that link.
+- **Test-only links.** A hand-built test net wired with the test-only untyped
+  `connect`, or one instantiated from an `unpolarized_for_test` template,
+  skips the checks.
 
 ## Runtime Identity and Graph State
 

@@ -184,8 +184,9 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
         nodes,
         wires,
         exposed,
+        polarized,
     } = template;
-    let _: (&Arc<[Node<S>]>, &Arc<[Wire]>, &Port) = (nodes, wires, exposed);
+    let _: (&Arc<[Node<S>]>, &Arc<[Wire]>, &Port, &bool) = (nodes, wires, exposed, polarized);
 
     match node {
         Node::Bind | Node::Erase => {}
@@ -209,7 +210,9 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
         copies,
         cursor_obligations,
         active,
+        polarity_checked,
     } = runtime;
+    let _: &bool = polarity_checked;
     let _: (
         &u64,
         &u64,
@@ -231,7 +234,7 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
     );
 
     let RuntimeEntry { node, links } = entry;
-    let _: (&RuntimeNode<S>, &[Option<Port>; 3]) = (node, links);
+    let _: (&RuntimeNode<S>, &[Option<Link>; 3]) = (node, links);
 
     match runtime_node {
         RuntimeNode::Bind | RuntimeNode::Erase | RuntimeNode::Interface => {}
@@ -3488,8 +3491,10 @@ fn auxiliary_cursor_drives_the_local_cursor_facing_the_principal() {
         |data| Ok(OperatorYield::Data(*data)),
     )));
     let exposed = source.add_interface(Port::principal(root));
-    source.connect(Port::auxiliary(root, 1), Port::principal(host));
-    source.connect(Port::auxiliary(root, 2), Port::auxiliary(host, 1));
+    // A function bind lists `[result, argument]`: the argument feeds the
+    // operator, whose result returns to the bind.
+    source.connect(Port::auxiliary(root, 2), Port::principal(host));
+    source.connect(Port::auxiliary(root, 1), Port::auxiliary(host, 1));
     source.exposed = Some(exposed);
     let source = SharedRuntimeNet::new(source);
 
@@ -3506,8 +3511,8 @@ fn auxiliary_cursor_drives_the_local_cursor_facing_the_principal() {
     ));
 
     let state = target.copies.values().next().unwrap();
-    let argument_cursor = state.frontiers[&Port::auxiliary(root, 1)];
-    let result_cursor = state.frontiers[&Port::auxiliary(root, 2)];
+    let argument_cursor = state.frontiers[&Port::auxiliary(root, 2)];
+    let result_cursor = state.frontiers[&Port::auxiliary(root, 1)];
     assert_eq!(
         claim_test_cursor(&mut target, result_cursor),
         Some(CursorProgress::Claimed)
@@ -4352,4 +4357,124 @@ fn operator_application_resolves_an_argument_wired_to_its_result() {
     ));
     assert_eq!(net.nodes.len(), 1);
     assert_eq!(net.active_pairs().len(), 0);
+}
+
+/// Reduces every structural active pair until only calls remain. Each rule's
+/// debug polarity checks run as it rewrites.
+fn reduce_structural_pairs(runtime: &mut RuntimeNet<()>) -> usize {
+    let mut steps = 0;
+    loop {
+        let next = runtime.active_pairs().find(|pair| {
+            let (left, right) = runtime
+                .pair_nodes(*pair)
+                .expect("an active pair has two nodes");
+            !matches!(
+                (runtime.node(left), runtime.node(right)),
+                (Some(RuntimeNode::Bind), Some(RuntimeNode::Data(_)))
+                    | (Some(RuntimeNode::Data(_)), Some(RuntimeNode::Bind))
+                    | (Some(RuntimeNode::Operator(_)), Some(RuntimeNode::Data(_)))
+                    | (Some(RuntimeNode::Data(_)), Some(RuntimeNode::Operator(_)))
+            )
+        });
+        let Some(pair) = next else {
+            return steps;
+        };
+        runtime
+            .reduce_pair(pair)
+            .expect("a structural pair reduces");
+        steps += 1;
+    }
+}
+
+#[test]
+fn every_structural_rewrite_preserves_the_polarity_type() {
+    let identity_function = |net: &mut NetBuilder<()>| {
+        let [function, argument, result] = net.function_bind();
+        net.wire(argument, result);
+        function
+    };
+    let mut templates = Vec::new();
+
+    // `(\x -> x) ()`: a crossed bind join.
+    let mut net = NetBuilder::new();
+    let function = identity_function(&mut net);
+    let [application, applied, result] = net.bind();
+    net.wire(application, function);
+    let data = net.data(());
+    net.wire(applied, data);
+    templates.push(net.finish(result));
+
+    // A copied function, one copy erased: fan duplication of a bind, fan
+    // annihilation, and erasure of a function, whose argument side receives
+    // a positive eraser.
+    let mut net = NetBuilder::new();
+    let function = identity_function(&mut net);
+    let copy = net.copy(2);
+    net.wire(copy.input, function);
+    let erase = net.copy(0).input;
+    net.wire(copy.outputs[1], erase);
+    templates.push(net.finish(copy.outputs[0]));
+
+    // Two values merged into an operator: fan duplication of an operator.
+    let mut net = NetBuilder::new();
+    let [input, output] = net.operator(TestOperator::new("unit", |_| Ok(OperatorYield::Data(()))));
+    let merge = net.push_fan();
+    net.wire(Port::principal(merge), input);
+    let left = net.data(());
+    let right = net.data(());
+    net.wire(Port::auxiliary(merge, 1), left);
+    net.wire(Port::auxiliary(merge, 2), right);
+    templates.push(net.finish(output));
+
+    // A merged value copied: fan commutation, then fan duplication of data
+    // and erasure of data.
+    let mut net = NetBuilder::new();
+    let merge = net.push_fan();
+    let left = net.data(());
+    let right = net.data(());
+    net.wire(Port::auxiliary(merge, 1), left);
+    net.wire(Port::auxiliary(merge, 2), right);
+    let copy = net.copy(2);
+    net.wire(copy.input, Port::principal(merge));
+    let erase = net.copy(0).input;
+    net.wire(copy.outputs[1], erase);
+    templates.push(net.finish(copy.outputs[0]));
+
+    for template in templates {
+        let mut runtime = template.instantiate();
+        assert!(runtime.polarity_checked() || !cfg!(debug_assertions));
+        assert!(reduce_structural_pairs(&mut runtime) > 0);
+    }
+}
+
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "polarity checks run in debug builds")]
+#[should_panic(expected = "joined two ports of the same sign")]
+fn a_wire_between_two_providers_fails_the_polarity_check() {
+    let mut net = NetBuilder::<()>::new();
+    let exposed = net.data(());
+    let mut runtime = net.finish(exposed).instantiate();
+    let left = runtime.add_node(RuntimeNode::Data(()));
+    let right = runtime.add_node(RuntimeNode::Data(()));
+    runtime.wire(
+        SignedPort::new(Port::principal(left), Sign::Provides),
+        SignedPort::new(Port::principal(right), Sign::Provides),
+    );
+}
+
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "polarity checks run in debug builds")]
+#[should_panic(expected = "polarity violated: data")]
+fn a_node_wired_against_its_rule_fails_the_polarity_check() {
+    let mut net = NetBuilder::<()>::new();
+    let exposed = net.data(());
+    let mut runtime = net.finish(exposed).instantiate();
+    let consumer = runtime.add_node(RuntimeNode::Data(()));
+    let provider = runtime.add_node(RuntimeNode::Data(()));
+    // Data bound to a provider would itself consume.
+    runtime.bind_reference(
+        Port::principal(consumer),
+        SignedPort::new(Port::principal(provider), Sign::Provides),
+    );
+    runtime.debug_check_node_polarity(consumer);
 }

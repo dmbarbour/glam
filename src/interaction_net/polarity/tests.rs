@@ -230,6 +230,7 @@ fn a_long_fan_chain_checks_without_deep_recursion() {
         nodes: Arc::from(nodes),
         wires: Arc::from(wires),
         exposed: Port::principal(NodeId::from_index(0)),
+        polarized: true,
     };
     assert_eq!(check_template(&net), Ok(()));
 }

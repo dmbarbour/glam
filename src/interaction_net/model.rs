@@ -8,8 +8,29 @@ use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
+/// A packed port is `(node << 3) + index + 1`: two bits of port index, one
+/// reserved sign bit, and the node above them. A plain [`Port`] keeps the
+/// sign bit clear; a runtime [`Link`] stores its peer's sign there.
 const PORT_BITS: u32 = 2;
 const PORT_MASK: u64 = (1 << PORT_BITS) - 1;
+pub(super) const SIGN_BIT: u64 = 1 << PORT_BITS;
+const NODE_SHIFT: u32 = PORT_BITS + 1;
+
+/// A port's polarity: it provides a value, or consumes one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Sign {
+    Provides,
+    Consumes,
+}
+
+impl Sign {
+    pub fn opposite(self) -> Self {
+        match self {
+            Self::Provides => Self::Consumes,
+            Self::Consumes => Self::Provides,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeId(NonZeroU64);
@@ -154,17 +175,26 @@ impl Port {
 
     pub(super) fn new(node: NodeId, index: u32) -> Self {
         let index = u64::from(index);
-        let max_node = (u64::MAX - index - 1) >> PORT_BITS;
+        let max_node = (u64::MAX - SIGN_BIT - index - 1) >> NODE_SHIFT;
         assert!(
             node.get() <= max_node,
             "interaction-net packed port space exhausted"
         );
-        let tagged = (node.get() << PORT_BITS) + index + 1;
+        let tagged = (node.get() << NODE_SHIFT) + index + 1;
         Self(NonZeroU64::new(tagged).expect("packed port is always nonzero"))
     }
 
+    pub(super) fn raw(self) -> u64 {
+        self.0.get()
+    }
+
+    pub(super) fn from_raw(raw: u64) -> Option<Self> {
+        debug_assert_eq!(raw & SIGN_BIT, 0, "a plain port has no sign bit");
+        NonZeroU64::new(raw).map(Self)
+    }
+
     pub fn node(self) -> NodeId {
-        NodeId::from_zero_based((self.0.get() - 1) >> PORT_BITS)
+        NodeId::from_zero_based((self.0.get() - 1) >> NODE_SHIFT)
     }
 
     pub fn index(self) -> u32 {
@@ -173,6 +203,53 @@ impl Port {
 
     pub fn is_principal(self) -> bool {
         self.index() == 0
+    }
+}
+
+/// A port together with its own sign.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignedPort {
+    pub port: Port,
+    pub sign: Sign,
+}
+
+impl SignedPort {
+    pub fn new(port: Port, sign: Sign) -> Self {
+        Self { port, sign }
+    }
+}
+
+/// One stored runtime link: a reference to the peer port, typed by the
+/// peer's sign. It packs into the same word as a plain port, with the peer's
+/// sign in the reserved bit, so the polarity type costs no extra space.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct Link(NonZeroU64);
+
+impl Link {
+    pub(super) fn to(peer: SignedPort) -> Self {
+        let sign = match peer.sign {
+            Sign::Provides => 0,
+            Sign::Consumes => SIGN_BIT,
+        };
+        Self(NonZeroU64::new(peer.port.raw() | sign).expect("a packed port is nonzero"))
+    }
+
+    pub(super) fn peer(self) -> SignedPort {
+        let raw = self.0.get();
+        SignedPort {
+            port: Port::from_raw(raw & !SIGN_BIT).expect("a link names a peer port"),
+            sign: if raw & SIGN_BIT == 0 {
+                Sign::Provides
+            } else {
+                Sign::Consumes
+            },
+        }
+    }
+}
+
+impl fmt::Debug for Link {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.peer().fmt(f)
     }
 }
 
@@ -248,6 +325,19 @@ pub enum RuntimeNode<S: NetSpecialization> {
 }
 
 impl<S: NetSpecialization> RuntimeNode<S> {
+    /// The sign of auxiliary `index`, given the principal's sign, from the
+    /// polarity table. A bind's auxiliaries are fixed; a fan's oppose its
+    /// principal; an operator's result provides.
+    pub(super) fn auxiliary_sign(&self, principal: Sign, index: u32) -> Sign {
+        match (self, index) {
+            (Self::Bind, 1) => Sign::Consumes,
+            (Self::Bind, 2) => Sign::Provides,
+            (Self::Fan { .. }, 1 | 2) => principal.opposite(),
+            (Self::Operator(_), 1) => Sign::Provides,
+            _ => unreachable!("node has no auxiliary {index}"),
+        }
+    }
+
     pub(super) fn port_count(&self) -> u32 {
         match self {
             Self::Bind | Self::Fan { .. } => 3,
@@ -335,8 +425,14 @@ impl ActivePairKey {
 #[derive(Clone)]
 pub struct InteractionNet<S: NetSpecialization> {
     pub(super) nodes: Arc<[Node<S>]>, // nodes identified by index
-    pub(super) wires: Arc<[Wire]>,    // all wires between ports
-    pub(super) exposed: Port,         // closed net has one exposed port
+    /// Every wire between ports, stored provider-first: `left` provides and
+    /// `right` consumes.
+    pub(super) wires: Arc<[Wire]>,
+    pub(super) exposed: Port, // closed net has one exposed port; it provides
+    /// False for a test template built deliberately unpolarized; its wire
+    /// orientation is then arbitrary.
+    #[cfg(test)]
+    pub(super) polarized: bool,
 }
 
 #[cfg(test)]

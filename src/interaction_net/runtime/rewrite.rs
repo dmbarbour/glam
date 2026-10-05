@@ -59,13 +59,15 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             unreachable!();
         };
         self.remove_node(fan);
-        let replacements = (0..boundary.len())
-            .map(|_| {
-                let clone = self.add_node(RuntimeNode::Data(duplicator.duplicate_data(&payload)));
-                BoundaryReplacement::Port(Port::principal(clone))
-            })
+        let clones = (0..boundary.len())
+            .map(|_| self.add_node(RuntimeNode::Data(duplicator.duplicate_data(&payload))))
+            .collect::<Vec<_>>();
+        let replacements = clones
+            .iter()
+            .map(|clone| BoundaryReplacement::Port(Port::principal(*clone)))
             .collect::<Vec<_>>();
         self.attach_boundary(boundary, &replacements);
+        self.debug_check_created_polarity(&clones);
     }
 
     pub(in crate::interaction_net::runtime) fn duplicate_bind(
@@ -90,10 +92,16 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 let residual = self.add_node(RuntimeNode::Fan {
                     identity: identity.clone(),
                 });
+                // Each copied bind auxiliary keeps the original's sign; the
+                // boundary lists the fan's two sockets, then the bind's.
+                let sign = boundary.socket_sign(2 + auxiliary as usize);
                 for (branch, bind) in binds.iter().enumerate() {
-                    self.connect(
-                        Port::auxiliary(residual, branch as u32 + 1),
-                        Port::auxiliary(*bind, auxiliary + 1),
+                    self.wire(
+                        SignedPort::new(Port::auxiliary(*bind, auxiliary + 1), sign),
+                        SignedPort::new(
+                            Port::auxiliary(residual, branch as u32 + 1),
+                            sign.opposite(),
+                        ),
                     );
                 }
                 residual
@@ -105,6 +113,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             .map(|node| BoundaryReplacement::Port(Port::principal(*node)))
             .collect::<Vec<_>>();
         self.attach_boundary(boundary, &replacements);
+        self.debug_check_created_polarity(&[binds, residuals].concat());
     }
 
     pub(in crate::interaction_net::runtime) fn duplicate_operator(
@@ -134,10 +143,16 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         let residual = self.add_node(RuntimeNode::Fan {
             identity: identity.clone(),
         });
+        // Each copied operator result keeps the original's sign; the boundary
+        // lists the fan's two sockets, then the operator's.
+        let sign = boundary.socket_sign(2);
         for (branch, operator) in operators.iter().enumerate() {
-            self.connect(
-                Port::auxiliary(residual, branch as u32 + 1),
-                Port::auxiliary(*operator, 1),
+            self.wire(
+                SignedPort::new(Port::auxiliary(*operator, 1), sign),
+                SignedPort::new(
+                    Port::auxiliary(residual, branch as u32 + 1),
+                    sign.opposite(),
+                ),
             );
         }
         let replacements = operators
@@ -146,6 +161,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             .map(|node| BoundaryReplacement::Port(Port::principal(*node)))
             .collect::<Vec<_>>();
         self.attach_boundary(boundary, &replacements);
+        self.debug_check_created_polarity(&[operators, vec![residual]].concat());
     }
 
     pub(in crate::interaction_net::runtime) fn commute_fans(
@@ -177,11 +193,21 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 })
             })
             .collect::<Vec<_>>();
+        // Each copy keeps its original's signs. The boundary lists the left
+        // fan's two sockets, then the right fan's, and both branches of one
+        // fan share a sign.
+        let right_branch_sign = boundary.socket_sign(2);
         for (left_branch, right_fan) in right_fans.iter().enumerate() {
             for (right_branch, left_fan) in left_fans.iter().enumerate() {
-                self.connect(
-                    Port::auxiliary(*right_fan, right_branch as u32 + 1),
-                    Port::auxiliary(*left_fan, left_branch as u32 + 1),
+                self.wire(
+                    SignedPort::new(
+                        Port::auxiliary(*right_fan, right_branch as u32 + 1),
+                        right_branch_sign,
+                    ),
+                    SignedPort::new(
+                        Port::auxiliary(*left_fan, left_branch as u32 + 1),
+                        right_branch_sign.opposite(),
+                    ),
                 );
             }
         }
@@ -191,6 +217,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             .map(|node| BoundaryReplacement::Port(Port::principal(*node)))
             .collect::<Vec<_>>();
         self.attach_boundary(boundary, &replacements);
+        self.debug_check_created_polarity(&[right_fans, left_fans].concat());
     }
 
     pub(in crate::interaction_net::runtime) fn erase(&mut self, eraser: NodeId, other: NodeId) {

@@ -1,8 +1,14 @@
 # Net Polarity Checker Plan — 2026-10-05
 
-Status: slices 1–3 done 2026-10-05: documentation, the test-only checker,
-and enforcement at `try_finish`. Slice 4, a runtime polarity type stored in
-port links, is in progress; see "Slice 4 Design" below. This plan comes before N8's random closed-net generator and
+Status: slices 1–4 done 2026-10-05:
+- documentation;
+- the test-only checker;
+- enforcement at `try_finish`;
+- a runtime remote-polarity type in port links, with debug checks on every
+  rewrite.
+
+Next: the N8 random-net generator, slice 5. The positive-erasure
+translation is deferred to the GAL performance adaptation. This plan comes before N8's random closed-net generator and
 before any fuzzing of nets. It follows the crossed `Bind >< Bind` join that
 landed on 2026-10-05.
 
@@ -168,7 +174,12 @@ union-find arrays.
      conflict. It comes from regenerating the earlier constraints and
      searching between the conflicting ports, so it costs nothing until
      something fails.
-4. **Runtime invariant.** Check polarity preservation after every rewrite in
+4. **Runtime invariant.** *Done 2026-10-05,* as the runtime polarity type in
+   "Slice 4 Design" below. Its first full-suite run found no rewrite that
+   breaks polarity. The only violation came from an unpolarized hand-built
+   copy source in one cursor test, which was rewired as a function bind.
+   Dedicated tests exercise each structural rule and prove that both checks
+   fire. The original wording follows: Check polarity preservation after every rewrite in
    test builds, alongside N8's link-symmetry and active-pair checks.
 5. **N8 generator.** Random polarized closed nets, plus a negative mode that
    must be rejected at construction. Compare readback across random pair
@@ -194,31 +205,47 @@ keeps a lightweight polarity type rather than re-solving signs.
   bits for the port index, one for the sign, and the rest for the node.
   Net performance must improve a lot later, so no new runtime tables.
 
-**Design:**
-- **Local polarity.** Each port's slot records the port's own sign, and the
-  sign persists while the port is unwired. A node is created with its port
-  signs. `connect` checks, in debug builds, that the two ends have opposite
-  signs, so every rewrite is checked locally in O(1) per wire.
-- **Node rules.** Creating a node checks its own rules, again in debug
-  builds:
-  - `Bind` auxiliaries are `[−, +]`;
-  - `Data` is `+`;
-  - `Operator` is `[−, +]`;
-  - a `Fan`'s branches agree and oppose its principal.
-- **Rewrite rules.** Each rule derives its new nodes' signs from the pair's
-  stored signs. That makes each rule's typing explicit, and `connect`
-  verifies it.
+**Design** (remote polarity; maintainer, 2026-10-05):
+- **Typed references.** Each port's link records its peer and the peer's
+  sign. An unwired port has no sign. Remote polarity was chosen over storing
+  each port's own sign, which carries the same bit inverted on a wired port,
+  because rewrites mostly move references. Fusing two sockets writes the two
+  references read from the dying slots verbatim. A new node binds to a
+  boundary reference unchanged, and the peer's slot gets the opposite sign,
+  so no rule has to assign signs.
+- **Node rules are local.** They read as the expected peer type of each
+  port:
+  - a `Bind`'s first auxiliary references a provider and its second a
+    consumer;
+  - `Data` references a consumer;
+  - an `Operator`'s input references a provider and its result a consumer;
+  - a `Fan`'s branch references agree with each other and oppose its
+    principal's;
+  - an interface anchor references a provider.
+- **Checks only in debug and test builds.** Release builds only move bits.
+  Debug builds assert two things:
+  - fusing two existing references joins opposite signs;
+  - each node a rule creates satisfies its node rule once wired.
+
+  Every rewrite in the test suite is then a preservation test.
+- **New-to-new wires.** These occur inside some rules, such as fan
+  duplication. Each new port takes the sign of the old port it copies, which
+  is the opposite of the old slot's reference.
 - **Templates carry orientation, not a table.** `try_finish` keeps the sign
   solution and stores every template wire provider-first. Instantiation
-  reads signs from wire order, and the exposed port is `+`. A sign component
-  the constraints leave free, such as an isolated `Bind >< Bind` pair, is
+  writes each slot's reference from wire order, and the exposed port
+  references its interface anchor as a consumer. A sign component the
+  constraints leave free, such as an isolated `Bind >< Bind` pair, is
   oriented arbitrarily. Subject reduction holds for any valid typing.
-- **Logical copies.** Materialization copies a remote node's signs from its
-  source slots. It already reads that node under the source lock.
+- **Logical copies.** A remote cursor stands for the source port across its
+  link. Materialization copies the source node's references.
 - **Exempt fixtures.** A template from an `unpolarized_for_test` builder,
-  and its runtime nets, carry a test-only flag that skips the sign checks.
+  its runtime nets, and copies of them carry a test-only flag that skips the
+  checks.
 
-**Follow-up slice, after slice 4: positive erasure becomes error `Data`.**
+**Deferred to the GAL performance adaptation (maintainer, 2026-10-05):
+positive erasure becomes error `Data`.** It is not needed now; GAL work
+should weigh it against its own level nodes.
 Construction can translate a `+` eraser directly. Reduction also creates
 `+` erasers: erasing a function bind leaves one on its argument side,
 feeding the dead body, and erasing a copy fan or an operator with an error
