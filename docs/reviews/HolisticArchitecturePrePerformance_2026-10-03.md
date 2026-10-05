@@ -1857,13 +1857,18 @@ findings that raise them are noted, and lower-confidence items are marked.
    - *Maintainer decision, 2026-10-03:* retire most inventories. Keep the
      practice of temporary syntax-backed negative tests for major
      transitions (X5).
-   - The surviving set has not yet been chosen.
+   - *Maintainer decision, 2026-10-05:* the surviving set is the V4 table.
+     Exact counts, fingerprints and whitespace-exact snippets are dropped,
+     and each kept rule is reported for review.
 5. **Plans retention.** Delete versus archive. (X8)
 6. **Reflection semantics:**
    - whether `.heap.get` outside a cut should be retry-observable;
    - the lifetime of captured continuations. (R6, R8)
 7. **Script extensions.** Reject unknown extensions, or correct the docs.
    (A5)
+   - *Maintainer decision, 2026-10-05:* reject unknown extensions. Only an
+     extension with a front-end compiler is accepted, so `CLI.md`'s claim
+     that the extension selects the compiler becomes true.
 8. **Language declaration.** How strict to be, including ASCII versus
    `utf8` enforcement. (F7)
    - *Maintainer decision, 2026-10-05:* fail-fast on an unknown base or

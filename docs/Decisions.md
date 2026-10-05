@@ -110,7 +110,8 @@ maps the short names used here to file names.
   - Census totals and fingerprints are never evidence of safety.
 - **Consequences:** supersedes "keep exact inventories through Gate G3", and
   overrides the parallel review's RF-003 suggestion to share inventory
-  parsing. The surviving set is not yet chosen (holistic review P1-7).
+  parsing. The surviving set is the holistic review's V4 table (maintainer,
+  2026-10-05): one negative rule per area, no counts or fingerprints.
 - **Rule lives in:** `AgentContext.md` "Working Rules".
 - **Recorded in:** holistic review X5, V4, Decision 4.
 
@@ -183,6 +184,17 @@ maps the short names used here to file names.
   maintainer answer 2.
 
 ## Language and front end
+
+### Script extensions select a compiler; unknown ones are rejected
+`script-extension-selects-compiler` · 2026-10-05 · maintainer · accepted
+- **Context:** `--script.json` silently parsed as `.g`, contradicting
+  `CLI.md`, which says the extension selects the front-end compiler.
+- **Decision:** reject an extension that has no front-end compiler, failing
+  fast as the language declaration does.
+- **Consequences:** a script's extension is meaningful, and adding a
+  front end means registering its extension.
+- **Rule lives in:** `CLI.md`.
+- **Recorded in:** holistic review A5, Decision 7.
 
 ### Language declarations fail fast; source is ASCII unless `utf8`
 `fail-fast-language-declaration` · 2026-10-05 · maintainer · accepted
