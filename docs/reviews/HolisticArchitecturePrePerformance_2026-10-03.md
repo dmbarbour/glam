@@ -2049,6 +2049,9 @@ findings that raise them are noted, and lower-confidence items are marked.
      Exact counts, fingerprints and whitespace-exact snippets are dropped,
      and each kept rule is reported for review.
 5. **Plans retention.** Delete versus archive. (X8)
+   - *Maintainer decision, 2026-10-05:* delete retired plans and reviews;
+     git is the archive. Their decisions move to `docs/Decisions.md`, and
+     `docs/plans/README.md` keeps a retired-history table of commit hashes.
 6. **Reflection semantics:**
    - whether `.heap.get` outside a cut should be retry-observable;
    - the lifetime of captured continuations. (R6, R8)
