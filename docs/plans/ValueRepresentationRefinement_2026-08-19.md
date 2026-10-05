@@ -222,6 +222,18 @@ request a collector large-object fallback.
 - For candidate 8-, 16-, and 32-byte Rust node alignments, measure tag budget,
   effective metadata-requested stride by node family, slots per run, bitmap
   bytes, and internal fragmentation. Include 24-byte node layouts explicitly.
+- Measure collector pressure tuning, which was planned but never measured: the
+  survivor ratio (currently one half), run size, and class-cache width.
+- Separate logical from physical visits. Tracing is logical: it revisits
+  shared persistent spines once per reference. Physical deduplication is
+  future work, and needs these counts first.
+- Measure two costs the resumable-WHNF work accepted, and revisit them here or
+  at concurrent GC's CG0:
+  - each published checkpoint quantum takes one mutex and walks every edge
+    before and after;
+  - exact routes store O(depth) state.
+- Consider columnar descriptors for large netlists, which net construction
+  deferred to this plan.
 
 ### V1 — Isolated Tagged-Word Prototype
 

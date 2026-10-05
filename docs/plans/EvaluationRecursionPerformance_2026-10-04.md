@@ -37,7 +37,9 @@ milliseconds at modest depth, far beyond any plausible constant overhead.
 1. A per-step scheduler operation walks the whole chain of pending lazy
    dependencies. Exact-dependency routing, cycle detection, or demand-spine
    traversal would each make every call O(depth). The cycle diagnostics
-   already report full dependency chains.
+   already report full dependency chains. Prior evidence: the resumable-WHNF
+   scheduler measurements found an O(depth) chain walk in exact-route
+   selection, and accepted O(depth) route storage as a bootstrap cost.
 2. Each call becomes coordinator work, plus repeated round trips: holistic
    review S1, E1, and E2. This would add a large constant, but not the
    growth.
@@ -51,3 +53,7 @@ milliseconds at modest depth, far beyond any plausible constant overhead.
   this cheap.
 - Check whether time per call scales with the number of pending lazies.
 - Add the countdown to the X3 performance corpus at a few depths.
+- Recheck an old crash. Before the collector and resumable WHNF existed,
+  the `direct_assembly_elf` sample with `--workers 4` and `--workers 1`
+  exited with status 134, from a worker stack overflow. Nobody has rerun
+  it since resumable WHNF replaced recursive demand.

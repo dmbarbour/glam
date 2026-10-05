@@ -1618,6 +1618,10 @@ promise, the headline keeps the reason text.
   use internals.
 - `public_api.rs`'s settle helper panics on `MaintenanceRequired`.
 - The logger-style transactional `TaskHost` has no external test.
+- *Added 2026-10-05, from the GC integration reviews:* a promise resolver
+  given a value from another runtime consumes that value and leaves its
+  promise unassigned forever. Decide whether to reject the value before
+  consuming it.
 
 **A5 — Low.**
 

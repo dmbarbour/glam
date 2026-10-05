@@ -50,6 +50,9 @@ Entry requires:
   and destruction inventories; and
 - a dated post-integration review confirming that no migration adapter or
   conservative root accidentally became part of the permanent graph model.
+  Gate G4 (2026-10-02) served as that review; see
+  [`VERIFY.md`](../../crates/glam-gc/VERIFY.md) and
+  [`Decisions.md`](../Decisions.md).
 
 Compact values from
 [`ValueRepresentationRefinement_2026-08-19.md`](ValueRepresentationRefinement_2026-08-19.md)
@@ -670,9 +673,9 @@ it in [`Decisions.md`](../Decisions.md).
    collector rather than retaining it as an oracle and maintenance mode.
 9. How runtime settlement composes with collection that is not confined to
    an explicit stable-boundary service. Settlement is a known source of
-   issues; the 2026-10-03 aggressive-verification remediation
-   ([`GarbageCollectorAggressiveVerificationRegression_2026-10-03.md`](GarbageCollectorAggressiveVerificationRegression_2026-10-03.md))
-   found two hazards that a concurrent collector must address deliberately:
+   issues; the 2026-10-03 aggressive-verification remediation found two
+   hazards (see `architecture/evaluation.md` "Collector Boundary" and the
+   `settlement-ignores-maintenance-revision` decision) that a concurrent collector must address deliberately:
    - Settlement validation no longer compares the GC maintenance revision.
      It relies on a non-moving, root-preserving collection leaving the
      settled instant unchanged. Re-examine that premise for collection that
