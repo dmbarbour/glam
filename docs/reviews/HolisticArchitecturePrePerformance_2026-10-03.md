@@ -1857,8 +1857,8 @@ findings that raise them are noted, and lower-confidence items are marked.
 
 ## Cross-Reference: Parallel Review
 
-[`ArchitectureAndVerification_2026-10-03.md`](ArchitectureAndVerification_2026-10-03.md)
-reviewed the same revision independently, with a different model on Rust
+`ArchitectureAndVerification_2026-10-03.md` (retired 2026-10-05; see
+`plans/README.md`) reviewed the same revision independently, with a different model on Rust
 1.99.0. The two reviews agree on the verification baseline and differ mainly
 in breadth and in how they treat the inventories.
 

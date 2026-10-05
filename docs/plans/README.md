@@ -31,9 +31,6 @@ Recover a retired doc with `git show <commit>:<path>`.
 - [`HolisticArchitecturePrePerformance_2026-10-03.md`](../reviews/HolisticArchitecturePrePerformance_2026-10-03.md)
   is the pre-performance backlog: its P1 and P2 sequences and open maintainer
   decisions.
-- [`ArchitectureAndVerification_2026-10-03.md`](../reviews/ArchitectureAndVerification_2026-10-03.md)
-  is the parallel review; its remaining findings are mirrored in the holistic
-  review's cross-reference.
 
 ## Deferred Plans
 
@@ -150,3 +147,4 @@ Each line moves into a plan as soon as one owns it.
 | `reviews/ResumableWhnfW6G1Design_2026-09-19.md` | `d959cfd1` | resumable WHNF (`W…`) |
 | `reviews/ResumableWhnfW7_2026-09-27.md` | `ca8548ca` | resumable WHNF (`W…`) |
 | `plans/GarbageCollectorOwnershipLedger_2026-08-20.md` | `8ad63790` | GC integration (`I…`) |
+| `reviews/ArchitectureAndVerification_2026-10-03.md` | `8b1ace22` | parallel review (`AR-…`, `RF-…`) |

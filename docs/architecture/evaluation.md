@@ -166,6 +166,13 @@ only while the record remains blocked on both that epoch and the same
 runtime-local dependency key; stale completion, session teardown, and
 reblocking notifications are harmless. The attached
 `EvaluationExecutor` owns only worker activation, shutdown, and thread handles.
+Activation is all-or-nothing:
+- every worker is spawned behind a `WorkerStartGate` before any may claim
+  work;
+- if a spawn fails, the gate aborts, the prepared workers exit and are
+  joined, nothing is published, and activation stays retryable;
+- on success, the executor publishes the handles and worker count and
+  notifies the coordinator, and only then releases the gate.
 Workers retain a weak coordinator attachment and claim either an exact ready
 task or spark record from it. Reflection and deferred claims need only their
 coordinator records; resident machine contexts may retain closed demand state,

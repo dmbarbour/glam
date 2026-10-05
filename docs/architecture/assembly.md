@@ -121,6 +121,17 @@ path, digest algorithm, and hexadecimal digest in tab-separated fields, so the
 algorithm remains explicit even if a manifest combines different source kinds
 or digest formats in the future.
 
+Writing the manifest never damages an input:
+- **Snapshot first.** It snapshots the digest map and releases the lock
+  before formatting or writing.
+- **Identity check.** It rejects an output whose resolved identity matches
+  any tracked input, following symlinks. Identity is device and inode on
+  Unix, and the canonical path elsewhere.
+- **Atomic publish.** It writes an exclusively created sibling temporary file
+  and renames it into place. An existing destination is never truncated, a
+  failed write leaves it unchanged, and an output symlink to an unrelated
+  file is replaced rather than written through.
+
 Standalone `--check_manifest PATH` re-reads every entry relative to the
 invocation directory when its recorded path is relative. It prints every
 changed or unreadable path and exits unsuccessfully if any differ;
