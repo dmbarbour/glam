@@ -4,9 +4,9 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
-# Keep the profiling-only accounting and deterministic W4E work fuse in the
-# routine verification set without repeating every ordinary Glam test under
-# an instrumented build.
+# Keep the profiling-only accounting and the deterministic net-driver work
+# fuse in the routine verification set without repeating every ordinary Glam
+# test under an instrumented build.
 tests=(
   api::tests::interaction_net_profiles_are_runtime_local
   core_net::tests::profiling_classifies_each_committed_rule_family_exactly_once

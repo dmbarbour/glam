@@ -40,23 +40,15 @@ static RESUME_TAG: LazyLock<Key> = LazyLock::new(|| {
     Key::abstract_global_path(["builtin", "interaction_net", "builder", "resume"])
 });
 
-#[allow(
-    dead_code,
-    reason = "PNC4 defines the private initial state before PNC5 composes the public runner"
-)]
 pub(super) fn initial_user_state(_access: &RuntimeValueAccess<'_>) -> Value {
     Value::Dict(Dict::new_sync().insert(CONTROL_KEY.clone(), Value::List(List::empty())))
 }
 
 /// Constructs the one fixed initial state for a pure builder invocation.
 ///
-/// Brand allocation belongs to the public runner in PNC5. Individual builder
+/// The public runner allocates the brand. Individual builder
 /// operations receive and preserve this state; they never allocate a new
 /// construction identity.
-#[allow(
-    dead_code,
-    reason = "PNC4 defines the private initial state before PNC5 composes the public runner"
-)]
 pub(super) fn initial_builder_state(
     access: &RuntimeValueAccess<'_>,
     brand: &Arc<super::identity::ConstructionBrand>,
@@ -76,10 +68,6 @@ pub(super) fn initial_builder_state(
 /// These are ordinary values. The operation builtins retain the implicit
 /// builder-state argument in their arity, so normal partial application is
 /// the source-visible operation value.
-#[allow(
-    dead_code,
-    reason = "PNC4 assembles the private API before PNC5 composes the public runner"
-)]
 pub(super) fn private_builder_api(_access: &RuntimeValueAccess<'_>) -> Value {
     let mut api = Dict::new_sync();
     for (name, builtin) in [

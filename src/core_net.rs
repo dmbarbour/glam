@@ -1464,8 +1464,8 @@ impl CoreActivePairStep {
     }
 }
 
-// These are representation diagnostics for the observer-free I8A.0 handoff,
-// not ABI promises. A frontier observation is now one traceable net edge plus
+// These pin the current observer-free representation sizes, not ABI
+// promises. A frontier observation is one traceable net edge plus
 // only its scalar operation snapshot; external temporary copy preparation
 // continues to use a registered root.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]

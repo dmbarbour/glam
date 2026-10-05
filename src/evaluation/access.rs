@@ -4,8 +4,7 @@
 //! bounded callback-free evaluator region, whose lifetime-bound authority
 //! cannot enter durable machine state or cross a thread. Production machine,
 //! client-demand, spark, direct-effect, and isolated-search polls receive this
-//! context; I3B-I3D partition the opaque evaluator operations which may safely
-//! open it.
+//! context.
 
 #[cfg(test)]
 use crate::core::ManagedCoreNetRoot;
@@ -39,8 +38,8 @@ pub(crate) struct EvaluationValueAccess<'scope> {
 /// Unlike [`EvaluationValueAccess`], this carrier contains no active mutator
 /// and may remain live while evaluation reports a dependency or invokes a
 /// callback. Callback-free semantic operations use [`Self::with_value_access`]
-/// to open smaller managed-access regions. Its private construction preserves
-/// the poll admission route established by I3A and completed by I3C.
+/// to open smaller managed-access regions. Private construction keeps poll
+/// admission its only entry route.
 pub(crate) struct EvaluatorStepContext<'step> {
     admission: EvaluatorStepAdmission<'step>,
     context: &'step EvalContext,
@@ -153,9 +152,8 @@ impl EvaluatorStepContext<'_> {
         }
     }
 
-    /// Compatibility root publication for a currently bare evaluator result.
-    /// I4F.2 replaces the wrapper with a collector root without changing this
-    /// step-owned boundary.
+    /// Roots one bare evaluator result in a collector-backed runtime root at
+    /// this step-owned boundary.
     pub(crate) fn root_value(
         &self,
         construct: impl for<'scope> FnOnce(&EvaluationValueAccess<'scope>) -> Value,

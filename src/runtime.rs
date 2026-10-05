@@ -828,9 +828,9 @@ impl fmt::Debug for RuntimeValueRoot {
 ///
 /// The existing `Arc<EvaluationFailure>` remains the canonical shared failure
 /// identity. The parallel roots are deliberately shallow: recursive edges are
-/// owned by the root for each direct emission or context value. I6C retained
-/// this compatibility shell after proving that its external owner is not
-/// managed-reachable and retires with its report/coordinator owner.
+/// owned by the root for each direct emission or context value. This
+/// compatibility shell is sound because its external owner is not
+/// managed-reachable and retires with its report or coordinator owner.
 #[derive(Clone)]
 pub(crate) struct RuntimeFailureRoot(Arc<RuntimeFailureRootInner>);
 
@@ -847,7 +847,7 @@ struct RuntimeFailureRootInner {
     failure: Arc<EvaluationFailure>,
     #[allow(
         dead_code,
-        reason = "the I6C-audited compatibility root retains direct failure values for its external owner"
+        reason = "held only to keep the failure's direct values rooted for its external owner; only tests read it"
     )]
     value_roots: Box<[RuntimeValueRoot]>,
 }

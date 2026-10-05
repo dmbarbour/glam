@@ -1,9 +1,10 @@
 //! Exact semantic-value edges in compatibility structural payloads.
 //!
-//! I5 replaced the recursive lazy, promise, and core-net identities. The
-//! remaining adapters keep immutable Rust-owned shells compile-exhaustive and
-//! compose into those exact managed leaves. I6-I8 may retire an adapter only
-//! when an audited managed replacement reports the same edges.
+//! Lazy, promise, and core-net identities are managed edges; see
+//! `Decisions.md` `recursive-identities-are-managed-edges`. These adapters
+//! keep immutable Rust-owned shells compile-exhaustive and compose into those
+//! exact managed leaves. Retire an adapter only when a managed replacement
+//! reports the same edges.
 
 use super::super::{
     BuiltinCall, EvaluatedValue, FixpointComputation, LazyApplication, LazySource,
@@ -19,10 +20,6 @@ use super::super::{EvaluationFailure, SemanticComputation};
 /// reported value. The callback is synchronous and may not retain the borrow.
 /// External scheduler/host lifecycle state is not a semantic value edge and
 /// remains governed by its own root inventory.
-#[allow(
-    dead_code,
-    reason = "I4C compatibility adapters remain the exact walk for audited structural shells"
-)]
 pub(crate) trait CompatibilityValueEdges {
     fn visit_compatibility_value_edges(&self, visit: &mut dyn FnMut(&Value));
 
@@ -191,9 +188,8 @@ impl CompatibilityValueEdges for LazySource {
             #[cfg(test)]
             Self::SemanticThunk(_) => {
                 // This capture-bearing compatibility constructor does not
-                // exist in production. I4B deliberately retains it only for
-                // pre-managed unit fixtures, where it is never presented as
-                // exact traceable state.
+                // exist in production. Only older unit fixtures build it, and
+                // it is never presented as exact traceable state.
             }
             Self::ReflectionTask(computation) => {
                 computation.visit_compatibility_value_edges(visit);

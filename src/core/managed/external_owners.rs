@@ -121,9 +121,9 @@ impl ExternalOwnerRegistry {
     /// Detaches dead entries under the registry lock and destroys their active
     /// owners one at a time only after releasing it.
     ///
-    /// IDs establish a deterministic candidate order within one drain. If one
-    /// destructor unwinds, that attempted owner remains detached while every
-    /// untouched later owner remains registered for the next drain. Concurrent
+    /// IDs establish a deterministic candidate order within one drain. A
+    /// destructor panic is caught and that owner still counts as drained; the
+    /// same pass continues with the remaining owners. Concurrent
     /// drains may divide and interleave destruction; removal under the registry
     /// lock still gives exactly one caller ownership of each destructor, but
     /// destructor order is not a semantic guarantee.

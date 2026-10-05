@@ -181,10 +181,10 @@ pub(crate) fn max_runtime_value_access_depth_for_test() -> usize {
 
 /// The reviewed destruction policy for one Glam-managed representation.
 ///
-/// This record is deliberately smaller than the durable ownership ledger. It
-/// is the compile-time admission token proving that the ledger's direct and
-/// transitive destruction fields were completed before a type reached Glam's
-/// collector gateway.
+/// It is the compile-time admission token proving that a family's direct and
+/// transitive destruction reviews were completed before the type reached
+/// Glam's collector gateway; see `docs/architecture/values.md` "Managed
+/// Families".
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(
     dead_code,

@@ -79,7 +79,7 @@ pub struct InteractionNetProfileSnapshot {
 /// Coordinator mutations observed between an exact-route claim and guarded
 /// release.
 ///
-/// The fields follow the factual W9C coordinator vocabulary. They are
+/// The fields mirror the coordinator's state-transition kinds. They are
 /// profiling observations, not scheduler policy: an occurrence does not by
 /// itself imply that the retained route became invalid.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -131,7 +131,8 @@ impl CoordinatorMutationCounts {
     }
 }
 
-/// Fixed-cost W9 exact-route reconciliation accounting.
+/// Fixed-cost accounting for exact-route reconciliation; see `Decisions.md`
+/// `validated-exact-route-hint`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExactRouteMutationProfileSnapshot {
     pub complete_searches: u64,
@@ -172,7 +173,7 @@ pub struct CoordinatorWaiterOutcomeCounts {
     pub unrelated: u64,
 }
 
-/// Schedule-sensitive W9C accounting for the shared coordinator condition
+/// Schedule-sensitive accounting for the shared coordinator condition
 /// variable.
 ///
 /// The runtime retains aggregate counts only. It does not retain thread,

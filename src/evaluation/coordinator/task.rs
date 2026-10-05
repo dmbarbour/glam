@@ -62,9 +62,9 @@ pub(crate) struct EvaluationTaskBlock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EvaluationWaitPoll {
     Pending(EvaluationWaitToken),
-    // The compatibility root still embeds a large `Value`. Keep the poll
-    // itself pointer-sized until I4F.2 replaces that interior with a managed
-    // root; recursive evaluator drivers carry this enum in several frames.
+    // A runtime value root is wider than a pointer. Boxing it keeps the poll
+    // within two words (asserted below); drivers carry this enum in several
+    // frames.
     Complete(Box<RuntimeValueRoot>),
     Failed(RuntimeFailureRoot),
     Cancelled,

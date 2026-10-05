@@ -429,8 +429,8 @@ impl EvaluationWorkCoordinator {
     /// Test-only compatibility pump for lifecycle fixtures which are not
     /// concerned with thread-role selection.
     ///
-    /// Production selectors deliberately cannot perform this search after
-    /// W6G.1e. Tests which exercise ownership policy must claim an exact
+    /// Production selectors deliberately cannot perform this search. Tests
+    /// which exercise ownership policy must claim an exact
     /// client ID or call `select_worker` and assert that it is absent.
     #[cfg(test)]
     pub(in crate::evaluation) fn claim_ready_client_demand_for_test(

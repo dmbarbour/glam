@@ -6,15 +6,11 @@ use super::CompatibilityValueEdges;
 use crate::core::{Dict, Key, List, Value};
 use crate::list::{LogicalListPart, LogicalListVisitStats};
 
-/// Trace-work counters retained by I7's persistent-representation audit.
+/// Trace-work counters for persistent-collection edge walks.
 ///
 /// Counts are logical visits rather than unique physical nodes. Reusing one
 /// persistent spine in two positions intentionally counts both traversals.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "I7 retains these logical counters for focused fixtures and later profiling"
-)]
 pub(crate) struct PersistentEdgeVisitStats {
     pub(crate) map_entries: usize,
     pub(crate) key_nodes: usize,
@@ -36,9 +32,9 @@ fn visit_map_entries<K: Ord, V>(
 
 /// Exhaustively walks the recursively structured, value-free key language.
 ///
-/// This reports no semantic edge. Keeping the match explicit makes adding a
-/// key representation capable of hiding a `Value` a compile-time I4/I7 audit
-/// event rather than silently treating it as a leaf.
+/// This reports no semantic edge. Keeping the match explicit means a new key
+/// representation that could hide a `Value` fails to compile here instead of
+/// silently being treated as a leaf.
 fn key_node_count(root: &Key) -> usize {
     let mut count = 0;
     let mut worklist = vec![root];

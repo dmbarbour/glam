@@ -289,7 +289,9 @@ impl LazyTaskMachine {
                 self.fail(context, EvaluationHalt::failure(failure.into_failure()))
             }
             WhnfOwnerPoll::External(_) => {
-                unreachable!("W4 external sources retain explicit lazy-task modes")
+                unreachable!(
+                    "external sources run as explicit lazy-task modes, not WHNF boundaries"
+                )
             }
         }
     }
@@ -1523,7 +1525,7 @@ impl EvaluationTaskMachine for PromiseFollower {
             WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
             WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
             WhnfOwnerPoll::External(boundary) => {
-                unreachable!("W2 promise follower produced an external {boundary:?} boundary")
+                unreachable!("promise follower produced an external {boundary:?} boundary")
             }
         }
     }

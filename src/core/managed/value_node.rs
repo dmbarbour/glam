@@ -20,10 +20,9 @@ pub(crate) struct ManagedValueNode {
     value: Value,
 }
 
-// The ownership ledger records stable production-family layouts on the
-// bootstrap's primary target. Keep that record compile-time checked: a layout
-// change is allowed, but it must deliberately update the ledger and this
-// assertion together before the family remains admitted.
+// Layout latch for this managed family on the bootstrap's primary target; see
+// `docs/architecture/values.md` "Managed Families". A layout change is
+// allowed, but it must update this assertion deliberately.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 const _: () = {
     assert!(std::mem::size_of::<ManagedValueNode>() == 64);

@@ -477,8 +477,7 @@ enum TaskHaltKind {
 /// `EdgeFree` is restricted to freshly constructed text-only failures and the
 /// bounded compatibility path from an evaluator phase. Any failure retained
 /// by a lifecycle, search result, or other host-visible protocol surface is
-/// converted to `Rooted` first. W8 revisits whether the edge-free evaluator
-/// carrier remains necessary after recursive-halt compatibility retires.
+/// converted to `Rooted` first.
 #[derive(Clone)]
 enum TaskFailure {
     EdgeFree(Arc<EvaluationFailure>),

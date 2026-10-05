@@ -333,8 +333,7 @@ pub(crate) fn evaluation_context_frame_with_args(operation: &str, args: Dict) ->
 ///
 /// Unlike `eval::failure_diagnostic_value_in`, this path may evaluate the
 /// emission while normalizing it into a diagnostic object. It therefore must
-/// not receive or retain an active value-access region. D.2g replaces its raw
-/// compatibility transport at the public diagnostic boundary.
+/// not receive or retain an active value-access region.
 pub(crate) fn failure_diagnostic_root_with(
     values: &CoreValueFactory,
     failure: &EvaluationFailure,

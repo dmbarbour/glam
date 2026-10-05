@@ -166,8 +166,8 @@ impl EvaluationWorkCoordinator {
         drop(mutation);
         if admitted {
             // The shared condition variable also parks client/session
-            // waiters, none of which may claim a spark. Broadcast until W9C's
-            // evidence justifies distinct waiter-class channels.
+            // waiters, none of which may claim a spark, so broadcast; see
+            // `Decisions.md` `shared-condvar-notification-policy`.
             self.notify_all(CoordinatorMutationKind::FreshWorkAdmission);
         }
     }

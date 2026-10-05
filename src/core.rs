@@ -297,9 +297,8 @@ pub(crate) struct PromisedValue {
     edge: managed::ManagedPromiseEdge,
 }
 
-// GCI5R-003 records the pre-remediation façade cost explicitly. Later
-// checkpoints update these target-specific representation latches as fields
-// are removed; they are not a language-level value-size policy.
+// Target-specific representation latches: each handle is one managed edge
+// with no drop glue. They are not a language-level value-size policy.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 const _: () = {
     assert!(std::mem::size_of::<LazyValue>() == 8);
@@ -575,9 +574,6 @@ impl CoreValueFactory {
             .expect("canonical runtime values initialize before factory publication")
     }
 
-    // D.2h.3b fixture bridge. Production has no factory-level raw-value
-    // projection; the all-target fixture migration removes these helpers
-    // before ledger closure.
     /// Returns one runtime-local cache entry, allowing harmless duplicate
     /// construction when callers race. Only the completed value is installed.
     pub(crate) fn cached<T>(&self, build: impl FnOnce() -> T) -> Arc<T>
@@ -1389,7 +1385,7 @@ impl FunctionCode {
     #[inline(always)]
     #[allow(
         dead_code,
-        reason = "D.2b.3c establishes the explicit shell operation before D.2c migrates core operators"
+        reason = "no production caller copies a whole function-code shell; fixtures use it"
     )]
     pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
         Self::new(
@@ -1680,9 +1676,8 @@ struct HostCallOwner {
 ///
 /// The record deliberately does not claim that a Rust closure environment is
 /// traceable. It makes every production constructor name the external owner
-/// and distinguish no semantic capture from explicit traceable capture. I10A
-/// source-latches the remaining arbitrary callback environments as
-/// conservative external owners.
+/// and distinguish no semantic capture from explicit traceable capture. Any
+/// other callback environment is treated conservatively as an external owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct HostCallRecord {
     family: &'static str,
@@ -2009,115 +2004,31 @@ pub enum Builtin {
     /// interaction-net record. The built-in module never binds this value.
     #[allow(
         dead_code,
-        reason = "PNC1 establishes hidden replay before PNC5 composes the pure public runner"
+        reason = "the pure builder runner replays netlists directly; only fixtures construct this builtin"
     )]
     InteractionNetFromNetlist,
     /// Evaluator-private state-over-list composition used while lowering
     /// interaction-net construction away from the reflection task runner.
-    #[allow(
-        dead_code,
-        reason = "PNC2-PNC5 assemble the hidden pure builder in stages"
-    )]
     InteractionNetBuilderReturn,
-    #[allow(
-        dead_code,
-        reason = "PNC2-PNC5 assemble the hidden pure builder in stages"
-    )]
     InteractionNetBuilderSeq,
-    #[allow(
-        dead_code,
-        reason = "PNC2-PNC5 assemble the hidden pure builder in stages"
-    )]
     InteractionNetBuilderContinue,
-    #[allow(
-        dead_code,
-        reason = "PNC2-PNC5 assemble the hidden pure builder in stages"
-    )]
     InteractionNetBuilderAlt,
-    #[allow(
-        dead_code,
-        reason = "PNC2-PNC5 assemble the hidden pure builder in stages"
-    )]
     InteractionNetBuilderFail,
-    #[allow(
-        dead_code,
-        reason = "PNC2-PNC5 assemble the hidden pure builder in stages"
-    )]
     InteractionNetBuilderCut,
-    #[allow(
-        dead_code,
-        reason = "PNC2-PNC5 assemble the hidden pure builder in stages"
-    )]
     InteractionNetBuilderGet,
-    #[allow(
-        dead_code,
-        reason = "PNC2-PNC5 assemble the hidden pure builder in stages"
-    )]
     InteractionNetBuilderSet,
-    #[allow(
-        dead_code,
-        reason = "PNC3-PNC5 assemble hidden pure builder control in stages"
-    )]
     InteractionNetBuilderReset,
-    #[allow(
-        dead_code,
-        reason = "PNC3-PNC5 assemble hidden pure builder control in stages"
-    )]
     InteractionNetBuilderShift,
-    #[allow(
-        dead_code,
-        reason = "PNC4-PNC5 assemble hidden pure builder construction in stages"
-    )]
     InteractionNetBuilderBind,
-    #[allow(
-        dead_code,
-        reason = "PNC4-PNC5 assemble hidden pure builder construction in stages"
-    )]
     InteractionNetBuilderCopy,
-    #[allow(
-        dead_code,
-        reason = "PNC4-PNC5 assemble hidden pure builder construction in stages"
-    )]
     InteractionNetBuilderData,
-    #[allow(
-        dead_code,
-        reason = "PNC4-PNC5 assemble hidden pure builder construction in stages"
-    )]
     InteractionNetBuilderWire,
-    #[allow(
-        dead_code,
-        reason = "PNC5 interprets nested construction effects through the pure builder"
-    )]
     InteractionNetBuilderRun,
-    #[allow(
-        dead_code,
-        reason = "PNC3-PNC5 assemble hidden pure builder control in stages"
-    )]
     InteractionNetBuilderResume,
-    #[allow(
-        dead_code,
-        reason = "PNC5 presents captured builder continuations as functions returning effects"
-    )]
     InteractionNetBuilderResumeApply,
-    #[allow(
-        dead_code,
-        reason = "PNC3-PNC5 assemble hidden pure builder control in stages"
-    )]
     InteractionNetBuilderFix,
-    #[allow(
-        dead_code,
-        reason = "PNC3-PNC5 assemble hidden pure builder control in stages"
-    )]
     InteractionNetBuilderFixApply,
-    #[allow(
-        dead_code,
-        reason = "PNC3-PNC5 assemble hidden pure builder control in stages"
-    )]
     InteractionNetBuilderFixRun,
-    #[allow(
-        dead_code,
-        reason = "PNC3-PNC5 assemble hidden pure builder control in stages"
-    )]
     InteractionNetBuilderFixRestore,
     NetArity,
     /// Host-provided capability for inspecting opaque compilation origins.
@@ -2641,10 +2552,6 @@ impl RuntimeValueAccess<'_> {
 
     /// Names the outer diagnostic category without demanding the value or any
     /// member of a persistent container.
-    #[allow(
-        dead_code,
-        reason = "D.2b.1b establishes the regional operation before D.2c-D.2g migrate callers"
-    )]
     pub(crate) fn diagnostic_kind_name(&self, value: &Value) -> &'static str {
         match value {
             Value::Atom(atom) if atom.key() == &*keys::UNIT => "Unit",
@@ -2667,10 +2574,6 @@ impl RuntimeValueAccess<'_> {
     /// A deferred list segment, lazy value, promise, function, net, sealed
     /// carrier, or opaque value returns `None`. In particular, this traversal
     /// never invokes the list forcing callback merely to discover a mismatch.
-    #[allow(
-        dead_code,
-        reason = "D.2b.1b establishes the regional operation before D.2c-D.2g migrate callers"
-    )]
     pub(crate) fn key_from_value(&self, value: &Value) -> Option<Key> {
         match value {
             Value::Atom(atom) => Some(Key::Atom(*atom)),
@@ -2726,10 +2629,6 @@ impl RuntimeValueAccess<'_> {
     }
 
     /// Reifies one key as ordinary raw data inside this access region.
-    #[allow(
-        dead_code,
-        reason = "D.2b.1b establishes the regional operation before D.2c-D.2g migrate callers"
-    )]
     pub(crate) fn value_from_key(&self, key: &Key) -> Value {
         match key {
             Key::Atom(atom) => Value::Atom(*atom),
@@ -2875,10 +2774,6 @@ impl RuntimeValueAccess<'_> {
 
     /// Borrows one non-demanding diagnostic representation under this value
     /// domain's active access region.
-    #[allow(
-        dead_code,
-        reason = "D.2b.1d establishes the regional formatter before D.2c-D.2g migrate callers"
-    )]
     pub(crate) fn diagnostic_debug<'access>(
         &'access self,
         value: &'access Value,
@@ -2890,8 +2785,8 @@ impl RuntimeValueAccess<'_> {
     }
 }
 
-/// Explicit representation relation used by unit fixtures after the P4
-/// standard-trait cutover.
+/// Explicit representation relation used by unit fixtures in place of the
+/// standard equality traits.
 ///
 /// The relation always names the value domain whose mutator authorizes any
 /// managed-edge observation. Recursive container implementations make it

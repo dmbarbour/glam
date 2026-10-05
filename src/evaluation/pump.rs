@@ -47,7 +47,7 @@ impl ClientDemandOperation {
                 coordinator::ClientDemandPoll::Failed(failure)
             }
             super::whnf::WhnfOwnerPoll::External(boundary) => {
-                unreachable!("W2 semantic shell produced an external {boundary:?} boundary")
+                unreachable!("client demand produced an external {boundary:?} boundary")
             }
         }
     }

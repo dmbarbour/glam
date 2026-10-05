@@ -910,14 +910,13 @@ impl EvalContext {
         ))
     }
 
-    /// Temporary raw-value compatibility facade for callers not yet migrated
+    /// Test-only raw-value compatibility facade for fixtures not yet migrated
     /// to regional handoff APIs.
     ///
     /// New orchestration must retain a [`RuntimeValueRoot`] and call
     /// [`Self::evaluate_root_whnf`]. This method necessarily registers one
     /// input root, opens no mutator while pumping, then projects the completed
-    /// root only for its raw return. GCI11R-002D.2 owns its remaining callers
-    /// and eventual removal.
+    /// root only for its raw return.
     #[cfg(test)]
     pub(crate) fn evaluate_compatibility_whnf(
         &self,
@@ -935,7 +934,7 @@ impl EvalContext {
 
     /// Runs one explicitly bounded evaluator quantum for a regional test.
     ///
-    /// Unlike W8's retired direct-evaluator admission, this enters through
+    /// Unlike a direct evaluator call, this enters through
     /// the normal poll carrier and therefore exercises the same publication
     /// boundary as a scheduled machine. Whole-value fixtures should use the
     /// runtime-owned client-demand driver instead.
@@ -1135,10 +1134,9 @@ impl EvalContext {
     /// Advances one retained test demand until it completes or exposes its
     /// current exact dependency without abandoning the resumable operation.
     ///
-    /// W8 uses this only for fixtures which deliberately withhold a host-side
-    /// completion. The normal synchronous driver remains patient; this seam
-    /// exists so those tests do not reconstruct the retired recursive
-    /// evaluator or discard continuation state merely to inspect a wait.
+    /// Only fixtures which deliberately withhold a host-side completion use
+    /// this. The normal synchronous driver remains patient; this seam lets
+    /// those tests inspect a wait without discarding continuation state.
     #[cfg(test)]
     pub(crate) fn advance_client_demand_for_test(
         &self,
@@ -1230,8 +1228,8 @@ impl EvalContext {
     /// Forces exactly one scheduled deferred demand to return its dependency
     /// before cooperative pumping can complete the producer.
     ///
-    /// W0A uses this deterministic seam to characterize the coarse reflection
-    /// replay which the resumable-WHNF transition must remove. The shared arm
+    /// Tests use this deterministic seam to confirm that reflection decoding
+    /// resumes from its checkpoint without replay. The shared arm
     /// bit follows clones of one machine context, but deferred producer
     /// contexts do not inherit the hook.
     #[cfg(test)]

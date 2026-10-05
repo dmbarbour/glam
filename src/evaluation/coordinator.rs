@@ -698,9 +698,8 @@ struct WorkCoordinatorState {
 
 /// Factual source of one broad coordinator revision publication.
 ///
-/// These labels deliberately describe the state transition rather than its
-/// eventual exact-route policy. W9C.1 profiles them before W9C.3 decides which
-/// classes can affect a retained route.
+/// Variants describe the state transition, not route policy;
+/// `affects_exact_route` decides which can invalidate a retained route.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CoordinatorMutationKind {
@@ -778,9 +777,9 @@ const COORDINATOR_MUTATION_KIND_COUNT: usize = 21;
 impl WorkCoordinatorState {
     /// Publishes one scheduler-visible mutation.
     ///
-    /// Keep every production revision advance behind this boundary so the
-    /// W9C mutation census remains compile-exhaustive as coordinator paths are
-    /// added or reorganized.
+    /// Keep every production revision advance behind this boundary so each
+    /// one is classified by a `CoordinatorMutationKind` as coordinator paths
+    /// are added or reorganized.
     fn advance_work_generation(&mut self, kind: CoordinatorMutationKind) {
         self.work_generation = self.work_generation.wrapping_add(1);
         if kind.affects_exact_route() {

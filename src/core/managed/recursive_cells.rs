@@ -378,10 +378,6 @@ impl ManagedLazyEdge {
     }
 
     #[inline(always)]
-    #[allow(
-        dead_code,
-        reason = "P2B installs explicit lazy identity before parent raw-Value equality migrates"
-    )]
     pub(crate) fn same_allocation_in(
         &self,
         other: &Self,
@@ -416,10 +412,6 @@ impl ManagedPromiseEdge {
     }
 
     #[inline(always)]
-    #[allow(
-        dead_code,
-        reason = "P2B installs explicit promise identity before EvaluationHalt equality migrates"
-    )]
     pub(crate) fn same_allocation_in(
         &self,
         other: &Self,
@@ -1422,8 +1414,7 @@ unsafe impl ManagedFamily for ManagedCoreNetCell {
 }
 
 // These are representation records, not a value-size policy. A deliberate
-// field change must update the ownership ledger and these target-specific
-// latches.
+// field change must update these target-specific latches.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 const _: () = {
     assert!(std::mem::size_of::<ManagedLazyCell>() == 144);

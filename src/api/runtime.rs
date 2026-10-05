@@ -956,8 +956,8 @@ impl EvaluationRuntime {
         }
     }
 
-    /// Test compatibility name retained while I11 fixtures migrate to the
-    /// public I12 maintenance service.
+    /// Test-only alias for the public `service_managed_collection`, still
+    /// used by older fixtures.
     #[cfg(test)]
     pub(crate) fn collect_managed_for_maintenance(
         &self,

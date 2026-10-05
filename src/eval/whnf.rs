@@ -1,9 +1,9 @@
 //! Crate-private protocol for resumable evaluation to outer WHNF.
 //!
-//! W1A installs the state vocabulary and W1B adds its callback-free regional
-//! driver. W1C projects and publishes durable checkpoints at real regional
-//! boundaries. W2 uses that protocol for client demand and promise following;
-//! later checkpoints extend it through lazy sources and caller frames.
+//! Each poll runs a callback-free regional driver under one access region and
+//! takes a durable checkpoint only at real boundaries. Client demand, promise
+//! following, and reflection all drive this one computation; see
+//! `Decisions.md` `resumable-whnf-regional-quanta`.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -105,12 +105,12 @@ pub(crate) struct NetWhnfObservation {
 pub(crate) struct WhnfFrame {
     #[allow(
         dead_code,
-        reason = "the W1 synthetic frame algebra observes control fields only in protocol fixtures"
+        reason = "production never builds generic frames; only fixtures read these fields"
     )]
     kind: WhnfFrameKind,
     #[allow(
         dead_code,
-        reason = "the W1 synthetic frame algebra observes control fields only in protocol fixtures"
+        reason = "production never builds generic frames; only fixtures read these fields"
     )]
     cursor: usize,
     retained: Vec<Value>,
@@ -300,10 +300,11 @@ impl std::ops::DerefMut for RegionalWhnfWork {
     }
 }
 
-/// Shared resumption shapes selected by the W0 census.
+/// Shared resumption shapes: most demand sites inspect the result, so frames
+/// share one continuation vocabulary.
 #[allow(
     dead_code,
-    reason = "W0 selected the complete frame vocabulary; W3-W6 construct the deeper frame families"
+    reason = "production never builds generic frames; fixtures build only some kinds"
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WhnfFrameKind {
@@ -321,10 +322,6 @@ pub(crate) enum WhnfFrameKind {
 /// `Delegate` replaces the current focus without pushing a frame. `Boundary`
 /// carries only a durable request; its interpretation belongs to the outer
 /// evaluation driver after regional access closes.
-#[allow(
-    dead_code,
-    reason = "W2 needs delegation and terminal steps; W3+ adds explicit continuation frames"
-)]
 pub(crate) enum RegionalWhnfStep {
     Delegate(Value),
     Ready(Value),
@@ -335,9 +332,9 @@ pub(crate) enum RegionalWhnfStep {
 /// Outcome of driving callback-free WHNF work beneath one managed-access
 /// region.
 ///
-/// `Boundary` and `Yielded` deliberately return the exact regional work. W1C
-/// will project that work into a durable checkpoint before the access region
-/// closes; callers must not store this raw form in a machine.
+/// `Boundary` and `Yielded` deliberately return the exact regional work. The
+/// caller projects it into a durable checkpoint before the access region
+/// closes and must not store this raw form in a machine.
 pub(crate) enum RegionalWhnfDrive {
     Ready(Value),
     Boundary {
@@ -362,7 +359,7 @@ pub(crate) enum RegionalWhnfStatus {
 /// still active and therefore need no intermediate roots.
 #[allow(
     dead_code,
-    reason = "the NC1 split oracle retains the consuming driver; production NC4 claims in place so unwind can restore the same payload"
+    reason = "production drives net checkpoints in place so unwind can restore them; only fixtures use this consuming form"
 )]
 pub(crate) enum NetWhnfDrive {
     Ready(Value),
@@ -435,7 +432,7 @@ fn drive_regional_state_in_place<'scope>(
 /// A regional result which requires orchestration outside managed access.
 #[allow(
     dead_code,
-    reason = "W2 implements deferred shells; W3-W4 construct direct dependencies and external boundaries"
+    reason = "the semantic reducer emits only deferred requests; fixtures build the other forms"
 )]
 pub(crate) enum RegionalBoundaryRequest {
     Dependency(WhnfDependency),
@@ -454,10 +451,13 @@ pub(crate) enum WhnfDeferredRequest {
     PromiseFollow(ManagedPromiseRoot),
 }
 
-/// External boundary family. Later checkpoints add the source-specific
-/// durable payload only when a production boundary is migrated.
+/// External boundary family. A source-specific durable payload is added only
+/// when a production reducer yields that boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code, reason = "external source families are staged for W4")]
+#[allow(
+    dead_code,
+    reason = "no production reducer yields an external boundary; fixtures build some families"
+)]
 pub(crate) enum WhnfExternalBoundary {
     Reflection,
     Host,
@@ -472,7 +472,7 @@ pub(crate) enum WhnfExternalBoundary {
 #[derive(Clone)]
 #[allow(
     dead_code,
-    reason = "W2 consumes translated dependencies; W3+ constructs them inside the semantic machine"
+    reason = "the semantic reducer emits only deferred requests; fixtures build dependencies"
 )]
 pub(crate) enum WhnfDependency {
     Wait(CoreWaitToken),
@@ -547,7 +547,7 @@ impl NetWhnfState {
     /// transition loop as ordinary WHNF computation.
     #[allow(
         dead_code,
-        reason = "the NC1 split oracle retains this consuming adapter; production NC4 drives an in-place claim so unwind can restore it"
+        reason = "production drives net checkpoints in place so unwind can restore them; only fixtures use this consuming adapter"
     )]
     pub(crate) fn drive_in(
         self,
@@ -854,9 +854,8 @@ impl WhnfComputation {
 
     /// Polls the production outer-shell reducer beneath one managed region.
     ///
-    /// W2 initially handles only lazy and promise shells. Later phases extend
-    /// the same reducer with caller frames and source-specific work without
-    /// changing the durable publication boundary.
+    /// The reducer follows lazy and promise shells and resumes semantic
+    /// frames; extensions keep the same durable publication boundary.
     pub(crate) fn poll_semantic_in(
         &mut self,
         access: &EvaluationValueAccess<'_>,
@@ -1006,7 +1005,7 @@ fn resume_semantic_frame(
             return resume_static_access(access, work);
         }
         Some(WhnfContinuation::Generic(_)) => {
-            unreachable!("W3C has not activated the remaining generic frame families")
+            unreachable!("the semantic reducer never resumes a generic frame")
         }
         None => unreachable!("a semantic frame resume requires one frame"),
     }
