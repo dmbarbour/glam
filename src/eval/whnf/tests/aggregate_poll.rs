@@ -34,8 +34,8 @@ fn wait(context: &EvalContext) -> CoreWaitToken {
 fn one_poll_aggregates_every_focus_and_frame_edit_into_one_edge_transition() {
     let context = context();
     let values = context.values();
-    let (old_root, old) = values.rooted_error_lazy_for_test("W6G.3e old edge");
-    let (new_root, new) = values.rooted_error_lazy_for_test("W6G.3e new edge");
+    let (old_root, old) = values.rooted_error_lazy_for_test("aggregate-poll old edge");
+    let (new_root, new) = values.rooted_error_lazy_for_test("aggregate-poll new edge");
     let focus = values.construct_runtime_value_root(|access| Value::Lazy(old.duplicate_in(access)));
     let mut computation = WhnfComputation::from_root(focus);
     let expected = wait(&context);
@@ -163,7 +163,7 @@ fn managed_checkpoint_resumes_on_another_worker_after_collection() {
 
 #[test]
 fn aggregate_poll_exit_matrix_remains_explicit() {
-    let w1c = include_str!("w1c.rs");
+    let publication = include_str!("checkpoint_publication.rs");
     for fixture in [
         "external_boundary_publishes_the_complete_checkpoint_before_access_closes",
         "permanent_failure_is_rooted_inside_the_regional_poll",
@@ -172,19 +172,19 @@ fn aggregate_poll_exit_matrix_remains_explicit() {
         "collection_between_polls_preserves_only_the_installed_checkpoint",
     ] {
         assert!(
-            w1c.contains(&format!("fn {fixture}")),
-            "W6G.3e exit coverage lost `{fixture}`"
+            publication.contains(&format!("fn {fixture}")),
+            "aggregate-poll exit coverage lost `{fixture}`"
         );
     }
 
-    let current = include_str!("w6g3e.rs");
+    let current = include_str!("aggregate_poll.rs");
     for fixture in [
         "one_poll_aggregates_every_focus_and_frame_edit_into_one_edge_transition",
         "managed_checkpoint_resumes_on_another_worker_after_collection",
     ] {
         assert!(
             current.contains(&format!("fn {fixture}")),
-            "W6G.3e aggregate coverage lost `{fixture}`"
+            "aggregate-poll coverage lost `{fixture}`"
         );
     }
 

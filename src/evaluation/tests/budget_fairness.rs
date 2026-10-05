@@ -1,4 +1,4 @@
-//! Deterministic budget, yield, and fairness witnesses for Phase W7C.
+//! Deterministic budget, yield, and fairness witnesses for scheduler polls.
 //!
 //! Every ordering assertion is driven by explicit single-poll calls. Repeated
 //! execution under an uncontrolled scheduler is deliberately not evidence.

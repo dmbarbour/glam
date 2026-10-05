@@ -290,7 +290,7 @@ impl EvaluationDemandState {
     }
 }
 #[cfg(test)]
-mod tests;
+#[path = "evaluation/tests/budget_fairness.rs"]
+mod budget_fairness_tests;
 #[cfg(test)]
-#[path = "evaluation/tests/w7c.rs"]
-mod w7c_tests;
+mod tests;

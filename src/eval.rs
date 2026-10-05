@@ -102,5 +102,5 @@ use value::*;
 mod tests;
 
 #[cfg(test)]
-#[path = "eval/tests/w7b.rs"]
-mod w7b_tests;
+#[path = "eval/tests/small_stack.rs"]
+mod small_stack_tests;

@@ -1762,8 +1762,11 @@ cheaper. Items within a group are independent.
        holds it only to keep its values rooted.
      - *Unused even by tests:* `WhnfFrameKind::{Application, KeyConversion}`
        and `WhnfExternalBoundary::Net`.
-     - Still open: inventory step IDs (with inventory triage) and the test
-       modules and files named after step IDs.
+     - The 17 test files named after step IDs now have descriptive names,
+       such as `callable_checkpoint.rs`, `small_stack.rs` and
+       `budget_fairness.rs`. The profiling script follows them.
+     - Still open: step IDs inside inventories (with inventory triage) and
+       inside test-module comments.
 8. **Docs that perf work will rebase on (X8, R4).**
    - `architecture/values.md` and a definition of "compatibility".
    - Correct the fusion, saturation, and net-driver descriptions.

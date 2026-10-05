@@ -491,7 +491,7 @@ impl RootPublicationOccurrence {
                 | "src/eval/value.rs::impl LazyTaskMachine::poll_builtin_checkpoint"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll_object_fixpoint_checkpoint"
                 | "src/eval/value.rs::impl LazyTaskMachine::poll_list_effect_checkpoint"
-                | "src/eval/value/tests/w4.rs::host_call_follows_a_lazy_result_without_reinvocation"
+                | "src/eval/value/tests/lazy_checkpoint.rs::host_call_follows_a_lazy_result_without_reinvocation"
                 | "src/eval/whnf.rs::impl WhnfComputation::from_promise_root"
                 | "src/eval/whnf.rs::regional_status_poll"
                 | "src/evaluation/access.rs::impl EvaluationValueAccess < 'scope >::root_value"
@@ -831,10 +831,12 @@ fn every_runtime_root_publication_has_an_exact_disposition() {
     // panicked after caching its result settles with that cached result.
     // A3 adds one outer construction boundary: a macro compiler diagnostic
     // carries an evaluation failure as its structured cause.
+    // Test files named after plan steps were renamed descriptively; only
+    // source paths changed.
     assert_eq!(actual.len(), 274, "runtime-root publication count drifted");
     assert_eq!(
         root_publication_fingerprint(&occurrences),
-        7_739_186_239_368_988_222,
+        943_982_521_893_308_522,
         "runtime-root publication source fingerprint drifted"
     );
 

@@ -1531,49 +1531,49 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "whnf/tests/w1b.rs"]
-mod w1b_tests;
+#[path = "whnf/tests/regional_steps.rs"]
+mod regional_steps_tests;
 
 #[cfg(test)]
-#[path = "whnf/tests/w1c.rs"]
-mod w1c_tests;
+#[path = "whnf/tests/checkpoint_publication.rs"]
+mod checkpoint_publication_tests;
 
 #[cfg(test)]
-#[path = "whnf/tests/w2a.rs"]
-mod w2a_tests;
+#[path = "whnf/tests/lazy_follower.rs"]
+mod lazy_follower_tests;
 
 #[cfg(test)]
-#[path = "whnf/tests/w2b.rs"]
-mod w2b_tests;
+#[path = "whnf/tests/promise_follower.rs"]
+mod promise_follower_tests;
 
 #[cfg(test)]
-#[path = "whnf/tests/w3b_application.rs"]
-mod w3b_application_tests;
+#[path = "whnf/tests/application.rs"]
+mod application_tests;
 
 #[cfg(test)]
-#[path = "whnf/tests/w3c_access.rs"]
-mod w3c_access_tests;
+#[path = "whnf/tests/static_access.rs"]
+mod static_access_tests;
 
 #[cfg(test)]
-#[path = "whnf/tests/nc1.rs"]
-mod nc1_tests;
+#[path = "whnf/tests/net_state.rs"]
+mod net_state_tests;
 
 #[cfg(test)]
-#[path = "whnf/tests/w6g3a.rs"]
-mod w6g3a_tests;
+#[path = "whnf/tests/seed_promotion.rs"]
+mod seed_promotion_tests;
 
 #[cfg(test)]
-#[path = "whnf/tests/w6g3b.rs"]
-mod w6g3b_tests;
+#[path = "whnf/tests/borrowed_yield.rs"]
+mod borrowed_yield_tests;
 
 #[cfg(test)]
-#[path = "whnf/tests/w6g3c.rs"]
-mod w6g3c_tests;
+#[path = "whnf/tests/managed_state.rs"]
+mod managed_state_tests;
 
 #[cfg(test)]
-#[path = "whnf/tests/w6g3e.rs"]
-mod w6g3e_tests;
+#[path = "whnf/tests/aggregate_poll.rs"]
+mod aggregate_poll_tests;
 
 #[cfg(test)]
-#[path = "whnf/tests/w6g1f1.rs"]
-mod w6g1f1_tests;
+#[path = "whnf/tests/checkpoint_cycle.rs"]
+mod checkpoint_cycle_tests;

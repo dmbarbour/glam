@@ -584,9 +584,11 @@ fn every_mutator_introduction_has_an_exact_disposition() {
     // test-only access compares the `panicked` task status with its key. One
     // cold-path outer admission records a lazy's own panic when its route
     // releases.
+    // Test files named after plan steps were renamed descriptively; only
+    // source paths changed.
     assert_eq!(
         admission_occurrence_fingerprint(&occurrences),
-        15_179_578_428_082_071_443,
+        16_243_700_549_454_850_851,
         "managed mutator-introduction source fingerprint drifted"
     );
 

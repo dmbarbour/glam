@@ -1925,9 +1925,9 @@ mod ownership_tests {
 }
 
 #[cfg(test)]
-#[path = "value/tests/w3a.rs"]
-mod w3a_tests;
+#[path = "value/tests/lazy_source_install.rs"]
+mod lazy_source_install_tests;
 
 #[cfg(test)]
-#[path = "value/tests/w4.rs"]
-mod w4_tests;
+#[path = "value/tests/lazy_checkpoint.rs"]
+mod lazy_checkpoint_tests;

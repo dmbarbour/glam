@@ -432,7 +432,7 @@ fn retained_application_machine(
 }
 
 #[test]
-fn w6g1f3i_application_checkpoint_survives_promise_and_route_loss() {
+fn application_checkpoint_survives_promise_and_route_loss() {
     let context = isolated_context();
     let function = PromisedValue::new(context.values(), "deferred application function");
     let _function_root = function.root(context.values());
@@ -459,7 +459,7 @@ fn w6g1f3i_application_checkpoint_survives_promise_and_route_loss() {
 }
 
 #[test]
-fn w6g1f3i_function_fixpoint_checkpoint_survives_promise_and_route_loss() {
+fn function_fixpoint_checkpoint_survives_promise_and_route_loss() {
     let context = isolated_context();
     let result = PromisedValue::new(context.values(), "deferred fixpoint result");
     let _result_root = result.root(context.values());
@@ -504,7 +504,7 @@ fn w6g1f3i_function_fixpoint_checkpoint_survives_promise_and_route_loss() {
 }
 
 #[test]
-fn w6g1f3i_static_access_checkpoint_survives_promise_and_route_loss() {
+fn static_access_checkpoint_survives_promise_and_route_loss() {
     let context = isolated_context();
     let result = PromisedValue::new(context.values(), "deferred static access result");
     let _result_root = result.root(context.values());
@@ -536,7 +536,7 @@ fn w6g1f3i_static_access_checkpoint_survives_promise_and_route_loss() {
 }
 
 #[test]
-fn w6g1f3i_immediate_builtin_result_is_installed_before_route_loss() {
+fn immediate_builtin_result_is_installed_before_route_loss() {
     let context = isolated_context();
     let left = Value::List(List::from_values(vec![number(3)]));
     let right = Value::List(List::from_values(vec![number(5)]));
@@ -567,7 +567,7 @@ fn w6g1f3i_immediate_builtin_result_is_installed_before_route_loss() {
 }
 
 #[test]
-fn w6g1f3i_semantic_thunk_result_survives_route_loss_without_callback_replay() {
+fn semantic_thunk_result_survives_route_loss_without_callback_replay() {
     let context = isolated_context();
     let result = PromisedValue::new(context.values(), "semantic thunk result");
     let _result_root = result.root(context.values());
@@ -609,7 +609,7 @@ fn return_semantic_capture(
 }
 
 #[test]
-fn w6g1f3i_semantic_computation_result_survives_route_loss() {
+fn semantic_computation_result_survives_route_loss() {
     let context = isolated_context();
     let result = PromisedValue::new(context.values(), "semantic computation result");
     let _result_root = result.root(context.values());
@@ -2809,7 +2809,7 @@ fn host_call_follows_a_lazy_result_without_reinvocation() {
             "W4 lazy host callback",
             crate::core::HostCallRecord::external_with_semantic_values(
                 "W4 host fixture",
-                "eval/value/tests/w4.rs",
+                "eval/value/tests/lazy_checkpoint.rs",
                 "one explicit lazy result",
             ),
             [result],

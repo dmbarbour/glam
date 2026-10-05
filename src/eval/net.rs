@@ -4578,7 +4578,7 @@ mod driver_tests {
         }));
     }
 
-    mod nc5_tests {
-        include!("net/tests/nc5.rs");
+    mod callable_checkpoint_tests {
+        include!("net/tests/callable_checkpoint.rs");
     }
 }

@@ -991,9 +991,11 @@ fn persistent_edge_trait_occurrence_inventory_is_complete() {
     // two internal feature-gated carriers and the exact erased validation
     // operation. They observe rootability without creating or preserving an
     // edge and remain absent from ordinary builds.
+    // Test files named after plan steps were renamed descriptively; only
+    // source paths changed.
     assert_eq!(
         occurrence_fingerprint(actual),
-        13_015_988_324_278_488_767,
+        16_400_809_524_881_859_725,
         "persistent-edge occurrence fingerprint drifted: {:#?}",
         occurrence_summary(actual)
     );

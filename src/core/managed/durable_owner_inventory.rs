@@ -1411,7 +1411,7 @@ const LIFECYCLE_DELTA: &[LifecycleDeltaEntry] = &[
                 needle: "fn frontier_observation_is_a_nonrooting_edge_for_managed_driver_state()",
             },
             LifecycleSourceLatch {
-                path: "src/eval/value/tests/w4.rs",
+                path: "src/eval/value/tests/lazy_checkpoint.rs",
                 needle: "fn net_whnf_checkpoint_survives_route_loss_and_collection()",
             },
             LifecycleSourceLatch {

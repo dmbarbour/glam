@@ -1,4 +1,5 @@
-//! Deterministic small-stack closure fixtures for Phase W7B.
+//! Deterministic small-stack fixtures: semantic depth must not consume the
+//! Rust stack.
 //!
 //! These tests force semantic depth and suspension order. Repeating a test
 //! under an uncontrolled scheduler is deliberately not used as evidence.
