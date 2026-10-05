@@ -1218,6 +1218,17 @@ Progress:
 - Wave 4: `plans/README.md` is now the index.
 - Wave 5, first batch: the 27 RETIRE docs are deleted and listed in the
   README's Retired History.
+- §3 extractions and their retirements are done:
+  - nets (`9b216d14`);
+  - collector crate (`685ac728`);
+  - GC integration, aggressive verification and resumable WHNF (`d893d0a2`).
+
+  Docs remaining:
+  - the ownership ledger, until wave 6 repoints its code comments;
+  - the two measurement reviews, kept for P1-5;
+  - the active and deferred docs.
+
+  That leaves 19 files, down from 78.
 
 1. **Outdated standing docs** (§5.1 items 1–8, 12 and 13), plus the panic
    plan's disconnected-subnet wording. Items 9, 10 and 11 wait on Decision
