@@ -111,6 +111,43 @@ fn panicking_subscriber_destructor_leaves_the_bus_usable() {
 }
 
 #[test]
+fn unrecognized_annotations_warn_once_through_the_bus() {
+    let assembler = Assembler::new();
+    let values = assembler.values();
+    let warnings = Arc::new(Mutex::new(Vec::new()));
+    let observed = warnings.clone();
+    let _subscription =
+        assembler
+            .diagnostic_bus()
+            .subscribe(DiagnosticCallback(move |event: DiagnosticEvent| {
+                observed
+                    .lock()
+                    .expect("warning collector should not be poisoned")
+                    .push(event.message().to_string());
+            }));
+    let annotated = values
+        .anno(values.atom_from_text("unknown_marker"), values.integer(42))
+        .expect("same-runtime annotation construction should succeed");
+
+    // Evaluation records the annotation; the assembler publishes one warning
+    // per runtime, not one per evaluation.
+    for _ in 0..2 {
+        let result = assembler
+            .evaluator()
+            .eval(&annotated)
+            .expect("an unrecognized annotation is transparent");
+        assert_eq!(result.as_i64().expect("result should be numeric"), Some(42));
+    }
+    let warnings = warnings
+        .lock()
+        .expect("warning collector should not be poisoned")
+        .clone();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("unrecognized annotation"));
+    assert!(warnings[0].contains("unknown_marker"));
+}
+
+#[test]
 fn panicking_subscriber_is_skipped_for_that_event() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let values = runtime.values();

@@ -1037,6 +1037,7 @@ impl Assembler {
     pub fn drain_reasoning(&self) -> RuntimeReadiness {
         let runtime = self.evaluation_runtime();
         runtime.pump_until_stable();
+        self.publish_unrecognized_annotation_warnings();
         runtime.readiness()
     }
 
@@ -1116,6 +1117,24 @@ impl Assembler {
 
     pub(super) fn evaluation_error(&self, error: EvaluationHalt) -> Error {
         Error::from_eval(&self.core_values(), error)
+    }
+
+    /// Publishes a warning for each annotation evaluation recorded as
+    /// unrecognized since the last drain. Evaluation itself performs no I/O.
+    pub(super) fn publish_unrecognized_annotation_warnings(&self) {
+        let pending = self.core_values().take_unrecognized_annotations();
+        if pending.is_empty() {
+            return;
+        }
+        let values = self.values();
+        let bus = self.diagnostic_bus();
+        for rendered in pending {
+            bus.publish_local(Diagnostic::new(
+                &values,
+                Severity::Warning,
+                format!("unrecognized annotation: {rendered}"),
+            ));
+        }
     }
 
     /// Builds one closed interaction-net value through a checked, effect-style

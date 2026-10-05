@@ -937,6 +937,20 @@ inside a checkpoint transition. This is the library's only stderr write.
 *Recommendation:* return the warning as an outcome that crosses the region
 boundary, deduplicate it, and publish it through runtime diagnostics.
 
+*Resolved 2026-10-05, following the maintainer's choice of a runtime
+ledger.*
+- **Recording.** Evaluation records each distinct unrecognized annotation in
+  a deduplicated ledger owned by the value domain, then continues. Recording
+  is a leaf-lock update, with no I/O and no callback.
+- **Publishing.** The assembler drains the ledger after `ValueEvaluator::eval`
+  and in `drain_reasoning`, and publishes each annotation once per runtime as
+  a `Warning` on its diagnostic bus, where counts and subscribers see it.
+- **Scope.** The library no longer writes to stderr. `'deprecated` and
+  `'TBD`, which are not yet implemented, go through the same route.
+
+A regression evaluates an unrecognized annotation twice and observes one bus
+warning naming it.
+
 **E8 — Medium — Allocation and copy hot spots.** Verified (list operator),
 Reported (others).
 

@@ -775,7 +775,10 @@ impl RegionalAnnotationMachine {
                 }
             }
             RecognizedAnnotation::Unknown(rendered) => {
-                warn_unknown_annotation(&rendered);
+                access
+                    .values()
+                    .values()
+                    .record_unrecognized_annotation(&rendered);
                 RegionalAnnotationPhase::Ready(access.values().duplicate_value(&self.target))
             }
         }
@@ -1069,8 +1072,4 @@ impl RegionalAnnotationPhase {
             Self::Done => {}
         }
     }
-}
-
-fn warn_unknown_annotation(rendered: &str) {
-    eprintln!("warning: unrecognized annotation encountered: {rendered}");
 }

@@ -324,6 +324,18 @@ pub(crate) struct CoreValueFactory {
 /// their roots become inaccessible after the last authorized domain lease is
 /// dropped. The scheduler route is weak so retaining the value domain does not
 /// retain runtime execution infrastructure.
+/// Runtime ledger of unrecognized annotations awaiting a warning.
+///
+/// Evaluation performs no I/O, so it only records each distinct annotation
+/// here. An assembler drains the pending entries and publishes them as
+/// warnings through its diagnostic bus. Each annotation warns once per
+/// runtime.
+#[derive(Default)]
+struct UnrecognizedAnnotations {
+    seen: std::collections::BTreeSet<Arc<str>>,
+    pending: Vec<Arc<str>>,
+}
+
 pub(crate) struct RuntimeValueDomain {
     runtime: EvaluationRuntimeId,
     ids: Arc<RuntimeIds>,
@@ -332,6 +344,8 @@ pub(crate) struct RuntimeValueDomain {
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     work_coordinator: Arc<Mutex<Weak<EvaluationWorkCoordinator>>>,
     external_owners: ExternalOwnerRegistry,
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
+    unrecognized_annotations: Mutex<UnrecognizedAnnotations>,
     #[cfg(test)]
     managed_promise_allocations: AtomicUsize,
     #[cfg(test)]
@@ -380,6 +394,7 @@ impl CoreValueFactory {
             },
             work_coordinator: Arc::new(Mutex::new(Weak::new())),
             external_owners: ExternalOwnerRegistry::new(runtime),
+            unrecognized_annotations: Mutex::new(UnrecognizedAnnotations::default()),
             #[cfg(test)]
             managed_promise_allocations: AtomicUsize::new(0),
             #[cfg(test)]
@@ -457,6 +472,31 @@ impl CoreValueFactory {
         } else {
             *binding = Arc::downgrade(coordinator);
         }
+    }
+
+    /// Records an annotation evaluation did not recognize. Only its first
+    /// occurrence in this runtime becomes a pending warning.
+    pub(crate) fn record_unrecognized_annotation(&self, rendered: &str) {
+        let mut ledger = self
+            .domain
+            .unrecognized_annotations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if ledger.seen.insert(Arc::from(rendered)) {
+            ledger.pending.push(Arc::from(rendered));
+        }
+    }
+
+    /// Takes the unrecognized annotations not yet warned about.
+    pub(crate) fn take_unrecognized_annotations(&self) -> Vec<Arc<str>> {
+        std::mem::take(
+            &mut self
+                .domain
+                .unrecognized_annotations
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .pending,
+        )
     }
 
     pub(crate) fn work_coordinator(&self) -> Option<Arc<EvaluationWorkCoordinator>> {

@@ -1347,9 +1347,10 @@ const EXPECTED_W7_UNAPPROVED_RECURSION: &[&str] = &[];
 // fault and adds a cached-poll panic lookup. Client-callback containment
 // moves the reflection launcher call inside an unwind boundary. R3's single
 // effect-poll budget pumps through `pump_wait_on_route_within`, adding one
-// edge. None of them recurses, so the cycle set stays empty.
-const EXPECTED_W7_RESOLVED_CALLS: usize = 1_145;
-const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 8_060_155_174_205_777_086;
+// edge. E7 replaces the annotation machine's stderr helper with a ledger
+// record, removing one. None of them recurses, so the cycle set stays empty.
+const EXPECTED_W7_RESOLVED_CALLS: usize = 1_144;
+const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 5_949_764_167_448_106_331;
 const EXPECTED_W7_CYCLIC_FUNCTIONS: &[&str] = &[];
 const EXPECTED_W8_REMAINING_RETRYABLE_HALT_CALLS: &[&str] = &[
     "src/eval/net.rs::drive_net_semantic_action#1|HaltBlocked",

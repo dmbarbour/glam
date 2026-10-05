@@ -28,11 +28,14 @@ impl ValueEvaluator<'_> {
     pub fn eval(&self, value: &Value) -> Result<EvaluatedValue, Error> {
         let values = self.assembler.values();
         values.require(value)?;
-        self.assembler
+        let evaluated = self
+            .assembler
             .eval_context()
             .evaluate_root_whnf(value.0.clone())
             .map(|value| EvaluatedValue::from_whnf(&values, Value::from_runtime_root(value)))
-            .map_err(|error| self.assembler.evaluation_error(error))
+            .map_err(|error| self.assembler.evaluation_error(error));
+        self.assembler.publish_unrecognized_annotation_warnings();
+        evaluated
     }
 }
 
