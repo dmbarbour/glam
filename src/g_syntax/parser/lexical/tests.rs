@@ -432,9 +432,12 @@ fn invalid_syntax_fixtures_have_explicit_lexical_classification() {
         "do_pattern_foundation.g",
         "let_where_syntax.g",
         "missing_language.g",
+        "non_ascii_without_utf8.g",
         "path_whitespace.g",
         "reserved_keywords.g",
         "tagged_spacing.g",
+        "unknown_language_extension.g",
+        "unknown_language_version.g",
     ];
     let expected_lexical = ["multiline_text.g", "unbalanced_delimiters.g"];
     let paths = sample_files(Path::new("samples/invalid/syntax"));

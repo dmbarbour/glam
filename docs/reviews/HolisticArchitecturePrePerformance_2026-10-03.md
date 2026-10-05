@@ -1389,6 +1389,26 @@ Reproduced.
 unknown `demo` extension is accepted. Text literals accept non-ASCII
 without `utf8`. This contradicts `DistilledDesign.md` and `Syntax.md`.
 
+*Resolved 2026-10-05, following the maintainer's Decision 8: fail-fast, with
+an ASCII-only source unless `utf8` is declared.*
+- **Admission.** `StagedSourceParser` checks the leading declaration on the
+  compile, inspection and test parse paths.
+  - A base other than `g0` is an error, and so is an extension other than
+    `utf8`.
+  - Either error stops parsing, so no later declaration is lowered or
+    macro-expanded under a language the source did not ask for.
+- **Character set.** Without `utf8`, the first non-ASCII character anywhere
+  in the source is an error at its line. Parsing continues. Names and
+  whitespace were already ASCII-only, so in practice this applies to texts and
+  comments.
+- **Tests.**
+  - The `demo` parser tests now expect rejection, or use `utf8`.
+  - New parser tests cover the version stop and the `utf8` requirement for
+    both texts and comments.
+  - Three invalid samples were added: unknown version, unknown extension, and
+    non-ASCII without `utf8`.
+  - The review's `language g9 with nonsense` reproduction now fails at line 1.
+
 **F8 — Low.**
 
 - `SyntaxCheatSheet.md` presents unsupported `import 'trig` and
@@ -1672,6 +1692,9 @@ findings that raise them are noted, and lower-confidence items are marked.
    (A5)
 8. **Language declaration.** How strict to be, including ASCII versus
    `utf8` enforcement. (F7)
+   - *Maintainer decision, 2026-10-05:* fail-fast on an unknown base or
+     extension. Without `utf8` the whole source, including texts and
+     comments, must be ASCII. Resolved under F7.
 
 ## Cross-Reference: Parallel Review
 

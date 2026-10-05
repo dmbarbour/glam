@@ -13,6 +13,12 @@ disagree.
   whitespace, embedded text and numeric payloads, delimiter balance,
   indentation facts, and declaration sections. Fatal lexical errors stop
   grammatical parsing.
+- `StagedSourceParser` admits the leading `language` declaration before it
+  parses anything else. Versioning is fail-fast: a base other than `g0`, or an
+  extension other than `utf8`, is an error and stops parsing. Without `utf8`,
+  the first non-ASCII character anywhere in the source is an error. The lexer
+  already rejects non-ASCII names and whitespace, so this check catches texts
+  and comments. It does not stop parsing.
 - `parser/input.rs` is the only adapter from the shared lexical result to token
   parsers. Production parsers receive an existing `TokenView`; do not re-lex
   source substrings or add another global structure scan.

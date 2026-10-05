@@ -470,7 +470,6 @@ fn declaration_resolution_builds_uncached_effects_outside_managed_access() {
 fn parses_language_declaration_with_extensions() {
     let parsed = parse("language g0 with utf8, demo\nanswer = 42\n");
 
-    assert_eq!(parsed.diagnostics, []);
     assert_eq!(
         parsed.declarations[0].kind,
         DeclarationKind::Language(LanguageDecl {
@@ -478,6 +477,55 @@ fn parses_language_declaration_with_extensions() {
             extensions: vec!["utf8".to_owned(), "demo".to_owned()],
         })
     );
+    assert_eq!(parsed.diagnostics.len(), 1);
+    assert_eq!(parsed.diagnostics[0].severity, Severity::Error);
+    assert!(
+        parsed.diagnostics[0]
+            .message
+            .contains("unrecognized language extension `demo`")
+    );
+}
+
+#[test]
+fn unrecognized_language_version_stops_parsing() {
+    let parsed = parse("language g9\nanswer = \n");
+
+    assert_eq!(parsed.declarations.len(), 1);
+    assert_eq!(parsed.diagnostics.len(), 1);
+    assert_eq!(parsed.diagnostics[0].line, 1);
+    assert!(
+        parsed.diagnostics[0]
+            .message
+            .contains("unrecognized language version `g9`")
+    );
+}
+
+#[test]
+fn non_ascii_texts_and_comments_require_utf8() {
+    // `utf8` covers the whole file, including a header comment that precedes
+    // the declaration.
+    for (source, line) in [
+        ("language g0\ngreeting = \"caf\u{e9}\"\n", 2),
+        ("language g0\n# caf\u{e9}\ngreeting = \"cafe\"\n", 2),
+        ("# caf\u{e9}\nlanguage g0\ngreeting = \"cafe\"\n", 1),
+    ] {
+        let parsed = parse(source);
+        assert_eq!(parsed.diagnostics.len(), 1, "{source:?}");
+        assert_eq!(parsed.diagnostics[0].line, line, "{source:?}");
+        assert!(
+            parsed.diagnostics[0]
+                .message
+                .contains("non-ASCII character `\u{e9}` requires `language g0 with utf8`")
+        );
+        assert_eq!(
+            parsed.declarations.len(),
+            2,
+            "the character set does not stop parsing"
+        );
+
+        let parsed = parse(&source.replacen("language g0", "language g0 with utf8", 1));
+        assert_eq!(parsed.diagnostics, [], "{source:?}");
+    }
 }
 
 #[test]
@@ -587,8 +635,8 @@ fn keyword_atoms_explicit_key_paths_and_tags_remain_data() {
 fn simple_declarations_preserve_indented_line_continuations() {
     let parsed = parse(concat!(
         "language\n",
-        "  g0 with utf8,\n",
-        "    demo\n",
+        "  g0 with\n",
+        "    utf8\n",
         "import\n",
         "  'std\n",
         "  as standard\n",
@@ -603,7 +651,7 @@ fn simple_declarations_preserve_indented_line_continuations() {
         parsed.declarations[0].kind,
         DeclarationKind::Language(LanguageDecl {
             base: "g0".to_owned(),
-            extensions: vec!["utf8".to_owned(), "demo".to_owned()],
+            extensions: vec!["utf8".to_owned()],
         })
     );
     assert_eq!(
@@ -926,7 +974,7 @@ fn parses_unique_declarations() {
 #[test]
 fn parses_mixed_top_level_declarations() {
     let parsed = parse(concat!(
-        "language g0 with demo\n",
+        "language g0 with utf8\n",
         "import 'std as standard\n",
         "abstract missing, nested.value\n",
         "unique Marker\n",

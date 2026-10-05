@@ -100,11 +100,13 @@ impl<'source> StagedSourceParser<'source> {
         }
         let declaration = lexical.declarations().get(self.next_declaration)?;
         self.next_declaration += 1;
-        Some(parse_lexical_declaration(
-            lexical,
-            declaration,
-            &mut self.diagnostics,
-        ))
+        let declaration = parse_lexical_declaration(lexical, declaration, &mut self.diagnostics);
+        if self.next_declaration == 1
+            && !admit_language(lexical, &declaration, &mut self.diagnostics)
+        {
+            self.next_declaration = lexical.declarations().len();
+        }
+        Some(declaration)
     }
 
     fn next_inspected_declaration(&mut self) -> Option<InspectedDeclaration> {
@@ -135,6 +137,11 @@ impl<'source> StagedSourceParser<'source> {
             Ok(None) => {
                 let declaration =
                     parse_lexical_declaration(lexical, &declaration, &mut self.diagnostics);
+                if self.next_declaration == 1
+                    && !admit_language(lexical, &declaration, &mut self.diagnostics)
+                {
+                    self.next_declaration = lexical.declarations().len();
+                }
                 Some(InspectedDeclaration {
                     line: declaration.line,
                     kind: InspectedDeclarationKind::Parsed(declaration.kind),
@@ -159,11 +166,14 @@ impl<'source> StagedSourceParser<'source> {
         let mut work = match DeclarationMacroWork::from_original(lexical, &declaration) {
             Ok(Some(work)) => work,
             Ok(None) => {
-                return Some(vec![parse_lexical_declaration(
-                    lexical,
-                    &declaration,
-                    &mut self.diagnostics,
-                )]);
+                let declaration =
+                    parse_lexical_declaration(lexical, &declaration, &mut self.diagnostics);
+                if self.next_declaration == 1
+                    && !admit_language(lexical, &declaration, &mut self.diagnostics)
+                {
+                    self.next_declaration = lexical.declarations().len();
+                }
+                return Some(vec![declaration]);
             }
             Err(diagnostic) => {
                 self.diagnostics.push(diagnostic);
@@ -654,6 +664,69 @@ fn declared_language_value(
                 )),
             ),
     )
+}
+
+/// The only base language this compiler implements.
+const LANGUAGE_BASE: &str = "g0";
+/// The extensions this compiler recognizes for [`LANGUAGE_BASE`].
+const LANGUAGE_EXTENSIONS: &[&str] = &["utf8"];
+
+/// Checks the source's leading language declaration and returns whether
+/// parsing may continue.
+///
+/// Versioning is fail-fast: an unrecognized base or extension stops the
+/// parser, because later declarations would be read under a language the
+/// source did not ask for. Without `utf8` the whole source must be ASCII.
+/// The lexer already rejects non-ASCII names and whitespace, so this finds
+/// texts and comments.
+fn admit_language(
+    lexical: &LexedSource<'_>,
+    declaration: &Declaration,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> bool {
+    let super::super::DeclarationKind::Language(language) = &declaration.kind else {
+        return true;
+    };
+    if language.base != LANGUAGE_BASE {
+        diagnostics.push(Diagnostic::error(
+            declaration.line,
+            format!(
+                "unrecognized language version `{}`; this compiler implements `{LANGUAGE_BASE}`",
+                language.base
+            ),
+        ));
+        return false;
+    }
+    let unrecognized = language
+        .extensions
+        .iter()
+        .filter(|extension| !LANGUAGE_EXTENSIONS.contains(&extension.as_str()))
+        .map(|extension| {
+            Diagnostic::error(
+                declaration.line,
+                format!("unrecognized language extension `{extension}` for `{LANGUAGE_BASE}`"),
+            )
+        })
+        .collect::<Vec<_>>();
+    if !unrecognized.is_empty() {
+        diagnostics.extend(unrecognized);
+        return false;
+    }
+    if !language
+        .extensions
+        .iter()
+        .any(|extension| extension == "utf8")
+        && let Some((byte, ch)) = lexical
+            .source()
+            .char_indices()
+            .find(|(_, ch)| !ch.is_ascii())
+    {
+        diagnostics.push(Diagnostic::error(
+            lexical.line_at_byte(byte).unwrap_or(declaration.line),
+            format!("non-ASCII character `{ch}` requires `language {LANGUAGE_BASE} with utf8`"),
+        ));
+    }
+    true
 }
 
 fn parse_lexical_declaration(

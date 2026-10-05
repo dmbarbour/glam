@@ -43,6 +43,8 @@ SourceArtifact bytes
   -> UTF-8 validation
   -> one lexical token/group/declaration structure
   -> staged declaration stream
+       -> admit the leading `language` declaration (fail-fast version,
+          ASCII unless `utf8`)
        -> expand original macro invocations, when present
        -> parse one declaration range
        -> resolve lexical and namespace names
