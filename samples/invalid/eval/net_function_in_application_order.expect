@@ -1,0 +1,3 @@
+# Required stderr substrings for runtime evaluation failure.
+error: interaction net is not polarized: the wire between port 3 of `.bind` #1 and `.data` #1 joins two ports of the same sign
+port 3 of `.bind` #1 provides as a bind's second auxiliary

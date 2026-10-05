@@ -4,7 +4,7 @@ use std::sync::{Arc, LazyLock};
 
 use crate::core::{EvaluationHalt, List, NetValue, RuntimeValueAccess, Value};
 use crate::core_net::CoreSpecialization;
-use crate::interaction_net::{NetBuilder, Port};
+use crate::interaction_net::{NetBuildError, NetBuilder, NodeId, Port};
 use crate::list::LogicalListPart;
 use crate::number::Number;
 
@@ -160,9 +160,22 @@ pub(in crate::eval) fn interaction_net_from_netlist_in(
         .try_reserve_exact(capacity)
         .map_err(|_| malformed("replay allocation is too large"))?;
     let mut builder = NetBuilder::<CoreSpecialization>::new();
+    let mut spans = Vec::new();
 
     for constructor in reverse_constructors.iter().rev() {
-        replay_constructor(access, constructor, capacity, &mut mapped, &mut builder)?;
+        let nodes = builder.node_count();
+        let ports = mapped.len();
+        let kind = replay_constructor(access, constructor, capacity, &mut mapped, &mut builder)?;
+        let ordinal = 1 + spans
+            .iter()
+            .filter(|span: &&ConstructorSpan| span.kind.same_constructor(kind))
+            .count();
+        spans.push(ConstructorSpan {
+            kind,
+            ordinal,
+            nodes: nodes..builder.node_count(),
+            ports: ports..mapped.len(),
+        });
     }
     if mapped.len() != capacity {
         return Err(malformed(
@@ -176,13 +189,89 @@ pub(in crate::eval) fn interaction_net_from_netlist_in(
 
     let exposed = decode_port_value(access, &exposed, &brand)?;
     let exposed = mapped_port(&mapped, exposed)?;
-    let template = builder
-        .try_finish(exposed)
-        .map_err(|error| malformed(error.to_string()))?;
+    let template = builder.try_finish(exposed).map_err(|error| match error {
+        // An unpolarized or disconnected net is the user's wiring error, so
+        // it names the constructors and ports the user built.
+        NetBuildError::Polarity(violation) => EvaluationHalt::new(
+            violation.describe(&|port| describe_port(&spans, &mapped, port), &|node| {
+                describe_node(&spans, node)
+            }),
+        ),
+        error => malformed(error.to_string()),
+    })?;
     let runtime = access
         .construct_managed_core_net(template.instantiate_with(access))
         .expect("managed core-net representation must fit one collector run");
     Ok(Value::Net(NetValue::new(runtime)))
+}
+
+/// One replayed constructor: its kind, its position among constructors of
+/// that kind, and the builder nodes and logical ports it created.
+struct ConstructorSpan {
+    kind: ConstructorKind,
+    ordinal: usize,
+    nodes: std::ops::Range<usize>,
+    ports: std::ops::Range<usize>,
+}
+
+#[derive(Clone, Copy)]
+enum ConstructorKind {
+    Bind,
+    Data,
+    Copy(usize),
+}
+
+impl ConstructorKind {
+    fn same_constructor(self, other: Self) -> bool {
+        matches!(
+            (self, other),
+            (Self::Bind, Self::Bind) | (Self::Data, Self::Data) | (Self::Copy(_), Self::Copy(_))
+        )
+    }
+
+    fn name(self) -> String {
+        match self {
+            Self::Bind => "`.bind`".to_owned(),
+            Self::Data => "`.data`".to_owned(),
+            Self::Copy(outputs) => format!("`.copy {outputs}`"),
+        }
+    }
+}
+
+fn node_index(node: NodeId) -> usize {
+    usize::try_from(node.get()).unwrap_or(usize::MAX)
+}
+
+fn span_of(spans: &[ConstructorSpan], node: usize) -> Option<&ConstructorSpan> {
+    spans.iter().find(|span| span.nodes.contains(&node))
+}
+
+/// Names a builder port the way the user built it, such as "port 2 of
+/// `.bind` #1" or "output 1 of `.copy 2` #3".
+fn describe_port(spans: &[ConstructorSpan], mapped: &[Port], port: Port) -> String {
+    let Some(span) = span_of(spans, node_index(port.node())) else {
+        return format!("{port:?}");
+    };
+    let name = format!("{} #{}", span.kind.name(), span.ordinal);
+    match mapped[span.ports.clone()]
+        .iter()
+        .position(|candidate| *candidate == port)
+    {
+        Some(position) => match span.kind {
+            ConstructorKind::Data => name,
+            ConstructorKind::Bind => format!("port {} of {name}", position + 1),
+            ConstructorKind::Copy(_) if position == 0 => format!("the input of {name}"),
+            ConstructorKind::Copy(_) => format!("output {position} of {name}"),
+        },
+        None => format!("an internal port of {name}"),
+    }
+}
+
+fn describe_node(spans: &[ConstructorSpan], node: NodeId) -> String {
+    span_of(spans, node_index(node)).map_or_else(
+        || format!("node {}", node.get()),
+        |span| format!("{} #{}", span.kind.name(), span.ordinal),
+    )
 }
 
 fn replay_constructor(
@@ -191,11 +280,11 @@ fn replay_constructor(
     capacity: usize,
     mapped: &mut Vec<Port>,
     builder: &mut NetBuilder<CoreSpecialization>,
-) -> Result<(), EvaluationHalt> {
+) -> Result<ConstructorKind, EvaluationHalt> {
     if matches!(constructor, Value::Atom(tag) if tag.key() == &*BIND_TAG) {
         validate_constructor_capacity(mapped.len(), 3, capacity)?;
         mapped.extend(builder.bind());
-        return Ok(());
+        return Ok(ConstructorKind::Bind);
     }
 
     let mut fields = strict_record(access, constructor, "constructor descriptor")?;
@@ -222,13 +311,13 @@ fn replay_constructor(
             validate_constructor_capacity(mapped.len(), port_count, capacity)?;
             let copy = builder.copy(output_count);
             mapped.extend(std::iter::once(copy.input).chain(copy.outputs));
-            Ok(())
+            Ok(ConstructorKind::Copy(output_count))
         }
         key if key == &*DATA_TAG => {
             let [value]: [Value; 1] = exact_record(access, fields, "data descriptor")?;
             validate_constructor_capacity(mapped.len(), 1, capacity)?;
             mapped.push(builder.data(access.duplicate_value(&value)));
-            Ok(())
+            Ok(ConstructorKind::Data)
         }
         _ => Err(malformed("constructor descriptor tag is not recognized")),
     }

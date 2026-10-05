@@ -259,6 +259,9 @@ sum = partial 23
                                     #   (Expr copied logically)
 
 # Wiring (each port must be wired EXACTLY once):
+#   each wire joins a port that provides a value to one that consumes it;
+#   the returned port must provide one, and every node must be reachable
+#   from it. Construction rejects nets that break these rules.
     .wire A B                       # commutative: .wire B A equivalent
                                     # Standard Effects available for
                                     # bookkeeping and backtracking
@@ -270,7 +273,7 @@ sum = partial 23
 #                        required for another argument
 #   bind-data(Net): load a logical copy through the raw net's exposed port
 #   copy-data: dup     copy-copy: join if same instance, else dup
-#   data-data: STUCK — a type error; report and debug
+#   data-data: impossible: both provide, so construction rejects the wire
 
 # Lambda calculus is a design pattern within inets:
 #   lambda      = .bind -> [fn, result, arg], wiring arg INTO result

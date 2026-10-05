@@ -573,8 +573,8 @@ Entry surfaces:
   change landed on 2026-10-05: binds join crossed (`B.1-C.2`, `B.2-C.1`),
   and function binds list `[result, argument]`.
   Construction rejects a net with a component disconnected from the public
-  port, as a miswiring error; test builds already check this, and polarity
-  slice 3 enforces it at `try_finish`. Only disconnected garbage that
+  port, as a miswiring error, enforced at `NetBuilder::try_finish` since
+  2026-10-05. Only disconnected garbage that
   reduction leaves behind, such as closed loops and erased subnets, must never
   fail evaluation unless demand reaches it. This follows the maintainer's
   2026-10-05 decision in the [polarity plan](NetPolarityChecker_2026-10-05.md)

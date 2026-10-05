@@ -1351,9 +1351,11 @@ const EXPECTED_W7_UNAPPROVED_RECURSION: &[&str] = &[];
 // edge. E7 replaces the annotation machine's stderr helper with a ledger
 // record, removing one. R7 removes six: the blocked-halt translation, its
 // `From` impl, and the effect task's blocked-halt branch and assertion.
+// Net polarity enforcement adds six: netlist replay records each
+// constructor's span and describes a violation in the user's terms.
 // None of them recurses, so the cycle set stays empty.
-const EXPECTED_W7_RESOLVED_CALLS: usize = 1_138;
-const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 9_346_311_223_319_165_447;
+const EXPECTED_W7_RESOLVED_CALLS: usize = 1_144;
+const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 15_286_440_900_662_348_986;
 const EXPECTED_W7_CYCLIC_FUNCTIONS: &[&str] = &[];
 const EXPECTED_W8_REMAINING_RETRYABLE_HALT_CALLS: &[&str] = &[
     "src/eval/net.rs::drive_net_semantic_action#1|HaltBlocked",

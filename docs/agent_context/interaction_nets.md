@@ -127,9 +127,8 @@ not route construction through a reflection or task machine again
 Every port has a sign: `+` provides a value and `−` consumes one. Each wire
 joins a `+` port to a `−` port, and a net's exposed port is `+` by fiat, like
 `Data`. Polarity is a construction contract, not a runtime tag: nodes store no
-sign and rewrite rules ignore it. The planned checker
-([`../plans/NetPolarityChecker_2026-10-05.md`](../plans/NetPolarityChecker_2026-10-05.md))
-will enforce it at `NetBuilder::try_finish`.
+sign and rewrite rules ignore it. `NetBuilder::try_finish` enforces it
+(`interaction_net/polarity.rs`); see "Enforcement" below.
 
 | Node | Ports | Signs |
 | --- | --- | --- |
@@ -153,10 +152,20 @@ will enforce it at `NetBuilder::try_finish`.
   net.
 - **Construction.** A constructed net whose component is unreachable from the
   exposed port is miswired. Reduction may still leave disconnected garbage.
-- **Test builds.** `NetBuilder::try_finish` checks every template's signs and
-  connectivity in test builds (`interaction_net/polarity.rs`). A fixture that
-  is deliberately unpolarized or disconnected opts out with
-  `unpolarized_for_test` or `disconnected_for_test`, and states why.
+- **Enforcement.** `NetBuilder::try_finish` checks signs and connectivity in
+  every build. It checks the builder's own topology before splicing out
+  tunnels, so a violation names constructed ports, and a `.copy 1` tunnel
+  passes a sign through. A violation is `NetBuildError::Polarity`, with the
+  closing wire or exposed port and the earlier rules that forced it. The
+  happy path allocates only the union-find; the explanation is rebuilt on
+  failure.
+  - A Rust-built template that fails panics through `finish`, because it is
+    a constructor bug.
+  - A user netlist reports an ordinary evaluation failure that names the
+    user's constructors and ports, such as "port 3 of `.bind` #1" or
+    "output 1 of `.copy 2` #1".
+  - A test fixture that is deliberately unpolarized or disconnected opts out
+    with `unpolarized_for_test` or `disconnected_for_test`, and states why.
 
 ## Runtime Identity and Graph State
 

@@ -1,7 +1,7 @@
 # Net Polarity Checker Plan — 2026-10-05
 
-Status: slices 1 (documentation) and 2 (test-only checker) done
-2026-10-05; slice 3, enforcement at `try_finish`, is next. This plan comes before N8's random closed-net generator and
+Status: slices 1–3 done 2026-10-05: documentation, the test-only checker,
+and enforcement at `try_finish`. Slice 4, the runtime invariant, is next. This plan comes before N8's random closed-net generator and
 before any fuzzing of nets. It follows the crossed `Bind >< Bind` join that
 landed on 2026-10-05.
 
@@ -153,6 +153,20 @@ union-find arrays.
    - a function bind wired in application order;
    - a `−` exposed port;
    - a component disconnected from the exposed port.
+
+   *Done 2026-10-05.*
+   - **Error.** `NetBuildError::Polarity` reports the closing wire or exposed
+     port, plus the earlier rules that forced it.
+   - **Where the check runs.** It runs on the builder's own topology before
+     tunnels are spliced out, so it can name constructed ports. Tunnels pass
+     a sign through.
+   - **Diagnostics.** Netlist replay names the user's constructors and ports,
+     for example "port 3 of `.bind` #1".
+   - **Samples.** Four invalid samples cover the four rejection shapes.
+   - **Path explanation.** The plan asked for the path that forced a
+     conflict. It comes from regenerating the earlier constraints and
+     searching between the conflicting ports, so it costs nothing until
+     something fails.
 4. **Runtime invariant.** Check polarity preservation after every rewrite in
    test builds, alongside N8's link-symmetry and active-pair checks.
 5. **N8 generator.** Random polarized closed nets, plus a negative mode that
@@ -160,6 +174,43 @@ union-find arrays.
    orders.
 6. **Fuzzing,** per the panic-safety plan's discovery policy, over polarized
    nets only.
+
+## Slice 4 Design Questions — Open, 2026-10-05
+
+Slice 4 guards against a rewrite rule, or cursor materialization, that
+miswires a net. Rewrites never consult signs, so a polarized net that
+reduces to an unpolarized one is a reduction bug. Three questions need the
+maintainer before it starts:
+
+1. **Scope.**
+   - (a) Check only generic runtime nets, whose nodes are `Bind`, `Fan`,
+     `Erase`, `Data` and `Operator`. This tests the rewrite rules
+     themselves, in the generic runtime tests and in N8's generator.
+   - (b) Also check core runtime nets, which carry evaluator-only nodes:
+     - an interface anchor is `−`;
+     - a callable checkpoint provides `+`, as the application result it
+       replaces did;
+     - a remote cursor takes the sign of the port it stands for in another
+       net.
+
+     A remote cursor's sign needs either a per-port sign table carried by
+     each copy source, or reading the source net. Reading the source must not
+     take nested runtime-net locks, a discipline the runtime tests guard.
+     Some signs are inherently undetermined, such as which bind of a
+     `Bind >< Bind` pair is the function, so a sign table needs a "free"
+     state. Leaving cursors free is simpler but weaker.
+
+   *Recommendation:* do (a) now and fold it into N8, slice 5. Take on (b)
+   only if a defect appears in cursor or checkpoint code.
+2. **Cost.** A full check after every rewrite is O(n), so quadratic over a
+   whole reduction.
+
+   *Recommendation:* check after every rewrite in N8's generated nets, which
+   are small by construction, and in the generic runtime tests. Never check
+   in scale or stress fixtures.
+3. **Exempt fixtures.** A runtime net instantiated from one of the four
+   unpolarized test templates must skip the invariant. This needs a
+   test-only flag carried from the template to its runtime net.
 
 ## Background: polarity, GAL, and Lafont
 

@@ -1,0 +1,2 @@
+# Required stderr substrings for runtime evaluation failure.
+error: interaction net is not connected: `.data` #2 cannot be reached from the exposed port

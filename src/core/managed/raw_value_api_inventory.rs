@@ -1042,9 +1042,11 @@ fn raw_core_value_api_inventory_is_complete() {
         "inventory count drifted: {:#?}",
         occurrence_summary(&actual)
     );
+    // Net polarity enforcement changes netlist replay's constructor helper
+    // to return the constructor's kind; its raw-value uses are unchanged.
     assert_eq!(
         occurrence_fingerprint(&actual),
-        9_495_114_017_072_832_932,
+        9_367_143_353_251_087_579,
         "inventory fingerprint drifted: {:#?}",
         occurrence_file_summary(&actual),
     );

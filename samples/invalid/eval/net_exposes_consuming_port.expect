@@ -1,0 +1,3 @@
+# Required stderr substrings for runtime evaluation failure.
+error: interaction net is not polarized: port 2 of `.bind` #1 is exposed but consumes a value
+A net must expose a port that provides a value.

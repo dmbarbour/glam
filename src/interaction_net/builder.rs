@@ -3,15 +3,16 @@ use std::fmt;
 use std::sync::Arc;
 
 use super::model::*;
+use super::polarity::{PolarityViolation, Shape, TemplateChecks, Topology};
 
 pub struct NetBuilder<S: NetSpecialization> {
     nodes: Vec<BuilderNode<S>>,
     wires: Vec<Wire>,
     next_fan_site: u64,
-    /// Test builds check every finished template's polarity and
-    /// connectivity unless a test deliberately builds a net without them.
+    /// Every finished template is checked for polarity and connectivity. A
+    /// test may opt out to model a deliberately malformed net.
     #[cfg(test)]
-    checks: super::polarity::TemplateChecks,
+    checks: TemplateChecks,
 }
 
 enum BuilderNode<S: NetSpecialization> {
@@ -57,6 +58,9 @@ pub enum NetBuildError {
     ExposedPortWired(Port),
     PortUnwired(Port),
     TunnelCycle,
+    /// The wiring is not polarized, or a node is unreachable from the exposed
+    /// port.
+    Polarity(PolarityViolation),
 }
 
 impl fmt::Display for NetBuildError {
@@ -86,6 +90,7 @@ impl fmt::Display for NetBuildError {
             }
             Self::TunnelCycle => formatter
                 .write_str("interaction-net copy tunnels form a component with no runtime node"),
+            Self::Polarity(violation) => violation.fmt(formatter),
         }
     }
 }
@@ -105,7 +110,7 @@ impl<S: NetSpecialization> NetBuilder<S> {
             wires: Vec::new(),
             next_fan_site: 0,
             #[cfg(test)]
-            checks: super::polarity::TemplateChecks::ALL,
+            checks: TemplateChecks::ALL,
         }
     }
 
@@ -282,12 +287,37 @@ impl<S: NetSpecialization> NetBuilder<S> {
 
     pub fn try_finish(self, exposed: Port) -> Result<InteractionNet<S>, NetBuildError> {
         self.validate(exposed)?;
+        self.check_polarity(exposed)?;
+        self.normalize(exposed)
+    }
+
+    /// The number of nodes constructed so far, including builder tunnels.
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Checks the builder's own topology before tunnels are spliced out, so
+    /// a violation names the ports the caller constructed.
+    fn check_polarity(&self, exposed: Port) -> Result<(), NetBuildError> {
         #[cfg(test)]
         let checks = self.checks;
-        let net = self.normalize(exposed)?;
-        #[cfg(test)]
-        super::polarity::assert_template_for_test(&net, checks);
-        Ok(net)
+        #[cfg(not(test))]
+        let checks = TemplateChecks::ALL;
+        let shapes = self
+            .nodes
+            .iter()
+            .map(|node| match node {
+                BuilderNode::Runtime(node) => Shape::of(node),
+                BuilderNode::Tunnel => Shape::Tunnel,
+            })
+            .collect::<Vec<_>>();
+        Topology {
+            shapes: &shapes,
+            wires: &self.wires,
+            exposed,
+        }
+        .check(checks)
+        .map_err(NetBuildError::Polarity)
     }
 
     fn normalize(self, exposed: Port) -> Result<InteractionNet<S>, NetBuildError> {

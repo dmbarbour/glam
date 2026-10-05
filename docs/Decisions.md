@@ -311,9 +311,10 @@ maps the short names used here to file names.
   - User merge fans are allowed. Erasers take either sign; in `+` position
     an eraser is an error value.
   - Build the checker before N8's generator and any net fuzzing.
-- **Consequences:** a linear union-find checker runs at `try_finish` in test
-  builds. Production enforcement, with `NetBuildError::Polarity`, is polarity
-  plan slice 3. Rewrites must preserve polarity. GAL levels are deferred.
+- **Consequences:** a linear union-find checker runs at `try_finish` in every
+  build and reports `NetBuildError::Polarity`. User netlists get diagnostics
+  that name their constructors and ports. Rewrites must preserve polarity.
+  GAL levels are deferred.
 - **Rule lives in:** `agent_context/interaction_nets.md` "Polarity" and
   "Templates and Construction"; `Design.md` "Interaction Nets".
 - **Recorded in:** polarity plan, "Decisions"; holistic review N8; commits

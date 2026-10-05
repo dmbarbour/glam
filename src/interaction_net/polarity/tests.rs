@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::interaction_net::NetBuilder;
 use crate::interaction_net::model::Wire;
+use crate::interaction_net::{NetBuildError, NetBuilder};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Signed;
@@ -84,7 +84,13 @@ fn data_wired_to_data_conflicts_at_its_wire() {
     let exposed = builder.data(());
     assert_eq!(
         check_template(&finish_unchecked(builder, exposed)),
-        Err(PolarityViolation::Conflict(PolarityRule::Wire(left, right)))
+        Err(PolarityViolation::Conflict {
+            closing: PolarityRule::Wire(left, right),
+            forced_by: vec![
+                PolarityRule::Node(left, NodeRule::DataProvides),
+                PolarityRule::Node(right, NodeRule::DataProvides),
+            ],
+        })
     );
 }
 
@@ -100,7 +106,10 @@ fn a_function_built_in_application_order_conflicts() {
     builder.wire(argument, erase);
     assert!(matches!(
         check_template(&finish_unchecked(builder, function)),
-        Err(PolarityViolation::Conflict(PolarityRule::Wire(..)))
+        Err(PolarityViolation::Conflict {
+            closing: PolarityRule::Wire(..),
+            ..
+        })
     ));
 }
 
@@ -112,7 +121,10 @@ fn a_consuming_exposed_port_conflicts() {
     builder.wire(output, erase);
     assert_eq!(
         check_template(&finish_unchecked(builder, input)),
-        Err(PolarityViolation::Conflict(PolarityRule::Exposed(input)))
+        Err(PolarityViolation::Conflict {
+            closing: PolarityRule::Exposed(input),
+            forced_by: vec![PolarityRule::Node(input, NodeRule::OperatorConsumesInput)],
+        })
     );
 }
 
@@ -127,6 +139,58 @@ fn a_component_unreachable_from_the_exposed_port_is_disconnected() {
         check_template(&finish_unchecked(builder, exposed)),
         Err(PolarityViolation::Disconnected(garbage.node()))
     );
+}
+
+#[test]
+fn finishing_rejects_an_unpolarized_template_and_names_the_forcing_rules() {
+    let mut builder = NetBuilder::<Signed>::new();
+    let left = builder.data(());
+    let right = builder.data(());
+    builder.wire(left, right);
+    let exposed = builder.data(());
+    let Err(NetBuildError::Polarity(violation)) = builder.try_finish(exposed) else {
+        panic!("an unpolarized template must not finish")
+    };
+    let message = violation.to_string();
+    assert!(message.starts_with("interaction net is not polarized: the wire between"));
+    assert!(message.contains("provides its data"), "{message}");
+
+    let mut builder = NetBuilder::<Signed>::new();
+    let exposed = builder.data(());
+    let garbage = builder.data(());
+    let erase = builder.copy(0).input;
+    builder.wire(garbage, erase);
+    assert_eq!(
+        builder.try_finish(exposed).err(),
+        Some(NetBuildError::Polarity(PolarityViolation::Disconnected(
+            garbage.node()
+        )))
+    );
+}
+
+#[test]
+fn a_copy_tunnel_passes_its_sign_through() {
+    // .data -> .copy 1 -> exposed: the tunnel's output provides.
+    let mut builder = NetBuilder::<Signed>::new();
+    let data = builder.data(());
+    let tunnel = builder.copy(1);
+    builder.wire(data, tunnel.input);
+    assert!(builder.try_finish(tunnel.outputs[0]).is_ok());
+
+    // An operator's input exposed through a tunnel still consumes.
+    let mut builder = NetBuilder::<Signed>::new();
+    let [input, output] = builder.operator(());
+    let erase = builder.copy(0).input;
+    builder.wire(output, erase);
+    let tunnel = builder.copy(1);
+    builder.wire(input, tunnel.input);
+    assert!(matches!(
+        builder.try_finish(tunnel.outputs[0]),
+        Err(NetBuildError::Polarity(PolarityViolation::Conflict {
+            closing: PolarityRule::Exposed(_),
+            ..
+        }))
+    ));
 }
 
 #[test]
