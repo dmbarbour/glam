@@ -856,6 +856,9 @@ a managed edge transition.** Reported.
 - Debug-assert that admission is never re-entered.
 - Add this nesting to the CG0 inventory.
 
+*Docs progress 2026-10-05:* `agent_context/evaluation.md` names this as a
+known exception to callback-free access. The code fix remains open.
+
 **S5 — Medium — The lifecycle state machine is written five times.**
 Reported.
 
