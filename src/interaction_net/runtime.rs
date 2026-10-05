@@ -204,6 +204,17 @@ pub enum CursorStep<S: NetSpecialization> {
     NotAdmitted,
 }
 
+/// What a step is about to claim, so its caller can decide whether to admit
+/// the claim.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClaimKind {
+    /// A rule application: a rewrite, a cursor step, or a new semantic call.
+    Reduction,
+    /// Resuming a callable checkpoint's suspended evaluation. This continues
+    /// an earlier call rather than applying a new rule.
+    CheckpointResumption,
+}
+
 #[derive(Debug)]
 pub enum ActivePairStep<S: NetSpecialization> {
     Reduction(Reduction),
@@ -1392,20 +1403,21 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
             pair,
             expected_topology_revision,
             &DIRECT_RUNTIME_NET_MUTATION_GATEWAY,
-            || true,
+            |_| true,
             inspect_source,
         )
     }
 
     /// Takes one non-blocking step at `pair`. `admit` runs only when the pair
-    /// is ready to claim; returning `false` leaves it unclaimed and reports
-    /// `NotAdmitted`. Every other outcome only observes.
+    /// is ready to claim, told what kind of claim it is; returning `false`
+    /// leaves the pair unclaimed and reports `NotAdmitted`. Every other
+    /// outcome only observes.
     pub(crate) fn step_active_pair_with_gateway<Gateway>(
         &self,
         pair: ActivePairKey,
         expected_topology_revision: Option<u64>,
         gateway: &Gateway,
-        admit: impl FnOnce() -> bool,
+        admit: impl FnOnce(ClaimKind) -> bool,
         inspect_source: impl FnOnce(&S::RuntimeSource, Port) -> SourceFrontier<S>,
     ) -> ActivePairStep<S>
     where
@@ -1430,7 +1442,15 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
             }
             let mut cursor_claim = None;
             let (outcome, changed) = match state.runtime.active.get(&pair) {
-                Some(ActivePairState::Ready) if !admit() => (ActivePairStep::NotAdmitted, false),
+                Some(ActivePairState::Ready)
+                    if !admit(if state.runtime.callable_checkpoint(pair).is_some() {
+                        ClaimKind::CheckpointResumption
+                    } else {
+                        ClaimKind::Reduction
+                    }) =>
+                {
+                    (ActivePairStep::NotAdmitted, false)
+                }
                 Some(ActivePairState::Ready) => {
                     let edges = state.runtime.reduce_pair_edge_transition(pair);
                     let reduction = gateway
@@ -1524,20 +1544,21 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
             cursor,
             expected_topology_revision,
             &DIRECT_RUNTIME_NET_MUTATION_GATEWAY,
-            || true,
+            |_| true,
             inspect_source,
         )
     }
 
     /// Takes one non-blocking step at `cursor`. `admit` runs only when the
-    /// cursor is ready to claim; returning `false` leaves it unclaimed and
-    /// reports `NotAdmitted`. Every other outcome only observes.
+    /// cursor is ready to claim, always as a `Reduction`; returning `false`
+    /// leaves it unclaimed and reports `NotAdmitted`. Every other outcome only
+    /// observes.
     pub(crate) fn step_cursor_with_gateway<Gateway>(
         &self,
         cursor: NodeId,
         expected_topology_revision: Option<u64>,
         gateway: &Gateway,
-        admit: impl FnOnce() -> bool,
+        admit: impl FnOnce(ClaimKind) -> bool,
         inspect_source: impl FnOnce(&S::RuntimeSource, Port) -> SourceFrontier<S>,
     ) -> CursorStep<S>
     where
@@ -1555,7 +1576,9 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
                 return CursorStep::Disturbed;
             }
             match state.runtime.inspect_cursor_step(cursor, gateway) {
-                CursorStepInspection::Claimable(_) if !admit() => return CursorStep::NotAdmitted,
+                CursorStepInspection::Claimable(_) if !admit(ClaimKind::Reduction) => {
+                    return CursorStep::NotAdmitted;
+                }
                 CursorStepInspection::Claimable(expected_pair) => {
                     let progress = gateway
                         .transition(&mut state.runtime, |runtime| {

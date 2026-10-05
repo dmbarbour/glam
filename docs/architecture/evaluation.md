@@ -248,9 +248,22 @@ Each claimed evaluator quantum also owns one stack-local
 `EvaluationStepBudget`. Budget-aware nested machines borrow that same mutable
 token; they never reconstruct an allowance from its remaining count. The
 token records its original grant, remaining units, and exact declared spend.
-Delegating reflection phases charge an administrative unit only when their
-child consumed none, so a one-unit quantum can still advance nested WHNF work
-without hiding a renewed sub-budget. The current demand pump deliberately
+
+A step pays one unit when it changes state, and observing is free (decision
+`reduction-costs-one-budget-unit`). A step needs a unit available to start:
+- **WHNF:** the regional driver charges each delegation; reporting a ready
+  value, a boundary or a failure costs nothing.
+- **Builtins:** applying an immediate builtin costs one unit. A builtin
+  machine step pays one unit when its operand evaluation cost nothing
+  (`ManagedLazyCheckpointEdge::machine_step`); a machine takes at most one
+  step per poll.
+- **Nets:** each rule application is charged at its claim; see
+  [`interaction_nets.md`](interaction_nets.md) "The Net Driver".
+- **Reflection:** delegating phases charge an administrative unit only when
+  their child consumed none, and waiting pumps within the caller's budget.
+
+So a one-unit quantum can always advance some work without hiding a renewed
+sub-budget. The current demand pump deliberately
 interprets its outer scalar as a reservation allowance: it reserves a whole
 task quantum before polling and does not refund unused units. Its
 `BudgetExhausted` result therefore describes exhausted reservation, not exact

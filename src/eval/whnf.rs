@@ -354,12 +354,19 @@ fn drive_regional_state_in_place<'scope>(
         &mut RegionalWhnfState<'_>,
     ) -> RegionalWhnfStep,
 ) -> RegionalWhnfStatus {
+    // A delegation is a reduction and costs one unit; reporting a ready
+    // value, a boundary, or a failure only observes. The reducer can change
+    // frames before it delegates, so the driver stops before a step it could
+    // not pay for rather than inside one.
     loop {
-        if !budget.try_consume() {
+        if budget.remaining() == 0 {
             return RegionalWhnfStatus::Yielded;
         }
         match reduce(access, work) {
-            RegionalWhnfStep::Delegate(focus) => work.focus = focus,
+            RegionalWhnfStep::Delegate(focus) => {
+                budget.consume(1);
+                work.focus = focus;
+            }
             RegionalWhnfStep::Ready(value) => return RegionalWhnfStatus::Ready(value),
             RegionalWhnfStep::Boundary(request) => {
                 return RegionalWhnfStatus::Boundary(request);

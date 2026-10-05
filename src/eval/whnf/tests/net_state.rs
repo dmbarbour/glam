@@ -408,10 +408,14 @@ fn net_state_and_durable_work_share_exact_budget_split_semantics() {
         access
             .values()
             .assert_same_representation_for_test(&uninterrupted, &Value::Number(3.into()));
-        assert_eq!(uninterrupted_budget.spent(), 3);
-        assert_eq!(uninterrupted_budget.remaining(), 1);
+        // Two delegations are paid; the final ready report is free.
+        assert_eq!(uninterrupted_budget.spent(), 2);
+        assert_eq!(uninterrupted_budget.remaining(), 2);
 
-        for first_quantum in 0..=3 {
+        // Splitting the chain at any point spends the same two units. A quantum
+        // that ends exactly after a delegation yields before the free ready
+        // report, which the next quantum makes without spending.
+        for first_quantum in 0..=2 {
             let mut first_budget = WhnfStepBudget::new(first_quantum);
             let (first, state) = drive_net_state(
                 &access,
@@ -419,30 +423,21 @@ fn net_state_and_durable_work_share_exact_budget_split_semantics() {
                 &mut first_budget,
                 reduce_shell,
             );
-            assert_eq!(first_budget.spent(), first_quantum.min(3));
-            if first_quantum == 3 {
-                let RegionalWhnfStatus::Ready(value) = first else {
-                    panic!("three transitions must complete the shell chain")
-                };
-                access
-                    .values()
-                    .assert_same_representation_for_test(&value, &uninterrupted);
-                continue;
-            }
+            assert_eq!(first_budget.spent(), first_quantum);
             let RegionalWhnfStatus::Yielded = first else {
-                panic!("a split before completion must preserve a successor")
+                panic!("a spent quantum must preserve a successor")
             };
-            let mut rest_budget = WhnfStepBudget::new(3 - first_quantum);
+            let mut rest_budget = WhnfStepBudget::new(2 - first_quantum + 1);
             let (RegionalWhnfStatus::Ready(value), _) =
                 drive_net_state(&access, state, &mut rest_budget, reduce_shell)
             else {
-                panic!("the remaining exact allowance must complete the shell chain")
+                panic!("the remaining delegations must complete the shell chain")
             };
             access
                 .values()
                 .assert_same_representation_for_test(&value, &uninterrupted);
-            assert_eq!(rest_budget.spent(), 3 - first_quantum);
-            assert_eq!(rest_budget.remaining(), 0);
+            assert_eq!(rest_budget.spent(), 2 - first_quantum);
+            assert_eq!(rest_budget.remaining(), 1);
         }
     });
 }

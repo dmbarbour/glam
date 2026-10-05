@@ -1289,7 +1289,7 @@ costs one unit, and observation is free.
   - one unit per pure reduction, with a free final observation;
   - a long chain yielding at each multi-unit budget;
   - a blocked checkpoint rechecked at zero budget.
-- The decision is `net-reduction-costs-one-budget-unit`.
+- The decision is `reduction-costs-one-budget-unit`.
 
 **Budget consistency audit (2026-10-05, at the maintainer's request).**
 Every evaluation path was checked against the N9 rule ("charge reductions,
@@ -1319,6 +1319,19 @@ confirmed by reading or running the code:
 6. **By design:** the pumps' reservation accounting, and the absence of a
    total cap on client demand, macro expansion and imports, where each poll
    mints a fresh quantum.
+
+*Resolved 2026-10-05,* after the maintainer approved the proposal. The
+decision is `reduction-costs-one-budget-unit`.
+- **Item 1:** resuming a callable checkpoint needs a unit available but is
+  not charged. A regression test confirms that one-unit polls now finish
+  the lazy-callable call.
+- **Item 2:** `poll_blocked` pumps through `pump_wait_on_route_within`.
+- **Item 3:** the WHNF driver charges only delegations.
+- **Item 4:** applying an immediate builtin costs one unit. Builtin machine,
+  access, object-fixpoint and list-effect steps pay one unit when their
+  operand evaluation cost nothing.
+- Seven exact-budget tests changed to the new counts. New tests cover
+  immediate and machine builtins.
 
 ### Reflection (R)
 

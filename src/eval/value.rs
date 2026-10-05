@@ -382,9 +382,21 @@ impl LazyTaskMachine {
             if checkpoint.kind() != ManagedLazyCheckpointKindTag::Access {
                 return Transition::Replaced(checkpoint.kind());
             }
-            match checkpoint
-                .with_access_transition_in(&access, |machine| machine.poll_in(&access, step_budget))
-            {
+            match checkpoint.with_access_transition_in(&access, |machine| {
+                ManagedLazyCheckpointEdge::machine_step(
+                    step_budget,
+                    || AccessRegionalPoll::Yielded,
+                    |poll| {
+                        matches!(
+                            poll,
+                            AccessRegionalPoll::Ready(_)
+                                | AccessRegionalPoll::Whnf(_)
+                                | AccessRegionalPoll::Yielded
+                        )
+                    },
+                    |budget| machine.poll_in(&access, budget),
+                )
+            }) {
                 AccessRegionalPoll::Ready(value) => {
                     let evaluated = EvaluatedValue::from_whnf_in(access.values(), value)
                         .expect("computed access must demand its final selected value to WHNF");
@@ -1313,6 +1325,10 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                             }
                         }
                         LazySource::Builtin(call) => {
+                            // Applying an immediate builtin is a reduction.
+                            if !step_budget.try_consume() {
+                                return EvaluationMachinePoll::Yielded;
+                            }
                             let result = context.with_value_access(|access| {
                                 let mut arguments = call
                                     .arguments

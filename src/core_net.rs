@@ -609,12 +609,12 @@ impl CoreRuntimeNetAccess<'_, '_> {
 
     #[cfg(test)]
     pub(crate) fn step_cursor(&self, cursor: NodeId) -> CoreCursorStep {
-        self.step_cursor_within(cursor, || true)
+        self.step_cursor_within(cursor, |_| true)
     }
 
     #[cfg(test)]
     pub(crate) fn step_active_pair(&self, pair: ActivePairKey) -> CoreActivePairStep {
-        self.step_active_pair_within(pair, || true)
+        self.step_active_pair_within(pair, |_| true)
     }
 
     /// Steps `cursor`, calling `admit` only if it would claim (see
@@ -622,7 +622,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
     pub(crate) fn step_cursor_within(
         &self,
         cursor: NodeId,
-        admit: impl FnOnce() -> bool,
+        admit: impl FnOnce(crate::interaction_net::ClaimKind) -> bool,
     ) -> CoreCursorStep {
         self.step_cursor_if_current(cursor, None, admit)
     }
@@ -632,7 +632,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
     pub(crate) fn step_active_pair_within(
         &self,
         pair: ActivePairKey,
-        admit: impl FnOnce() -> bool,
+        admit: impl FnOnce(crate::interaction_net::ClaimKind) -> bool,
     ) -> CoreActivePairStep {
         self.step_active_pair_if_current(pair, None, admit)
     }
@@ -661,7 +661,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         &self,
         cursor: NodeId,
         expected_topology_revision: Option<u64>,
-        admit: impl FnOnce() -> bool,
+        admit: impl FnOnce(crate::interaction_net::ClaimKind) -> bool,
     ) -> CoreCursorStep {
         let step = self.runtime.cell().step_cursor_with_gateway(
             cursor,
@@ -685,7 +685,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         &self,
         pair: ActivePairKey,
         expected_topology_revision: Option<u64>,
-        admit: impl FnOnce() -> bool,
+        admit: impl FnOnce(crate::interaction_net::ClaimKind) -> bool,
     ) -> CoreActivePairStep {
         let step = self.runtime.cell().step_active_pair_with_gateway(
             pair,
@@ -1229,7 +1229,7 @@ impl CoreFrontierObservation {
         &self,
         access: &CoreRuntimeNetAccess<'_, '_>,
         pair: ActivePairKey,
-        admit: impl FnOnce() -> bool,
+        admit: impl FnOnce(crate::interaction_net::ClaimKind) -> bool,
     ) -> CoreActivePairStep {
         assert!(
             self.source(access.values)
@@ -1243,7 +1243,7 @@ impl CoreFrontierObservation {
         &self,
         access: &CoreRuntimeNetAccess<'_, '_>,
         cursor: NodeId,
-        admit: impl FnOnce() -> bool,
+        admit: impl FnOnce(crate::interaction_net::ClaimKind) -> bool,
     ) -> CoreCursorStep {
         assert!(
             self.source(access.values)
@@ -2573,10 +2573,10 @@ mod tests {
 
         target.with_test_access(&values, |wrong_access| match observation.endpoint() {
             DemandEndpoint::Cursor(cursor) => {
-                let _ = observation.step_cursor(&wrong_access, cursor, || true);
+                let _ = observation.step_cursor(&wrong_access, cursor, |_| true);
             }
             DemandEndpoint::ActivePair(pair) => {
-                let _ = observation.step_active_pair(&wrong_access, pair, || true);
+                let _ = observation.step_active_pair(&wrong_access, pair, |_| true);
             }
         });
     }

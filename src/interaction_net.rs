@@ -26,11 +26,11 @@ pub(crate) use model::{
 };
 pub(crate) use runtime::{
     ActivePairStep, BlockedCallableCheckpoint, Call, CallableCheckpointCall, CheckpointBlockResult,
-    CursorDependency, CursorDependencyDisposition, CursorDependencyResolution, CursorProgress,
-    CursorStep, DemandEndpoint, FrontierObservation, InterfaceDemand, NetContention, OperatorCall,
-    PreparedCopySource, Reduction, ReductionKind, RuntimeNet, RuntimeNetCell,
-    RuntimeNetEdgeTransition, RuntimeNetMutation, RuntimeNetMutationGateway, RuntimeNetPayload,
-    RuntimeNetPayloadDuplicator, SourceFrontier, StuckReason,
+    ClaimKind, CursorDependency, CursorDependencyDisposition, CursorDependencyResolution,
+    CursorProgress, CursorStep, DemandEndpoint, FrontierObservation, InterfaceDemand,
+    NetContention, OperatorCall, PreparedCopySource, Reduction, ReductionKind, RuntimeNet,
+    RuntimeNetCell, RuntimeNetEdgeTransition, RuntimeNetMutation, RuntimeNetMutationGateway,
+    RuntimeNetPayload, RuntimeNetPayloadDuplicator, SourceFrontier, StuckReason,
 };
 #[cfg(test)]
 pub(crate) use runtime::{RuntimeNetRevisions, SharedRuntimeNet};

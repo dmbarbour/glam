@@ -456,23 +456,41 @@ maps the short names used here to file names.
 - **Recorded in:** resumable-WHNF plan W7A.1; W7 review; documentation
   disposition, maintainer answer 4.
 
-### Every net reduction costs one budget unit; observation is free
-`net-reduction-costs-one-budget-unit` · 2026-10-05 · maintainer · accepted
-- **Context:** the net driver charged only semantic handoffs, so one poll
-  could run a long or divergent pure reduction inside one access region.
-  A separate admission after the claim also needed a refund path, which
-  panicked on a blocked checkpoint.
-- **Decision:** charge one unit for every rule application, at the claim:
-  pure rewrites, the remote-cursor rule, and semantic claims. Interface
-  polls, chain walks, dependency resolution and rechecking a blocked wait
-  are free. A refused claim leaves the net unchanged and ends the poll.
-- **Consequences:** a poll performs at most its budget of reductions. Free
-  observation cannot loop, because a poll without a reduction ends in a
-  result, handoff, contention or block. Budgets stay simple heuristics
-  rather than cost models.
-- **Rule lives in:** `agent_context/interaction_nets.md` "Reduction and
-  External Work"; `architecture/interaction_nets.md` "The Net Driver".
-- **Recorded in:** holistic review N9.
+### Every reduction costs one budget unit; observation is free
+`reduction-costs-one-budget-unit` · 2026-10-05 · maintainer · accepted
+- **Context:**
+  - The net driver charged only semantic handoffs, so one poll could run a
+    long or divergent pure reduction inside one access region.
+  - Elsewhere the WHNF driver charged observation, and builtin machines
+    charged nothing of their own.
+  - A separate admission after a net claim needed a refund path, which
+    panicked on a blocked checkpoint.
+  - One-unit polls never finished a call on a lazy callable.
+- **Decision:** a step pays one unit when it changes state; observing is
+  free; a step needs a unit available to start.
+  - **Nets:** every rule application is charged at its claim, through an
+    admission callback. Resuming a callable checkpoint continues an earlier
+    call: it needs a unit available but is not charged.
+  - **WHNF:** a delegation costs one unit; reporting a ready value, a
+    boundary or a failure is free.
+  - **Builtins:**
+    - applying an immediate builtin costs one unit;
+    - a builtin machine step whose operand evaluation cost nothing pays one
+      unit for its own work.
+  - **Reflection:** steps charge as before, and waiting pumps within the
+    caller's budget.
+- **Consequences:**
+  - A poll performs at most its budget of reductions. Free observation
+    cannot loop, because a poll without a reduction ends in a result,
+    handoff, contention or block.
+  - With no units left, WHNF stops before its next step. A ready result
+    after the last paid step is therefore reported by the next poll, where
+    nets report it at once.
+  - Budgets stay simple heuristics rather than cost models: one step may
+    still do work proportional to its data.
+- **Rule lives in:** `architecture/evaluation.md` "Context and Session";
+  `agent_context/interaction_nets.md` "Reduction and External Work".
+- **Recorded in:** holistic review N9 and its budget consistency audit.
 
 ### The step budget is a reservation; a poll spends at most its budget
 `step-budget-is-reservation` · 2026-09-25, extended 2026-10-05 · agent · accepted

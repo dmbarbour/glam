@@ -552,8 +552,10 @@ fn immediate_builtin_result_is_installed_before_route_loss() {
     let retained = lazy.root(context.values());
     let mut machine = lazy_machine(&context, lazy);
     let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+    // One unit applies the builtin; the result is installed, and reporting it
+    // waits for a later poll.
     assert!(matches!(
-        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(0)),
+        machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1)),
         EvaluationMachinePoll::Yielded
     ));
     assert_lazy_checkpoint_kind(&context, &machine, ManagedLazyCheckpointKindTag::Whnf);
@@ -563,6 +565,100 @@ fn immediate_builtin_result_is_installed_before_route_loss() {
         &context,
         &drive_after_route_loss(&context, &retained, machine, &mut route_losses),
         &Value::List(List::from_values(vec![number(3), number(5)])),
+    );
+}
+
+fn builtin_lazy(context: &EvalContext, builtin: Builtin, arguments: [Value; 2]) -> LazyValue {
+    context.values().with_runtime_value_access(|access| {
+        LazyValue::from_builtin_in(
+            &access,
+            BuiltinCall {
+                builtin,
+                arguments: Arc::from(arguments),
+            },
+        )
+    })
+}
+
+/// Polls with one-unit budgets until the lazy completes, checking that every
+/// poll which does not finish spends its unit. Returns the number of polls.
+fn complete_in_one_unit_polls(context: &EvalContext, lazy: LazyValue) -> usize {
+    let poll = crate::evaluation::EvaluationPollContext::for_context(context);
+    let mut machine = lazy_machine(context, lazy);
+    for polls in 1..=32 {
+        let mut one = crate::evaluation::EvaluationStepBudget::new(1);
+        let outcome = machine.poll(&poll, &mut one);
+        if let EvaluationMachinePoll::Complete(_) = outcome {
+            return polls;
+        }
+        assert!(matches!(outcome, EvaluationMachinePoll::Yielded));
+        assert_eq!(
+            one.spent(),
+            1,
+            "a poll that does not finish spends its unit"
+        );
+    }
+    panic!("one-unit polls must keep making progress");
+}
+
+#[test]
+fn applying_an_immediate_builtin_costs_one_unit() {
+    let context = isolated_context();
+    let lists = || {
+        [
+            Value::List(List::from_values(vec![number(3)])),
+            Value::List(List::from_values(vec![number(5)])),
+        ]
+    };
+    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+    let mut machine = lazy_machine(&context, builtin_lazy(&context, Builtin::Append, lists()));
+    let mut budget = crate::evaluation::EvaluationStepBudget::new(64);
+    assert!(matches!(
+        machine.poll(&poll, &mut budget),
+        EvaluationMachinePoll::Complete(_)
+    ));
+    assert_eq!(budget.spent(), 1);
+    assert_eq!(
+        complete_in_one_unit_polls(&context, builtin_lazy(&context, Builtin::Append, lists())),
+        2,
+        "one poll applies the builtin; the next reports its result for free"
+    );
+}
+
+#[test]
+fn a_builtin_machine_step_on_evaluated_operands_costs_one_unit() {
+    // Observing evaluated operands is free, so each machine step pays one unit
+    // of its own. A machine takes one step per poll, even with budget left,
+    // and a final poll reports the result for free.
+    let context = isolated_context();
+    let operands = || [number(3), number(5)];
+    let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+    let mut machine = lazy_machine(&context, builtin_lazy(&context, Builtin::Add, operands()));
+    let mut steps = 0;
+    let sum = loop {
+        let mut budget = crate::evaluation::EvaluationStepBudget::new(64);
+        let outcome = machine.poll(&poll, &mut budget);
+        steps += 1;
+        match outcome {
+            EvaluationMachinePoll::Complete(sum) => {
+                assert_eq!(budget.spent(), 0, "reporting the result is free");
+                break sum;
+            }
+            EvaluationMachinePoll::Yielded => {
+                assert_eq!(
+                    budget.spent(),
+                    1,
+                    "each machine step costs exactly one unit"
+                );
+                assert!(steps < 32, "the machine must finish");
+            }
+            _ => panic!("adding evaluated numbers neither blocks nor fails"),
+        }
+    };
+    assert_same_value(&context, &sum.clone_core_for_test(), &number(8));
+    assert_eq!(
+        complete_in_one_unit_polls(&context, builtin_lazy(&context, Builtin::Add, operands())),
+        steps
     );
 }
 

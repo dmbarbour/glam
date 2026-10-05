@@ -284,7 +284,7 @@ it, and a stale holder fails quietly.
 
 Every reduction costs one unit of the shared step budget, spent through the
 admission callback at the moment of the claim; observation is free
-(decision `net-reduction-costs-one-budget-unit`). Do not charge per driver
+(decision `reduction-costs-one-budget-unit`). Do not charge per driver
 work item, which starves a one-unit poll, and do not add a separate budget
 check after a claim: a refusal there needs a refund path, and the old one
 missed a state and panicked.

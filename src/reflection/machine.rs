@@ -665,7 +665,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         if let Some(poll) = self.poll_exit() {
             return poll;
         }
-        if let Some(blocked) = self.poll_blocked() {
+        if let Some(blocked) = self.poll_blocked(step_budget) {
             return blocked;
         }
 
@@ -3229,7 +3229,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
     }
 
-    fn poll_blocked(&mut self) -> Option<EffectTaskPoll> {
+    fn poll_blocked(
+        &mut self,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> Option<EffectTaskPoll> {
         self.blocked.as_ref()?;
         match self.validate_blocked_retry() {
             BlockedRetryPoll::Stable => {}
@@ -3255,8 +3258,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
         match self.eval_context.poll_wait(wait) {
             EvaluationWaitPoll::Pending(_) => {
                 if matches!(
-                    self.eval_context
-                        .pump_wait_on_route(wait, 256, &mut self.exact_demand_route,),
+                    self.eval_context.pump_wait_on_route_within(
+                        wait,
+                        step_budget,
+                        &mut self.exact_demand_route,
+                    ),
                     EvaluationPumpOutcome::TargetReady
                 ) {
                     self.blocked = None;

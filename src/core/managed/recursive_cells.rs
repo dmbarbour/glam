@@ -2157,7 +2157,7 @@ mod tests {
                     pair,
                     None,
                     &net,
-                    || true,
+                    |_| true,
                     |_source, _anchor| unreachable!("erase does not inspect a source"),
                 ),
                 crate::interaction_net::ActivePairStep::Reduction(

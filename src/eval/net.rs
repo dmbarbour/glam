@@ -572,6 +572,18 @@ enum NetBatchOutcome {
     },
 }
 
+/// Admits a claim against the shared step budget. A reduction costs one unit.
+/// Resuming a callable checkpoint only needs a unit to be available: its
+/// callable's own evaluation steps pay as they run.
+fn admit_claim(
+    step_budget: &mut crate::evaluation::EvaluationStepBudget,
+) -> impl FnOnce(crate::interaction_net::ClaimKind) -> bool + '_ {
+    move |claim| match claim {
+        crate::interaction_net::ClaimKind::Reduction => step_budget.try_consume(),
+        crate::interaction_net::ClaimKind::CheckpointResumption => step_budget.remaining() != 0,
+    }
+}
+
 /// Runs consecutive work items on one net inside its normalization batch.
 ///
 /// Every reduction costs one unit of the shared step budget, spent when the
@@ -658,7 +670,7 @@ fn drive_net_work_item(
         NetDriverWork::Cursor { root, cursor } => {
             #[cfg(feature = "interaction-net-profiling")]
             access.record_driver(crate::interaction_net::profiling::DriverEvent::CursorStep);
-            match access.step_cursor_within(cursor, || step_budget.try_consume()) {
+            match access.step_cursor_within(cursor, admit_claim(step_budget)) {
                 CursorStep::Progressed(progress) => {
                     debug_assert_ne!(progress, crate::interaction_net::CursorProgress::Claimed);
                     driver.progressed = true;
@@ -705,7 +717,7 @@ fn drive_net_work_item(
         } => {
             #[cfg(feature = "interaction-net-profiling")]
             access.record_driver(crate::interaction_net::profiling::DriverEvent::CursorStep);
-            match observation.step_cursor(access, cursor, || step_budget.try_consume()) {
+            match observation.step_cursor(access, cursor, admit_claim(step_budget)) {
                 CursorStep::Progressed(progress) => {
                     debug_assert_ne!(progress, crate::interaction_net::CursorProgress::Claimed);
                     driver.progressed = true;
@@ -760,13 +772,13 @@ fn drive_net_work_item(
                 access,
                 root,
                 pair,
-                access.step_active_pair_within(pair, || step_budget.try_consume()),
+                access.step_active_pair_within(pair, admit_claim(step_budget)),
             );
         }
         NetDriverWork::ObservedActivePair { observation, pair } => {
             #[cfg(feature = "interaction-net-profiling")]
             access.record_driver(crate::interaction_net::profiling::DriverEvent::ActivePairStep);
-            let step = observation.step_active_pair(access, pair, || step_budget.try_consume());
+            let step = observation.step_active_pair(access, pair, admit_claim(step_budget));
             return prepare_active_pair_step(
                 driver,
                 access,
@@ -3242,6 +3254,51 @@ mod driver_tests {
                 assert!(halt.blocked_on().is_some());
                 assert_eq!(budget.spent(), 0);
             }
+        });
+    }
+
+    #[test]
+    fn one_unit_polls_finish_a_call_on_a_lazy_callable() {
+        // The call's claim takes a poll's only unit, so its callable spills
+        // unevaluated. Resuming that checkpoint must not cost a unit of its
+        // own, or no later poll could ever take a callable step.
+        let context = test_context();
+        let lazy = crate::core::LazyValue::from_access(
+            context.values(),
+            Arc::from([]),
+            Arc::from([context
+                .values()
+                .with_runtime_value_access(|access| access.unit())]),
+        );
+        crate::core::cache_test_lazy(
+            context.values(),
+            &lazy,
+            Ok(context.values().with_runtime_value_access(|access| {
+                crate::core::EvaluatedValue::from_whnf_in(&access, Value::Builtin(Builtin::ListLen))
+                    .expect("a builtin is already in WHNF")
+            })),
+        )
+        .expect_without_debug("fresh callable lazy accepts its cached result");
+        let mut net = NetBuilder::<CoreSpecialization>::new();
+        let [application, argument, result] = net.bind();
+        let function = net.data(Value::Lazy(lazy));
+        let value = net.data(
+            context
+                .values()
+                .with_runtime_value_access(|access| access.unit()),
+        );
+        net.wire(application, function);
+        net.wire(argument, value);
+        let mut machine = rooted_machine(&context, net.finish(result));
+
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
+            for _ in 0..16 {
+                let mut one = crate::evaluation::EvaluationStepBudget::new(1);
+                if let NetWhnfPoll::Ready(_) = machine.poll(evaluator, &mut one).unwrap() {
+                    return;
+                }
+            }
+            panic!("one-unit polls never finished the call");
         });
     }
 

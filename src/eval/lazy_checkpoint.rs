@@ -267,6 +267,28 @@ impl ManagedLazyCheckpointEdge {
         ))))
     }
 
+    /// Runs one regional machine step under the shared step budget.
+    ///
+    /// A step needs one unit available. Operand evaluation pays per
+    /// delegation; a step whose operands cost nothing pays one unit for the
+    /// machine's own work, unless it only reported a boundary or a failure.
+    pub(in crate::eval) fn machine_step<P>(
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+        yielded: impl FnOnce() -> P,
+        advanced: impl FnOnce(&P) -> bool,
+        step: impl FnOnce(&mut crate::evaluation::EvaluationStepBudget) -> P,
+    ) -> P {
+        if step_budget.remaining() == 0 {
+            return yielded();
+        }
+        let before = step_budget.remaining();
+        let poll = step(step_budget);
+        if advanced(&poll) {
+            step_budget.charge_if_unchanged(before);
+        }
+        poll
+    }
+
     pub(in crate::eval) fn with_access_transition_in<R>(
         &self,
         authority: &crate::evaluation::EvaluationValueAccess<'_>,
@@ -322,7 +344,20 @@ impl ManagedLazyCheckpointEdge {
                 &mut *state,
                 RegionalObjectFixpoint::trace_managed_edges,
                 RegionalObjectFixpoint::trace_managed_edges,
-                |state| state.poll_in(authority, step_budget),
+                |state| {
+                    Self::machine_step(
+                        step_budget,
+                        || RegionalObjectFixpointPoll::Yielded,
+                        |poll| {
+                            matches!(
+                                poll,
+                                RegionalObjectFixpointPoll::Ready(_)
+                                    | RegionalObjectFixpointPoll::Yielded
+                            )
+                        },
+                        |budget| state.poll_in(authority, budget),
+                    )
+                },
             )
         }
     }
@@ -354,7 +389,21 @@ impl ManagedLazyCheckpointEdge {
                 &mut *state,
                 RegionalListEffect::trace_managed_edges,
                 RegionalListEffect::trace_managed_edges,
-                |state| state.poll_in(authority, step_budget),
+                |state| {
+                    Self::machine_step(
+                        step_budget,
+                        || RegionalListEffectPoll::Yielded,
+                        |poll| {
+                            matches!(
+                                poll,
+                                RegionalListEffectPoll::Ready(_)
+                                    | RegionalListEffectPoll::FixReady { .. }
+                                    | RegionalListEffectPoll::Yielded
+                            )
+                        },
+                        |budget| state.poll_in(authority, budget),
+                    )
+                },
             )
         }
     }
@@ -386,7 +435,21 @@ impl ManagedLazyCheckpointEdge {
                 &mut *state,
                 RegionalBuiltinMachine::trace_managed_edges,
                 RegionalBuiltinMachine::trace_managed_edges,
-                |state| state.poll_in(authority, step_budget),
+                |state| {
+                    Self::machine_step(
+                        step_budget,
+                        || RegionalBuiltinPoll::Yielded,
+                        |poll| {
+                            matches!(
+                                poll,
+                                RegionalBuiltinPoll::Ready(_)
+                                    | RegionalBuiltinPoll::SparkIntent(_)
+                                    | RegionalBuiltinPoll::Yielded
+                            )
+                        },
+                        |budget| state.poll_in(authority, budget),
+                    )
+                },
             )
         }
     }

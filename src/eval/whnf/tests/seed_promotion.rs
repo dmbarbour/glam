@@ -79,7 +79,8 @@ fn managed_seed_promotion(frame_count: usize) {
         },
     );
     assert_deferred(installed, &deferred);
-    assert_eq!((install_budget.spent(), install_budget.remaining()), (1, 0));
+    // Reporting a boundary observes; only delegations are paid.
+    assert_eq!((install_budget.spent(), install_budget.remaining()), (0, 1));
     assert_eq!(
         values.managed_root_registrations_for_test() - registrations_before,
         1,
@@ -121,7 +122,7 @@ fn managed_seed_promotion(frame_count: usize) {
     assert_deferred(pending, &deferred);
     assert_eq!(
         (dependency_budget.spent(), dependency_budget.remaining()),
-        (1, 0)
+        (0, 1)
     );
     assert_eq!(
         values.managed_root_registrations_for_test() - registrations_after_yield,
@@ -141,7 +142,7 @@ fn managed_seed_promotion(frame_count: usize) {
         panic!("the baseline computation must retain its result semantics")
     };
     values.assert_same_representation_for_test(&ready.clone_core_for_test(), &text("ready"));
-    assert_eq!((ready_budget.spent(), ready_budget.remaining()), (1, 0));
+    assert_eq!((ready_budget.spent(), ready_budget.remaining()), (0, 1));
     assert_eq!(
         values.managed_root_registrations_for_test() - registrations_before_ready,
         1,

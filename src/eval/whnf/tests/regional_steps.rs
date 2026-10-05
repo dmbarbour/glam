@@ -9,7 +9,7 @@ fn isolated_values() -> CoreValueFactory {
 }
 
 #[test]
-fn immediate_completion_returns_whnf_in_one_step() {
+fn immediate_completion_returns_whnf_without_spending_budget() {
     let context = EvalContext::isolated(isolated_values());
     let poll = EvaluationPollContext::for_context(&context);
     poll.with_value_access(&context, |access| {
@@ -32,7 +32,7 @@ fn immediate_completion_returns_whnf_in_one_step() {
         access
             .values()
             .assert_same_representation_for_test(&actual, &expected);
-        assert_eq!(budget.remaining(), 0);
+        assert_eq!(budget.remaining(), 1, "observing a ready value is free");
     });
 }
 
@@ -57,6 +57,8 @@ fn tail_delegation_is_iterative_and_does_not_push_or_root() {
             None,
         );
         let mut transitions = 0;
+        // Each delegation costs one unit. The final ready report is free,
+        // but like any step it needs a unit available.
         let mut budget = WhnfStepBudget::new(DELEGATIONS + 1);
         let outcome = drive_regional(&access, work, &mut budget, |access, work| {
             assert!(work.frames.is_empty());
@@ -75,7 +77,7 @@ fn tail_delegation_is_iterative_and_does_not_push_or_root() {
             .values()
             .assert_same_representation_for_test(&actual, &expected);
         assert_eq!(transitions, DELEGATIONS);
-        assert_eq!(budget.remaining(), 0);
+        assert_eq!(budget.spent(), DELEGATIONS);
     });
     assert_eq!(
         values.managed_root_registrations_for_test(),

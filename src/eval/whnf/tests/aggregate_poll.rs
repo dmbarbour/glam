@@ -60,7 +60,8 @@ fn one_poll_aggregates_every_focus_and_frame_edit_into_one_edge_transition() {
     };
     assert_eq!(observed.id(), expected.id());
     assert_eq!(transition, 3);
-    assert_eq!((budget.spent(), budget.remaining()), (3, 1));
+    // Two delegations are paid; reporting the boundary is free.
+    assert_eq!((budget.spent(), budget.remaining()), (2, 2));
 
     let records = probe.records();
     assert_eq!(
@@ -118,7 +119,11 @@ fn managed_checkpoint_resumes_on_another_worker_after_collection() {
                 RegionalWhnfStep::Ready(Value::Number(5.into()))
             })
         });
-        assert_eq!((resume_budget.spent(), resume_budget.remaining()), (1, 0));
+        assert_eq!(
+            (resume_budget.spent(), resume_budget.remaining()),
+            (0, 1),
+            "a resumption that only reports its result spends nothing"
+        );
         let WhnfPoll::Ready(result) = resumed else {
             panic!("cross-worker resumption must complete")
         };

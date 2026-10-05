@@ -352,6 +352,8 @@ fn explicit_whnf_worklist_completes_at_the_recursive_control_depth() {
             let work =
                 RegionalWhnfWork::from_focus(&access, access.values().duplicate_value(&expected));
             let mut transitions = 0;
+            // Each delegation is paid. The final ready report is free, but
+            // like any step it needs a unit available.
             let mut budget = WhnfStepBudget::new(SEMANTIC_DEPTH + 1);
             let outcome = drive_regional(&access, work, &mut budget, |_access, _work| {
                 if transitions == SEMANTIC_DEPTH {
@@ -368,7 +370,7 @@ fn explicit_whnf_worklist_completes_at_the_recursive_control_depth() {
                 .values()
                 .assert_same_representation_for_test(&actual, &expected);
             assert_eq!(transitions, SEMANTIC_DEPTH);
-            assert_eq!(budget.remaining(), 0);
+            assert_eq!(budget.spent(), SEMANTIC_DEPTH);
         });
     });
 }
