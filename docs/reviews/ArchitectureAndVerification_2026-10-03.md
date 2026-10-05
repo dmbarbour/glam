@@ -184,6 +184,15 @@ The documentation-only exemption in
 included by Rust inventory tests are test inputs. Changes to those documents
 need the affected inventory tests, even when no `.rs` file changes.
 
+**Resolved 2026-10-03**, together with holistic X1.
+- **Prose test.** `74088606` retired the failing prose test and removed every
+  plan and review read from Rust tests. `tests/source_doc_coupling.rs` now
+  fails if `src/` references `docs/plans` or `docs/reviews`, so no document
+  is a test input and the exemption needs no qualification.
+- **Clippy and toolchain.** `4c849c19` migrates the three `fetch_update`
+  calls to `try_update`, pins Rust 1.99.0 in `rust-toolchain.toml`, and
+  declares the matching `rust-version`.
+
 ### AR-004 — P2: Routine commands omit the collector's own test suite
 
 Owners: [`Cargo.toml`](../../Cargo.toml),
@@ -213,6 +222,19 @@ checks, targeted scale checks, and documented dynamic-tool exceptions.
 Pin/record toolchain identity and preserve results against the exact revision.
 Choose CI or a documented local gate without requiring every edit to rerun
 all expensive tools.
+
+**Resolved 2026-10-04**, together with holistic X2. `scripts/check.sh`
+(`5e68163d`) is the documented local gate; there is no CI, by decision.
+- **Levels.** `fast` runs workspace fmt, Clippy, and tests, so `glam-gc`'s
+  unit tests, Loom models, and doctests run. `all`, the pre-commit gate, adds
+  `glam-gc`'s own check script (unsafe audit and codegen latch), the G0
+  semantic regressions, and the profiling fixtures. `full` adds the
+  aggressive-GC workspace pass, cursor stress, and the scale proofs.
+- **Fail-closed filters.** The G0 script now fails on a filter that matches
+  no test (`2ff5bc3e`).
+- **Aggressive GC.** The `full` pass is green since `df60695d`.
+- **Remaining gap.** Miri and the sanitizers run only for `glam-gc` and only
+  when a nightly is installed; `full` otherwise skips them with a notice.
 
 ### AR-005 — P2: Raw-value safety still relies on review, not escape analysis
 

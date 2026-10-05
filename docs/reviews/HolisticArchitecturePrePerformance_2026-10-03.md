@@ -205,6 +205,15 @@ folds singleton `List::concat`s into an N-deep left spine
 - Add a check that `src/` never references `docs/plans` or `docs/reviews`.
 - Treat a red routine suite as blocking for any "complete" commit.
 
+*Resolved 2026-10-03* in `74088606`.
+- **Tests.** Five doc-prose tests were retired, including the red
+  `runtime_gc_policy_review_links_selected_plan_and_completion_gate`. Four
+  mixed tests kept their code invariants and lost their plan and review
+  assertions.
+- **Guard.** `tests/source_doc_coupling.rs` fails if any file under `src/`
+  references `docs/plans` or `docs/reviews`. It scans `src/` only.
+- **Gate.** `scripts/check.sh` is now the pre-commit gate; see X2.
+
 ### X2 — High — The routine checks cover less than they appear to
 
 **Verified.**
@@ -262,6 +271,26 @@ folds singleton `List::concat`s into an N-deep left spine
 - Make scripts fail when a filter matches zero tests.
 - Replace `rg` in scripts with `grep -E`, or declare it as a dependency.
 - Add minimal CI: `check.sh` per push, `check-full.sh` nightly.
+
+*Resolved 2026-10-04, except CI and the nightly tools.*
+- **Workspace gate.** `scripts/check.sh` (`5e68163d`) has cumulative levels.
+  `fast` runs workspace fmt, Clippy, and tests. `all` adds `glam-gc`'s own
+  suite, the G0 semantic regressions, and the profiling fixtures. `full` adds
+  the aggressive-GC workspace pass, cursor stress, and the `glam-gc` scale
+  proofs. `AGENTS.md` names the script; `AgentContext.md` explains the levels.
+- **Aggressive GC.** The regression found on 2026-10-03 was fixed in
+  `df60695d`: verification now collects at the stable-pump maintenance
+  boundary, and `scripts/check.sh full` passes.
+- **Toolchain.** `4c849c19` pins Rust 1.99.0 in `rust-toolchain.toml`,
+  declares `rust-version`, and finishes the `fetch_update` → `try_update`
+  migration.
+- **Scripts.** `2ff5bc3e` replaces `rg` with `grep`, restores the G0 script's
+  renamed test filter, and makes that script fail on a filter that matches no
+  test.
+- **Not done.** There is no CI, by decision; `scripts/check.sh` is the local
+  gate. Miri and the sanitizers run only for `glam-gc` and only when a nightly
+  is installed. The production-runtime Miri and sanitizer matrix is not
+  scripted, and no docs link check was added.
 
 ### X3 — High — There is no performance harness, and the existing hooks are unused
 
@@ -388,6 +417,27 @@ Then capture and check in a post-G4 baseline in one owning doc.
 - Add forced-panic tests for each work kind.
 - Add a no-panic fuzz target for `inspect_g_source` seeded from `samples/`.
 - Add a random closed-net generator, including auxiliary-loop shapes (N8).
+
+*Mostly resolved 2026-10-05, following the maintainer's Decision 1: a panic is
+a bug, contained as an interruption and never treated as semantics.* The
+[panic plan](../plans/UserInputPanicSafety_2026-10-04.md) has the details.
+- **Crashes.** N1 is fixed in `0d5c54df` and F1 in `0e3e456b`, each with a
+  regression. The parser and evaluation inspections found no further
+  user-reachable panic.
+- **Containment.** Each step has forced-panic regressions.
+  - The three claimed-poll boundaries catch an unwind and end the claim as
+    `Panicked` through the ordinary terminal path. Waiters halt, and workers
+    survive (`f8a00dde`).
+  - A lazy records its own panic as evaluation state and is never replayed
+    (`94f5e635`).
+  - A panic that tears runtime-core state poisons the runtime. Parked threads
+    wake, and further mutation fails loudly instead of hanging (`04798681`).
+  - Collection survives a panic (`3a9eb1a6`), and client callbacks invoked
+    outside polls are contained (`e50a641d`).
+- **Open.** The interaction-net inspection and N8's random closed-net
+  generator follow the net polarity checker. Fuzzing is deferred by decision
+  until inspection stalls. Deeply nested source still overflows the parser's
+  stack.
 
 ### X5 — High — Transition scaffolding taxes every structural change
 
@@ -772,6 +822,14 @@ lock.** Verified in part.
 Drop the ordered queue. Make the probes use a reusable scratch buffer.
 
 **S3 — High — Claims have no unwind guard.** See X4.
+
+*Resolved 2026-10-04.* `ClaimedTask::poll`, `poll_claimed_client_demand`,
+and `poll_claimed_spark` catch an unwind and end the claim as `Panicked`
+through the existing terminal path. The record no longer stays `Running`,
+waiters halt, and the worker survives. A panic that escapes those boundaries
+came from scheduler code: the worker loop's outer catch poisons the runtime,
+and the worker exits. Release paths rely on that runtime poisoning, not on a
+per-claim guard.
 
 **S4 — Medium (blocks Concurrent GC step CG0) — Coordinator locking inside
 a managed edge transition.** Reported.

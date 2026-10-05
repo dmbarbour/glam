@@ -12,12 +12,16 @@ belong in `docs/agent_context/`; target behavior belongs in the design docs.
 | Source loading, modules, CLI, batch lifecycle | [`architecture/assembly.md`](architecture/assembly.md) | [`agent_context/assembly.md`](agent_context/assembly.md) |
 | Built-in `.g` compiler and macros | [`architecture/front_end.md`](architecture/front_end.md) | [`agent_context/g_syntax.md`](agent_context/g_syntax.md) |
 | Values, laziness, sessions, workers | [`architecture/evaluation.md`](architecture/evaluation.md) | [`agent_context/evaluation.md`](agent_context/evaluation.md) |
+| Managed values, roots, collection policy | [`architecture/values.md`](architecture/values.md) | [`agent_context/evaluation.md`](agent_context/evaluation.md) |
 | Freer effects, heap, reflection tasks | [`architecture/reflection.md`](architecture/reflection.md) | [`agent_context/reflection.md`](agent_context/reflection.md) |
 | Structured failures and configured logging | [`architecture/diagnostics.md`](architecture/diagnostics.md) | [`agent_context/diagnostics.md`](agent_context/diagnostics.md) |
 | Interaction nets | Evaluation handoff above | [`agent_context/interaction_nets.md`](agent_context/interaction_nets.md) |
 | Objects and linearization | Front-end and evaluation notes above | [`agent_context/objects.md`](agent_context/objects.md) |
 
 [`src/README.md`](../src/README.md) is the compact source-module map.
+[`Decisions.md`](Decisions.md) records why significant decisions were made;
+standing docs keep the resulting rules. The log is incomplete: it starts late
+in development.
 [`DistilledDesign.md`](DistilledDesign.md) describes intended design, not
 necessarily implemented behavior. [`SyntaxCheatSheet.md`](SyntaxCheatSheet.md),
 [`CLI.md`](CLI.md), and [`Macros.md`](Macros.md) are user-facing references;
@@ -91,6 +95,11 @@ verify current bootstrap acceptance against tests and samples.
   counts. At the transition's closing review, retire these tests and keep only
   the negative rules that remain durable. Do not use fingerprints or census
   totals as evidence of safety. Rust tests must not read plan or review prose.
+- Plan and review step IDs (such as `W7B` or `GCI11R-002D.2e.4`) may appear in
+  code and comments while their work is active. At the next cleanup, replace
+  each one with a reference to its `Decisions.md` entry or with a short
+  explanation, whichever is clearer. A step ID never stands alone as a
+  justification. (Glam itself uses "label" for a dictionary key.)
 
 ## Verification
 
@@ -112,10 +121,13 @@ point. Its levels are cumulative:
   fixtures. The pre-commit gate. The profiling check names only the
   profiling-specific and profiling-augmented fixtures; it does not repeat the
   whole suite under instrumentation.
-- `scripts/check.sh full` — adds the expensive periodic tier: the aggressive-GC
+- `scripts/check.sh full` — adds the expensive tier: the aggressive-GC
   verification pass over the whole workspace, the cursor-stress and
-  million-edge scale proofs, and Miri and the sanitizers. Run before
-  performance work and periodically.
+  million-edge scale proofs, and Miri and the sanitizers. Run it before
+  performance work and after any change to runtime or collector code, or to
+  unsafe, tracing, mutation, root, admission, finalization, or scheduler
+  behavior. Documentation-only changes may reuse the last result. Running it
+  only periodically once let a regression stay unnoticed for weeks.
 
 Scale-only proofs (cursor stress, million-edge) stay `#[ignore]`d in the
 ordinary suite and run only at `full`. The project pins a stable toolchain, so

@@ -572,8 +572,14 @@ Entry surfaces:
   so the generator exercises the final `bind >< bind` semantics. That
   change landed on 2026-10-05: binds join crossed (`B.1-C.2`, `B.2-C.1`),
   and function binds list `[result, argument]`.
-  Users can build nets with subnets disconnected from the public port. Such
-  garbage must never fail evaluation unless demand reaches it.
+  Construction rejects a net with a component disconnected from the public
+  port, as a miswiring error; test builds already check this, and polarity
+  slice 3 enforces it at `try_finish`. Only disconnected garbage that
+  reduction leaves behind, such as closed loops and erased subnets, must never
+  fail evaluation unless demand reaches it. This follows the maintainer's
+  2026-10-05 decision in the [polarity plan](NetPolarityChecker_2026-10-05.md)
+  and supersedes this plan's earlier wording, which let users build
+  disconnected subnets.
 - **Poisoning.** Inventory the mutexes and `RwLock`s whose poisoning
   makes a runtime unusable, especially `lock().expect(..)` in `Drop` impls
   and guards, and `try_lock().expect(..)` on collector paths. For each lock

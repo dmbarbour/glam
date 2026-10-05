@@ -201,7 +201,7 @@ control-flow overview.
 - `anno meta_refl:EffectfulUpdate Carriers` uses the same validation,
   arity-preserving projections, and sealed outputs, but its one shared update
   is a result-producing reflection task. Annotation construction and ordinary
-  transport never launch it. The first demand owns the task; copied carriers
+  transport never launch it. The first demand reserves the task; copied carriers
   and projections share its result, waits, failure, and cancellation.
 - Associated metadata has bidirectional hidden transport but one-way
   observability. Ordinary transport leaves hidden work latent; `seq` demands
@@ -260,44 +260,47 @@ control-flow overview.
   Projection preserves its ad hoc fields and existing `msg.context`, prepending
   later evaluator-owned demand frames rather than replacing client context.
 - Reflection annotations are lazy gates. Construction demands neither effect
-  nor target. Demand on a gate waits for its demand-session-owned coordinator
-  task, requires
-  canonical unit, and then transfers the same demand to the target. Waits are
-  not cached as lazy failures.
+  nor target. Demand on a gate waits on its completion promise, which the
+  task assigns the target only after its result is canonical unit; the same
+  demand then continues to the target. Waits are not cached as lazy failures.
 - `refl` and `meta_refl` select the runtime's once-sealed default task profile,
   never the profile of the session which claims the lazy annotation. A
   `.task.new` child instead inherits its parent's whole profile, including
   effect vocabulary, environment, diagnostic routing, and shared host
   resources. An annotation child therefore inherits the runtime default which
   its parent received.
-- A reflection lazy itself traces the immutable effect and optional gate
-  target. Its external-owner record caches only a scalar admission error or an
-  edge-free observation with scalar identity/disposition and weak task routes.
-  The first observer's one-use permit temporarily roots the effect until
-  activation transfers ownership to the coordinator machine. Draining the
-  external owner does not cancel or retain work while that permit survives;
-  dropping an unconsumed permit cancels the still-reserved task.
+- A reflection lazy traces its immutable effect, optional gate target, and one
+  managed completion promise; it has no external-owner record or task
+  observation. The first producing poll registers the reserved task as the
+  promise's producer, installs a WHNF checkpoint on the promise, and defers a
+  one-use permit that roots the effect until activation transfers ownership
+  to the coordinator machine. Dropping an unconsumed permit cancels the
+  still-reserved task and fails its promise. An activated task is an
+  autonomous background root; retiring the lazy's route never cancels it.
 - The boxed reflection lazy source has an explicit completion policy. A gate
-  selects `RequireUnit` and then exposes its target; the internal
-  result-producing form selects `ReturnValue` and forwards the task result
-  through the ordinary WHNF demand. Keep this distinction at the launcher
-  boundary rather than inferring policy from whether a task happens to be
-  public or joinable. `meta_refl` is the evaluator production use of the
-  result-producing form; its result remains hidden behind metadata carriers.
-- When a demand-owned reflection task failure is propagated into its lazy
-  consumer, the task handle acknowledges the owner's reporting ledger through
-  its scalar reporting identity and weak runtime-coordinator route,
-  including when demand transfers through an observer in another session of
-  the same runtime. If nobody observes the failure, it remains unacknowledged
-  and is reported during reasoning drain.
-- A gate's first observer establishes its demand owner and task profile.
-  Same-runtime observers follow its exact coordinator dependency and may help
-  pump that producer without changing ownership or profile; terminal success
-  transfers demand to the target. Another runtime rejects the value before
-  demand. Wait tokens retain stable scalar runtime, owner-session, and producer
-  IDs but no owner lease; coordinator registration and exhaustive closure
-  publication make unavailable or dropped producers explicit without caching
-  a retryable condition as `LazyFailure`.
+  selects `RequireUnit`, and its terminal mapper assigns the target; the
+  internal result-producing form selects `ReturnValue` and assigns the task
+  result. Either reaches the consumer through the ordinary WHNF demand on the
+  promise. A panicked task leaves the promise unassigned. Keep this
+  distinction at the launcher boundary rather than inferring policy from
+  whether a task happens to be public or joinable. `meta_refl` is the
+  evaluator production use of the result-producing form; its result remains
+  hidden behind metadata carriers.
+- When WHNF propagates a failed completion promise, the promise's producer
+  obligation acknowledges the task's failure-ledger entry through its scalar
+  task/session identity and weak coordinator route, whichever same-runtime
+  session's demand propagates it. If nobody propagates the failure, it remains
+  unacknowledged in the runtime ledger and appears in settled reports.
+- An annotation task belongs to the runtime's background demand domain and
+  uses the runtime-default profile, whichever session observes the gate
+  first, and it outlives that session. Same-runtime observers follow the
+  lazy's exact producer route and may help pump the task without changing
+  ownership or profile; terminal success transfers demand to the target.
+  Another runtime rejects the value before demand. Wait tokens retain stable
+  scalar runtime, owner-session, and producer IDs but no owner lease;
+  coordinator registration and exhaustive closure publication make
+  unavailable or dropped producers explicit without caching a retryable
+  condition as a permanent lazy failure.
 - Opaque reflection task values retain `EvaluationTaskHandle`, not a bare task
   ID. `.task.status`, `.task.value`, and `.task.error` may inspect the
   protected query from any session in the same runtime without changing

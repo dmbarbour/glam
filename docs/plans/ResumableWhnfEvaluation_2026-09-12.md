@@ -6,10 +6,11 @@ review required by completion criterion 10 closed by 2026-09-28 in
 This is the focused implementation plan selected by
 GCI11R-002D.2c.1d in
 [`GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md`](GarbageCollectorAggressiveVerificationRemediation_2026-09-11.md).
-Client demand, lazy and promise following, external-source owners, and
-reflection request work now use the crate-private resumable protocol. The
-remaining builtin evaluator families and compatibility retirement belong to
-W6-W8.
+Every production evaluator family now uses the crate-private resumable
+protocol: client demand, lazy and promise following, external-source owners,
+reflection request work, and the builtin families. W8 retired the direct
+evaluator gate and its wrappers; the remaining `evaluate_compatibility_whnf`
+helper is test-only.
 
 ## Purpose
 

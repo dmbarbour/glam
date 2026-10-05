@@ -1,8 +1,12 @@
 # Concurrent Garbage Collection Plan — 2026-08-28
 
-Status: preliminary and deferred until the initial collector integration has
-passed roadmap Gate G4. This is a successor to, not a continuation or renaming
-of, the completed C0-C6 stop-the-world collector implementation. Its phase
+Status: preliminary and deferred. Its original gate, roadmap Gate G4, passed
+on 2026-10-02. The expected order now completes Value Representation
+Refinement first (see Relationship to Existing Plans), and the holistic
+pre-performance review adds CG0 prerequisites: its findings N2, E3, S4, and
+F5. Open Design Gates 1–9 remain open. This is a successor to, not a
+continuation or renaming of, the completed C0-C6 stop-the-world collector
+implementation. Its phase
 names use `CG` so historical collector checkpoints remain unambiguous.
 
 ## Purpose
@@ -643,7 +647,10 @@ repair.
 ## Open Design Gates
 
 These are deliberately unresolved until CG0 supplies the post-integration
-inventory:
+inventory. The plan's direction is itself still a proposal: non-moving
+concurrent marking, delayed logical sweep, and epoch-gated recycling, with
+the stop-the-world collector kept as the oracle. CG0 confirms it and records
+it in [`Decisions.md`](../Decisions.md).
 
 1. The exact transient-root representation for bare/local managed pointers,
    including whether canonical root-adjacent `RootFrame<T>` state can provide

@@ -53,20 +53,21 @@ task handles contain scalar runtime provenance plus already inventoried task
 and query handles; they contain no hidden semantic value. The mutation token
 used by query writers is borrowed for one guarded callback and cannot escape.
 
-Demanding one of those annotations first reserves a stable task and wait
-inside pure evaluation. The managed reflection computation continues to own
-and trace the immutable effect and optional gate target. Its external registry
-record retains only an edge-free weak task observation (or scalar admission
-failure), never a semantic root or value-domain lease. The first observer also
-receives a one-use permit which temporarily roots the effect and selected
-launch policy. The evaluator-step boundary ends before that permit invokes the
-type-erased launcher; successful activation transfers ownership into the
-coordinator task machine. Concurrent observers share the observation without
-constructing competing machines or permits. Dropping an unconsumed permit
-cancels the reservation, while external-owner drain alone is inert. A
-pre-activation cancellation suppresses launcher construction; cancellation
-or demand closure racing an already-entered launcher keeps the terminal state
-and discards the unused machine.
+Each annotation lazy's managed reflection computation owns and traces the
+immutable effect, the optional gate target, and a managed completion promise.
+The first producing poll reserves a task in the runtime's background demand
+domain, registers it as that promise's producer, and leaves the lazy waiting
+on the promise through an ordinary WHNF checkpoint. A one-use permit
+temporarily roots the effect and selected launch policy. The evaluator-step
+boundary ends before that permit invokes the type-erased launcher; successful
+activation transfers ownership into the coordinator task machine. Later polls
+find the registered producer and construct no competing machine or permit.
+Dropping an unconsumed permit cancels the reservation and fails its promise.
+A pre-activation terminal state suppresses launcher construction;
+cancellation or demand closure racing an already-entered launcher keeps the
+terminal state and discards the unused machine. The task's terminal outcome
+is mapped onto the promise; [`evaluation.md`](evaluation.md) describes the
+mapper and failure acknowledgement.
 
 Core operators merely construct tagged request values. Host operations occur
 when the effect task dispatches those requests.
@@ -176,13 +177,20 @@ than invoking host code under evaluator access. Scalar and specialization
 demands follow the same rule; a specialization callback receives an evaluated
 public value only after its owned WHNF computation completes.
 
-The production fast path may fuse a bounded chain of task-local `.seq`, `.r`,
-`.get`, and `.set` operations plus one immediately available Glam
-continuation. The explicit unfused path remains the semantic test oracle.
-Choice and cut, reset/shift/fix, shared-state and task requests, logging,
-reflection, specialization callbacks, and non-Glam delivery stay at explicit
-interpreter boundaries because they publish control, transaction, promise, or
-host obligations.
+There is no fused chain or fusion budget. After the shared decoder produces a
+request, a dispatch shortcut handles four task-local requests directly, one
+machine step each:
+
+- `.seq` pushes its Glam continuation and decodes the operation next;
+- `.r` applies a Glam continuation on top of the sequence stack directly;
+- `.get` and `.set` enter task-local state-path work.
+
+Every other request takes the general interpreter. Choice and cut,
+reset/shift/fix, shared-state and task requests, logging, reflection,
+specialization callbacks, and non-Glam delivery stay at explicit interpreter
+boundaries because they publish control, transaction, promise, or host
+obligations. Tests can force the general path, but it shares the decoder, so
+it is not an independent oracle.
 
 `reflection/store.rs` owns the persistent shared-volume roots, query lifetime,
 transaction snapshots, ordered edit overlays, rebasing, and commit. Its private

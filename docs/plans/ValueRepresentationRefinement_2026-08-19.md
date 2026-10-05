@@ -1,8 +1,11 @@
 # Value Representation Refinement Plan — 2026-08-19
 
-Status: preliminary and deliberately deferred until the initial Glam-owned GC
-boundary is working. This plan must not expand the collector implementation or
-integration gates merely to obtain a compact value representation.
+Status: preliminary and deferred. Its original gate, a working Glam-owned GC
+boundary, was met when roadmap Gate G4 passed on 2026-10-02. The holistic
+pre-performance review now sequences it after that review's measurement and
+overhead-removal steps, so that it measures representation rather than lock
+and scheduler overhead. That review also proposes V-1 prework from its
+findings V1–V5.
 
 The deferred
 [Pure Effect Access Fusion plan](PureEffectAccessFusion_2026-09-23.md) follows

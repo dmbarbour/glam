@@ -40,8 +40,11 @@ not define language semantics or collect subsystem invariants.
 | `g_syntax/parser/input.rs` | Checked token views and Chumsky input over the authoritative lexical structure |
 | `g_syntax/parser/layout.rs`, `expression_context.rs` | Layout ownership, floors, and expression boundaries |
 | `g_syntax/parser/expression.rs`, `structural.rs`, `do_expr.rs`, `conditional.rs` | Expression and structural syntax |
+| `g_syntax/parser/pattern.rs` | Pattern grammar shared by pattern-bearing syntax |
 | `g_syntax/parser/declaration.rs`, `declaration/` | Top-level and recursive declarations |
 | `g_syntax/keywords.rs` | Language-version keyword ownership |
+| `g_syntax/ast.rs` | Parsed syntax tree and non-evaluating inspection summaries |
+| `g_syntax/recursive_do.rs` | Forward-name registry and declaration/fulfillment plan for recursive `do` |
 | `g_syntax/resolve/`, `resolved.rs`, `analysis.rs`, `name_analysis.rs` | Resolution, affine IR, and source analysis |
 | `g_syntax/compiler_values.rs` | Atomically published, runtime-rooted closed compiler helpers and modules |
 | `g_syntax/macro_expansion/` | Macro effect API, journals, and isolated search |
@@ -58,18 +61,26 @@ not define language semantics or collect subsystem invariants.
 | `core_net.rs` | Exact-value-domain facade plus scoped observation and mutation for managed core interaction nets; raw shared-net ownership is absent from the core specialization |
 | `interaction_net/model.rs`, `builder.rs` | Generic topology and checked construction |
 | `interaction_net/runtime/` | Mutable graph, active-pair reduction, logical copies, and a read-only logical payload walk which never reduces or materializes cursors |
-| `evaluation.rs`, `evaluation/session.rs`, `evaluation/pump.rs` | Shared demand/profile contracts, session admission, edge-free reflection observations, one-use activation permits, cooperative pumping, and runtime pumping |
+| `interaction_net/polarity.rs` | Test-build polarity and connectivity check of every finished template |
+| `interaction_net/profiling.rs` | Rewrite counters, compiled only for tests and the `interaction-net-profiling` feature |
+| `evaluation.rs`, `evaluation/session.rs`, `evaluation/pump.rs` | Shared demand/profile contracts, session admission, reflection completion-promise reservations, one-use activation permits, cooperative pumping, and runtime pumping |
 | `evaluation/access.rs` | Scoped evaluator authority, thread-bound mutator-free poll and evaluator-step contexts, claim/direct-owner poll admission, scoped wait-completion projection, and post-scope reflection activation; the step context has one poll-derived access route and no direct evaluator compatibility gate |
 | `evaluation/coordinator.rs`, `evaluation/coordinator/` | Authoritative work registry/queues plus task, completion, client-demand, spark, reflection, deferred, and settlement lifecycles; activated reflection machines own transferred effect roots, completed wait observations retain disposition-specific roots, parked demand routing is weak, and detached claims temporarily upgrade the exact registered session/domain |
 | `evaluation/observation.rs`, `evaluation/executor.rs` | Semantic observation epochs and worker lifecycle |
 | `evaluation/whnf.rs` | Narrow translation from semantic WHNF dependencies to coordinator work dependencies |
 | `eval/value.rs`, `application.rs`, `operator.rs`, `net.rs`, `lazy_checkpoint.rs` | Value forcing and semantic execution; lazy net-WHNF progress lives in a traced managed checkpoint whose edge-owned driver excludes concurrent semantic handoffs and uses registered net roots only for post-access execution |
 | `eval/builtin_machine.rs`, `eval/annotation_machine.rs`, `eval/comparison_machine.rs`, `eval/dict_machine.rs`, `eval/effect_machine.rs`, `eval/list_observation_machine.rs`, `eval/object_builtin_machine.rs`, `eval/object_composition_machine.rs`, `eval/strategy_machine.rs` | Regional saturated-builtin state beneath one managed lazy checkpoint; annotation recognition/collections/metadata, assertion, conditional-list-front, numeric, provenance, recursive comparison, dictionary key/path/operand, effect dispatch/fixpoint, list observation, object specification/diagnostic/local-name traversal/instance construction/definition adapters, object extension/composed-definition application/recursive override, and strategy demand use resumable WHNF work while immediate validation, arithmetic, dictionary/list result construction, opaque-origin inspection, and post-access spark admission remain callback-free |
+| `eval/access_machine.rs` | Resumable computed dictionary access and recursive key conversion |
+| `eval/object_machine.rs` | Pollable object-fixpoint construction |
+| `eval/pattern_machine.rs` | Resumable compiler-pattern builtins: list, path, dictionary, and equality observations |
+| `eval/list_machine.rs` | Pollable logical-list front and back projection shared by other machines |
+| `eval/list_effect_machine.rs` | Regional reducer for the lazy list-effect recipe family |
+| `eval/list_transform_machine.rs` | Non-forcing structural `map` and `list.concat` |
 | `eval/tagged_machine.rs` | Shared resumable tagged-payload recognition and iterative semantic-undefined traversal |
 | `eval/whnf.rs`, `eval/whnf/tests/` | Crate-private WHNF submachine protocol with one canonical raw-edge state behind zero-walk regional/net ownership wrappers, a separate durable rooted demand checkpoint, a bounded callback-free regional driver, atomic rooted checkpoint publication, and scheduler-independent lifecycle/collection fixtures; lazy sources install progress beneath their owning lazy, while client demand, promise sources, reflection request work, and demand-capable builtin machines use the protocol |
 | `eval/whnf_checkpoint_inventory.rs` | Test-only census of the remaining durable WHNF demand constructors, observers, and seed modifiers; lazy source entry is inventoried separately as direct lazy-owned checkpoint installation |
 | `eval/access_inventory.rs` | Test-only I3B closure inventory for scoped evaluator functions, durable subsystem seams, external direct calls, and builtin downgrades |
-| `eval/builtins/` | Builtin implementations by semantic family; saturation uses the caller's bounded `EvaluationValueAccess`, immediate constructors publish before that region closes, and `ManagedBuiltinCheckpointCell` traces every demand-capable family's regional state across yield, dependency, failure, and completion |
+| `eval/builtins/` | Builtin implementations by semantic family; forcing a saturated builtin lazy uses the caller's bounded `EvaluationValueAccess`, immediate constructors publish before that region closes, and `ManagedBuiltinCheckpointCell` traces every demand-capable family's regional state across yield, dependency, failure, and completion |
 | `eval/builtins/net/identity.rs` | Invocation-local construction brands and edge-free opaque logical port handles |
 | `eval/builtins/net/runner.rs` | Pure source construction effect runner, retained first-two selector, exposed-port demand, and selected netlist replay |
 | `eval/builtins/net/builder.rs` | Private pure state-over-list construction handler, protected fixed-width builder state, resumable state/control/construction operations, and exact private API |
@@ -79,7 +90,8 @@ not define language semantics or collect subsystem invariants.
 | `diagnostic.rs`, `api/diagnostics.rs` | Semantic diagnostic shapes plus embedding buses, ingress, and enrichment |
 | `reflection.rs`, `reflection/protocol.rs` | Reflection facade, cut-wide observation/branch-local edit protocol, read-only host validation, and bounded callback evaluation service |
 | `reflection/lifecycle.rs` | Effect lifecycle, scheduled runs, and task launchers |
-| `reflection/machine.rs`, `reflection/requests.rs`, `reflection/search.rs` | Persistent phased effect machine, resumable rooted WHNF request decoding, bounded standard-effect fusion, and isolated search |
+| `reflection/machine.rs`, `reflection/requests.rs`, `reflection/search.rs` | Persistent phased effect machine, resumable rooted WHNF request decoding, a dispatch shortcut for decoded `.seq`, `.r`, `.get`, and `.set`, and isolated search |
+| `reflection/machine/reset_stack.rs` | Resumable decoding of the reset frames serialized in reflection state |
 | `reflection/store.rs` | Journaled volume roots, edits, snapshots, commits, and query lifetime |
 | `reflection/store/conflict.rs` | Conflict paths plus exact, fingerprint, coarse, and client-defined observation strategies |
 | `runtime.rs` | Runtime identity, mutation admission, activity accounting |

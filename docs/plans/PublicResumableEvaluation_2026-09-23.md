@@ -2,9 +2,13 @@
 
 Date: 2026-09-23
 
-Status: preliminary and deferred until the resumable-WHNF W6G performance
-closure. This plan consolidates an API transition which was previously
-mentioned only as deferred follow-up in the resumable-WHNF plan and reviews.
+Status: preliminary and deferred. Its original gate, the resumable-WHNF W6G
+performance closure, was met by the W6G review on 2026-09-24, and the whole
+resumable-WHNF plan completed on 2026-09-28. The holistic pre-performance
+review now sequences this plan last, after its findings S7 (gaps in the
+client-demand driver) and A1 (a hidden public API tier). This plan
+consolidates an API transition which was previously mentioned only as
+deferred follow-up in the resumable-WHNF plan and reviews.
 
 ## Purpose
 

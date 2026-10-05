@@ -57,6 +57,6 @@ scripts/check.sh        # (all) fast + glam-gc suite, G0 semantics, profiling
 scripts/check.sh full   # all + aggressive GC, scale, cursor stress, miri/san
 ```
 
-Use `all` (the default) as the pre-commit gate and `full` before performance
-work and periodically. See [`docs/AgentContext.md`](docs/AgentContext.md) for
+Use `all` (the default) as the pre-commit gate. Run `full` before performance
+work and after changes to runtime, collector, or unsafe-sensitive code. See [`docs/AgentContext.md`](docs/AgentContext.md) for
 what each level covers and the nightly-only Miri/sanitizer gap.

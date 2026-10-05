@@ -268,15 +268,14 @@ and every unsafe function, implementation, and block are checked into
 
 - `Gc<T>` is transparent over exactly one `NonNull<T>`. An unconditional const
   assertion latches its one-pointer width. It carries no heap, domain, class,
-  allocation-record, or debug field and is not a root. Its current `Copy`,
-  `Clone`, pointer-identity equality, and `Debug` implementations are a
-  counted migration surface, not the final ownership contract. The selected
-  contract removes all five ordinary traits and replaces duplication and
-  same-allocation comparison with explicit matching-mutator operations.
-  Optimized non-moving builds must still reduce those operations to one
-  pointer copy or comparison without allocation, locking, reference counting,
-  or root registration. `Hash` is already absent because an address hash could
-  not remain stable across later moving collection.
+  allocation-record, or debug field and is not a root. It implements none of
+  `Copy`, `Clone`, `PartialEq`, `Eq`, or `Debug`, and has no `ptr_eq`; the
+  persistent-edge cutover is closed. Duplication and same-allocation
+  comparison are the explicit matching-mutator operations `duplicate_in` and
+  `same_allocation_in`. Optimized non-moving builds reduce them to one pointer
+  copy or comparison without allocation, locking, reference counting, or root
+  registration. `Hash` is also absent because an address hash could not remain
+  stable across later moving collection.
 - A persistent typed edge belongs either below a representation which reports
   it through `Trace` or in a registered root. A temporary duplicate may exist
   while its matching mutator remains admitted, but must be installed beneath
@@ -1343,10 +1342,11 @@ mutation closure runs.
   allocation is rejected by const evaluation, `Gc<T>` has no `Deref` path, and
   address identity does not implement `Hash`.
 - Unconditional const assertions enforce the `Gc<T>` pointer-width contract.
-  `persistent_edge_standard_trait_cutover_is_explicitly_pending` also latches
-  the five transitional standard-trait implementations by exact source shape;
-  it is deliberately a pending P4 assertion, not evidence that the final
-  negative trait contract has passed.
+  The closed standard-trait cutover is checked twice in `pointer.rs`. In test
+  builds, compile-time assertions show that `Gc<u64>` implements none of the
+  five ordinary traits. The unit test
+  `persistent_edge_standard_trait_cutover_is_closed` rejects their
+  reintroduction, or a `ptr_eq`, in production source.
   Unit tests cover pointer identity, cross-thread handle transfer, nested
   separate heaps, debug rejection of wrong heap and representation, exact
   recursive edge sequences with duplicate pointers, full retracing after an
@@ -1490,7 +1490,79 @@ mutation closure runs.
 
 ## Governing Invariants
 
-The cross-plan invariants are maintained in
-[`../../docs/plans/GarbageCollectionRoadmap_2026-08-19.md`](../../docs/plans/GarbageCollectionRoadmap_2026-08-19.md).
-This ledger restates only the concrete representation facts needed to audit
-unsafe code; it does not create competing semantic rules.
+These rules govern the collector and its Glam integration. The sections above
+restate only the representation facts needed to audit unsafe code; they
+create no competing semantic rules.
+
+- **Exact, non-moving, stop-the-world, full collection.** `Heap::collect_full`
+  waits until every active outer mutator has exited. It holds the heap
+  `Exclusive` while it clears marks, traces from every root, and sweeps, and
+  then finalizes. Allocation requires mutator authority, so no allocation can
+  race a trace or sweep. Allocated payloads never move.
+- **One heap per runtime; no cross-heap edge.** In Glam each
+  `EvaluationRuntime` value domain owns one heap. Mutator authority, recursive
+  depth, and allocation caches are heap-qualified even when one thread holds
+  several heaps. Root construction and access reject a foreign heap in every
+  build. Tracing rejects a foreign, stale, interior, or unallocated edge before
+  dispatch. Debug access and the mutation gateways validate ownership.
+- **Roots are explicit; there is no stack scan.** Only registered `Root<T>`
+  cells, the edges traced from them, and pending-finalizer records keep an
+  allocation alive. A bare `Gc<T>` is not liveness evidence and is safe only
+  inside its mutator region.
+- **No untraced production edge.** Reclamation relies on `Trace` reporting
+  every managed edge reachable from a production root. Any other retention,
+  such as an external owner's registered root, is documented and
+  conservative.
+- **Tracing is observational.** `Trace` may run while the collector holds
+  managed data. It only reports edges and may not allocate, enter a heap,
+  destroy values, or call host or runtime code.
+- **Finalization grants no authority and takes no collector lock.**
+  Destructors run outside every collector lock and must remain safe without a
+  matching-heap mutator. The collector supplies one during ordinary
+  finalization and none at last-owner teardown. Glam's managed payloads are
+  passive and never use it.
+- **Stable addresses are an implementation fact, not an API promise.**
+  Edges are reported through a visitor rather than offset tables, so a later
+  moving collector can add edge rewriting. `Gc<T>` has no `Hash` for the same
+  reason.
+- **Structural mutation goes through owner-qualified gateways.** Every
+  replacement of a managed edge passes through a `Mutator` edge-transition
+  gateway. Its collector hook is empty for this collector; a future barrier
+  belongs there.
+- **Opaque values are external handles.** A Glam opaque value stores only a
+  passive external-owner handle. Host data never lives in the heap and never
+  holds a `Gc<T>`, an unrooted value, or a root that would hide a managed
+  cycle.
+- **A failed collection is recoverable or permanently poisons the heap.** An
+  unwind during topology mutation, or after a destructor was dispatched but
+  before its run committed, poisons the heap permanently; every other attempt
+  restores admission and relatches the request. No destructor is ever invoked
+  twice, and a poisoned heap skips managed destructors at teardown rather than
+  risk redispatch.
+- **Collection is operational only.** Its timing and frequency never change
+  Glam results.
+- **Unsupported layouts stay unsupported.** Allocation-class discovery
+  rejects zero-sized types and any type that cannot fit one slot of the fixed
+  run geometry (`UnsupportedLayout`). There is no large-object or multi-run
+  path.
+
+## Non-goals and Deferred Work
+
+The initial collector deliberately omits:
+
+- weak pointers, ephemerons, and user-visible weak-key semantics;
+- moving, copying, compacting, generational, and remembered-set collection,
+  and parallel tracing;
+- variable-size runs, a large-object path, and dynamically sized objects;
+- returning or decommitting arena chunks before heap destruction;
+- first-class Glam finalizers and resurrection of a dead allocation;
+- `Trace` derive macros and GC-aware persistent containers;
+- precise reclamation through opaque host payloads; and
+- cross-runtime migration, live-graph serialization, and stack maps.
+
+Collection starts only when the heap has no active mutator, so continuously
+overlapping mutators can starve it; the baseline accepts that. The
+[concurrent-collector plan](../../docs/plans/ConcurrentGarbageCollection_2026-08-28.md)
+owns concurrent marking and that starvation remedy. The
+[scoped-pointer plan](../../docs/plans/GarbageCollectorScopedPointerSafety_2026-09-09.md)
+owns lifetime-branded pointer views.

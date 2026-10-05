@@ -120,15 +120,19 @@ will enforce it at `NetBuilder::try_finish`.
 
 - Generic `SharedRuntimeNet<S>` ownership remains inside the interaction-net
   implementation. Core values instead carry the private `CoreRuntimeNet`
-  facade, which pairs the generic owner with a weak observer for the exact
-  `RuntimeValueDomain`. `EvaluationRuntimeId` remains globally unique and
-  identifies that value domain. The observer is a non-retaining route for
-  future scoped access, not a second identity scheme.
-- Core-net templates are instantiated through a `CoreValueFactory` or from an
-  already domain-qualified core net. Returned frontier observations and
-  contention records preserve the facade rather than exposing their generic
-  shared owner. Prepared logical-copy sources likewise retain exact-domain
-  provenance and reject installation into another domain.
+  facade: exactly one non-rooting managed edge (`ManagedCoreNetEdge`, latched
+  at 8 bytes on x86-64). It holds no weak observer, domain route, or cached
+  provenance. Inspection, mutation, duplication, identity comparison, and
+  root projection each require a matching `RuntimeValueAccess`. Public
+  construction boundaries establish runtime provenance; registered roots and
+  collector debug validation recheck it. `EvaluationRuntimeId` remains
+  globally unique and identifies the value domain.
+- Core-net templates are instantiated under a matching `RuntimeValueAccess`
+  (`construct_managed_core_net`) or from an already domain-qualified core
+  net. Returned frontier observations and contention records preserve the
+  facade rather than exposing their generic shared owner. Prepared
+  logical-copy sources likewise retain exact-domain provenance and reject
+  installation into another domain.
 - Ordinary core-net inspection and mutation is available only through a
   private scoped view derived from the matching runtime value-access region.
   Durable net handles retain identity and provenance, but cannot inspect an
@@ -203,11 +207,12 @@ Core `Bind >< Data` semantic work is owned by a private, thread-bound callable
 claim guard. Initial acquisition succeeds only while the reduction's exact
 pair remains claimed. A blocked retry atomically verifies and reclaims its
 exact wait before issuing the guard. The guard is consumed by one exhaustive
-disposition: copied net, operator, exact wait, permanent structured failure,
-or release. It cannot enter a worklist or poll result. Release and unwind
-publish a replayable state: a fresh claim becomes ready, while a retried claim
-restores the same blocked wait. Stale acquisition and wait mismatch are quiet
-non-acquisitions, not terminal claim outcomes.
+disposition: copied net, operator, installed callable checkpoint (see Core
+Specialization), permanent structured failure, or release. It cannot enter a
+worklist or poll result. Release and unwind publish a replayable state: a
+fresh claim becomes ready, while a retried claim restores the same blocked
+wait. Stale acquisition and wait mismatch are quiet non-acquisitions, not
+terminal claim outcomes.
 
 ## Logical Copies and Cursors
 
@@ -218,9 +223,10 @@ A logical copy is target-owned `CopyState` containing:
   nodes; and
 - source-to-target fan-site translation.
 
-There is deliberately no source-node to target-node history. Embedded data is
-ordinary `Clone` data. Copied target nodes may reduce or disappear immediately,
-so their former source identity is not useful provenance.
+There is deliberately no source-node to target-node history. Embedded payloads
+are duplicated through the access-qualified payload duplicator. Copied target
+nodes may reduce or disappear immediately, so their former source identity is
+not useful provenance.
 
 Creating a logical copy is also lock-separated. The source's immutable exposed
 port is captured in a prepared copy-source token before target mutation begins;
@@ -285,40 +291,75 @@ comparison oracle is insufficient.
 
 ## Core Specialization
 
-`NetSpecialization` defines cloneable `Data`, cloneable unary `Operator`, a
-permanent error, callable-data interpretation, and `Operator >< Data`
-execution.
+`NetSpecialization` (`interaction_net/model.rs`) declares associated types
+only. It has no methods, and its payloads need no `Clone`:
 
-- `Data >< Bind` asks `callable` for either a shared net or an operator. A net
-  installs a logical-copy cursor. Callable-to-operator completion fuses the
-  inevitable unary-function bind join: it removes the application `Bind` and
-  callable `Data`, then connects the operator principal to the former argument
-  neighbor and its auxiliary to the former result neighbor. Failure leaves the
-  original pair stuck.
-- `Operator >< Data` executes outside the runtime lock and yields either `Data`
-  or another `Operator`. A returned operator is bind-wrapped for the next
-  argument. A retryable evaluation wait is recorded against that exact pair;
-  permanent failure leaves it stuck.
+- `Data` and the unary `Operator`, duplicated only through an
+  access-qualified `RuntimeNetPayloadDuplicator`;
+- `RuntimeSource`, the identity one net keeps for another;
+- `WaitToken`, compared to reject a stale wakeup;
+- `StuckReason`, kept on a pair that policy cannot reduce; and
+- `CallableCheckpoint`, a linear `Send + 'static` payload that generic code
+  moves and visits but never clones, compares, or formats.
+
+Core binds them to `Value`, `CoreOperator`, `CoreRuntimeNet`,
+`CoreWaitToken`, `EvaluationHalt`, and `Box<NetWhnfState>` (the impl is in
+`eval/net.rs`). Callable interpretation (`eval/net.rs`) and operator
+execution (`eval/operator.rs`) are evaluator code and run outside the runtime
+mutex.
+
+- **`Bind >< Data`.** A callable already in WHNF is classified at once:
+  - `Value::Net` installs a logical-copy cursor at the net's exposed port;
+  - a builtin or partial builtin becomes `CoreOperator::Builtin`;
+  - a function or dictionary becomes `CoreOperator::Applicable`;
+  - any other value fails, and the pair stays stuck with that
+    `EvaluationHalt`.
+
+  Operator completion fuses the inevitable unary-function bind join: it
+  removes the application `Bind` and callable `Data`, then connects the
+  operator principal to the former argument neighbor and its auxiliary to the
+  former result neighbor.
+- **Callable checkpoint.** A lazy or promised callable is first driven to WHNF
+  inline under the quantum's step budget. Only budget exhaustion or a real
+  dependency replaces the `Data` node in place with a runtime-only
+  `CallableCheckpoint` node holding the boxed WHNF state and a generation.
+  - It has one port, never appears in a template, and is never copied: cursor
+    materialization blocks on it. Its only rule is with `Bind`; any other
+    partner is stuck.
+  - The pair becomes ready again or blocks on the exact wait. A later claim
+    takes the state, drives it, and then publishes the next generation,
+    finishes into a copy or operator as above, or fails the pair. A failed or
+    killed dependency also fails the pair. A stale generation is rejected
+    quietly and never publishes a competing result.
+  - The payload's managed edges are traced through the net's payload walk.
+- **`Operator >< Data`.** It runs synchronously and yields `Data` or another
+  `Operator`; a returned operator is bind-wrapped for the next argument.
+  Operators only construct: saturated application, builtin, access, and
+  computation operators yield lazy `Data` instead of evaluating inside the
+  claim, so a core operator never waits. The generic `BlockedOperatorCall`
+  state is exercised only by tests. An error leaves the pair stuck with that
+  `EvaluationHalt`.
 - Core uses explicit `CoreOperator` enum values rather than opaque Rust
-  closures. `Error` is an operator whose activated result is stuck.
+  closures. There is no error operator: a permanent failure is the stuck
+  pair's `StuckReason`.
 
 Ordinary `Value::Function` application is evaluator-owned semantic staging and
-does not expose the function's staged net as a host function. When
-`Data(Value::Function)` meets `Bind`, core callable lowering instead installs
-`CoreOperator::Applicable` through the fused splice above. One `Bind` performs
-one ordinary `apply_value` step. If arguments remain, the result is
-`Data(Value::Function)`; another application therefore requires another
-explicit `Bind`.
+does not expose the function's staged net to callable classification. When
+`Data(Value::Function)` meets `Bind`, the fused splice above installs
+`CoreOperator::Applicable`. Applying it yields one lazy application of the
+function to that argument (`LazyValue::from_application_in`). If arguments
+remain, that lazy's WHNF is a `Value::Function`, so another application
+requires another explicit `Bind`.
 
-Raw `Value::Net` is opaque closed data already in WHNF; ordinary `apply_value`
-must not reinterpret it as a lambda-calculus callable. When a
-`Data(Value::Net)` node instead meets a `Bind` inside an interaction net,
-`CallableData` installs a logical-copy cursor at the raw net's exposed
-interface. This runtime call reduction is the only implicit operation that
-opens the net. Opening `FunctionValue::stage()` through this raw-net path would
-break value-level partial application and is forbidden.
+Raw `Value::Net` is opaque closed data already in WHNF; ordinary application
+rejects it as non-callable. When a `Data(Value::Net)` node instead meets a
+`Bind` inside an interaction net, callable classification installs a
+logical-copy cursor at the raw net's exposed interface. This runtime call
+reduction is the only implicit operation that opens the net. Opening
+`FunctionValue::stage()` through this raw-net path would break value-level
+partial application and is forbidden.
 
-`HostFn`, copying, and erasure otherwise treat `Value::Net` like closed data;
+Builtins, copying, and erasure otherwise treat `Value::Net` like closed data;
 they do not project its exposed agent. A net-backed `Value::Lazy` represents
 the explicit zero-arity bridge and must produce `Data` when observed.
 `FunctionValue` staging is the positive-arity bridge: partial application only

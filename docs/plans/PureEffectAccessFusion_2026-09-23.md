@@ -2,6 +2,12 @@
 
 Status: preliminary and deliberately deferred until after
 [Value Representation Refinement](ValueRepresentationRefinement_2026-08-19.md).
+Its premise is stale: W5B (`f064f93c`) removed the bounded W5 fusion loop that
+Purpose, PEAF0, and PEAF1 below treat as the baseline. Only a dispatch
+shortcut for decoded `.seq`, `.r`, `.get`, and `.set` remains, and the
+forced-general-path test shares its decoder, so it is no independent oracle
+(holistic pre-performance review, finding R4). Rewrite those sections against
+the shortcut before starting.
 This plan was extracted from W6G.2 of the
 [resumable-WHNF plan](ResumableWhnfEvaluation_2026-09-12.md) so effect-fusion
 performance work does not block stack/budget closure or the remaining GC

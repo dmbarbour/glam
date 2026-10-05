@@ -39,6 +39,13 @@ client-owned rendering. Current flow lives in
   function arguments or follow later calls.
 - Import failures use the `import` tag. Reserve `g` for built-in front-end
   syntax and definition context.
+- When a host or compiler boundary reports a failure that another failure
+  caused, the cause stays structured. Its diagnostic emission becomes a
+  context frame: a nested message that renderers show with its own context.
+  The headline states only the boundary's own finding and never repeats the
+  cause's text. Without a structured cause, such as a wait or a genuinely new
+  validation error, the headline keeps the reason. Macro failures and the
+  CLI's killed-work reports follow this rule.
 
 ## Origins and Privilege
 

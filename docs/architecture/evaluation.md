@@ -41,10 +41,12 @@ crate-private paths for consumers without becoming another scheduler.
   and `settlement` children keep each lifecycle's state and transitions
   together without introducing separate registries.
 
-The coordinator remains the sole mutation authority. The pump claims and
-orchestrates work through coordinator transitions; it does not own a second
-queue or terminal state. Session/context code owns policy and construction,
-not executable machine storage.
+The coordinator owns work records, their indexes, and ready state. It is not
+the only lifecycle state: wait-token terminal cells, `LocalPromiseOwner`
+obligations, and client-demand result cells keep their own locked state. The
+pump claims and orchestrates work through coordinator transitions; it does not
+own a second queue or terminal state. Session/context code owns policy and
+construction, not executable machine storage.
 
 ## Context and Session
 
@@ -100,8 +102,14 @@ it.
 The `NoAuto` policy deliberately separates pressure detection from collection.
 Allocation records pressure on the value domain; only a runtime client which
 has pumped to a stable readiness boundary may promote that latch to
-`MaintenanceRequired` and explicitly service it. Collection and finalization
-then run as runtime activity under exclusive mutation admission. This baseline
+`MaintenanceRequired` and explicitly service it. The service publishes a GC
+activity lease while holding *shared* runtime mutation admission only briefly
+(`begin_gc_activity`); it never takes the exclusive settlement gate. It then
+calls `Heap::collect_full`, whose own admission coordinator waits for every
+active outer mutator to exit and holds the heap `Exclusive` for marking and
+sweep, blocking new mutator entry. Finalizers then run in the heap's
+`Finalizing` phase, outside collector locks, with ordinary mutator authority
+reopened. The lease retires after the outcome is recorded. This baseline
 can defer collection indefinitely when useful runtime work never reaches a
 stable boundary. That is an accepted progress limitation, not permission for
 ordinary mutator entry to elect collection; the deferred concurrent-collector
@@ -133,14 +141,17 @@ the lease in `EvalContext`. Serial pumping and report construction belong to
 work by demand ID, and return the closed report if the external lease has
 already ended. No machine-visible context can recover that lease.
 
-The runtime-owned `EvaluationWorkCoordinator` owns session registration, one
-runtime-wide ready-task queue, worker fairness, its work generation, the
+The runtime-owned `EvaluationWorkCoordinator` owns session registration, the
+runtime-wide ready-task set, worker fairness, its work generation, the
 condition variable used to await work, and stable runtime-local reflection,
-deferred-producer, and spark records. Reflection and deferred records own
-reservation/dormancy, queued, running, blocked, control, and terminalization
-state. Reflection and deferred claims take their machine from the work record
-while marking it `Running`; release either restores the machine before making
-the record claimable or returns it for terminal destruction. The weak session
+deferred-producer, and spark records. Production selection walks causal
+producer chains from rotating background roots and exact demand routes; the
+ready set's insertion order is read only by a test-only claim helper.
+Reflection and deferred records own reservation/dormancy, queued, running,
+blocked, control, and terminalization state. Reflection and deferred claims
+take their machine from the work record while marking it `Running`; release
+either restores the machine before making the record claimable or returns it
+for terminal destruction. The weak session
 registration validates admission but does not retain demand state or survive
 owner closure. A reflection claim needs no session-owned reporting tail:
 task/wait identity and terminal publication remain in its stable coordinator
@@ -334,8 +345,8 @@ projection always require an explicit matching `RuntimeValueAccess` rather
 than retaining weak value-domain re-entry on either representation.
 
 The underlying collector pointers are likewise non-rooting regional edges.
-The completed
-[persistent-edge trait migration](../plans/GarbageCollectorPersistentEdgeTraits_2026-09-12.md)
+The persistent-edge migration
+([decision](../Decisions.md#persistent-managed-edges-are-move-only-raw-core-values-are-regional))
 removed their ordinary copy, equality, and formatting traits. Persistent edge
 duplication and allocation identity are explicit matching-access operations;
 ordinary cloning remains only on registered roots and public rooted value
@@ -405,13 +416,18 @@ separate narrow exception: its bracketed local claim and acyclic handoff prove
 that another evaluator is completing the same callback-free net work, so it
 does not establish a general permission to wait with managed access.
 
-Builtin application has a matching regional/durable boundary. Saturation
-calls `apply_builtin_in` with the caller's existing `EvaluationValueAccess`;
-the dispatcher does not open nested access or receive an evaluator-step
-carrier. It either constructs a partial builtin, installs a lazy saturated
-source, or performs one immediate callback-free constructor such as append or
-list-effect recipe construction. The lazy-source owner routes every
-demand-capable saturated family through one `ManagedBuiltinCheckpointCell`.
+Builtin application has a matching regional/durable boundary. Application
+never runs a builtin. WHNF application (`Value::builtin_call_in`) and the core
+`Builtin` operator yield a partial builtin until saturation and then always
+allocate a lazy builtin source (`LazyValue::from_builtin_in`). Forcing that
+lazy is the only production caller of `apply_builtin_in`, and only for
+families that `RegionalBuiltinMachine::supports` does not cover. It runs with
+the caller's existing `EvaluationValueAccess`, opens no nested access, and
+receives no evaluator-step carrier. It either returns another lazy builtin
+source or performs one immediate callback-free constructor such as append or
+list-effect recipe construction, and the lazy continues from that result as
+regional WHNF work. The lazy-source owner routes every demand-capable
+saturated family through one `ManagedBuiltinCheckpointCell`.
 Its compile-exhaustive regional state traces raw operands, completed prefixes,
 and resumable child work beneath the owning lazy. Each transition runs inside
 bounded caller-supplied value access; ready, failure, scheduler-boundary, and
@@ -568,26 +584,40 @@ asserting that it remains reserved. Blocked reflection and deferred work
 retain their machines in their coordinator records. Terminal work retires from
 coordinator indexes and destroys its detached machine outside runtime locks.
 
-An `anno refl:Task` or metadata-reflection lazy traces its immutable effect and
-optional gate target as direct semantic edges. Its runtime external-owner
-record caches only a scalar admission error or a stable task observation made
-of scalar identity/disposition and weak coordinator/wait routes; it owns no
-semantic root or value-domain lease. The evaluator phase may reserve or
-discover a transient strong handle and report its wait, while its thread-bound
-step carrier collects the first observer's one-use activation permit. That
-permit temporarily roots the effect together with the selected profile,
-result policy, and bounded context. Poll orchestration drops the evaluator
-carrier before draining activation requests, and successful activation
-transfers effect ownership into the coordinator task machine.
+An `anno refl:Task` or metadata-reflection lazy has a boxed
+`ReflectionComputation` source. It traces the immutable effect, the optional
+gate target, and one managed completion promise allocated with the lazy as
+direct semantic edges. There is no external-owner record or task observation
+sidecar. The first producing poll roots those three values and, unless the
+promise already has a producer or a result:
 
-Concurrent observers share the reservation and receive no second permit. A
-task terminal before activation skips the launcher. Dropping an unconsumed
-permit cancels reserved work; merely draining the edge-free external owner is
-inert while a permit remains. Cancellation or owner closure racing an entered
-launcher retains the terminal result and makes machine installation discard
-the unused machine outside coordinator locks. Annotation tasks always use the
-runtime-default reflection profile; this split does not make their host policy
-observer-dependent.
+- reserves a task in the runtime's background demand domain, never the
+  observer's session, with the runtime-default reflection profile;
+- registers that task as the promise's producer. When the task terminates, a
+  terminal mapper assigns the task result (`ReturnValue`), the gate target
+  after unit validation (`RequireUnit`), or a structured failure for every
+  abnormal outcome. A panic instead leaves the promise unassigned and records
+  the panic on the producer obligation;
+- installs a regional WHNF checkpoint focused on that promise beneath the
+  lazy, so the lazy waits on the promise like any other dependency; and
+- defers the one-use activation permit to its thread-bound step carrier. The
+  permit roots the effect, profile, result policy, and bounded context. Poll
+  orchestration drops the evaluator carrier before activating it, and
+  successful activation transfers effect ownership into the coordinator task
+  machine.
+
+Other observers wait on the lazy's single producer route; a later producing
+poll finds the registered producer or result and reserves nothing. An
+activated task is an autonomous background root: retiring the lazy's route
+after its last subscriber leaves never cancels it, and it outlives the
+discovering session. A task terminal before activation skips the launcher.
+Dropping an unconsumed permit cancels the reservation, which assigns a
+cancellation failure to the promise. Cancellation or owner closure racing an
+entered launcher retains the terminal result and makes machine installation
+discard the unused machine outside coordinator locks. When WHNF propagates a
+failed completion promise, the producer obligation acknowledges the task's
+failure-ledger entry; an unobserved failure stays in the runtime ledger and
+appears in settled reports.
 
 Every scheduler wait token is one shared cell containing runtime-local
 identity, scalar producer/owner provenance, an optional terminal result, and
@@ -629,8 +659,8 @@ state:
 
 | State | Owner |
 | --- | --- |
-| reflection effect and optional gate target before terminal lazy caching | managed `ReflectionComputation` beneath its lazy cell |
-| stable reflection reservation identity/disposition | edge-free runtime external-owner observation |
+| reflection effect, optional gate target, and completion promise before terminal lazy caching | managed `ReflectionComputation` beneath its lazy cell |
+| completion-promise producer obligation and terminal mapper | coordinator task record |
 | unactivated effect and launch policy | first observer's shared one-use activation permit |
 | reserved, dormant, queued, running, blocked, or terminalizing reflection/deferred work | runtime work coordinator |
 | queued, worker-owned, or dependency-blocked spark | runtime work coordinator |
