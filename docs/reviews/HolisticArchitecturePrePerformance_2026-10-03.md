@@ -1276,6 +1276,11 @@ fusion" that no longer exists.** Reported.
 and PEAF's purpose and PEAF0 sections. Note that a differential oracle must
 be independent of the shared decoder.
 
+*Resolved 2026-10-05.* The docs were corrected in the documentation cleanup.
+PEAF now describes the shortcut as its baseline, and PEAF0 requires a
+differential reference independent of the production decoder plus forced
+yields inside eligible chains.
+
 **R5 — Medium — Key-path decoding implemented two or three times.**
 Reported.
 
@@ -1492,6 +1497,19 @@ an ASCII-only source unless `utf8` is declared.*
 - `abstract_global_path` joins and re-splits strings.
 - Macro re-lexing is O(line number) per macro declaration.
 
+*Docs resolved 2026-10-05.*
+- The cheat sheet marks remote imports as target syntax and lists the real
+  built-in modules (`'prelude`/`'std`, `'math`, `'list`) instead of `'trig`.
+- It lists effectful view, predicate, and guard patterns as supported in
+  every do-binding direction.
+- It notes that a top-level `abstract` only declares names for name
+  analysis, and that `meta.abstract_names` is not yet populated.
+- `front_end.md` places source-wide name analysis after the declaration
+  stream.
+
+The line-only diagnostics, `abstract_global_path` string round trip, and
+macro re-lexing cost remain open.
+
 ### Embedding API, diagnostics, and CLI (A)
 
 **A1 — Medium — A hidden public tier.** Reported.
@@ -1654,6 +1672,12 @@ promise, the headline keeps the reason text.
 - The diagnostic viewer schema between `rendering.rs` and
   `diagnostic_formatter.rs` is undocumented.
 
+*Docs progress 2026-10-05.* `CLI.md` now documents the short flags and an
+exit-status table: 1 for a command that ran and failed, including configured
+usage errors, and 2 for an invalid bootstrap command line. The script
+extension is decision 7 below. The settle driver, conf-entry idiom, default
+builder, binary test placement, and viewer schema remain open.
+
 ---
 
 ## What Is Solid
@@ -1793,12 +1817,13 @@ cheaper. Items within a group are independent.
        - the module-map gaps;
        - the retention policy (deletion, recorded in `plans/README.md`);
        - the plan status refresh.
+       - the VRR V-1 prework checkpoint (V1–V3, V5);
+       - PEAF's premise, rebased on the dispatch shortcut, with an
+         oracle-independence requirement in PEAF0 and the R2 and E4
+         prerequisites stated.
      - **Open:**
        - an architecture description of the net driver and cursor-WHNF
-         control flow;
-       - the VRR V-1 checkpoint;
-       - rewriting PEAF's premise. Its status line now flags the premise as
-         stale.
+         control flow.
 
 ### P2 — Remove structural overheads that would mask representation measurements
 

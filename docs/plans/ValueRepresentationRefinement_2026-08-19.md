@@ -4,8 +4,8 @@ Status: preliminary and deferred. Its original gate, a working Glam-owned GC
 boundary, was met when roadmap Gate G4 passed on 2026-10-02. The holistic
 pre-performance review now sequences it after that review's measurement and
 overhead-removal steps, so that it measures representation rather than lock
-and scheduler overhead. That review also proposes V-1 prework from its
-findings V1–V5.
+and scheduler overhead. Its findings V1–V3 and V5 are the V-1 prework phase
+below.
 
 The deferred
 [Pure Effect Access Fusion plan](PureEffectAccessFusion_2026-09-23.md) follows
@@ -212,6 +212,47 @@ or oversized storage remains external or is decomposed; this plan does not
 request a collector large-object fallback.
 
 ## Transition Phases
+
+### V-1 — Prework from the Pre-Performance Review
+
+These fixes come before V0. Otherwise V0 would measure lock contention, a
+wasteful trace, and avoidable per-construction costs rather than the
+representation itself. The holistic pre-performance review's findings V1–V3 and V5
+are the source.
+
+- **Allocation and root registration without global locks.** Each managed
+  allocation re-acquires an allocator. That locks a process-wide `TypeId`
+  metadata map and the heap's data mutex, and root registration repeats the
+  lookup. Use a per-family static or per-thread class cache keyed by
+  metadata address, shared by allocators and roots. Compact roots
+  opportunistically, and expose `HeapMetrics` through the performance
+  harness's counters.
+- **A physical, iterative trace.**
+  - Walk dictionary values only, and walk each list once, not once for
+    thunks and once for values.
+  - Drop the per-entry worklist that computes discarded statistics; keep
+    those statistics in a test-only variant.
+  - Replace value recursion with an explicit worklist.
+- **Stack-safe core walks and destruction.**
+  - Give `ListNode` an iterative `Drop`.
+  - Lower list literals with `List::from_values` rather than left-deep
+    concatenation.
+  - Make the key conversions iterative: `Key::to_value_in`,
+    `key_from_value` and `value_from_key`.
+  - Add small-stack tests that build, trace, collect and drop a 100k-deep
+    concatenation and a 10k-nested strict dictionary.
+  - The no-unapproved-recursion rule now covers `src/core`; extend it to
+    `list.rs`.
+- **Per-construction overheads.**
+  - Each lazy allocates an `Arc<str>` from a static label.
+  - A promise allocates three side `Arc`s.
+  - `EvaluationFailure::with_context_in` copies earlier contexts, so k
+    frames cost O(k²).
+  - Projecting an inline integer allocates a `BigRational`.
+  - Atoms, builtins and the cached unit each cost a 64-byte node plus a
+    locked root registration.
+  - `core::Value` is 64 bytes because `Number(BigRational)` is; boxing
+    `Number` is a measurable precursor to V2.
 
 ### V0 — Measurements and Semantic Ledger
 

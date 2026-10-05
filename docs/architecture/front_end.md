@@ -48,8 +48,9 @@ SourceArtifact bytes
        -> expand original macro invocations, when present
        -> parse one declaration range
        -> resolve lexical and namespace names
-       -> analyze source-wide name use
        -> lower immediately into semantic values and nets
+  -> check the `language` position and analyze source-wide name use, once,
+     over every parsed declaration
   -> close the module final-definition promise
   -> drain compilation-session macro reasoning
   -> closed module Value

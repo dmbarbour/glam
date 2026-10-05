@@ -34,6 +34,8 @@ y = foo.(['bar] ++ path)    # .(ListExpr); .([1,'two]++[3]) ≡ .[1].two.[3]
 
 # Declarations:
 abstract foo, bar           # names assumed provided externally
+                            # (bootstrap: only declares the names for name
+                            # analysis; no runtime check or metadata yet)
 unique Red, Green, Blue     # introduce unique atoms based on namespace path
  
 # Multi-line: continuation lines must be indented; closing }]) may sit at col 0.
@@ -155,8 +157,10 @@ import "Bar.g" as b         # introduce b
 import "Baz.g" at b         # extend existing b
 import "A/B/C.g"            # subfolders ok; NO "../", absolute, or dot-paths
 import "data.bin" binary as blob    # raw bytes, not compiled
-import 'prelude             # built-in module
-import 'trig as t
+import 'prelude             # built-in module ('std; also 'math, 'list)
+import 'math as m
+
+# Target syntax, not yet in the bootstrap:
 import as q from {          # remote: content-addressed
     , ref:"Qux.q"
     , rev:"abc123..."
@@ -361,8 +365,9 @@ nested = f [do { .r 1 }, do {; .r 2; }]
 # - Do bindings currently support irrefutable names, `_`, grouping, irrefutable
 #   `P as Q`, scalar literals, fixed quoted paths, list patterns with at most
 #   one potentially refutable variable-length segment, computed-path dictionary
-#   and quoted-path patterns, static and computed tags, and tuples. Effectful
-#   patterns remain target syntax.
+#   and quoted-path patterns, static and computed tags, tuples, and the
+#   effectful view, predicate, and local-guard patterns, in every binding
+#   direction (`P <- op`, `op -> P`, `P = value`).
 
 op1 >>= k           # bind        k1 >=> k2   # Kleisli
 op1 =>> op2         # sequence, dropping unit result
@@ -585,7 +590,8 @@ anno context:{origin:module_origin} Expr
 type_of.foo = ...           # associated names: '_of' dicts
 final_of.foo = _foo         # guard against accidental override
 refl.check_invariants = ... # refl.* run automatically as reflection tasks
-meta.abstract_names         # compiler metadata lives under meta.*
+meta.abstract_names         # compiler metadata lives under meta.* (target;
+                            # not yet populated)
 env                         # implicitly abstract; provided on import by host 
 module                      # alias for module toplevel namespace
 module_origin               # opaque provenance for this source compilation

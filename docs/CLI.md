@@ -52,8 +52,9 @@ later reasoning reports an error.
 ## Bootstrap commands
 
 The bootstrap interface is selected whenever the first argument begins with
-`-`. With no arguments, Glam prints help. `glam --help` prints the compact
-synopsis and `glam --version` prints the bootstrap implementation version.
+`-`. With no arguments, Glam prints help. `glam --help` (`-h`) prints the
+compact synopsis and `glam --version` (`-V`) prints the bootstrap
+implementation version.
 
 ### Assembly options
 
@@ -84,8 +85,9 @@ glam --parse source.g --verbose
 
 `--parse` runs only the built-in `.g` parser. It does not compile the source or
 load imports. Normal output reports diagnostics and a declaration count;
-`--quiet` reports only through the exit status, while `--verbose` also lists
-the declarations. Inspection output is written to standard output.
+`--quiet` (`-q`) reports only through the exit status, while `--verbose`
+(`-v`) also lists the declarations. Inspection output is written to standard
+output.
 
 ### Reproducibility manifests
 
@@ -102,13 +104,24 @@ glam --check_manifest inputs.manifest --quiet
 ```
 
 The check prints each changed or unreadable file to standard output and exits
-nonzero when any entry differs. `--quiet` suppresses those lines but preserves
+nonzero when any entry differs. `--quiet` (`-q`) suppresses those lines but preserves
 the exit status; it may also precede `--check_manifest`. Relative entries are
 resolved from the process working folder, matching manifest creation.
 
 If a local file changes between two reads during an assembly, assembly stops.
 If it changes only after all required bytes were consumed, Glam retains the
 original digest and reports a warning during the final consistency check.
+
+### Exit status
+
+| Status | Meaning |
+| --- | --- |
+| 0 | Success. |
+| 1 | The command ran and failed: an error diagnostic, a failed result, a manifest mismatch, an I/O failure, or a configured command that `conf.cli` rejected. |
+| 2 | The bootstrap command line itself is invalid: an unknown or repeated option, a missing operand, an invalid `--workers` or `GLAM_WORKERS` value, or an invalid completion-script name. |
+
+A configured bare command is expanded by Glam code, so its usage errors are
+ordinary error diagnostics and exit 1; only the fixed bootstrap parser exits 2.
 
 ## Configuration
 
