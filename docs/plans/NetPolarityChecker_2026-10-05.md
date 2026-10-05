@@ -1,6 +1,7 @@
 # Net Polarity Checker Plan — 2026-10-05
 
-Status: planned. This plan comes before N8's random closed-net generator and
+Status: slice 1 (documentation) done 2026-10-05; slice 2, the test-only
+checker, is next. This plan comes before N8's random closed-net generator and
 before any fuzzing of nets. It follows the crossed `Bind >< Bind` join that
 landed on 2026-10-05.
 

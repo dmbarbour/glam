@@ -188,7 +188,10 @@ impl fmt::Debug for Port {
 /// Immutable nodes in a reusable interaction-net template.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Node<S: NetSpecialization> {
-    /// Function or application constructor. Ports: `[ap*, arg, result]`.
+    /// Function or application constructor. Ports: `[principal*, aux1,
+    /// aux2]`, read as `[ap*, arg, result]` for an application and
+    /// `[fn*, result, arg]` for a function. `aux1` consumes and `aux2`
+    /// provides in both roles.
     Bind,
     /// Binary Lamping-style fan. Ports: `[input*, left, right]`.
     Fan { site: FanSite },

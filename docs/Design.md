@@ -373,7 +373,7 @@ For effects that accept arguments, we can generally leverage method objects to e
 
 ## Interaction Nets
 
-In contrast to lambda calculus, interaction nets are graph-structured instead of tree-structured, and symmetric instead of directional. This simplfies fine-grained, flexible dataflow and supports backpropagation without fixpoint. In this project, interaction nets are scoped to expressions, exposing only one port.
+In contrast to lambda calculus, interaction nets are graph-structured instead of tree-structured, with undirected wiring between polarized ports. This simplfies fine-grained, flexible dataflow and supports backpropagation without fixpoint. In this project, interaction nets are scoped to expressions, exposing only one port.
 
     # identity function as inet
     interaction_net do
@@ -455,8 +455,12 @@ Lambda calculus becomes a design pattern within interaction nets:
 - application as `.bind -> [ap, arg, result]` that provides `arg`, extracts
   `result`
 
-For interaction nets in general, there is no arg-result distinction. Data
-flows in both directions similar to session types. `net_arity` presents only
+A `Bind` node does not itself distinguish argument from result. Its first
+auxiliary always consumes and its second always provides, and only its
+principal's polarity says whether it acts as a function or an application.
+Data flows in both directions, similar to session types, but each wire joins a
+`+` port, which provides a value, to a `−` port, which consumes one. A net's
+exposed port is `+`. `net_arity` presents only
 the selected prefix of `Bind` stages and final `Data` as an ordinary function;
 the raw net retains its more general interface. Initially, we'll mostly use
 interaction nets as a performance tool for difficult dataflows behind explicit

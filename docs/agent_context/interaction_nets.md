@@ -80,6 +80,38 @@ alternatives are never finalized, so their partial topology cannot produce
 spurious build errors. `.data` records and replays its payload without forcing
 it.
 
+## Polarity
+
+Every port has a sign: `+` provides a value and `−` consumes one. Each wire
+joins a `+` port to a `−` port, and a net's exposed port is `+` by fiat, like
+`Data`. Polarity is a construction contract, not a runtime tag: nodes store no
+sign and rewrite rules ignore it. The planned checker
+([`../plans/NetPolarityChecker_2026-10-05.md`](../plans/NetPolarityChecker_2026-10-05.md))
+will enforce it at `NetBuilder::try_finish`.
+
+| Node | Ports | Signs |
+| --- | --- | --- |
+| `Data` | `[data]` | `[+]` |
+| `Operator` | `[input, result]` | `[−, +]` |
+| `Bind`, application | `[ap, arg, result]` | `[−, −, +]` |
+| `Bind`, function | `[fn, result, arg]` | `[+, −, +]` |
+| `Fan`, copy | `[input, left, right]` | `[−, +, +]` |
+| `Fan`, merge | `[input, left, right]` | `[+, −, −]` |
+| `Erase` | `[input]` | either |
+
+- **Bind.** Its auxiliaries are always `[−, +]`. Only the principal's sign
+  separates a function from an application. The crossed `Bind >< Bind` join
+  is what keeps every reconnected wire `+`-to-`−`.
+- **Fan.** The principal's sign is opposite its auxiliaries'. A copy
+  duplicates a value. A merge superposes consumers, and user-built merges are
+  allowed.
+- **Erase.** Its sign is free. In `−` position it discards a value. In `+`
+  position it is an error value, the analog of `void`.
+- **Rewrites.** Every rewrite of a polarized active pair yields a polarized
+  net.
+- **Construction.** A constructed net whose component is unreachable from the
+  exposed port is miswired. Reduction may still leave disconnected garbage.
+
 ## Runtime Identity and Graph State
 
 - Generic `SharedRuntimeNet<S>` ownership remains inside the interaction-net
