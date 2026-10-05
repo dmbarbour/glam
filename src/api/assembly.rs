@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
@@ -432,7 +432,50 @@ impl ModuleInput {
     }
 }
 
+/// The front-end compiler a source's extension selects. An extension with no
+/// front end is rejected before its source loads, so an extension always
+/// means what it says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrontEnd {
+    /// The built-in `.g` compiler.
+    G,
+}
+
+impl FrontEnd {
+    fn for_extension(extension: &str) -> Result<Self, String> {
+        match extension {
+            "g" => Ok(Self::G),
+            _ => Err(format!(
+                "no front-end compiler for extension `.{extension}`; the built-in front end compiles `.g`"
+            )),
+        }
+    }
+
+    fn for_path(path: &Path) -> Result<Self, String> {
+        let extension = path.extension().ok_or_else(|| {
+            format!(
+                "`{}` has no extension to select a front-end compiler",
+                path.display()
+            )
+        })?;
+        let extension = extension.to_str().ok_or_else(|| {
+            format!(
+                "`{}` has a non-UTF-8 extension, which selects no front-end compiler",
+                path.display()
+            )
+        })?;
+        Self::for_extension(extension)
+    }
+
+    fn compile(self, source: &[u8], context: &CompileContext) -> RuntimeValueRoot {
+        match self {
+            Self::G => compile_source(source, context),
+        }
+    }
+}
+
 struct PreparedSource {
+    front_end: FrontEnd,
     source: Arc<SourceArtifact>,
     context: CompileContext,
     had_errors: Arc<AtomicBool>,
@@ -1228,7 +1271,9 @@ impl Assembler {
                     execution: execution.clone(),
                 },
             )?;
-            definitions = compile_source(prepared.source.bytes(), &prepared.context);
+            definitions = prepared
+                .front_end
+                .compile(prepared.source.bytes(), &prepared.context);
             had_errors |= prepared.had_errors.load(Ordering::Relaxed);
         }
 
@@ -1255,6 +1300,7 @@ impl Assembler {
         } = setup;
         match input {
             ModuleInput::File(path) => {
+                let front_end = FrontEnd::for_path(path).map_err(Error::new)?;
                 let source = Arc::new(
                     self.source_system
                         .load_top_level(path)
@@ -1283,12 +1329,14 @@ impl Assembler {
                     had_errors.clone(),
                 ));
                 Ok(PreparedSource {
+                    front_end,
                     source,
                     context,
                     had_errors,
                 })
             }
             ModuleInput::Script { extension, body } => {
+                let front_end = FrontEnd::for_extension(extension).map_err(Error::new)?;
                 let label: Arc<str> = Arc::from(format!("<script.{extension}>"));
                 let source = Arc::new(SourceArtifact::new(
                     body.clone(),
@@ -1316,6 +1364,7 @@ impl Assembler {
                     had_errors.clone(),
                 ));
                 Ok(PreparedSource {
+                    front_end,
                     source,
                     context,
                     had_errors,
@@ -1423,6 +1472,16 @@ impl Assembler {
                 None,
             )
         })?;
+        let front_end =
+            FrontEnd::for_path(Path::new(args.request.as_str())).map_err(|message| {
+                import_failure(
+                    Some(&self.core_values()),
+                    format!("local import `{}`: {message}", args.request.as_str()),
+                    args.request.as_str(),
+                    args.importer_trace.as_deref(),
+                    Some(importer),
+                )
+            })?;
         let source = Arc::new(importer.load_relative(&args.request).map_err(|error| {
             import_failure(
                 Some(&self.core_values()),
@@ -1469,7 +1528,7 @@ impl Assembler {
             session,
             had_errors.clone(),
         ));
-        let definitions = compile_source(source.bytes(), &context);
+        let definitions = front_end.compile(source.bytes(), &context);
 
         if had_errors.load(Ordering::Relaxed) {
             Err(import_failure(

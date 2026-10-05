@@ -1665,6 +1665,71 @@ fn missing_module_and_binary_imports_retain_requesting_origin() {
 }
 
 #[test]
+fn source_extensions_without_a_front_end_are_rejected_before_loading() {
+    let sources = MemorySourceSystem::new([
+        (
+            "main.g",
+            b"language g0\nimport \"data.json\" as data\nasm.result = data.value\n".as_slice(),
+        ),
+        ("data.json", b"language g0\nvalue = \"loaded\"\n".as_slice()),
+    ]);
+    let assembler = Assembler::builder()
+        .source_system(sources)
+        .build()
+        .expect("test assembler should build");
+
+    let script = assembler
+        .module(["script"])
+        .script("json", "language g0\nasm.result = \"ignored\"\n")
+        .build()
+        .expect_err("a script extension without a front end should be rejected");
+    assert_eq!(
+        script.to_string(),
+        "no front-end compiler for extension `.json`; the built-in front end compiles `.g`"
+    );
+
+    // The file does not exist, so this error also shows the check runs
+    // before loading.
+    let file = assembler
+        .module(["file"])
+        .file("absent.txt")
+        .build()
+        .expect_err("a file extension without a front end should be rejected");
+    assert_eq!(
+        file.to_string(),
+        "no front-end compiler for extension `.txt`; the built-in front end compiles `.g`"
+    );
+
+    let bare = assembler
+        .module(["bare"])
+        .file("main")
+        .build()
+        .expect_err("a file without an extension selects no front end");
+    assert_eq!(
+        bare.to_string(),
+        "`main` has no extension to select a front-end compiler"
+    );
+
+    let module = assembler
+        .module(["import"])
+        .file("main.g")
+        .build()
+        .expect("imports stay lazy until observed");
+    let error = binary_at(&assembler, module.value(), "asm.result")
+        .expect_err("observing an import without a front end should fail");
+    let diagnostic = error
+        .diagnostic(&assembler.values())
+        .expect("import failure should belong to the assembler runtime");
+    assert!(
+        diagnostic
+            .message()
+            .contains("local import `data.json`: no front-end compiler for extension `.json`"),
+        "{}",
+        diagnostic.message()
+    );
+}
+
+#[test]
 fn caller_selected_module_path_scopes_abstract_global_paths() {
     let assembler = Assembler::default();
     let module = assembler

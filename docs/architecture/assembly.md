@@ -67,6 +67,7 @@ policy is part of the library API.
 ModuleBuilder + ordered ModuleInput values
   -> allocate one CompilationExecution for this top-level build
   -> Assembler::build_module_inner
+       -> the input's extension selects a FrontEnd, or the input is rejected
        -> SourceSystem returns an immutable SourceArtifact
        -> artifact supplies identity, SHA-256 digest, and relative resolver
        -> CompileContext hides source/import provenance
@@ -82,6 +83,14 @@ ones. A front end sees raw bytes, a relative import request, and compiler
 capabilities. The assembler retains source identity and digest, qualifies
 names, performs loads through artifact-carried relative resolvers, and builds
 the import chain. Inline scripts have no resolver and therefore cannot import.
+
+A source's extension selects its front end: the script extension for an
+inline script, and the path extension for a file or a non-binary local
+import. `FrontEnd` in `api/assembly.rs` is that one choice; the bootstrap has
+only `.g`. Any other extension, or none, fails before the source loads: a
+top-level input fails the build, and an import fails when observed, as other
+import failures do (decision `script-extension-selects-compiler`). Binary
+imports take any extension.
 
 Each source compilation receives a local invocation ID. Diagnostic envelopes
 retain compact source/import provenance without retaining module values or

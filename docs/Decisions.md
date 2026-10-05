@@ -194,8 +194,12 @@ maps the short names used here to file names.
 - **Decision:** reject an extension that has no front-end compiler, failing
   fast as the language declaration does.
 - **Consequences:** a script's extension is meaningful, and adding a
-  front end means registering its extension.
-- **Rule lives in:** `CLI.md`.
+  front end means registering its extension. Applied to files and
+  non-binary imports as well, through one `FrontEnd` selector in
+  `api/assembly.rs`, since a file extension selects the compiler in the same
+  way.
+- **Rule lives in:** `CLI.md` and `architecture/assembly.md` "Module
+  Construction".
 - **Recorded in:** holistic review A5, Decision 7.
 
 ### Language declarations fail fast; source is ASCII unless `utf8`

@@ -429,6 +429,24 @@ fn undefined_configuration_env_defaults_assembly_env_to_empty_object() {
 }
 
 #[test]
+fn script_extension_without_a_front_end_fails_the_assembly() {
+    let output = glam_command()
+        .arg("--script.json")
+        .arg("language g0\nasm.result = \"ignored\"\n")
+        .output()
+        .expect("failed to run glam");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stdout, b"");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("no front-end compiler for extension `.json`"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn script_local_import_errors_only_when_observed() {
     let unused = glam_command()
         .arg("--script.g")

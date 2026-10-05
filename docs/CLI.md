@@ -43,6 +43,11 @@ front-end compiler:
 glam --script.g 'asm.result = "hello"' >hello.bin
 ```
 
+Files and imported sources select their compiler by path extension in the same
+way. The bootstrap compiles only `.g`; any other extension, or none, fails the
+assembly with exit status 1. Binary imports are not compiled and take any
+extension.
+
 Every assembly needs at least one file or script input. `asm.result` must be a
 binary value. Diagnostics go to standard error; the result goes to standard
 output. Glam exits unsuccessfully if the result fails or any error diagnostic

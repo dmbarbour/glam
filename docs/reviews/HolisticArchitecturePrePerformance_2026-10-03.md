@@ -1744,8 +1744,8 @@ promise, the headline keeps the reason text.
 exit-status table: 1 for a command that ran and failed, including configured
 usage errors, and 2 for an invalid bootstrap command line.
 `architecture/diagnostics.md` now documents the `viewer` record. The script
-extension is decision 7 below. The settle driver, conf-entry idiom, default
-builder, and binary test placement remain open.
+extension is decision 7 below, now implemented. The settle driver,
+conf-entry idiom, default builder, and binary test placement remain open.
 
 ---
 
@@ -1962,6 +1962,10 @@ findings that raise them are noted, and lower-confidence items are marked.
    - *Maintainer decision, 2026-10-05:* reject unknown extensions. Only an
      extension with a front-end compiler is accepted, so `CLI.md`'s claim
      that the extension selects the compiler becomes true.
+   - *Implemented 2026-10-05:* one `FrontEnd` selector in `api/assembly.rs`
+     covers scripts, files and non-binary imports, and runs before the
+     source loads. A missing or unknown extension fails the build; on an
+     import, it fails when observed.
 8. **Language declaration.** How strict to be, including ASCII versus
    `utf8` enforcement. (F7)
    - *Maintainer decision, 2026-10-05:* fail-fast on an unknown base or
