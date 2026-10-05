@@ -67,9 +67,11 @@ Each line moves into a plan as soon as one owns it.
   steps, annotated normalization, and a measured specialized checkpoint. Owner
   once it exists: a net performance plan (holistic N3).
 - **Net construction performance.** Budgeted or incremental replay of large
-  netlists, batching, and split counters. Indexed list-fix reevaluation is
-  potentially quadratic and unmeasured. Columnar descriptors belong to
-  value-representation refinement.
+  netlists, batching, split counters, and moving reusable pure handler
+  definitions into Glam source. Indexed list-fix reevaluation is potentially
+  quadratic and unmeasured: each alternative re-runs from the start to get
+  its own future. Columnar descriptors belong to value-representation
+  refinement.
 - **History-coupling guard scope.** `tests/source_doc_coupling.rs` scans
   `src/` only; extend it to `tests/` and `crates/`.
 
@@ -90,9 +92,6 @@ docs or `Decisions.md`. The disposition plan tracks each one.
   aggressive verification and persistent edges.
 - [`ResumableWhnfEvaluation_2026-09-12.md`](ResumableWhnfEvaluation_2026-09-12.md):
   bounded regional WHNF with durable checkpoints.
-- [`InteractionNetCallableWhnfSpill_2026-09-16.md`](InteractionNetCallableWhnfSpill_2026-09-16.md)
-  and [`PureInteractionNetConstruction_2026-09-20.md`](PureInteractionNetConstruction_2026-09-20.md):
-  net callables and pure construction.
 
 ## Retired History
 
@@ -125,3 +124,8 @@ docs or `Decisions.md`. The disposition plan tracks each one.
 | `reviews/ResumableWhnfW8_2026-09-27.md` | `672845d5` | resumable WHNF (`W8…`) |
 | `reviews/ResumableWhnfW9_2026-09-28.md` | `8c611ae0` | resumable WHNF (`W9…`) |
 | `reviews/InteractionNetCallableWhnfSpill_2026-09-16.md` | `fd574a05` | net callable spill (`NC…`) |
+| `plans/InteractionNetCallableWhnfSpill_2026-09-16.md` | `fd574a05` | net callable spill (`NC…`) |
+| `plans/PureInteractionNetConstruction_2026-09-20.md` | `d492b966` | pure net construction (`PNC…`) |
+| `reviews/PureInteractionNetConstructionPNC3_2026-09-20.md` | `8a2c8a2f` | pure net construction (`PNC3…`) |
+| `reviews/PureInteractionNetConstructionPNC4_2026-09-20.md` | `87c4a3fa` | pure net construction (`PNC4…`) |
+| `reviews/PureInteractionNetConstructionPNC5_2026-09-21.md` | `3bfc7def` | pure net construction (`PNC5…`) |

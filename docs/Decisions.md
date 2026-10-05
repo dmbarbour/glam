@@ -281,8 +281,8 @@ maps the short names used here to file names.
   dropped.
 - **Consequences:** immediate validation strings are not compatibility
   promises.
-- **Rule lives in:** `Syntax.md` "Errors" (partly); not yet in
-  `agent_context/diagnostics.md`.
+- **Rule lives in:** `agent_context/diagnostics.md` "Context Frames";
+  `Syntax.md` "Errors" (partly).
 - **Recorded in:** PNC4 review PNC4R-001.
 
 ## Interaction nets

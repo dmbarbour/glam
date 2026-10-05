@@ -72,6 +72,17 @@ brands its opaque logical port handles; operations reject handles from another
 invocation. Alternatives cheaply share persistent builder-state and journal
 prefixes. No partial graph is built while searching.
 
+Construction effects follow the same recursive `eff` discipline as
+`ListEffect`. The effect operands of `.seq`, `.alt`, `.cut`, `.reset`,
+`.shift`, and `.fix` are interpreted against the same private API before they
+receive builder state. A captured `.shift` continuation is an ordinary
+`Value -> Effect` callable, never itself an effect: applying it yields an `eff`
+value for the same runner. It is reusable within its own invocation and
+rejected by brand in any other. The hidden reset stack lives under a private
+key inside user state, so `.get []` and `.set []` capture, clear, and restore
+it. The active sequence/cut stack is a separate protected builder field, so
+`.set []` cannot erase the sequence that is executing it.
+
 At completion, zero successful branches fail, more than one is ambiguous, and
 exactly one must return a branded port to expose. Only that result is encoded
 and replayed in order through the hidden semantic-netlist boundary, then
@@ -79,6 +90,37 @@ instantiated once as the runtime memoized by the construction lazy. Failed
 alternatives are never finalized, so their partial topology cannot produce
 spurious build errors. `.data` records and replays its payload without forcing
 it.
+
+Search order is authoritative:
+
+- Outcomes are observed in source order. A blocked left alternative blocks the
+  whole search; a ready right alternative is never selected ahead of it.
+  `.cut` selects the first success in that order.
+- Selection observes at most two outcomes, one list front at a time. The
+  second-result check stays lazy; if it blocks, selection blocks rather than
+  accepting the first.
+- Ambiguity is decided before the first outcome or its exposed port is
+  decoded, so it outranks a malformed exposure. A third result is never
+  demanded.
+
+Replay is one-shot because it completes inside one builtin poll: under an
+exclusive lazy claim, the owner replaces the builtin checkpoint with a WHNF
+checkpoint in the same value-access transition, so a later route cannot
+restart it. If replay ever gains a yield or callback boundary, this argument
+fails; give replay resumable state or a replay-progress test.
+
+Why `ListEffect`: it already supplies ordered choice, failure, cut, and
+fixpoint as a managed, resumable list checkpoint. Construction adds only
+branch-local state, so it is a state transformer over that search
+(`BuilderState -> List [value, BuilderState]`), not a second search engine.
+The rejected design ran construction in an isolated reflection-task
+interpreter with a Rust-side journal. Its search state was root-heavy and
+outside the managed graph. Moving it beneath a traced checkpoint would store
+roots in the graph. Leaving it outside lost progress on route loss: a later
+route restarted the search and repeated completed operations. It also gave
+construction far more interpreter capability than pure construction needs. Do
+not route construction through a reflection or task machine again
+([decision](../Decisions.md#net-construction-is-pure-state-over-ordered-listeffect-search-plus-hidden-strict-netlist-replay)).
 
 ## Polarity
 
@@ -214,6 +256,15 @@ fresh claim becomes ready, while a retried claim restores the same blocked
 wait. Stale acquisition and wait mismatch are quiet non-acquisitions, not
 terminal claim outcomes.
 
+Profiling counts outcomes at the mutation boundary. With
+`interaction-net-profiling`, reduction and callable-checkpoint counters are
+recorded in `CoreRuntimeNetAccess` only after the authoritative runtime
+mutation reports its result. An evaluator's intent is never counted: an
+attempt whose exact pair or generation lost a race records a stale admission
+or nothing. Inline callable-WHNF transitions record the exact shared-budget
+delta. Ordinary builds compile every counter out: no observer lookup, branch,
+or atomic update.
+
 ## Logical Copies and Cursors
 
 A logical copy is target-owned `CopyState` containing:
@@ -320,18 +371,42 @@ mutex.
   operator principal to the former argument neighbor and its auxiliary to the
   former result neighbor.
 - **Callable checkpoint.** A lazy or promised callable is first driven to WHNF
-  inline under the quantum's step budget. Only budget exhaustion or a real
-  dependency replaces the `Data` node in place with a runtime-only
-  `CallableCheckpoint` node holding the boxed WHNF state and a generation.
+  inline, spending the net machine's borrowed step budget; a retry within
+  one outer poll never gets a fresh budget. A callable that resolves within
+  budget leaves no checkpoint. Only budget exhaustion or a real dependency
+  replaces the `Data` node in place with a runtime-only `CallableCheckpoint`
+  node holding the boxed WHNF state and a generation.
   - It has one port, never appears in a template, and is never copied: cursor
-    materialization blocks on it. Its only rule is with `Bind`; any other
-    partner is stuck.
+    materialization blocks on it. Its only rule is with `Bind`. Any other
+    partner, `Fan` and `Erase` included, is stuck, so a checkpoint is never
+    duplicated or erased.
+  - `NetWhnfState` and `RegionalWhnfWork` wrap the same canonical
+    `WhnfState`. Installing, claiming, and publishing move it between them
+    without walking, duplicating, or rooting its values.
   - The pair becomes ready again or blocks on the exact wait. A later claim
     takes the state, drives it, and then publishes the next generation,
-    finishes into a copy or operator as above, or fails the pair. A failed or
-    killed dependency also fails the pair. A stale generation is rejected
-    quietly and never publishes a competing result.
-  - The payload's managed edges are traced through the net's payload walk.
+    finishes into a copy or operator as above, or fails the pair. At a
+    dependency, the claim publishes the complete state and ends, the
+    dependency is admitted outside managed access, and the pair blocks only if
+    the same pair and generation are still current. A failed or killed
+    dependency also fails the pair. A stale generation is rejected quietly and
+    never publishes a competing result.
+  - The payload needs `Send`, not `Sync`: the runtime mutex and the exact
+    claim exclude shared access. A claimed state is bound to its non-`Send`
+    value-access region and is republished or restored before that region
+    closes.
+  - The payload's managed edges are traced through the net's payload walk. It
+    is never a root, and a claimed state exists only under mutator admission,
+    so there is no untraced gap.
+  - **Why boxed.** Boxing keeps `RuntimeNode<CoreSpecialization>` at its
+    ordinary size (96 bytes on x86-64; unboxed, 128). Checkpoints exist only
+    after suspension, so one allocation per spill beats enlarging every node.
+    The test `regional_whnf_and_callable_checkpoint_layout_baseline` in
+    `eval/whnf.rs` holds the sizes. `Gc<WhnfState>` was rejected: `Trace`
+    requires `Send + Sync`, a claim cannot move state out of a managed
+    allocation, and every successor checkpoint would cost a managed
+    allocation. Revisit only if the state fits without enlarging the node or
+    profiling shows the indirection matters.
 - **`Operator >< Data`.** It runs synchronously and yields `Data` or another
   `Operator`; a returned operator is bind-wrapped for the next argument.
   Operators only construct: saturated application, builtin, access, and

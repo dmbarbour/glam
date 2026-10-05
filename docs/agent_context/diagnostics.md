@@ -34,6 +34,16 @@ client-owned rendering. Current flow lives in
   add no frame.
 - Explicit net computation adds `eval:{op:'net_computation}`. Raw `Value::Net`
   is already WHNF and receives none.
+- Public interaction-net construction adds one `eval:{op:'net_construction}`
+  frame around its whole pipeline: effect application, builder execution,
+  result selection, exposed-port demand, and replay. Unlike most frames, it
+  also wraps the pipeline's own validation failures (no result, ambiguity,
+  foreign port, invalid topology). Private operand demands (copy counts, wire
+  ports, reset/shift keys, state paths, builder state) add no frame and
+  propagate their failures unchanged. If operand roles ever need context,
+  design one structured operation-and-operand policy, not a frame per role.
+- `net_arity` adds `eval:{op:'net_arity}` when demanding its arity operand
+  fails.
 - Built-in source definition initialization uses the shallow static frame
   `{g:{origin:OpaqueOrigin, line:Number, definition:Text}}`. It must not capture
   function arguments or follow later calls.
