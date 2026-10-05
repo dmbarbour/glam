@@ -1184,6 +1184,8 @@ fn retryable_reflection_errors_are_reported_with_deadlocks() {
     assert!(stderr.contains("reflection scheduler deadlocked"));
     assert!(stderr.contains("retained error"));
     assert!(stderr.contains("requires a function value"));
+    // The retained error stays structured, as a nested context message.
+    assert!(stderr.contains("msg: application requires a function value"));
 }
 
 #[test]

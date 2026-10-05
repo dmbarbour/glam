@@ -1045,6 +1045,60 @@ answer = @meta.expected actual
 }
 
 #[test]
+fn macro_evaluation_failures_keep_their_structured_cause() {
+    // One failure while selecting the macro, one while forcing its result.
+    for (macro_definition, headline) in [
+        ("meta.bad = 1 / 0", "could not be selected"),
+        ("meta.bad = .r (1 / 0)", "macro result evaluation failed"),
+    ] {
+        let assembler = Assembler::default();
+        let error = assembler
+            .module(["macro_failure_cause_test"])
+            .script(
+                "g",
+                format!(
+                    "language g0\nimport 'std\nmeta.macro.env = {{}}\n{macro_definition}\nanswer = @meta.bad x\n"
+                ),
+            )
+            .build()
+            .expect_err("a macro whose evaluation fails should reject the module");
+        let diagnostic = error
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.message().contains(headline))
+            .unwrap_or_else(|| panic!("{macro_definition}: missing `{headline}` diagnostic"));
+        assert!(
+            diagnostic.message().contains("cannot divide by zero"),
+            "{macro_definition}: the headline keeps the cause's text"
+        );
+
+        let Value::Dict(emission) = diagnostic.emission().clone_core_for_test() else {
+            panic!("{macro_definition}: a macro failure is an object diagnostic")
+        };
+        let Some(Value::Dict(message)) = emission.get(&Key::atom_from_text("msg")) else {
+            panic!("{macro_definition}: the diagnostic has a message interface")
+        };
+        let Some(Value::List(contexts)) = message.get(&Key::atom_from_text("context")) else {
+            panic!("{macro_definition}: the cause is carried as a context frame")
+        };
+        let cause = contexts
+            .value_slice()
+            .and_then(<[Value]>::first)
+            .expect("the cause is the first context frame");
+        let Value::Dict(cause) = cause else {
+            panic!("{macro_definition}: the cause is a nested diagnostic")
+        };
+        let Some(Value::Dict(cause_message)) = cause.get(&Key::atom_from_text("msg")) else {
+            panic!("{macro_definition}: the cause keeps its own message interface")
+        };
+        let Some(Value::Binary(text)) = cause_message.get(&Key::atom_from_text("text")) else {
+            panic!("{macro_definition}: the cause keeps its own text")
+        };
+        assert!(String::from_utf8_lossy(text).contains("cannot divide by zero"));
+    }
+}
+
+#[test]
 fn invalid_expanded_source_reports_an_excerpt_and_expansion_frames() {
     let assembler = Assembler::default();
     let error = assembler

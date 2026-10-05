@@ -289,9 +289,9 @@ const INVENTORY: &[InventoryEntry] = &[
     entry!(
         "src/g_syntax/parser/source.rs",
         0,
-        2,
+        3,
         1,
-        "embedded macro values, lookup results, and diagnostic updates cross orchestration only as runtime roots",
+        "embedded macro values, lookup results, diagnostic updates, and structured causes cross orchestration only as runtime roots",
         "GCI11R-002D.2e.4 rooted parser and macro orchestration"
     ),
     entry!(
@@ -465,7 +465,8 @@ impl RootPublicationOccurrence {
                 | "src/g_syntax/compiler_values.rs::run_pure_match_resolved"
                 | "src/g_syntax/macro_expansion/effects.rs::hidden_effect"
                 | "src/g_syntax/parser/source.rs::apply_macro_context"
-                | "src/g_syntax/parser/source.rs::macro_compiler_diagnostic"
+                | "src/g_syntax/parser/source.rs::caused_error_emission"
+                | "src/g_syntax/parser/source.rs::with_cause"
                 | "src/reflection/machine.rs::alternative_returns_root"
                 | "src/reflection/machine.rs::effect_api"
                 | "src/reflection/machine.rs::volume_effects"
@@ -828,10 +829,12 @@ fn every_runtime_root_publication_has_an_exact_disposition() {
     // application checkpoints, metadata carriers, and reflection gates.
     // Panic containment adds one same-region publication: a lazy route that
     // panicked after caching its result settles with that cached result.
-    assert_eq!(actual.len(), 273, "runtime-root publication count drifted");
+    // A3 adds one outer construction boundary: a macro compiler diagnostic
+    // carries an evaluation failure as its structured cause.
+    assert_eq!(actual.len(), 274, "runtime-root publication count drifted");
     assert_eq!(
         root_publication_fingerprint(&occurrences),
-        292_970_567_950_687_913,
+        7_739_186_239_368_988_222,
         "runtime-root publication source fingerprint drifted"
     );
 

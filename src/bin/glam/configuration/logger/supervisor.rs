@@ -278,9 +278,7 @@ pub(crate) fn settled_report_diagnostics(
         );
     }
     for work in selection.killed_work {
-        let blocked_error = work
-            .project_blocked_diagnostic(values)?
-            .map(|diagnostic| diagnostic.message().to_owned());
+        let blocked_error = work.project_blocked_diagnostic(values)?;
         let mut args = vec![
             ("work", report_id(values, work.work_id())?),
             (
@@ -320,10 +318,15 @@ pub(crate) fn settled_report_diagnostics(
         );
         if let Some(blocked) = &blocked_error {
             message.push_str("; retained error: ");
-            message.push_str(blocked);
+            message.push_str(blocked.message());
         }
-        diagnostics
-            .push(Diagnostic::new(values, Severity::Error, message).with_context(values, context)?);
+        let mut diagnostic = Diagnostic::new(values, Severity::Error, message);
+        // The retained error stays structured: it follows the kill frame as a
+        // nested message with its own emission and context.
+        if let Some(blocked) = blocked_error {
+            diagnostic = diagnostic.with_context(values, blocked.emission().clone())?;
+        }
+        diagnostics.push(diagnostic.with_context(values, context)?);
     }
     Ok(diagnostics)
 }

@@ -13,7 +13,7 @@ pub(in crate::g_syntax) use io::{
 };
 #[cfg(test)]
 pub(in crate::g_syntax) use runner::{MacroFailure, MacroRun};
-pub(in crate::g_syntax) use runner::{render_macro_case, run_macro_effect};
+pub(in crate::g_syntax) use runner::{evaluation_cause, render_macro_case, run_macro_effect};
 
 #[cfg(test)]
 mod tests;

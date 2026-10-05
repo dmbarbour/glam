@@ -206,10 +206,16 @@ impl<'source> StagedSourceParser<'source> {
         ) {
             Ok(environment) => environment,
             Err(error) => {
-                self.diagnostics.push(Diagnostic::error(
+                let message = format!("macro environment could not be selected: {error}");
+                let emission = caused_error_emission(
+                    context.values(),
                     declaration.line(),
-                    format!("macro environment could not be selected: {error}"),
-                ));
+                    &message,
+                    error.cause.as_deref(),
+                );
+                self.diagnostics.push(
+                    Diagnostic::error(declaration.line(), message).with_emission_root(emission),
+                );
                 return Some(Vec::new());
             }
         };
@@ -257,7 +263,7 @@ impl<'source> StagedSourceParser<'source> {
                     return Some(Vec::new());
                 }
                 Err(error) => {
-                    self.diagnostics.push(macro_compiler_diagnostic(
+                    self.diagnostics.push(caused_macro_compiler_diagnostic(
                         context.values(),
                         &original,
                         format!(
@@ -267,6 +273,7 @@ impl<'source> StagedSourceParser<'source> {
                         None,
                         &[],
                         std::slice::from_ref(&original),
+                        error.cause.as_deref(),
                     ));
                     return Some(Vec::new());
                 }
@@ -296,7 +303,7 @@ impl<'source> StagedSourceParser<'source> {
                     let position_detail = position.map_or_else(String::new, |(_, line, column)| {
                         format!(" at input line {line}, column {column}")
                     });
-                    self.diagnostics.push(macro_compiler_diagnostic(
+                    self.diagnostics.push(caused_macro_compiler_diagnostic(
                         context.values(),
                         &original,
                         format!(
@@ -307,6 +314,7 @@ impl<'source> StagedSourceParser<'source> {
                         position,
                         failure.cases(),
                         std::slice::from_ref(&original),
+                        failure.cause(),
                     ));
                     return Some(Vec::new());
                 }
@@ -449,11 +457,58 @@ fn macro_compiler_diagnostic(
     cases: &[PublicValue],
     frames: &[OriginalMacroInvocation],
 ) -> Diagnostic {
-    let emission = values.construct_runtime_value_root(|access| {
-        crate::diagnostic::text_message_in(access, Some(invocation.line), &message)
-    });
+    caused_macro_compiler_diagnostic(values, invocation, message, frontier, cases, frames, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn caused_macro_compiler_diagnostic(
+    values: &crate::core::CoreValueFactory,
+    invocation: &OriginalMacroInvocation,
+    message: String,
+    frontier: Option<(usize, usize, usize)>,
+    cases: &[PublicValue],
+    frames: &[OriginalMacroInvocation],
+    cause: Option<&crate::api::Diagnostic>,
+) -> Diagnostic {
+    let emission = caused_error_emission(values, invocation.line, &message, cause);
     let emission = apply_macro_context(values, emission, frontier, cases, frames);
     Diagnostic::error(invocation.line, message).with_emission_root(emission)
+}
+
+fn caused_error_emission(
+    values: &crate::core::CoreValueFactory,
+    line: usize,
+    message: &str,
+    cause: Option<&crate::api::Diagnostic>,
+) -> RuntimeValueRoot {
+    let emission = values.construct_runtime_value_root(|access| {
+        crate::diagnostic::text_message_in(access, Some(line), message)
+    });
+    with_cause(values, emission, cause)
+}
+
+/// Carries a structured cause, such as an evaluation failure inside a macro,
+/// as the first context frame of a compiler message. Renderers show such a
+/// frame as a nested message with its own context, so the cause's emission
+/// and context stack survive alongside the compiler's text.
+fn with_cause(
+    values: &crate::core::CoreValueFactory,
+    emission: RuntimeValueRoot,
+    cause: Option<&crate::api::Diagnostic>,
+) -> RuntimeValueRoot {
+    let Some(cause) = cause else {
+        return emission;
+    };
+    let contexts = values.construct_runtime_value_root(|access| {
+        Value::List(List::from_values(vec![
+            cause
+                .emission()
+                .clone()
+                .into_runtime_root()
+                .clone_core_with(access),
+        ]))
+    });
+    crate::diagnostic::prepend_contexts_root(values, emission.clone(), contexts).unwrap_or(emission)
 }
 
 fn apply_public_macro_context(
@@ -559,12 +614,34 @@ fn macro_frame_value(_access: &RuntimeValueAccess<'_>, frame: &OriginalMacroInvo
     )
 }
 
+/// Why a macro lookup failed. An evaluation failure keeps its structured
+/// diagnostic as the cause.
+struct MacroLookupFailure {
+    message: String,
+    cause: Option<Box<crate::api::Diagnostic>>,
+}
+
+impl From<String> for MacroLookupFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            cause: None,
+        }
+    }
+}
+
+impl std::fmt::Display for MacroLookupFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
 fn macro_lookup(
     execution: &CompilationExecution,
     root: &RuntimeValueRoot,
     path: &[Key],
     force_result: bool,
-) -> Result<RuntimeValueRoot, String> {
+) -> Result<RuntimeValueRoot, MacroLookupFailure> {
     let mut current = root.clone();
     for key in path {
         let evaluated = force_macro_lookup_value(execution, current)?;
@@ -596,7 +673,7 @@ fn macro_lookup(
 fn force_macro_lookup_value(
     execution: &CompilationExecution,
     value: RuntimeValueRoot,
-) -> Result<RuntimeValueRoot, String> {
+) -> Result<RuntimeValueRoot, MacroLookupFailure> {
     execution
         .lookup_context()
         .evaluate_root_whnf(value)
@@ -606,7 +683,14 @@ fn force_macro_lookup_value(
             if let Some(report) = error.panic_report() {
                 report.resume();
             }
-            error.to_string()
+            MacroLookupFailure {
+                message: error.to_string(),
+                cause: super::super::macro_expansion::evaluation_cause(
+                    execution.lookup_context().values(),
+                    &error,
+                )
+                .map(Box::new),
+            }
         })
 }
 

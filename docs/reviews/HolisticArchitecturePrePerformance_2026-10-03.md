@@ -1490,8 +1490,39 @@ publish completion-script failures, add the context frames, and add failing
 - **Regressions.** Failing `conf.completion_script` and `conf.cli` CLI tests
   were added.
 
-*Still open:* macro task failures, killed-work reports, and logger-transport
-failures are still converted to text.
+*Remainder resolved 2026-10-05.* An audit of the three remaining claims found
+lossy sites in macros, one in killed-work reports, and none that mattered in
+the logger transport. The fix keeps the compiler's or host's readable headline
+and carries the original failure as a *cause*. The cause is a nested message
+in the context list, which the CLI already renders with its own context.
+- **Macros.** An effect failure, a failure that blocks the effect, and a
+  failure forcing a macro's result each keep the `TaskHalt` or evaluator
+  failure diagnostic as the cause. So do failures selecting a macro or
+  `meta.macro.env`. Previously each was reduced to `{error}` text.
+- **Killed work.** The logger supervisor's deadlock report keeps the retained
+  blocked failure as a cause after its `runtime: killed` frame. It previously
+  appended only the failure's message.
+- **Logger transport.** A diagnostic whose `transport_value` fails now
+  publishes that error locally. It previously wrote a placeholder record,
+  which the logger would have rejected at decode. The path is probably
+  unreachable, since it needs a foreign-runtime diagnostic in the journal,
+  so it has no test.
+- **Left as text, as genuinely new errors:** macro arity, text, and regex
+  validation; `IsolatedEffectSearch::new_in_context` ownership checks; the
+  fallback-drain `eprintln!`s in `batch.rs`; and terminal rendering
+  failures.
+- **Regressions.**
+  - A macro test checks that the cause's emission and text survive, for
+    both the selection path and the result path.
+  - The deadlock CLI test checks the nested `msg:` frame.
+
+*Noted, not changed:*
+- `.task.status` reports `killed` without its kill root, while `failed`
+  carries `{err: diagnostic}`. This is a reflection API question.
+- `TaskHalt::with_context` replaces the halt with text when the context
+  belongs to a foreign runtime. This is a programmer-error path.
+- `RuntimeDeadlockWork::blocked_error()` is a public text accessor that only
+  tests use.
 
 **A4 — Medium — Public-contract verification gaps.** Reported.
 

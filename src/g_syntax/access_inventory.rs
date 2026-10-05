@@ -84,7 +84,7 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax/macro_expansion/runner.rs",
-        [7, 14, 4, 0],
+        [7, 15, 4, 0],
         "rooted macro environment, effect, result, output, failure, and diagnostic values with bounded inspection regions"
     ),
     entry!(
@@ -99,8 +99,8 @@ const INVENTORY: &[InventoryEntry] = &[
     ),
     entry!(
         "src/g_syntax/parser/source.rs",
-        [9, 7, 3, 0],
-        "rooted embedded values, macro effects, and diagnostic emissions with bounded macro-data and diagnostic-context projection"
+        [12, 8, 3, 0],
+        "rooted embedded values, macro effects, and diagnostic emissions and their structured causes with bounded macro-data and diagnostic-context projection"
     ),
 ];
 

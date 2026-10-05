@@ -428,21 +428,20 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
             .events
             .unwrap_or_else(|| RuntimeEventJournal::new(snapshot.clone()));
         for diagnostic in journal.reflection.diagnostics() {
-            if let Err(error) = events.write(
-                &self.diagnostic_writer,
-                diagnostic
-                    .transport_value(&self.resources.values())
-                    .map_err(|_| ())
-                    .unwrap_or_else(|()| {
-                        self.resources
-                            .values()
-                            .record([(
-                                "emission",
-                                self.resources.values().text("diagnostic transport failed"),
-                            )])
-                            .expect("fallback diagnostic is local")
-                    }),
-            ) {
+            let transport = match diagnostic.transport_value(&self.resources.values()) {
+                Ok(transport) => transport,
+                Err(error) => {
+                    // Report why the diagnostic cannot cross into the logger
+                    // rather than writing a placeholder it would fail to decode.
+                    self.diagnostics.publish_local(
+                        error
+                            .diagnostic(&self.resources.values())
+                            .expect("logger failures belong to the logger runtime"),
+                    );
+                    continue;
+                }
+            };
+            if let Err(error) = events.write(&self.diagnostic_writer, transport) {
                 self.diagnostics.publish_local(
                     error
                         .diagnostic(&self.resources.values())

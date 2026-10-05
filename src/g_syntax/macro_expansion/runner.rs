@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::api::{CompilationExecution, Diagnostic, Value as PublicValue, Values};
 use crate::core::CoreValueFactory;
-use crate::core::Value;
+use crate::core::{EvaluationHalt, Value};
 use crate::diagnostic::Severity;
 use crate::evaluation::{EvaluationPumpOutcome, ExactDemandRoute};
 use crate::reflection::{IsolatedEffectSearch, IsolatedSearchPoll};
@@ -26,6 +26,10 @@ pub(in crate::g_syntax) struct MacroRun {
 #[derive(Debug)]
 pub(in crate::g_syntax) struct MacroFailure {
     diagnostic: Diagnostic,
+    /// The structured failure raised by the macro's own evaluation. The
+    /// compiler diagnostic carries it as a nested context message rather than
+    /// only its text.
+    cause: Option<Diagnostic>,
     frontier: Option<usize>,
     cases: Vec<PublicValue>,
 }
@@ -35,8 +39,17 @@ impl MacroFailure {
         self.diagnostic.message()
     }
 
+    pub(in crate::g_syntax) fn cause(&self) -> Option<&Diagnostic> {
+        self.cause.as_ref()
+    }
+
     pub(in crate::g_syntax) fn frontier(&self) -> Option<usize> {
         self.frontier
+    }
+
+    fn caused_by(mut self: Box<Self>, cause: Option<Diagnostic>) -> Box<Self> {
+        self.cause = cause;
+        self
     }
 
     pub(in crate::g_syntax) fn cases(&self) -> &[PublicValue] {
@@ -110,14 +123,19 @@ pub(in crate::g_syntax) fn run_macro_effect(
             IsolatedSearchPoll::Yielded => {}
             IsolatedSearchPoll::Blocked(blocked) => {
                 let Some(dependency) = blocked.dependency().cloned() else {
-                    let detail = blocked.error().map_or_else(
-                        || "without a lazy dependency".to_owned(),
-                        |error| format!("after evaluation failed: {error}"),
-                    );
-                    return Err(macro_error(
-                        values,
-                        format!("macro effect became blocked {detail}"),
-                    ));
+                    return Err(match blocked.error() {
+                        Some(error) => macro_error(
+                            values,
+                            format!("macro effect became blocked after evaluation failed: {error}"),
+                        )
+                        .caused_by(Some(
+                            error.diagnostic(&Values::from_core_factory(values.clone())),
+                        )),
+                        None => macro_error(
+                            values,
+                            "macro effect became blocked without a lazy dependency",
+                        ),
+                    });
                 };
                 match execution.macro_context().pump_wait_on_route(
                     &dependency,
@@ -137,7 +155,10 @@ pub(in crate::g_syntax) fn run_macro_effect(
             }
             IsolatedSearchPoll::Complete(branches) => break branches,
             IsolatedSearchPoll::Failed(error) => {
-                return Err(macro_error(values, format!("macro effect failed: {error}")));
+                return Err(macro_error(values, format!("macro effect failed: {error}"))
+                    .caused_by(Some(
+                        error.diagnostic(&Values::from_core_factory(values.clone())),
+                    )));
             }
             IsolatedSearchPoll::Cancelled => {
                 return Err(macro_error(values, "macro effect was cancelled"));
@@ -238,14 +259,33 @@ fn force_result(
             if let Some(report) = error.panic_report() {
                 report.resume();
             }
+            let values = execution.macro_context().values();
             let detail = if error.blocked_on().is_some() {
                 "macro result is waiting on a lazy producer unavailable to the macro demand session"
                     .to_owned()
             } else {
                 format!("macro result evaluation failed: {error}")
             };
-            macro_error(execution.macro_context().values(), detail)
+            macro_error(values, detail).caused_by(evaluation_cause(values, &error))
         })
+}
+
+/// Projects an evaluator failure into the structured diagnostic that a macro
+/// compiler diagnostic carries as its cause. Waits and unassigned promises
+/// have no permanent failure, so they have no cause.
+pub(in crate::g_syntax) fn evaluation_cause(
+    values: &CoreValueFactory,
+    halt: &EvaluationHalt,
+) -> Option<Diagnostic> {
+    crate::diagnostic::halt_diagnostic_root_with(values, halt).map(|emission| {
+        Diagnostic::from_parts(
+            &Values::from_core_factory(values.clone()),
+            None,
+            Severity::Error,
+            PublicValue::from_runtime_root(emission),
+            None,
+        )
+    })
 }
 
 pub(in crate::g_syntax) fn render_macro_case(
@@ -359,6 +399,7 @@ fn macro_error(
 ) -> Box<MacroFailure> {
     Box::new(MacroFailure {
         diagnostic: Diagnostic::new_with_factory(values, Severity::Error, message),
+        cause: None,
         frontier: None,
         cases: Vec::new(),
     })
@@ -386,10 +427,13 @@ mod owner_tests {
     fn assert_macro_failure_owner(failure: &MacroFailure) {
         let MacroFailure {
             diagnostic,
+            cause,
             frontier,
             cases,
         } = failure;
         let _: &Diagnostic = diagnostic;
+        // A cause is a public diagnostic, which roots its emission.
+        let _: &Option<Diagnostic> = cause;
         let _: &Option<usize> = frontier;
         let _: &Vec<PublicValue> = cases;
     }
@@ -431,6 +475,7 @@ mod owner_tests {
         let (case, retained_case) = retained_value(&domain);
         let failure = MacroFailure {
             diagnostic: Diagnostic::new_with_factory(&core, Severity::Error, "failed macro"),
+            cause: None,
             frontier: Some(0),
             cases: vec![case],
         };
