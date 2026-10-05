@@ -456,6 +456,24 @@ maps the short names used here to file names.
 - **Recorded in:** resumable-WHNF plan W7A.1; W7 review; documentation
   disposition, maintainer answer 4.
 
+### Every net reduction costs one budget unit; observation is free
+`net-reduction-costs-one-budget-unit` · 2026-10-05 · maintainer · accepted
+- **Context:** the net driver charged only semantic handoffs, so one poll
+  could run a long or divergent pure reduction inside one access region.
+  A separate admission after the claim also needed a refund path, which
+  panicked on a blocked checkpoint.
+- **Decision:** charge one unit for every rule application, at the claim:
+  pure rewrites, the remote-cursor rule, and semantic claims. Interface
+  polls, chain walks, dependency resolution and rechecking a blocked wait
+  are free. A refused claim leaves the net unchanged and ends the poll.
+- **Consequences:** a poll performs at most its budget of reductions. Free
+  observation cannot loop, because a poll without a reduction ends in a
+  result, handoff, contention or block. Budgets stay simple heuristics
+  rather than cost models.
+- **Rule lives in:** `agent_context/interaction_nets.md` "Reduction and
+  External Work"; `architecture/interaction_nets.md` "The Net Driver".
+- **Recorded in:** holistic review N9.
+
 ### The step budget is a reservation; a poll spends at most its budget
 `step-budget-is-reservation` · 2026-09-25, extended 2026-10-05 · agent · accepted
 - **Context:** exact spend and foreground allowance were conflated, and

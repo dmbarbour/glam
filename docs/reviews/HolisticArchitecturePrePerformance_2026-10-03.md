@@ -1278,6 +1278,19 @@ costs one unit, and observation is free.
 - **The check runs before the claim.** With no budget left, the item goes
   back on the worklist and the poll yields.
 
+*Resolved 2026-10-05.*
+- The runtime's step functions take an admission callback, invoked only at
+  the claim. The driver passes `try_consume`, and a refusal reports
+  `NotAdmitted` without changing the net.
+- A semantic claim is charged like any other, so handoffs need no admission
+  of their own. That removed the refund path behind the blocked-checkpoint
+  panic noted under N5.
+- Tests cover:
+  - one unit per pure reduction, with a free final observation;
+  - a long chain yielding at each multi-unit budget;
+  - a blocked checkpoint rechecked at zero budget.
+- The decision is `net-reduction-costs-one-budget-unit`.
+
 ### Reflection (R)
 
 **R1 — High — The store's change log grows without bound, and each

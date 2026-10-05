@@ -282,6 +282,13 @@ the runtime mutex. Work delegated to a specialization follows this sequence:
 A claim therefore spans several critical sections; every later one rechecks
 it, and a stale holder fails quietly.
 
+Every reduction costs one unit of the shared step budget, spent through the
+admission callback at the moment of the claim; observation is free
+(decision `net-reduction-costs-one-budget-unit`). Do not charge per driver
+work item, which starves a one-unit poll, and do not add a separate budget
+check after a claim: a refusal there needs a refund path, and the old one
+missed a state and panicked.
+
 Do not rediscover work by scanning active-pair collections, remove elements
 from the middle of queues, or hold source and target runtime mutexes together.
 An `Erase >< RemoteCursor` pair has no shortcut: it demands normal cursor
@@ -425,8 +432,9 @@ mutex.
   operator principal to the former argument neighbor and its auxiliary to the
   former result neighbor.
 - **Callable checkpoint.** A lazy or promised callable is first driven to WHNF
-  inline, spending the net machine's borrowed step budget; a retry within
-  one outer poll never gets a fresh budget. A callable that resolves within
+  inline, spending what remains of the net machine's borrowed step budget
+  after the call's own reduction unit; a retry within one outer poll never
+  gets a fresh budget. A callable that resolves within
   budget leaves no checkpoint. Only budget exhaustion or a real dependency
   replaces the `Data` node in place with a runtime-only `CallableCheckpoint`
   node holding the boxed WHNF state and a generation.

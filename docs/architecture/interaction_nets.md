@@ -155,15 +155,25 @@ while the net mutex is held.
 NetWhnfMachine::poll_in                     (one value-access region)
   loop: pop item -> open a normalization batch on the item's net
     run items while they stay on that net    (another net: push back, close)
+      claim refused: no budget left      -> push back -> yield
       pure rewrite or cursor progress    -> continue
       root terminal                      -> poll outcome
-      Call | Checkpoint | Operator       -> leave batch -> budget unit -> handoff
+      Call | Checkpoint | Operator       -> leave batch -> handoff
       Claimed pair, cursor, or batch     -> Contended
   access closes
 handoff:   drive_net_semantic_action (own access regions), then re-poll
 contended: wait for the net's disturbance epoch, then yield
 ```
 
+- **Budget.** Every reduction costs one unit of the shared step budget:
+  pure rewrites, the remote-cursor rule, and semantic claims alike. The
+  runtime spends it at the claim, through an admission callback on
+  `step_active_pair_with_gateway` and `step_cursor_with_gateway`; a refused
+  claim reports `NotAdmitted`, leaves the net unchanged, and ends the poll.
+  Observation is free: interface polls, chain walks, dependency resolution,
+  and rechecking a blocked checkpoint's wait. A poll that performs no
+  reduction ends in a result, handoff, contention or block, so free
+  observation cannot loop.
 - **Batches.** Only one evaluator may hold a net's batch; a second claimant
   gets `Contended` at once. Stepping a source's pair or cursor opens a batch
   on that source, so source-local work runs in the source.
@@ -178,9 +188,9 @@ contended: wait for the net's disturbance epoch, then yield
 
 `drive_net_semantic_action` runs after the batch and access region close.
 Each claim opens its own access region (see [`evaluation.md`](evaluation.md)
-"WHNF Submachine Flow"). Each handoff, retries included, first spends one
-step-budget unit. A denial restores the claim
-(`release_unstarted_semantic_step`) and re-queues the pair.
+"WHNF Submachine Flow"). The claim already paid its budget unit, so a
+handoff needs no admission of its own; callable WHNF then draws on what
+remains.
 
 - **`Bind >< Data`** (`progress_exact_core_call_in`).
   1. `CoreCallClaim::fresh` checks `Claimed` and duplicates the callable in a
@@ -219,7 +229,7 @@ step-budget unit. A denial restores the claim
 | failed or killed dependency | checkpoint dropped, `Stuck` | permanent failure |
 | pair, cursor or batch claimed elsewhere | unchanged | wait for disturbance, then yield |
 | stale observation | unchanged | progress; re-derived from the root |
-| step budget spent | claim restored | yield |
+| step budget spent | nothing claimed | yield |
 
 A stale observation of a since-stuck pair still reports `Stuck`, so the
 failure propagates without a rescan.
@@ -319,9 +329,8 @@ The rules are in the agent note's "Polarity" and "Runtime Polarity Type".
 
 **Driver**
 
-- Only semantic handoffs and callable WHNF spend the step budget.
-  Pure rewrites, cursor steps and dependency resolutions are free, so one
-  poll runs until a root outcome, a handoff, contention or a failure.
+- Each reduction costs one budget unit, so one poll performs at most its
+  budget of reductions; observation is free (see "Budget" above).
 - The request root sits at the bottom of the worklist and is re-polled
   whenever the items above it finish. Each re-poll from an auxiliary walks
   the principal chain with a fresh `HashSet`. Source-frontier classification

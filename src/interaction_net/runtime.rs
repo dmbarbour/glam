@@ -200,6 +200,8 @@ pub enum CursorStep<S: NetSpecialization> {
     Contended(NetContention),
     Disturbed,
     Gone,
+    /// The cursor was claimable, but its caller refused the claim.
+    NotAdmitted,
 }
 
 #[derive(Debug)]
@@ -211,6 +213,8 @@ pub enum ActivePairStep<S: NetSpecialization> {
     Contended(NetContention),
     Disturbed,
     Gone,
+    /// The pair was ready, but its caller refused the claim.
+    NotAdmitted,
 }
 
 /// One versioned observation of the work currently demanded from a source
@@ -1388,15 +1392,20 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
             pair,
             expected_topology_revision,
             &DIRECT_RUNTIME_NET_MUTATION_GATEWAY,
+            || true,
             inspect_source,
         )
     }
 
+    /// Takes one non-blocking step at `pair`. `admit` runs only when the pair
+    /// is ready to claim; returning `false` leaves it unclaimed and reports
+    /// `NotAdmitted`. Every other outcome only observes.
     pub(crate) fn step_active_pair_with_gateway<Gateway>(
         &self,
         pair: ActivePairKey,
         expected_topology_revision: Option<u64>,
         gateway: &Gateway,
+        admit: impl FnOnce() -> bool,
         inspect_source: impl FnOnce(&S::RuntimeSource, Port) -> SourceFrontier<S>,
     ) -> ActivePairStep<S>
     where
@@ -1421,6 +1430,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
             }
             let mut cursor_claim = None;
             let (outcome, changed) = match state.runtime.active.get(&pair) {
+                Some(ActivePairState::Ready) if !admit() => (ActivePairStep::NotAdmitted, false),
                 Some(ActivePairState::Ready) => {
                     let edges = state.runtime.reduce_pair_edge_transition(pair);
                     let reduction = gateway
@@ -1514,15 +1524,20 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
             cursor,
             expected_topology_revision,
             &DIRECT_RUNTIME_NET_MUTATION_GATEWAY,
+            || true,
             inspect_source,
         )
     }
 
+    /// Takes one non-blocking step at `cursor`. `admit` runs only when the
+    /// cursor is ready to claim; returning `false` leaves it unclaimed and
+    /// reports `NotAdmitted`. Every other outcome only observes.
     pub(crate) fn step_cursor_with_gateway<Gateway>(
         &self,
         cursor: NodeId,
         expected_topology_revision: Option<u64>,
         gateway: &Gateway,
+        admit: impl FnOnce() -> bool,
         inspect_source: impl FnOnce(&S::RuntimeSource, Port) -> SourceFrontier<S>,
     ) -> CursorStep<S>
     where
@@ -1540,6 +1555,7 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
                 return CursorStep::Disturbed;
             }
             match state.runtime.inspect_cursor_step(cursor, gateway) {
+                CursorStepInspection::Claimable(_) if !admit() => return CursorStep::NotAdmitted,
                 CursorStepInspection::Claimable(expected_pair) => {
                     let progress = gateway
                         .transition(&mut state.runtime, |runtime| {
@@ -2896,26 +2912,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             ActivePairState::Stuck(StuckReason::Specialization(reason)),
         );
         Ok(payload)
-    }
-
-    pub(crate) fn release_claimed_callable_checkpoint(&mut self, pair: ActivePairKey) -> bool {
-        let Some(call) = self.callable_checkpoint(pair) else {
-            return false;
-        };
-        if !self
-            .active
-            .get(&pair)
-            .is_some_and(ActivePairState::is_claimed)
-            || !matches!(
-                self.node(call.checkpoint),
-                Some(RuntimeNode::CallableCheckpoint(checkpoint))
-                    if checkpoint.generation == call.generation && checkpoint.payload.is_some()
-            )
-        {
-            return false;
-        }
-        self.active.insert(pair, ActivePairState::Ready);
-        true
     }
 
     pub(crate) fn fail_claimed_callable_checkpoint(

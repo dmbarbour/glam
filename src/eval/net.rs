@@ -180,7 +180,7 @@ impl NetWhnfMachine {
             }
             #[cfg(all(test, feature = "interaction-net-profiling"))]
             NetDriverOutcome::ProbeBudgetExhausted => Ok(NetWhnfAccessPoll::Yielded),
-            NetDriverOutcome::SemanticBudgetExhausted => Ok(NetWhnfAccessPoll::Yielded),
+            NetDriverOutcome::BudgetExhausted => Ok(NetWhnfAccessPoll::Yielded),
             NetDriverOutcome::Root(InterfaceDemand::Data) => {
                 let runtime = self.driver.request.root.duplicate_in(access.values());
                 let value = access.net(&runtime).with(|runtime| {
@@ -436,7 +436,7 @@ enum NetDriverOutcome {
     Progressed,
     Root(InterfaceDemand),
     Contended(NetContention),
-    SemanticBudgetExhausted,
+    BudgetExhausted,
     Semantic(NetSemanticAction),
     #[cfg(all(test, feature = "interaction-net-profiling"))]
     ProbeBudgetExhausted,
@@ -522,7 +522,7 @@ fn drive_net_driver_work_with_budget_access(
         let work_runtime = work.runtime(values.values());
         let access = values.net(&work_runtime);
         let outcome = access.with_normalization_batch(|access| {
-            drive_net_batch(driver, &work_runtime, work, access)
+            drive_net_batch(driver, &work_runtime, work, access, step_budget)
         });
         let outcome = match outcome {
             Ok(outcome) => outcome?,
@@ -543,13 +543,6 @@ fn drive_net_driver_work_with_budget_access(
             NetBatchOutcome::Continue => {}
             NetBatchOutcome::Driver(outcome) => return Ok(outcome),
             NetBatchOutcome::Semantic { root, pair, step } => {
-                if !step_budget.try_consume() {
-                    release_unstarted_semantic_step(values, &root, pair, step);
-                    driver
-                        .worklist
-                        .push(NetDriverWork::ActivePair { root, pair });
-                    return Ok(NetDriverOutcome::SemanticBudgetExhausted);
-                }
                 let action_root = root.root_in(values.values());
                 driver
                     .worklist
@@ -569,55 +562,6 @@ fn drive_net_driver_work_with_budget_access(
     Ok(NetDriverOutcome::Progressed)
 }
 
-/// Restores any claim taken while discovering a semantic active-pair step.
-///
-/// Budget admission happens after the normalization batch closes because the
-/// semantic callback itself must run outside that batch. A call reduction is
-/// already claimed by then, so a denied budget must explicitly return it to
-/// the runtime before retaining ordinary active-pair work.
-fn release_unstarted_semantic_step(
-    access: &crate::evaluation::EvaluationValueAccess<'_>,
-    root: &CoreRuntimeNet,
-    pair: ActivePairKey,
-    step: ActivePairStep,
-) {
-    let runtime = root.duplicate_in(access.values());
-    match step {
-        ActivePairStep::Reduction(reduction) => match reduction.kind {
-            ReductionKind::Call { bind, data } => {
-                let restored = access
-                    .net(&runtime)
-                    .release_claimed_call(Call { pair, bind, data });
-                assert!(restored, "budget denial must restore the exact call claim");
-            }
-            ReductionKind::CallableCheckpoint { .. } => {
-                let restored = access
-                    .net(&runtime)
-                    .release_claimed_callable_checkpoint(pair);
-                assert!(
-                    restored,
-                    "budget denial must restore the exact checkpoint claim"
-                );
-            }
-            ReductionKind::OperatorCall { operator, data } => {
-                let restored = access
-                    .net(&runtime)
-                    .release_claimed_operator_call(OperatorCall {
-                        pair,
-                        operator,
-                        data,
-                    });
-                assert!(
-                    restored,
-                    "budget denial must restore the exact operator-call claim"
-                );
-            }
-            _ => unreachable!("only semantic reductions leave a normalization batch"),
-        },
-        _ => unreachable!("only semantic work reaches budget admission"),
-    }
-}
-
 enum NetBatchOutcome {
     Continue,
     Driver(NetDriverOutcome),
@@ -628,18 +572,24 @@ enum NetBatchOutcome {
     },
 }
 
+/// Runs consecutive work items on one net inside its normalization batch.
+///
+/// Every reduction costs one unit of the shared step budget, spent when the
+/// runtime claims the pair or cursor; observation is free. A claim refused
+/// for want of budget re-queues its item and ends the poll.
 fn drive_net_batch(
     driver: &mut NetDriver,
     batch_runtime: &CoreRuntimeNet,
     mut work: NetDriverWork,
     access: &CoreRuntimeNetAccess<'_, '_>,
+    step_budget: &mut crate::evaluation::EvaluationStepBudget,
 ) -> Result<NetBatchOutcome, EvaluationHalt> {
     loop {
         debug_assert!(
             work.runtime(access.values())
                 .same_net_in(batch_runtime, access.values())
         );
-        if let Some(outcome) = drive_net_work_item(driver, work, access)? {
+        if let Some(outcome) = drive_net_work_item(driver, work, access, step_budget)? {
             return Ok(outcome);
         }
         #[cfg(all(test, feature = "interaction-net-profiling"))]
@@ -670,6 +620,7 @@ fn drive_net_work_item(
     driver: &mut NetDriver,
     work: NetDriverWork,
     access: &CoreRuntimeNetAccess<'_, '_>,
+    step_budget: &mut crate::evaluation::EvaluationStepBudget,
 ) -> Result<Option<NetBatchOutcome>, EvaluationHalt> {
     #[cfg(feature = "interaction-net-profiling")]
     access.record_driver(crate::interaction_net::profiling::DriverEvent::WorkItem);
@@ -707,7 +658,7 @@ fn drive_net_work_item(
         NetDriverWork::Cursor { root, cursor } => {
             #[cfg(feature = "interaction-net-profiling")]
             access.record_driver(crate::interaction_net::profiling::DriverEvent::CursorStep);
-            match access.step_cursor(cursor) {
+            match access.step_cursor_within(cursor, || step_budget.try_consume()) {
                 CursorStep::Progressed(progress) => {
                     debug_assert_ne!(progress, crate::interaction_net::CursorProgress::Claimed);
                     driver.progressed = true;
@@ -731,6 +682,12 @@ fn drive_net_work_item(
                     );
                 }
                 CursorStep::Stable => driver.worklist.mark_nearest_dependency_stable(),
+                CursorStep::NotAdmitted => {
+                    driver.worklist.push(NetDriverWork::Cursor { root, cursor });
+                    return Ok(Some(NetBatchOutcome::Driver(
+                        NetDriverOutcome::BudgetExhausted,
+                    )));
+                }
                 CursorStep::Contended(contention) => {
                     #[cfg(feature = "interaction-net-profiling")]
                     access
@@ -748,7 +705,7 @@ fn drive_net_work_item(
         } => {
             #[cfg(feature = "interaction-net-profiling")]
             access.record_driver(crate::interaction_net::profiling::DriverEvent::CursorStep);
-            match observation.step_cursor(access, cursor) {
+            match observation.step_cursor(access, cursor, || step_budget.try_consume()) {
                 CursorStep::Progressed(progress) => {
                     debug_assert_ne!(progress, crate::interaction_net::CursorProgress::Claimed);
                     driver.progressed = true;
@@ -772,6 +729,15 @@ fn drive_net_work_item(
                     );
                 }
                 CursorStep::Stable => driver.worklist.mark_nearest_dependency_stable(),
+                CursorStep::NotAdmitted => {
+                    driver.worklist.push(NetDriverWork::ObservedCursor {
+                        observation,
+                        cursor,
+                    });
+                    return Ok(Some(NetBatchOutcome::Driver(
+                        NetDriverOutcome::BudgetExhausted,
+                    )));
+                }
                 CursorStep::Contended(contention) => {
                     #[cfg(feature = "interaction-net-profiling")]
                     access
@@ -794,13 +760,13 @@ fn drive_net_work_item(
                 access,
                 root,
                 pair,
-                access.step_active_pair(pair),
+                access.step_active_pair_within(pair, || step_budget.try_consume()),
             );
         }
         NetDriverWork::ObservedActivePair { observation, pair } => {
             #[cfg(feature = "interaction-net-profiling")]
             access.record_driver(crate::interaction_net::profiling::DriverEvent::ActivePairStep);
-            let step = observation.step_active_pair(access, pair);
+            let step = observation.step_active_pair(access, pair, || step_budget.try_consume());
             return prepare_active_pair_step(
                 driver,
                 access,
@@ -876,6 +842,14 @@ fn prepare_active_pair_step(
             return Ok(Some(NetBatchOutcome::Semantic { root, pair, step }));
         }
         ActivePairStep::Stuck => return Err(stuck_pair_error_in(access, pair)),
+        ActivePairStep::NotAdmitted => {
+            driver
+                .worklist
+                .push(NetDriverWork::ActivePair { root, pair });
+            return Ok(Some(NetBatchOutcome::Driver(
+                NetDriverOutcome::BudgetExhausted,
+            )));
+        }
         ActivePairStep::Contended(contention) => {
             #[cfg(feature = "interaction-net-profiling")]
             access.record_driver(crate::interaction_net::profiling::DriverEvent::Contention);
@@ -1064,8 +1038,8 @@ fn drive_net_interface_with_contention_handoff(
     loop {
         match drive_net_work_in(context, request)? {
             NetDriverOutcome::Progressed => continue,
-            NetDriverOutcome::SemanticBudgetExhausted => {
-                unreachable!("the test-only driver receives an unbounded semantic budget")
+            NetDriverOutcome::BudgetExhausted => {
+                unreachable!("the test-only driver receives an unbounded budget")
             }
             NetDriverOutcome::Semantic(_) => {
                 unreachable!("the direct driver executes semantic handoffs before returning")
@@ -3003,8 +2977,8 @@ mod driver_tests {
                 panic!("resumed driver unexpectedly remained contended")
             }
             NetDriverOutcome::Progressed => unreachable!("the fixture loop consumes progress"),
-            NetDriverOutcome::SemanticBudgetExhausted => {
-                unreachable!("the test-only driver receives an unbounded semantic budget")
+            NetDriverOutcome::BudgetExhausted => {
+                unreachable!("the test-only driver receives an unbounded budget")
             }
             NetDriverOutcome::Semantic(_) => {
                 unreachable!("the direct driver executes semantic handoffs before returning")
@@ -3136,16 +3110,139 @@ mod driver_tests {
         );
         builder.wire(application, function);
         builder.wire(argument, value);
-        let runtime = instantiate(builder.finish(result));
+        rooted_machine(context, builder.finish(result))
+    }
+
+    fn rooted_machine(
+        context: &EvalContext,
+        template: crate::core_net::CoreInteractionNet,
+    ) -> RootedNetWhnfMachine {
+        let runtime = instantiate(template);
         let interface = runtime.test_with(context.values(), |net| net.exposed());
         let machine = crate::evaluation::EvalContext::evaluate_test_step(context, |evaluator| {
-            NetWhnfMachine::new(evaluator, runtime, interface, "NC1C budget fixture")
+            NetWhnfMachine::new(evaluator, runtime, interface, "budget fixture")
         });
         let root = context.values().root_core_net(machine.retained_runtime());
         RootedNetWhnfMachine {
             machine,
             _root: root,
         }
+    }
+
+    /// `id (id (... (id unit)))` with `length` identities. Every application
+    /// is a ready `Bind >< Bind` pair, so normalizing takes exactly `length`
+    /// pure reductions.
+    fn identity_chain(context: &EvalContext, length: usize) -> RootedNetWhnfMachine {
+        let mut net = NetBuilder::<CoreSpecialization>::new();
+        let mut value = net.data(
+            context
+                .values()
+                .with_runtime_value_access(|access| access.unit()),
+        );
+        for _ in 0..length {
+            let [function, parameter, body] = net.function_bind();
+            net.wire(parameter, body);
+            let [application, argument, result] = net.bind();
+            net.wire(function, application);
+            net.wire(argument, value);
+            value = result;
+        }
+        rooted_machine(context, net.finish(value))
+    }
+
+    #[test]
+    fn every_pure_reduction_spends_one_budget_unit() {
+        let context = test_context();
+
+        let mut bounded = identity_chain(&context, 8);
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
+            let mut zero = crate::evaluation::EvaluationStepBudget::new(0);
+            assert!(matches!(
+                bounded.poll(evaluator, &mut zero).unwrap(),
+                NetWhnfPoll::Yielded
+            ));
+            for reduction in 1..=8 {
+                let mut one = crate::evaluation::EvaluationStepBudget::new(1);
+                let poll = bounded.poll(evaluator, &mut one).unwrap();
+                assert_eq!(one.spent(), 1, "reduction {reduction} spends one unit");
+                assert_eq!(
+                    matches!(poll, NetWhnfPoll::Ready(_)),
+                    reduction == 8,
+                    "only the last reduction exposes the data; observing it is free"
+                );
+            }
+        });
+
+        let mut unbounded = identity_chain(&context, 8);
+        let mut many = crate::evaluation::EvaluationStepBudget::new(100);
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
+            assert!(matches!(
+                unbounded.poll(evaluator, &mut many).unwrap(),
+                NetWhnfPoll::Ready(_)
+            ));
+        });
+        assert_eq!(many.spent(), 8);
+    }
+
+    #[test]
+    fn a_long_pure_reduction_yields_at_each_budget() {
+        // One poll can no longer run an unbounded pure reduction: each poll
+        // stops when its budget is spent, whatever the net does next.
+        let context = test_context();
+        let mut chain = identity_chain(&context, 200);
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
+            for _ in 0..3 {
+                let mut budget = crate::evaluation::EvaluationStepBudget::new(64);
+                assert!(matches!(
+                    chain.poll(evaluator, &mut budget).unwrap(),
+                    NetWhnfPoll::Yielded
+                ));
+                assert_eq!(budget.remaining(), 0);
+            }
+            let mut last = crate::evaluation::EvaluationStepBudget::new(64);
+            assert!(matches!(
+                chain.poll(evaluator, &mut last).unwrap(),
+                NetWhnfPoll::Ready(_)
+            ));
+            assert_eq!(last.spent(), 200 - 3 * 64);
+        });
+    }
+
+    #[test]
+    fn rechecking_a_blocked_callable_checkpoint_spends_no_budget() {
+        let context = test_context();
+        let promise = PromisedValue::new(context.values(), "pending callable");
+        let mut net = NetBuilder::<CoreSpecialization>::new();
+        let [application, argument, result] = net.bind();
+        let function = net.data(Value::Promised(promise));
+        let value = net.data(
+            context
+                .values()
+                .with_runtime_value_access(|access| access.unit()),
+        );
+        net.wire(application, function);
+        net.wire(argument, value);
+        let mut machine = rooted_machine(&context, net.finish(result));
+
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
+            let mut first = crate::evaluation::EvaluationStepBudget::new(16);
+            let Err(halt) = machine.poll(evaluator, &mut first) else {
+                panic!("a call on a pending promise must block");
+            };
+            assert!(halt.blocked_on().is_some());
+            assert!(first.spent() > 0, "claiming the call is a reduction");
+
+            // Rechecking the wait observes; with no budget at all it must
+            // still report the block rather than try to refund a claim.
+            for granted in [0, 1] {
+                let mut budget = crate::evaluation::EvaluationStepBudget::new(granted);
+                let Err(halt) = machine.poll(evaluator, &mut budget) else {
+                    panic!("the checkpoint must stay blocked");
+                };
+                assert!(halt.blocked_on().is_some());
+                assert_eq!(budget.spent(), 0);
+            }
+        });
     }
 
     #[test]

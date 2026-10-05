@@ -607,12 +607,34 @@ impl CoreRuntimeNetAccess<'_, '_> {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn step_cursor(&self, cursor: NodeId) -> CoreCursorStep {
-        self.step_cursor_if_current(cursor, None)
+        self.step_cursor_within(cursor, || true)
     }
 
+    #[cfg(test)]
     pub(crate) fn step_active_pair(&self, pair: ActivePairKey) -> CoreActivePairStep {
-        self.step_active_pair_if_current(pair, None)
+        self.step_active_pair_within(pair, || true)
+    }
+
+    /// Steps `cursor`, calling `admit` only if it would claim (see
+    /// `RuntimeNetCell::step_cursor_with_gateway`).
+    pub(crate) fn step_cursor_within(
+        &self,
+        cursor: NodeId,
+        admit: impl FnOnce() -> bool,
+    ) -> CoreCursorStep {
+        self.step_cursor_if_current(cursor, None, admit)
+    }
+
+    /// Steps `pair`, calling `admit` only if it would claim (see
+    /// `RuntimeNetCell::step_active_pair_with_gateway`).
+    pub(crate) fn step_active_pair_within(
+        &self,
+        pair: ActivePairKey,
+        admit: impl FnOnce() -> bool,
+    ) -> CoreActivePairStep {
+        self.step_active_pair_if_current(pair, None, admit)
     }
 
     pub(crate) fn prepare_copy_source(&self) -> CorePreparedCopySource {
@@ -639,11 +661,13 @@ impl CoreRuntimeNetAccess<'_, '_> {
         &self,
         cursor: NodeId,
         expected_topology_revision: Option<u64>,
+        admit: impl FnOnce() -> bool,
     ) -> CoreCursorStep {
         let step = self.runtime.cell().step_cursor_with_gateway(
             cursor,
             expected_topology_revision,
             &self.runtime,
+            admit,
             |source, anchor| self.inspect_source_frontier(source, anchor),
         );
         #[cfg(feature = "interaction-net-profiling")]
@@ -661,11 +685,13 @@ impl CoreRuntimeNetAccess<'_, '_> {
         &self,
         pair: ActivePairKey,
         expected_topology_revision: Option<u64>,
+        admit: impl FnOnce() -> bool,
     ) -> CoreActivePairStep {
         let step = self.runtime.cell().step_active_pair_with_gateway(
             pair,
             expected_topology_revision,
             &self.runtime,
+            admit,
             |source, anchor| self.inspect_source_frontier(source, anchor),
         );
         #[cfg(feature = "interaction-net-profiling")]
@@ -944,19 +970,6 @@ impl CoreRuntimeNetAccess<'_, '_> {
         result
     }
 
-    pub(crate) fn release_claimed_callable_checkpoint(&self, pair: ActivePairKey) -> bool {
-        self.runtime
-            .cell()
-            .with_cleanup_mut_via(&self.runtime, |runtime| {
-                if runtime.release_claimed_callable_checkpoint(pair) {
-                    RuntimeNetMutation::Changed(true)
-                } else {
-                    RuntimeNetMutation::Unchanged(false)
-                }
-            })
-            .unwrap_or(false)
-    }
-
     pub(crate) fn fail_claimed_callable_checkpoint(
         &self,
         call: crate::interaction_net::CallableCheckpointCall,
@@ -1216,26 +1229,28 @@ impl CoreFrontierObservation {
         &self,
         access: &CoreRuntimeNetAccess<'_, '_>,
         pair: ActivePairKey,
+        admit: impl FnOnce() -> bool,
     ) -> CoreActivePairStep {
         assert!(
             self.source(access.values)
                 .same_net_in(access.owner, access.values),
             "frontier observation requires access to its source net"
         );
-        access.step_active_pair_if_current(pair, Some(self.observed_topology))
+        access.step_active_pair_if_current(pair, Some(self.observed_topology), admit)
     }
 
     pub(crate) fn step_cursor(
         &self,
         access: &CoreRuntimeNetAccess<'_, '_>,
         cursor: NodeId,
+        admit: impl FnOnce() -> bool,
     ) -> CoreCursorStep {
         assert!(
             self.source(access.values)
                 .same_net_in(access.owner, access.values),
             "frontier observation requires access to its source net"
         );
-        access.step_cursor_if_current(cursor, Some(self.observed_topology))
+        access.step_cursor_if_current(cursor, Some(self.observed_topology), admit)
     }
 
     fn to_generic(
@@ -1311,6 +1326,7 @@ pub(crate) enum CoreCursorStep {
     Contended(CoreNetContention),
     Disturbed,
     Gone,
+    NotAdmitted,
 }
 
 impl CoreCursorStep {
@@ -1329,6 +1345,7 @@ impl CoreCursorStep {
             }
             CursorStep::Disturbed => Self::Disturbed,
             CursorStep::Gone => Self::Gone,
+            CursorStep::NotAdmitted => Self::NotAdmitted,
         }
     }
 }
@@ -1341,6 +1358,7 @@ pub(crate) enum CoreActivePairStep {
     Contended(CoreNetContention),
     Disturbed,
     Gone,
+    NotAdmitted,
 }
 
 impl CoreActivePairStep {
@@ -1365,6 +1383,7 @@ impl CoreActivePairStep {
             }
             ActivePairStep::Disturbed => Self::Disturbed,
             ActivePairStep::Gone => Self::Gone,
+            ActivePairStep::NotAdmitted => Self::NotAdmitted,
         }
     }
 }
@@ -2554,10 +2573,10 @@ mod tests {
 
         target.with_test_access(&values, |wrong_access| match observation.endpoint() {
             DemandEndpoint::Cursor(cursor) => {
-                let _ = observation.step_cursor(&wrong_access, cursor);
+                let _ = observation.step_cursor(&wrong_access, cursor, || true);
             }
             DemandEndpoint::ActivePair(pair) => {
-                let _ = observation.step_active_pair(&wrong_access, pair);
+                let _ = observation.step_active_pair(&wrong_access, pair, || true);
             }
         });
     }
