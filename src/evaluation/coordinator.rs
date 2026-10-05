@@ -1238,6 +1238,15 @@ impl EvaluationWorkCoordinator {
         self.admission.poison_marked()
     }
 
+    /// Collects at a quantum boundary when collector pressure asks for it:
+    /// after a claimed task, spark or client demand is polled and before it
+    /// is released. See `RuntimeMutationAdmission::service_collection_pressure`.
+    pub(crate) fn service_collection_pressure(&self) {
+        if let Some(values) = self.values.upgrade() {
+            self.admission.service_collection_pressure(&values);
+        }
+    }
+
     pub(crate) fn mark_runtime_poisoned(&self) {
         self.admission.mark_poisoned();
     }

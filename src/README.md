@@ -57,7 +57,7 @@ not define language semantics or collect subsystem invariants.
 | `core/managed/value_node.rs` | Private production inline-or-root preparation, the managed outer value shell, exhaustive variant dispatch, and root lifecycle fixtures |
 | `core/managed/managed_boundary_audit.rs` | Test-only audit: managed-graph declarations hold no value-domain authority, registered root, or active `Drop`, and opaque payloads enter only through unsafe admission; plus managed-boundary reclamation tests |
 | `core/managed/raw_value_api_inventory.rs` | Test-only audit: a raw core `Value` in a production signature needs an access witness, except four named edge adapters |
-| `crates/glam-gc/` | Glam-owned typed-run tracing collector; each runtime value domain owns one immutable `NoAuto` heap, recursive identities are exact managed edges, and explicit stable-boundary runtime maintenance owns pressure promotion, collection activity, and non-panicking recovery snapshots |
+| `crates/glam-gc/` | Glam-owned typed-run tracing collector; each runtime value domain owns one immutable `NoAuto` heap, recursive identities are exact managed edges, evaluation drivers collect under pressure between a claimed quantum's poll and its release, and explicit runtime maintenance owns stable-pump promotion and non-panicking recovery snapshots |
 | `core_net.rs` | Exact-value-domain facade plus scoped observation and mutation for managed core interaction nets; raw shared-net ownership is absent from the core specialization |
 | `interaction_net/model.rs`, `builder.rs` | Generic topology and checked construction |
 | `interaction_net/runtime/` | Mutable graph, active-pair reduction, logical copies, and a read-only logical payload walk which never reduces or materializes cursors |

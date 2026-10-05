@@ -631,7 +631,12 @@ fn passive_finalization_produces_no_runtime_work() {
         .collect_managed_for_maintenance()
         .expect("passive shell finalization should complete beside host work");
 
+    // Under aggressive verification a worker-boundary collection may finalize
+    // the shell first; only this count depends on that.
+    #[cfg(not(feature = "aggressive-gc-verification"))]
     assert_eq!(report.finalized_slots(), 1);
+    #[cfg(feature = "aggressive-gc-verification")]
+    let _ = report;
     assert_eq!(drops.load(Ordering::Relaxed), 0);
     assert_eq!(bus.counts(), diagnostic_counts);
     assert_eq!(runtime.transaction_snapshot().0, observation_epoch);
@@ -1034,6 +1039,67 @@ fn runtime_no_auto_pressure_requires_explicit_service() {
             .core()
             .managed_statistics()
             .collection_requested()
+    );
+    drop(retained);
+}
+
+#[test]
+fn foreground_evaluation_services_collector_pressure() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .expect("assembler should build");
+    let module = assembler
+        .module(["pressure"])
+        .script("g", "language g0\nanswer = 6 * 7\n")
+        .build()
+        .expect("module should build");
+    let answer = access_path(&assembler, module.value(), "answer")
+        .expect("access should construct a lazy selection");
+    let before = runtime
+        .service_managed_collection()
+        .expect("baseline collection should complete");
+    let retained = runtime
+        .values()
+        .core()
+        .cross_managed_pressure_threshold_for_test();
+    assert!(
+        runtime
+            .values()
+            .core()
+            .managed_statistics()
+            .collection_requested()
+    );
+
+    // No explicit service: the evaluation's own driver collects at a quantum
+    // boundary.
+    let evaluated = assembler
+        .evaluator()
+        .eval(&answer)
+        .expect("the selection should evaluate");
+    assert_eq!(evaluated.as_i64().unwrap(), Some(42));
+    assert!(
+        runtime
+            .values()
+            .core()
+            .completed_collection_epoch_for_test()
+            > before.epoch(),
+        "foreground evaluation must collect under pressure"
+    );
+    assert!(
+        !runtime
+            .values()
+            .core()
+            .managed_statistics()
+            .collection_requested()
+    );
+    // The pressure was serviced, so a stable pump leaves no maintenance work.
+    runtime.pump_until_stable();
+    let readiness = runtime.readiness();
+    assert!(
+        matches!(readiness, RuntimeReadiness::Ready(_)),
+        "{readiness:?}"
     );
     drop(retained);
 }

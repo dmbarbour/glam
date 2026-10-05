@@ -297,9 +297,9 @@ is in [`VERIFY.md`](../../crates/glam-gc/VERIFY.md).
   process-wide metadata lock plus heap lock per allocation; unmeasured
   pressure thresholds.
 - [Concurrent Garbage Collection](../plans/ConcurrentGarbageCollection_2026-08-28.md):
-  concurrent marking; a never-stable runtime never collects; CLI peak memory
-  equals total allocation because there is no foreground GC (open decision);
-  settlement's reliance on non-moving collection.
+  concurrent marking; work that stays inside one access region cannot
+  collect until its driver's next quantum boundary; settlement's reliance on
+  non-moving collection.
 - [Scoped Pointer Safety](../plans/GarbageCollectorScopedPointerSafety_2026-09-09.md):
   branded `ScopedGc`, only after a concrete defect.
 - Moving collection waits for parallel-root retirement: no bare value across a

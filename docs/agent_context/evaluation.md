@@ -39,11 +39,17 @@ control-flow overview.
   holds no runtime gate while it collects. The converse is forbidden. No
   allocation or value-domain entry may take the gate, a non-reentrant
   `RwLock` that settlement holds exclusively while it constructs values.
-- Glam heaps use immutable `CollectionPolicy::NoAuto`. Allocation pressure is
-  promoted only after the runtime pump reaches a revision-checked stable
-  boundary, and explicit maintenance performs collection as runtime activity.
-  If work never becomes stable, collection may be deferred indefinitely; do
-  not “fix” that accepted baseline by collecting on ordinary mutator entry.
+- Glam heaps use immutable `CollectionPolicy::NoAuto`. Pressure is acted on
+  in two places only:
+  - after a claimed task, spark or client demand is polled and before it is
+    released, through `service_collection_pressure`;
+  - a stable runtime pump promotes it to `MaintenanceRequired` for explicit
+    service.
+
+  Never collect on ordinary mutator entry. A new kind of claimed work gets the
+  same call between its poll and its release. Test fixtures that hold raw
+  values across evaluation must root them; the process-wide shared test
+  domains (`shared_test_value_factory`) are never collected.
 - Collection is not a Glam semantic mutation. It never advances observation
   epochs or changes values, transactions, diagnostics, or net topology, and
   pure Glam cannot observe policy, pressure, revisions, collection counts, or

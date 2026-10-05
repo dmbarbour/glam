@@ -5745,6 +5745,9 @@ fn assigned_task_promise_is_removed_before_later_task_terminalization() {
     let promise = promise_receiver
         .recv()
         .expect("task construction should publish its promise");
+    // The task's obligation roots the promise only while the task lives; the
+    // test reads it afterwards.
+    let _promise_root = promise.root(context.values());
     let promise_wait = promise
         .task(context.values())
         .expect("task promise should retain producer provenance")
@@ -6953,6 +6956,9 @@ fn executor_shutdown_preserves_worker_owned_cancellation_and_task_promise() {
     let promise = promise_receiver
         .recv()
         .expect("task construction should publish its promise");
+    // The task's obligation roots the promise only while the task lives; the
+    // test reads it afterwards.
+    let _promise_root = promise.root(context.values());
     let promise_wait = promise
         .task(context.values())
         .expect("task-owned promise should retain producer provenance")

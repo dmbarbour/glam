@@ -76,15 +76,33 @@ background work and obtained exclusive settlement admission, it promotes a
 pending collector pressure latch into that same explicit maintenance protocol.
 The pump does not collect: the next stable readiness observation returns
 `MaintenanceRequired`, whose revision-checked service performs collection.
-Ordinary mutator entry never elects collection, in any build.
+Drivers also service pressure themselves (decision
+`noauto-runtime-collection-policy`, revised 2026-10-05):
+- whoever polls a claimed task, spark or client demand reads the collector's
+  lock-free pressure latch after the poll and before releasing the claim.
+  That covers workers, the client-demand loop and the background pump. The
+  poll's access region has closed and its result is rooted. The work is still
+  claimed, so readiness stays `Busy` through a collection and a settlement
+  snapshot is never invalidated by one;
+- idle drivers never check, so an idle runtime's value domain still drops as
+  soon as its last handle does;
+- under pressure they collect through
+  `RuntimeMutationAdmission::service_collection_pressure`, sharing the public
+  service's lease and outcome handling.
 
-The private `aggressive-gc-verification` mode changes only the pressure input
-of that promotion: any allocation since the previous stable pump counts as
-pressure, and the pump then services its own request, standing in for the
-embedding client, before continuing toward stability. Verification
-collections therefore use the same stable boundary and explicit service path
-as production maintenance, readiness observed after a pump matches ordinary
-mode, and heap policy remains `NoAuto`. Tests that need a collection at a
+So long foreground work, including CLI assembly, collects without reaching a
+stable boundary. Ordinary mutator entry never elects collection, in any
+build.
+
+The private `aggressive-gc-verification` mode changes only the pressure input:
+any allocation since the previous check counts as pressure.
+- At a stable pump, the pump then services its own request, standing in for
+  the embedding client, before continuing toward stability.
+- At driver boundaries, drivers collect as in production.
+
+Verification collections therefore use the same collection points and service
+path as production. Readiness observed after a pump matches ordinary mode,
+and heap policy remains `NoAuto`. Tests that need a collection at a
 particular boundary request it explicitly.
 
 Settlement validation rechecks the probe's work generation and exits, its
@@ -100,20 +118,25 @@ concurrent collection; the concurrent-collector plan's Open Design Gate 9 owns
 it.
 
 The `NoAuto` policy deliberately separates pressure detection from collection.
-Allocation records pressure on the value domain; only a runtime client which
-has pumped to a stable readiness boundary may promote that latch to
-`MaintenanceRequired` and explicitly service it. The service publishes a GC
+Allocation records pressure on the value domain. Two places act on that latch:
+- a driver collects at its quantum boundary;
+- a runtime client which has pumped to a stable readiness boundary promotes
+  the latch to `MaintenanceRequired` and explicitly services it.
+
+Either service publishes a GC
 activity lease while holding *shared* runtime mutation admission only briefly
 (`begin_gc_activity`); it never takes the exclusive settlement gate. It then
 calls `Heap::collect_full`, whose own admission coordinator waits for every
 active outer mutator to exit and holds the heap `Exclusive` for marking and
 sweep, blocking new mutator entry. Finalizers then run in the heap's
 `Finalizing` phase, outside collector locks, with ordinary mutator authority
-reopened. The lease retires after the outcome is recorded. This baseline
-can defer collection indefinitely when useful runtime work never reaches a
-stable boundary. That is an accepted progress limitation, not permission for
-ordinary mutator entry to elect collection; the deferred concurrent-collector
-plan owns the eventual starvation remedy.
+reopened. The lease retires after the outcome is recorded. A driver nested
+inside an access region gets `ActiveMutator` from the collector, which
+records no failure, and skips. Work that runs long inside one access region,
+such as lowering one large declaration, defers collection until the next
+driver boundary. That is still no reason for ordinary mutator entry to elect
+collection; the deferred concurrent-collector plan owns the remaining
+starvation cases.
 
 Every production evaluator entry receives an `EvalContext` derived from an
 external `EvaluationSession` owner lease. An `Assembler` and its clones share

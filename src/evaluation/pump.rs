@@ -213,6 +213,10 @@ impl ClaimedTask {
         Option<ReleasedTaskMachine>,
         Option<ExactRouteRelease>,
     ) {
+        // The quantum boundary: the poll's access region has closed, its
+        // result is rooted, and the work is still claimed, so readiness stays
+        // `Busy` through any collection here.
+        self.coordinator.service_collection_pressure();
         let (poll, spark) = match poll {
             EvaluationMachinePoll::ScheduleSpark(value) => {
                 (EvaluationMachinePoll::Yielded, Some(value))
@@ -1079,6 +1083,8 @@ impl EvaluationWorkCoordinator {
                 EvaluationPanicOrigin::ClientDemand(claimed.id.get()),
             )),
         };
+        // The quantum boundary, while the demand is still claimed.
+        self.service_collection_pressure();
         self.release_client_demand(claimed, poll);
     }
 
@@ -1119,6 +1125,8 @@ impl EvaluationWorkCoordinator {
             }
         };
         drop(context);
+        // The quantum boundary, while the spark is still claimed.
+        self.service_collection_pressure();
         self.release_spark(claimed, poll);
     }
 }

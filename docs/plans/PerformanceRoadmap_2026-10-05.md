@@ -110,17 +110,12 @@ gains this consequence when it lands.
 1. **Profiling harness.** The build mode, counters, report, suite, and a
    recorded baseline for Hello World and the first microbenchmarks.
    Everything after this measures against it.
-2. **Collection during foreground work.** Maintainer decision, 2026-10-05:
-   long evaluation must collect, including CLI assembly. Today
-   `noauto-runtime-collection-policy` acts on pressure only when the pump is
-   stable, so the CLI collects nothing until `asm.result` is written.
-   - **Candidate design:** service maintenance between a foreground demand's
-     poll quanta when pressure exceeds its target. Those gaps are already
-     safepoints: no access region is open and in-flight state is rooted. So
-     ordinary entry still never collects.
-   - **Open:** how the collection waits for other workers to leave the heap.
-   - Until this lands, CLI memory figures measure total allocation, not
-     peak live memory.
+2. **Collection during foreground work.** *Done 2026-10-05, ahead of the
+   harness at the maintainer's request.* Whoever polls claimed work
+   collects between the poll and the release when the collector's pressure
+   latch is set (revised
+   `noauto-runtime-collection-policy`). CLI memory figures now reflect live
+   memory.
 3. **Parser.**
    - Apply the constant-time lookahead fix from
      [Parser Backtracking Performance](ParserBacktrackingPerformance_2026-10-04.md);
@@ -180,4 +175,4 @@ Maintainer answers, 2026-10-05:
 - **Baselines:** in the track's plan or a performance review, not kept long
   term.
 - **Suite location:** wherever is convenient, excluded from normal builds.
-- **Collection during CLI assembly:** required; see track 2.
+- **Collection during CLI assembly:** required, and done; see track 2.

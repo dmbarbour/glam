@@ -179,9 +179,10 @@ so does any maintenance failure in a settled report, even if a later retry
 succeeded, because the report keeps the durable failure history. Readiness
 `MaintenanceFailed` (heap poison) or `Poisoned` (runtime-core poison) ends
 settlement at once: the batch writes plain host text to stderr, without
-entering the value domain, and fails. Because `asm.result` is written before
-the first settlement pump, assembly itself never collects, so peak memory
-equals total allocation (see [`values.md`](values.md)).
+entering the value domain, and fails. Assembly collects at its foreground
+driver's quantum boundaries whenever collector pressure requires it, without
+waiting for settlement (see [`evaluation.md`](evaluation.md)
+"Context and Session").
 
 Standalone `--parse` inspects one built-in `.g` source through the narrow
 library report without constructing an assembler or loading imports. Its

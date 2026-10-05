@@ -1223,6 +1223,11 @@ mod tests {
         let result_demands = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&result_demands);
         let front = PromisedValue::new(context.values(), "conditional deferred front");
+        // The thunk captures `deferred_front` outside the managed graph, so a
+        // driver-boundary collection before the thunk runs would free it.
+        // Root it until the selection checkpoint owns it; the collection
+        // below then checks that ownership without this root.
+        let front_root = front.root(context.values());
         let deferred_front = front.duplicate_for_test(context.values());
         let deferred_values = context.values().clone();
         let results = Value::semantic_thunk(context.values(), "conditional results", move |_| {
@@ -1242,6 +1247,7 @@ mod tests {
                 .expect_err_without_debug("the deferred list front must suspend selection");
         assert!(blocked.unassigned_promise_root().is_some() || blocked.blocked_on().is_some());
         assert_eq!(result_demands.load(Ordering::Relaxed), 1);
+        drop(front_root);
         context
             .values()
             .collect_managed_for_test()

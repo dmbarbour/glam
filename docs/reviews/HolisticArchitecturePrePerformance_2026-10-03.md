@@ -2038,8 +2038,20 @@ findings that raise them are noted, and lower-confidence items are marked.
    point to foreground demand, or keep `NoAuto` non-collecting until
    Concurrent GC? This affects every CLI benchmark. (X3)
    - *Maintainer decision, 2026-10-05:* collect during foreground work,
-     including CLI assembly. The design is track 2 of the
-     [performance roadmap](../plans/PerformanceRoadmap_2026-10-05.md).
+     including CLI assembly.
+   - *Implemented 2026-10-05:* whoever polls a claimed task, spark or client
+     demand collects after the poll and before the release, when the
+     collector's pressure latch is set. Ordinary mutator entry still never
+     collects. The decision is the revised `noauto-runtime-collection-policy`.
+     - **Aggressive verification found no production defect.** It did find
+       test fixtures relying on the old policy:
+       - three process-wide shared test domains, now registered and never
+         collected;
+       - fourteen tests holding raw values across evaluation without roots,
+         now rooted.
+     - **The first placement had a real defect.** Collecting at the top of the
+       worker loop held an idle runtime's domain open and raced its teardown.
+       Collecting before the release also keeps settlement snapshots valid.
 3. **Inline-first lazy forcing.** It would change the "every uncached lazy
    is a coordinator route" invariant and exact-dependency routing.
    (S1, E2; size of the win unknown until measured)

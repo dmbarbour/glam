@@ -735,25 +735,36 @@ maps the short names used here to file names.
 - **Rule lives in:** `architecture/evaluation.md` "WHNF Submachine Flow".
 - **Recorded in:** D2h review D2HR-004; scoped-pointer plan SP0.
 
-### Runtimes never collect automatically (`NoAuto`); pressure is promoted only at a stable pump
-`noauto-runtime-collection-policy` · 2026-10-02 · maintainer · accepted
-- **Context:** automatic collection would put a lease and wake around every
-  outer access, and pause placement would be accidental.
-- **Decision:** every heap is `NoAuto`, fixed at construction.
-  `pump_until_stable` promotes pressure to `MaintenanceRequired`, which
-  clients service explicitly. Rejected: `Automatic` by default, a hybrid,
-  and public configuration.
-- **Consequences:** ordinary entry never collects. A busy runtime or the CLI
-  may never collect, an accepted limit owned by the concurrent-GC plan. Any
-  change must come as a new construction contract.
-  - *Revisited 2026-10-05:* the maintainer requires collection during
-    foreground work, including CLI assembly. The candidate keeps `NoAuto`
-    and ordinary entry non-collecting, and services maintenance between a
-    foreground demand's poll quanta (performance roadmap, track 2). This
-    entry is superseded once that design is accepted.
-- **Rule lives in:** `architecture/evaluation.md` "Context and Session".
+### Runtimes never collect on mutator entry (`NoAuto`); drivers collect at quantum boundaries
+`noauto-runtime-collection-policy` · 2026-10-02, revised 2026-10-05 · maintainer · accepted
+- **Context:**
+  - Automatic collection would put a lease and wake around every outer
+    access, and pause placement would be accidental.
+  - The 2026-10-02 version acted on pressure only at a stable pump, so a
+    busy runtime, and every CLI assembly, never collected until its work was
+    done. The maintainer called that a serious oversight (2026-10-05).
+- **Decision:**
+  - Every heap is `NoAuto`, fixed at construction, and ordinary mutator
+    entry never collects.
+  - Drivers collect at their quantum boundaries when the collector's
+    pressure latch is set: after a claimed task, spark or client demand is
+    polled and before it is released. The poll's access region has closed,
+    and the claim keeps readiness `Busy` through the collection.
+  - `pump_until_stable` still promotes pressure to `MaintenanceRequired`
+    for embedders that service explicitly.
+  - Rejected: `Automatic` by default, a hybrid, and public configuration.
+- **Consequences:**
+  - Long foreground work, CLI assembly included, collects as it goes.
+  - Pauses fall only between quanta.
+  - A driver nested inside an access region skips: the collector reports
+    `ActiveMutator`, which records no failure.
+  - Work that stays inside one access region defers collection until its
+    next boundary.
+- **Rule lives in:** `architecture/evaluation.md` "Context and Session";
+  `agent_context/evaluation.md`.
 - **Recorded in:** RuntimePolicy review; GC integration plan I1A; 2026-08-25
-  integration review GCI-001 and GCI-015.
+  integration review GCI-001 and GCI-015; holistic review decision 2 and
+  the performance roadmap (2026-10-05 revision).
 
 ### Runtime-owned GC maintenance state with actionable readiness
 `runtime-owned-gc-maintenance-state` · 2026-10-02 · agent · accepted

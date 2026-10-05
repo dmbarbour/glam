@@ -169,7 +169,11 @@ fn net_computation_runtime(lazy: &LazyValue, context: &EvalContext) -> CoreRunti
 fn wrapper_returning_function_then_accepts_remaining_application() {
     let context = isolated_test_context();
     let computation_lazy = wrapper_returning_function_computation(&context);
+    let _computation_root = computation_lazy.root(context.values());
+    // The lazy drops its net source when it completes, but the test still
+    // inspects the net afterwards.
     let computation_runtime = net_computation_runtime(&computation_lazy, &context);
+    let _computation_runtime_root = context.values().root_core_net(&computation_runtime);
     let computation = Value::Lazy(computation_lazy.duplicate_for_test(context.values()));
 
     #[cfg(feature = "interaction-net-profiling")]
@@ -2081,18 +2085,22 @@ fn resolver_failure_exactly_wakes_its_deferred_follower() {
 fn resolver_completion_wakes_only_its_cross_session_deferred_follower() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let promise_a = PromisedValue::new(owner.values(), "cross-session promise A");
+    let _promise_a_root = promise_a.root(owner.values());
     let promise_b = PromisedValue::new(owner.values(), "cross-session promise B");
+    let _promise_b_root = promise_b.root(owner.values());
     let lazy_for = |promise: &PromisedValue| {
-        Value::Lazy(LazyValue::from_access(
+        let lazy = LazyValue::from_access(
             observer.values(),
             Arc::from([]),
             Arc::from([Value::Promised(
                 promise.duplicate_for_test(observer.values()),
             )]),
-        ))
+        );
+        let root = lazy.root(observer.values());
+        (Value::Lazy(lazy), root)
     };
-    let lazy_a = lazy_for(&promise_a);
-    let lazy_b = lazy_for(&promise_b);
+    let (lazy_a, _lazy_a_root) = lazy_for(&promise_a);
+    let (lazy_b, _lazy_b_root) = lazy_for(&promise_b);
 
     assert!(
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &lazy_a).is_err()
@@ -5145,6 +5153,12 @@ fn partial_builtins_share_lazy_arguments() {
         &TestExpr::Apply(Arc::new(make_partial), Arc::new(argument)),
     )
     .expect("a partial builtin should retain its argument lazily");
+    // The first application's demand does not retain the partial, which
+    // the second application reuses.
+    let _partial_root = RuntimeValueRoot::new(
+        context.values(),
+        partial.duplicate_for_test(context.values()),
+    );
 
     assert!(matches!(partial, Value::PartialBuiltin(_)));
     assert_eq!(force_count.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -6842,8 +6856,19 @@ fn metadata_update_reorders_copies_and_clears_hidden_values() {
     // The fixture carries raw managed function values between calls, so it
     // must not share a heap with parallel tests which explicitly collect.
     let context = isolated_test_context();
+    // Carriers hold managed metadata, and each demand below may collect at
+    // its driver boundaries. Root inputs and outputs for as long as they
+    // are reused or inspected.
+    let root = |carrier: &Value| {
+        RuntimeValueRoot::new(
+            context.values(),
+            carrier.duplicate_for_test(context.values()),
+        )
+    };
     let left = metadata_carrier(&context, n(1));
+    let _left_root = root(&left);
     let right = metadata_carrier(&context, n(2));
+    let _right_root = root(&right);
 
     let swapped = run_metadata_update(
         &context,
@@ -6854,6 +6879,7 @@ fn metadata_update_reorders_copies_and_clears_hidden_values() {
         ],
     )
     .expect("metadata update should support permutation");
+    let _swapped_roots = swapped.iter().map(root).collect::<Vec<_>>();
     context.values().assert_same_representation_for_test(
         &swapped
             .iter()
@@ -6869,6 +6895,7 @@ fn metadata_update_reorders_copies_and_clears_hidden_values() {
         vec![left, right],
     )
     .expect("metadata update should support copying");
+    let _copied_roots = copied.iter().map(root).collect::<Vec<_>>();
     context.values().assert_same_representation_for_test(
         &copied
             .iter()
@@ -6898,6 +6925,7 @@ fn metadata_update_reorders_copies_and_clears_hidden_values() {
         ],
     )
     .expect("metadata update should permit merging and clearing");
+    let _cleared_roots = cleared.iter().map(root).collect::<Vec<_>>();
     context.values().assert_same_representation_for_test(
         &cleared
             .iter()
@@ -7803,6 +7831,12 @@ fn reflection_task_result_returns_arbitrary_lazy_value_once() {
         counted_result_forces.fetch_add(1, Ordering::SeqCst);
         Ok(n(42))
     });
+    // The launcher and its task machine hold the result outside the
+    // managed graph until the task completes.
+    let _result_root = RuntimeValueRoot::new(
+        context.values(),
+        result.duplicate_for_test(context.values()),
+    );
     let builds = Arc::new(AtomicUsize::new(0));
     let result_policies = Arc::new(Mutex::new(Vec::new()));
     context
@@ -8634,6 +8668,12 @@ fn worker_spark_demands_metadata_behind_a_lazy_carrier_shell() {
         Ok(n(7))
     });
     let carrier = metadata_carrier(&context, metadata);
+    // The thunk captures the carrier outside the managed graph, and the
+    // worker may collect before it runs.
+    let _carrier_root = RuntimeValueRoot::new(
+        context.values(),
+        carrier.duplicate_for_test(context.values()),
+    );
     let values = context.values().clone();
     let lazy_carrier = Value::semantic_thunk(
         context.values(),
@@ -8676,9 +8716,15 @@ fn metadata_strategy_failures_are_cached_and_seq_propagates_them() {
                 .expect("attempt receiver should remain open");
             Err(EvaluationHalt::new("metadata strategy failed"))
         });
+    // The test holds `metadata` and `carrier` across worker quanta.
+    let _metadata_root = metadata.root(context.values());
     let carrier = metadata_carrier(
         &context,
         Value::Lazy(metadata.duplicate_for_test(context.values())),
+    );
+    let _carrier_root = RuntimeValueRoot::new(
+        context.values(),
+        carrier.duplicate_for_test(context.values()),
     );
 
     let result = evaluate_strategy(
@@ -8763,12 +8809,12 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
         crate::evaluation::test_execution_resources(1).expect("test worker should start");
     let session = crate::evaluation::EvaluationSession::shared(&coordinator);
     let context = EvalContext::new(&session);
+    // Build and root every value before the first spark: once the worker
+    // runs, it may collect anything the test holds unrooted.
+    // The net lives in the shared test domain, which is never collected.
     let net = closed_net(|builder| builder.data(n(1)));
-    context.spark(Value::Net(net));
-    context.spark(Value::Promised(PromisedValue::new(
-        context.values(),
-        "unassigned spark input",
-    )));
+    let unassigned = PromisedValue::new(context.values(), "unassigned spark input");
+    let _unassigned_root = unassigned.root(context.values());
     let promised_forces = Arc::new(AtomicUsize::new(0));
     let counted_promised_forces = promised_forces.clone();
     let promised_work =
@@ -8776,15 +8822,15 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
             counted_promised_forces.fetch_add(1, Ordering::SeqCst);
             Ok(n(7))
         });
+    let _promised_work_root = promised_work.root(context.values());
     let promise = PromisedValue::new(context.values(), "resolved spark input");
+    let _promise_root = promise.root(context.values());
     set_promise(
         &context,
         &promise,
         Value::Lazy(promised_work.duplicate_for_test(context.values())),
     )
     .expect_without_debug("test promise should accept its one assignment");
-    context.spark(Value::Promised(promise));
-
     let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
     let sentinel =
         LazyValue::semantic_thunk(context.values(), "spark admission sentinel", move |_| {
@@ -8793,6 +8839,11 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
                 .expect("sentinel receiver should remain open");
             Ok(unit_value())
         });
+    let _sentinel_root = sentinel.root(context.values());
+
+    context.spark(Value::Net(net));
+    context.spark(Value::Promised(unassigned));
+    context.spark(Value::Promised(promise));
     context.spark(Value::Lazy(sentinel.duplicate_for_test(context.values())));
     finished_receiver
         .recv_timeout(std::time::Duration::from_secs(2))

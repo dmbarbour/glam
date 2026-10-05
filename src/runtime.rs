@@ -207,39 +207,51 @@ impl RuntimeMutationAdmission {
         _settlement: &RuntimeSettlementGuard<'_>,
         values: &CoreValueFactory,
     ) -> bool {
-        values
-            .managed_maintenance_snapshot()
-            .statistics()
-            .is_some_and(|statistics| self.gc_pressure_requested(statistics, values))
-            && self.activity.promote_gc_pressure_request()
+        self.gc_pressure_requested(values) && self.activity.promote_gc_pressure_request()
+    }
+
+    /// Collects at a driver's quantum boundary when collector pressure asks
+    /// for it.
+    ///
+    /// Callers are drivers between poll quanta, such as an evaluation worker
+    /// or a client-demand loop. No access region is open on the calling
+    /// thread there, and every in-flight value is rooted or traced. Ordinary
+    /// mutator entry never collects. The collector waits for other threads to
+    /// leave their access regions. A nested driver whose thread still holds a
+    /// mutator gets `ActiveMutator`, which records no failure, and simply
+    /// skips.
+    pub(crate) fn service_collection_pressure(self: &Arc<Self>, values: &CoreValueFactory) {
+        #[cfg(test)]
+        if values.is_shared_test_domain() {
+            return;
+        }
+        if self.is_poisoned() || !self.gc_pressure_requested(values) {
+            return;
+        }
+        let lease = self.begin_gc_activity();
+        let _ = collect_under_lease(lease, values, || {});
     }
 
     #[cfg(not(feature = "aggressive-gc-verification"))]
-    fn gc_pressure_requested(
-        &self,
-        statistics: glam_gc::HeapStatistics,
-        _values: &CoreValueFactory,
-    ) -> bool {
-        statistics.collection_requested()
+    fn gc_pressure_requested(&self, values: &CoreValueFactory) -> bool {
+        values.managed_collection_requested()
     }
 
     /// The private `aggressive-gc-verification` mode replaces only the
     /// pressure input: any allocation since the previous evaluation counts.
-    /// Every other promotion condition is unchanged, so verification
-    /// collections use the same stable boundary and explicit service path as
-    /// production maintenance. Keying on new allocations, rather than
-    /// unconditional `true`, lets a pump/service loop converge.
+    /// Every collection point is unchanged, so verification collections use
+    /// the same stable-pump promotion and driver-boundary service as
+    /// production. Keying on new allocations, rather than unconditional
+    /// `true`, lets a pump/service loop converge.
     ///
-    /// Exclusive settlement admission serializes evaluation. Recording the
-    /// count even when promotion is then refused is safe: at a stable boundary,
+    /// Recording the count even when promotion is then refused is safe:
     /// refusal means a pending or retry-required collection already covers
     /// these allocations.
     #[cfg(feature = "aggressive-gc-verification")]
-    fn gc_pressure_requested(
-        &self,
-        _statistics: glam_gc::HeapStatistics,
-        values: &CoreValueFactory,
-    ) -> bool {
+    fn gc_pressure_requested(&self, values: &CoreValueFactory) -> bool {
+        if values.managed_maintenance_snapshot().is_poisoned() {
+            return false;
+        }
         let allocations = values.managed_allocation_count();
         allocations
             > self
@@ -368,6 +380,72 @@ impl RuntimeGcLeaseOutcome {
         Self {
             heap,
             failure: Some((kind, message.into())),
+        }
+    }
+}
+
+/// What one leased collection attempt did. The lease has already published
+/// it to runtime maintenance state.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a short-lived return value, made once per collection; boxing the report would only add an allocation"
+)]
+pub(crate) enum RuntimeCollectionAttempt {
+    Collected(glam_gc::CollectionReport, glam_gc::HeapStatistics),
+    /// The calling thread still holds a mutator; nothing was collected.
+    ActiveMutator,
+    Failed(RuntimeGcMaintenanceFailureKind, Arc<str>),
+}
+
+/// Runs one full collection under `lease` and publishes its outcome.
+///
+/// `before_publication` runs after the collection and before the outcome is
+/// published.
+pub(crate) fn collect_under_lease(
+    lease: RuntimeGcActivityLease,
+    values: &CoreValueFactory,
+    before_publication: impl FnOnce(),
+) -> RuntimeCollectionAttempt {
+    let attempted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        values.collect_managed_for_maintenance()
+    }));
+    let heap = values.managed_maintenance_snapshot();
+    before_publication();
+    match attempted {
+        Ok(Ok(report)) => {
+            let statistics = heap
+                .statistics()
+                .expect("successful collection must leave a usable managed heap");
+            lease.finish(RuntimeGcLeaseOutcome::success(heap));
+            RuntimeCollectionAttempt::Collected(report, statistics)
+        }
+        Ok(Err(glam_gc::CollectionError::ActiveMutator)) => {
+            lease.finish(RuntimeGcLeaseOutcome::no_collection(heap));
+            RuntimeCollectionAttempt::ActiveMutator
+        }
+        Ok(Err(glam_gc::CollectionError::Poisoned)) => {
+            let message: Arc<str> = Arc::from(glam_gc::CollectionError::Poisoned.to_string());
+            lease.finish(RuntimeGcLeaseOutcome::failure(
+                heap,
+                RuntimeGcMaintenanceFailureKind::Poisoned,
+                message.clone(),
+            ));
+            RuntimeCollectionAttempt::Failed(RuntimeGcMaintenanceFailureKind::Poisoned, message)
+        }
+        Err(payload) => {
+            let message: Arc<str> = Arc::from(crate::core::panic_payload_message(payload.as_ref()));
+            let kind = if heap.is_poisoned() {
+                RuntimeGcMaintenanceFailureKind::Poisoned
+            } else if heap
+                .statistics()
+                .is_some_and(|statistics| statistics.pending_finalizers() != 0)
+            {
+                RuntimeGcMaintenanceFailureKind::FinalizerPanic
+            } else {
+                RuntimeGcMaintenanceFailureKind::CollectorPanic
+            };
+            lease.finish(RuntimeGcLeaseOutcome::failure(heap, kind, message.clone()));
+            RuntimeCollectionAttempt::Failed(kind, message)
         }
     }
 }

@@ -613,6 +613,17 @@ impl Heap {
         self.inner.maintenance_snapshot()
     }
 
+    /// Whether allocation pressure has latched a collection request, read
+    /// without taking any heap lock.
+    ///
+    /// This is the same latch [`HeapStatistics::collection_requested`]
+    /// reports. It is advisory: a host polls it at its own safe boundaries
+    /// and decides whether to collect. A poisoned heap reports `false`.
+    #[must_use]
+    pub fn collection_requested(&self) -> bool {
+        !self.inner.is_poisoned() && self.inner.collection_requested.load(Ordering::Acquire)
+    }
+
     /// Arms one deterministic panic immediately after the collector's first
     /// irreversible topology mutation.
     ///

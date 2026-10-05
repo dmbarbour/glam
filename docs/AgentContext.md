@@ -42,8 +42,8 @@ verify current bootstrap acceptance against tests and samples.
 - A managed `Gc<T>` is an interior edge, never durable ownership. Observe it
   only under matching bounded value access; publish state crossing that region
   as a registered root. Managed access is callback-free, managed destruction
-  is passive, and `NoAuto` collection runs only through explicit stable runtime
-  maintenance.
+  is passive, and `NoAuto` collection runs only at driver quantum boundaries
+  or through explicit runtime maintenance, never on mutator entry.
 - Evaluation is pure value demand. Reflection effects, shared heap edits,
   diagnostics, and external I/O remain outside value and interaction-net
   semantics. Reflection may inspect evaluation; evaluation cannot observably

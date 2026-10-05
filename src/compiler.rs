@@ -69,10 +69,7 @@ impl Default for CompileContext {
 #[cfg(test)]
 pub(crate) fn test_value_factory() -> CoreValueFactory {
     static FACTORY: std::sync::LazyLock<CoreValueFactory> = std::sync::LazyLock::new(|| {
-        CoreValueFactory::new(
-            crate::runtime::allocate_evaluation_runtime_id(),
-            crate::runtime::RuntimeIds::compiler_test_values(),
-        )
+        crate::core::shared_test_value_factory(crate::runtime::RuntimeIds::compiler_test_values())
     });
     FACTORY.clone()
 }

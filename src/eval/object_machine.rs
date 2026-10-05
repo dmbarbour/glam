@@ -865,8 +865,12 @@ mod tests {
     fn object_fixpoint_resumes_through_spec_name_and_dependency_chunk() {
         let context = context();
         let spec = PromisedValue::new(context.values(), "object spec");
+        // Nothing managed references these until the spec is assigned after
+        // the first demand, whose driver boundaries may collect.
         let name = PromisedValue::new(context.values(), "object name");
+        let _name_root = name.root(context.values());
         let deps = PromisedValue::new(context.values(), "object dependency chunk");
+        let _deps_root = deps.root(context.values());
         let object = Value::Lazy(LazyValue::computed_fixpoint(
             context.values(),
             "object self",
@@ -958,7 +962,10 @@ mod tests {
     fn object_fixpoint_resumes_each_mixin_application_once() {
         let context = context();
         let first_result = PromisedValue::new(context.values(), "first mixin application");
+        // Nothing managed references this until the second stage is built
+        // after the first demand, whose driver boundaries may collect.
         let second_result = PromisedValue::new(context.values(), "second mixin application");
+        let _second_result_root = second_result.root(context.values());
         let defs = closed_function_value_in(
             context.values(),
             1,

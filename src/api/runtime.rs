@@ -891,66 +891,36 @@ impl EvaluationRuntime {
         &self,
         lease: crate::runtime::RuntimeGcActivityLease,
     ) -> Result<RuntimeMaintenanceReport, RuntimeMaintenanceError> {
-        let resources = &self.state.shared_resources;
-        let attempted = catch_unwind(AssertUnwindSafe(|| {
-            resources.values.core().collect_managed_for_maintenance()
-        }));
-        let heap = resources.values.core().managed_maintenance_snapshot();
-        #[cfg(test)]
-        self.pause_gc_outcome_publication_for_test();
-        match attempted {
-            Ok(Ok(report)) => {
-                let statistics = heap
-                    .statistics()
-                    .expect("successful collection must leave a usable managed heap");
-                lease.finish(RuntimeGcLeaseOutcome::success(heap));
+        let attempt = crate::runtime::collect_under_lease(
+            lease,
+            self.state.shared_resources.values.core(),
+            || {
+                #[cfg(test)]
+                self.pause_gc_outcome_publication_for_test();
+            },
+        );
+        match attempt {
+            crate::runtime::RuntimeCollectionAttempt::Collected(report, statistics) => {
                 Ok(RuntimeMaintenanceReport::new(report, statistics))
             }
-            Ok(Err(glam_gc::CollectionError::ActiveMutator)) => {
-                lease.finish(RuntimeGcLeaseOutcome::no_collection(heap));
+            crate::runtime::RuntimeCollectionAttempt::ActiveMutator => {
                 Err(RuntimeMaintenanceError::new(
                     RuntimeMaintenanceErrorKind::ActiveMutator,
                     glam_gc::CollectionError::ActiveMutator.to_string(),
                 ))
             }
-            Ok(Err(glam_gc::CollectionError::Poisoned)) => {
-                let message: Arc<str> = Arc::from(glam_gc::CollectionError::Poisoned.to_string());
-                lease.finish(RuntimeGcLeaseOutcome::failure(
-                    heap,
-                    RuntimeGcMaintenanceFailureKind::Poisoned,
-                    message.clone(),
-                ));
-                Err(RuntimeMaintenanceError::new(
-                    RuntimeMaintenanceErrorKind::Poisoned,
-                    message,
-                ))
-            }
-            Err(payload) => {
-                let message = panic_payload_message(payload.as_ref());
-                let (failure_kind, error_kind) = if heap.is_poisoned() {
-                    (
-                        RuntimeGcMaintenanceFailureKind::Poisoned,
-                        RuntimeMaintenanceErrorKind::Poisoned,
-                    )
-                } else if heap
-                    .statistics()
-                    .is_some_and(|statistics| statistics.pending_finalizers() != 0)
-                {
-                    (
-                        RuntimeGcMaintenanceFailureKind::FinalizerPanic,
-                        RuntimeMaintenanceErrorKind::FinalizerPanic,
-                    )
-                } else {
-                    (
-                        RuntimeGcMaintenanceFailureKind::CollectorPanic,
-                        RuntimeMaintenanceErrorKind::CollectorPanic,
-                    )
+            crate::runtime::RuntimeCollectionAttempt::Failed(kind, message) => {
+                let error_kind = match kind {
+                    RuntimeGcMaintenanceFailureKind::Poisoned => {
+                        RuntimeMaintenanceErrorKind::Poisoned
+                    }
+                    RuntimeGcMaintenanceFailureKind::FinalizerPanic => {
+                        RuntimeMaintenanceErrorKind::FinalizerPanic
+                    }
+                    RuntimeGcMaintenanceFailureKind::CollectorPanic => {
+                        RuntimeMaintenanceErrorKind::CollectorPanic
+                    }
                 };
-                lease.finish(RuntimeGcLeaseOutcome::failure(
-                    heap,
-                    failure_kind,
-                    message.clone(),
-                ));
                 Err(RuntimeMaintenanceError::new(error_kind, message))
             }
         }

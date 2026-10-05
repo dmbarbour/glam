@@ -1784,9 +1784,8 @@ mod driver_tests {
     use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
     fn test_value_factory() -> CoreValueFactory {
-        static FACTORY: std::sync::LazyLock<CoreValueFactory> = std::sync::LazyLock::new(|| {
-            CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new())
-        });
+        static FACTORY: std::sync::LazyLock<CoreValueFactory> =
+            std::sync::LazyLock::new(|| crate::core::shared_test_value_factory(RuntimeIds::new()));
         FACTORY.clone()
     }
 
@@ -1930,8 +1929,15 @@ mod driver_tests {
         runtime: &CoreRuntimeNet,
         interface: Port,
     ) -> RootedNormalizationRequest {
-        let context = test_context();
-        let request = crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
+        normalization_request_in(&test_context(), runtime, interface)
+    }
+
+    fn normalization_request_in(
+        context: &EvalContext,
+        runtime: &CoreRuntimeNet,
+        interface: Port,
+    ) -> RootedNormalizationRequest {
+        let request = crate::evaluation::EvalContext::evaluate_test_step(context, |evaluator| {
             NormalizationRequest::cursor_whnf(runtime, interface, evaluator)
         });
         RootedNormalizationRequest {
@@ -2446,43 +2452,47 @@ mod driver_tests {
     }
 
     fn assert_productive_cursor_chain_alternates_pairless_and_pair_owned_layers(layers: usize) {
-        let values = test_value_factory();
+        // Each layer returns a raw net before the next one takes it over, so
+        // this chain cannot stay rooted between constructions. Sibling
+        // fixtures collect the module's shared domain at their driver
+        // boundaries, so the chain is built in a private domain instead.
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let context = EvalContext::isolated(values.clone());
         let expected = values.with_runtime_value_access(|access| access.unit());
         let mut leaf = NetBuilder::<CoreSpecialization>::new();
         let data = leaf.data(expected.duplicate_for_test(&values));
-        let mut source = instantiate(leaf.finish(data));
-        let mut root_interface = source.test_with(&test_value_factory(), |net| net.exposed());
+        let mut source = values.instantiate_core_net(&leaf.finish(data));
+        let mut root_interface = source.test_with(&values, |net| net.exposed());
 
         for layer in 0..layers {
             if layer % 2 == 0 {
                 (source, root_interface) =
                     crate::core_net::CoreRuntimeNet::test_productive_pair_owned_copy_layer(
-                        &test_value_factory(),
-                        source,
+                        &values, source,
                     );
             } else {
                 (source, root_interface) =
-                    crate::core_net::CoreRuntimeNet::test_copy_layer(&test_value_factory(), source);
+                    crate::core_net::CoreRuntimeNet::test_copy_layer(&values, source);
             }
         }
+        // The request's root ends with its statement; the reads below
+        // still observe the net.
+        let _source_root = values.root_core_net(&source);
 
         assert_eq!(
-            normalization_request(&source, root_interface)
-                .drive(&test_context())
+            normalization_request_in(&context, &source, root_interface)
+                .drive(&context)
                 .unwrap(),
             NetInterfaceOutcome::Data
         );
-        let actual = source.with_test_access(&test_value_factory(), |access| {
+        let actual = source.with_test_access(&values, |access| {
             access.with(|net| {
                 net.interface_data(root_interface)
                     .map(|value| access.values().duplicate_value(value))
             })
         });
-        test_value_factory().assert_same_representation_for_test(&actual, &Some(expected));
-        assert_eq!(
-            source.active_normalization_batch(&test_value_factory()),
-            None
-        );
+        values.assert_same_representation_for_test(&actual, &Some(expected));
+        assert_eq!(source.active_normalization_batch(&values), None);
     }
 
     #[test]

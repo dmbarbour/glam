@@ -1855,15 +1855,27 @@ fn list_effect_fix_allocates_one_future_for_each_observed_alternative() {
     .expect("list-effect fix construction should evaluate");
     let lifecycle_before = context.values().managed_promise_lifecycle_counts_for_test();
 
+    // The test holds each alternative and tail across evaluation, which may
+    // collect, so it roots them.
     let (first, tail) = list_front(&context, fixed).expect("the first alternative must exist");
     let Value::Promised(first) = first else {
         panic!("the first alternative must expose its own future")
     };
+    let _first_root = first.root(context.values());
+    let _tail_root = crate::runtime::RuntimeValueRoot::new(
+        context.values(),
+        tail.duplicate_for_test(context.values()),
+    );
     let (second, exhausted) =
         list_front(&context, tail).expect("the second alternative must exist");
     let Value::Promised(second) = second else {
         panic!("the second alternative must expose its own future")
     };
+    let _second_root = second.root(context.values());
+    let _exhausted_root = crate::runtime::RuntimeValueRoot::new(
+        context.values(),
+        exhausted.duplicate_for_test(context.values()),
+    );
     assert_ne!(
         first.id(context.values()),
         second.id(context.values()),

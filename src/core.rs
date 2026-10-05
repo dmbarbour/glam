@@ -651,19 +651,37 @@ impl CoreValueFactory {
     }
 }
 
+/// Runtimes of the process-wide test value domains that many tests share.
 #[cfg(test)]
-static SHARED_TEST_VALUE_RUNTIME: OnceLock<EvaluationRuntimeId> = OnceLock::new();
+static SHARED_TEST_VALUE_RUNTIMES: std::sync::Mutex<Vec<EvaluationRuntimeId>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Creates a process-wide value domain for a module's tests to share.
+///
+/// Parallel tests may hold raw values in it without roots, so nothing may
+/// collect it: explicit test collection refuses it, and drivers skip it.
+#[cfg(test)]
+pub(crate) fn shared_test_value_factory(ids: Arc<RuntimeIds>) -> CoreValueFactory {
+    let runtime = crate::runtime::allocate_evaluation_runtime_id();
+    SHARED_TEST_VALUE_RUNTIMES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(runtime);
+    CoreValueFactory::new(runtime, ids)
+}
+
+#[cfg(test)]
+fn is_shared_test_value_runtime(runtime: EvaluationRuntimeId) -> bool {
+    SHARED_TEST_VALUE_RUNTIMES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&runtime)
+}
 
 #[cfg(test)]
 pub(crate) fn test_value_factory() -> CoreValueFactory {
-    static FACTORY: LazyLock<CoreValueFactory> = LazyLock::new(|| {
-        let runtime = crate::runtime::allocate_evaluation_runtime_id();
-        assert!(
-            SHARED_TEST_VALUE_RUNTIME.set(runtime).is_ok(),
-            "the shared test value runtime must initialize exactly once"
-        );
-        CoreValueFactory::new(runtime, RuntimeIds::compiler_test_values())
-    });
+    static FACTORY: LazyLock<CoreValueFactory> =
+        LazyLock::new(|| shared_test_value_factory(RuntimeIds::compiler_test_values()));
     FACTORY.clone()
 }
 

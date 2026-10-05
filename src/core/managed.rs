@@ -676,6 +676,21 @@ impl CoreValueFactory {
         self.domain.heap.collect_full()
     }
 
+    /// Whether this is the process-wide shared test value domain. Its fixtures
+    /// hold raw values outside any root by design, so nothing may collect it.
+    #[cfg(test)]
+    pub(crate) fn is_shared_test_domain(&self) -> bool {
+        super::is_shared_test_value_runtime(self.runtime_id())
+    }
+
+    /// Whether collector pressure has latched a collection request. Lock-free
+    /// and advisory; see `glam_gc::Heap::collection_requested`. Aggressive
+    /// verification substitutes its own pressure input.
+    #[cfg(not(feature = "aggressive-gc-verification"))]
+    pub(crate) fn managed_collection_requested(&self) -> bool {
+        self.domain.heap.collection_requested()
+    }
+
     /// Returns a non-panicking collector disposition for runtime maintenance
     /// recovery. This never grants managed-value access.
     pub(crate) fn managed_maintenance_snapshot(&self) -> glam_gc::HeapMaintenanceSnapshot {
@@ -695,9 +710,8 @@ impl CoreValueFactory {
     pub(crate) fn collect_managed_for_test(
         &self,
     ) -> Result<glam_gc::CollectionReport, glam_gc::CollectionError> {
-        assert_ne!(
-            super::SHARED_TEST_VALUE_RUNTIME.get().copied(),
-            Some(self.runtime_id()),
+        assert!(
+            !self.is_shared_test_domain(),
             "tests must not collect the process-wide shared value domain; use a private CoreValueFactory"
         );
         self.collect_managed_for_maintenance()
