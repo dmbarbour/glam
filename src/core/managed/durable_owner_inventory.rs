@@ -1004,9 +1004,11 @@ const DECLARATION_BASELINE_COUNT: usize = 253;
 // projects its sole definitions root only under caller-held test access. The
 // failure/diagnostic and canonical-root migrations also retire six redundant
 // RuntimeValueRoot fields without changing the reviewed declaration set.
+// A3 gives a decoded killed task state its kill diagnostic as a public Value,
+// like a failed one, within the existing decoded-request owner.
 const DECLARATION_BASELINE_SIGNALS: DeclarationSignals =
-    DeclarationSignals::new([319, 112, 5, 35, 13, 11, 2, 9]);
-const DECLARATION_BASELINE_FINGERPRINT: u64 = 13_224_810_679_222_499_778;
+    DeclarationSignals::new([320, 112, 5, 35, 13, 11, 2, 9]);
+const DECLARATION_BASELINE_FINGERPRINT: u64 = 12_979_863_737_282_875_697;
 
 fn declaration_signal_totals(
     declarations: &BTreeMap<String, DeclarationSignals>,

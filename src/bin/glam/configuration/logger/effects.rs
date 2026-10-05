@@ -428,19 +428,11 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
             .events
             .unwrap_or_else(|| RuntimeEventJournal::new(snapshot.clone()));
         for diagnostic in journal.reflection.diagnostics() {
-            let transport = match diagnostic.transport_value(&self.resources.values()) {
-                Ok(transport) => transport,
-                Err(error) => {
-                    // Report why the diagnostic cannot cross into the logger
-                    // rather than writing a placeholder it would fail to decode.
-                    self.diagnostics.publish_local(
-                        error
-                            .diagnostic(&self.resources.values())
-                            .expect("logger failures belong to the logger runtime"),
-                    );
-                    continue;
-                }
-            };
+            // Encoding fails only on a runtime mismatch, and a logger task's
+            // diagnostics never come from another runtime.
+            let transport = diagnostic
+                .transport_value(&self.resources.values())
+                .expect("logger task diagnostics belong to the logger runtime");
             if let Err(error) = events.write(&self.diagnostic_writer, transport) {
                 self.diagnostics.publish_local(
                     error

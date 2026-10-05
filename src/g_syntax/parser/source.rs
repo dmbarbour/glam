@@ -206,7 +206,7 @@ impl<'source> StagedSourceParser<'source> {
         ) {
             Ok(environment) => environment,
             Err(error) => {
-                let message = format!("macro environment could not be selected: {error}");
+                let message = error.headline("macro environment could not be selected");
                 let emission = caused_error_emission(
                     context.values(),
                     declaration.line(),
@@ -266,10 +266,10 @@ impl<'source> StagedSourceParser<'source> {
                     self.diagnostics.push(caused_macro_compiler_diagnostic(
                         context.values(),
                         &original,
-                        format!(
-                            "macro `{}` could not be selected: {error}",
+                        error.headline(&format!(
+                            "macro `{}` could not be selected",
                             original.path.join(".")
-                        ),
+                        )),
                         None,
                         &[],
                         std::slice::from_ref(&original),
@@ -630,9 +630,14 @@ impl From<String> for MacroLookupFailure {
     }
 }
 
-impl std::fmt::Display for MacroLookupFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.message)
+impl MacroLookupFailure {
+    /// Completes a diagnostic headline. A structured cause carries the reason
+    /// itself, so the headline repeats it only when there is no cause.
+    fn headline(&self, headline: &str) -> String {
+        match &self.cause {
+            Some(_) => headline.to_owned(),
+            None => format!("{headline}: {}", self.message),
+        }
     }
 }
 

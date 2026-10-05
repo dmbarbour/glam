@@ -137,8 +137,10 @@ and control flow.
 - `.task.new` reserves an opaque handle and a private transactional status
   query, but journals launch inside a transaction. Losing branches discard
   both. The query stores atoms `'launched` or `'blocked`, terminal tagged values
-  `ok:Value` or `err:Error`, or the atom `'canceled` or `'abandoned`; the handle
-  keeps the terminal observation alive. Abandonment is owner-session loss, not
+  `ok:Value`, `err:Diagnostic`, or `killed:Diagnostic`, or the atom
+  `'canceled`, `'abandoned`, `'exited`, or `'panicked`; the handle keeps the
+  terminal observation alive. A kill carries the client's kill reason, which
+  is also what `.task.join` fails with and what `.task.error` returns. Abandonment is owner-session loss, not
   a failed task, and therefore creates no failure-ledger entry.
 - `.task.join` waits directly on every nonterminal child state and propagates
   terminal errors. A joined dependency becoming terminal reruns the join

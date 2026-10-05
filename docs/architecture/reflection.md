@@ -264,8 +264,9 @@ volume to retry. Dropping the Rust owner does not revoke it.
 - `.task.new Effect` reserves an opaque child handle plus a private status
   query; launch is commit-ordered inside a transaction. The status query is
   updated only when the projected state changes between atoms `'launched` and
-  `'blocked`, terminal tagged values `ok:Value` and `err:Error`, and the atom
-  `'canceled` or `'abandoned`. Abandonment means the task's owning demand
+  `'blocked`, terminal tagged values `ok:Value`, `err:Diagnostic`, and
+  `killed:Diagnostic`, and the atoms `'canceled`, `'abandoned`, `'exited`,
+  and `'panicked`. Abandonment means the task's owning demand
   session closed before it published another terminal result; it is not an
   ordinary task failure and creates no failure-ledger entry.
 - `.task.join` waits directly and propagates non-success terminal states,

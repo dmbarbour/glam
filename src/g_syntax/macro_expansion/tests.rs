@@ -22,8 +22,29 @@ impl DiagnosticSubscriber for DiagnosticMessages {
         self.0
             .lock()
             .expect("diagnostic observation mutex should not be poisoned")
-            .push(event.diagnostic().message().to_owned());
+            .push(diagnostic_text(event.diagnostic()));
     }
+}
+
+/// A diagnostic's headline followed by the text of each nested cause. A
+/// macro failure's reason is its cause, not part of its headline.
+fn diagnostic_text(diagnostic: &Diagnostic) -> String {
+    let mut text = diagnostic.message().to_owned();
+    if let Value::Dict(emission) = diagnostic.emission().clone_core_for_test()
+        && let Some(Value::Dict(message)) = emission.get(&Key::atom_from_text("msg"))
+        && let Some(Value::List(contexts)) = message.get(&Key::atom_from_text("context"))
+    {
+        for frame in contexts.value_slice().unwrap_or(&[]) {
+            if let Value::Dict(frame) = frame
+                && let Some(Value::Dict(cause)) = frame.get(&Key::atom_from_text("msg"))
+                && let Some(Value::Binary(cause_text)) = cause.get(&Key::atom_from_text("text"))
+            {
+                text.push_str("\n  cause: ");
+                text.push_str(&String::from_utf8_lossy(cause_text));
+            }
+        }
+    }
+    text
 }
 
 struct CapturedDiagnostics(Arc<Mutex<Vec<Diagnostic>>>);
@@ -177,12 +198,15 @@ fn macro_runner_distinguishes_a_non_effect_value() {
         MacroInput::empty(),
     )
     .expect_err("ordinary data is not a source macro effect");
+    let cause = error
+        .cause()
+        .expect("the effect's own failure is the macro failure's cause");
     assert!(
-        error
+        cause
             .message()
             .contains("reflection task requires an effect object"),
         "unexpected diagnostic: {}",
-        error.message(),
+        cause.message(),
     );
 }
 
@@ -944,7 +968,7 @@ fn source_macro_anchor_contract_rejects_ambiguous_or_empty_items() {
             error
                 .diagnostics()
                 .iter()
-                .any(|diagnostic| diagnostic.message().contains(expected)),
+                .any(|diagnostic| diagnostic_text(diagnostic).contains(expected)),
             "unexpected diagnostics for `{body}` at `{invocation}`: {:?}",
             error.diagnostics()
         );
@@ -1068,8 +1092,8 @@ fn macro_evaluation_failures_keep_their_structured_cause() {
             .find(|diagnostic| diagnostic.message().contains(headline))
             .unwrap_or_else(|| panic!("{macro_definition}: missing `{headline}` diagnostic"));
         assert!(
-            diagnostic.message().contains("cannot divide by zero"),
-            "{macro_definition}: the headline keeps the cause's text"
+            !diagnostic.message().contains("cannot divide by zero"),
+            "{macro_definition}: the cause carries its own text, so the headline omits it"
         );
 
         let Value::Dict(emission) = diagnostic.emission().clone_core_for_test() else {

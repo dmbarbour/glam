@@ -1492,33 +1492,62 @@ publish completion-script failures, add the context frames, and add failing
 
 *Remainder resolved 2026-10-05.* An audit of the three remaining claims found
 lossy sites in macros, one in killed-work reports, and none that mattered in
-the logger transport. The fix keeps the compiler's or host's readable headline
-and carries the original failure as a *cause*. The cause is a nested message
-in the context list, which the CLI already renders with its own context.
-- **Macros.** An effect failure, a failure that blocks the effect, and a
-  failure forcing a macro's result each keep the `TaskHalt` or evaluator
-  failure diagnostic as the cause. So do failures selecting a macro or
-  `meta.macro.env`. Previously each was reduced to `{error}` text.
+the logger transport. The fix carries the original failure as a *cause*: a
+nested message in the context list, which the CLI already renders with its
+own context.
+
+The headline states only the compiler's or host's own finding. Before the
+maintainer's review, the headline also repeated the cause's text, so the
+CLI printed the reason twice. The duplicate was removed from the headline,
+not from the nested message, for two reasons:
+- The nested message *is* the cause, and dropping it would drop the
+  structure.
+- Copying the cause's text into the headline is exactly the stringification
+  this finding is about.
+
+When no structured cause exists, for example a wait or an unassigned
+promise, the headline keeps the reason text.
+
+- **Macros.** These failures each keep the `TaskHalt` or evaluator failure
+  diagnostic as the cause:
+  - an effect failure;
+  - a failure that blocks the effect;
+  - a failure forcing a macro's result;
+  - a failure selecting a macro or `meta.macro.env`.
+
+  Previously each was reduced to `{error}` text.
 - **Killed work.** The logger supervisor's deadlock report keeps the retained
-  blocked failure as a cause after its `runtime: killed` frame. It previously
-  appended only the failure's message.
-- **Logger transport.** A diagnostic whose `transport_value` fails now
-  publishes that error locally. It previously wrote a placeholder record,
-  which the logger would have rejected at decode. The path is probably
-  unreachable, since it needs a foreign-runtime diagnostic in the journal,
-  so it has no test.
-- **Left as text, as genuinely new errors:** macro arity, text, and regex
-  validation; `IsolatedEffectSearch::new_in_context` ownership checks; the
-  fallback-drain `eprintln!`s in `batch.rs`; and terminal rendering
-  failures.
+  blocked failure as a cause after its `runtime: killed` frame. Its headline
+  now ends ", with a retained error"; previously it appended the failure's
+  message.
+- **Task status.** `.task.status` now reports `killed:Diagnostic` in the same
+  shape as `err:Diagnostic`, and `.task.error` returns it. Before, a killed
+  task's status was the bare atom `'killed`. The diagnostic is the client's
+  kill reason, the same root that `.task.join` already fails with.
+  - The kill's emission is stored as built and is not normalized.
+  - Normalizing evaluates, and evaluation cannot progress while the runtime
+    is settling a deadlock. The first attempt hung the deadlock CLI test.
+- **Logger transport.** `transport_value` fails only on a runtime-ownership
+  mismatch. Cross-runtime communication has been removed, so that is now an
+  `expect` contract instead of a handled path. Previously it wrote a
+  placeholder record, which the logger would have rejected at decode.
+- **Left as text, as genuinely new errors:**
+  - macro arity, text, and regex validation;
+  - `IsolatedEffectSearch::new_in_context` ownership checks;
+  - the fallback-drain `eprintln!`s in `batch.rs`;
+  - terminal rendering failures.
 - **Regressions.**
-  - A macro test checks that the cause's emission and text survive, for
-    both the selection path and the result path.
-  - The deadlock CLI test checks the nested `msg:` frame.
+  - A macro test checks that the cause's emission and text survive and that
+    the headline omits them. It covers both the selection path and the
+    result path.
+  - The deadlock CLI test checks the nested `msg:` frame and that the reason
+    appears once.
+  - The task-status round trip checks the `killed` diagnostic.
+  - Three macro tests found a macro's reason in the headline. That reason
+    is now the cause, including text-only validation errors raised by the
+    macro runtime, so the tests read the cause instead.
 
 *Noted, not changed:*
-- `.task.status` reports `killed` without its kill root, while `failed`
-  carries `{err: diagnostic}`. This is a reflection API question.
 - `TaskHalt::with_context` replaces the halt with text when the context
   belongs to a foreign runtime. This is a programmer-error path.
 - `RuntimeDeadlockWork::blocked_error()` is a public text accessor that only

@@ -316,13 +316,13 @@ pub(crate) fn settled_report_diagnostics(
             runtime_work_kind_name(work.kind()),
             work.work_id()
         );
-        if let Some(blocked) = &blocked_error {
-            message.push_str("; retained error: ");
-            message.push_str(blocked.message());
+        // The retained error stays structured: it follows the kill frame as a
+        // nested message with its own emission and context, so the headline
+        // only notes that it exists.
+        if blocked_error.is_some() {
+            message.push_str(", with a retained error");
         }
         let mut diagnostic = Diagnostic::new(values, Severity::Error, message);
-        // The retained error stays structured: it follows the kill frame as a
-        // nested message with its own emission and context.
         if let Some(blocked) = blocked_error {
             diagnostic = diagnostic.with_context(values, blocked.emission().clone())?;
         }

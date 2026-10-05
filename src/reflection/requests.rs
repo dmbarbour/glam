@@ -657,9 +657,10 @@ fn finish_task_query<S: TaskSpecialization>(
         (TaskQueryRequest::Value, TaggedTaskState::Complete(value)) => {
             Ok(RequestResult::Return(value))
         }
-        (TaskQueryRequest::Halt, TaggedTaskState::Failed(error)) => {
-            Ok(RequestResult::Return(error))
-        }
+        (
+            TaskQueryRequest::Halt,
+            TaggedTaskState::Failed(error) | TaggedTaskState::Killed(error),
+        ) => Ok(RequestResult::Return(error)),
         (TaskQueryRequest::Halt, TaggedTaskState::Cancelled) => Ok(RequestResult::Return(
             context.values().text("reflection task was cancelled"),
         )),
@@ -676,7 +677,7 @@ fn finish_task_query<S: TaskSpecialization>(
             | TaggedTaskState::Cancelled
             | TaggedTaskState::Abandoned
             | TaggedTaskState::Exited
-            | TaggedTaskState::Killed
+            | TaggedTaskState::Killed(_)
             | TaggedTaskState::Panicked,
         )
         | (
@@ -684,7 +685,6 @@ fn finish_task_query<S: TaskSpecialization>(
             TaggedTaskState::Complete(_)
             | TaggedTaskState::Abandoned
             | TaggedTaskState::Exited
-            | TaggedTaskState::Killed
             | TaggedTaskState::Panicked,
         ) => Ok(RequestResult::Fail),
         (TaskQueryRequest::Status, _) => unreachable!("status returns before tagged decoding"),
@@ -1606,10 +1606,21 @@ fn task_status_query_value(
             (*keys::ERR).clone(),
             failure_diagnostic.expect("failed task status precomputes its diagnostic"),
         )),
+        // A killed task carries its kill reason, so a status reader sees why
+        // without joining. The kill is published while the runtime settles a
+        // deadlock, where nothing can evaluate, so its emission is stored as
+        // built rather than normalized like a failure's diagnostic.
+        EvaluationTaskStatus::Killed(error) => {
+            let failure = error.as_failure();
+            let diagnostic = match failure.emission_value_in(access) {
+                Some(emission) => access.duplicate_value(emission),
+                None => crate::diagnostic::text_message_in(access, None, failure.to_string()),
+            };
+            CoreValue::Dict(Dict::new_sync().insert((*keys::KILLED).clone(), diagnostic))
+        }
         EvaluationTaskStatus::Cancelled => access.value_from_key(&keys::CANCELED),
         EvaluationTaskStatus::Abandoned => access.value_from_key(&keys::ABANDONED),
         EvaluationTaskStatus::Exited => access.value_from_key(&keys::EXITED),
-        EvaluationTaskStatus::Killed(_) => access.value_from_key(&keys::KILLED),
         EvaluationTaskStatus::Panicked(_) => access.value_from_key(&keys::PANICKED),
     }
 }
@@ -1653,7 +1664,7 @@ enum TaggedTaskState {
     Cancelled,
     Abandoned,
     Exited,
-    Killed,
+    Killed(Value),
     Panicked,
 }
 
@@ -1692,12 +1703,6 @@ fn tagged_task_state(values: &Values, value: &Value) -> Result<TaggedTaskState, 
         }
         if access
             .runtime_access()
-            .same_representation(&value, &access.runtime_access().key_value(&keys::KILLED))
-        {
-            return Ok(TaggedTaskState::Killed);
-        }
-        if access
-            .runtime_access()
             .same_representation(&value, &access.runtime_access().key_value(&keys::PANICKED))
         {
             return Ok(TaggedTaskState::Panicked);
@@ -1715,6 +1720,11 @@ fn tagged_task_state(values: &Values, value: &Value) -> Result<TaggedTaskState, 
         }
         if let Some(error) = state.get(&*keys::ERR) {
             return Ok(TaggedTaskState::Failed(
+                access.wrap(access.runtime_access().duplicate_value(error)),
+            ));
+        }
+        if let Some(error) = state.get(&*keys::KILLED) {
+            return Ok(TaggedTaskState::Killed(
                 access.wrap(access.runtime_access().duplicate_value(error)),
             ));
         }
@@ -1816,7 +1826,9 @@ mod tests {
 
     fn assert_tagged_task_state_inventory(state: &TaggedTaskState) {
         match state {
-            TaggedTaskState::Complete(value) | TaggedTaskState::Failed(value) => {
+            TaggedTaskState::Complete(value)
+            | TaggedTaskState::Failed(value)
+            | TaggedTaskState::Killed(value) => {
                 let _: &Value = value;
             }
             TaggedTaskState::Launched
@@ -1824,7 +1836,6 @@ mod tests {
             | TaggedTaskState::Cancelled
             | TaggedTaskState::Abandoned
             | TaggedTaskState::Exited
-            | TaggedTaskState::Killed
             | TaggedTaskState::Panicked => {}
         }
     }
@@ -1978,16 +1989,24 @@ mod tests {
                 Arc::new(crate::core::EvaluationFailure::message("killed fixture")),
             )),
         );
+        // Like a failure, a kill carries its diagnostic as `{killed: Diagnostic}`.
+        let TaggedTaskState::Killed(diagnostic) =
+            tagged_task_state(&values, &killed).expect("killed status should decode")
+        else {
+            panic!("a killed status decodes as killed")
+        };
         values.core().with_runtime_value_access(|access| {
+            let CoreValue::Dict(diagnostic) = values.clone_core(&diagnostic).unwrap() else {
+                panic!("a kill diagnostic is a dictionary")
+            };
+            let Some(CoreValue::Dict(message)) = diagnostic.get(&*keys::MSG) else {
+                panic!("a kill diagnostic has a message interface")
+            };
             access.assert_same_representation_for_test(
-                &values.clone_core(&killed).unwrap(),
-                &access.key_value(&keys::KILLED),
+                message.get(&*keys::TEXT).expect("the kill keeps its text"),
+                &CoreValue::binary_from_text("killed fixture"),
             );
         });
-        assert!(matches!(
-            tagged_task_state(&values, &killed).expect("killed status should decode"),
-            TaggedTaskState::Killed
-        ));
     }
 
     #[test]

@@ -1182,10 +1182,11 @@ fn retryable_reflection_errors_are_reported_with_deadlocks() {
     assert_eq!(output.stdout, b"ok");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("reflection scheduler deadlocked"));
-    assert!(stderr.contains("retained error"));
-    assert!(stderr.contains("requires a function value"));
-    // The retained error stays structured, as a nested context message.
+    assert!(stderr.contains("with a retained error"));
+    // The retained error stays structured, as a nested context message, and
+    // the headline does not repeat it.
     assert!(stderr.contains("msg: application requires a function value"));
+    assert_eq!(stderr.matches("requires a function value").count(), 1);
 }
 
 #[test]

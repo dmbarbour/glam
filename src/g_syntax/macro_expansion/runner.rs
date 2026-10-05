@@ -27,8 +27,8 @@ pub(in crate::g_syntax) struct MacroRun {
 pub(in crate::g_syntax) struct MacroFailure {
     diagnostic: Diagnostic,
     /// The structured failure raised by the macro's own evaluation. The
-    /// compiler diagnostic carries it as a nested context message rather than
-    /// only its text.
+    /// compiler diagnostic carries it as a nested context message, so the
+    /// headline states only the compiler's own finding.
     cause: Option<Diagnostic>,
     frontier: Option<usize>,
     cases: Vec<PublicValue>,
@@ -126,7 +126,7 @@ pub(in crate::g_syntax) fn run_macro_effect(
                     return Err(match blocked.error() {
                         Some(error) => macro_error(
                             values,
-                            format!("macro effect became blocked after evaluation failed: {error}"),
+                            "macro effect became blocked after evaluation failed",
                         )
                         .caused_by(Some(
                             error.diagnostic(&Values::from_core_factory(values.clone())),
@@ -155,10 +155,9 @@ pub(in crate::g_syntax) fn run_macro_effect(
             }
             IsolatedSearchPoll::Complete(branches) => break branches,
             IsolatedSearchPoll::Failed(error) => {
-                return Err(macro_error(values, format!("macro effect failed: {error}"))
-                    .caused_by(Some(
-                        error.diagnostic(&Values::from_core_factory(values.clone())),
-                    )));
+                return Err(macro_error(values, "macro effect failed").caused_by(Some(
+                    error.diagnostic(&Values::from_core_factory(values.clone())),
+                )));
             }
             IsolatedSearchPoll::Cancelled => {
                 return Err(macro_error(values, "macro effect was cancelled"));
@@ -260,13 +259,16 @@ fn force_result(
                 report.resume();
             }
             let values = execution.macro_context().values();
+            let cause = evaluation_cause(values, &error);
             let detail = if error.blocked_on().is_some() {
                 "macro result is waiting on a lazy producer unavailable to the macro demand session"
                     .to_owned()
+            } else if cause.is_some() {
+                "macro result evaluation failed".to_owned()
             } else {
                 format!("macro result evaluation failed: {error}")
             };
-            macro_error(values, detail).caused_by(evaluation_cause(values, &error))
+            macro_error(values, detail).caused_by(cause)
         })
 }
 
