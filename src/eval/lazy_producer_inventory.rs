@@ -1,85 +1,37 @@
-//! W6G.1f.0 source-backed inventory of lazy producer checkpoint families.
+//! Audit: a lazy task's route marker carries no producer state.
 //!
-//! The policy table lives in the baseline review. This test makes additions
-//! to `LazyTaskWork` fail closed until their ownership, tracing, and replay
-//! behavior have been reviewed.
+//! `LazyTaskWork` only names which managed checkpoint a lazy task polls, or
+//! grants the one-shot host-call invocation permit. Producer progress lives in
+//! the checkpoint beneath the managed lazy, where the collector traces it and
+//! a later route resumes it without replay. A field on a marker would hold
+//! state outside that checkpoint.
 
 use std::fs;
 use std::path::Path;
 
-const EXPECTED_VARIANTS: &[&str] = &[
-    // W6G.1f.3d carries no access progress: it marks the typed checkpoint
-    // retained directly beneath the managed lazy.
-    "AccessCheckpoint",
-    // Migrated builtin families retain raw progress beneath the typed managed
-    // checkpoint; this marker carries no duplicate producer state.
-    "BuiltinCheckpoint",
-    // Only the installer receives one transient invocation permit. Durable
-    // before/after state belongs to the managed checkpoint.
-    "HostCallCheckpoint",
-    "HostCallInvoke",
-    "ListEffectCheckpoint",
-    // W6G.1f.3c retains the complete driver beneath the managed lazy.
-    "NetWhnfCheckpoint",
-    // W6G.1f.3e retains complete C3 and mix progress beneath the lazy.
-    "ObjectFixpointCheckpoint",
-    "Produce",
-    // W6G.1f.2a carries no producer state: it marks that the canonical WHNF
-    // state has moved into the owning managed lazy.
-    "WhnfCheckpoint",
-];
-
 #[test]
-fn lazy_task_work_families_are_exact() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let path = manifest.join("src/eval/value.rs");
-    let source = fs::read_to_string(&path).expect("lazy producer source should be readable");
-    let syntax = syn::parse_file(&source).expect("lazy producer source should parse");
-    let item = syntax
+fn lazy_task_work_variants_carry_no_state() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/eval/value.rs");
+    let source = fs::read_to_string(&path).expect("the lazy task source should be readable");
+    let syntax = syn::parse_file(&source).expect("the lazy task source should parse");
+    let work = syntax
         .items
         .iter()
         .find_map(|item| match item {
             syn::Item::Enum(item) if item.ident == "LazyTaskWork" => Some(item),
             _ => None,
         })
-        .expect("LazyTaskWork must remain an explicit checkpoint-family enum");
-    let mut variants = item
+        .expect("crate::eval::value::LazyTaskWork should exist");
+
+    let stateful = work
         .variants
         .iter()
+        .filter(|variant| !matches!(variant.fields, syn::Fields::Unit))
         .map(|variant| variant.ident.to_string())
         .collect::<Vec<_>>();
-    variants.sort();
-    assert_eq!(variants, EXPECTED_VARIANTS);
-
-    for variant in &item.variants {
-        assert!(
-            matches!(&variant.fields, syn::Fields::Unit),
-            "{name} must remain a state-free route marker or transient permit",
-            name = variant.ident,
-        );
-    }
-}
-
-#[test]
-fn lazy_task_work_external_boundaries_remain_visible() {
-    let mut source =
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/eval/value.rs"))
-            .expect("lazy producer source should be readable");
-    source.push_str(
-        &fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/eval/lazy_checkpoint.rs"),
-        )
-        .expect("lazy checkpoint source should be readable"),
+    assert!(
+        stateful.is_empty(),
+        "LazyTaskWork variants must stay state-free markers; keep producer state in the \
+         managed lazy checkpoint: {stateful:?}"
     );
-
-    for boundary in [
-        "ManagedHostCallCheckpointState::Invoking",
-        "reserve_reflection_completion_activation",
-        "ManagedPromiseRoot",
-    ] {
-        assert!(
-            source.contains(boundary),
-            "W6G.1f.0 boundary `{boundary}` disappeared; update the producer replay and tracing review"
-        );
-    }
 }

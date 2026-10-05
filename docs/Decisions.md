@@ -112,6 +112,8 @@ maps the short names used here to file names.
   overrides the parallel review's RF-003 suggestion to share inventory
   parsing. The surviving set is the holistic review's V4 table (maintainer,
   2026-10-05): one negative rule per area, no counts or fingerprints.
+  Applied the same day, leaving about 3.8k lines; the kept rules are listed
+  under V4.
 - **Rule lives in:** `AgentContext.md` "Working Rules".
 - **Recorded in:** holistic review X5, V4, Decision 4.
 

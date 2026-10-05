@@ -54,8 +54,6 @@ mod test_support;
 mod value;
 pub(crate) mod whnf;
 #[cfg(test)]
-mod whnf_checkpoint_inventory;
-#[cfg(test)]
 mod whnf_inventory;
 
 #[cfg(test)]

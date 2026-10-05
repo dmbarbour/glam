@@ -747,6 +747,47 @@ reviewer.
 
 Target: about 13k lines down to about 2–3k, with no fingerprints.
 
+*Resolved 2026-10-05,* following the maintainer's adoption of this table.
+Inventory and audit code went from about 12.8k lines to about 3.8k, with no
+counts, fingerprints, whitespace-exact snippets or step IDs left. Every kept
+rule is a negative rule checked with `syn` and keyed by module and item.
+Most also have a fixture or injected violation proving the check fires.
+
+- **Retired:** `gate_g2`, `persistent_edge_trait`, `whnf_checkpoint` (only a
+  census), `g_syntax/access` (only counts and snippets), and the
+  `recursive_cells.rs` source-text tests.
+- **`durable_owner`: retired, deviating from the table.** Once the baseline
+  was gone, what remained only checked that 18 named tests still exist. The
+  named behaviour tests stay in their own modules.
+- **`managed_boundary_audit.rs`** replaces the `recursive_identity`,
+  `active_owner` and `containment` inventories:
+  - managed-graph declarations hold no value-domain authority or registered
+    root;
+  - they neither implement `Drop` nor store a type that does, except
+    `RuntimeNetCell`, which only closes its edge-free companion;
+  - opaque payloads enter `OpaqueValue` only through the unsafe
+    `OpaquePayloadFamily`.
+
+  It also keeps 14 runtime behaviour tests moved from those modules.
+- **`raw_value_api_inventory`:** a raw core `Value` in a production
+  signature needs an access witness. The exceptions are four named edge
+  adapters. glam-gc's `Visitor` counts as a witness, since only the
+  collector constructs one.
+- **`whnf_inventory`:** the no-unapproved-recursion property now covers
+  `src/core` too. Four core functions recurse per level of user data:
+  `key_from_value`, `value_from_key`, `same_representation` and
+  `visit_value_with`. They are listed as open defects, not approvals, and
+  belong to VRR's prework phase.
+- **The other evaluator, coordinator and API audits:**
+  - specialization request work never evaluates synchronously;
+  - `LazyTaskWork` variants carry no fields;
+  - the raw mutator entry stays private to the higher-ranked gateway;
+  - no access region opens inside another;
+  - background work kinds exclude client demand;
+  - the work generation and shared wakeups each change at one boundary;
+  - no code escapes between public and bare core values;
+  - every heap selects `NoAuto` collection.
+
 Reported coverage gap: `PromisedValue::fixpoint` returns a bare
 `Gc`-backed edge across access regions without an access parameter
 (`core.rs:1059-1076`). It is safe only because a coordinator root exists.
@@ -1829,8 +1870,8 @@ cheaper. Items within a group are independent.
      - The 17 test files named after step IDs now have descriptive names,
        such as `callable_checkpoint.rs`, `small_stack.rs` and
        `budget_fairness.rs`. The profiling script follows them.
-     - Still open: step IDs inside inventories (with inventory triage) and
-       inside test-module comments.
+     - Still open: step IDs inside test-module comments.
+   - *Inventory triage done 2026-10-05,* per the V4 resolution below.
 8. **Docs that perf work will rebase on (X8, R4).**
    - `architecture/values.md` and a definition of "compatibility".
    - Correct the fusion, saturation, and net-driver descriptions.
@@ -1849,9 +1890,8 @@ cheaper. Items within a group are independent.
        - PEAF's premise, rebased on the dispatch shortcut, with an
          oracle-independence requirement in PEAF0 and the R2 and E4
          prerequisites stated.
-     - **Open:**
-       - an architecture description of the net driver and cursor-WHNF
-         control flow.
+       - `architecture/interaction_nets.md`, describing the net driver and
+         cursor-WHNF control flow. Writing it surfaced N9.
 
 ### P2 — Remove structural overheads that would mask representation measurements
 

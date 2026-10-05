@@ -198,7 +198,7 @@ mod tests {
 
     use super::*;
     use crate::core::CoreValueFactory;
-    use crate::core::managed::active_owner_inventory::{
+    use crate::core::managed::managed_boundary_audit::{
         closed_compatibility_variants, compatibility_variant_name,
     };
     use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};

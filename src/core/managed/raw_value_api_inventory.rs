@@ -1,82 +1,32 @@
-//! GCI11R-002D.1a syntax-backed inventory of APIs transporting raw core values.
+//! Raw core values cross production signatures only with an access witness.
 //!
-//! `core::Value` is not lifetime branded, so Rust's type system does not yet
-//! prevent it from escaping a managed-access region. This inventory makes
-//! every production signature which directly or through a type alias carries
-//! that representation an explicit review event. Storage declarations remain
-//! owned by `durable_owner_inventory`; this module audits operations on them.
+//! `core::Value` is not lifetime-branded, so the compiler does not stop a raw
+//! value from outliving the managed-access region that produced it. The rule
+//! in this module closes that gap syntactically. A production function whose
+//! signature carries a raw core `Value`, directly or through a type alias,
+//! must also carry an access witness, as a parameter or as the receiver's
+//! type. The witnesses are `RuntimeValueAccess`, `EvaluationValueAccess`,
+//! glam-gc's trace `Visitor` (which only the collector constructs, during a
+//! trace), and any type that stores one of them. A standard trait derived on a
+//! raw-value type counts as such a signature. The public `api::Value` is a
+//! durable root, not a raw value.
+//!
+//! The named exceptions are the edge adapters that lend stored values to a
+//! synchronous visitor callback.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::collections::BTreeSet;
 
 use quote::ToTokens;
 use syn::visit::{self, Visit};
-use syn::{Attribute, ImplItem, Item, ReturnType, Signature, TraitItem, Type, UseTree};
+use syn::{ImplItem, Item, ReturnType, Signature, TraitItem, Type, UseTree};
+
+use super::managed_boundary_audit::{is_test_only, production_sources};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum ApiKind {
     Function,
     TypeAlias,
     DerivedTrait,
-}
-
-impl ApiKind {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Function => "function",
-            Self::TypeAlias => "type-alias",
-            Self::DerivedTrait => "derived-trait",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-enum ApiDisposition {
-    RegionalRepresentation,
-    RegionalAccess,
-    CollectorPrimitive,
-    Violation,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-enum RemediationOwner {
-    D2bCoreCompatibility,
-    D2cEvaluator,
-    D2dOrchestration,
-    D2eFrontend,
-    D2fReflection,
-    D2gPublicCompilerDiagnostics,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-enum ReplacementShape {
-    CoreStructuralOperation,
-    ManagedCellAccess,
-    RuntimeRootProjection,
-    EvaluatorQuantum,
-    RootedOrchestration,
-    FrontendRegion,
-    ReflectionRegionOrRoot,
-    PublicDurableBoundary,
-    CompilerDiagnosticRegion,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct RemediationAssignment {
-    owner: RemediationOwner,
-    replacement: ReplacementShape,
-}
-
-impl ApiDisposition {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::RegionalRepresentation => "regional-representation",
-            Self::RegionalAccess => "regional-access",
-            Self::CollectorPrimitive => "collector-primitive",
-            Self::Violation => "violation",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
@@ -92,153 +42,71 @@ impl TypeSignals {
     }
 }
 
+/// One production signature or alias that carries a raw core value.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 struct ApiOccurrence {
+    /// Module path and item, such as `eval::whnf::trace_whnf_value`.
     declaration: String,
     shape: String,
     kind: ApiKind,
-    inputs: usize,
-    outputs: usize,
     access: usize,
 }
 
 impl ApiOccurrence {
-    fn disposition(&self) -> ApiDisposition {
-        if self.kind == ApiKind::TypeAlias {
-            ApiDisposition::RegionalRepresentation
-        } else if self.access != 0 {
-            ApiDisposition::RegionalAccess
-        } else if self
-            .declaration
-            .starts_with("src/core/managed/payload_edges")
-            || self.declaration == "src/core/managed.rs::trace_compatibility_value_managed_edges"
-            || self.declaration == "src/core/managed/recursive_cells.rs::trace_promise_assignment"
-            || self.declaration == "src/eval/lazy_checkpoint.rs::trace_host_call_result"
-            || self.declaration == "src/eval/object_machine.rs::trace_object_values"
-            || self.declaration == "src/eval/whnf.rs::trace_whnf_value"
-            || self.declaration == "src/eval/whnf.rs::trace_whnf_values"
-        {
-            ApiDisposition::CollectorPrimitive
-        } else {
-            ApiDisposition::Violation
-        }
-    }
-
-    fn record(&self) -> String {
-        format!(
-            "{}|shape={}|kind={}|in={}|out={}|access={}|disposition={}",
-            self.declaration,
-            self.shape,
-            self.kind.label(),
-            self.inputs,
-            self.outputs,
-            self.access,
-            self.disposition().label(),
-        )
-    }
-
-    fn remediation_assignment(&self) -> Option<RemediationAssignment> {
-        if self.disposition() != ApiDisposition::Violation {
-            return None;
-        }
-
-        let path = self
-            .declaration
-            .split("::")
-            .next()
-            .expect("an inventory declaration should begin with a source path");
-        let assignment = if path == "src/core.rs" || path == "src/core_net.rs" {
-            RemediationAssignment {
-                owner: RemediationOwner::D2bCoreCompatibility,
-                replacement: ReplacementShape::CoreStructuralOperation,
-            }
-        } else if path.starts_with("src/core/") {
-            RemediationAssignment {
-                owner: RemediationOwner::D2bCoreCompatibility,
-                replacement: ReplacementShape::ManagedCellAccess,
-            }
-        } else if path == "src/runtime.rs" {
-            RemediationAssignment {
-                owner: RemediationOwner::D2bCoreCompatibility,
-                replacement: ReplacementShape::RuntimeRootProjection,
-            }
-        } else if path == "src/eval.rs" || path.starts_with("src/eval/") {
-            RemediationAssignment {
-                owner: RemediationOwner::D2cEvaluator,
-                replacement: ReplacementShape::EvaluatorQuantum,
-            }
-        } else if path == "src/evaluation.rs" || path.starts_with("src/evaluation/") {
-            RemediationAssignment {
-                owner: RemediationOwner::D2dOrchestration,
-                replacement: ReplacementShape::RootedOrchestration,
-            }
-        } else if path == "src/g_syntax.rs" || path.starts_with("src/g_syntax/") {
-            RemediationAssignment {
-                owner: RemediationOwner::D2eFrontend,
-                replacement: ReplacementShape::FrontendRegion,
-            }
-        } else if path == "src/reflection.rs" || path.starts_with("src/reflection/") {
-            RemediationAssignment {
-                owner: RemediationOwner::D2fReflection,
-                replacement: ReplacementShape::ReflectionRegionOrRoot,
-            }
-        } else if path == "src/api.rs" || path.starts_with("src/api/") {
-            RemediationAssignment {
-                owner: RemediationOwner::D2gPublicCompilerDiagnostics,
-                replacement: ReplacementShape::PublicDurableBoundary,
-            }
-        } else if matches!(
-            path,
-            "src/compiler.rs" | "src/diagnostic.rs" | "src/source.rs"
-        ) {
-            RemediationAssignment {
-                owner: RemediationOwner::D2gPublicCompilerDiagnostics,
-                replacement: ReplacementShape::CompilerDiagnosticRegion,
-            }
-        } else {
-            panic!(
-                "{} has no reviewed GCI11R-002D.2 remediation owner",
-                self.declaration
-            );
-        };
-        Some(assignment)
+    fn has_access_witness(&self) -> bool {
+        self.access != 0
     }
 }
 
-fn is_test_only(attributes: &[Attribute]) -> bool {
-    attributes.iter().any(|attribute| {
-        attribute.path().is_ident("test")
-            || (attribute.path().is_ident("cfg")
-                && attribute
-                    .meta
-                    .require_list()
-                    .is_ok_and(|list| list.tokens.to_string() == "test"))
+/// Production functions that carry raw core values without an access witness:
+/// module path (covering its submodules), function name, and why it is safe.
+const WITNESS_EXCEPTIONS: &[(&str, &str, &str)] = &[
+    (
+        "core::managed::payload_edges",
+        "visit_compatibility_value_edges",
+        "edge-adapter trait and impls lend each stored value to a synchronous visitor callback",
+    ),
+    (
+        "core::managed::payload_edges",
+        "visit_values",
+        "lends each value of a borrowed slice to a synchronous visitor callback",
+    ),
+    (
+        "core::managed::payload_edges::persistent",
+        "visit_dict_edges",
+        "lends each value of a borrowed dictionary to a synchronous visitor callback",
+    ),
+    (
+        "core::managed::payload_edges::persistent",
+        "visit_list_edges",
+        "lends each value of a borrowed list to a synchronous visitor callback",
+    ),
+];
+
+fn witness_exception(
+    declaration: &str,
+) -> Option<&'static (&'static str, &'static str, &'static str)> {
+    WITNESS_EXCEPTIONS.iter().find(|(module, function, _)| {
+        declaration
+            .strip_prefix(module)
+            .is_some_and(|rest| rest.starts_with("::"))
+            && declaration
+                .rsplit("::")
+                .next()
+                .is_some_and(|name| name == *function)
     })
 }
 
-fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
-    for entry in fs::read_dir(directory).expect("the source tree should be readable") {
-        let path = entry.expect("a source entry should be readable").path();
-        if path.is_dir() {
-            collect_rust_sources(&path, sources);
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
-            sources.push(path);
-        }
-    }
+fn is_core_module(module: &str) -> bool {
+    module == "core"
 }
 
-fn is_production_source(relative: &Path) -> bool {
-    if relative
-        .components()
-        .any(|component| component.as_os_str() == "tests")
-    {
-        return false;
-    }
-    !relative.file_name().is_some_and(|name| {
-        name == "tests.rs"
-            || name == "test_support.rs"
-            || name.to_string_lossy().ends_with("_inventory.rs")
-    })
+fn is_core_child(module: &str) -> bool {
+    module.starts_with("core::")
+}
+
+fn is_api_module(module: &str) -> bool {
+    module == "api" || module.starts_with("api::")
 }
 
 fn flatten_use(tree: &UseTree, prefix: &mut Vec<String>, imports: &mut Vec<(Vec<String>, String)>) {
@@ -298,13 +166,13 @@ fn is_api_value_path(path: &[String]) -> bool {
 }
 
 fn initial_raw_names(
-    relative: &Path,
+    module: &str,
     syntax: &syn::File,
     canonical_core_names: &BTreeSet<String>,
     cross_file_alias_names: &BTreeSet<String>,
 ) -> BTreeSet<String> {
-    let core_source = relative == Path::new("src/core.rs");
-    let core_child = relative.starts_with("src/core/");
+    let core_source = is_core_module(module);
+    let core_child = is_core_child(module);
     let mut names = BTreeSet::new();
     let mut imports_raw_value = false;
     let mut imports_public_value = false;
@@ -317,7 +185,7 @@ fn initial_raw_names(
         flatten_use(&item.tree, &mut Vec::new(), &mut imports);
         for (source, local) in imports {
             let imports_api_value = is_api_value_path(&source)
-                || ((relative.starts_with("src/api/") || relative == Path::new("src/api.rs"))
+                || (is_api_module(module)
                     && source.last().is_some_and(|name| name == "Value")
                     && source
                         .first()
@@ -340,10 +208,7 @@ fn initial_raw_names(
     if core_source
         || core_child
         || imports_raw_value
-        || (!imports_public_value
-            && !relative.starts_with("src/api/")
-            && relative != Path::new("src/api.rs")
-            && relative != Path::new("src/list.rs"))
+        || (!imports_public_value && !is_api_module(module) && module != "list")
     {
         names.insert("Value".to_owned());
     } else {
@@ -644,8 +509,8 @@ fn simple_type_name(ty: &Type) -> Option<String> {
         .map(|segment| segment.ident.to_string())
 }
 
-struct ApiVisitor<'path, 'names> {
-    path: &'path Path,
+struct ApiVisitor<'module, 'names> {
+    module: &'module str,
     raw_names: &'names BTreeSet<String>,
     canonical_core_names: &'names BTreeSet<String>,
     cross_file_alias_names: &'names BTreeSet<String>,
@@ -659,7 +524,11 @@ struct ApiVisitor<'path, 'names> {
 
 impl ApiVisitor<'_, '_> {
     fn declaration(&self, name: &str) -> String {
-        let mut parts = vec![self.path.display().to_string()];
+        let mut parts = if self.module.is_empty() {
+            vec!["crate".to_owned()]
+        } else {
+            vec![self.module.to_owned()]
+        };
         parts.extend(self.modules.iter().cloned());
         if let Some(owner) = &self.owner {
             parts.push(owner.clone());
@@ -692,8 +561,6 @@ impl ApiVisitor<'_, '_> {
             declaration: self.declaration(&signature.ident.to_string()),
             shape: signature.to_token_stream().to_string(),
             kind: ApiKind::Function,
-            inputs: inputs.raw_values,
-            outputs: outputs.raw_values,
             access: inputs.value_accesses + outputs.value_accesses,
         });
     }
@@ -711,8 +578,6 @@ impl ApiVisitor<'_, '_> {
                 declaration: self.declaration(&format!("type {name}")),
                 shape: ty.to_token_stream().to_string(),
                 kind: ApiKind::TypeAlias,
-                inputs: 0,
-                outputs: signals.raw_values,
                 access: signals.value_accesses,
             });
         }
@@ -826,20 +691,15 @@ impl<'ast> Visit<'ast> for ApiVisitor<'_, '_> {
                 else {
                     continue;
                 };
-                let (inputs, outputs) = match name.as_str() {
-                    "Clone" => (1, 1),
-                    "PartialEq" => (2, 0),
-                    // `Eq` is a marker but still records the standard-trait
-                    // representation promise made by the raw value type.
-                    "Eq" => (1, 0),
-                    _ => continue,
-                };
+                // `Eq` is a marker, but it still promises a structural
+                // relation that `PartialEq` would expose without access.
+                if !matches!(name.as_str(), "Clone" | "PartialEq" | "Eq") {
+                    continue;
+                }
                 self.occurrences.push(ApiOccurrence {
                     declaration: self.declaration(&format!("derive {name}")),
                     shape: format!("#[derive({name})] {}", item.ident),
                     kind: ApiKind::DerivedTrait,
-                    inputs,
-                    outputs,
                     access: 0,
                 });
             }
@@ -847,28 +707,21 @@ impl<'ast> Visit<'ast> for ApiVisitor<'_, '_> {
     }
 }
 
-fn collect_occurrences(manifest: &Path) -> Vec<ApiOccurrence> {
-    let mut sources = Vec::new();
-    collect_rust_sources(&manifest.join("src"), &mut sources);
-    sources.sort();
-
-    let mut parsed = Vec::new();
-    for source_path in sources {
-        let relative = source_path
-            .strip_prefix(manifest)
-            .expect("a source path should belong to this package");
-        if !is_production_source(relative) {
-            continue;
-        }
-        let source = fs::read_to_string(&source_path).expect("Rust source should be readable");
-        let syntax = syn::parse_file(&source)
-            .unwrap_or_else(|error| panic!("{} should parse as Rust: {error}", relative.display()));
-        parsed.push((relative.to_path_buf(), syntax));
-    }
+fn collect_occurrences() -> Vec<ApiOccurrence> {
+    let parsed = production_sources()
+        .iter()
+        .map(|source| {
+            let syntax = syn::parse_file(&source.text).unwrap_or_else(|error| {
+                panic!("{} should parse as Rust: {error}", source.path.display())
+            });
+            (source.module.as_str(), syntax)
+        })
+        .collect::<Vec<_>>();
 
     let core_access_names = BTreeSet::from([
         "RuntimeValueAccess".to_owned(),
         "EvaluationValueAccess".to_owned(),
+        "Visitor".to_owned(),
     ]);
 
     let mut canonical_core_names = BTreeSet::from(["Value".to_owned()]);
@@ -876,8 +729,8 @@ fn collect_occurrences(manifest: &Path) -> Vec<ApiOccurrence> {
     loop {
         let core = parsed
             .iter()
-            .find(|(path, _)| path == Path::new("src/core.rs"))
-            .expect("the core value source must be inventoried");
+            .find(|(module, _)| is_core_module(module))
+            .expect("the core value module must be scanned");
         let prior = canonical_core_names.clone();
         let changed = discover_raw_aliases(
             &core.1.items,
@@ -895,11 +748,11 @@ fn collect_occurrences(manifest: &Path) -> Vec<ApiOccurrence> {
     loop {
         let mut changed = false;
         let known_alias_names = cross_file_alias_names.clone();
-        for (path, syntax) in &parsed {
+        for (module, syntax) in &parsed {
             let mut access_names = core_access_names.clone();
             while discover_access_carriers(&syntax.items, &mut access_names) {}
             let mut names =
-                initial_raw_names(path, syntax, &canonical_core_names, &known_alias_names);
+                initial_raw_names(module, syntax, &canonical_core_names, &known_alias_names);
             while discover_raw_aliases(
                 &syntax.items,
                 &mut names,
@@ -922,11 +775,11 @@ fn collect_occurrences(manifest: &Path) -> Vec<ApiOccurrence> {
     }
 
     let mut occurrences = Vec::new();
-    for (path, syntax) in parsed {
+    for (module, syntax) in parsed {
         let mut access_names = core_access_names.clone();
         while discover_access_carriers(&syntax.items, &mut access_names) {}
         let mut names = initial_raw_names(
-            &path,
+            module,
             &syntax,
             &canonical_core_names,
             &cross_file_alias_names,
@@ -939,7 +792,7 @@ fn collect_occurrences(manifest: &Path) -> Vec<ApiOccurrence> {
             &access_names,
         ) {}
         let mut visitor = ApiVisitor {
-            path: &path,
+            module,
             raw_names: &names,
             canonical_core_names: &canonical_core_names,
             cross_file_alias_names: &cross_file_alias_names,
@@ -957,272 +810,38 @@ fn collect_occurrences(manifest: &Path) -> Vec<ApiOccurrence> {
     occurrences
 }
 
-fn occurrence_fingerprint(occurrences: &[ApiOccurrence]) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-    let mut fingerprint = FNV_OFFSET;
-    for occurrence in occurrences {
-        for byte in occurrence.record().bytes().chain([0xff]) {
-            fingerprint = (fingerprint ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
-        }
-    }
-    fingerprint
-}
-
-fn occurrence_summary(occurrences: &[ApiOccurrence]) -> BTreeMap<(ApiKind, ApiDisposition), usize> {
-    occurrences
-        .iter()
-        .fold(BTreeMap::new(), |mut counts, occurrence| {
-            *counts
-                .entry((occurrence.kind, occurrence.disposition()))
-                .or_default() += 1;
-            counts
-        })
-}
-
-fn occurrence_file_summary(occurrences: &[ApiOccurrence]) -> BTreeMap<String, (usize, usize)> {
-    occurrences
-        .iter()
-        .fold(BTreeMap::new(), |mut counts, occurrence| {
-            let path = occurrence
-                .declaration
-                .split("::")
-                .next()
-                .expect("an inventory declaration should begin with a source path");
-            let count = counts.entry(path.to_owned()).or_insert((0, 0));
-            if occurrence.disposition() == ApiDisposition::Violation {
-                count.1 += 1;
-            } else {
-                count.0 += 1;
-            }
-            counts
-        })
-}
-
-fn remediation_summary(
-    occurrences: &[ApiOccurrence],
-) -> BTreeMap<(RemediationOwner, ReplacementShape), usize> {
-    occurrences
-        .iter()
-        .filter_map(ApiOccurrence::remediation_assignment)
-        .fold(BTreeMap::new(), |mut counts, assignment| {
-            *counts
-                .entry((assignment.owner, assignment.replacement))
-                .or_default() += 1;
-            counts
-        })
-}
-
-fn d2c_occurrences(occurrences: &[ApiOccurrence]) -> Vec<&ApiOccurrence> {
-    occurrences
-        .iter()
-        .filter(|occurrence| {
-            occurrence
-                .remediation_assignment()
-                .is_some_and(|assignment| assignment.owner == RemediationOwner::D2cEvaluator)
-        })
-        .collect()
-}
-
+/// Rule: a raw core `Value` crosses a production signature only with an
+/// access witness or a named exception.
 #[test]
-fn raw_core_value_api_inventory_is_complete() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let actual = collect_occurrences(manifest);
-
-    if std::env::var_os("GLAM_DUMP_RAW_VALUE_API_INVENTORY").is_some() {
-        for occurrence in &actual {
-            eprintln!("{}", occurrence.record());
-        }
-    }
-
-    assert_eq!(
-        actual.len(),
-        518,
-        "inventory count drifted: {:#?}",
-        occurrence_summary(&actual)
-    );
-    // Net polarity enforcement changes netlist replay's constructor helper
-    // to return the constructor's kind; its raw-value uses are unchanged.
-    assert_eq!(
-        occurrence_fingerprint(&actual),
-        9_367_143_353_251_087_579,
-        "inventory fingerprint drifted: {:#?}",
-        occurrence_file_summary(&actual),
-    );
-}
-
-#[test]
-fn raw_core_value_api_inventory_has_reviewed_dispositions() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let actual = collect_occurrences(manifest);
-    let expected = BTreeMap::from([
-        // W6G.1f.3g.1a-.3e.3b expose the regional list/key constructors and
-        // builtin family entry points through literal-pattern migration. Each
-        // raw value handoff remains tied to caller-supplied value access.
-        // W6G.1f.3g.4c moves object composition and its recursive override
-        // stack to eleven caller-access-qualified regional helpers.
-        // PNC1 adds seventeen access-qualified helpers which encode, validate,
-        // and replay the strict semantic interaction-net record. PNC2 adds
-        // eleven access-qualified state/list composition and path adapters.
-        // PNC3 adds thirteen access-qualified control/fix composition and
-        // strict hidden-frame adapters. Their values remain within the same
-        // caller-owned evaluator region.
-        // PNC4 adds eight access-qualified transition, compact-codec, and API
-        // helpers. Even immediate journal/value constructors retain explicit
-        // regional authority so the production access rule has no exception.
-        // Raw production values never cross the caller-owned evaluator region.
-        // PNC5 adds the shared effect-header projection and two retained
-        // runner constructors; each requires caller-owned value access. W7B
-        // adds one ready key-list constructor within that same region.
-        ((ApiKind::Function, ApiDisposition::RegionalAccess), 485),
-        ((ApiKind::Function, ApiDisposition::CollectorPrimitive), 28),
-        (
-            (ApiKind::TypeAlias, ApiDisposition::RegionalRepresentation),
-            5,
-        ),
-    ]);
-
-    assert_eq!(
-        occurrence_summary(&actual),
-        expected,
-        "raw core-value APIs require a reviewed access/disposition classification"
-    );
-
-    assert!(actual.iter().all(|occurrence| {
-        occurrence.declaration != "src/evaluation/session.rs::EvalContext::evaluate_whnf"
-    }));
-    assert!(actual.iter().all(|occurrence| {
-        occurrence.declaration
-            != "src/evaluation/session.rs::EvalContext::evaluate_compatibility_whnf"
-    }));
-
-    assert!(actual.iter().all(|occurrence| {
-        occurrence.declaration != "src/api/assembly.rs::Assembler::compile_diagnostic_emitter"
-    }));
-    assert!(actual.iter().any(|occurrence| {
-        occurrence.declaration == "src/g_syntax/resolve/scope.rs::NameScope::resolved_in"
-            && occurrence.disposition() == ApiDisposition::RegionalAccess
-    }));
-    assert!(
-        actual
-            .iter()
-            .all(|occurrence| !occurrence.declaration.starts_with("src/bin/")),
-        "the binary crate should expose only durable public Value handles"
-    );
-    assert!(actual.iter().all(|occurrence| {
-        occurrence.disposition() != ApiDisposition::CollectorPrimitive
-            || occurrence
-                .declaration
-                .starts_with("src/core/managed/payload_edges")
-            || occurrence.declaration
-                == "src/core/managed/recursive_cells.rs::trace_promise_assignment"
-            || occurrence.declaration
-                == "src/core/managed.rs::trace_compatibility_value_managed_edges"
-            || occurrence.declaration == "src/eval/lazy_checkpoint.rs::trace_host_call_result"
-            || occurrence.declaration == "src/eval/object_machine.rs::trace_object_values"
-            || occurrence.declaration == "src/eval/whnf.rs::trace_whnf_value"
-            || occurrence.declaration == "src/eval/whnf.rs::trace_whnf_values"
-    }));
-}
-
-#[test]
-fn every_raw_value_violation_has_one_reviewed_remediation_assignment() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let actual = collect_occurrences(manifest);
-    let expected = BTreeMap::new();
-
-    assert_eq!(
-        remediation_summary(&actual),
-        expected,
-        "each raw-value violation needs exactly one checkpoint owner and replacement shape"
-    );
-    assert_eq!(
-        actual
-            .iter()
-            .filter(|occurrence| occurrence.disposition() == ApiDisposition::Violation)
-            .count(),
-        expected.values().sum(),
-        "the remediation manifest must account for every violation"
-    );
-}
-
-#[test]
-fn d2b_core_compatibility_declarations_are_exact() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let actual = collect_occurrences(manifest)
+fn raw_core_values_cross_production_signatures_only_with_access() {
+    let unwitnessed = collect_occurrences()
         .into_iter()
         .filter(|occurrence| {
-            occurrence
-                .remediation_assignment()
-                .is_some_and(|assignment| {
-                    assignment.owner == RemediationOwner::D2bCoreCompatibility
-                })
+            occurrence.kind != ApiKind::TypeAlias && !occurrence.has_access_witness()
         })
-        .map(|occurrence| occurrence.declaration)
-        .collect::<BTreeSet<_>>();
-    let expected = BTreeSet::new();
-
-    assert_eq!(
-        actual, expected,
-        "D.2b.4 permits only the exact compatibility declarations handed to D.2c-D.2g and P4"
-    );
-}
-
-#[test]
-fn d2c_evaluator_boundary_is_closed() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let inventory = collect_occurrences(manifest);
-    let actual = d2c_occurrences(&inventory)
-        .into_iter()
-        .map(ApiOccurrence::record)
         .collect::<Vec<_>>();
-
+    let violations = unwitnessed
+        .iter()
+        .filter(|occurrence| witness_exception(&occurrence.declaration).is_none())
+        .map(|occurrence| format!("{}: {}", occurrence.declaration, occurrence.shape))
+        .collect::<Vec<_>>();
     assert!(
-        actual.is_empty(),
-        "D.2c is closed; new raw evaluator APIs require an explicit later owner: {actual:#?}"
+        violations.is_empty(),
+        "raw core values cross production signatures without an access witness: {violations:#?}"
     );
-}
 
-#[test]
-fn d2d_orchestration_declarations_are_exact() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let actual = collect_occurrences(manifest)
-        .into_iter()
-        .filter(|occurrence| {
-            occurrence
-                .remediation_assignment()
-                .is_some_and(|assignment| assignment.owner == RemediationOwner::D2dOrchestration)
+    let stale = WITNESS_EXCEPTIONS
+        .iter()
+        .filter(|exception| {
+            !unwitnessed
+                .iter()
+                .any(|occurrence| witness_exception(&occurrence.declaration) == Some(*exception))
         })
-        .map(|occurrence| occurrence.declaration)
-        .collect::<BTreeSet<_>>();
-    let expected = BTreeSet::new();
-
-    assert_eq!(
-        actual, expected,
-        "D.2d begins from one exact orchestration manifest; new raw-value APIs require a reviewed owner"
-    );
-}
-
-#[test]
-fn d2g_public_compiler_diagnostic_declarations_are_exact() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let actual = collect_occurrences(manifest)
-        .into_iter()
-        .filter(|occurrence| {
-            occurrence
-                .remediation_assignment()
-                .is_some_and(|assignment| {
-                    assignment.owner == RemediationOwner::D2gPublicCompilerDiagnostics
-                })
-        })
-        .map(|occurrence| occurrence.declaration)
-        .collect::<BTreeSet<_>>();
-    let expected = BTreeSet::new();
-
-    assert_eq!(
-        actual, expected,
-        "D.2g begins from one exact public/compiler/diagnostic manifest; new raw-value APIs require a reviewed owner"
+        .map(|(module, function, _)| format!("{module}::{function}"))
+        .collect::<Vec<_>>();
+    assert!(
+        stale.is_empty(),
+        "witness exceptions no longer match an unwitnessed raw-value signature: {stale:?}"
     );
 }
 
@@ -1235,6 +854,7 @@ fn raw_core_value_type_scanner_covers_wrappers_callbacks_aliases_and_bounds() {
     let access_names = BTreeSet::from([
         "RuntimeValueAccess".to_owned(),
         "EvaluationValueAccess".to_owned(),
+        "Visitor".to_owned(),
     ]);
 
     let wrapped: Type =
@@ -1301,6 +921,7 @@ fn raw_core_value_type_scanner_covers_wrappers_callbacks_aliases_and_bounds() {
     for admitted in [
         "&RuntimeValueAccess<'_>",
         "Option<&EvaluationValueAccess<'_>>",
+        "&mut glam_gc::Visitor<'_>",
     ] {
         let value_type: Type = syn::parse_str(admitted).expect("access fixture should parse");
         assert_ne!(

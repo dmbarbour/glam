@@ -26,8 +26,8 @@ not define language semantics or collect subsystem invariants.
 | `source.rs` | Source artifacts, digests, relative resolvers, tracked local files |
 | `lib.rs`, `api.rs` | Stable embedding facade and re-exports |
 | `api/value.rs`, `api/evaluator.rs`, `api/error.rs` | Opaque inline-or-managed runtime-rooted value construction, explicit demand/extraction, privileged inspection, and structured embedding failures |
-| `api/value/access_inventory.rs` | Test-only production-root and forbidden bare-core escape inventories for the managed public facade |
-| `core/managed.rs`, `core/managed/` | Private managed-family and opaque-payload admission, scoped allocation/access, production managed value nodes, source-backed closure/opaque containment inventory, and exact compatibility semantic-edge adapters |
+| `api/value/access_inventory.rs` | Test-only audit: no code escapes between public and bare core values |
+| `core/managed.rs`, `core/managed/` | Private managed-family and opaque-payload admission, scoped allocation/access, production managed value nodes, and exact compatibility semantic-edge adapters |
 | `api/diagnostics.rs` | Diagnostic values, buses, subscriptions, enrichment, and runtime ingress |
 | `api/runtime.rs`, `api/runtime/` | Runtime ownership, transactional events, delivery, readiness, deadlock reports, settlement, authoritative explicit GC maintenance activity/failure reporting, and stable pressure promotion |
 | `api/assembly.rs` | Assembler/reasoning construction, protected volumes, sources, imports, and module builds |
@@ -55,8 +55,8 @@ not define language semantics or collect subsystem invariants.
 | `core.rs`, `core/` | Syntax-independent values, runtime value-domain ownership, factory-scoped managed allocation/rooting, lazies, promises, functions, keys, builtins, and reflection computations whose effect/target remain exact semantic edges |
 | `core/managed.rs` | Factory-qualified collector access and `RuntimeValueAccess`, Glam's centralized managed-slot policy, and private managed-family destruction admission records |
 | `core/managed/value_node.rs` | Private production inline-or-root preparation, the managed outer value shell, exhaustive variant dispatch, and root lifecycle fixtures |
-| `core/managed/*_inventory.rs` | Source-backed durable-root, recursive-identity, containment, active-RAII, persistent-edge, and whole-production-graph composition gates without duplicated source-count baselines |
-| `core/managed/raw_value_api_inventory.rs` | Test-only syntax-backed inventory of every production signature carrying private `core::Value`, including aliases, standard operations, access classification, rooted orchestration seams, and the closed evaluator/orchestration/front-end/reflection/public partitions; its accepted surface contains no authority-free violation or pending remediation |
+| `core/managed/managed_boundary_audit.rs` | Test-only audit: managed-graph declarations hold no value-domain authority, registered root, or active `Drop`, and opaque payloads enter only through unsafe admission; plus managed-boundary reclamation tests |
+| `core/managed/raw_value_api_inventory.rs` | Test-only audit: a raw core `Value` in a production signature needs an access witness, except four named edge adapters |
 | `crates/glam-gc/` | Glam-owned typed-run tracing collector; each runtime value domain owns one immutable `NoAuto` heap, recursive identities are exact managed edges, and explicit stable-boundary runtime maintenance owns pressure promotion, collection activity, and non-panicking recovery snapshots |
 | `core_net.rs` | Exact-value-domain facade plus scoped observation and mutation for managed core interaction nets; raw shared-net ownership is absent from the core specialization |
 | `interaction_net/model.rs`, `builder.rs` | Generic topology and checked construction |
@@ -78,8 +78,7 @@ not define language semantics or collect subsystem invariants.
 | `eval/list_transform_machine.rs` | Non-forcing structural `map` and `list.concat` |
 | `eval/tagged_machine.rs` | Shared resumable tagged-payload recognition and iterative semantic-undefined traversal |
 | `eval/whnf.rs`, `eval/whnf/tests/` | Crate-private WHNF submachine protocol with one canonical raw-edge state behind zero-walk regional/net ownership wrappers, a separate durable rooted demand checkpoint, a bounded callback-free regional driver, atomic rooted checkpoint publication, and scheduler-independent lifecycle/collection fixtures; lazy sources install progress beneath their owning lazy, while client demand, promise sources, reflection request work, and demand-capable builtin machines use the protocol |
-| `eval/whnf_checkpoint_inventory.rs` | Test-only census of the remaining durable WHNF demand constructors, observers, and seed modifiers; lazy source entry is inventoried separately as direct lazy-owned checkpoint installation |
-| `eval/access_inventory.rs` | Test-only I3B closure inventory for scoped evaluator functions, durable subsystem seams, external direct calls, and builtin downgrades |
+| `eval/access_inventory.rs` | Test-only audit: specialization request work never evaluates synchronously |
 | `eval/builtins/` | Builtin implementations by semantic family; forcing a saturated builtin lazy uses the caller's bounded `EvaluationValueAccess`, immediate constructors publish before that region closes, and `ManagedBuiltinCheckpointCell` traces every demand-capable family's regional state across yield, dependency, failure, and completion |
 | `eval/builtins/net/identity.rs` | Invocation-local construction brands and edge-free opaque logical port handles |
 | `eval/builtins/net/runner.rs` | Pure source construction effect runner, retained first-two selector, exposed-port demand, and selected netlist replay |
@@ -173,9 +172,8 @@ focused [interaction-net invariants](../docs/agent_context/interaction_nets.md).
 - `api/tests.rs` retains cross-facade value/assembly tests;
   `api/tests/runtime_tests.rs` and `api/tests/diagnostic_tests.rs` own runtime
   event/readiness and diagnostic transport integration tests.
-- `api/value/access_inventory.rs` owns the mechanically checked registered-root
-  publication inventory and rejects authority-free bare-core escapes from the
-  production `Value`/`RuntimeValueRoot` facade.
+- `api/value/access_inventory.rs` rejects escapes between the public
+  `Value`/`RuntimeValueRoot` facade and bare core values.
 - Binary command-line and logger unit tests live below `bin/glam/`; `tests/cli.rs`
   covers the executable process contract.
 - `tests/` also covers the public library facade, valid samples, and invalid

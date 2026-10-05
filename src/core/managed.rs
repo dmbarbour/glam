@@ -337,14 +337,14 @@ unsafe impl ManagedFamily for ClosedCompatibilityValue {
 ///
 /// Unlike [`ManagedDropRecord`], this is not collector admission. It prevents
 /// `OpaqueValue`'s `Any` boundary from accepting a new family merely because
-/// the Rust type is `Send + Sync`. Every admitted external family remains in
-/// the authoritative external-owner inventory; a family that instead needs
-/// managed edges or managed destructor authority requires a new
+/// the Rust type is `Send + Sync`. Every admitted payload lives in the
+/// runtime's external-owner registry, outside the managed graph; a family that
+/// instead needs managed edges or managed destructor authority requires a new
 /// representation review.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(
     dead_code,
-    reason = "opaque records are compile-time admission evidence, inspected by containment audits"
+    reason = "opaque records are compile-time admission evidence, read only by tests"
 )]
 pub(crate) struct OpaquePayloadRecord {
     family: &'static str,
@@ -359,8 +359,8 @@ impl OpaquePayloadRecord {
         Self::reviewed(family, source, "edge-free token")
     }
 
-    /// Records an external capability whose lifecycle remains outside the
-    /// collector and is covered by the authoritative ownership audit.
+    /// Records an external capability whose lifecycle stays outside the
+    /// collector, in the runtime's external-owner registry.
     pub(crate) const fn external(family: &'static str, source: &'static str) -> Self {
         Self::reviewed(family, source, "external capability")
     }
@@ -392,10 +392,10 @@ impl OpaquePayloadRecord {
 /// The payload must contain no bare `Gc`, unrooted recursive `core::Value`,
 /// `RuntimeValueRoot`, or other unreported managed edge. `edge_free` families
 /// contain no Glam value/runtime capability at all. `external` families may
-/// carry an audited host lifecycle capability, but must remain in the active
-/// external-owner inventory rather than being treated as a collector-managed
-/// leaf. A family needing a collector-visible edge or managed destructor
-/// authority is not admissible here; it requires a new representation review.
+/// carry a host lifecycle capability, which the runtime's external-owner
+/// registry retires; collector finalization never does. A family needing a
+/// collector-visible edge or managed destructor authority is not admissible
+/// here; it requires a new representation review.
 pub(crate) unsafe trait OpaquePayloadFamily: Any + Send + Sync {
     const PAYLOAD_RECORD: OpaquePayloadRecord;
 }
@@ -1029,25 +1029,10 @@ impl<T: ManagedFamily> CoreValueAllocator<'_, T> {
 }
 
 #[cfg(test)]
-mod containment_inventory;
-
-#[cfg(test)]
-mod active_owner_inventory;
-
-#[cfg(test)]
-mod durable_owner_inventory;
-
-#[cfg(test)]
-mod recursive_identity_inventory;
-
-#[cfg(test)]
-mod gate_g2_inventory;
+mod managed_boundary_audit;
 
 #[cfg(test)]
 mod raw_value_api_inventory;
-
-#[cfg(test)]
-mod persistent_edge_trait_inventory;
 
 mod payload_edges;
 

@@ -131,7 +131,7 @@ which vary by process or heap.
 | layout | `managed_slot_extent::<T>()`; `const` latches on core cells and facades |
 | destruction | the record's direct and transitive reviews (`no_drop` or `passive`) |
 | mutation | immutable (`ManagedValueNode` and its shells), one-write (lazy result, promise assignment), or replaceable under the owner's mutex (lazy producer slot, checkpoint state, net topology); every change after publication is one owner-qualified transition |
-| no edge hidden behind a root | the `*_inventory.rs` source latches |
+| no edge hidden behind a root | the `core/managed/managed_boundary_audit.rs` source audit |
 | evidence | survival across a forced collection; cycle-reclamation fixtures for the core cells |
 
 ## Recursive Identities
@@ -279,9 +279,13 @@ access in lease traffic and pause wherever a region happened to open.
 - Allocations are published before their region ends.
 - Destruction is passive; a trace does no semantic work.
 
-Source latches (the `*_inventory.rs` modules and `core/runtime_cache.rs`)
-reject unclassified heap entries, roots, families and payloads. Tests collect
-only private domains.
+Source audits reject the shapes that would break these rules: authority,
+roots or active `Drop` in managed-graph declarations, and unadmitted opaque
+payloads (`core/managed/managed_boundary_audit.rs`); raw core values crossing
+production signatures without access (`core/managed/raw_value_api_inventory.rs`);
+heaps that collect automatically (`api/runtime/gc_activity_inventory.rs`); and
+unreviewed runtime cache families (`core/runtime_cache.rs`). Tests collect only
+private domains.
 `scripts/check.sh full` adds `aggressive-gc-verification`. Collector evidence
 is in [`VERIFY.md`](../../crates/glam-gc/VERIFY.md).
 

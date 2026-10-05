@@ -1,411 +1,149 @@
-//! W0B source-backed census of recursive WHNF work and suspension boundaries.
+//! Audit: no unapproved recursion in evaluator and core-value code.
 //!
-//! This inventory complements the D.2c raw-`Value` inventory: it records the
-//! control-flow operation at each occurrence, plus the reviewed resumption
-//! role which must survive the WHNF trampoline transition. It intentionally
-//! scans orchestration adapters only where they translate evaluator halts or
-//! host resumptions; it is not a second inventory of the entire scheduler.
+//! User data can be arbitrarily deep, so semantic work must not recurse on the
+//! Rust stack. The permitted forms are bounded plumbing, log-depth balanced
+//! containers, and owned worklists. This audit builds a call graph over the
+//! production code of the evaluator, the core value domain, and the
+//! evaluator-facing orchestration and reflection modules. It rejects every
+//! call cycle that is neither approved on [`BOUNDED_RECURSION`] nor recorded
+//! as an open defect on [`KNOWN_UNBOUNDED_RECURSION`].
+//!
+//! The graph sees only calls it can resolve syntactically within one module:
+//! a free function, `Self::f` or `Type::f`, and `self.f()`. It does not see
+//! recursion through another receiver (`child.f()`), another module, a trait
+//! object, a closure value, or implicit `Drop` glue. Those shapes need
+//! small-stack tests instead.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use quote::ToTokens;
+use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
-use syn::{
-    Attribute, ExprCall, ExprForLoop, ExprLoop, ExprMethodCall, ExprWhile, ImplItemFn, ItemFn,
-};
+use syn::{Attribute, ExprCall, ExprMethodCall, ImplItemFn, ItemFn, Meta, Token};
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum Signal {
-    EvalValue,
-    EvalLazy,
-    EvalPromise,
-    ApplyValue,
-    ApplyValues,
-    ReflectionEvaluate,
-    RetryableWait,
-    UnassignedPromise,
-    DependencyTranslation,
-    CoordinatorBoundary,
-    ReflectionBoundary,
-    HostBoundary,
-    NetBoundary,
-    StructuralRecursion,
-    UserSizedLoop,
-}
+/// Recursive call families whose depth is bounded independently of user
+/// data. Each entry names one function on a cycle, keyed by module and item,
+/// with the reason the cycle cannot grow with user input.
+const BOUNDED_RECURSION: &[(&str, &str)] = &[];
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OuterOwner {
-    PureEvaluator,
-    LazyTask,
-    ClientDemand,
-    Spark,
-    ReflectionMachine,
-    NetWorklist,
-    CoordinatorAdapter,
-}
+/// Open defects, not approvals: cycles whose depth follows user data. Each
+/// awaits an iterative rewrite. They are listed so that a new cycle still
+/// fails the audit; remove an entry once its function stops recursing.
+const KNOWN_UNBOUNDED_RECURSION: &[(&str, &str)] = &[
+    (
+        "crate::core::RuntimeValueAccess::key_from_value",
+        "recurses once per list or dictionary nesting level of the value it converts",
+    ),
+    (
+        "crate::core::RuntimeValueAccess::same_representation",
+        "recurses once per strict list or dictionary nesting level of the compared values",
+    ),
+    (
+        "crate::core::RuntimeValueAccess::value_from_key",
+        "recurses once per list or dictionary nesting level of the key it reifies",
+    ),
+    (
+        "crate::core::managed::payload_edges::managed::visit_value_with",
+        "the collector's edge walk recurses once per strict aggregate level above a managed identity",
+    ),
+];
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ResultDisposition {
-    ReturnWhnf,
-    PublishLazyCache,
-    PublishClientDemand,
-    DiscardSparkResult,
-    ParseReflectionRequest,
-    ContinueReflectionPhase,
-    ContinueNetWork,
-    TranslateDependency,
-}
+/// Modules whose production code must not recurse, with their submodules.
+const AUDITED_MODULE_TREES: &[&str] = &["crate::eval", "crate::core"];
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StableOwner {
-    InputValue,
-    LazyIdentity,
-    PromiseIdentity,
-    ClientDemandRecord,
-    ReflectionTaskRecord,
-    NetMachine,
-    CoordinatorRecord,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DependencyKind {
-    None,
-    LazyWait,
-    PromiseAssignment,
-    GenericWait,
-    ReflectionTask,
-    Host,
-    Net,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum WorkShape {
-    TailDemand,
-    DemandThenInspect,
-    OrderedOperands,
-    CollectionWalk,
-    Application,
-    KeyConversion,
-    AccessPath,
-    DiagnosticContext,
-    OrchestrationHandoff,
-}
-
-/// W7's stack-ownership disposition for one W0B occurrence.
-///
-/// This is deliberately independent from `WorkShape`: the latter explains
-/// what must resume after a boundary, while this enum explains why the source
-/// occurrence does not hide user-controlled semantic depth on the Rust stack.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum W7Disposition {
-    ExplicitIteration,
-    Orchestration,
-    UnapprovedRecursion,
-}
-
-/// Compile-exhaustive latch for W0C's selected shared work-stack vocabulary.
-/// Production payloads arrive in W1; changing this set first requires updating
-/// the census-backed representation decision in the plan.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SelectedWorkVariant {
-    Delegate,
-    DemandThenInspect,
-    OrderedOperands,
-    CollectionWalk,
-    Application,
-    KeyConversion,
-    AccessPath,
-    DiagnosticContext,
-    OrchestrationHandoff,
-}
-
-fn selected_variant_shape(variant: SelectedWorkVariant) -> Option<WorkShape> {
-    match variant {
-        SelectedWorkVariant::Delegate => None,
-        SelectedWorkVariant::DemandThenInspect => Some(WorkShape::DemandThenInspect),
-        SelectedWorkVariant::OrderedOperands => Some(WorkShape::OrderedOperands),
-        SelectedWorkVariant::CollectionWalk => Some(WorkShape::CollectionWalk),
-        SelectedWorkVariant::Application => Some(WorkShape::Application),
-        SelectedWorkVariant::KeyConversion => Some(WorkShape::KeyConversion),
-        SelectedWorkVariant::AccessPath => Some(WorkShape::AccessPath),
-        SelectedWorkVariant::DiagnosticContext => Some(WorkShape::DiagnosticContext),
-        SelectedWorkVariant::OrchestrationHandoff => Some(WorkShape::OrchestrationHandoff),
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ContextBehavior {
-    Preserve,
-    AttachEvaluatorContext,
-    TranslateToTaskHalt,
-    TranslateToDependency,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Classification {
-    outer: OuterOwner,
-    disposition: ResultDisposition,
-    stable_owner: StableOwner,
-    dependency: DependencyKind,
-    remaining: WorkShape,
-    context: ContextBehavior,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct Occurrence {
-    declaration: String,
-    ordinal: usize,
-    signal: Signal,
-    classification: Classification,
-}
-
-impl Occurrence {
-    fn record(&self) -> String {
-        format!(
-            "{}#{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
-            self.declaration,
-            self.ordinal,
-            self.signal,
-            self.classification.outer,
-            self.classification.disposition,
-            self.classification.stable_owner,
-            self.classification.dependency,
-            self.classification.remaining,
-            self.classification.context,
-        )
-    }
-
-    fn w7_record(&self) -> String {
-        format!("{}|{:?}", self.record(), w7_disposition(self))
-    }
-}
-
-struct CensusVisitor<'path> {
-    path: &'path Path,
-    module: Vec<String>,
-    impl_name: Option<String>,
-    function: Option<String>,
-    ordinals: BTreeMap<String, usize>,
-    occurrences: Vec<Occurrence>,
-}
+/// Single orchestration and reflection modules that drive evaluator work.
+const AUDITED_MODULES: &[&str] = &[
+    "crate::evaluation::pump",
+    "crate::evaluation::session",
+    "crate::evaluation::whnf",
+    "crate::reflection::machine",
+    "crate::reflection::protocol",
+    "crate::reflection::requests",
+];
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct FunctionKey {
-    path: String,
-    module: Vec<String>,
+    module: String,
     impl_name: Option<String>,
     name: String,
 }
 
 impl FunctionKey {
-    fn declaration(&self) -> String {
-        let mut parts = vec![self.path.clone()];
-        parts.extend(self.module.iter().cloned());
-        if let Some(name) = &self.impl_name {
-            parts.push(name.clone());
+    fn item_path(&self) -> String {
+        match &self.impl_name {
+            Some(owner) => format!("{}::{owner}::{}", self.module, self.name),
+            None => format!("{}::{}", self.module, self.name),
         }
-        parts.push(self.name.clone());
-        parts.join("::")
-    }
-}
-
-#[derive(Clone, Debug)]
-struct ResolvedCall {
-    caller: FunctionKey,
-    ordinal: usize,
-    callee: FunctionKey,
-}
-
-impl ResolvedCall {
-    fn record(&self) -> String {
-        format!(
-            "{}#{}->{}",
-            self.caller.declaration(),
-            self.ordinal,
-            self.callee.declaration()
-        )
-    }
-}
-
-#[derive(Clone, Debug)]
-enum LocalCallTarget {
-    Free(String),
-    Associated { owner: String, name: String },
-}
-
-#[derive(Clone, Debug)]
-struct LocalCall {
-    caller: FunctionKey,
-    ordinal: usize,
-    target: LocalCallTarget,
-}
-
-/// Retired W8 compatibility entry points and the two live retryable-halt
-/// constructors which decide whether `EvaluationHalt` can collapse into a
-/// permanent failure.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum W8Surface {
-    EvalValue,
-    EvalValueIn,
-    EvalLazyIn,
-    EvalPromisedIn,
-    AwaitDeferredTask,
-    DeferredWaitResult,
-    ProduceLazySourceIn,
-    WithDirectEvaluator,
-    HaltBlocked,
-    HaltUnassignedPromise,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct W8Call {
-    declaration: String,
-    ordinal: usize,
-    surface: W8Surface,
-}
-
-impl W8Call {
-    fn record(&self) -> String {
-        format!("{}#{}|{:?}", self.declaration, self.ordinal, self.surface)
     }
 }
 
 #[derive(Default)]
-struct W8BoundaryInventory {
-    retired_declarations: Vec<String>,
-    calls: Vec<W8Call>,
+struct CallGraph {
+    definitions: BTreeSet<FunctionKey>,
+    calls: BTreeMap<FunctionKey, BTreeSet<FunctionKey>>,
 }
 
-struct W8CallerVisitor<'path> {
-    path: &'path Path,
-    module: Vec<String>,
-    impl_name: Option<String>,
-    function: Option<String>,
-    ordinals: BTreeMap<String, usize>,
-    retired_declarations: Vec<String>,
-    calls: Vec<W8Call>,
-}
-
-impl<'path> W8CallerVisitor<'path> {
-    fn new(path: &'path Path) -> Self {
-        Self {
-            path,
-            module: Vec::new(),
+impl CallGraph {
+    fn add_module(&mut self, module: &str, syntax: &syn::File) {
+        let mut visitor = CallGraphVisitor {
+            module: vec![module.to_owned()],
             impl_name: None,
             function: None,
-            ordinals: BTreeMap::new(),
-            retired_declarations: Vec::new(),
+            definitions: BTreeSet::new(),
             calls: Vec::new(),
-        }
-    }
-
-    fn declaration(&self) -> String {
-        let mut parts = vec![self.path.display().to_string()];
-        parts.extend(self.module.iter().cloned());
-        if let Some(name) = &self.impl_name {
-            parts.push(name.clone());
-        }
-        parts.push(
-            self.function
-                .clone()
-                .unwrap_or_else(|| "<module>".to_owned()),
-        );
-        parts.join("::")
-    }
-
-    fn visit_function(&mut self, name: String, body: &syn::Block) {
-        let prior_function = self.function.replace(name);
-        if retired_w8_surface(
-            self.function
-                .as_deref()
-                .expect("a visited function has a name"),
-        )
-        .is_some()
-        {
-            self.retired_declarations.push(self.declaration());
-        }
-        self.visit_block(body);
-        self.function = prior_function;
-    }
-
-    fn record(&mut self, surface: W8Surface) {
-        let declaration = self.declaration();
-        let ordinal = self.ordinals.entry(declaration.clone()).or_default();
-        *ordinal += 1;
-        self.calls.push(W8Call {
-            declaration,
-            ordinal: *ordinal,
-            surface,
-        });
-    }
-}
-
-impl<'ast> Visit<'ast> for W8CallerVisitor<'_> {
-    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
-        let Some((_, items)) = &node.content else {
-            return;
         };
-        self.module.push(node.ident.to_string());
-        for item in items {
-            self.visit_item(item);
+        visitor.visit_file(syntax);
+        self.definitions.extend(visitor.definitions);
+        for (caller, callee) in visitor.calls {
+            self.calls.entry(caller).or_default().insert(callee);
         }
-        self.module.pop();
     }
 
-    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
-        let prior_impl = self.impl_name.replace(type_name(&node.self_ty));
-        visit::visit_item_impl(self, node);
-        self.impl_name = prior_impl;
-    }
-
-    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
-        self.visit_function(node.sig.ident.to_string(), &node.block);
-    }
-
-    fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
-        self.visit_function(node.sig.ident.to_string(), &node.block);
-    }
-
-    fn visit_expr_call(&mut self, node: &'ast ExprCall) {
-        if let syn::Expr::Path(path) = node.func.as_ref()
-            && let Some(surface) = w8_surface(&path.path)
-        {
-            self.record(surface);
-        }
-        visit::visit_expr_call(self, node);
+    /// Every defined function from which a resolved call path returns to it.
+    fn cyclic_functions(&self) -> BTreeSet<String> {
+        self.definitions
+            .iter()
+            .filter(|start| {
+                let resolved = |key: &FunctionKey| self.definitions.contains(key);
+                let mut pending = self
+                    .calls
+                    .get(*start)
+                    .into_iter()
+                    .flatten()
+                    .filter(|key| resolved(key))
+                    .collect::<Vec<_>>();
+                let mut visited = BTreeSet::new();
+                while let Some(next) = pending.pop() {
+                    if next == *start {
+                        return true;
+                    }
+                    if visited.insert(next)
+                        && let Some(following) = self.calls.get(next)
+                    {
+                        pending.extend(following.iter().filter(|key| resolved(key)));
+                    }
+                }
+                false
+            })
+            .map(FunctionKey::item_path)
+            .collect()
     }
 }
 
-struct CallGraphVisitor<'path> {
-    path: &'path Path,
+struct CallGraphVisitor {
     module: Vec<String>,
     impl_name: Option<String>,
     function: Option<FunctionKey>,
-    ordinals: BTreeMap<FunctionKey, usize>,
     definitions: BTreeSet<FunctionKey>,
-    calls: Vec<LocalCall>,
+    calls: Vec<(FunctionKey, FunctionKey)>,
 }
 
-impl<'path> CallGraphVisitor<'path> {
-    fn new(path: &'path Path) -> Self {
-        Self {
-            path,
-            module: Vec::new(),
-            impl_name: None,
-            function: None,
-            ordinals: BTreeMap::new(),
-            definitions: BTreeSet::new(),
-            calls: Vec::new(),
-        }
-    }
-
-    fn key(&self, name: String) -> FunctionKey {
+impl CallGraphVisitor {
+    fn key(&self, impl_name: Option<String>, name: String) -> FunctionKey {
         FunctionKey {
-            path: self.path.display().to_string(),
-            module: self.module.clone(),
-            impl_name: self.impl_name.clone(),
+            module: self.module.join("::"),
+            impl_name,
             name,
         }
     }
@@ -414,40 +152,33 @@ impl<'path> CallGraphVisitor<'path> {
         if is_test_only(attributes) {
             return;
         }
-        let function = self.key(name);
+        let function = self.key(self.impl_name.clone(), name);
         self.definitions.insert(function.clone());
         let prior = self.function.replace(function);
         self.visit_block(body);
         self.function = prior;
     }
 
-    fn record(&mut self, target: LocalCallTarget) {
-        let Some(caller) = self.function.clone() else {
-            return;
-        };
-        let ordinal = self.ordinals.entry(caller.clone()).or_default();
-        *ordinal += 1;
-        self.calls.push(LocalCall {
-            caller,
-            ordinal: *ordinal,
-            target,
-        });
+    fn record(&mut self, impl_name: Option<String>, name: String) {
+        if let Some(caller) = self.function.clone() {
+            let callee = self.key(impl_name, name);
+            self.calls.push((caller, callee));
+        }
     }
 }
 
-impl<'ast> Visit<'ast> for CallGraphVisitor<'_> {
+impl<'ast> Visit<'ast> for CallGraphVisitor {
     fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
         if is_test_only(&node.attrs) {
             return;
         }
-        let Some((_, items)) = &node.content else {
-            return;
-        };
-        self.module.push(node.ident.to_string());
-        for item in items {
-            self.visit_item(item);
+        if let Some((_, items)) = &node.content {
+            self.module.push(node.ident.to_string());
+            for item in items {
+                self.visit_item(item);
+            }
+            self.module.pop();
         }
-        self.module.pop();
     }
 
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
@@ -476,19 +207,11 @@ impl<'ast> Visit<'ast> for CallGraphVisitor<'_> {
                 .map(|segment| segment.ident.to_string())
                 .collect::<Vec<_>>();
             match segments.as_slice() {
-                [name] => self.record(LocalCallTarget::Free(name.clone())),
-                [owner, name] if owner == "Self" || owner == "self" => {
-                    if let Some(owner) = self.impl_name.clone() {
-                        self.record(LocalCallTarget::Associated {
-                            owner,
-                            name: name.clone(),
-                        });
-                    }
+                [name] => self.record(None, name.clone()),
+                [owner, name] if owner == "Self" => {
+                    self.record(self.impl_name.clone(), name.clone());
                 }
-                [owner, name] => self.record(LocalCallTarget::Associated {
-                    owner: owner.clone(),
-                    name: name.clone(),
-                }),
+                [owner, name] => self.record(Some(owner.clone()), name.clone()),
                 _ => {}
             }
         }
@@ -499,165 +222,11 @@ impl<'ast> Visit<'ast> for CallGraphVisitor<'_> {
         if matches!(
             node.receiver.as_ref(),
             syn::Expr::Path(path) if path.path.is_ident("self")
-        ) && let Some(owner) = self.impl_name.clone()
-        {
-            self.record(LocalCallTarget::Associated {
-                owner,
-                name: node.method.to_string(),
-            });
+        ) {
+            self.record(self.impl_name.clone(), node.method.to_string());
         }
         visit::visit_expr_method_call(self, node);
     }
-}
-
-impl<'path> CensusVisitor<'path> {
-    fn new(path: &'path Path) -> Self {
-        Self {
-            path,
-            module: Vec::new(),
-            impl_name: None,
-            function: None,
-            ordinals: BTreeMap::new(),
-            occurrences: Vec::new(),
-        }
-    }
-
-    fn declaration(&self) -> String {
-        let mut parts = vec![self.path.display().to_string()];
-        parts.extend(self.module.iter().cloned());
-        if let Some(name) = &self.impl_name {
-            parts.push(name.clone());
-        }
-        parts.push(
-            self.function
-                .clone()
-                .unwrap_or_else(|| "<module>".to_owned()),
-        );
-        parts.join("::")
-    }
-
-    fn record(&mut self, signal: Signal) {
-        let declaration = self.declaration();
-        let ordinal = self.ordinals.entry(declaration.clone()).or_default();
-        *ordinal += 1;
-        self.occurrences.push(Occurrence {
-            classification: classify(self.path, &declaration, signal),
-            declaration,
-            ordinal: *ordinal,
-            signal,
-        });
-    }
-
-    fn visit_function(&mut self, name: String, attributes: &[Attribute], body: &syn::Block) {
-        if is_test_only(attributes) {
-            return;
-        }
-        let prior = self.function.replace(name);
-        self.visit_block(body);
-        self.function = prior;
-    }
-}
-
-impl<'ast> Visit<'ast> for CensusVisitor<'_> {
-    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
-        let Some((_, items)) = &node.content else {
-            return;
-        };
-        self.module.push(node.ident.to_string());
-        for item in items {
-            self.visit_item(item);
-        }
-        self.module.pop();
-    }
-
-    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
-        if is_test_only(&node.attrs) {
-            return;
-        }
-        let prior = self.impl_name.replace(type_name(&node.self_ty));
-        visit::visit_item_impl(self, node);
-        self.impl_name = prior;
-    }
-
-    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
-        self.visit_function(node.sig.ident.to_string(), &node.attrs, &node.block);
-    }
-
-    fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
-        self.visit_function(node.sig.ident.to_string(), &node.attrs, &node.block);
-    }
-
-    fn visit_expr_call(&mut self, node: &'ast ExprCall) {
-        if let syn::Expr::Path(path) = node.func.as_ref() {
-            let full = path_string(&path.path);
-            let name = path.path.segments.last().map(|part| part.ident.to_string());
-            if let Some(signal) = name
-                .as_deref()
-                .and_then(|name| function_signal(&full, name))
-            {
-                self.record(signal);
-            }
-            if is_direct_recursive_call(
-                &path.path,
-                self.function.as_deref(),
-                self.impl_name.as_deref(),
-            ) {
-                self.record(Signal::StructuralRecursion);
-            }
-        }
-        visit::visit_expr_call(self, node);
-    }
-
-    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
-        if let Some(signal) = method_signal(self.path, &node.method.to_string()) {
-            self.record(signal);
-        }
-        if node.method == self.function.as_deref().unwrap_or_default()
-            && matches!(
-                node.receiver.as_ref(),
-                syn::Expr::Path(path) if path.path.is_ident("self")
-            )
-        {
-            self.record(Signal::StructuralRecursion);
-        }
-        visit::visit_expr_method_call(self, node);
-    }
-
-    fn visit_expr_for_loop(&mut self, node: &'ast ExprForLoop) {
-        self.record(Signal::UserSizedLoop);
-        visit::visit_expr_for_loop(self, node);
-    }
-
-    fn visit_expr_while(&mut self, node: &'ast ExprWhile) {
-        self.record(Signal::UserSizedLoop);
-        visit::visit_expr_while(self, node);
-    }
-
-    fn visit_expr_loop(&mut self, node: &'ast ExprLoop) {
-        // W1B proves that the target WHNF driver consumes one explicit budget
-        // unit before every transition. It cannot scale with user data inside
-        // one quantum, so it is not one of this migration census's
-        // user-sized-loop sources.
-        if self.declaration() != "src/eval/whnf.rs::drive_regional" {
-            self.record(Signal::UserSizedLoop);
-        }
-        visit::visit_expr_loop(self, node);
-    }
-}
-
-fn is_test_only(attributes: &[Attribute]) -> bool {
-    attributes.iter().any(|attribute| {
-        attribute.path().is_ident("test")
-            || (attribute.path().is_ident("cfg")
-                && attribute
-                    .meta
-                    .to_token_stream()
-                    .to_string()
-                    .contains("test"))
-    })
 }
 
 fn type_name(ty: &syn::Type) -> String {
@@ -671,885 +240,209 @@ fn type_name(ty: &syn::Type) -> String {
     }
 }
 
-fn path_string(path: &syn::Path) -> String {
-    path.segments
-        .iter()
-        .map(|part| part.ident.to_string())
-        .collect::<Vec<_>>()
-        .join("::")
+/// Whether an item exists only in test builds: `#[test]`, or a `cfg`
+/// predicate that is false whenever `test` is off.
+fn is_test_only(attributes: &[Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        attribute.path().is_ident("test")
+            || (attribute.path().is_ident("cfg")
+                && attribute
+                    .parse_args::<Meta>()
+                    .is_ok_and(|predicate| cfg_without_test(&predicate) == Some(false)))
+    })
 }
 
-fn retired_w8_surface(name: &str) -> Option<W8Surface> {
-    match name {
-        "eval_value" => Some(W8Surface::EvalValue),
-        "eval_value_in" => Some(W8Surface::EvalValueIn),
-        "eval_lazy_in" => Some(W8Surface::EvalLazyIn),
-        "eval_promised_in" => Some(W8Surface::EvalPromisedIn),
-        "await_deferred_task" => Some(W8Surface::AwaitDeferredTask),
-        "deferred_wait_result" => Some(W8Surface::DeferredWaitResult),
-        "produce_lazy_source_in" => Some(W8Surface::ProduceLazySourceIn),
-        "with_direct_evaluator" => Some(W8Surface::WithDirectEvaluator),
-        _ => None,
-    }
-}
-
-fn w8_surface(path: &syn::Path) -> Option<W8Surface> {
-    let name = path.segments.last()?.ident.to_string();
-    retired_w8_surface(&name).or_else(|| match name.as_str() {
-        "blocked" | "unassigned_root"
-            if path
-                .segments
+/// Evaluates a `cfg` predicate with `test` off and every other option
+/// unknown (`None`).
+fn cfg_without_test(predicate: &Meta) -> Option<bool> {
+    match predicate {
+        Meta::Path(path) if path.is_ident("test") => Some(false),
+        Meta::List(list) => {
+            let operands = list
+                .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+                .ok()?
                 .iter()
-                .rev()
-                .nth(1)
-                .is_some_and(|segment| segment.ident == "EvaluationHalt") =>
-        {
-            Some(if name == "blocked" {
-                W8Surface::HaltBlocked
-            } else {
-                W8Surface::HaltUnassignedPromise
-            })
-        }
-        _ => None,
-    })
-}
-
-fn is_direct_recursive_call(
-    path: &syn::Path,
-    function: Option<&str>,
-    impl_name: Option<&str>,
-) -> bool {
-    let Some(function) = function else {
-        return false;
-    };
-    let segments = path
-        .segments
-        .iter()
-        .map(|segment| segment.ident.to_string())
-        .collect::<Vec<_>>();
-    match segments.as_slice() {
-        // Bare `drop(value)` inside a `Drop::drop` implementation resolves to
-        // the prelude function, not recursively to the trait method.
-        [name] => name == function && function != "drop",
-        [owner, name] if name == function => {
-            owner == "Self" || owner == "self" || impl_name.is_some_and(|ty| owner == ty)
-        }
-        _ => false,
-    }
-}
-
-fn function_signal(full: &str, name: &str) -> Option<Signal> {
-    match name {
-        "eval_value_in" => Some(Signal::EvalValue),
-        "eval_lazy_in" => Some(Signal::EvalLazy),
-        "eval_promised_in" => Some(Signal::EvalPromise),
-        "apply_value_in" => Some(Signal::ApplyValue),
-        "apply_values_in" => Some(Signal::ApplyValues),
-        "evaluate_in" => Some(Signal::ReflectionEvaluate),
-        "client_demand_halt_poll" | "client_demand_halt" => Some(Signal::DependencyTranslation),
-        "blocked" if full.contains("EvaluationHalt") => Some(Signal::RetryableWait),
-        "unassigned_root" if full.contains("EvaluationHalt") => Some(Signal::UnassignedPromise),
-        _ => None,
-    }
-}
-
-fn method_signal(path: &Path, name: &str) -> Option<Signal> {
-    match name {
-        "poll_wait"
-        | "pump_wait"
-        | "pump_wait_on_route"
-        | "pump_wait_on_route_within"
-        | "wait_for_claimed_task"
-        | "wait_for_claimed_task_on_route"
-        | "wait_for_observed_dependency_progress"
-        | "wait_for_observed_dependency_progress_on_route"
-        | "retry_after_no_progress"
-        | "retry_after_no_progress_on_route"
-        | "lazy_task"
-        | "promise_task"
-        | "promise_root_task" => Some(Signal::CoordinatorBoundary),
-        "defer_reflection_activation"
-        | "poll_reflection_task"
-        | "reserve_reflection_task"
-        | "activate_reflection_task" => Some(Signal::ReflectionBoundary),
-        "wait_for_disturbance" => Some(Signal::NetBoundary),
-        "handle_request" | "snapshot" | "commit" if path.starts_with("src/reflection") => {
-            Some(Signal::HostBoundary)
-        }
-        _ => None,
-    }
-}
-
-fn classify(path: &Path, declaration: &str, signal: Signal) -> Classification {
-    let path_text = path.to_string_lossy();
-    let declaration_lower = declaration.to_ascii_lowercase();
-    let is_reflection = path_text.starts_with("src/reflection/");
-    let is_net = path_text == "src/eval/net.rs";
-    let is_value = path_text == "src/eval/value.rs";
-    let is_client = declaration.contains("ClientDemand") || declaration.contains("client_demand");
-    let is_spark = declaration.contains("spark");
-
-    let outer = if is_reflection {
-        OuterOwner::ReflectionMachine
-    } else if is_net {
-        OuterOwner::NetWorklist
-    } else if is_client {
-        OuterOwner::ClientDemand
-    } else if is_spark {
-        OuterOwner::Spark
-    } else if is_value && declaration.contains("LazyTaskMachine") {
-        OuterOwner::LazyTask
-    } else if path_text.starts_with("src/evaluation/") {
-        OuterOwner::CoordinatorAdapter
-    } else {
-        OuterOwner::PureEvaluator
-    };
-
-    let disposition = match outer {
-        OuterOwner::LazyTask => ResultDisposition::PublishLazyCache,
-        OuterOwner::ClientDemand => ResultDisposition::PublishClientDemand,
-        OuterOwner::Spark => ResultDisposition::DiscardSparkResult,
-        OuterOwner::ReflectionMachine if declaration.contains("effect_request") => {
-            ResultDisposition::ParseReflectionRequest
-        }
-        OuterOwner::ReflectionMachine => ResultDisposition::ContinueReflectionPhase,
-        OuterOwner::NetWorklist => ResultDisposition::ContinueNetWork,
-        OuterOwner::CoordinatorAdapter => ResultDisposition::TranslateDependency,
-        OuterOwner::PureEvaluator => ResultDisposition::ReturnWhnf,
-    };
-
-    let stable_owner = match outer {
-        OuterOwner::LazyTask => StableOwner::LazyIdentity,
-        OuterOwner::ClientDemand => StableOwner::ClientDemandRecord,
-        OuterOwner::ReflectionMachine => StableOwner::ReflectionTaskRecord,
-        OuterOwner::NetWorklist => StableOwner::NetMachine,
-        OuterOwner::CoordinatorAdapter | OuterOwner::Spark => StableOwner::CoordinatorRecord,
-        OuterOwner::PureEvaluator => match signal {
-            Signal::EvalPromise | Signal::UnassignedPromise => StableOwner::PromiseIdentity,
-            Signal::EvalLazy => StableOwner::LazyIdentity,
-            _ => StableOwner::InputValue,
-        },
-    };
-
-    let dependency = match signal {
-        Signal::EvalLazy => DependencyKind::LazyWait,
-        Signal::EvalPromise | Signal::UnassignedPromise => DependencyKind::PromiseAssignment,
-        Signal::RetryableWait | Signal::DependencyTranslation | Signal::CoordinatorBoundary => {
-            DependencyKind::GenericWait
-        }
-        Signal::ReflectionBoundary => DependencyKind::ReflectionTask,
-        Signal::HostBoundary => DependencyKind::Host,
-        Signal::NetBoundary => DependencyKind::Net,
-        _ => DependencyKind::None,
-    };
-
-    let remaining = if matches!(
-        signal,
-        Signal::CoordinatorBoundary
-            | Signal::ReflectionBoundary
-            | Signal::HostBoundary
-            | Signal::NetBoundary
-            | Signal::DependencyTranslation
-    ) {
-        WorkShape::OrchestrationHandoff
-    } else if path_text.contains("application.rs") {
-        WorkShape::Application
-    } else if path_text.contains("access") || declaration.contains("path") {
-        WorkShape::AccessPath
-    } else if path_text.contains("pattern.rs") || declaration.contains("key") {
-        WorkShape::KeyConversion
-    } else if path_text.contains("list")
-        || path_text.contains("dict")
-        || declaration.contains("list")
-        || declaration.contains("dict")
-    {
-        WorkShape::CollectionWalk
-    } else if path_text.contains("comparison")
-        || path_text.contains("numeric")
-        || declaration_lower.contains("numeric")
-        || declaration.contains("arguments")
-        || declaration.contains("operands")
-    {
-        WorkShape::OrderedOperands
-    } else if declaration.contains("context") || declaration.contains("failure") {
-        WorkShape::DiagnosticContext
-    } else if matches!(signal, Signal::EvalLazy | Signal::EvalPromise)
-        && (declaration.ends_with("::eval_value_in")
-            || declaration.contains("eval_lazy")
-            || declaration.contains("eval_promised")
-            || declaration.contains("follow"))
-    {
-        WorkShape::TailDemand
-    } else {
-        WorkShape::DemandThenInspect
-    };
-
-    let context = match signal {
-        Signal::DependencyTranslation => ContextBehavior::TranslateToDependency,
-        _ if is_reflection => ContextBehavior::TranslateToTaskHalt,
-        _ if declaration.contains("context") || declaration.contains("failure") => {
-            ContextBehavior::AttachEvaluatorContext
-        }
-        _ => ContextBehavior::Preserve,
-    };
-
-    Classification {
-        outer,
-        disposition,
-        stable_owner,
-        dependency,
-        remaining,
-        context,
-    }
-}
-
-fn w7_disposition(occurrence: &Occurrence) -> W7Disposition {
-    match occurrence.signal {
-        Signal::StructuralRecursion => W7Disposition::UnapprovedRecursion,
-        Signal::UserSizedLoop => W7Disposition::ExplicitIteration,
-        Signal::EvalValue
-        | Signal::EvalLazy
-        | Signal::EvalPromise
-        | Signal::ApplyValue
-        | Signal::ApplyValues
-        | Signal::ReflectionEvaluate
-        | Signal::RetryableWait
-        | Signal::UnassignedPromise
-        | Signal::DependencyTranslation
-        | Signal::CoordinatorBoundary
-        | Signal::ReflectionBoundary
-        | Signal::HostBoundary
-        | Signal::NetBoundary => W7Disposition::Orchestration,
-    }
-}
-
-fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
-    for entry in fs::read_dir(directory).expect("the source tree should be readable") {
-        let path = entry.expect("a source entry should be readable").path();
-        if path.is_dir() {
-            collect_rust_sources(&path, sources);
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
-            sources.push(path);
-        }
-    }
-}
-
-fn is_in_scope(relative: &Path) -> bool {
-    if relative
-        .components()
-        .any(|component| component.as_os_str() == "tests")
-    {
-        return false;
-    }
-    if relative
-        .file_name()
-        .is_some_and(|name| name.to_string_lossy().ends_with("_inventory.rs"))
-    {
-        return false;
-    }
-    if relative.starts_with("src/eval") {
-        return !matches!(
-            relative.to_str(),
-            Some(
-                "src/eval/access_inventory.rs"
-                    | "src/eval/whnf_inventory.rs"
-                    | "src/eval/test_support.rs"
-                    | "src/eval/tests.rs"
-            )
-        );
-    }
-    matches!(
-        relative.to_str(),
-        Some(
-            "src/reflection/machine.rs"
-                | "src/reflection/protocol.rs"
-                | "src/reflection/requests.rs"
-                | "src/evaluation/session.rs"
-                | "src/evaluation/pump.rs"
-                | "src/evaluation/whnf.rs"
-        )
-    )
-}
-
-fn scoped_sources(manifest: &Path) -> Vec<PathBuf> {
-    let mut sources = Vec::new();
-    collect_rust_sources(&manifest.join("src/eval"), &mut sources);
-    sources.extend([
-        manifest.join("src/reflection/machine.rs"),
-        manifest.join("src/reflection/protocol.rs"),
-        manifest.join("src/reflection/requests.rs"),
-        manifest.join("src/evaluation/session.rs"),
-        manifest.join("src/evaluation/pump.rs"),
-        manifest.join("src/evaluation/whnf.rs"),
-    ]);
-    sources.sort();
-    sources.dedup();
-    sources
-}
-
-fn collect_occurrences(manifest: &Path) -> Vec<Occurrence> {
-    let mut occurrences = Vec::new();
-    for path in scoped_sources(manifest) {
-        let relative = path
-            .strip_prefix(manifest)
-            .expect("census source must belong to the package");
-        if !is_in_scope(relative) {
-            continue;
-        }
-        let source = fs::read_to_string(&path).expect("census source should be readable");
-        let syntax = syn::parse_file(&source).unwrap_or_else(|error| {
-            panic!("{} must parse for census: {error}", relative.display())
-        });
-        let mut visitor = CensusVisitor::new(relative);
-        visitor.visit_file(&syntax);
-        occurrences.extend(visitor.occurrences);
-    }
-    occurrences.sort_by_key(Occurrence::record);
-    occurrences
-}
-
-fn collect_w8_boundary_inventory(manifest: &Path) -> W8BoundaryInventory {
-    let mut sources = Vec::new();
-    collect_rust_sources(&manifest.join("src"), &mut sources);
-    let tests = manifest.join("tests");
-    if tests.exists() {
-        collect_rust_sources(&tests, &mut sources);
-    }
-    sources.sort();
-    sources.dedup();
-
-    let mut inventory = W8BoundaryInventory::default();
-    for path in sources {
-        let relative = path
-            .strip_prefix(manifest)
-            .expect("W8 caller source must belong to the package");
-        let source = fs::read_to_string(&path).expect("W8 caller source should be readable");
-        let syntax = syn::parse_file(&source).unwrap_or_else(|error| {
-            panic!(
-                "{} must parse for the W8 caller census: {error}",
-                relative.display()
-            )
-        });
-        let mut visitor = W8CallerVisitor::new(relative);
-        visitor.visit_file(&syntax);
-        inventory
-            .retired_declarations
-            .extend(visitor.retired_declarations);
-        inventory.calls.extend(visitor.calls);
-    }
-    inventory.retired_declarations.sort();
-    inventory.calls.sort_by_key(W8Call::record);
-    inventory
-}
-
-fn collect_resolved_calls(manifest: &Path) -> (BTreeSet<FunctionKey>, Vec<ResolvedCall>) {
-    let mut definitions = BTreeSet::new();
-    let mut local_calls = Vec::new();
-    for path in scoped_sources(manifest) {
-        let relative = path
-            .strip_prefix(manifest)
-            .expect("call-graph source must belong to the package");
-        if !is_in_scope(relative) {
-            continue;
-        }
-        let source = fs::read_to_string(&path).expect("call-graph source should be readable");
-        let syntax = syn::parse_file(&source).unwrap_or_else(|error| {
-            panic!("{} must parse for call graph: {error}", relative.display())
-        });
-        let mut visitor = CallGraphVisitor::new(relative);
-        visitor.visit_file(&syntax);
-        definitions.extend(visitor.definitions);
-        local_calls.extend(visitor.calls);
-    }
-
-    let calls = local_calls
-        .into_iter()
-        .filter_map(|call| {
-            let callee = match call.target {
-                LocalCallTarget::Free(name) => FunctionKey {
-                    path: call.caller.path.clone(),
-                    module: call.caller.module.clone(),
-                    impl_name: None,
-                    name,
-                },
-                LocalCallTarget::Associated { owner, name } => FunctionKey {
-                    path: call.caller.path.clone(),
-                    module: call.caller.module.clone(),
-                    impl_name: Some(owner),
-                    name,
-                },
-            };
-            definitions.contains(&callee).then_some(ResolvedCall {
-                caller: call.caller,
-                ordinal: call.ordinal,
-                callee,
-            })
-        })
-        .collect::<Vec<_>>();
-    (definitions, calls)
-}
-
-fn resolved_call_fingerprint(calls: &[ResolvedCall]) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut records = calls.iter().map(ResolvedCall::record).collect::<Vec<_>>();
-    records.sort();
-    records.iter().fold(FNV_OFFSET, |mut fingerprint, record| {
-        for byte in record.bytes().chain([0xff]) {
-            fingerprint = (fingerprint ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
-        }
-        fingerprint
-    })
-}
-
-fn cyclic_functions(
-    definitions: &BTreeSet<FunctionKey>,
-    calls: &[ResolvedCall],
-) -> BTreeSet<FunctionKey> {
-    let mut adjacency = BTreeMap::<FunctionKey, BTreeSet<FunctionKey>>::new();
-    for call in calls {
-        adjacency
-            .entry(call.caller.clone())
-            .or_default()
-            .insert(call.callee.clone());
-    }
-
-    definitions
-        .iter()
-        .filter(|start| {
-            let mut pending = adjacency
-                .get(*start)
-                .into_iter()
-                .flatten()
-                .cloned()
+                .map(cfg_without_test)
                 .collect::<Vec<_>>();
-            let mut visited = BTreeSet::new();
-            while let Some(next) = pending.pop() {
-                if &next == *start {
-                    return true;
+            if list.path.is_ident("not") {
+                operands.first().copied().flatten().map(|value| !value)
+            } else if list.path.is_ident("all") {
+                if operands.contains(&Some(false)) {
+                    Some(false)
+                } else {
+                    operands
+                        .iter()
+                        .all(|value| *value == Some(true))
+                        .then_some(true)
                 }
-                if visited.insert(next.clone())
-                    && let Some(following) = adjacency.get(&next)
-                {
-                    pending.extend(following.iter().cloned());
+            } else if list.path.is_ident("any") {
+                if operands.contains(&Some(true)) {
+                    Some(true)
+                } else {
+                    operands
+                        .iter()
+                        .all(|value| *value == Some(false))
+                        .then_some(false)
                 }
+            } else {
+                None
             }
-            false
-        })
-        .cloned()
-        .collect()
+        }
+        _ => None,
+    }
 }
 
-fn occurrence_fingerprint(occurrences: &[Occurrence]) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    occurrences
-        .iter()
-        .fold(FNV_OFFSET, |mut fingerprint, occurrence| {
-            for byte in occurrence.record().bytes().chain([0xff]) {
-                fingerprint = (fingerprint ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
-            }
-            fingerprint
-        })
+/// Every production module reachable from `src/lib.rs` through `mod`
+/// declarations that are not test-only, with its parsed file.
+fn production_modules(manifest: &Path) -> Vec<(String, syn::File)> {
+    let mut pending = vec![(PathBuf::from("src/lib.rs"), "crate".to_owned())];
+    let mut modules = Vec::new();
+    while let Some((path, module)) = pending.pop() {
+        let source = fs::read_to_string(manifest.join(&path))
+            .unwrap_or_else(|error| panic!("{} should be readable: {error}", path.display()));
+        let syntax = syn::parse_file(&source)
+            .unwrap_or_else(|error| panic!("{} should parse: {error}", path.display()));
+        let directory = if path.ends_with("lib.rs") || path.ends_with("mod.rs") {
+            path.parent()
+                .expect("a module file has a directory")
+                .to_owned()
+        } else {
+            path.with_extension("")
+        };
+        child_module_files(manifest, &syntax.items, &directory, &module, &mut pending);
+        modules.push((module, syntax));
+    }
+    modules
 }
 
-fn w7_disposition_fingerprint(occurrences: &[Occurrence]) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    occurrences
-        .iter()
-        .fold(FNV_OFFSET, |mut fingerprint, occurrence| {
-            for byte in occurrence.w7_record().bytes().chain([0xff]) {
-                fingerprint = (fingerprint ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
-            }
-            fingerprint
-        })
-}
-
-fn signal_counts(occurrences: &[Occurrence]) -> BTreeMap<Signal, usize> {
-    occurrences
-        .iter()
-        .fold(BTreeMap::new(), |mut counts, occurrence| {
-            *counts.entry(occurrence.signal).or_default() += 1;
-            counts
-        })
-}
-
-fn shape_counts(occurrences: &[Occurrence]) -> BTreeMap<WorkShape, usize> {
-    occurrences
-        .iter()
-        .fold(BTreeMap::new(), |mut counts, occurrence| {
-            *counts
-                .entry(occurrence.classification.remaining)
-                .or_default() += 1;
-            counts
-        })
-}
-
-fn w7_disposition_counts(occurrences: &[Occurrence]) -> BTreeMap<W7Disposition, usize> {
-    occurrences
-        .iter()
-        .fold(BTreeMap::new(), |mut counts, occurrence| {
-            *counts.entry(w7_disposition(occurrence)).or_default() += 1;
-            counts
-        })
-}
-
-fn validate_classifications(occurrences: &[Occurrence]) -> Result<(), String> {
-    for occurrence in occurrences {
-        let path = occurrence
-            .declaration
-            .split("::")
-            .next()
-            .expect("a census declaration begins with its path");
-        let expected = classify(Path::new(path), &occurrence.declaration, occurrence.signal);
-        if occurrence.classification != expected {
-            return Err(format!(
-                "{}#{} was classified as {:?}, expected {:?}",
-                occurrence.declaration,
-                occurrence.ordinal,
-                occurrence.classification.remaining,
-                expected.remaining,
-            ));
+fn child_module_files(
+    manifest: &Path,
+    items: &[syn::Item],
+    directory: &Path,
+    module: &str,
+    pending: &mut Vec<(PathBuf, String)>,
+) {
+    for item in items {
+        let syn::Item::Mod(child) = item else {
+            continue;
+        };
+        if is_test_only(&child.attrs) {
+            continue;
+        }
+        let name = child.ident.to_string();
+        let child_module = format!("{module}::{name}");
+        if let Some((_, items)) = &child.content {
+            child_module_files(
+                manifest,
+                items,
+                &directory.join(&name),
+                &child_module,
+                pending,
+            );
+        } else {
+            assert!(
+                !child
+                    .attrs
+                    .iter()
+                    .any(|attribute| attribute.path().is_ident("path")),
+                "{child_module}: a production `#[path]` module needs audit support"
+            );
+            let file = directory.join(format!("{name}.rs"));
+            let file = if manifest.join(&file).exists() {
+                file
+            } else {
+                directory.join(&name).join("mod.rs")
+            };
+            pending.push((file, child_module));
         }
     }
-    Ok(())
 }
 
-// Filled from W0B's deliberately failing initial AST scan. The per-signal
-// summary explains count drift; the full record fingerprint detects moves or
-// classification substitutions which leave those counts unchanged.
-// W6B.0 removed two copied-budget adapter occurrences while preserving their
-// resumable owners; nested WHNF now borrows the outer poll budget directly.
-// NC2.0 removes NC1's borrowed net/regional projection walks. The remaining
-// bounded state walks are durable root conversion and the canonical managed
-// edge visitor, not recursive Rust evaluation.
-// W6B.4b.1 replaces synchronous effect-API lookup and application with the
-// existing resumable static-access and application lazy owners.
-// W6C.4 replaces recursive numeric operand demand with one durable builtin
-// owner which polls each operand through the ordinary WHNF machine.
-// W6C.3 replaces recursive comparison, tuple-tag, and semantic-undefined
-// demand with explicit durable machine stacks and bounded collection walks.
-// W6C.6 gives seq and best-effort sparks one shared resumable demand owner;
-// scheduler admission is a rooted post-access poll disposition.
-// W6D.1-W6D.2 replace synchronous dictionary dispatch, key-path demand, and
-// recursive merge demand with one durable dictionary owner. Its remaining
-// recursive calls transform already-observed persistent dictionary/key data.
-// W6F.3a moves ordinary extension and composed-definition application to one
-// resumable source owner. Lazy applications retain the undemanded stages, so
-// only callable transitions enter the WHNF census.
-// W6F.3b replaces recursive override demand and traversal with a rooted
-// persistent-dictionary frame stack; only its pending prior-value demand is
-// evaluator work.
-// W6F.4b moves default and dictionary definition operands into the durable
-// object owner while preserving base-before-dictionary demand.
-// W6G.1f.3d.1 makes the two regional key/list trace walks explicit access-path
-// loops inside one managed converter checkpoint.
-// W6G.1f.3e.2 replaces recursive rooted object helpers with explicit regional
-// state transitions. Five bounded demand-and-inspect walks become visible to
-// the census while one obsolete recursive helper disappears.
-// W6G.1f.3g.2a replaces the rooted numeric operand helper with one explicit
-// regional operand loop beneath the managed builtin checkpoint.
-// W6G.1f.3g.2b replaces three rooted assertion, provenance, and conditional
-// poll helpers with regional state transitions beneath that checkpoint.
-// W6G.1f.3g.2c replaces the rooted net helper with one regional phase machine.
-// W6G.1f.3g.2d removes the two durable strategy forwarding helpers; regional
-// seq demand remains explicit beneath the builtin checkpoint while spark
-// admission returns a post-access scheduling intent without inline demand.
-// W6G.1f.3g.3a replaces the durable dictionary constructor/poller helpers
-// with regional key/path children and one explicit sequential operand walk.
-// W6G.1f.3g.3b makes scalar, list, dictionary, and tuple comparisons explicit
-// regional frame work beneath the shared builtin checkpoint.
-// W6G.1f.3g.3e.1 replaces rooted pattern-list and list-back helpers with one
-// regional source demand and explicit front/back traversal state.
-// W6G.1f.3g.3e.2a replaces rooted pattern-path and optional key-conversion
-// helpers with regional expected/actual path state under the builtin owner.
-// W6G.1f.3g.3e.2b replaces rooted literal/list-item demand and durable
-// list-front recursion with regional state under that owner.
-// W6G.1f.3g.3f exposes annotation recognition and collection/metadata walks
-// as regional work beneath the managed builtin checkpoint.
-// W6G.1f.3g.4b replaces rooted object-builtin phases with one explicit
-// regional object state machine. Its list-prefix traversal is represented as
-// two user-sized loops rather than one recursive helper.
-// W6G.1f.3g.4c replaces rooted object-composition phases with explicit
-// regional application and iterative override state.
-// PNC1 moves the two strict semantic replay loops from the construction host
-// into `netlist.rs`; their reviewed shape is now a collection walk rather
-// than generic construction demand-and-inspect work.
-// PNC3 adds one bounded strict scan of the reset stack to locate the nearest
-// matching delimiter. The key conversion itself remains resumable regional
-// work; only the already-decoded in-memory frame vector is searched here.
-// PNC4 adds the private API assembly loop, ordered operand queue, checked port
-// allocation, journal/result construction, and its test-only operation loops.
-// Semantic operand demand remains one resumable regional state machine.
-// W6G4R-001B replaces the foreground pump's source-level producer-chain loop
-// with the coordinator's guarded exact-route selector. The loop remains real
-// scheduler work, but its coordinator boundary was already counted; removing
-// the duplicated pump-side traversal removes one user-sized-loop occurrence.
-// W6G4R-001E carries exact-route state through the existing orchestration
-// boundaries. The route-aware method names preserve those boundary counts;
-// the blocking client driver now delegates bounded polling to the common pump
-// instead of maintaining one additional unbounded source-level polling loop.
-// W7B replaces recursive dictionary/list key conversion with one explicit
-// parent-stack walk. Its trace visitor contributes one reviewed access-path
-// loop; no recursive semantic call remains.
-// GCI11R-002D.2g's routine gate exposed that the blocking client driver used
-// the generic coordinator wait after observing a claimed exact producer. It
-// now delegates that case to the existing exact-route wait, adding one
-// reviewed coordinator/orchestration boundary without adding recursion.
-// R7 deletes `task_eval_error`, the reflection protocol's translation of an
-// evaluator wait into a blocked task halt. Production never reached it;
-// reflection machines report waits as `WorkDependency` values.
-const EXPECTED_OCCURRENCES: usize = 139;
-// W6G.1f.2b moves lazy producer orchestration behind a machine-free route;
-// the retained test-only lazy-task helper is no longer a production boundary.
-const EXPECTED_FINGERPRINT: u64 = 16_032_121_824_215_579_295;
-const EXPECTED_SIGNAL_COUNTS: &[(Signal, usize)] = &[
-    (Signal::RetryableWait, 4),
-    (Signal::UnassignedPromise, 1),
-    (Signal::DependencyTranslation, 1),
-    (Signal::CoordinatorBoundary, 14),
-    (Signal::ReflectionBoundary, 6),
-    (Signal::HostBoundary, 21),
-    (Signal::NetBoundary, 1),
-    (Signal::UserSizedLoop, 91),
-];
-const EXPECTED_SHAPE_COUNTS: &[(WorkShape, usize)] = &[
-    (WorkShape::DemandThenInspect, 69),
-    (WorkShape::OrderedOperands, 8),
-    (WorkShape::CollectionWalk, 8),
-    (WorkShape::KeyConversion, 2),
-    (WorkShape::AccessPath, 8),
-    (WorkShape::DiagnosticContext, 1),
-    (WorkShape::OrchestrationHandoff, 43),
-];
-
-const EXPECTED_W7_DISPOSITION_FINGERPRINT: u64 = 8_860_955_152_160_050_346;
-const EXPECTED_W7_DISPOSITION_COUNTS: &[(W7Disposition, usize)] = &[
-    (W7Disposition::ExplicitIteration, 91),
-    (W7Disposition::Orchestration, 48),
-];
-
-const EXPECTED_W7_UNAPPROVED_RECURSION: &[&str] = &[];
-
-// W9C.4 makes the first bounded observation after a coordinator wake
-// explicit. Those non-recursive status probes add one resolved orchestration
-// edge after the existing wait boundary; the cyclic-function ledger below
-// remains empty.
-// D.2e makes the already-open resolver access explicit at the effect-path
-// call site, adding one statically resolved edge without changing recursion.
-// GCI11R-002D.2g removes the production compatibility-WHNF diagnostic path;
-// rooted normalization resumes through the ordinary evaluator boundary. The
-// two deleted helper edges leave the resolved graph smaller without changing
-// its cycle set.
-// Panic containment adds six resolved edges: the poll boundary queries a
-// claim's prior-dependency panic and a blocked poll's dependency panic. Its
-// lazy-state step replaces one WHNF poison-failure edge with a diverging
-// fault and adds a cached-poll panic lookup. Client-callback containment
-// moves the reflection launcher call inside an unwind boundary. R3's single
-// effect-poll budget pumps through `pump_wait_on_route_within`, adding one
-// edge. E7 replaces the annotation machine's stderr helper with a ledger
-// record, removing one. R7 removes six: the blocked-halt translation, its
-// `From` impl, and the effect task's blocked-halt branch and assertion.
-// Net polarity enforcement adds six: netlist replay records each
-// constructor's span and describes a violation in the user's terms.
-// None of them recurses, so the cycle set stays empty.
-const EXPECTED_W7_RESOLVED_CALLS: usize = 1_144;
-const EXPECTED_W7_RESOLVED_CALL_FINGERPRINT: u64 = 15_286_440_900_662_348_986;
-const EXPECTED_W7_CYCLIC_FUNCTIONS: &[&str] = &[];
-const EXPECTED_W8_REMAINING_RETRYABLE_HALT_CALLS: &[&str] = &[
-    "src/eval/net.rs::drive_net_semantic_action#1|HaltBlocked",
-    "src/eval/net.rs::drive_net_semantic_action#2|HaltBlocked",
-    "src/eval/net.rs::drive_net_semantic_action#3|HaltBlocked",
-    "src/evaluation/session.rs::client_demand_halt#1|HaltBlocked",
-    "src/evaluation/session.rs::client_demand_halt#2|HaltUnassignedPromise",
-];
-
-#[test]
-fn whnf_suspension_and_recursion_census_is_exact() {
-    let occurrences = collect_occurrences(Path::new(env!("CARGO_MANIFEST_DIR")));
-    validate_classifications(&occurrences).expect("live census classifications must be canonical");
-    assert_eq!(
-        signal_counts(&occurrences),
-        EXPECTED_SIGNAL_COUNTS.iter().copied().collect(),
-        "W0B per-family counts drifted"
-    );
-    assert_eq!(
-        shape_counts(&occurrences),
-        EXPECTED_SHAPE_COUNTS.iter().copied().collect(),
-        "W0B resumption-shape counts drifted"
-    );
-    assert_eq!(
-        (occurrences.len(), occurrence_fingerprint(&occurrences)),
-        (EXPECTED_OCCURRENCES, EXPECTED_FINGERPRINT),
-        "W0B census drifted; reviewed shapes: {:#?}",
-        shape_counts(&occurrences),
-    );
-}
-
-#[test]
-fn w7_stack_disposition_gate_is_exact() {
-    let occurrences = collect_occurrences(Path::new(env!("CARGO_MANIFEST_DIR")));
-    assert_eq!(
-        w7_disposition_counts(&occurrences),
-        EXPECTED_W7_DISPOSITION_COUNTS.iter().copied().collect(),
-        "every W0B occurrence needs one reviewed W7 stack disposition"
-    );
-    assert_eq!(
-        w7_disposition_fingerprint(&occurrences),
-        EXPECTED_W7_DISPOSITION_FINGERPRINT,
-        "a W7 stack disposition or its source occurrence drifted"
-    );
-
-    let unapproved = occurrences
-        .iter()
-        .filter(|occurrence| w7_disposition(occurrence) == W7Disposition::UnapprovedRecursion)
-        .map(|occurrence| format!("{}#{}", occurrence.declaration, occurrence.ordinal))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        unapproved, EXPECTED_W7_UNAPPROVED_RECURSION,
-        "W7A.1 must leave no unapproved recursive semantic call"
-    );
-}
-
-#[test]
-fn w7_resolved_call_graph_cycles_are_exact() {
-    let (definitions, calls) = collect_resolved_calls(Path::new(env!("CARGO_MANIFEST_DIR")));
-    assert_eq!(
-        (calls.len(), resolved_call_fingerprint(&calls)),
-        (
-            EXPECTED_W7_RESOLVED_CALLS,
-            EXPECTED_W7_RESOLVED_CALL_FINGERPRINT
-        ),
-        "the statically resolved W7 call-edge ledger drifted"
-    );
-    assert_eq!(
-        cyclic_functions(&definitions, &calls)
-            .into_iter()
-            .map(|function| function.declaration())
-            .collect::<Vec<_>>(),
-        EXPECTED_W7_CYCLIC_FUNCTIONS,
-        "W7A.1 must leave no statically resolved recursive semantic family"
-    );
-}
-
-#[test]
-fn retired_w8_compatibility_and_retryable_halt_boundaries_are_exact() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let inventory = collect_w8_boundary_inventory(manifest);
-    assert_eq!(
-        inventory.retired_declarations,
-        Vec::<String>::new(),
-        "retired W8 compatibility entry points must not be reintroduced under their old names"
-    );
-
-    let direct_value_entries = collect_occurrences(manifest)
-        .iter()
-        .filter(|occurrence| {
-            matches!(
-                occurrence.signal,
-                Signal::EvalValue | Signal::EvalLazy | Signal::EvalPromise
-            )
+fn is_audited(module: &str) -> bool {
+    AUDITED_MODULES.contains(&module)
+        || AUDITED_MODULE_TREES.iter().any(|tree| {
+            module == *tree
+                || module
+                    .strip_prefix(tree)
+                    .is_some_and(|rest| rest.starts_with("::"))
         })
-        .map(Occurrence::record)
-        .collect::<Vec<_>>();
-    assert!(
-        direct_value_entries.is_empty(),
-        "ordinary production owners must not restore direct whole-value compatibility demand: \
-         {direct_value_entries:#?}"
-    );
-
-    let remaining_retryable_halts = inventory
-        .calls
-        .iter()
-        .map(W8Call::record)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        remaining_retryable_halts, EXPECTED_W8_REMAINING_RETRYABLE_HALT_CALLS,
-        "retired W8 compatibility calls must stay absent and W8A.0's EvaluationHalt \
-         disposition must follow the five live retryable callers"
-    );
 }
 
 #[test]
-fn reflection_has_no_unowned_recursive_whnf_demand() {
-    let occurrences = collect_occurrences(Path::new(env!("CARGO_MANIFEST_DIR")));
-    let unowned = occurrences
+fn evaluator_and_core_code_has_no_unapproved_recursion() {
+    let mut graph = CallGraph::default();
+    for (module, syntax) in production_modules(Path::new(env!("CARGO_MANIFEST_DIR"))) {
+        if is_audited(&module) {
+            graph.add_module(&module, &syntax);
+        }
+    }
+    let cyclic = graph.cyclic_functions();
+    let listed = BOUNDED_RECURSION
         .iter()
-        .filter(|occurrence| occurrence.declaration.starts_with("src/reflection/"))
-        .filter(|occurrence| {
-            matches!(
-                occurrence.signal,
-                Signal::EvalValue
-                    | Signal::EvalLazy
-                    | Signal::EvalPromise
-                    | Signal::ReflectionEvaluate
-            )
+        .chain(KNOWN_UNBOUNDED_RECURSION)
+        .map(|(function, reason)| {
+            assert!(!reason.is_empty(), "{function} needs a reason");
+            *function
         })
-        .map(Occurrence::record)
+        .collect::<BTreeSet<_>>();
+
+    let unapproved = cyclic
+        .iter()
+        .filter(|function| !listed.contains(function.as_str()))
         .collect::<Vec<_>>();
     assert!(
-        unowned.is_empty(),
-        "reflection must own WHNF demand in resumable computations: {unowned:#?}"
+        unapproved.is_empty(),
+        "recursive call cycles must become explicit iteration, or be added to \
+         BOUNDED_RECURSION with a reason when their depth is bounded: {unapproved:#?}"
+    );
+    let stale = listed
+        .iter()
+        .filter(|function| !cyclic.contains(**function))
+        .collect::<Vec<_>>();
+    assert!(
+        stale.is_empty(),
+        "remove listed functions that no longer recurse: {stale:#?}"
     );
 }
 
 #[test]
-fn whnf_census_rejects_retired_tail_demand_and_nested_misclassification() {
-    let occurrences = collect_occurrences(Path::new(env!("CARGO_MANIFEST_DIR")));
-    assert!(
-        occurrences
-            .iter()
-            .all(|occurrence| occurrence.classification.remaining != WorkShape::TailDemand),
-        "W8A.1 must retire the direct tail-demand compatibility evaluator"
+fn recursion_audit_detects_direct_mutual_and_method_cycles() {
+    let syntax = syn::parse_file(
+        r#"
+        fn direct(depth: usize) { if depth > 0 { direct(depth - 1) } }
+        fn even(n: usize) -> bool { n == 0 || odd(n - 1) }
+        fn odd(n: usize) -> bool { n != 0 && even(n - 1) }
+        fn leaf() {}
+        fn caller() { leaf(); leaf() }
+        struct Tree;
+        impl Tree {
+            fn walk(&self) { self.walk() }
+            fn visit(&self) { Self::visit_children(self) }
+            fn visit_children(&self) { Tree::visit(self) }
+        }
+        #[cfg(test)]
+        fn test_only_recursion() { test_only_recursion() }
+        #[cfg(any(test, feature = "profiling"))]
+        fn profiling_recursion() { profiling_recursion() }
+        "#,
+    )
+    .expect("the recursion fixture should parse");
+    let mut graph = CallGraph::default();
+    graph.add_module("crate::fixture", &syntax);
+
+    assert_eq!(
+        graph.cyclic_functions(),
+        [
+            "crate::fixture::Tree::visit",
+            "crate::fixture::Tree::visit_children",
+            "crate::fixture::Tree::walk",
+            "crate::fixture::direct",
+            "crate::fixture::even",
+            "crate::fixture::odd",
+            "crate::fixture::profiling_recursion",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>()
     );
-
-    let mut misclassified = occurrences.clone();
-    let target = misclassified
-        .iter_mut()
-        .find(|occurrence| occurrence.classification.remaining == WorkShape::DemandThenInspect)
-        .expect("the census must contain a demand-and-inspect witness");
-    target.classification.remaining = WorkShape::TailDemand;
-    assert!(
-        validate_classifications(&misclassified).is_err(),
-        "the exact census must reject a demand-and-inspect classification substitution"
-    );
-}
-
-#[test]
-fn synchronous_whnf_demand_uses_the_runtime_owned_client_submachine() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let session = fs::read_to_string(manifest.join("src/evaluation/session.rs"))
-        .expect("the evaluation session source should be readable");
-    let client = fs::read_to_string(manifest.join("src/evaluation/coordinator/client_demand.rs"))
-        .expect("the client-demand source should be readable");
-    let pump = fs::read_to_string(manifest.join("src/evaluation/pump.rs"))
-        .expect("the evaluation pump source should be readable");
-
-    assert!(session.contains("let handle = self\n            .demand_whnf(value)"));
-    assert!(client.contains("pub(crate) struct ClientDemandOperation {"));
-    assert!(client.contains("computation: WhnfComputation"));
-    assert!(client.contains("originating_task: Option<EvaluationTaskId>"));
-    assert!(pump.contains("&mut self.computation,"));
-    assert!(
-        !pump.contains("crate::eval::eval_value_in"),
-        "the runtime-owned client operation must not restart recursive evaluation"
-    );
-}
-
-#[test]
-fn selected_whnf_work_vocabulary_is_compile_exhaustive() {
-    let variants = [
-        SelectedWorkVariant::Delegate,
-        SelectedWorkVariant::DemandThenInspect,
-        SelectedWorkVariant::OrderedOperands,
-        SelectedWorkVariant::CollectionWalk,
-        SelectedWorkVariant::Application,
-        SelectedWorkVariant::KeyConversion,
-        SelectedWorkVariant::AccessPath,
-        SelectedWorkVariant::DiagnosticContext,
-        SelectedWorkVariant::OrchestrationHandoff,
-    ];
-    assert_eq!(selected_variant_shape(variants[0]), None);
-    assert_eq!(variants.len(), 9);
 }

@@ -1,993 +1,168 @@
-//! Production managed-root publication and forbidden-escape inventories.
+//! Audit: no authority-free escape between public, rooted, and core values.
 //!
-//! Registered root creation is a legitimate publication boundary and remains
-//! source-counted by owner, including publication through an already-admitted
-//! `RuntimeValueAccess`. Authority-free bare-core conversions are not a
-//! migration allowance: the second latch rejects them anywhere in production.
+//! A bare core value is valid only inside a managed access region. Converting
+//! a public value or runtime root to or from one without access authority
+//! would let a core value outlive its region, or publish one the collector
+//! does not see. The audit forbids the escape shapes everywhere under `src/`,
+//! in production and test code alike.
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use quote::ToTokens;
 use syn::visit::{self, Visit};
-use syn::{Attribute, ExprCall, ExprMethodCall, ImplItemFn, ItemFn, ItemImpl, ItemMod};
+use syn::{ExprCall, ExprMethodCall, ImplItemFn, ItemFn, ItemImpl};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct RootPublicationCounts {
-    compatibility_root_new: usize,
-    scoped_factory_root: usize,
-    access_root: usize,
+/// Methods that would project a bare core value out of a public value.
+const CORE_PROJECTIONS: &[&str] = &["as_core", "into_core"];
+
+/// Value types that must not gain an authority-free constructor.
+const ESCAPE_TYPES: &[&str] = &["RuntimeValueRoot", "Value"];
+
+/// Constructors that would wrap a bare core value without access.
+const BARE_CONSTRUCTORS: &[&str] = &["from_core", "from_runtime"];
+
+struct EscapeVisitor<'path> {
+    path: &'path str,
+    impl_name: Option<String>,
+    escapes: Vec<String>,
 }
 
-impl RootPublicationCounts {
-    const fn new(
-        compatibility_root_new: usize,
-        scoped_factory_root: usize,
-        access_root: usize,
-    ) -> Self {
-        Self {
-            compatibility_root_new,
-            scoped_factory_root,
-            access_root,
-        }
+impl EscapeVisitor<'_> {
+    fn record(&mut self, shape: String) {
+        self.escapes.push(format!("{}: {shape}", self.path));
     }
 
-    fn in_source(source: &str) -> Self {
-        Self::new(
-            source.matches("RuntimeValueRoot::new(").count(),
-            source.matches(".construct_runtime_value_root(").count()
-                + source.matches(".try_construct_runtime_value_root(").count(),
-            source.matches(".root_runtime_value(").count(),
-        )
-    }
-}
-
-struct InventoryEntry {
-    path: &'static str,
-    counts: RootPublicationCounts,
-    role: &'static str,
-    migration: &'static str,
-}
-
-macro_rules! entry {
-    ($path:literal, $root_new:literal, $scoped_root:literal, $access_root:literal, $role:literal, $migration:literal) => {
-        InventoryEntry {
-            path: $path,
-            counts: RootPublicationCounts::new($root_new, $scoped_root, $access_root),
-            role: $role,
-            migration: $migration,
-        }
-    };
-}
-
-const INVENTORY: &[InventoryEntry] = &[
-    entry!(
-        "src/api/assembly.rs",
-        0,
-        1,
-        0,
-        "assembly setup, rooted compiler handoff, import results, modules, and reflection environment",
-        "I3E.2 bounded compiler regions; I4F.1 durable roots; GCI11R-002D.1b rooted module completion"
-    ),
-    entry!(
-        "src/api/diagnostics.rs",
-        0,
-        1,
-        0,
-        "rooted compilation origins at the public diagnostic boundary",
-        "GCI11R-002D.2g durable diagnostic envelopes"
-    ),
-    entry!(
-        "src/api/runtime/readiness.rs",
-        0,
-        1,
-        0,
-        "observational blocked-failure diagnostic publication",
-        "GCI11R-002D.2g durable diagnostic envelopes"
-    ),
-    entry!(
-        "src/api/value.rs",
-        0,
-        0,
-        2,
-        "constructors, composite validation, observers, extraction, and net data",
-        "I3B.1 scoped construction/extraction; I4F.2 public facade switch; GCI5R-001B same-region root publication"
-    ),
-    entry!(
-        "src/compiler.rs",
-        4,
-        6,
-        0,
-        "rooted source context, origins, definition promises, and import results; I10A import inputs are declared HostCall captures",
-        "I3E.2 bounded compiler regions; I4F.1 durable roots; I10A explicit deferred-capture handoff"
-    ),
-    entry!(
-        "src/core.rs",
-        2,
-        1,
-        6,
-        "post-domain canonical-root initialization, test mutation-root publication, I10A one-shot HostCall capture bundles, and transient reflection handoff roots",
-        "I4F.2d.0 canonical initialization; I4F.2a.1c fixture closure; GCI5R-001B regional construction entry; GCI5R-003E root-owned mutation; GCI5R-005B direct reflection semantic edges; I10A deferred callback containment; W6G.1f.3b autonomous reflection handoff"
-    ),
-    entry!(
-        "src/core/managed/active_owner_inventory.rs",
-        1,
-        0,
-        0,
-        "test-only external callback root-backedge containment proof",
-        "I5F.4 external-owner closure audit; I10A deferred callback containment"
-    ),
-    entry!(
-        "src/core/managed/containment_inventory.rs",
-        0,
-        1,
-        0,
-        "source-backed managed-containment verification fixture",
-        "I11B managed containment closure; GCI11R-002D.2b.2 scoped root publication inventory"
-    ),
-    entry!(
-        "src/core/managed/payload_edges.rs",
-        0,
-        2,
-        0,
-        "test-only failure and host-call capture traversal fixtures",
-        "GCI11R-002D.2h collector-only edge closure"
-    ),
-    entry!(
-        "src/core/managed/recursive_cells.rs",
-        0,
-        4,
-        0,
-        "recursive-cell ownership and publication lifecycle fixtures",
-        "I5 managed recursive identities; GCI11R-002D.2b.2 access-qualified promise publication"
-    ),
-    entry!(
-        "src/diagnostic.rs",
-        0,
-        3,
-        4,
-        "root-preserving diagnostic normalization, context composition, and summary demand",
-        "GCI11R-002D.2g rooted diagnostic transformations"
-    ),
-    entry!(
-        "src/eval/access_machine.rs",
-        0,
-        2,
-        0,
-        "forced key and key-list conversion fixtures retain one temporary managed regional checkpoint while computed access itself is an edge-owned lazy checkpoint",
-        "W6G.1f.3d.1 regional converter bridge; W6G.1f.3d.2-.3 access checkpoint cutover; W6G.1f.3g.1b shared path child"
-    ),
-    entry!(
-        "src/eval/list_machine.rs",
-        0,
-        1,
-        2,
-        "forced-collection fixture plus shared managed front-list reconstruction; back traversal is regional beneath builtin checkpoints",
-        "W6G.1f.3e.1 regional list-front bridge / W6G.1f.3g.1 regional list-back bridge / W6G.1f.3g.3e.1 pattern-list embedding"
-    ),
-    entry!(
-        "src/eval/strategy_machine.rs",
-        0,
-        0,
-        1,
-        "hidden metadata retained across resumable seq and spark demand",
-        "W6C.6 shared durable strategy-demand owner"
-    ),
-    entry!(
-        "src/eval/test_support.rs",
-        0,
-        1,
-        0,
-        "test-only resumable client-demand input root",
-        "W8A.1 retained-state suspension fixture"
-    ),
-    entry!(
-        "src/eval/value.rs",
-        0,
-        0,
-        7,
-        "computed-access, object-fixpoint, list-effect, and spark-intent terminal publication plus managed-checkpoint publication; immediate builtin results now install beneath the owning lazy",
-        "W3B.2b, W6C.1b, W6F.6, and W6G.1f.3d.2-.3/W6G.1f.3f/W6G.1f.3g.2d-.4c source or terminal handoff"
-    ),
-    entry!(
-        "src/eval/whnf.rs",
-        0,
-        1,
-        1,
-        "terminal WHNF result rooting and promise-follower focus construction",
-        "W2B.2 promise-follower ownership; W6G.3f retired root-per-field checkpoint publication in favor of one managed state root"
-    ),
-    entry!(
-        "src/evaluation/access.rs",
-        0,
-        3,
-        1,
-        "poll/evaluator-step completion rooting and scoped projection",
-        "I3A.4/I3C.2 outcome typing and projection; I4F.2 managed root switch; GCI11R-002D.2d.3 access-qualified result publication"
-    ),
-    entry!(
-        "src/evaluation/coordinator/spark.rs",
-        0,
-        1,
-        0,
-        "durable spark demand",
-        "I3A.4/I3C.2 poll outcomes; I4F.1 coordinator roots"
-    ),
-    entry!(
-        "src/evaluation/coordinator/task.rs",
-        0,
-        0,
-        1,
-        "promise terminal projection into one durable wait result",
-        "GCI11R-002D.2d.1 caller-access-qualified task-promise terminal publication"
-    ),
-    entry!(
-        "src/evaluation/pump.rs",
-        0,
-        0,
-        2,
-        "centralized client/spark evaluation and same-region exceptional lazy-cycle and panicked-route publication",
-        "I3A.3/I3B.1b/I3B.2/I3C.2 scoped polling; I4F.1 outcomes; GCI11R-002D.2b.2e.3 nested-construction repair"
-    ),
-    entry!(
-        "src/evaluation/session.rs",
-        1,
-        2,
-        0,
-        "session demand, effect entry, and patient completion; reflection completion activation now roots through explicit access publication",
-        "I3A.3/I3B.2/I3C.1-I3D.1 scoped polling and activation; I4F.1 outcomes; GCI11R-002D.2d.2 rooted reflection admission"
-    ),
-    entry!(
-        "src/evaluation/whnf.rs",
-        0,
-        3,
-        0,
-        "post-region WHNF lazy admission and focused dependency tests",
-        "W2A.2 regional-shell polling followed by callback-capable admission"
-    ),
-    entry!(
-        "src/g_syntax.rs",
-        0,
-        1,
-        0,
-        "rooted lowered definitions and compiler diagnostics across publication",
-        "I3E.2 bounded compiler regions; I4F.1 durable roots"
-    ),
-    entry!(
-        "src/g_syntax/compiler_values.rs",
-        0,
-        2,
-        3,
-        "owned closed-evaluation results and complete runtime-cached compiler helper bundles",
-        "I3E.2 rooted cache publication; I4F.1 durable roots; GCI11R-002C direct client-demand result ownership"
-    ),
-    entry!(
-        "src/g_syntax/macro_expansion/effects.rs",
-        0,
-        1,
-        0,
-        "macro effect completion fixture publication",
-        "phase-9 macro effect ownership; GCI11R-002D.2b.2 scoped root publication inventory"
-    ),
-    entry!(
-        "src/g_syntax/macro_expansion/runner.rs",
-        0,
-        0,
-        1,
-        "macro explanation fields are rooted before their next demand boundary",
-        "GCI11R-002D.2e.4 rooted macro orchestration"
-    ),
-    entry!(
-        "src/g_syntax/module_lowering.rs",
-        0,
-        0,
-        2,
-        "declaration-to-declaration definitions and directly owned reflection annotator",
-        "I3E.2 bounded lowering regions; I4F.1 durable roots; GCI11R-002C owned closed-result handoff; W2R-001D.1 post-resolution publication"
-    ),
-    entry!(
-        "src/g_syntax/parser/source.rs",
-        0,
-        3,
-        1,
-        "embedded macro values, lookup results, diagnostic updates, and structured causes cross orchestration only as runtime roots",
-        "GCI11R-002D.2e.4 rooted parser and macro orchestration"
-    ),
-    entry!(
-        "src/g_syntax/resolve/do_expr.rs",
-        1,
-        0,
-        0,
-        "test-only embedded semantic-data fixture root",
-        "GCI11R-002D.2e.4 rooted embedded parser data"
-    ),
-    entry!(
-        "src/reflection/machine.rs",
-        0,
-        7,
-        6,
-        "rooted reflection machine and decoded-request handoff plus bounded evaluator, parser, and store access",
-        "I3D.2/I3D.4 interpreter phases; I4F.1d.3 complete machine roots and bounded raw values; I4F.2a compatibility-access retirement; GCI11R-002D.2d.2 rooted effect-task construction"
-    ),
-    entry!(
-        "src/reflection/protocol.rs",
-        0,
-        1,
-        0,
-        "reflection protocol structured-failure fixtures",
-        "GCI11R-002D.2b.2 scoped halt payload construction"
-    ),
-    entry!(
-        "src/reflection/requests.rs",
-        0,
-        1,
-        1,
-        "task request state and classified dictionary members published under access",
-        "GCI11R-002D.2g public value boundary"
-    ),
-    entry!(
-        "src/reflection/store.rs",
-        0,
-        6,
-        1,
-        "reflection store publication and inspection boundaries",
-        "I3D.4 bounded reflection-store access; GCI11R-002D.2b.2 scoped root publication inventory"
-    ),
-    entry!(
-        "src/runtime.rs",
-        0,
-        0,
-        3,
-        "shallow direct-value rooting for one runtime failure root",
-        "I4F.1c.1 failure-root boundary; I6C failure-shell and owner audit"
-    ),
-];
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum RootPublicationSurface {
-    CompatibilityNew,
-    ScopedFactory,
-    AccessPublication,
-}
-
-impl RootPublicationSurface {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::CompatibilityNew => "compatibility-new",
-            Self::ScopedFactory => "scoped-factory",
-            Self::AccessPublication => "access-publication",
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct RootPublicationOccurrence {
-    declaration: String,
-    surface: RootPublicationSurface,
-    ordinal: usize,
-    test_only: bool,
-    access_nesting: usize,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RootPublicationOwner {
-    D2bCoreCarriers,
-    D2cEvaluator,
-    D2dOrchestration,
-    D2eFrontend,
-    D2fReflection,
-    D2gPublicCompilerDiagnostics,
-    D2eTestFixtures,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RootPublicationDisposition {
-    OuterConstructionBoundary,
-    RegionalPublication,
-    RootedTransportMigration,
-    CanonicalConstructor,
-    TemporaryTestFixture,
-    Defect,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct RootPublicationReview {
-    owner: RootPublicationOwner,
-    disposition: RootPublicationDisposition,
-}
-
-impl RootPublicationOccurrence {
-    fn record(&self) -> String {
-        format!(
-            "{}#{}|surface={}|scope={}",
-            self.declaration,
-            self.ordinal,
-            self.surface.label(),
-            if self.test_only { "test" } else { "production" },
-        )
-    }
-
-    fn review(&self) -> RootPublicationReview {
-        if self.test_only {
-            return RootPublicationReview {
-                owner: RootPublicationOwner::D2eTestFixtures,
-                disposition: RootPublicationDisposition::TemporaryTestFixture,
-            };
-        }
-
-        let owner = if self.declaration.starts_with("src/core.rs::")
-            || self.declaration.starts_with("src/core_net.rs::")
-            || self.declaration.starts_with("src/runtime.rs::")
-        {
-            RootPublicationOwner::D2bCoreCarriers
-        } else if self.declaration.starts_with("src/eval/") {
-            RootPublicationOwner::D2cEvaluator
-        } else if self.declaration.starts_with("src/evaluation/") {
-            RootPublicationOwner::D2dOrchestration
-        } else if self.declaration.starts_with("src/g_syntax") {
-            RootPublicationOwner::D2eFrontend
-        } else if self.declaration.starts_with("src/reflection/") {
-            RootPublicationOwner::D2fReflection
-        } else if self.declaration.starts_with("src/api/")
-            || self.declaration.starts_with("src/compiler.rs::")
-            || self.declaration.starts_with("src/diagnostic.rs::")
-            || self.declaration.starts_with("src/source.rs::")
-        {
-            RootPublicationOwner::D2gPublicCompilerDiagnostics
+    fn is_escape_constructor(&self, owner: &str, name: &str) -> bool {
+        let owner = if owner == "Self" {
+            self.impl_name.as_deref().unwrap_or_default()
         } else {
-            panic!(
-                "{} has no GCI11R-002D.2 root-publication owner",
-                self.declaration
-            );
+            owner
         };
-
-        let disposition = {
-            match self.declaration.as_str() {
-                "src/core.rs::impl CoreValueFactory::construct_runtime_value_root"
-                | "src/core.rs::impl CoreValueFactory::try_construct_runtime_value_root" => {
-                    RootPublicationDisposition::CanonicalConstructor
-                }
-                "src/evaluation/coordinator/spark.rs::impl EvaluationWorkCoordinator::submit_spark"
-                | "src/evaluation/coordinator/task.rs::promise_assignment_terminal"
-                | "src/evaluation/session.rs::impl EvalContext::evaluate_compatibility_whnf"
-                | "src/evaluation/session.rs::impl EvalContext::reserve_reflection_activation"
-                | "src/reflection/machine.rs::impl Branch < S >::root_value"
-                | "src/reflection/machine.rs::impl ContextualValueEffectTask < S >::new"
-                | "src/reflection/machine.rs::impl EffectTask < S >::new_in_context_with_capabilities"
-                | "src/reflection/requests.rs::create_task" => {
-                    RootPublicationDisposition::RootedTransportMigration
-                }
-                "src/api/assembly.rs::impl Assembler::load_local_binary"
-                | "src/g_syntax.rs::impl Diagnostic::into_emission"
-                | "src/g_syntax/compiler_values.rs::build_module"
-                | "src/g_syntax/compiler_values.rs::evaluate_closed"
-                | "src/g_syntax/compiler_values.rs::run_pure_match_resolved"
-                | "src/g_syntax/macro_expansion/effects.rs::hidden_effect"
-                | "src/g_syntax/parser/source.rs::apply_macro_context"
-                | "src/g_syntax/parser/source.rs::caused_error_emission"
-                | "src/g_syntax/parser/source.rs::with_cause"
-                | "src/reflection/machine.rs::alternative_returns_root"
-                | "src/reflection/machine.rs::effect_api"
-                | "src/reflection/machine.rs::volume_effects"
-                | "src/reflection/protocol.rs::impl EffectRequestSpec < R >::effect"
-                | "src/reflection/requests.rs::task_status_public_value"
-                | "src/reflection/store.rs::complete_query_value" => {
-                    RootPublicationDisposition::OuterConstructionBoundary
-                }
-                "src/api/value.rs::impl ScopedValues < '_ >::wrap"
-                | "src/api/value.rs::impl Values::wrap_in"
-                | "src/api/diagnostics.rs::impl Diagnostic::from_compile"
-                | "src/api/runtime/readiness.rs::blocked_reasoning_diagnostic"
-                | "src/compiler.rs::impl CompileContext::new"
-                | "src/compiler.rs::impl CompileContext::with_compilation_trace"
-                | "src/core.rs::impl CoreValues::new"
-                | "src/core.rs::impl HostCallRootBundle::from_producer"
-                | "src/core.rs::impl ReflectionComputation::handoff_roots_in"
-                | "src/eval/list_machine.rs::impl ManagedListFrontRoot::poll_in"
-                | "src/eval/strategy_machine.rs::impl StrategyDemandMachine::poll"
-                | "src/eval/value.rs::impl LazyTaskMachine::poll"
-                | "src/eval/value.rs::impl LazyTaskMachine::poll_access_checkpoint"
-                | "src/eval/value.rs::impl LazyTaskMachine::poll_builtin_checkpoint"
-                | "src/eval/value.rs::impl LazyTaskMachine::poll_object_fixpoint_checkpoint"
-                | "src/eval/value.rs::impl LazyTaskMachine::poll_list_effect_checkpoint"
-                | "src/eval/value/tests/lazy_checkpoint.rs::host_call_follows_a_lazy_result_without_reinvocation"
-                | "src/eval/whnf.rs::impl WhnfComputation::from_promise_root"
-                | "src/eval/whnf.rs::regional_status_poll"
-                | "src/evaluation/access.rs::impl EvaluationValueAccess < 'scope >::root_value"
-                | "src/evaluation/pump.rs::poison_lazy_cycle"
-                | "src/evaluation/pump.rs::record_lazy_panic"
-                | "src/evaluation/session.rs::impl EvalContext::compose_builtin"
-                | "src/diagnostic.rs::diagnostic_object_root"
-                | "src/diagnostic.rs::conventional_summary_root"
-                | "src/diagnostic.rs::enrich_root"
-                | "src/diagnostic.rs::failure_diagnostic_root_with"
-                | "src/diagnostic.rs::prepend_contexts_root"
-                | "src/g_syntax/compiler_values.rs::build_effect_path_value"
-                | "src/g_syntax/compiler_values.rs::fail_effect_root"
-                | "src/g_syntax/compiler_values.rs::root_value"
-                | "src/g_syntax/macro_expansion/runner.rs::select_field_root"
-                | "src/g_syntax/module_lowering.rs::impl ModuleLowerer < 'context >::lower_declaration"
-                | "src/g_syntax/parser/source.rs::macro_lookup"
-                | "src/reflection/machine.rs::impl Branch < S >::new"
-                | "src/reflection/machine.rs::impl EffectTask < S >::new_rooted_in_context_with_capabilities"
-                | "src/reflection/machine.rs::impl EffectTask < S >::capture_continuation"
-                | "src/reflection/machine.rs::impl EffectTask < S >::interpret_decoded_drive"
-                | "src/reflection/machine.rs::impl EffectTask < S >::store_path_step"
-                | "src/reflection/machine.rs::lazy_value_path_root"
-                | "src/reflection/requests.rs::classify_key_value"
-                | "src/reflection/store.rs::apply_edit"
-                | "src/reflection/store.rs::apply_value_at_path"
-                | "src/reflection/store.rs::decode_query_state"
-                | "src/reflection/store.rs::impl ReflectionStore::retire_queries"
-                | "src/reflection/store.rs::impl StoreJournal::peek_query_with_observation"
-                | "src/reflection/store.rs::impl StoreSnapshot::poll_query"
-                | "src/runtime.rs::impl RuntimeFailureRoot::root_direct_values" => {
-                    RootPublicationDisposition::RegionalPublication
-                }
-                _ => panic!(
-                    "{} has no exact GCI11R-002D.2 root-publication disposition",
-                    self.declaration
-                ),
-            }
-        };
-        RootPublicationReview { owner, disposition }
+        ESCAPE_TYPES.contains(&owner) && BARE_CONSTRUCTORS.contains(&name)
     }
-}
 
-fn is_test_only(attributes: &[Attribute]) -> bool {
-    attributes.iter().any(|attribute| {
-        attribute.path().is_ident("test")
-            || (attribute.path().is_ident("cfg")
-                && attribute
-                    .meta
-                    .require_list()
-                    .is_ok_and(|list| list.tokens.to_string() == "test"))
-    })
-}
-
-struct RootPublicationVisitor {
-    path: String,
-    scopes: Vec<String>,
-    test_scopes: Vec<bool>,
-    ordinals: BTreeMap<(String, RootPublicationSurface), usize>,
-    occurrences: Vec<RootPublicationOccurrence>,
-    access_nesting: usize,
-}
-
-impl RootPublicationVisitor {
-    fn new(path: String, test_only: bool) -> Self {
-        Self {
-            path,
-            scopes: Vec::new(),
-            test_scopes: vec![test_only],
-            ordinals: BTreeMap::new(),
-            occurrences: Vec::new(),
-            access_nesting: 0,
+    fn check_definition(&mut self, name: &syn::Ident) {
+        let name = name.to_string();
+        if CORE_PROJECTIONS.contains(&name.as_str())
+            || self.is_escape_constructor("Self", name.as_str())
+        {
+            self.record(format!("defines `{name}`"));
         }
     }
-
-    fn in_test_scope(&self) -> bool {
-        self.test_scopes.last().copied().unwrap_or(false)
-    }
-
-    fn with_scope(
-        &mut self,
-        scope: String,
-        attributes: &[Attribute],
-        visit: impl FnOnce(&mut Self),
-    ) {
-        self.scopes.push(scope);
-        self.test_scopes
-            .push(self.in_test_scope() || is_test_only(attributes));
-        visit(self);
-        self.test_scopes.pop();
-        self.scopes.pop();
-    }
-
-    fn declaration(&self) -> String {
-        if self.scopes.is_empty() {
-            self.path.clone()
-        } else {
-            format!("{}::{}", self.path, self.scopes.join("::"))
-        }
-    }
-
-    fn record(&mut self, surface: RootPublicationSurface) {
-        let declaration = self.declaration();
-        let ordinal = self
-            .ordinals
-            .entry((declaration.clone(), surface))
-            .or_default();
-        *ordinal += 1;
-        self.occurrences.push(RootPublicationOccurrence {
-            declaration,
-            surface,
-            ordinal: *ordinal,
-            test_only: self.in_test_scope(),
-            access_nesting: self.access_nesting,
-        });
-    }
 }
 
-impl<'ast> Visit<'ast> for RootPublicationVisitor {
-    fn visit_item_mod(&mut self, node: &'ast ItemMod) {
-        self.with_scope(node.ident.to_string(), &node.attrs, |visitor| {
-            visit::visit_item_mod(visitor, node);
-        });
-    }
-
+impl<'ast> Visit<'ast> for EscapeVisitor<'_> {
     fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
-        let scope = format!("impl {}", node.self_ty.to_token_stream());
-        self.with_scope(scope, &node.attrs, |visitor| {
-            visit::visit_item_impl(visitor, node);
-        });
+        let name = match node.self_ty.as_ref() {
+            syn::Type::Path(path) => path.path.segments.last().map(|part| part.ident.to_string()),
+            _ => None,
+        };
+        let prior = std::mem::replace(&mut self.impl_name, name);
+        visit::visit_item_impl(self, node);
+        self.impl_name = prior;
     }
 
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
-        self.with_scope(node.sig.ident.to_string(), &node.attrs, |visitor| {
-            visit::visit_item_fn(visitor, node);
-        });
+        if CORE_PROJECTIONS.iter().any(|name| node.sig.ident == name) {
+            self.record(format!("defines `{}`", node.sig.ident));
+        }
+        visit::visit_item_fn(self, node);
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
-        self.with_scope(node.sig.ident.to_string(), &node.attrs, |visitor| {
-            visit::visit_impl_item_fn(visitor, node);
-        });
-    }
-
-    fn visit_expr_call(&mut self, node: &'ast ExprCall) {
-        if let syn::Expr::Path(function) = node.func.as_ref() {
-            let segments = function
-                .path
-                .segments
-                .iter()
-                .map(|segment| segment.ident.to_string())
-                .collect::<Vec<_>>();
-            if segments.ends_with(&["RuntimeValueRoot".to_owned(), "new".to_owned()]) {
-                self.record(RootPublicationSurface::CompatibilityNew);
-            }
-        }
-        visit::visit_expr_call(self, node);
+        self.check_definition(&node.sig.ident);
+        visit::visit_impl_item_fn(self, node);
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
-        let method = node.method.to_string();
-        match method.as_str() {
-            "construct_runtime_value_root" | "try_construct_runtime_value_root" => {
-                self.record(RootPublicationSurface::ScopedFactory);
-            }
-            "root_runtime_value" => {
-                self.record(RootPublicationSurface::AccessPublication);
-            }
-            _ => {}
+        if CORE_PROJECTIONS.iter().any(|name| node.method == name) {
+            self.record(format!("calls `.{}()`", node.method));
         }
-        if method == "with_runtime_value_access" {
-            self.visit_expr(&node.receiver);
-            for argument in &node.args {
-                if matches!(argument, syn::Expr::Closure(_)) {
-                    self.access_nesting += 1;
-                    self.visit_expr(argument);
-                    self.access_nesting -= 1;
-                } else {
-                    self.visit_expr(argument);
-                }
-            }
-        } else {
-            visit::visit_expr_method_call(self, node);
+        visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref()
+            && let [.., owner, name] = path.path.segments.iter().collect::<Vec<_>>().as_slice()
+            && self.is_escape_constructor(&owner.ident.to_string(), &name.ident.to_string())
+        {
+            self.record(format!("calls `{}::{}`", owner.ident, name.ident));
         }
+        visit::visit_expr_call(self, node);
     }
 }
 
-fn is_test_source(relative: &Path) -> bool {
-    relative
-        .components()
-        .any(|component| component.as_os_str() == "tests")
-        || relative.file_name().is_some_and(|name| {
-            name == "tests.rs"
-                || name == "test_support.rs"
-                || name.to_string_lossy().ends_with("_inventory.rs")
-        })
-}
-
-fn collect_root_publication_occurrences(manifest: &Path) -> Vec<RootPublicationOccurrence> {
-    let mut sources = Vec::new();
-    collect_rust_sources(&manifest.join("src"), &mut sources);
-    let inventory_path = Path::new("src/api/value/access_inventory.rs");
-    let mut occurrences = Vec::new();
-    for path in sources {
-        let relative = path
-            .strip_prefix(manifest)
-            .expect("a discovered source should belong to this package");
-        if relative == inventory_path || relative.starts_with("src/bin") {
-            continue;
-        }
-        let source = fs::read_to_string(&path).expect("an inventoried source should be UTF-8");
-        let syntax = syn::parse_file(&source).expect("an inventoried source should parse");
-        let mut visitor = RootPublicationVisitor::new(
-            relative
-                .to_str()
-                .expect("repository paths should be UTF-8")
-                .replace('\\', "/"),
-            is_test_source(relative),
-        );
-        visitor.visit_file(&syntax);
-        occurrences.extend(visitor.occurrences);
-    }
-    occurrences.sort();
-    occurrences
-}
-
-fn root_publication_fingerprint(occurrences: &[RootPublicationOccurrence]) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-    let mut fingerprint = FNV_OFFSET;
-    for occurrence in occurrences {
-        for byte in occurrence.record().bytes().chain([0xff]) {
-            fingerprint = (fingerprint ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
-        }
-    }
-    fingerprint
-}
-
-fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
+fn rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(directory).expect("the source tree should be readable") {
         let path = entry.expect("a source entry should be readable").path();
         if path.is_dir() {
-            collect_rust_sources(&path, sources);
+            rust_sources(&path, sources);
         } else if path.extension().is_some_and(|extension| extension == "rs") {
             sources.push(path);
         }
     }
 }
 
-fn is_inventoried_source(relative: &Path) -> bool {
-    if relative.starts_with("src/bin") {
-        return false;
-    }
-    if relative
-        .components()
-        .any(|component| component.as_os_str() == "tests")
-    {
-        return false;
-    }
-    if relative
-        .file_name()
-        .is_some_and(|name| name == "tests.rs" || name == "access_inventory.rs")
-    {
-        return false;
-    }
-    true
+fn escapes_in(path: &str, syntax: &syn::File) -> Vec<String> {
+    let mut visitor = EscapeVisitor {
+        path,
+        impl_name: None,
+        escapes: Vec::new(),
+    };
+    visitor.visit_file(syntax);
+    visitor.escapes
 }
 
 #[test]
-fn registered_runtime_root_publication_inventory_is_complete() {
+fn no_code_escapes_between_public_and_bare_core_values() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut sources = Vec::new();
-    collect_rust_sources(&manifest.join("src"), &mut sources);
+    rust_sources(&manifest.join("src"), &mut sources);
+    sources.sort();
 
-    let actual = sources
-        .into_iter()
-        .filter_map(|path| {
-            let relative = path
-                .strip_prefix(manifest)
-                .expect("a discovered source should belong to this package");
-            if !is_inventoried_source(relative) {
-                return None;
-            }
-            let source = fs::read_to_string(&path).expect("an inventoried source should be UTF-8");
-            let counts = RootPublicationCounts::in_source(&source);
-            (counts != RootPublicationCounts::new(0, 0, 0)).then(|| {
-                (
-                    relative
-                        .to_str()
-                        .expect("repository source paths should be UTF-8")
-                        .replace('\\', "/"),
-                    counts,
-                )
-            })
-        })
-        .collect::<BTreeMap<_, _>>();
-
-    let mut expected = BTreeMap::new();
-    for entry in INVENTORY {
-        assert!(!entry.role.is_empty(), "{} needs a role", entry.path);
-        assert!(
-            !entry.migration.is_empty(),
-            "{} needs a migration checkpoint",
-            entry.path
-        );
-        assert!(
-            expected
-                .insert(entry.path.to_owned(), entry.counts)
-                .is_none(),
-            "{} appears twice in the root-publication inventory",
-            entry.path
-        );
-    }
-
-    assert_eq!(actual, expected);
-}
-
-#[test]
-fn every_runtime_root_publication_has_an_exact_disposition() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let occurrences = collect_root_publication_occurrences(manifest);
-    let actual = occurrences
-        .iter()
-        .map(RootPublicationOccurrence::record)
-        .collect::<Vec<_>>();
-    if std::env::var_os("GLAM_DUMP_ROOT_PUBLICATION_INVENTORY").is_some() {
-        for occurrence in &actual {
-            eprintln!("{occurrence}");
-        }
-    }
-    // D.2h.4c.2b.2 adds one test-only publication that constructs a host-call
-    // lazy and its public value root within the same bounded access region.
-    // D.2h.4c.2b.3 adds five rooted reflection fixtures for constant effects,
-    // application checkpoints, metadata carriers, and reflection gates.
-    // Panic containment adds one same-region publication: a lazy route that
-    // panicked after caching its result settles with that cached result.
-    // A3 adds one outer construction boundary: a macro compiler diagnostic
-    // carries an evaluation failure as its structured cause.
-    // Test files named after plan steps were renamed descriptively; only
-    // source paths changed.
-    assert_eq!(actual.len(), 274, "runtime-root publication count drifted");
-    assert_eq!(
-        root_publication_fingerprint(&occurrences),
-        943_982_521_893_308_522,
-        "runtime-root publication source fingerprint drifted"
-    );
-
-    let reviews = occurrences
-        .iter()
-        .map(RootPublicationOccurrence::review)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        reviews
-            .iter()
-            .filter(|review| review.disposition == RootPublicationDisposition::Defect)
-            .count(),
-        0,
-        "the immediate nested lazy-cycle root construction defect must stay repaired"
-    );
-    assert_eq!(
-        reviews
-            .iter()
-            .filter(|review| review.disposition == RootPublicationDisposition::CanonicalConstructor)
-            .count(),
-        2,
-        "only the two CoreValueFactory implementation calls are canonical constructors"
-    );
-    assert!(
-        occurrences
-            .iter()
-            .zip(&reviews)
-            .all(|(occurrence, review)| {
-                (occurrence.test_only
-                    && review.owner == RootPublicationOwner::D2eTestFixtures
-                    && review.disposition == RootPublicationDisposition::TemporaryTestFixture)
-                    || (!occurrence.test_only
-                        && review.owner != RootPublicationOwner::D2eTestFixtures
-                        && review.disposition != RootPublicationDisposition::TemporaryTestFixture)
-            }),
-        "production and test-only root-publication dispositions must remain distinct"
-    );
-}
-
-#[test]
-fn runtime_root_construction_does_not_reenter_an_active_access_region() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let nested = collect_root_publication_occurrences(manifest)
-        .into_iter()
-        .filter(|occurrence| {
-            occurrence.access_nesting != 0
-                && occurrence.surface == RootPublicationSurface::ScopedFactory
-        })
-        .map(|occurrence| occurrence.record())
-        .collect::<Vec<_>>();
-    assert!(
-        nested.is_empty(),
-        "factory root construction reentered active runtime access: {nested:?}"
-    );
-}
-
-#[test]
-fn public_whnf_orchestration_reuses_registered_input_and_completion_roots() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let evaluator = fs::read_to_string(manifest.join("src/api/evaluator.rs"))
-        .expect("the public evaluator source should be readable");
-    let assembly = fs::read_to_string(manifest.join("src/api/assembly.rs"))
-        .expect("the assembly source should be readable");
-
-    assert!(evaluator.contains(".evaluate_root_whnf(value.0.clone())"));
-    assert!(evaluator.contains("Value::from_runtime_root(value)"));
-    assert!(!evaluator.contains("values.clone_core(value)?"));
-    assert!(assembly.contains(".evaluate_root_whnf(definitions.clone())"));
-}
-
-#[test]
-fn public_value_switch_inventory_has_no_compatibility_escape() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut sources = Vec::new();
-    collect_rust_sources(&manifest.join("src"), &mut sources);
-
-    let forbidden = [
-        ".as_core()",
-        ".into_core()",
-        "Value::from_core(",
-        "Value::from_runtime(",
-        "Self::from_runtime(",
-        "RuntimeValueRoot::from_runtime(",
-    ];
     let mut escapes = Vec::new();
     for path in sources {
         let relative = path
             .strip_prefix(manifest)
-            .expect("a discovered source should belong to this package");
-        if !is_inventoried_source(relative) {
-            continue;
-        }
-        let source = fs::read_to_string(&path).expect("production source should be UTF-8");
-        for forbidden in forbidden {
-            if source.contains(forbidden) {
-                escapes.push((relative.to_path_buf(), forbidden));
-            }
-        }
+            .expect("a source should belong to this package")
+            .display()
+            .to_string();
+        let source = fs::read_to_string(&path).expect("a source should be readable");
+        let syntax = syn::parse_file(&source)
+            .unwrap_or_else(|error| panic!("{relative} should parse: {error}"));
+        escapes.extend(escapes_in(&relative, &syntax));
     }
-
     assert!(
         escapes.is_empty(),
-        "the managed public-value switch regained authority-free core escapes: {escapes:?}"
+        "convert between public, rooted, and core values only through access: {escapes:#?}"
     );
 }
 
-fn braced_item_after<'a>(source: &'a str, marker: &str) -> &'a str {
-    let start = source
-        .find(marker)
-        .expect("source item marker should exist");
-    let open = source[start..]
-        .find('{')
-        .map(|offset| start + offset)
-        .expect("source item should have a body");
-    let mut depth = 0_usize;
-    for (offset, byte) in source[open..].bytes().enumerate() {
-        match byte {
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return &source[start..=open + offset];
-                }
-            }
-            _ => {}
-        }
-    }
-    panic!("source item body should be balanced");
-}
-
 #[test]
-fn public_value_facade_exposes_no_core_or_provenance_observer() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let source = fs::read_to_string(manifest.join("src/api/value.rs"))
-        .expect("the public value facade should be readable");
-    let value_impl = braced_item_after(&source, "impl Value {");
+fn escape_audit_rejects_each_shape() {
+    let syntax = syn::parse_file(
+        r"
+        impl Value {
+            pub fn into_core(self) -> CoreValue { todo!() }
+            fn from_runtime(value: CoreValue) -> Self { todo!() }
+            fn wrap(value: CoreValue) -> Self { Self::from_runtime(value) }
+        }
+        impl ValueKind {
+            fn from_core(access: &RuntimeValueAccess<'_>, value: &CoreValue) -> Self { todo!() }
+        }
+        fn project(value: &Value) { value.as_core(); RuntimeValueRoot::from_runtime(core); }
+        ",
+    )
+    .expect("the escape fixture should parse");
 
-    for forbidden in [
-        "pub fn as_core",
-        "pub fn into_core",
-        "pub(crate) fn into_core",
-        "pub fn runtime_id",
-        "pub fn is_undefined",
-        "pub fn as_binary",
-        "pub fn as_i64",
-        "pub fn kind",
-        "pub fn as_number_text",
-    ] {
-        assert!(
-            !value_impl.contains(forbidden),
-            "public Value facade regained forbidden surface `{forbidden}`"
-        );
-    }
+    assert_eq!(
+        escapes_in("fixture", &syntax),
+        [
+            "fixture: defines `into_core`",
+            "fixture: defines `from_runtime`",
+            "fixture: calls `Self::from_runtime`",
+            "fixture: calls `.as_core()`",
+            "fixture: calls `RuntimeValueRoot::from_runtime`",
+        ]
+    );
 }

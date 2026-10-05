@@ -4,8 +4,6 @@ use crate::core::{Builtin, keys};
 use crate::diagnostic::Severity;
 use crate::runtime::RuntimeValueRoot;
 
-#[cfg(test)]
-mod access_inventory;
 mod analysis;
 mod ast;
 mod compiler_values;

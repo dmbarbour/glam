@@ -1,440 +1,280 @@
-//! Inventory of managed-access evaluator surfaces and the retired direct
-//! production entries into recursive evaluation.
+//! Audit: specialization request work never evaluates synchronously.
 //!
-//! Production collection remains `NoAuto`. The inventory prevents a new
-//! authority-free entry or direct admission gate from appearing. The
-//! context-surface inventory separately accounts for every scoped evaluator
-//! function and every durable seam below `src/eval`.
+//! A specialization's request work runs inside a reflection machine poll. It
+//! hands semantic demand back as `SpecializationRequestPoll::Demand` and
+//! resumes with the result. Evaluating synchronously instead would nest
+//! evaluation on the Rust stack and could block a worker on its own work.
+//!
+//! The audit covers every production module that implements
+//! `SpecializationRequestWork`, in the library and the `glam` binary. Within
+//! such a module it checks every item except the task host's implementations,
+//! which run outside request polling.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct EntryCounts {
-    eval_value: usize,
-    apply_values: usize,
-    demand_strategy_value: usize,
-    eval_key_path_list: usize,
-    list_to_value_items: usize,
+use syn::punctuated::Punctuated;
+use syn::visit::{self, Visit};
+use syn::{
+    Attribute, ExprCall, ExprMethodCall, ImplItemFn, ItemFn, ItemImpl, ItemMod, Meta, Token,
+};
+
+/// Calls that obtain or use synchronous evaluation.
+const SYNCHRONOUS_EVALUATION: &[&str] = &["eval", "evaluate", "evaluate_root_whnf", "evaluator"];
+
+struct SynchronousEvaluationVisitor {
+    scope: Vec<String>,
+    violations: Vec<String>,
 }
 
-impl EntryCounts {
-    const fn new(counts: [usize; 5]) -> Self {
-        Self {
-            eval_value: counts[0],
-            apply_values: counts[1],
-            demand_strategy_value: counts[2],
-            eval_key_path_list: counts[3],
-            list_to_value_items: counts[4],
+impl SynchronousEvaluationVisitor {
+    fn within(&mut self, name: String, attributes: &[Attribute], visit: impl FnOnce(&mut Self)) {
+        if is_test_only(attributes) {
+            return;
+        }
+        self.scope.push(name);
+        visit(self);
+        self.scope.pop();
+    }
+
+    fn check(&mut self, name: &syn::Ident) {
+        if SYNCHRONOUS_EVALUATION
+            .iter()
+            .any(|forbidden| name == forbidden)
+        {
+            self.violations
+                .push(format!("{}: `{name}`", self.scope.join("::")));
         }
     }
+}
 
-    fn in_source(source: &str) -> Self {
-        Self {
-            eval_value: source.matches("eval::eval_value(").count(),
-            apply_values: source.matches("eval::apply_values(").count(),
-            demand_strategy_value: source.matches("eval::demand_strategy_value(").count(),
-            eval_key_path_list: source.matches("eval::eval_key_path_list(").count(),
-            list_to_value_items: source.matches("eval::list_to_value_items(").count(),
+impl<'ast> Visit<'ast> for SynchronousEvaluationVisitor {
+    fn visit_item_mod(&mut self, node: &'ast ItemMod) {
+        self.within(node.ident.to_string(), &node.attrs, |visitor| {
+            visit::visit_item_mod(visitor, node);
+        });
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
+        self.within(type_name(&node.self_ty), &node.attrs, |visitor| {
+            visit::visit_item_impl(visitor, node);
+        });
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
+        self.within(node.sig.ident.to_string(), &node.attrs, |visitor| {
+            visit::visit_item_fn(visitor, node);
+        });
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
+        self.within(node.sig.ident.to_string(), &node.attrs, |visitor| {
+            visit::visit_impl_item_fn(visitor, node);
+        });
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        self.check(&node.method);
+        visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref()
+            && let Some(last) = path.path.segments.last()
+        {
+            self.check(&last.ident);
         }
-    }
-
-    fn is_empty(self) -> bool {
-        self == Self::new([0; 5])
+        visit::visit_expr_call(self, node);
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ContextCounts {
-    scoped: usize,
-    durable: usize,
+fn implements(item: &ItemImpl, trait_name: &str) -> bool {
+    !is_test_only(&item.attrs)
+        && item.trait_.as_ref().is_some_and(|(_, path, _)| {
+            path.segments
+                .last()
+                .is_some_and(|segment| segment.ident == trait_name)
+        })
 }
 
-impl ContextCounts {
-    const fn new(scoped: usize, durable: usize) -> Self {
-        Self { scoped, durable }
+/// Synchronous evaluation inside a request-work module, or `None` when the
+/// module implements no request work.
+fn request_work_violations(module: &str, syntax: &syn::File) -> Option<Vec<String>> {
+    let impls = syntax.items.iter().filter_map(|item| match item {
+        syn::Item::Impl(item) => Some(item),
+        _ => None,
+    });
+    if !impls
+        .clone()
+        .any(|item| implements(item, "SpecializationRequestWork"))
+    {
+        return None;
     }
-
-    fn in_source(source: &str) -> Self {
-        Self {
-            scoped: source.matches("context: &EvaluatorStepContext").count(),
-            durable: source.matches("context: &EvalContext").count(),
-        }
-    }
-
-    fn is_empty(self) -> bool {
-        self == Self::new(0, 0)
-    }
-}
-
-struct ContextInventoryEntry {
-    path: &'static str,
-    counts: ContextCounts,
-    owner: &'static str,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct LazyProducerCounts {
-    semantic_thunk: usize,
-    semantic_computation: usize,
-    external_host_call: usize,
-}
-
-impl LazyProducerCounts {
-    const fn new(
-        semantic_thunk: usize,
-        semantic_computation: usize,
-        external_host_call: usize,
-    ) -> Self {
-        Self {
-            semantic_thunk,
-            semantic_computation,
-            external_host_call,
-        }
-    }
-
-    fn in_source(source: &str) -> Self {
-        Self {
-            semantic_thunk: source.matches("::semantic_thunk(").count(),
-            semantic_computation: source.matches("::semantic_computation(").count()
-                + source.matches("::semantic_computation_in(").count(),
-            external_host_call: source.matches("::external_host_call(").count()
-                + source.matches("::external_host_call_in(").count(),
-        }
-    }
-
-    fn is_empty(self) -> bool {
-        self == Self::new(0, 0, 0)
-    }
-}
-
-macro_rules! context_entry {
-    ($path:literal, [$scoped:literal, $durable:literal], $owner:literal) => {
-        ContextInventoryEntry {
-            path: $path,
-            counts: ContextCounts::new($scoped, $durable),
-            owner: $owner,
-        }
+    let hosts = impls
+        .filter(|item| implements(item, "TaskHost"))
+        .map(|item| type_name(&item.self_ty))
+        .collect::<BTreeSet<_>>();
+    let mut visitor = SynchronousEvaluationVisitor {
+        scope: vec![module.to_owned()],
+        violations: Vec::new(),
     };
+    for item in &syntax.items {
+        match item {
+            syn::Item::Impl(item) if hosts.contains(&type_name(&item.self_ty)) => {}
+            item => visitor.visit_item(item),
+        }
+    }
+    Some(visitor.violations)
 }
 
-/// Every evaluator function which already carries scoped access, plus every
-/// deliberate durable-context seam which later checkpoints must split.
-///
-/// Counts are per source owner rather than one aggregate: adding, removing, or
-/// moving an evaluator entry requires naming the receiving migration phase.
-/// The test-only `apply_builtin` compatibility wrapper remains visible in
-/// `builtins.rs`; it does not create another production admission gate.
-const CONTEXT_INVENTORY: &[ContextInventoryEntry] = &[
-    context_entry!(
-        "src/eval/access_machine.rs",
-        [4, 7],
-        "W6G.1f.3d.1-.3 regional key/list bridge plus edge-owned access state and boundary adapter; W6G.1f.3g.1b exposes required key-list conversion through that shared regional child; W6G.1f.3g.3e.2a removes the optional durable adapter"
-    ),
-    context_entry!(
-        "src/eval/application.rs",
-        [0, 3],
-        "W6F.4d.3 ordinary lazy application test constructors and access-qualified leaves"
-    ),
-    context_entry!(
-        "src/eval/builtins.rs",
-        [0, 1],
-        "W6C.1b regional dispatcher and test-only durable compatibility wrapper"
-    ),
-    context_entry!(
-        "src/eval/list_machine.rs",
-        [1, 3],
-        "W6G.1f.3e.1 retains the regional logical-list front bridge while W6G.1f.3g.3e.1 removes the final durable back owner after pattern-list embedding"
-    ),
-    context_entry!(
-        "src/eval/net.rs",
-        [22, 7],
-        "I3D.3d-I3D.4 scoped batches and claims; I8A.0 normalization roots; W4C.1 persistent driver and net-WHNF owner; NC1 shared net-WHNF budget driver; NC3-NC5 regional callable spill, resumption, and cold exact terminalization; NC6 retired the synchronous deferred-callable context; W6B.4b.1 retired synchronous access resolution; W6G.1f.3c drives managed net checkpoints beneath caller-supplied access"
-    ),
-    context_entry!(
-        "src/eval/sequence.rs",
-        [2, 3],
-        "I3B.2 and I3D/I3E direct sequence callers"
-    ),
-    context_entry!(
-        "src/eval/strategy_machine.rs",
-        [1, 1],
-        "W6G.1f.3g.2d leaves only the detached spark worker's durable demand owner; seq and spark admission are regional builtin state"
-    ),
-    context_entry!(
-        "src/eval/tagged_machine.rs",
-        [0, 2],
-        "W6G.1f.3g.3b regional tagged-payload and semantic-undefined owner; W6G.1f.3g.3e.3b retires the durable pattern client"
-    ),
-    context_entry!(
-        "src/eval/value.rs",
-        [15, 5],
-        "I3B.2/I3C.2 scoped wait and I4F.1c.2 failure-root projection; I3D reflection/net; I3E.1 deferred producers; GCI5R-003D explicit lazy/promise observation; GCI5R-008 root-only retry projection; W2A.2 exact lazy-root admission; W2B.2 removes the follower's recursive halt adapter; W3B.2 removes the direct fixpoint helper; W6G.1f.2a installs and polls lazy-owned WHNF checkpoints; W6G.1f.3a.1 bounds host-call checkpoint projection and rooted-outcome publication on either side of the mutator-free callback; W6G.1f.3b removes the route-owned reflection evaluator context; W6G.1f.3c installs and transitions managed net checkpoints in bounded access; W6G.1f.3d.2-.3 does the same for computed access; W6G.1f.3e.3 and W6G.1f.3f directly install and poll object/list-effect checkpoints; W6G.1f.3g.2a polls the numeric checkpoint under bounded access"
-    ),
-];
+fn type_name(ty: &syn::Type) -> String {
+    match ty {
+        syn::Type::Path(path) => path
+            .path
+            .segments
+            .last()
+            .map_or_else(|| "impl".to_owned(), |part| part.ident.to_string()),
+        _ => "impl".to_owned(),
+    }
+}
 
-fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
+/// Whether an item exists only in test builds: `#[test]`, or a `cfg`
+/// predicate that is false whenever `test` is off.
+fn is_test_only(attributes: &[Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        attribute.path().is_ident("test")
+            || (attribute.path().is_ident("cfg")
+                && attribute
+                    .parse_args::<Meta>()
+                    .is_ok_and(|predicate| cfg_without_test(&predicate) == Some(false)))
+    })
+}
+
+/// Evaluates a `cfg` predicate with `test` off and every other option
+/// unknown (`None`).
+fn cfg_without_test(predicate: &Meta) -> Option<bool> {
+    match predicate {
+        Meta::Path(path) if path.is_ident("test") => Some(false),
+        Meta::List(list) => {
+            let operands = list
+                .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+                .ok()?
+                .iter()
+                .map(cfg_without_test)
+                .collect::<Vec<_>>();
+            if list.path.is_ident("not") {
+                operands.first().copied().flatten().map(|value| !value)
+            } else if list.path.is_ident("all") {
+                if operands.contains(&Some(false)) {
+                    Some(false)
+                } else {
+                    operands
+                        .iter()
+                        .all(|value| *value == Some(true))
+                        .then_some(true)
+                }
+            } else if list.path.is_ident("any") {
+                if operands.contains(&Some(true)) {
+                    Some(true)
+                } else {
+                    operands
+                        .iter()
+                        .all(|value| *value == Some(false))
+                        .then_some(false)
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Rust sources under `directory`, except test directories and test files.
+fn non_test_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(directory).expect("the source tree should be readable") {
         let path = entry.expect("a source entry should be readable").path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
         if path.is_dir() {
-            collect_rust_sources(&path, sources);
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            if name != "tests" {
+                non_test_sources(&path, sources);
+            }
+        } else if let Some(stem) = name.strip_suffix(".rs")
+            && !matches!(stem, "tests" | "test_support")
+            && !stem.ends_with("_inventory")
+        {
             sources.push(path);
         }
     }
 }
 
-fn is_external_production_source(relative: &Path) -> bool {
-    !relative.starts_with("src/eval")
-        && !relative.starts_with("src/bin")
-        && relative != Path::new("src/g_syntax/access_inventory.rs")
-        && !relative
-            .components()
-            .any(|component| component.as_os_str() == "tests")
-        && relative.file_name().is_none_or(|name| name != "tests.rs")
-}
-
-fn is_evaluator_surface_source(relative: &Path) -> bool {
-    relative.starts_with("src/eval")
-        && !relative
-            .components()
-            .any(|component| component.as_os_str() == "tests")
-        && !matches!(
-            relative.to_str(),
-            Some("src/eval/access_inventory.rs" | "src/eval/test_support.rs" | "src/eval/tests.rs")
-        )
-}
-
-fn is_lazy_producer_inventory_source(relative: &Path) -> bool {
-    relative.starts_with("src")
-        && relative != Path::new("src/core.rs")
-        && relative != Path::new("src/core/managed/active_owner_inventory.rs")
-        && relative != Path::new("src/core/managed/containment_inventory.rs")
-        && relative != Path::new("src/eval/access_inventory.rs")
-        && !relative
-            .components()
-            .any(|component| component.as_os_str() == "tests")
-        && relative.file_name().is_none_or(|name| name != "tests.rs")
-}
-
-fn production_prefix(source: &str) -> &str {
-    source
-        .split_once("\n#[cfg(test)]\nmod tests")
-        .map_or(source, |(production, _)| production)
-}
-
 #[test]
-fn evaluator_context_surfaces_are_complete() {
+fn specialization_request_work_never_evaluates_synchronously() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut sources = Vec::new();
-    collect_rust_sources(&manifest.join("src/eval"), &mut sources);
+    non_test_sources(&manifest.join("src"), &mut sources);
+    sources.sort();
 
-    let actual = sources
-        .into_iter()
-        .filter_map(|path| {
-            let relative = path
-                .strip_prefix(manifest)
-                .expect("evaluator source should belong to this package");
-            if !is_evaluator_surface_source(relative) {
-                return None;
-            }
-            let source = fs::read_to_string(&path).expect("Rust source should be readable");
-            let counts = ContextCounts::in_source(&source);
-            (!counts.is_empty()).then(|| (relative.to_path_buf(), counts))
-        })
-        .collect::<BTreeMap<_, _>>();
-    let expected = CONTEXT_INVENTORY
-        .iter()
-        .map(|entry| {
-            assert!(
-                !entry.owner.is_empty(),
-                "every evaluator context surface needs a migration owner"
-            );
-            (PathBuf::from(entry.path), entry.counts)
-        })
-        .collect::<BTreeMap<_, _>>();
-
-    assert_eq!(actual, expected);
-}
-
-#[test]
-fn direct_evaluator_entries_are_retired() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut sources = Vec::new();
-    collect_rust_sources(&manifest.join("src"), &mut sources);
-
-    let actual = sources
-        .into_iter()
-        .filter_map(|path| {
-            let relative = path
-                .strip_prefix(manifest)
-                .expect("source path should be below the manifest");
-            if !is_external_production_source(relative) {
-                return None;
-            }
-            let source = fs::read_to_string(&path).expect("Rust source should be readable");
-            let counts = EntryCounts::in_source(&source);
-            (!counts.is_empty()).then(|| (relative.to_path_buf(), counts))
-        })
-        .collect::<BTreeMap<_, _>>();
-    let expected = BTreeMap::<PathBuf, EntryCounts>::new();
-
-    assert_eq!(actual, expected);
-}
-
-#[test]
-fn lazy_producer_roles_are_explicit_and_complete() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut sources = Vec::new();
-    collect_rust_sources(&manifest.join("src"), &mut sources);
-
-    let actual = sources
-        .into_iter()
-        .filter_map(|path| {
-            let relative = path
-                .strip_prefix(manifest)
-                .expect("source path should be below the manifest");
-            if !is_lazy_producer_inventory_source(relative) {
-                return None;
-            }
-            let source = fs::read_to_string(&path).expect("Rust source should be readable");
-            assert!(
-                !source.contains("::deferred("),
-                "{relative:?} must classify lazy producers as semantic thunks or host calls"
-            );
-            let counts = LazyProducerCounts::in_source(production_prefix(&source));
-            (!counts.is_empty()).then(|| (relative.to_path_buf(), counts))
-        })
-        .collect::<BTreeMap<_, _>>();
-    let expected = [(
-        PathBuf::from("src/compiler.rs"),
-        LazyProducerCounts::new(0, 0, 2),
-    )]
-    .into_iter()
-    .collect::<BTreeMap<_, _>>();
-
-    assert_eq!(actual, expected);
-}
-
-#[test]
-fn direct_evaluator_admission_is_retired() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut sources = Vec::new();
-    collect_rust_sources(&manifest.join("src"), &mut sources);
-    let actual = sources
-        .into_iter()
-        .filter_map(|path| {
-            let relative = path
-                .strip_prefix(manifest)
-                .expect("source path should be below the manifest");
-            if relative == Path::new("src/eval/access_inventory.rs") {
-                return None;
-            }
-            let source = fs::read_to_string(&path).expect("Rust source should be readable");
-            let count = source
-                .matches("EvaluatorStepContext::for_direct_compatibility(")
-                .count();
-            (count != 0).then(|| (relative.to_path_buf(), count))
-        })
-        .collect::<BTreeMap<_, _>>();
-    assert!(
-        actual.is_empty(),
-        "W8B.2 must leave no direct evaluator admission: {actual:?}"
-    );
-}
-
-#[test]
-fn effect_interpreter_sources_have_no_direct_compatibility_entry() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for relative in [
-        "src/reflection/machine.rs",
-        "src/reflection/protocol.rs",
-        "src/reflection/requests.rs",
-        "src/g_syntax/macro_expansion/effects.rs",
-        "src/bin/glam/configuration/logger/effects.rs",
-        "src/bin/glam/command_line/configured/effects.rs",
-        "src/bin/glam/command_line/configured/token/effects.rs",
-    ] {
-        let source = fs::read_to_string(manifest.join(relative))
-            .expect("effect interpreter source should be readable");
-        assert!(
-            !source.contains("EvaluatorStepContext::for_direct_compatibility("),
-            "{relative} must re-enter evaluation only through its admitted poll context"
-        );
-        assert!(
-            EntryCounts::in_source(&source).is_empty(),
-            "{relative} must not call the durable-context evaluator compatibility API"
-        );
-    }
-}
-
-#[test]
-fn specialization_callbacks_have_no_nested_semantic_evaluator() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for relative in [
-        "src/reflection/requests.rs",
-        "src/g_syntax/macro_expansion/effects.rs",
-        "src/bin/glam/configuration/logger/effects.rs",
-        "src/bin/glam/command_line/configured/effects.rs",
-        "src/bin/glam/command_line/configured/token/effects.rs",
-    ] {
-        let source = fs::read_to_string(manifest.join(relative))
-            .expect("specialization source should be readable");
-        for forbidden in [
-            "context.evaluate(",
-            ".evaluator().eval(",
-            "eval::eval_value(",
-            "eval::eval_value_in(",
-            "evaluate_root_whnf(",
-        ] {
-            assert!(
-                !source.contains(forbidden),
-                "{relative} must transfer semantic demand to owned request work, not `{forbidden}`"
-            );
+    let mut request_modules = Vec::new();
+    let mut violations = Vec::new();
+    for path in sources {
+        let relative = path
+            .strip_prefix(manifest)
+            .expect("a source should belong to this package")
+            .display()
+            .to_string();
+        let source = fs::read_to_string(&path).expect("a source should be readable");
+        let syntax = syn::parse_file(&source)
+            .unwrap_or_else(|error| panic!("{relative} should parse: {error}"));
+        if let Some(found) = request_work_violations(&relative, &syntax) {
+            request_modules.push(relative);
+            violations.extend(found);
         }
     }
+
+    assert!(
+        !request_modules.is_empty(),
+        "the audit must find the modules that implement SpecializationRequestWork"
+    );
+    assert!(
+        violations.is_empty(),
+        "specialization request work must return SpecializationRequestPoll::Demand \
+         instead of evaluating synchronously: {violations:#?}"
+    );
 }
 
 #[test]
-fn builtin_durable_context_downgrades_are_explicit_and_complete() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let dispatcher = fs::read_to_string(manifest.join("src/eval/builtins.rs"))
-        .expect("builtin dispatcher source should be readable");
+fn request_work_audit_exempts_only_the_task_host() {
+    let syntax = syn::parse_file(
+        r"
+        impl SpecializationRequestWork<Effects> for Work {
+            fn poll(&mut self) { self.assembler.evaluator().eval(&self.value); }
+        }
+        fn helper(context: &EvalContext) { context.evaluate_root_whnf(root); }
+        impl TaskHost<Effects> for Host {}
+        impl Host {
+            fn new(assembler: Assembler) { assembler.evaluator().eval(&value); }
+        }
+        #[cfg(test)]
+        fn fixture(assembler: Assembler) { assembler.evaluator().eval(&value); }
+        ",
+    )
+    .expect("the request-work fixture should parse");
 
     assert_eq!(
-        dispatcher.matches("context.context()").count(),
-        0,
-        "builtin dispatch must not downgrade evaluator-step authority"
+        request_work_violations("fixture", &syntax),
+        Some(vec![
+            "fixture::Work::poll: `eval`".to_owned(),
+            "fixture::Work::poll: `evaluator`".to_owned(),
+            "fixture::helper: `evaluate_root_whnf`".to_owned(),
+        ])
     );
-    assert!(
-        dispatcher.contains("access: &EvaluationValueAccess<'_>")
-            && dispatcher.contains("LazyValue::from_builtin_in(\n            access.values()")
-            && !dispatcher.contains("context.construct_lazy"),
-        "saturated builtin dispatch must use only the caller's bounded regional access"
-    );
-
-    let source = fs::read_to_string(manifest.join("src/eval/value.rs"))
-        .expect("lazy-source owner should be readable");
-    assert!(
-        source.contains("apply_builtin_in(&access, call.builtin, arguments, argument)")
-            && source.contains("self.install_regional_whnf_in(&access, work)"),
-        "the lazy-source owner must install an immediate builtin result beneath the owning lazy before regional access closes"
-    );
-
-    let annotation = fs::read_to_string(manifest.join("src/eval/annotation_machine.rs"))
-        .expect("annotation machine source should be readable");
-    for annotation_boundary in [
-        "pub(in crate::eval) struct RegionalAnnotationMachine",
-        "RegionalAnnotationPhase::MetadataItems",
-        "LazyValue::from_reflection_gate_in",
-        "Value::reflection_task_result_in",
-        "RecognizedAnnotation::Seq(value)",
-        "RecognizedAnnotation::Spark(value)",
-    ] {
-        assert!(
-            annotation.contains(annotation_boundary),
-            "missing annotation authority boundary `{annotation_boundary}`"
-        );
-    }
+    let no_request_work =
+        syn::parse_file("fn helper(context: &EvalContext) { context.evaluate(); }")
+            .expect("the fixture should parse");
+    assert_eq!(request_work_violations("fixture", &no_request_work), None);
 }
