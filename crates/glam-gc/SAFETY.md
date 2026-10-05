@@ -161,6 +161,11 @@ and every unsafe function, implementation, and block are checked into
   or Rust reference exists in them at that checkpoint. C2A.3 initializes every
   run header before chunk publication, then initializes side metadata only
   while the arena is exclusively borrowed.
+- A chunk stays in its arena until heap destruction, even when every run is
+  free. Its free runs return to the heap-wide pool and remain capacity.
+  Returning or decommitting an empty chunk is deferred: it would complicate
+  the stable chunk index and free-run retirement for a case expected to be
+  rare.
 
 ## Run Topology Invariants
 
@@ -187,6 +192,13 @@ and every unsafe function, implementation, and block are checked into
   geometry, and accepts only an exact slot-start address. Header bytes,
   metadata, alignment padding, slot interiors, run ends, free runs, and other
   heaps all fail without producing an owner.
+- Why this geometry: a 64 KiB run bounds a cold class's waste to one modest
+  run. For the 16–256 B layouts measured before integration, the three side
+  bitmaps cost 0.11–1.55% of a run. A 1 B class stays supported at about 20%
+  rather than the collector setting value-layer alignment policy. The largest
+  payload is 65,408 B (one slot at minimum alignment) and the largest
+  alignment 32 KiB. Run and chunk sizes are build-time constants, not heap
+  options, because pointer masking depends on them.
 
 ## Mark Attempt Invariants
 
@@ -197,6 +209,9 @@ and every unsafe function, implementation, and block are checked into
 - Every collection attempt clears each assigned run's complete contiguous mark
   range after all mutators drain and before root visitation or synthetic mark
   work. The mutable `u64` slice exists only for that exclusive bulk fill.
+  Clearing before marking trades one cache-local bitmap pass per collection
+  for a small correctness surface: there is no mark color, allocation-time
+  mark, touched-word journal, or failure-time bitmap pass.
 - Collector lookup starts from the erased integer address, finds its owning
   live chunk and exact slot-start through the indexed arena, validates header
   class and geometry against the dense class entry and run pool, loads the
@@ -457,6 +472,18 @@ the separate liveness and exactly-once obligations at each call site.
   mutator's heap and cache and carries only a collector-private, non-owning
   class identity. Neither admission nor allocation-class discovery creates a
   new heap owner.
+- Two designs were rejected. Admission is not an `RwLock`, and an admitted
+  mutator holds a count rather than a guard. Reader/writer priority is not a
+  portable policy, and admission needs more than shared and exclusive modes:
+  idle-only election, the collector's mutator obligation through
+  `Finalizing` and its direct transfer to the elected entrant, epochs, and
+  poison. Layering those over a lock would duplicate the active state and
+  open a handoff race. A queued writer, a pending phase that turned away new
+  entrants while mutators drained, was implemented and then removed. It
+  needed a dependent admission category for cross-heap nesting, thread-local
+  deferred-service records, exit-time scans, and follow-up epochs.
+  Idle-entry election needs none of these. Its accepted cost is that
+  continuously overlapping mutators can starve collection.
 
 ## Heap-Local Allocation-Class Invariants
 
@@ -894,7 +921,9 @@ the poisoned heap. Terminal `HeapInner::drop` performs no managed destructor
 dispatch for a poisoned heap because allocation and destructor authority may
 no longer agree. Raw arena release may therefore leak Rust-owned resources,
 but it cannot retry an uncertain destructor or expose partially published
-allocator state.
+allocator state. Poison was chosen over aborting the process: it keeps the
+original panic, confines the failure to one heap, and wakes every waiter.
+That heap's leaked resources are the accepted price.
 
 After the swept allocator view and its lease epoch are authoritative, the
 attempt enters `AllocatorViewPublished`; pre-finalizer and already-committed
@@ -1555,7 +1584,9 @@ The initial collector deliberately omits:
 - variable-size runs, a large-object path, and dynamically sized objects;
 - returning or decommitting arena chunks before heap destruction;
 - first-class Glam finalizers and resurrection of a dead allocation;
-- `Trace` derive macros and GC-aware persistent containers;
+- `Trace` derive macros, to be reconsidered only if hand-written visitors
+  prove substantially repetitive, and then audited as a separate tool;
+- GC-aware persistent containers;
 - precise reclamation through opaque host payloads; and
 - cross-runtime migration, live-graph serialization, and stack maps.
 

@@ -501,8 +501,8 @@ maps the short names used here to file names.
   `ManagedDropRecord` covering direct and transitive destruction.
 - **Consequences:** every new managed family needs a reviewed destruction
   record.
-- **Rule lives in:** `agent_context/evaluation.md` "Values and Forcing" (not
-  yet the drop record).
+- **Rule lives in:** `architecture/values.md` "Managed Families";
+  `agent_context/evaluation.md` (the new-family checklist).
 - **Recorded in:** GC integration plan I4.0; I13 cleanup inventory; G4
   review.
 
@@ -704,7 +704,9 @@ maps the short names used here to file names.
 - **Context:** the queued-writer drain protocol was too complex.
 - **Decision:** collection requests are coalesced hints. An idle outer entry
   elects collection, and outer exit never collects. `RwLock` was rejected:
-  its priority is not portable, and it cannot express dependent admission.
+  reader/writer priority is not portable, and admission needs more than
+  shared and exclusive modes (idle-only election, the collector's mutator
+  obligation through finalization, epochs, and poison).
 - **Consequences:** an entry prepares, is admitted, then activates its
   thread-local entry state.
 - **Rule lives in:** `crates/glam-gc/SAFETY.md` "Regional Mutator Admission
@@ -730,14 +732,42 @@ maps the short names used here to file names.
   irreversibility and permanent poison".
 - **Recorded in:** C6 review GC6-002.
 
+### Collection pressure is proportional to survivors
+`survivor-proportional-pressure-target` · 2026-08-22 · agent · accepted
+- **Context:** a fixed collection threshold either collects too often for a
+  large live heap or too rarely for a small one.
+- **Decision:** after a successful collection, publish the assigned-run count
+  `S` and the target `S + 112 + ceil(S / 2)` runs. A failed mark or
+  pre-publication sweep keeps the prior baseline.
+- **Consequences:** collection frequency scales with what survives. The
+  one-half ratio, the 112-run floor, and run size were never measured; the
+  value-representation plan owns that measurement.
+- **Rule lives in:** `crates/glam-gc/SAFETY.md` "Worker-Local Allocation-Word
+  Invariants".
+- **Recorded in:** collector implementation plan, C2C.
+
+### Terminal heap destruction supplies no mutator
+`terminal-destruction-without-mutator` · 2026-08-24 · agent · accepted
+- **Context:** the last heap owner may drop on any thread, possibly while
+  unwinding, with no collector capability left to lend.
+- **Decision:** terminal destruction supplies no mutator and traces no
+  pending payloads. It visits detached finalization runs, then attached
+  class runs, and propagates the first destructor panic.
+- **Consequences:** every managed representation must be safely droppable
+  without heap capability. A destructor that panicked during finalization
+  retires only its own identity and is never attempted again.
+- **Rule lives in:** `crates/glam-gc/SAFETY.md`, the terminal-destruction
+  contract.
+- **Recorded in:** collector implementation plan, C6D.1–C6D.2; C6 review.
+
 ### Plain mark stack; no paged range tracing
 `plain-mark-stack-no-paged-tracing` · 2026-10-03 · agent · accepted
 - **Context:** a fan-out of 1M edges needed a 16 MiB worklist.
 - **Decision:** keep the plain `Vec<TraceWork>` mark stack.
 - **Consequences:** reopen only together with a real contiguous managed
   container and fresh measurements.
-- **Rule lives in:** `crates/glam-gc/VERIFY.md` "C8 collector measurements"
-  (not the reopen condition).
+- **Rule lives in:** `crates/glam-gc/VERIFY.md` "C8 collector measurements",
+  including the reopen condition.
 - **Recorded in:** C8 review C8B.3; commit `afa3d963`.
 
 ## Superseded decisions

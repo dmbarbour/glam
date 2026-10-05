@@ -98,16 +98,19 @@ holder drops, the domain retires and its roots become inert.
 
 `ManagedFamily: Trace` is the private unsafe admission every allocator
 requires. `Trace` does not constrain `Drop`, so a family also supplies a
-`ManagedDropRecord`: family, source, and direct and transitive destruction
-reviews. Destruction is passive: it may release Rust resources but never reach
-a runtime, heap, scheduler, service or callback, or touch a `Gc` it holds.
-Active cleanup belongs to an external owner.
+`ManagedDropRecord` (see the admission table below). Destruction is passive:
+it may release Rust resources but never reach a runtime, heap, scheduler,
+service or callback, or touch a `Gc` it holds. Active cleanup belongs to an
+external owner.
 
 Ownership classes: *managed node* (traced); *external root owner* (outside the
 graph, deliberately extends rooted lifetimes); *companion* (edge-free
-coordination state); *transient* (bounded owner, borrows only in a region);
-*external leaf* (no edge). Never hold an internal lazy, promise or fixpoint
-edge through a root: it hides the cycle.
+coordination state with no `Gc`, root or public value, so it keeps nothing
+alive); *transient* (bounded owner that borrows only inside a region and roots
+whatever it keeps across regions or callbacks); *external leaf* (no edge).
+Any other holder is a defect: remove it or make it an exact same-runtime
+root. Never hold an internal lazy, promise or fixpoint edge through a root:
+it hides the cycle.
 
 | Family | Source |
 | --- | --- |
@@ -116,6 +119,20 @@ edge through a root: it hides the cycle.
 | `ManagedLazyCheckpointCell` (WHNF state) | `eval/whnf/managed_state.rs` |
 | six typed lazy-producer checkpoints | `eval/lazy_checkpoint.rs` |
 | list-front and key-conversion checkpoints | `eval/list_machine.rs`, `eval/access_machine.rs` |
+
+Admitting a family settles each concern below. A family is identified by name,
+Rust type and source path, never by `TypeId`, metadata address or class ID,
+which vary by process or heap.
+
+| Concern | Settled by |
+| --- | --- |
+| identity | `ManagedDropRecord` `family` and `source` |
+| edges | its `unsafe impl Trace`, reporting every direct edge |
+| layout | `managed_slot_extent::<T>()`; `const` latches on core cells and facades |
+| destruction | the record's direct and transitive reviews (`no_drop` or `passive`) |
+| mutation | immutable (`ManagedValueNode` and its shells), one-write (lazy result, promise assignment), or replaceable under the owner's mutex (lazy producer slot, checkpoint state, net topology); every change after publication is one owner-qualified transition |
+| no edge hidden behind a root | the `*_inventory.rs` source latches |
+| evidence | survival across a forced collection; cycle-reclamation fixtures for the core cells |
 
 ## Recursive Identities
 

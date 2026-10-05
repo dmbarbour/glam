@@ -80,9 +80,7 @@ Each line moves into a plan as soon as one owns it.
 These completed plans still hold content that has not yet moved into standing
 docs or `Decisions.md`. The disposition plan tracks each one.
 
-- [`GarbageCollectionRoadmap_2026-08-19.md`](GarbageCollectionRoadmap_2026-08-19.md),
-  [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md),
-  [`GarbageCollectionGateG0Baseline_2026-08-20.md`](GarbageCollectionGateG0Baseline_2026-08-20.md),
+- [`GarbageCollectorImplementation_2026-08-19.md`](GarbageCollectorImplementation_2026-08-19.md),
   [`GarbageCollectorOwnershipLedger_2026-08-20.md`](GarbageCollectorOwnershipLedger_2026-08-20.md),
   and [`GarbageCollectorIntegration_2026-08-19.md`](GarbageCollectorIntegration_2026-08-19.md):
   the collector and its runtime integration.
@@ -129,3 +127,8 @@ docs or `Decisions.md`. The disposition plan tracks each one.
 | `reviews/PureInteractionNetConstructionPNC3_2026-09-20.md` | `8a2c8a2f` | pure net construction (`PNC3…`) |
 | `reviews/PureInteractionNetConstructionPNC4_2026-09-20.md` | `87c4a3fa` | pure net construction (`PNC4…`) |
 | `reviews/PureInteractionNetConstructionPNC5_2026-09-21.md` | `3bfc7def` | pure net construction (`PNC5…`) |
+| `plans/GarbageCollectionRoadmap_2026-08-19.md` | `9e8d86fe` | collector gates (`G0`–`G4`) |
+| `plans/GarbageCollectionGateG0Baseline_2026-08-20.md` | `807a91c1` | collector gates (`G0`) |
+| `reviews/GarbageCollectorC2C_2026-08-22.md` | `2d6eb2e4` | collector crate (`C2C…`, `GC2C-…`) |
+| `reviews/GarbageCollectorC6_2026-08-24.md` | `bb205d9b` | collector crate (`C6…`, `GC6-…`) |
+| `reviews/GarbageCollectorC8_2026-10-03.md` | `9e8d86fe` | collector crate (`C8…`) |

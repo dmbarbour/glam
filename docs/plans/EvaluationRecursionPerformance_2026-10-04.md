@@ -53,7 +53,7 @@ milliseconds at modest depth, far beyond any plausible constant overhead.
   this cheap.
 - Check whether time per call scales with the number of pending lazies.
 - Add the countdown to the X3 performance corpus at a few depths.
-- Recheck an old crash. Before the collector and resumable WHNF existed,
-  the `direct_assembly_elf` sample with `--workers 4` and `--workers 1`
-  exited with status 134, from a worker stack overflow. Nobody has rerun
-  it since resumable WHNF replaced recursive demand.
+- *Rechecked 2026-10-05:* an old worker stack overflow (the
+  `direct_assembly_elf` sample exited with status 134 under `--workers 4` and
+  `--workers 1`, before the collector and resumable WHNF) did not reproduce
+  in 40 release runs with 1, 2, and 4 workers.

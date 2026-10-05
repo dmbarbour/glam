@@ -929,6 +929,20 @@ This checkpoint moves rather than adds an unsafe reconstruction site. The
 returned `Gc<T>` remains unbranded and cannot justify use after the root or
 another traced owner ceases to prove liveness.
 
+## Gate history
+
+Five gates sequenced the collector and its Glam integration. Each authorized
+the next stage; none enabled automatic collection, and every Glam heap stays
+`NoAuto`.
+
+| Gate | Scope | Passed | Evidence |
+| --- | --- | --- | --- |
+| G0 | Pre-GC semantic contracts latched by named tests; release timing and peak RSS recorded as comparison data. Admitted C1's unsafe code. | 2026-08-20 | "Gate G0 Baseline" |
+| G1 | Isolated collector sound: explicit roots, regional mutators, forced race schedules, Miri and sanitizers, no Glam dependency. Admitted `Gc` in production types, with reclamation still disabled. | 2026-08-25 | "Gate G1 Certification" |
+| G2 | Production graph closed: every root and recursive edge exactly traced or a reviewed conservative retention, and every managed family published before its region ends. Admitted forced full collection in tests. | 2026-09-11 | `src/core/managed/gate_g2_inventory.rs`; [`values.md`](../../docs/architecture/values.md) "Managed Families" |
+| G3 | Forced full collection over the whole production graph passes the semantic, concurrency, drop and dynamic-tool checks, and the raw `core::Value` API inventory has no authority-free operation. Admitted explicit runtime maintenance. | 2026-10-02 | `src/api/tests/managed_collection_tests.rs`; the `aggressive-gc-verification` run in `scripts/check.sh full` |
+| G4 | Legacy ownership retired: no `Arc` merely keeps a recursive identity alive, every remaining `Arc` has a named role, and the docs describe the implemented collector. | 2026-10-02 | [`values.md`](../../docs/architecture/values.md) "Invariants and Verification" |
+
 ## Gate G1 Certification
 
 C6D.3 certified the isolated collector on 2026-08-25. Its review document has
@@ -964,23 +978,53 @@ semantics or unsafe code.
 
 ## Gate G0 Baseline
 
-Before changing the unsafe surface in C1, recheck the focused pre-GC semantic
-contracts with:
+G0 latched pre-GC behavior before C1 added unsafe code. `scripts/check.sh`
+(default level) still reruns its seven regressions:
 
 ```sh
 crates/glam-gc/scripts/check-g0-semantics.sh
 ```
 
-The operational comparison data can be recaptured on Linux with:
+| Contract | Regression |
+| --- | --- |
+| Runtime provenance and cross-runtime rejection | `composite_construction_preserves_provenance_errors` |
+| Fulfilled lazy source release | `terminal_lazy_cache_releases_its_shared_source_after_active_snapshots` |
+| Strict lazy-cycle diagnosis | `a_lazy_task_that_waits_on_itself_is_poisoned_as_a_cycle` |
+| Retryable promise cycle | `promise_only_cycle_remains_blocked_without_poisoning_its_assignment` |
+| Concurrent worker evaluation | `workers_force_sparks_and_poll_ready_reflection_tasks` |
+| Shared interaction-net function state | `compiled_function_values_reuse_one_shared_interaction_net` |
+| Settlement and retained exit failures | `ready_settlement_publishes_exited_once_and_retains_exit_errors` |
+
+Recapture the operational data on Linux with:
 
 ```sh
 crates/glam-gc/scripts/capture-g0-baseline.sh
 ```
 
-That script reports release-process timing and peak RSS; it does not enforce
-performance thresholds. The dated measurements, environment, methodology, and
-known pre-GC worker-stack observation are recorded in
-[`GarbageCollectionGateG0Baseline_2026-08-20.md`](../../docs/plans/GarbageCollectionGateG0Baseline_2026-08-20.md).
+The script builds release `glam` and runs each workload once to warm up, then
+seven times (`GLAM_BASELINE_RUNS` overrides). It requires a clean exit, empty
+stderr and stable output length, and reports wall time plus peak child RSS
+from `getrusage`, which includes startup, configuration, assembly and
+settlement. The numbers are observations, never thresholds.
+
+Captured 2026-08-20 at `60c6419e`: rustc 1.97.0, Linux 6.8 x86-64, eight
+logical processors, a shared 15 GiB container (compare shape and scale, not
+exact values). The release binary was 7,544,776 bytes.
+
+| Workload | Median ms | Min–max ms | Peak RSS KiB | Stdout B |
+| --- | ---: | ---: | ---: | ---: |
+| `hello_dict_w0`: small dictionary assembly | 23.955 | 23.008–25.163 | 12,160 | 13 |
+| `ordered_mixins_w0`: ordered multi-module composition | 27.559 | 27.255–28.316 | 12,160 | 13 |
+| `direct_assembly_elf_w0`: largest end-to-end example | 1,096.385 | 1,089.027–1,113.136 | 25,984 | 166 |
+| `hello_dict_w4`: four-worker overhead | 26.308 | 24.686–27.674 | 12,160 | 13 |
+
+Known pre-GC defect: one `direct_assembly_elf` capture with `--workers 4`
+aborted on a worker stack overflow, and a follow-up reproduced exit 134 with
+one worker. The baseline therefore runs that workload with zero workers. G0
+recorded the defect so later collector work could neither be blamed for it
+nor claim to have introduced it. A 2026-10-05 recheck, 40 release runs with
+1, 2 and 4 workers after resumable WHNF replaced recursive demand, did not
+reproduce it.
 
 ## C8 collector measurements
 
@@ -1008,11 +1052,53 @@ The exact inventory contains 148 constructs in ten source files under the 11
 reviewed module expectations. C8 adds no unsafe site and does not adopt the
 measured but currently unjustified paged-range tracing extension.
 
+One dated observation follows; recapture before any tuning decision. It was
+taken on 2026-10-03 at `3a8b6e54` with Rust 1.98.1, on an x86-64 Linux
+container with eight workers, in release without debug assertions.
+
+Geometry of the fixed 64 KiB run (bitmap bytes cover allocation, lease and
+mark):
+
+| Stride B | Slots | Bitmap B | Padding B | Tail slack B |
+| ---: | ---: | ---: | ---: | ---: |
+| 8 | 7,920 | 2,000 | 112 | 0 |
+| 16 | 4,024 | 1,016 | 72 | 0 |
+| 24 | 2,698 | 696 | 8 | 16 |
+| 32 | 2,028 | 520 | 56 | 0 |
+| 64 | 1,018 | 264 | 56 | 0 |
+| 128 | 510 | 136 | 56 | 0 |
+| 256 | 255 | 72 | 120 | 0 |
+| 1,024 | 63 | 24 | 40 | 896 |
+| 4,096 | 15 | 24 | 40 | 3,968 |
+
+- **Metrics scan.** 10,000 `Heap::metrics()` calls over 64 assigned 8 B runs
+  holding 500,000 allocations took 191.8 ms, about 19.2 µs each. A cold,
+  explicit scan does not justify a live-slot counter in the run header or
+  allocation-path contention.
+- **Finalization structures.** 4,096 finalizers at a 1,024 B stride spanned
+  66 runs, and a destructor panicked on the second-to-last one. That attempt
+  retired 4,095 obligations in about 0.76 ms. A rootability check against
+  the one remaining pending identity took about 141 ns including mutex
+  admission. The retry finalized it and reclaimed its run in about 20 µs.
+  Separately, 100,000 small finalizers across 13 runs took about 13.3 ms.
+  None of this justifies a specialized hasher, dense maps, or another
+  dispatch index.
+- **Mark stack.** `TraceWork` is 16 bytes. A 100,000-edge flat fan-out
+  reserved 2 MiB, and the 1,000,000-edge scale fixture 16 MiB; the
+  million-node chain keeps a constant-size worklist. No production
+  representation holds a flat `Vec<Gc<_>>`, so the plain `Vec<TraceWork>`
+  stays. Revisit range tracing only together with a real Glam-owned
+  contiguous managed container and fresh measurements. Ordinary bounded
+  `Trace` implementations do not become resumable cursors.
+
 ## C8 final certification
 
 The final C8 audit passed the focused native/Loom/doc/scale checks, strict-
 provenance Miri, ASan/LSan, TSan, the exact unsafe and persistent-edge source
 inventories, release persistent-edge code generation, the complete workspace
-test suite, and interaction-net profiling regressions. Exact counts and tuning
-dispositions are recorded in
-[`GarbageCollectorC8_2026-10-03.md`](../../docs/reviews/GarbageCollectorC8_2026-10-03.md).
+test suite, and interaction-net profiling regressions. The collector counts
+were 214 routine native tests plus two isolated scale fixtures, seven Loom
+models, and eight doc and compile-fail tests. Strict Miri passed 212 with
+three deliberate exclusions. ASan passed 213 and TSan 214, each with the two
+scale fixtures ignored. The intentional leak fixture passed separately under
+Miri and ASan with only leak checking disabled.

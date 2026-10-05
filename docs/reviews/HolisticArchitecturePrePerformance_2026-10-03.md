@@ -23,7 +23,8 @@ It covers four areas:
 
 Coverage: all of `src/`, the `glam-gc` crate's public boundary (not its
 unsafe internals, which the
-[C8 audit](GarbageCollectorC8_2026-10-03.md) just covered), `tests/`,
+C8 audit just covered; see
+[`VERIFY.md`](../../crates/glam-gc/VERIFY.md) "C8 final certification"), `tests/`,
 `scripts/`, `samples/`, and `docs/`.
 
 ## Method
