@@ -311,7 +311,7 @@ fn constant_effect_template(
     request: Value,
 ) -> crate::core_net::CoreInteractionNet {
     let mut net = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
-    let [input, argument, result] = net.bind();
+    let [input, argument, result] = net.function_bind();
     let erase = net.copy(0).input;
     net.wire(argument, erase);
     let data = net.data(request);

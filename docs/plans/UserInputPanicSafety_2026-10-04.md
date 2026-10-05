@@ -2,9 +2,9 @@
 
 Status: open. The parser and evaluation inspections are done: F1 is fixed,
 and no further panic was found. The poisoning audit is done, and its
-containment design is decided, and steps 1-5 are implemented. What
-remains is the interaction-net inspection, which waits on the polarity
-change.
+containment design is decided, and steps 1-5 are implemented. The net
+polarity change it waited on has landed: `Bind >< Bind` now joins crossed.
+What remains is the interaction-net inspection.
 
 This plan responds to the holistic pre-performance review, X4 and Maintainer
 Decision 1 ([review](../reviews/HolisticArchitecturePrePerformance_2026-10-03.md)).
@@ -568,8 +568,10 @@ Entry surfaces:
   program-supplied values, such as arity, shape, and type mismatches, and
   convert them to `EvaluationFailure`.
 - **Interaction nets.** Covers builder validation and reduction-time
-  panics. N8's random closed-net generator follows the planned net polarity
-  change, so the generator exercises the final `bind >< bind` semantics.
+  panics. N8's random closed-net generator follows the net polarity change,
+  so the generator exercises the final `bind >< bind` semantics. That
+  change landed on 2026-10-05: binds join crossed (`B.1-C.2`, `B.2-C.1`),
+  and function binds list `[result, argument]`.
   Users can build nets with subnets disconnected from the public port. Such
   garbage must never fail evaluation unless demand reaches it.
 - **Poisoning.** Inventory the mutexes and `RwLock`s whose poisoning

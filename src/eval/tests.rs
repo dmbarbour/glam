@@ -1327,12 +1327,12 @@ fn net_backed_lazy_values_reject_non_data_normal_forms() {
 #[test]
 fn early_function_data_is_left_to_ordinary_stuck_net_semantics() {
     let one_argument_stage = closed_net(|builder| {
-        let [application, argument, result] = builder.bind();
+        let [function, argument, result] = builder.function_bind();
         let erase = builder.copy(0);
         builder.wire(argument, erase.input);
         let data = builder.data(n(42));
         builder.wire(result, data);
-        application
+        function
     });
     let function = FunctionValue::new(one_argument_stage, 2);
     let partial = apply_function_values(&test_context(), function, vec![n(0)])
@@ -1396,7 +1396,7 @@ fn net_arity_bridges_opaque_nets_to_computations_and_functions() {
 #[test]
 fn saturated_function_calls_reject_a_remaining_bind() {
     let two_argument_stage = closed_net(|builder| {
-        let spine = builder.bind_spine(2);
+        let spine = builder.function_spine(2);
         for argument in &spine.arguments {
             let eraser = builder.copy(0);
             builder.wire(*argument, eraser.input);

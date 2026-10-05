@@ -34,7 +34,12 @@ its sole interface.
 
 The stored agents are:
 
-- `Bind`, with principal application plus argument and result auxiliaries;
+- `Bind`, whose two auxiliaries have opposite polarity: an application lists
+  `[argument, result]` and a function `[result, argument]`. `Bind >< Bind`
+  joins them crossed (`1-2`, `2-1`), while identical fans join positionally.
+  `NetBuilder::bind` returns the application order. `function_bind` and
+  `function_spine` name function ports by role, and `application_spine`
+  builds applications;
 - binary `Fan`, with a template-local `FanSite`;
 - `Erase`;
 - specialization-owned `Data`; and

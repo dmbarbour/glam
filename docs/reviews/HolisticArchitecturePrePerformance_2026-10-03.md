@@ -1093,6 +1093,11 @@ This gap is what hid N1.
 transition in test builds, and a random closed-net generator comparing
 readback across random pair orders.
 
+*Prerequisite, done 2026-10-05:* the maintainer's net polarity change
+landed first, so the generator exercises final semantics. `Bind >< Bind`
+joins crossed (`B.1-C.2`, `B.2-C.1`), and function-role binds list
+`[result, argument]`.
+
 ### Reflection (R)
 
 **R1 — High — The store's change log grows without bound, and each

@@ -377,9 +377,9 @@ In contrast to lambda calculus, interaction nets are graph-structured instead of
 
     # identity function as inet
     interaction_net do
-        .bind -> [ap, arg, result]
+        .bind -> [fn, result, arg]
         .wire arg result
-        .r ap
+        .r fn
 
 The construction effect produces a closed, opaque net value:
 
@@ -396,7 +396,9 @@ If the net produces data too late, extraction diverges. If the net produces data
 The `NetBuilder` Effects API: 
 
 - Node constructors introduce ports. Principal port is head.
-  - `.bind -> [ap, arg, result]` - constructor of functions
+  - `.bind -> [b, b1, b2]` - bind, the node behind functions and
+    applications. Its two auxiliaries have opposite polarity: an application
+    is `[ap, arg, result]`, while a function is `[fn, result, arg]`.
   - `.copy N -> [x0, x1, x2, ..., xN]` - dataflow, distinct logical instances
     - `.copy 0 -> [e]` - explicitly drops data
     - `.copy 1 -> [lhs,rhs]` - tunnel for non-local composition 
@@ -431,7 +433,13 @@ Nodes interact only when principal ports connect.
 Rules:
 - join: 
   - annihilate nodes
-  - connect auxilliaries positionally
+  - bind-bind: connect auxiliaries crossed, `b1-c2` and `b2-c1`, so a
+    function's `[result, arg]` meets an application's `[arg, result]`
+  - copy-copy of one instance: connect auxiliaries positionally
+  - The crossing gives each bind auxiliary a polarity that local analysis
+    can track. It supports adapting GAL, a cheap level-tracking optimization
+    of Lamping's brackets and croissants, to nets not built from lambda
+    calculus. That adaptation remains to be reviewed.
 - dup: 
   - copy node to each auxilliary opposite
   - wire auxilliaries to copies positionally
@@ -442,8 +450,10 @@ Rules:
 - stuck: a type error! report and debug
 
 Lambda calculus becomes a design pattern within interaction nets:
-- lambda as `.bind` that copies and wires `arg` *into* `result`
-- application as `.bind` that provides `arg`, extracts `result`
+- lambda as `.bind -> [fn, result, arg]` that copies and wires `arg` *into*
+  `result`
+- application as `.bind -> [ap, arg, result]` that provides `arg`, extracts
+  `result`
 
 For interaction nets in general, there is no arg-result distinction. Data
 flows in both directions similar to session types. `net_arity` presents only

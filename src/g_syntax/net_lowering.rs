@@ -111,7 +111,7 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
             return lowerer.net.finish(body_boundary.input);
         }
 
-        let binds = lowerer.net.bind_spine(inputs.len());
+        let binds = lowerer.net.function_spine(inputs.len());
         lowerer.net.wire(binds.result, body_boundary.input);
         for (binding, source) in inputs.into_iter().zip(binds.arguments) {
             let targets = lowerer.local_uses.remove(&binding).unwrap_or_default();

@@ -3351,11 +3351,13 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 node
             }
             OperatorYield::Operator(operator) => {
+                // The returned operator becomes a function awaiting its next
+                // argument. A function bind lists `[result, argument]`.
                 let bind = self.add_node(RuntimeNode::Bind);
                 let operator = self.add_node(RuntimeNode::Operator(operator));
                 self.connect(Port::principal(bind), target);
-                self.connect(Port::auxiliary(bind, 1), Port::principal(operator));
-                self.connect(Port::auxiliary(bind, 2), Port::auxiliary(operator, 1));
+                self.connect(Port::auxiliary(bind, 2), Port::principal(operator));
+                self.connect(Port::auxiliary(bind, 1), Port::auxiliary(operator, 1));
                 bind
             }
         }
@@ -3643,12 +3645,12 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             .expect("non-checkpoint node must remain generically copyable");
         let kind = match (&left, &right) {
             (RuntimeNode::Bind, RuntimeNode::Bind) => {
-                self.join(left_id, right_id, 2);
+                self.join(left_id, right_id, 2, rewrite::AuxiliaryPairing::Crossed);
                 ReductionKind::BindJoin
             }
             (RuntimeNode::Fan { identity: left }, RuntimeNode::Fan { identity: right }) => {
                 if left == right {
-                    self.join(left_id, right_id, 2);
+                    self.join(left_id, right_id, 2, rewrite::AuxiliaryPairing::Positional);
                     ReductionKind::FanJoin {
                         identity: left.clone(),
                     }

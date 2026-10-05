@@ -223,9 +223,9 @@ Body with
 # exposed port. A raw net is already WHNF and is not directly applicable.
 
 id_net = interaction_net do
-    .bind -> [ap, arg, result]      # function node; principal port first
+    .bind -> [fn, result, arg]      # function bind; principal port first
     .wire arg result                # identity: arg flows to result
-    .r ap                           # return port wired implicitly
+    .r fn                           # return port wired implicitly
 
 # Provisional arity bridge into ordinary application:
 id_fn = net_arity 1 id_net         # expect one Bind, then Data
@@ -250,7 +250,8 @@ partial = net_arity 0 partial_net
 sum = partial 23
 
 # Node constructors (introduce ports; principal port is head of list):
-    .bind -> [ap, arg, result]      # function constructor
+    .bind -> [ap, arg, result]      # bind as an application
+    .bind -> [fn, result, arg]      # bind as a function: mirrored polarity
     .copy N -> [x0, x1, ..., xN]    # dataflow fan-out, unique instances
     .copy 0 -> [e]                  #   explicitly drop data
     .copy 1 -> [lhs, rhs]           #   tunnel for non-local composition
@@ -263,7 +264,8 @@ sum = partial 23
                                     # bookkeeping and backtracking
 
 # Interaction occurs when principal ports connect:
-#   bind-bind: join    bind-copy: dup    bind-data: call (else stuck)
+#   bind-bind: join crossed (b1-c2, b2-c1)
+#   bind-copy: dup     bind-data: call (else stuck)
 #   bind-data(Function): one ordinary value application; another Bind is
 #                        required for another argument
 #   bind-data(Net): load a logical copy through the raw net's exposed port
@@ -271,8 +273,8 @@ sum = partial 23
 #   data-data: STUCK — a type error; report and debug
 
 # Lambda calculus is a design pattern within inets:
-#   lambda      = .bind copying/wiring arg INTO result
-#   application = .bind providing arg, extracting result
+#   lambda      = .bind -> [fn, result, arg], wiring arg INTO result
+#   application = .bind -> [ap, arg, result], providing arg, extracting result
 # A raw net embedded behind Bind is called by lazy cursor-based loading; an
 # ordinary Function is never opened as though it were that raw net.
 # Data flows BOTH directions (no inherent arg/result distinction),

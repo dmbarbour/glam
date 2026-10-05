@@ -7,12 +7,25 @@ use super::*;
 // assuming each auxiliary neighbor survives the rewrite. Rules allocate their
 // replacement nodes in a fixed order, which the payload edge-transition
 // predictions rely on.
+/// How an annihilation joins the two nodes' auxiliary ports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::interaction_net::runtime) enum AuxiliaryPairing {
+    /// Port `i` meets port `i`, as for identical fans.
+    Positional,
+    /// Port `1` meets port `2` and port `2` meets port `1`, as for binds.
+    /// A bind's auxiliaries have opposite polarity: an application lists
+    /// `[argument, result]` while a function lists `[result, argument]`, so
+    /// each meets its counterpart. This makes polarity locally analyzable.
+    Crossed,
+}
+
 impl<S: NetSpecialization> RuntimeNet<S> {
     pub(in crate::interaction_net::runtime) fn join(
         &mut self,
         left: NodeId,
         right: NodeId,
         auxiliaries: u32,
+        pairing: AuxiliaryPairing,
     ) {
         self.disconnect(Port::principal(left));
         let ports = auxiliary_ports(left, auxiliaries)
@@ -21,9 +34,15 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         let boundary = self.detach_boundary(&ports);
         self.remove_node(left);
         self.remove_node(right);
+        // The boundary lists the left auxiliaries, then the right ones.
         let sockets = boundary.len();
         let replacements = (0..sockets)
-            .map(|socket| BoundaryReplacement::Socket((socket + sockets / 2) % sockets))
+            .map(|socket| {
+                BoundaryReplacement::Socket(match pairing {
+                    AuxiliaryPairing::Positional => (socket + sockets / 2) % sockets,
+                    AuxiliaryPairing::Crossed => sockets - 1 - socket,
+                })
+            })
             .collect::<Vec<_>>();
         self.attach_boundary(boundary, &replacements);
     }

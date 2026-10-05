@@ -36,8 +36,8 @@ pub struct CopyPorts {
 }
 
 /// A curried chain of bind nodes. `input` is the first principal port,
-/// `arguments` contains one first auxiliary per bind in application order,
-/// and `result` is the final bind's second auxiliary.
+/// `arguments` contains one argument port per bind in application order, and
+/// `result` is the final bind's result port.
 pub struct BindSpine {
     pub input: Port,
     pub arguments: Vec<Port>,
@@ -109,6 +109,8 @@ impl<S: NetSpecialization> NetBuilder<S> {
         id
     }
 
+    /// Returns a bind's `[principal, auxiliary 1, auxiliary 2]` ports. In the
+    /// application role these are `[application, argument, result]`.
     pub fn bind(&mut self) -> [Port; 3] {
         let node = self.push(Node::Bind);
         [
@@ -118,9 +120,31 @@ impl<S: NetSpecialization> NetBuilder<S> {
         ]
     }
 
-    pub fn bind_spine(&mut self, arity: usize) -> BindSpine {
+    /// Returns a function-role bind as `[function, argument, result]`.
+    ///
+    /// Binds join crossed, so a function lists its auxiliaries as
+    /// `[result, argument]`, opposite to an application. This accessor names
+    /// the ports by role.
+    pub fn function_bind(&mut self) -> [Port; 3] {
+        let [function, result, argument] = self.bind();
+        [function, argument, result]
+    }
+
+    /// Builds the application spine `f a1 .. an`: `input` meets the
+    /// function, and each bind supplies one argument.
+    pub fn application_spine(&mut self, arity: usize) -> BindSpine {
+        self.spine(arity, Self::bind)
+    }
+
+    /// Builds the function spine `\x1 .. xn -> body`: `input` is the
+    /// function, `arguments` are its variables, and `result` is its body.
+    pub fn function_spine(&mut self, arity: usize) -> BindSpine {
+        self.spine(arity, Self::function_bind)
+    }
+
+    fn spine(&mut self, arity: usize, bind: fn(&mut Self) -> [Port; 3]) -> BindSpine {
         assert!(arity > 0, "a bind spine must contain at least one bind");
-        let binds = (0..arity).map(|_| self.bind()).collect::<Vec<_>>();
+        let binds = (0..arity).map(|_| bind(self)).collect::<Vec<_>>();
         for pair in binds.windows(2) {
             self.wire(pair[0][2], pair[1][0]);
         }
@@ -145,7 +169,7 @@ impl<S: NetSpecialization> NetBuilder<S> {
     /// The returned ports are the exposed function port and its internal result
     /// port, which is already wired to the operator continuation.
     pub fn unary_operator(&mut self, operator: S::Operator) -> Port {
-        let [function, argument, result] = self.bind();
+        let [function, argument, result] = self.function_bind();
         let [input, output] = self.operator(operator);
         self.wire(argument, input);
         self.wire(result, output);

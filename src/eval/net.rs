@@ -33,7 +33,7 @@ pub(super) fn attached_net_runtime(
 ) -> RuntimeNet<CoreSpecialization> {
     assert!(!arguments.is_empty(), "net attachment requires an argument");
     let mut net = NetBuilder::new();
-    let spine = net.bind_spine(arguments.len());
+    let spine = net.application_spine(arguments.len());
     let function = net.data(Value::Net(function));
     net.wire(spine.input, function);
     for (argument_port, argument) in spine.arguments.into_iter().zip(arguments) {

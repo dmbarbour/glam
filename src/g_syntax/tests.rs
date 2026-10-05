@@ -6040,6 +6040,34 @@ fn interaction_net_bind_builds_an_ordinary_identity_function() {
 }
 
 #[test]
+fn interaction_net_function_bind_lists_its_result_before_its_argument() {
+    // Binds join crossed, so a function bind lists `[function, result,
+    // argument]` while an application lists `[application, argument,
+    // result]`. A constant function distinguishes the two orders.
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(
+        parse(concat!(
+            "language g0\n",
+            "import 'std\n",
+            "constant = interaction_net do\n",
+            "  .bind -> function\n",
+            "  .copy 0 -> drop\n",
+            "  .data \"Hello, World!\" -> greeting\n",
+            "  .wire (list.head (list.tail function)) (list.head greeting)\n",
+            "  .wire (list.head (list.tail (list.tail function))) (list.head drop)\n",
+            "  .r (list.head function)\n",
+            "asm.result = net_arity 1 constant \"ignored\"\n",
+        )),
+        &context,
+    );
+    assert_eq!(lowered.diagnostics, []);
+
+    let definitions = evaluated_module_value(&context, &lowered);
+    let result = resolved_value_at_path(&definitions, &["asm", "result"]);
+    assert_eq!(output_bytes(&result), b"Hello, World!");
+}
+
+#[test]
 fn interaction_net_applies_a_self_linked_identity_bind() {
     // The applied identity's variable is wired to its own body, so the Bind
     // join rewrite meets a link between two ports of its own active pair.

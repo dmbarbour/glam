@@ -830,9 +830,9 @@ fn builder_reports_wiring_errors_without_panicking() {
 }
 
 #[test]
-fn bind_spine_builds_one_curried_chain() {
+fn application_spine_builds_one_curried_chain() {
     let mut builder = NetBuilder::<()>::new();
-    let spine = builder.bind_spine(3);
+    let spine = builder.application_spine(3);
     let function = builder.data(());
     builder.wire(spine.input, function);
     for argument in spine.arguments {
@@ -2561,6 +2561,43 @@ fn operator_consumes_data_and_emits_data() {
 }
 
 #[test]
+fn bind_join_crosses_auxiliaries_while_fan_join_is_positional() {
+    for crossed in [true, false] {
+        let mut net = RuntimeNet::<&'static str>::empty();
+        let node = || {
+            if crossed {
+                RuntimeNode::Bind
+            } else {
+                RuntimeNode::Fan {
+                    identity: FanIdentity::root(FanSite(0)),
+                }
+            }
+        };
+        let left = net.add_node(node());
+        let right = net.add_node(node());
+        net.connect(Port::principal(left), Port::principal(right));
+        let mut data = Vec::new();
+        for (owner, auxiliary) in [(left, 1), (left, 2), (right, 1), (right, 2)] {
+            let payload = net.add_node(RuntimeNode::Data("auxiliary"));
+            net.connect(Port::auxiliary(owner, auxiliary), Port::principal(payload));
+            data.push(payload);
+        }
+
+        assert!(net.reduce_pair(ActivePairKey::new(left, right)).is_some());
+        let joined = |from: usize| {
+            net.port_neighbor(Port::principal(data[from]))
+                .map(|port| data.iter().position(|node| *node == port.node()))
+        };
+        if crossed {
+            // `B.1-C.2` and `B.2-C.1`.
+            assert_eq!((joined(0), joined(1)), (Some(Some(3)), Some(Some(2))));
+        } else {
+            assert_eq!((joined(0), joined(1)), (Some(Some(2)), Some(Some(3))));
+        }
+    }
+}
+
+#[test]
 fn returned_operator_is_wrapped_as_a_unary_function() {
     let next = TestOperator::new("increment", |value| Ok(OperatorYield::Data(value + 1)));
     let (mut net, call, result) = operator_call_net(
@@ -2573,13 +2610,15 @@ fn returned_operator_is_wrapped_as_a_unary_function() {
     let bind = net.complete_operator_call(call, outcome);
 
     assert_eq!(net.interface_neighbor(result), Some(Port::principal(bind)));
-    let host = net.port_neighbor(Port::auxiliary(bind, 1)).unwrap();
+    // A function bind lists `[result, argument]`: its argument is the
+    // operator's input, and its result the operator's continuation.
+    let host = net.port_neighbor(Port::auxiliary(bind, 2)).unwrap();
     assert!(matches!(
         net.node(host.node()),
         Some(RuntimeNode::Operator(_))
     ));
     assert_eq!(
-        net.port_neighbor(Port::auxiliary(bind, 2)),
+        net.port_neighbor(Port::auxiliary(bind, 1)),
         Some(Port::auxiliary(host.node(), 1))
     );
 }
@@ -3565,9 +3604,11 @@ fn auxiliary_cursor_recomputes_its_spine_after_each_terminal_pair() {
         Port::principal(terminal_left),
         Port::principal(terminal_right),
     );
-    source.connect(Port::auxiliary(terminal_right, 1), Port::principal(next));
-    source.connect(Port::auxiliary(next, 1), Port::principal(last));
-    source.connect(Port::auxiliary(last, 1), Port::principal(result));
+    // Binds join crossed, so the right-hand chain continues through
+    // auxiliary 2 to meet the left-hand chain's auxiliary 1.
+    source.connect(Port::auxiliary(terminal_right, 2), Port::principal(next));
+    source.connect(Port::auxiliary(next, 2), Port::principal(last));
+    source.connect(Port::auxiliary(last, 2), Port::principal(result));
 
     for (left, right) in [
         (terminal_left, terminal_right),
@@ -3577,7 +3618,7 @@ fn auxiliary_cursor_recomputes_its_spine_after_each_terminal_pair() {
         let left_data = source.add_node(RuntimeNode::Data("unused-left"));
         let right_data = source.add_node(RuntimeNode::Data("unused-right"));
         source.connect(Port::auxiliary(left, 2), Port::principal(left_data));
-        source.connect(Port::auxiliary(right, 2), Port::principal(right_data));
+        source.connect(Port::auxiliary(right, 1), Port::principal(right_data));
     }
 
     let terminal_pair = ActivePairKey::new(terminal_left, terminal_right);

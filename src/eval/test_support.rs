@@ -178,7 +178,7 @@ fn lower_test_function_code_with_access(
     let exposed = if bind_count == 0 {
         boundary.input
     } else {
-        let binds = lowerer.net.bind_spine(bind_count);
+        let binds = lowerer.net.function_spine(bind_count);
         lowerer.net.wire(binds.result, boundary.input);
         let uses = std::mem::take(&mut lowerer.local_uses);
         for index in 0..bind_count {
