@@ -15,6 +15,9 @@ when their historical value no longer justifies keeping them.
   makes code that observes user input report diagnostics or evaluation
   failures instead of panicking, and keeps a caught panic from poisoning the
   runtime.
+- [`NetPolarityChecker_2026-10-05.md`](NetPolarityChecker_2026-10-05.md)
+  requires every interaction net to be polarized, with a `+` output edge by
+  fiat. A linear-time checker enforces this before N8 and net fuzzing.
 
 Preliminary and deferred plans below remain candidates for later work.
 
