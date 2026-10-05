@@ -275,13 +275,22 @@ impl ReflectionQueryWriter for RuntimeSharedResources {
         result
             .require_runtime(self.id)
             .expect("reflection query results belong to the runtime");
-        let updated = self
-            .transactions
-            .state
-            .lock()
-            .expect("runtime transaction mutex should not be poisoned")
-            .reflection
-            .update_query(handle, result);
+        let updated = {
+            let mut state = self
+                .transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned");
+            // The client's conflict analysis runs here, under the transaction
+            // lock, which is runtime core. A panic in it skips this status
+            // publication rather than tearing the transaction state.
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                state.reflection.update_query(handle, result)
+            }))
+        };
+        let Ok(updated) = updated else {
+            return Box::new(|| {});
+        };
         assert!(
             updated,
             "task status query must remain in its runtime domain"

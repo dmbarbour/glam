@@ -67,6 +67,18 @@ fn maintenance_failure(failure: RuntimeGcMaintenanceFailure) -> RuntimeMaintenan
     )
 }
 
+/// Runs code that may call the client's conflict analysis while the
+/// transaction lock is held.
+///
+/// The transaction state is runtime core, so a client panic must not unwind
+/// through its lock. The panic is caught here, under the lock. Validation
+/// calls the client before changing the store, so the store stays consistent,
+/// and the caller resumes the client's panic after releasing its guards. The
+/// operation that invoked the client is interrupted; the runtime is not.
+fn contain_client_conflict_analysis<R>(call: impl FnOnce() -> R) -> std::thread::Result<R> {
+    catch_unwind(AssertUnwindSafe(call))
+}
+
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> Arc<str> {
     Arc::from(crate::core::panic_payload_message(payload))
 }
@@ -336,7 +348,15 @@ impl RuntimeSharedResources {
                 .state
                 .lock()
                 .expect("runtime transaction mutex should not be poisoned");
-            let result = state.reflection.validate(store);
+            let result = match contain_client_conflict_analysis(|| state.reflection.validate(store))
+            {
+                Ok(result) => result,
+                Err(payload) => {
+                    drop(state);
+                    drop(mutation);
+                    std::panic::resume_unwind(payload)
+                }
+            };
             if !matches!(result, crate::reflection::StoreCommitResult::Committed) {
                 return result;
             }
@@ -373,7 +393,13 @@ impl RuntimeSharedResources {
             .state
             .lock()
             .expect("runtime transaction mutex should not be poisoned");
-        let result = state.reflection.validate(store);
+        let result = match contain_client_conflict_analysis(|| state.reflection.validate(store)) {
+            Ok(result) => result,
+            Err(payload) => {
+                drop(state);
+                std::panic::resume_unwind(payload)
+            }
+        };
         if !matches!(result, crate::reflection::StoreCommitResult::Committed) {
             return (result, generation);
         }
@@ -388,13 +414,20 @@ impl RuntimeSharedResources {
         journal: &crate::reflection::StoreJournal,
     ) -> crate::reflection::StoreCommitResult {
         let mutation = self.mutation_guard();
-        let (result, changed) = {
-            self.transactions
+        let committed = {
+            let mut state = self
+                .transactions
                 .state
                 .lock()
-                .expect("runtime transaction mutex should not be poisoned")
-                .reflection
-                .try_commit_with_change(journal)
+                .expect("runtime transaction mutex should not be poisoned");
+            contain_client_conflict_analysis(|| state.reflection.try_commit_with_change(journal))
+        };
+        let (result, changed) = match committed {
+            Ok(committed) => committed,
+            Err(payload) => {
+                drop(mutation);
+                std::panic::resume_unwind(payload)
+            }
         };
         if changed {
             self.publish_observation(mutation);
@@ -407,14 +440,18 @@ impl RuntimeSharedResources {
         journal: &crate::reflection::StoreJournal,
     ) -> (crate::reflection::StoreCommitResult, u64) {
         let generation = self.observations.current().get();
-        let result = self
-            .transactions
-            .state
-            .lock()
-            .expect("runtime transaction mutex should not be poisoned")
-            .reflection
-            .validate(journal);
-        (result, generation)
+        let validated = {
+            let state = self
+                .transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned");
+            contain_client_conflict_analysis(|| state.reflection.validate(journal))
+        };
+        match validated {
+            Ok(result) => (result, generation),
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     }
 
     pub(super) fn create_volume(&self, initial: Value) -> Result<VolumeId, Error> {
@@ -458,12 +495,19 @@ impl RuntimeSharedResources {
         result.require_runtime(self.id)?;
         let mutation = self.mutation_guard();
         let updated = {
-            self.transactions
+            let mut state = self
+                .transactions
                 .state
                 .lock()
-                .expect("runtime transaction mutex should not be poisoned")
-                .reflection
-                .update_query(handle, result)
+                .expect("runtime transaction mutex should not be poisoned");
+            contain_client_conflict_analysis(|| state.reflection.update_query(handle, result))
+        };
+        let updated = match updated {
+            Ok(updated) => updated,
+            Err(payload) => {
+                drop(mutation);
+                std::panic::resume_unwind(payload)
+            }
         };
         if updated {
             self.publish_observation(mutation);

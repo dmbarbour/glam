@@ -1783,20 +1783,39 @@ impl EvalContext {
         {
             return;
         }
-        let result = task_profile
-            .launcher()
-            .ok_or_else(|| {
-                Arc::new(EvaluationFailure::message(
-                    "reflection task profile is not sealed",
-                ))
-            })
-            .and_then(|launcher| {
-                launcher.build(
-                    Self::for_task(self.session.clone(), handle.id(), task_profile.clone()),
-                    effect.clone(),
-                    result_policy,
-                )
-            });
+        let launcher = task_profile.launcher().ok_or_else(|| {
+            Arc::new(EvaluationFailure::message(
+                "reflection task profile is not sealed",
+            ))
+        });
+        let result = match launcher {
+            Ok(launcher) => {
+                // A launcher may be client code. Its panic interrupts this
+                // task's activation, not the intact work activating it.
+                let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    launcher.build(
+                        Self::for_task(self.session.clone(), handle.id(), task_profile.clone()),
+                        effect.clone(),
+                        result_policy,
+                    )
+                }));
+                match built {
+                    Ok(result) => result,
+                    Err(payload) => {
+                        let report = crate::core::EvaluationPanic::from_payload(
+                            payload.as_ref(),
+                            crate::core::EvaluationPanicOrigin::ReflectionTask(handle.work.get()),
+                        );
+                        if coordinator.terminalize_reserved_reflection(handle.work) {
+                            coordinator.settle_panicked_work(handle.work, report);
+                            drop(coordinator.retire_reflection(handle.work));
+                        }
+                        return;
+                    }
+                }
+            }
+            Err(failure) => Err(failure),
+        };
         match result {
             Ok(machine) => {
                 if coordinator

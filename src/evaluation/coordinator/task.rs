@@ -339,9 +339,12 @@ impl TaskStatusWake {
         }
     }
 
+    /// Runs the status callback, which may be client code. A panic in it
+    /// skips this wake rather than interrupting the settlement that
+    /// published the status.
     pub(crate) fn notify(mut self) {
         if let Some(notify) = self.notify.take() {
-            notify();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(notify));
         }
     }
 }

@@ -111,6 +111,35 @@ fn panicking_subscriber_destructor_leaves_the_bus_usable() {
 }
 
 #[test]
+fn panicking_subscriber_is_skipped_for_that_event() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let values = runtime.values();
+    let bus = DiagnosticBus::new();
+    let _panicking = bus.subscribe(DiagnosticCallback(|_| panic!("forced subscriber panic")));
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let observed = received.clone();
+    let _survivor = bus.subscribe(DiagnosticCallback(move |event| {
+        observed
+            .lock()
+            .expect("diagnostic collector should not be poisoned")
+            .push(event);
+    }));
+
+    // Publication, which may be part of a runtime commit, is never
+    // interrupted by a subscriber's panic.
+    let first = bus.publish_local(Diagnostic::new(&values, Severity::Info, "first"));
+    let second = bus.publish_local(Diagnostic::new(&values, Severity::Info, "second"));
+    assert_eq!((first.sequence(), second.sequence()), (1, 2));
+    assert_eq!(
+        received
+            .lock()
+            .expect("diagnostic collector should not be poisoned")
+            .len(),
+        2
+    );
+}
+
+#[test]
 fn diagnostic_events_retain_emission_and_origin_roots_until_retirement() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let domain = EffectTokenDomain::new(&runtime.values());

@@ -672,8 +672,14 @@ impl DiagnosticBus {
             (None, Some(direct)) => direct,
             _ => unreachable!("a diagnostic selects exactly one publication route"),
         };
+        // A subscriber is client code. Its panic skips it for this event; the
+        // remaining subscribers still receive it, and publication, which may
+        // be part of a runtime commit, is never interrupted.
         for subscriber in subscribers {
-            subscriber.receive(event.clone());
+            let event = event.clone();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                subscriber.receive(event);
+            }));
         }
         Ok(event)
     }

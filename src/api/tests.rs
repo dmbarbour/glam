@@ -2423,6 +2423,77 @@ fn read_only_scheduler_panic_is_detected_by_readiness() {
 }
 
 #[test]
+fn panicking_conflict_index_interrupts_only_its_commit() {
+    use crate::reflection::{ConflictAddress, ConflictAnalysisStrategy, ConflictObservationIndex};
+
+    #[derive(Debug)]
+    struct PanickingStrategy(Arc<AtomicBool>);
+    impl ConflictAnalysisStrategy for PanickingStrategy {
+        fn begin(&self) -> Box<dyn ConflictObservationIndex> {
+            Box::new(PanickingIndex(self.0.clone()))
+        }
+
+        fn name(&self) -> &'static str {
+            "panicking"
+        }
+    }
+
+    #[derive(Clone)]
+    struct PanickingIndex(Arc<AtomicBool>);
+    impl ConflictObservationIndex for PanickingIndex {
+        fn clone_box(&self) -> Box<dyn ConflictObservationIndex> {
+            Box::new(self.clone())
+        }
+
+        fn observe(&mut self, _address: &ConflictAddress) {}
+
+        fn may_conflict(&self, _changed: &ConflictAddress) -> bool {
+            if self.0.load(Ordering::SeqCst) {
+                panic!("forced conflict-index panic");
+            }
+            false
+        }
+    }
+
+    let armed = Arc::new(AtomicBool::new(false));
+    let runtime =
+        EvaluationRuntime::with_conflict_analysis(0, Arc::new(PanickingStrategy(armed.clone())))
+            .expect("runtime should build");
+    // A committed change makes the stale transaction's validation consult
+    // the client's index.
+    let (stale_store, stale_events) = input_transaction(&runtime);
+    let (mut store, events) = input_transaction(&runtime);
+    store.write(
+        vec![Key::atom_from_text("changed")],
+        runtime.values().integer(1),
+    );
+    assert_eq!(
+        runtime.try_commit_transaction(&store, &events),
+        crate::reflection::StoreCommitResult::Committed
+    );
+
+    armed.store(true, Ordering::SeqCst);
+    let commit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.try_commit_transaction(&stale_store, &stale_events)
+    }));
+    let payload = commit.expect_err("the client's panic must reach the committing client");
+    assert_eq!(
+        crate::core::panic_payload_message(payload.as_ref()),
+        "forced conflict-index panic"
+    );
+
+    // Only that commit was interrupted: the runtime is not poisoned, and
+    // later transactions commit normally.
+    armed.store(false, Ordering::SeqCst);
+    assert!(!matches!(runtime.readiness(), RuntimeReadiness::Poisoned));
+    let (store, events) = input_transaction(&runtime);
+    assert_eq!(
+        runtime.try_commit_transaction(&store, &events),
+        crate::reflection::StoreCommitResult::Committed
+    );
+}
+
+#[test]
 fn builder_fixes_conflict_analysis_before_reasoning_starts() {
     let assembler = Assembler::builder()
         .conflict_analysis(Arc::new(crate::reflection::CoarseConflictAnalysis))

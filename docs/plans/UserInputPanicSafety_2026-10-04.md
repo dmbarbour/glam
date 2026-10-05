@@ -2,7 +2,9 @@
 
 Status: open. The parser and evaluation inspections are done: F1 is fixed,
 and no further panic was found. The poisoning audit is done, and its
-containment design is decided. Steps 1-4 are implemented; step 5 remains.
+containment design is decided, and steps 1-5 are implemented. What
+remains is the interaction-net inspection, which waits on the polarity
+change.
 
 This plan responds to the holistic pre-performance review, X4 and Maintainer
 Decision 1 ([review](../reviews/HolisticArchitecturePrePerformance_2026-10-03.md)).
@@ -484,7 +486,48 @@ The panic hook still prints every panic, so each one remains a visible bug.
      boundary, under a new `RuntimePoison` mutation kind. The executor-drop
      wake uses `ExecutorAvailability`. The RAII inventory classifies the
      settlement guard's new destructor.
-5. **Call-site containment of client callbacks outside polls.**
+5. **Call-site containment of client callbacks outside polls.** Done on
+   2026-10-04. Callbacks inside polls were already contained by step 2: host
+   calls, import resolvers, the conflict index's `begin` and `observe` in
+   task journals, and custom reflection hosts. The remaining sites fall into
+   two dispositions.
+   - **Resume.** Commits and validations a client or task initiated call the
+     client's conflict analysis under the transaction lock. That lock is
+     runtime core:
+     - `try_commit_transaction`, `validate_transaction`,
+       `commit_reflection`, `validate_reflection`, and `update_query` catch
+       the panic under the lock;
+     - the client is called before the store changes, so the store stays
+       consistent;
+     - after releasing their guards, they resume the client's own panic.
+
+     The initiating client gets its panic back, and inside a task the poll
+     boundary marks that task `Panicked`. This refines "the commit returns
+     `Err`": an `Err` inside a task would have become a semantic failure.
+   - **Skip.** Runtime-owned notifications skip only the panicking callback:
+     - task-status query publication, which leaves the status unwritten;
+     - `TaskStatusWake` closures;
+     - diagnostic subscribers, which the remaining subscribers still reach.
+       Publication is never interrupted, so a commit that publishes
+       diagnostics is never split.
+     - destructors of retired external owners, which no longer interrupt the
+       unrelated host call draining them.
+
+     The panic hook still reports each skipped panic.
+   - **Interrupt the launched task.** A panicking reflection launcher settles
+     the reserved task it was launching as `Panicked` and retires it. The
+     intact parent continues, and a parent that waits on the child halts by
+     the waiter rule.
+   - **Tests.** The external-owner drain test encoded the old propagation and
+     now expects the drain to continue past the panicking owner. New
+     regressions:
+     - a panicking conflict index reaches the committing client, and the
+       runtime keeps committing. This test fails without the containment,
+       because the panic then poisons the runtime.
+     - a panicking subscriber is skipped while publication continues.
+   - **Not separately regressed.** The launcher and status-wake catches have
+     no dedicated tests. Both are single choke points with no test fixture
+     for a custom launcher or wake today.
 
 Each step lands with forced-panic regressions. The acceptance test: after a
 client catches a panic, the same runtime evaluates unrelated work, settles,

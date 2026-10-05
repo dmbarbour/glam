@@ -148,7 +148,9 @@ impl ExternalOwnerRegistry {
             let Some(retired) = retired else {
                 continue;
             };
-            drop(retired);
+            // A retired owner may hold client data whose destructor panics.
+            // That must not interrupt the unrelated work draining it.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(retired)));
             count += 1;
         }
         count
@@ -176,7 +178,6 @@ impl ExternalOwnerHandle {
 
 #[cfg(test)]
 mod tests {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
@@ -260,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn opaque_drop_panic_retries_untouched_suffix() {
+    fn opaque_drop_panic_is_contained_and_draining_continues() {
         let registry = ExternalOwnerRegistry::new(crate::runtime::allocate_evaluation_runtime_id());
         let events = Arc::new(Mutex::new(Vec::new()));
         let first = registry.insert(Arc::new(OrderedDrop {
@@ -275,12 +276,9 @@ mod tests {
         }));
         drop((first, second));
 
-        let panic = catch_unwind(AssertUnwindSafe(|| registry.drain_retired()));
-        assert!(panic.is_err());
-        assert_eq!(*events.lock().unwrap(), vec![0]);
-        assert_eq!(registry.len(), 1);
-
-        assert_eq!(registry.drain_retired(), 1);
+        // A client destructor's panic must not interrupt the unrelated work
+        // draining retired owners, so the same pass retires the rest.
+        assert_eq!(registry.drain_retired(), 2);
         assert_eq!(*events.lock().unwrap(), vec![0, 1]);
         assert_eq!(registry.len(), 0);
     }
