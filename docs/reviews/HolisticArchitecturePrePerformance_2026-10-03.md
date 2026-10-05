@@ -1187,6 +1187,30 @@ joins crossed (`B.1-C.2`, `B.2-C.1`), and function-role binds list
 `[result, argument]`. A polarity checker comes next, before this generator:
 see [the net polarity checker plan](../plans/NetPolarityChecker_2026-10-05.md).
 
+**N9 — Medium — Pure net reduction spends no step budget.** Verified by
+reading the code; added 2026-10-05 while writing
+`architecture/interaction_nets.md`.
+
+- `drive_net_driver_work_with_budget_access` (`eval/net.rs`) calls
+  `try_consume` only before a semantic handoff. Pure rewrites, cursor steps
+  and dependency resolutions are free.
+- The request root is re-pushed on every non-terminal poll, so the worklist
+  never drains, and `NetDriverOutcome::Progressed` is effectively
+  unreachable. One poll reduces until a root result, a handoff, contention
+  or a failure.
+- That whole run stays inside one managed-access region. A long pure
+  reduction delays stop-the-world collection, cancellation and other work
+  on that worker. A divergent net built through the net builtins never
+  yields.
+- A yield point already exists: the test-only profiling probe
+  (`driver_work_item_limit_reached`, `ProbeBudgetExhausted`) stops a batch
+  between items and resumes from the worklist.
+
+*Recommendation:* charge the shared step budget per driver work item and
+yield through the probe's existing path, which becomes the production
+`BudgetExhausted` outcome. Test with a long pure chain under a one-unit
+budget, and a divergent net that must yield.
+
 ### Reflection (R)
 
 **R1 — High — The store's change log grows without bound, and each

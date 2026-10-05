@@ -15,7 +15,7 @@ belong in `docs/agent_context/`; target behavior belongs in the design docs.
 | Managed values, roots, collection policy | [`architecture/values.md`](architecture/values.md) | [`agent_context/evaluation.md`](agent_context/evaluation.md) |
 | Freer effects, heap, reflection tasks | [`architecture/reflection.md`](architecture/reflection.md) | [`agent_context/reflection.md`](agent_context/reflection.md) |
 | Structured failures and configured logging | [`architecture/diagnostics.md`](architecture/diagnostics.md) | [`agent_context/diagnostics.md`](agent_context/diagnostics.md) |
-| Interaction nets | Evaluation handoff above | [`agent_context/interaction_nets.md`](agent_context/interaction_nets.md) |
+| Interaction nets | [`architecture/interaction_nets.md`](architecture/interaction_nets.md) | [`agent_context/interaction_nets.md`](agent_context/interaction_nets.md) |
 | Objects and linearization | Front-end and evaluation notes above | [`agent_context/objects.md`](agent_context/objects.md) |
 
 [`src/README.md`](../src/README.md) is the compact source-module map.

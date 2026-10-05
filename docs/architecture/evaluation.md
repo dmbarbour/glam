@@ -540,9 +540,11 @@ A synchronous effect facade which exhausts immediate exact work follows its
 dependency chain before deciding that the wait is orphaned. If the chain ends
 at a coordinator-indexed observation epoch, it waits for the corresponding
 scheduler transition; a chain with no exact or broad wake remains quiescent.
-Interaction-net calls preserve the same distinction: both ordinary and
-operator calls retain retryable evaluator waits as blocked pair state, while
-only permanent failures become stuck pairs.
+Interaction-net calls preserve the same distinction: a callable that must
+wait spills into a callable checkpoint whose pair blocks on that exact
+retryable wait, core operators never wait, and only permanent failures become
+stuck pairs. See [`interaction_nets.md`](interaction_nets.md) "Semantic
+Handoffs".
 
 `EvalContext` separately carries the complete profile inherited by
 `.task.new`. A type-erased launcher closes over the specialization, immutable

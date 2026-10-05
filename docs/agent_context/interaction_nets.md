@@ -270,12 +270,17 @@ contention records, not frontier observations.
 Only principal-principal pairs reduce. Ordinary topology rules rewrite under
 the runtime mutex. Work delegated to a specialization follows this sequence:
 
-1. claim the exact pair under the mutex;
-2. copy out the immutable request data;
-3. release the mutex;
+1. claim the exact pair under the mutex, inside the driver's normalization
+   batch;
+2. release the mutex when the batch closes;
+3. copy out the immutable request data: a call rechecks its exact claim
+   and copies in a separate read, while a cursor copies while claiming;
 4. run callable, operator, or cursor work; and
 5. reacquire only the owning runtime long enough to complete, block, or mark
    that same pair stuck.
+
+A claim therefore spans several critical sections; every later one rechecks
+it, and a stale holder fails quietly.
 
 Do not rediscover work by scanning active-pair collections, remove elements
 from the middle of queues, or hold source and target runtime mutexes together.
