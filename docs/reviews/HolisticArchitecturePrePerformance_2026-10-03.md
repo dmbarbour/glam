@@ -1166,6 +1166,18 @@ This gap is what hid N1.
 transition in test builds, and a random closed-net generator comparing
 readback across random pair orders.
 
+*Resolved 2026-10-05*, through the net polarity plan's slices 4 and 5:
+- **Invariant checker.** `RuntimeNet::check_invariants` covers link symmetry
+  and polarity, active-map equality with principal wires, frontier and
+  cursor consistency, and obligation pairing. Test builds run it after every
+  gateway transition, so the whole suite exercises it.
+- **Generator.** A seeded random-net generator reduces 200 polarized nets in
+  three random orders each, and requires one step count and one canonical
+  readback.
+- **Polarity type.** A runtime polarity type, also checked on every rewrite
+  in debug builds, guards subject reduction.
+- **Still open:** fuzzing nets, slice 6 of the polarity plan.
+
 *Prerequisite, done 2026-10-05:* the maintainer's net polarity change
 landed first, so the generator exercises final semantics. `Bind >< Bind`
 joins crossed (`B.1-C.2`, `B.2-C.1`), and function-role binds list

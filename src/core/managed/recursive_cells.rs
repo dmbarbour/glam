@@ -1249,7 +1249,12 @@ impl RuntimeNetMutationGateway<CoreSpecialization> for ManagedCoreNetAccess<'_, 
                         trace_core_runtime_payload(payload, visitor);
                     });
                 },
-                update,
+                |runtime| {
+                    let result = update(runtime);
+                    #[cfg(test)]
+                    runtime.check_invariants_after_transition();
+                    result
+                },
             )
         }
     }

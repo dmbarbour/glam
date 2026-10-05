@@ -853,7 +853,10 @@ where
         _edges: RuntimeNetEdgeTransition,
         update: impl FnOnce(&mut RuntimeNet<S>) -> Result,
     ) -> Result {
-        update(runtime)
+        let result = update(runtime);
+        #[cfg(test)]
+        runtime.check_invariants_after_transition();
+        result
     }
 }
 

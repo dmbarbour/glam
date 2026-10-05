@@ -438,6 +438,103 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
     }
 
+    /// Checks the graph's structural invariants:
+    /// - every link is symmetric and, when polarity is checked, joins
+    ///   opposite signs;
+    /// - the active map is exactly the set of principal-to-principal wires;
+    /// - copy frontiers and remote cursors name each other;
+    /// - pairless cursor obligations belong to unpaired cursors.
+    #[cfg(test)]
+    pub(in crate::interaction_net::runtime) fn check_invariants(&self) {
+        let mut principal_wires = std::collections::BTreeSet::new();
+        for (&id, entry) in &self.nodes {
+            for (index, link) in entry.links.iter().enumerate() {
+                let Some(link) = link else {
+                    continue;
+                };
+                let port = Port::new(id, index as u32);
+                assert!(
+                    index < entry.node.port_count() as usize,
+                    "{port:?} is wired beyond its node's ports"
+                );
+                let peer = link.peer();
+                let back = self.reference(peer.port).unwrap_or_else(|| {
+                    panic!(
+                        "{port:?} references {:?}, which does not link back",
+                        peer.port
+                    )
+                });
+                assert_eq!(back.port, port, "the link at {port:?} is not symmetric");
+                if self.polarity_checked() {
+                    assert_ne!(
+                        back.sign, peer.sign,
+                        "the wire {port:?} -- {:?} joins equal signs",
+                        peer.port
+                    );
+                }
+                if port.is_principal() && peer.port.is_principal() {
+                    principal_wires.insert(ActivePairKey::new(id, peer.port.node()));
+                }
+            }
+        }
+        let active = self
+            .active
+            .keys()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            active, principal_wires,
+            "active pairs differ from principal-to-principal wires"
+        );
+        for (copy, state) in &self.copies {
+            for (remote, cursor) in &state.frontiers {
+                assert!(
+                    matches!(
+                        self.node(*cursor),
+                        Some(RuntimeNode::RemoteCursor { copy: owner, remote: anchor })
+                            if owner == copy && anchor == remote
+                    ),
+                    "frontier {remote:?} of {copy:?} does not name its cursor"
+                );
+            }
+        }
+        for (&id, entry) in &self.nodes {
+            if let RuntimeNode::RemoteCursor { copy, remote } = &entry.node {
+                assert_eq!(
+                    self.copies
+                        .get(copy)
+                        .and_then(|state| state.frontiers.get(remote)),
+                    Some(&id),
+                    "a remote cursor is missing from its copy's frontiers"
+                );
+            }
+        }
+        for &cursor in self.cursor_obligations.keys() {
+            assert!(matches!(
+                self.node(cursor),
+                Some(RuntimeNode::RemoteCursor { .. })
+            ));
+            assert!(
+                self.active_pair_key(cursor).is_none(),
+                "an obligated cursor must not be in an active pair"
+            );
+        }
+        if let Some(exposed) = self.exposed {
+            self.assert_interface(exposed);
+        }
+    }
+
+    /// Test builds check the invariants after every gateway transition, for
+    /// nets small enough that the check stays cheap. Scale fixtures exceed
+    /// the bound.
+    #[cfg(test)]
+    pub(crate) fn check_invariants_after_transition(&self) {
+        const CHECKED_NODES: usize = 4_096;
+        if self.nodes.len() <= CHECKED_NODES {
+            self.check_invariants();
+        }
+    }
+
     /// Checks every node a rule created, once the rule has wired them.
     pub(in crate::interaction_net::runtime) fn debug_check_created_polarity(
         &self,

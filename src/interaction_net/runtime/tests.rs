@@ -6,6 +6,8 @@ use std::time::Duration;
 use super::*;
 use crate::interaction_net::builder::{NetBuildError, NetBuilder};
 
+mod random_nets;
+
 macro_rules! assert_does_not_implement {
     ($module:ident, $type:ty, $trait:path) => {
         mod $module {

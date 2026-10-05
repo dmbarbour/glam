@@ -196,6 +196,15 @@ polarity type; see "Enforcement" and "Runtime Polarity Type" below.
 - **Logical copies.** Materialization binds the copied node where its cursor
   stood. The node's auxiliary signs follow its rule, and each new cursor
   stands for the source port across that link.
+- **Invariants.** Test builds run `RuntimeNet::check_invariants` after every
+  gateway transition on nets of up to 4,096 nodes. It checks four things:
+  - links are symmetric, with opposite signs;
+  - the active map equals the principal-to-principal wires;
+  - copy frontiers and cursors name each other;
+  - obligated cursors are unpaired.
+
+  The randomized tests in `runtime/tests/random_nets.rs` reduce generated
+  polarized nets in random orders and require one normal form.
 - **Test-only links.** A hand-built test net wired with the test-only untyped
   `connect`, or one instantiated from an `unpolarized_for_test` template,
   skips the checks.

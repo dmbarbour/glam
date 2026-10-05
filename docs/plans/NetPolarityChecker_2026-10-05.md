@@ -7,8 +7,10 @@ Status: slices 1–4 done 2026-10-05:
 - a runtime remote-polarity type in port links, with debug checks on every
   rewrite.
 
-Next: the N8 random-net generator, slice 5. The positive-erasure
-translation is deferred to the GAL performance adaptation. This plan comes before N8's random closed-net generator and
+Slice 5, the N8 generator and invariant checker, is done as well. Next is
+fuzzing (slice 6), which follows the panic-safety plan's discovery policy.
+The positive-erasure translation is deferred to the GAL performance
+adaptation. This plan comes before N8's random closed-net generator and
 before any fuzzing of nets. It follows the crossed `Bind >< Bind` join that
 landed on 2026-10-05.
 
@@ -184,6 +186,26 @@ union-find arrays.
 5. **N8 generator.** Random polarized closed nets, plus a negative mode that
    must be rejected at construction. Compare readback across random pair
    orders.
+
+   *Done 2026-10-05.*
+   - **Invariant checker.** `RuntimeNet::check_invariants` checks four
+     things:
+     - every link is symmetric, and its two signs are opposite;
+     - the active map equals the set of principal-to-principal wires;
+     - copy frontiers and remote cursors name each other;
+     - pairless cursor obligations belong to unpaired cursors.
+
+     Test builds run it after every gateway transition, on nets of up to
+     4,096 nodes. All 1,957 library tests pass with it, and the suite takes
+     about 5% longer.
+   - **Generator.** A seeded generator grows 200 random nets that are
+     polarized and connected by construction. It mixes binds in either role,
+     copy and merge fans, data, operators and erasers. Each net is reduced in
+     three random orders, with invariants checked after every step. Calls
+     stay inert. Every order must agree on the step count and on a canonical
+     readback from the exposed port, or all must exceed a 400-step budget.
+   - **Negative mode.** It rewires a provider whose sign is fixed to fresh
+     data. Construction must reject every such net as unpolarized.
 6. **Fuzzing,** per the panic-safety plan's discovery policy, over polarized
    nets only.
 
