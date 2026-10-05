@@ -68,8 +68,8 @@ fn managed_root_projects_only_under_matching_runtime_access() {
 fn managed_transition_reports_complete_before_and_after_edge_sets() {
     let context = context();
     let values = context.values();
-    let (old_root, old) = values.rooted_error_lazy_for_test("W6G.3c old edge");
-    let (new_root, new) = values.rooted_error_lazy_for_test("W6G.3c new edge");
+    let (old_root, old) = values.rooted_error_lazy_for_test("old edge");
+    let (new_root, new) = values.rooted_error_lazy_for_test("new edge");
     let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
     let poll = EvaluationPollContext::for_context(&context);
 
@@ -101,7 +101,7 @@ fn forced_collection_traces_every_edge_owned_by_the_managed_state() {
     let baseline = values
         .collect_managed_for_test()
         .expect("managed WHNF trace fixture should begin collectible");
-    let (sentinel_root, sentinel) = values.rooted_error_lazy_for_test("W6G.3c trace sentinel");
+    let (sentinel_root, sentinel) = values.rooted_error_lazy_for_test("trace sentinel");
     let poll = EvaluationPollContext::for_context(&context);
     let sentinel_id = poll.with_value_access(&context, |access| access.lazy(&sentinel).id());
     let state = poll.with_value_access(&context, |access| {
@@ -142,7 +142,7 @@ fn poisoned_state_remains_traceable_but_repolling_observes_poison() {
     let baseline = values
         .collect_managed_for_test()
         .expect("poison fixture should begin collectible");
-    let (sentinel_root, sentinel) = values.rooted_error_lazy_for_test("W6G.3c poison sentinel");
+    let (sentinel_root, sentinel) = values.rooted_error_lazy_for_test("poison sentinel");
     let poll = EvaluationPollContext::for_context(&context);
     let state = poll.with_value_access(&context, |access| {
         ManagedWhnfRoot::from_regional_in(&access, work(&access, Value::Lazy(sentinel)))
@@ -156,7 +156,7 @@ fn poisoned_state_remains_traceable_but_repolling_observes_poison() {
                 .access(&access)
                 .expect("state must project before unwind");
             let _ = state.with_state_transition::<()>(|_| {
-                panic!("injected W6G.3c evaluator unwind");
+                panic!("injected evaluator unwind");
             });
         });
     }));

@@ -46,7 +46,7 @@ fn unreachable_lazy_checkpoint_self_cycle_is_collected() {
     let baseline = values
         .collect_managed_for_test()
         .expect("checkpoint cycle fixture should start collectible");
-    let (root, lazy) = values.rooted_error_lazy_for_test("W6G.1f.1 self cycle");
+    let (root, lazy) = values.rooted_error_lazy_for_test("self cycle");
     install_self_checkpoint(&context, &root, &lazy);
 
     drop((lazy, root));
@@ -64,7 +64,7 @@ fn reachable_lazy_retains_and_resumes_its_checkpoint() {
     let baseline = values
         .collect_managed_for_test()
         .expect("checkpoint retention fixture should start collectible");
-    let (root, lazy) = values.rooted_error_lazy_for_test("W6G.1f.1 retained checkpoint");
+    let (root, lazy) = values.rooted_error_lazy_for_test("retained checkpoint");
     let lazy_id = root.id();
     install_self_checkpoint(&context, &root, &lazy);
 

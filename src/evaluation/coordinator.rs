@@ -824,7 +824,7 @@ pub(crate) struct EvaluationWorkCoordinator {
     exact_selection_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
-/// Test-owned accounting for W6G4R-001 exact-route discovery and handoff.
+/// Test-owned accounting for exact-route discovery and handoff.
 ///
 /// Ordinary builds contain neither this state nor updates to it. Tests and the
 /// static interaction-net profiling feature expose it without installing a

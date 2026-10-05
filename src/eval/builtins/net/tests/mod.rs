@@ -1,4 +1,4 @@
-//! PNC1 semantic-netlist conformance fixtures.
+//! Semantic-netlist conformance fixtures.
 
 use std::sync::Arc;
 

@@ -7534,7 +7534,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "C5D.2 scale fixture; run crates/glam-gc/scripts/check-scale.sh"]
+    #[ignore = "scale fixture; run crates/glam-gc/scripts/check-scale.sh"]
     fn c5d_scale_million_node_deep_chain_is_nonrecursive() {
         #[cfg(miri)]
         const NODE_COUNT: usize = 256;
@@ -7563,7 +7563,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "C5D.2 scale fixture; run crates/glam-gc/scripts/check-scale.sh"]
+    #[ignore = "scale fixture; run crates/glam-gc/scripts/check-scale.sh"]
     fn c5d_scale_flat_million_edge_array_records_worklist_peak() {
         #[cfg(miri)]
         const EDGE_COUNT: usize = 256;
@@ -7589,7 +7589,7 @@ mod tests {
         assert_eq!(traces.load(Ordering::Relaxed), EDGE_COUNT + 1);
         assert!(slot_is_marked(&heap, collector_slot(&heap, &last)));
         eprintln!(
-            "C5D.2 flat {EDGE_COUNT}-edge worklist peak: len={}, capacity={}",
+            "flat {EDGE_COUNT}-edge worklist peak: len={}, capacity={}",
             report.peak_object_worklist_len, report.peak_object_worklist_capacity
         );
         heap.with_mutator(|mutator| {

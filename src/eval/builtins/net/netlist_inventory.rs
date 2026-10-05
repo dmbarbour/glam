@@ -1,4 +1,6 @@
-//! PNC1 source latch for the deliberately narrow semantic replay boundary.
+//! Audit: semantic netlist replay never reaches an effect, scheduler, or
+//! rooting boundary. Replay is deliberately narrow: it builds a net from
+//! already-evaluated netlist data and nothing else.
 
 #[test]
 fn semantic_netlist_replay_has_no_effect_or_scheduler_boundary() {

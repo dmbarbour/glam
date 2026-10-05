@@ -1,4 +1,4 @@
-//! Randomized closed-net tests (holistic review N8).
+//! Randomized closed-net tests.
 //!
 //! A seeded generator grows random polarized, connected templates. Each is
 //! reduced under several random pair orders with the graph invariants and

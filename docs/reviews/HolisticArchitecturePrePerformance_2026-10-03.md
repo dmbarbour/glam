@@ -1954,8 +1954,19 @@ cheaper. Items within a group are independent.
      - The 17 test files named after step IDs now have descriptive names,
        such as `callable_checkpoint.rs`, `small_stack.rs` and
        `budget_fairness.rs`. The profiling script follows them.
-     - Still open: step IDs inside test-module comments.
    - *Inventory triage done 2026-10-05,* per the V4 resolution below.
+   - *Step IDs done 2026-10-05.*
+     - No step IDs remain in Rust source, tests or lint reasons.
+     - Test labels, thread names and comments now describe what they test.
+     - glam-gc's crate doc and unsafe-module reasons were rewritten, and the
+       unsafe audit's module list regenerated.
+     - The cleanup retired five more source-text latches the triage had
+       missed:
+       - two retired-name latches;
+       - two step-ID tables beside compile-exhaustive matches;
+       - one snippet-count inventory of callable-checkpoint reachability.
+     - It reduced the WHNF privacy latch to its one layering rule: core
+       never names `WhnfComputation`.
 8. **Docs that perf work will rebase on (X8, R4).**
    - `architecture/values.md` and a definition of "compatibility".
    - Correct the fusion, saturation, and net-driver descriptions.

@@ -160,7 +160,7 @@ fn isolated_test_context() -> OwnedEvalContext {
 fn net_computation_runtime(lazy: &LazyValue, context: &EvalContext) -> CoreRuntimeNet {
     let Some(crate::core::LazySource::NetComputation(net)) = lazy.source_snapshot(context.values())
     else {
-        panic!("the W4E fixture must retain its net-computation source");
+        panic!("the fixture must retain its net-computation source");
     };
     net.into_runtime()
 }

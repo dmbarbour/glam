@@ -3139,7 +3139,7 @@ mod tests {
     use std::sync::Barrier;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
-    // D.2h's semantic-relation gate is compiler-backed rather than a token
+    // The semantic-relation gate is compiler-backed rather than a token
     // search: the standard equality macros, operators, `contains`, and
     // transitive equality derives all require these traits. Keeping the raw
     // semantic leaves traitless therefore rejects every such spelling while
@@ -3220,8 +3220,8 @@ mod tests {
 
     struct ManagedFamilyLayoutProbe([u8; 1]);
 
-    /// Compile-exhaustive latch for the failure interiors retained by the I6C
-    /// compatibility audit after the I3A.4 poll-boundary migration.
+    /// Compile-exhaustive latch for the failure interiors that cross poll
+    /// boundaries.
     fn assert_evaluation_failure_boundary_inventory(failure: &EvaluationFailure) {
         let EvaluationFailure { kind, contexts } = failure;
         match kind {
@@ -3240,15 +3240,8 @@ mod tests {
 
     #[test]
     fn evaluation_failure_boundary_inventory_is_complete() {
-        const CHECKPOINTS: &[(&str, &str)] = &[
-            ("EvaluationFailureKind::Message(Arc<str>)", "D.2h.3g"),
-            ("EvaluationFailureKind::Emission(Value)", "I6C"),
-            ("EvaluationFailure.contexts: Arc<[Value]>", "I6C"),
-            ("EvaluationFailureKind::DependencyCycle", "I5B/I6C"),
-        ];
-
+        // Compiling the exhaustive match is the check.
         let _: fn(&EvaluationFailure) = assert_evaluation_failure_boundary_inventory;
-        assert_eq!(CHECKPOINTS.len(), 4);
     }
 
     // SAFETY: this layout-policy probe contains no managed edges.
@@ -3259,7 +3252,7 @@ mod tests {
     }
 
     // SAFETY: this layout-only probe has no drop glue, managed edge, or active
-    // capability. Its stable record admits only the existing I1D fixture.
+    // capability. Its stable record admits only this layout fixture.
     unsafe impl ManagedFamily for ManagedFamilyLayoutProbe {
         const DROP_RECORD: ManagedDropRecord =
             ManagedDropRecord::no_drop("managed slot layout probe", "src/core.rs");

@@ -71,7 +71,7 @@ fn callable_checkpoint_covers_lazy_and_mixed_dependency_chains_once() {
     let context = test_context();
     let inner_runs = Arc::new(AtomicUsize::new(0));
     let observed_inner = Arc::clone(&inner_runs);
-    let inner = LazyValue::semantic_thunk(context.values(), "NC5 inner lazy", move |_| {
+    let inner = LazyValue::semantic_thunk(context.values(), "inner lazy", move |_| {
         observed_inner.fetch_add(1, Ordering::SeqCst);
         Ok(Value::Builtin(Builtin::Add))
     });
@@ -80,7 +80,7 @@ fn callable_checkpoint_covers_lazy_and_mixed_dependency_chains_once() {
     let observed_outer = Arc::clone(&outer_runs);
     let outer_inner = Value::Lazy(inner);
     let outer_values = context.values().clone();
-    let outer = LazyValue::semantic_thunk(context.values(), "NC5 outer lazy", move |_| {
+    let outer = LazyValue::semantic_thunk(context.values(), "outer lazy", move |_| {
         observed_outer.fetch_add(1, Ordering::SeqCst);
         Ok(outer_inner.duplicate_for_test(&outer_values))
     });
@@ -121,13 +121,13 @@ fn callable_checkpoint_covers_lazy_and_mixed_dependency_chains_once() {
         CurrentCallablePath::DirectOperator
     );
 
-    let promise = PromisedValue::new(context.values(), "NC5 mixed promise");
+    let promise = PromisedValue::new(context.values(), "mixed promise");
     let promise_id = promise.id(context.values());
     let mixed_runs = Arc::new(AtomicUsize::new(0));
     let observed_mixed = Arc::clone(&mixed_runs);
     let promised = Value::Promised(promise.duplicate_for_test(context.values()));
     let mixed_values = context.values().clone();
-    let mixed = LazyValue::semantic_thunk(context.values(), "NC5 mixed lazy", move |_| {
+    let mixed = LazyValue::semantic_thunk(context.values(), "mixed lazy", move |_| {
         observed_mixed.fetch_add(1, Ordering::SeqCst);
         Ok(promised.duplicate_for_test(&mixed_values))
     });
@@ -165,11 +165,11 @@ fn callable_checkpoint_covers_lazy_and_mixed_dependency_chains_once() {
 #[test]
 fn callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures() {
     let context = test_context();
-    let terminal = PromisedValue::new(context.values(), "NC5 terminal promise");
+    let terminal = PromisedValue::new(context.values(), "terminal promise");
     crate::core::set_test_promise(context.values(), &terminal, Value::Builtin(Builtin::Add))
         .expect_without_debug("terminal promise accepts its callable result");
     let terminal_id = terminal.id(context.values());
-    let first = PromisedValue::new(context.values(), "NC5 first promise");
+    let first = PromisedValue::new(context.values(), "first promise");
     let terminal_value = context
         .values()
         .with_runtime_value_access(|access| Value::Promised(terminal.duplicate_in(&access)));
@@ -200,7 +200,7 @@ fn callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures() {
         CurrentCallablePath::DirectOperator
     );
 
-    let cycle = PromisedValue::new(context.values(), "NC5 repeated promise");
+    let cycle = PromisedValue::new(context.values(), "repeated promise");
     let cycle_id = cycle.id(context.values());
     let cycle_value = context
         .values()
@@ -231,8 +231,8 @@ fn callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures() {
         "a repeated promise remains one externally resolvable follower rather than being reconstructed"
     );
 
-    let failed_lazy = LazyValue::error(context.values(), "NC5 cached lazy failure");
-    let leading = PromisedValue::new(context.values(), "NC5 failure leader");
+    let failed_lazy = LazyValue::error(context.values(), "cached lazy failure");
+    let leading = PromisedValue::new(context.values(), "failure leader");
     crate::core::set_test_promise(context.values(), &leading, Value::Lazy(failed_lazy))
         .expect_without_debug("leader accepts failed lazy focus");
     let (runtime, call) = claimed_core_call_in(context.values(), Value::Promised(leading));
@@ -244,18 +244,18 @@ fn callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures() {
     reduce_checkpoint(context.values(), &runtime, call.pair);
     let error = progress_checkpoint(&context, &runtime, call.pair, usize::MAX)
         .expect_err("cached lazy failure must terminalize the checkpoint");
-    assert!(error.to_string().contains("NC5 cached lazy failure"));
+    assert!(error.to_string().contains("cached lazy failure"));
 
-    let failed_promise = PromisedValue::new(context.values(), "NC5 assigned failure");
+    let failed_promise = PromisedValue::new(context.values(), "assigned failure");
     crate::core::fail_test_promise_message(
         context.values(),
         &failed_promise,
-        "NC5 assigned promise failure",
+        "assigned promise failure",
     )
     .expect_without_debug("promise accepts its failure");
     let failed_values = context.values().clone();
     let leading =
-        LazyValue::semantic_thunk(context.values(), "NC5 promise failure leader", move |_| {
+        LazyValue::semantic_thunk(context.values(), "promise failure leader", move |_| {
             Ok(Value::Promised(
                 failed_promise.duplicate_for_test(&failed_values),
             ))
@@ -269,7 +269,7 @@ fn callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures() {
     ));
     let error = resume_blocked_checkpoint(&context, &runtime, &blocked)
         .expect_err("assigned promise failure must terminalize the checkpoint");
-    assert!(error.to_string().contains("NC5 assigned promise failure"));
+    assert!(error.to_string().contains("assigned promise failure"));
 }
 
 struct SameRuntimeFixture {
@@ -364,7 +364,7 @@ fn callable_checkpoint_propagates_task_cancellation_abandonment_and_failure() {
 
     let owner = fixture.context();
     let (promise, task, owner_context) = owner
-        .task_owned_promise("NC5 cancelled task promise")
+        .task_owned_promise("cancelled task promise")
         .expect("task promise should register");
     let (_root, runtime, call, blocked) = block_task_promise(&observer, promise);
     assert_eq!(task.cancel(), EvaluationTaskCancellation::Requested);
@@ -374,7 +374,7 @@ fn callable_checkpoint_propagates_task_cancellation_abandonment_and_failure() {
     let (_root, runtime, call, blocked) = {
         let owner = fixture.context();
         let (promise, _task, owner_context) = owner
-            .task_owned_promise("NC5 abandoned task promise")
+            .task_owned_promise("abandoned task promise")
             .expect("task promise should register");
         let blocked = block_task_promise(&observer, promise);
         drop(owner_context);
@@ -384,16 +384,16 @@ fn callable_checkpoint_propagates_task_cancellation_abandonment_and_failure() {
 
     let owner = fixture.context();
     let (promise, task, owner_context) = owner
-        .task_owned_promise("NC5 failed task promise")
+        .task_owned_promise("failed task promise")
         .expect("task promise should register");
     let (_root, runtime, call, blocked) = block_task_promise(&observer, promise);
-    owner.fail_wait(task.wait(), "NC5 producer task failure");
+    owner.fail_wait(task.wait(), "producer task failure");
     assert_task_terminal_fails_checkpoint(
         &observer,
         &runtime,
         call,
         &blocked,
-        "NC5 producer task failure",
+        "producer task failure",
     );
     drop((owner_context, owner));
 }
@@ -424,7 +424,7 @@ fn callable_checkpoint_admits_each_lazy_source_family_once() {
         Arc::<[crate::core_net::CoreDataKey]>::from([]),
         Arc::from([Value::Builtin(Builtin::Add)]),
     );
-    let host = LazyValue::host_call(context.values(), "NC5 host source", move |bundle| {
+    let host = LazyValue::host_call(context.values(), "host source", move |bundle| {
         assert!(bundle.into_roots().is_empty());
         observed_host_calls.fetch_add(1, Ordering::SeqCst);
         Ok(crate::runtime::RuntimeValueRoot::new(
@@ -485,7 +485,7 @@ fn callable_checkpoint_admits_each_lazy_source_family_once() {
 #[test]
 fn cached_lazy_failure_is_already_evaluated_by_construction() {
     let context = test_context();
-    let lazy = LazyValue::semantic_thunk(context.values(), "NC5 cache fixture", |_| {
+    let lazy = LazyValue::semantic_thunk(context.values(), "cache fixture", |_| {
         Ok(Value::Builtin(Builtin::Add))
     });
     crate::core::cache_test_lazy(
@@ -795,7 +795,7 @@ fn cursor_deferral_and_collection_retain_only_the_source_checkpoint() {
         crate::runtime::RuntimeIds::new(),
     );
     let context = EvalContext::isolated(values.clone());
-    let promise = PromisedValue::new(&values, "NC5 cursor dependency");
+    let promise = PromisedValue::new(&values, "cursor dependency");
     let (source, call) = claimed_applied_core_call_in(
         &values,
         Value::Promised(promise.duplicate_for_test(&values)),
@@ -924,10 +924,10 @@ fn cursor_deferral_and_collection_retain_only_the_source_checkpoint() {
 #[test]
 fn callable_checkpoint_usage_distinguishes_production_from_frame_fixture() {
     let context = test_context();
-    let terminal = PromisedValue::new(context.values(), "NC5D terminal promise");
+    let terminal = PromisedValue::new(context.values(), "terminal promise");
     crate::core::set_test_promise(context.values(), &terminal, Value::Builtin(Builtin::Add))
         .expect_without_debug("terminal promise accepts its callable result");
-    let first = PromisedValue::new(context.values(), "NC5D first promise");
+    let first = PromisedValue::new(context.values(), "first promise");
     let terminal_value = context
         .values()
         .with_runtime_value_access(|access| Value::Promised(terminal.duplicate_in(&access)));

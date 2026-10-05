@@ -183,7 +183,7 @@ fn structured_constructors_publish_canonical_state_under_existing_access() {
     let empty = values
         .collect_managed_for_test()
         .expect("baseline heap should collect before construction");
-    let (retained_lazy, _) = values.rooted_error_lazy_for_test("W6G.3d structured edge");
+    let (retained_lazy, _) = values.rooted_error_lazy_for_test("structured edge");
     let retained_lazy_id = retained_lazy.id();
     let registrations_before = values.managed_root_registrations_for_test();
 

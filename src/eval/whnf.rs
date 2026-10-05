@@ -1318,67 +1318,12 @@ mod tests {
     }
 
     #[test]
-    fn root_per_field_whnf_compatibility_is_retired() {
-        let source = include_str!("whnf.rs");
-        let production = source
-            .split_once("#[cfg(test)]\nmod tests")
-            .expect("WHNF source should retain its test boundary")
-            .0;
-        for retired in [
-            "struct DurableWhnfState",
-            "struct DurableWhnfFrame",
-            "enum DurableWhnfContinuation",
-            "struct DurableUndefinedDictionary",
-            "LegacyDemand",
-            "fn publish_checkpoint",
-            "fn root_continuation",
-        ] {
-            assert!(
-                !production.contains(retired),
-                "W6G.3f must retire `{retired}` instead of leaving an unreachable compatibility path"
-            );
-        }
-    }
-
-    #[test]
-    fn whnf_protocol_remains_private_and_has_only_named_production_owners() {
-        let source = include_str!("whnf.rs");
-        for declaration in [
-            "pub(crate) struct WhnfComputation",
-            "pub(crate) enum RegionalBoundaryRequest",
-            "pub(crate) enum WhnfDeferredRequest",
-            "pub(crate) enum WhnfPoll",
-        ] {
-            assert!(
-                source.contains(declaration),
-                "WHNF protocol declaration must remain crate-private: {declaration}"
-            );
-        }
-        let task_machine_impl = ["impl EvaluationTaskMachine", " for WhnfComputation"].concat();
-        assert!(!source.contains(&task_machine_impl));
-
-        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let core = fs::read_to_string(manifest.join("src/core.rs"))
+    fn core_values_never_name_whnf_progress() {
+        // WHNF progress belongs to evaluation; it must not become a core
+        // `Value` or `LazySource` variant.
+        let core = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/core.rs"))
             .expect("core value source should be readable");
-        assert!(
-            !core.contains("WhnfComputation"),
-            "WHNF progress must not become a Value or LazySource variant"
-        );
-        let deferred = fs::read_to_string(manifest.join("src/eval/value.rs"))
-            .expect("deferred evaluator source should be readable");
-        assert!(deferred.contains("computation: super::whnf::WhnfComputation"));
-        let client =
-            fs::read_to_string(manifest.join("src/evaluation/coordinator/client_demand.rs"))
-                .expect("client-demand source should be readable");
-        assert!(client.contains("pub(crate) struct ClientDemandOperation {"));
-        assert!(client.contains("computation: WhnfComputation"));
-
-        let reflection = fs::read_to_string(manifest.join("src/reflection/machine.rs"))
-            .expect("reflection machine source should be readable");
-        assert!(
-            reflection.contains("computation: WhnfComputation"),
-            "W5 reflection decoding must own its resumable WHNF computation"
-        );
+        assert!(!core.contains("WhnfComputation"));
     }
 }
 

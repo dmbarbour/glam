@@ -35,11 +35,9 @@ fn assert_same_value(context: &EvalContext, actual: &Value, expected: &Value) {
 #[test]
 fn stale_route_cannot_replace_a_newer_lazy_checkpoint() {
     let context = isolated_context();
-    let lazy = LazyValue::semantic_thunk(
-        context.values(),
-        "W6G.1 exact checkpoint replacement",
-        |_| unreachable!("the replacement fixture does not evaluate its source"),
-    );
+    let lazy = LazyValue::semantic_thunk(context.values(), "exact checkpoint replacement", |_| {
+        unreachable!("the replacement fixture does not evaluate its source")
+    });
     let rooted = lazy.root(context.values());
 
     crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
@@ -99,13 +97,13 @@ fn pump_to_ready(context: &EvalContext, wait: &crate::evaluation::EvaluationWait
             crate::evaluation::EvaluationPumpOutcome::TargetReady => return,
             crate::evaluation::EvaluationPumpOutcome::BudgetExhausted => {}
             crate::evaluation::EvaluationPumpOutcome::Busy => {
-                panic!("deterministic W6G.1 fixture unexpectedly found a claimed producer")
+                panic!("deterministic fixture unexpectedly found a claimed producer")
             }
             crate::evaluation::EvaluationPumpOutcome::NoProgress => {
-                panic!("deterministic W6G.1 fixture lost its producer: {wait:?}")
+                panic!("deterministic fixture lost its producer: {wait:?}")
             }
         }
-        assert_ne!(attempt, 63, "W6G.1 fixture exhausted its pump bound");
+        assert_ne!(attempt, 63, "fixture exhausted its pump bound");
     }
 }
 
@@ -1139,7 +1137,7 @@ fn interrupted_host_call_is_never_replayed_after_route_loss() {
     let context = isolated_context();
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&calls);
-    let lazy = LazyValue::host_call(context.values(), "W6G.1 interrupted host call", move |_| {
+    let lazy = LazyValue::host_call(context.values(), "interrupted host call", move |_| {
         observed.fetch_add(1, Ordering::SeqCst);
         panic!("injected host callback unwind")
     });
@@ -1182,7 +1180,7 @@ fn completed_host_call_checkpoint_survives_route_loss_and_collection() {
     let context = isolated_context();
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&calls);
-    let lazy = LazyValue::host_call(context.values(), "W6G.1 retained host outcome", {
+    let lazy = LazyValue::host_call(context.values(), "retained host outcome", {
         let values = context.values().clone();
         move |_| {
             observed.fetch_add(1, Ordering::SeqCst);
@@ -1224,7 +1222,7 @@ fn completed_host_call_checkpoint_survives_route_loss_and_collection() {
 #[test]
 fn net_whnf_checkpoint_survives_route_loss_and_collection() {
     let context = isolated_context();
-    let promise = PromisedValue::new(context.values(), "W6G.1 retained net callable");
+    let promise = PromisedValue::new(context.values(), "retained net callable");
     let mut builder =
         crate::interaction_net::NetBuilder::<crate::core_net::CoreSpecialization>::new();
     let [application, argument, result] = builder.bind();

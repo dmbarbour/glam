@@ -19,7 +19,7 @@ fn sentinel(values: &CoreValueFactory, label: String) -> Value {
 
 fn lazy_id(access: &EvaluationValueAccess<'_>, value: &Value) -> crate::core::LazyId {
     let Value::Lazy(lazy) = value else {
-        panic!("NC1A sentinel must remain lazy")
+        panic!("sentinel must remain lazy")
     };
     access.lazy(lazy).id()
 }
@@ -216,7 +216,7 @@ fn net_state_trace_retains_every_value_position_through_collection() {
         poll.with_value_access(&context, |access| {
             let mut next = 0;
             let mut make = || {
-                let value = sentinel(&values, format!("NC1A edge {next}"));
+                let value = sentinel(&values, format!("edge {next}"));
                 next += 1;
                 value
             };
@@ -244,7 +244,7 @@ fn net_state_trace_retains_every_value_position_through_collection() {
             assert_eq!(expected_lazy_ids.len(), next);
 
             let source_owner = expected_lazy_ids[1];
-            let promise = PromisedValue::new(&values, "NC1A promise breadcrumb");
+            let promise = PromisedValue::new(&values, "promise breadcrumb");
             let promise_id = access.promise(&promise).id();
             let followed = [
                 DeferredValueId::Lazy(expected_lazy_ids[0]),
@@ -296,7 +296,7 @@ fn net_state_trace_retains_every_value_position_through_collection() {
             let allocator = access
                 .values()
                 .allocator::<NetWhnfState>()
-                .expect("NC1A state must fit one managed run");
+                .expect("state must fit one managed run");
             let state_root = access.values().root(allocator.alloc(state));
             (state_root, expected_lazy_ids, source_owner, promise_id)
         });
@@ -548,7 +548,9 @@ fn net_driver_retains_frame_state_on_yield_boundary_and_failure() {
             &[Value::Number(10.into()), Value::Number(11.into())],
         );
 
-        let expected = Arc::new(crate::core::EvaluationFailure::message("NC1B failure"));
+        let expected = Arc::new(crate::core::EvaluationFailure::message(
+            "structured failure",
+        ));
         let mut failed_budget = WhnfStepBudget::new(1);
         let (RegionalWhnfStatus::Failed(actual), _) = drive_net_state(
             &access,
@@ -570,112 +572,4 @@ fn source_section<'source>(source: &'source str, start: &str, end: &str) -> &'so
         .split_once(end)
         .unwrap_or_else(|| panic!("missing inventory end `{end}`"))
         .0
-}
-
-#[test]
-fn callable_checkpoint_reachability_inventory_starts_frame_free() {
-    let net = include_str!("../../net.rs");
-    assert!(
-        !net.contains("fn lower_core_callable_in("),
-        "NC6 must not retain a synchronous deferred-callable forcing seam"
-    );
-
-    let production_driver = source_section(
-        net,
-        "fn drive_original_callable_whnf(",
-        "#[cfg(test)]\npub(super) fn classify_core_callable(",
-    );
-    assert_eq!(
-        production_driver
-            .matches("RegionalWhnfWork::from_focus")
-            .count(),
-        1,
-        "production callable demand must have one canonical frame-free constructor"
-    );
-    for producer_only_state in [
-        "from_application_checkpoint_in",
-        "from_static_access_checkpoint_in",
-        "with_source_owner",
-        "cycle_promise",
-        "frames.push",
-    ] {
-        assert!(
-            !production_driver.contains(producer_only_state),
-            "production callable admission must not synthesize producer state: {producer_only_state}"
-        );
-    }
-
-    let value = include_str!("../../value.rs");
-    let producer_dispatch = source_section(
-        value,
-        "match source {",
-        "if matches!(self.work, LazyTaskWork::HostCallInvoke)",
-    );
-    for producer_owned_family in [
-        "LazySource::Application(application)",
-        "LazySource::ReflectionTask(computation)",
-        "LazySource::Access { path, arguments }",
-    ] {
-        assert!(
-            producer_dispatch.contains(producer_owned_family),
-            "lazy-source work must remain owned by its canonical producer: {producer_owned_family}"
-        );
-    }
-
-    let whnf = include_str!("../../whnf.rs");
-    let initial = source_section(whnf, "pub(crate) fn from_focus(", "    fn from_parts(");
-    assert!(initial.contains("Vec::new(), BTreeSet::new(), None, None"));
-
-    let source_owner_transition = source_section(
-        whnf,
-        "pub(crate) fn with_source_owner(",
-        "    pub(crate) fn from_application_checkpoint_in(",
-    );
-    assert!(
-        source_owner_transition.contains("self.0.source_owner = Some(source_owner)"),
-        "source-owner modification must remain confined to regional WHNF work"
-    );
-    assert_eq!(
-        source_owner_transition
-            .matches("self.0.source_owner = Some(source_owner)")
-            .count(),
-        1,
-        "the regional modifier must install source ownership exactly once"
-    );
-    assert_eq!(
-        whnf.matches("self.0.source_owner = Some(source_owner)")
-            .count(),
-        1,
-        "new source-owner transitions require an NC5D inventory decision"
-    );
-
-    let semantic = source_section(
-        whnf,
-        "fn reduce_semantic_shell(",
-        "enum DirectApplicationStep",
-    );
-    assert_eq!(
-        semantic.matches(".cycle_promise = Some(").count(),
-        1,
-        "only following an assigned promise may create the promise breadcrumb"
-    );
-    assert_eq!(
-        whnf.matches("work.0.cycle_promise = Some(").count(),
-        1,
-        "new promise-breadcrumb transitions require an NC5D inventory decision"
-    );
-
-    for frame_transition in [
-        "fn resume_static_access(",
-        "fn advance_application(",
-        "fn begin_dictionary_application(",
-        "fn begin_semantic_undefined(",
-        "fn resume_semantic_undefined(",
-        "fn finish_semantic_undefined(",
-    ] {
-        assert!(
-            whnf.contains(frame_transition),
-            "the complete frame-transition inventory must retain {frame_transition}"
-        );
-    }
 }
