@@ -23,8 +23,6 @@ Recover a retired doc with `git show <commit>:<path>`.
 - [`UserInputPanicSafety_2026-10-04.md`](UserInputPanicSafety_2026-10-04.md)
   keeps code that observes user input from panicking, and keeps a caught panic
   from poisoning the runtime. Interaction-net inspection remains.
-- [`DocumentationDisposition_2026-10-05.md`](DocumentationDisposition_2026-10-05.md)
-  is the working plan for retiring this pile; it retires itself when done.
 
 ## Active Reviews
 
@@ -69,6 +67,10 @@ Each line moves into a plan as soon as one owns it.
   quadratic and unmeasured: each alternative re-runs from the start to get
   its own future. Columnar descriptors belong to value-representation
   refinement.
+- **Comment review** (maintainer, 2026-10-05). Find comments that are too
+  large and belong in a standing doc or `Decisions.md`, and comments that are
+  mostly redundant because the code already says it. Replace the step IDs
+  that remain in test-module comments along the way.
 - **History-coupling guard scope.** `tests/source_doc_coupling.rs` scans
   `src/` only; extend it to `tests/` and `crates/`.
 
@@ -148,3 +150,4 @@ Each line moves into a plan as soon as one owns it.
 | `reviews/ResumableWhnfW7_2026-09-27.md` | `ca8548ca` | resumable WHNF (`W…`) |
 | `plans/GarbageCollectorOwnershipLedger_2026-08-20.md` | `8ad63790` | GC integration (`I…`) |
 | `reviews/ArchitectureAndVerification_2026-10-03.md` | `8b1ace22` | parallel review (`AR-…`, `RF-…`) |
+| `plans/DocumentationDisposition_2026-10-05.md` | `f53e9b51` | documentation cleanup (its maintainer answers are in `Decisions.md`) |
