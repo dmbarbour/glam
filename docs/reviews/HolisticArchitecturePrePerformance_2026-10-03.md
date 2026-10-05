@@ -1291,6 +1291,35 @@ costs one unit, and observation is free.
   - a blocked checkpoint rechecked at zero budget.
 - The decision is `net-reduction-costs-one-budget-unit`.
 
+**Budget consistency audit (2026-10-05, at the maintainer's request).**
+Every evaluation path was checked against the N9 rule ("charge reductions,
+observation free"). Findings, highest risk first; "verified" means
+confirmed by reading or running the code:
+1. **One-unit livelock on lazy callables** (verified by a probe on the
+   current commit and the one before N9). A call's claim takes the poll's
+   only unit, so the callable's WHNF gets none and spills. Resuming the
+   spilled checkpoint is charged as a new claim, again leaving nothing. A
+   cached-lazy callable never completes under one-unit polls.
+2. **The reflection machine mints its own pump allowance** (verified).
+   `poll_blocked` calls `pump_wait_on_route(wait, 256, ..)` inside a
+   budgeted poll instead of `pump_wait_on_route_within`, contradicting
+   `step-budget-is-reservation`.
+3. **The WHNF driver charges observation.** `drive_regional_state_in_place`
+   spends a unit before every reducer call, including `Ready` for a focus
+   already in WHNF, `Boundary`, and `Failed`. Only `Delegate` reduces.
+4. **Builtin machines charge nothing themselves.** About 20 machines are
+   metered only through operand demands, so freeing observation in the WHNF
+   driver alone would leave many transitions free. Each machine poll makes
+   one transition, so none loops unmetered within a poll.
+   `InteractionNetFromNetlist` charges nothing at all.
+5. **Data-proportional work inside one transition:** strict-list map and
+   concat, dict merges, C3 linearization, annotation rendering, and the
+   netlist's quadratic span scan. Budgets are heuristics, not cost models,
+   so these are performance notes rather than budget defects.
+6. **By design:** the pumps' reservation accounting, and the absence of a
+   total cap on client demand, macro expansion and imports, where each poll
+   mints a fresh quantum.
+
 ### Reflection (R)
 
 **R1 — High — The store's change log grows without bound, and each
