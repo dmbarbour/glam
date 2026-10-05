@@ -440,10 +440,22 @@ impl FileSourceSystem {
         }
     }
 
+    /// Publishes the digests of every consumed input.
+    ///
+    /// The output must not be a tracked input under any spelling. Its
+    /// resolved file identity is compared with each input's, so outputs that
+    /// alias an input through a symlink, a hard link, or a symlinked parent
+    /// directory are rejected. The manifest is written to a fresh sibling file
+    /// and atomically renamed into place, so an existing destination is
+    /// replaced rather than truncated through.
     pub fn write_manifest(&self, path: &Path) -> Result<(), SourceError> {
         let output = absolute_path(path)?;
-        let observed = self.observed.lock().unwrap_or_else(PoisonError::into_inner);
-        if observed.contains_key(&output) {
+        let observed = self
+            .observed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if observed.contains_key(&output) || aliases_any(&output, observed.keys()) {
             return Err(SourceError::new(format!(
                 "manifest output `{}` is also an assembly input",
                 output.display()
@@ -451,7 +463,7 @@ impl FileSourceSystem {
         }
 
         let mut manifest = format!("{LOCAL_MANIFEST_HEADER}\n{LOCAL_MANIFEST_COLUMNS}\n");
-        for (source, digest) in observed.iter() {
+        for (source, digest) in &observed {
             manifest.push_str(&percent_encoded_path(source));
             manifest.push('\t');
             manifest.push_str(digest.algorithm());
@@ -459,7 +471,7 @@ impl FileSourceSystem {
             manifest.push_str(&digest.to_hex());
             manifest.push('\n');
         }
-        fs::write(&output, manifest).map_err(|error| {
+        publish_atomically(&output, manifest.as_bytes()).map_err(|error| {
             SourceError::new(format!(
                 "could not write manifest `{}`: {error}",
                 output.display()
@@ -517,6 +529,91 @@ fn validate_relative_source_path(request: &str) -> Result<(), SourceError> {
         }
     }
     Ok(())
+}
+
+/// Whether `output` resolves to the same existing file as any input.
+fn aliases_any<'a>(output: &Path, inputs: impl IntoIterator<Item = &'a PathBuf>) -> bool {
+    let Ok(output) = FileIdentity::of(output) else {
+        // A destination that does not exist yet cannot alias an input.
+        return false;
+    };
+    inputs
+        .into_iter()
+        .filter_map(|input| FileIdentity::of(input).ok())
+        .any(|input| input == output)
+}
+
+/// The identity of the file a path resolves to, following symlinks.
+#[derive(PartialEq, Eq)]
+struct FileIdentity {
+    #[cfg(unix)]
+    device_and_inode: (u64, u64),
+    #[cfg(not(unix))]
+    canonical: PathBuf,
+}
+
+impl FileIdentity {
+    #[cfg(unix)]
+    fn of(path: &Path) -> std::io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(path)?;
+        Ok(Self {
+            device_and_inode: (metadata.dev(), metadata.ino()),
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn of(path: &Path) -> std::io::Result<Self> {
+        Ok(Self {
+            canonical: fs::canonicalize(path)?,
+        })
+    }
+}
+
+/// Writes `bytes` to a fresh sibling of `output`, then renames it into place.
+///
+/// The rename replaces the destination's directory entry instead of writing
+/// through it, so a pre-existing destination is never truncated, and a
+/// failed write leaves it unchanged.
+fn publish_atomically(output: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
+
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let name = output
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("the output path names no file"))?;
+    let (temporary, mut file) = loop {
+        let mut candidate = std::ffi::OsString::from(".");
+        candidate.push(name);
+        candidate.push(format!(
+            ".{}.{}.tmp",
+            std::process::id(),
+            NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed)
+        ));
+        let candidate = parent.join(candidate);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => break (candidate, file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
+    let published = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            drop(file);
+            fs::rename(&temporary, output)
+        });
+    if published.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    published
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf, SourceError> {
@@ -738,6 +835,121 @@ mod tests {
             Some(ContentDigest::of(b"later edit"))
         );
         assert_eq!(mismatches[0].read_error(), None);
+    }
+
+    fn manifest_test_directory(name: &str) -> PathBuf {
+        let directory = env::current_dir()
+            .expect("test should have a working directory")
+            .join("target")
+            .join(format!("glam-manifest-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).expect("test directory should be created");
+        directory
+    }
+
+    #[test]
+    fn manifest_replaces_an_existing_destination_atomically() {
+        let directory = manifest_test_directory("replace");
+        let input = directory.join("input.g");
+        let manifest = directory.join("manifest.txt");
+        fs::write(&input, "consumed").expect("test input should be written");
+        fs::write(&manifest, "stale").expect("stale manifest should be written");
+        let sources = FileSourceSystem::default();
+        sources
+            .load_top_level(&input)
+            .expect("input should be readable");
+
+        sources
+            .write_manifest(&manifest)
+            .expect("manifest should be published");
+
+        let written = fs::read_to_string(&manifest).expect("manifest should be readable");
+        assert!(written.starts_with(LOCAL_MANIFEST_HEADER));
+        assert_eq!(
+            fs::read_dir(&directory)
+                .expect("test directory should be listable")
+                .count(),
+            2,
+            "publication must not leave a temporary file behind"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_rejects_every_output_alias_of_an_input() {
+        let directory = manifest_test_directory("alias");
+        let inputs = directory.join("inputs");
+        fs::create_dir_all(&inputs).expect("input directory should be created");
+        let input = inputs.join("input.g");
+        fs::write(&input, "consumed").expect("test input should be written");
+        let sources = FileSourceSystem::default();
+        sources
+            .load_top_level(&input)
+            .expect("input should be readable");
+
+        let output_symlink = directory.join("output-symlink");
+        std::os::unix::fs::symlink(&input, &output_symlink).expect("symlink should be created");
+        let hard_link = directory.join("output-hard-link");
+        fs::hard_link(&input, &hard_link).expect("hard link should be created");
+        let aliased_parent = directory.join("aliased-inputs");
+        std::os::unix::fs::symlink(&inputs, &aliased_parent)
+            .expect("directory symlink should be created");
+
+        for output in [
+            input.clone(),
+            output_symlink,
+            hard_link,
+            aliased_parent.join("input.g"),
+        ] {
+            let error = sources
+                .write_manifest(&output)
+                .expect_err("an output aliasing an input must be rejected");
+            assert!(
+                error.to_string().contains("is also an assembly input"),
+                "{}: {error}",
+                output.display()
+            );
+            assert_eq!(
+                fs::read(&input).expect("input should remain readable"),
+                b"consumed"
+            );
+        }
+
+        // An input tracked through a symlink still protects its target.
+        let target = directory.join("target.g");
+        fs::write(&target, "linked").expect("linked input should be written");
+        let input_symlink = directory.join("input-symlink.g");
+        std::os::unix::fs::symlink(&target, &input_symlink).expect("symlink should be created");
+        let linked_sources = FileSourceSystem::default();
+        linked_sources
+            .load_top_level(&input_symlink)
+            .expect("linked input should be readable");
+        assert!(linked_sources.write_manifest(&target).is_err());
+        assert_eq!(
+            fs::read(&target).expect("linked input should remain readable"),
+            b"linked"
+        );
+    }
+
+    #[test]
+    fn failed_manifest_publication_leaves_inputs_intact() {
+        let directory = manifest_test_directory("failed");
+        let input = directory.join("input.g");
+        fs::write(&input, "consumed").expect("test input should be written");
+        let sources = FileSourceSystem::default();
+        sources
+            .load_top_level(&input)
+            .expect("input should be readable");
+
+        assert!(
+            sources
+                .write_manifest(&directory.join("missing").join("manifest.txt"))
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(&input).expect("input should remain readable"),
+            b"consumed"
+        );
     }
 
     #[test]

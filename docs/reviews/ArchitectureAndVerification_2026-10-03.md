@@ -83,6 +83,26 @@ symlink, parent-directory alias, hard-link alias, and failed publication.
 Every rejected case must leave input bytes intact. This report exercised the
 output-symlink case; the other cases are proposed regressions.
 
+**Resolved 2026-10-05.** `write_manifest` changes in three ways:
+- **Snapshot first.** It snapshots the observed digest map, releases the lock,
+  and only then formats and writes.
+- **Identity check.** It rejects an output whose resolved file identity
+  matches any tracked input, following symlinks: device and inode on Unix,
+  canonical path elsewhere.
+- **Atomic publish.** It writes through a fresh, exclusively created sibling
+  file and renames it into place. The rename replaces the destination's
+  directory entry rather than writing through it, so an existing destination
+  is never truncated, and a failed write leaves it unchanged.
+
+Every case listed above has a regression: ordinary replacement with no
+temporary file left behind, the exact input path, an output symlink, a
+hard-link alias, a parent-directory alias, an input tracked through a
+symlink, and failed publication. Each rejected case leaves the input bytes
+intact.
+
+One behavior change: an output that is a symlink to an unrelated file is now
+replaced by a regular file instead of being written through.
+
 ### AR-002 — P2: Worker activation is not transactional on spawn failure
 
 Owner: [`evaluation/executor.rs`](../../src/evaluation/executor.rs),
@@ -111,6 +131,21 @@ complete activation before releasing them to claim work. On preparation
 failure, retire the prepared workers and leave a documented retryable or
 terminal activation state. Keep activation/shutdown authority in the executor;
 do not repair this with a second scheduler or ad hoc worker-count sampling.
+
+**Resolved 2026-10-05.** `activate_workers` is now transactional, and
+activation and shutdown authority stays in the executor.
+- **Gated start.** Every worker is spawned behind a `WorkerStartGate` before
+  any may claim work.
+- **Spawn failure.** The gate aborts, the prepared workers exit and are
+  joined, nothing is published, and activation stays retryable.
+- **Success.** Activation is marked, the handles and worker count are
+  published, the coordinator receives `executor_started`, and only then does
+  the gate release the workers.
+
+A test-only hook injects a spawn failure at a chosen index. The regression
+fails worker 1 of 3, checks that no worker remains and that the count is
+still zero, retries successfully with two workers, and rejects a second
+activation.
 
 **Verification:** a private injectable spawner should fail deterministically
 on the first and a later spawn. Check live thread retirement, reported count,

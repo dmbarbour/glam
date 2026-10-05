@@ -79,31 +79,51 @@ impl EvaluationExecutor {
         if *activated {
             return Err(Arc::from("evaluation workers were already activated"));
         }
-        *activated = true;
         if worker_count == 0 {
+            *activated = true;
             return Ok(());
         }
 
-        let mut workers = self.workers.lock().unwrap_or_else(PoisonError::into_inner);
+        // Activation is transactional. Every worker is prepared behind a
+        // start gate before any may claim work. If one fails to start, the
+        // prepared workers exit and are joined, and activation stays
+        // retryable. Only a complete set is published and released.
+        let gate = Arc::new(WorkerStartGate::default());
+        let mut prepared = Vec::with_capacity(worker_count);
         for index in 0..worker_count {
             let inner = self.inner.clone();
-            let worker = thread::Builder::new()
-                .name(format!("glam-eval-{index}"))
-                .spawn(move || evaluation_worker(inner))
-                .map_err(|error| {
-                    Arc::<str>::from(format!(
+            let worker_gate = gate.clone();
+            let spawned = spawn_worker(index, move || {
+                if worker_gate.wait_for_release() {
+                    evaluation_worker(inner);
+                }
+            });
+            match spawned {
+                Ok(worker) => prepared.push(worker),
+                Err(error) => {
+                    gate.open(false);
+                    for worker in prepared {
+                        let _ = worker.join();
+                    }
+                    return Err(Arc::from(format!(
                         "could not start evaluation worker {index}: {error}"
-                    ))
-                })?;
-            workers.push(worker);
+                    )));
+                }
+            }
         }
+
+        *activated = true;
+        self.workers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend(prepared);
         self.inner
             .worker_count
             .store(worker_count, Ordering::Release);
         if let Some(coordinator) = self.inner.coordinator.upgrade() {
             coordinator.executor_started(worker_count);
         }
-        drop(workers);
+        gate.open(true);
         Ok(())
     }
 
@@ -204,6 +224,57 @@ fn run_evaluation_worker(inner: &EvaluationExecutorInner) {
     }
 }
 
+/// Holds prepared workers until activation either publishes the complete set
+/// or abandons it.
+#[derive(Default)]
+struct WorkerStartGate {
+    /// `None` while pending; `Some(true)` releases, `Some(false)` aborts.
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
+    decision: Mutex<Option<bool>>,
+    decided: std::sync::Condvar,
+}
+
+impl WorkerStartGate {
+    fn open(&self, release: bool) {
+        *self.decision.lock().unwrap_or_else(PoisonError::into_inner) = Some(release);
+        self.decided.notify_all();
+    }
+
+    /// Waits for the decision and returns whether the worker may run.
+    fn wait_for_release(&self) -> bool {
+        let mut decision = self.decision.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if let Some(release) = *decision {
+                return release;
+            }
+            decision = self
+                .decided
+                .wait(decision)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+fn spawn_worker(
+    index: usize,
+    run: impl FnOnce() + Send + 'static,
+) -> std::io::Result<thread::JoinHandle<()>> {
+    #[cfg(test)]
+    if FAIL_WORKER_SPAWN_AT.with(|fail| fail.get()) == Some(index) {
+        return Err(std::io::Error::other("injected worker spawn failure"));
+    }
+    thread::Builder::new()
+        .name(format!("glam-eval-{index}"))
+        .spawn(run)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Injects a spawn failure at one worker index on the activating thread.
+    static FAIL_WORKER_SPAWN_AT: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// Retires inactive per-heap allocation cursors when one worker thread ends.
 ///
 /// Ordinary evaluation quantum boundaries deliberately preserve these
@@ -240,6 +311,38 @@ mod tests {
             glam_gc::Heap::release_current_thread_caches(),
             0,
             "worker termination should have retired every inactive collector cache"
+        );
+    }
+
+    #[test]
+    fn failed_worker_spawn_retires_prepared_workers_and_stays_retryable() {
+        let (_coordinator, executor) =
+            super::super::test_execution_resources(0).expect("test executor should build");
+
+        FAIL_WORKER_SPAWN_AT.with(|fail| fail.set(Some(1)));
+        let error = executor
+            .activate_workers(3)
+            .expect_err("an injected spawn failure must fail activation");
+        FAIL_WORKER_SPAWN_AT.with(|fail| fail.set(None));
+        assert!(error.contains("could not start evaluation worker 1"));
+        // The prepared worker 0 was joined rather than left running, and
+        // nothing was published.
+        assert_eq!(executor.worker_count(), 0);
+        assert!(
+            executor
+                .workers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_empty()
+        );
+
+        executor
+            .activate_workers(2)
+            .expect("a failed activation must remain retryable");
+        assert_eq!(executor.worker_count(), 2);
+        assert!(
+            executor.activate_workers(1).is_err(),
+            "a successful activation is not repeated"
         );
     }
 
