@@ -164,6 +164,15 @@ fn parse_parenthesized_structural(
     }
 
     let contents = trim_layout(view.group_contents(*group)?);
+    // A match leading a tuple, as in `(match y with {…}, 1)`, ends at its
+    // comma, since its arms cannot hold an unparenthesized one. The
+    // expression grammar parses the tuple and delimits the member.
+    let leads_with_match = contents.first_significant().is_some_and(|(_, token)| {
+        token_is_name(token, "match") || token_is_name(token, "try_match")
+    });
+    if leads_with_match && !top_level_symbols(contents, ",").is_empty() {
+        return None;
+    }
     let context = context.complete();
     let starts_structural = contents.first_significant().is_some_and(|(_, token)| {
         token_is_name(token, "let")
@@ -861,8 +870,16 @@ fn find_structural_body(view: TokenView<'_, '_>) -> Option<StructuralBody> {
         .into_iter()
         .next()
         .unwrap_or(view.range().end());
+    // The first ungrouped `with` after a `match` or `try_match` head is the
+    // match's own, and the match owns what follows it, so no later `with`
+    // opens an update or object body here.
+    let match_head = ["match", "try_match"]
+        .into_iter()
+        .filter_map(|head| contextual_keywords(view, head).first().copied())
+        .min()
+        .unwrap_or(view.range().end());
     for with_index in contextual_keywords(view, "with") {
-        if with_index >= where_boundary {
+        if with_index >= where_boundary || with_index > match_head {
             break;
         }
         let Some(next) = next_significant_after(view, with_index) else {

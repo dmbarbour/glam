@@ -1266,6 +1266,39 @@ mod tests {
     }
 
     #[test]
+    fn a_match_owns_its_with_inside_a_lambda_or_a_tuple() {
+        for source in [
+            "\\w -> match w with { z => w }",
+            "(\\w -> match w with { z => w })",
+            "\\w -> match w with\n  z => d with { x := 1 }",
+        ] {
+            let SyntaxExpr::Lambda(_, body) = parse(source) else {
+                panic!("`{source}` should produce a lambda");
+            };
+            assert!(
+                matches!(body.as_ref(), SyntaxExpr::Match(_)),
+                "`{source}` should produce a match body, not an update"
+            );
+        }
+        for source in [
+            "(1, match y with { z => z })",
+            "(match y with { z => z }, 1)",
+            "(match y with\n  z => z, 1)",
+        ] {
+            let SyntaxExpr::Tuple(items) = parse(source) else {
+                panic!("`{source}` should produce a tuple");
+            };
+            assert_eq!(items.len(), 2, "`{source}`");
+            assert!(
+                items
+                    .iter()
+                    .any(|item| matches!(item, SyntaxExpr::Match(_))),
+                "`{source}` should hold a match member"
+            );
+        }
+    }
+
+    #[test]
     fn complete_match_patterns_accept_unparenthesized_views_and_predicates() {
         let SyntaxExpr::Match(forward) = parse("match subject with { inspect -> value => value; }")
         else {
