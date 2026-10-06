@@ -1,10 +1,11 @@
 # Parser Backtracking Performance Plan — 2026-10-04
 
-Status: under investigation (2026-10-06); this is the parser track of the
-[performance roadmap](PerformanceRoadmap_2026-10-05.md). The maintainer asked
-for a more general solution than per-construct guards before any fix:
-something like CPS, with backtracking delimited or cut at boundaries. See
-[Investigation](#investigation-2026-10-06). It was found during the
+Status: design agreed with the maintainer on 2026-10-06; implementation not
+started. This is the parser track of the
+[performance roadmap](PerformanceRoadmap_2026-10-05.md). The fix is a merged
+grammar with prefix sharing, parsing into a cover syntax (IR) for patterns and
+expressions, implemented with an explicit stack; see [Design](#design). It
+replaces the lookahead guards first proposed here. It was found during the
 [user-input panic safety](UserInputPanicSafety_2026-10-04.md) parser
 inspection.
 
@@ -23,45 +24,6 @@ Realistic source nests 5–8 levels, so ordinary code already pays a
 measurable share of this cost. It likely explains part of the slow compile
 times recorded by the holistic review (F3 and its 60-second `g_syntax` unit
 test).
-
-## Cause
-
-The expression grammar in `parser/expression.rs` tries several alternatives
-that open with the same delimiter, and each parses the whole group before it
-can fail:
-
-- **`computed_tagged`** (inside `atom`) parses `computed_path` followed by
-  `:`, for path-dict literals such as `[a, b]:payload` and `(expr):payload`.
-  `computed_path` parses the entire bracketed or parenthesized group,
-  including every nested expression, before discovering that no `:` follows.
-- **`postfix_operator_section`** parses `(expr` and then fails when no infix
-  operator precedes the `)`.
-- **`grouped_or_trailing_tuple`** finally parses the same `(expr` again.
-
-Each level therefore re-parses its contents twice for lists
-(`computed_tagged`, then `list`) and three times for parentheses
-(`computed_tagged`, `postfix_operator_section`, then grouping). That gives
-roughly 2ⁿ and 3ⁿ.
-
-## Fix (option A)
-
-Fail the doomed alternatives in constant time using the lexer's existing
-delimiter pairing, which assigns each group a `GroupId` with known open and
-close tokens:
-
-1. Start `computed_tagged` only when the group's closing delimiter is
-   immediately (jointly) followed by `:`.
-2. Start `postfix_operator_section` only when the token before the closing
-   `)` is an infix operator.
-
-Grouping, tuples, and lists then parse their contents once, so total parse
-time becomes linear in nesting depth. Semantics are unchanged, because a
-guarded alternative only skips inputs it would have rejected anyway.
-
-An alternative is to left-factor these forms: parse the delimited group
-once, then decide its role from the following token. That restructures more
-of the grammar. Chumsky memoization would also bound the cost, but it adds
-memory and leaves the duplicated work in place.
 
 ## Investigation 2026-10-06
 
@@ -177,7 +139,16 @@ way; the hand-written layers show it. That suggests:
 - **A, B or both** could serve as a stopgap if D is scheduled later. Their
   value disappears once D lands.
 
-These are proposals for the maintainer to decide.
+**Maintainer direction, 2026-10-06:**
+- Avoid fragile lookahead; option A is rejected, including as a stopgap.
+- Think of the fix as merging parsers with prefix sharing.
+- Patterns and expressions share a cover syntax, an IR not decided until
+  context fixes its role.
+
+The pattern parser shows why patterns added no new cause: it finds a
+top-level `<-` or `->` first, then parses each side once. It falls back to
+trial and error only where that split is ambiguous: several arrows,
+predicate patterns, and `op -> P` statements.
 
 ### Incidental findings
 
@@ -187,11 +158,119 @@ These are proposals for the maintainer to decide.
 
 Both are possibly parser bugs unrelated to speed.
 
+## Design
+
+### Principles
+
+- **Prefix sharing.** Alternatives that begin alike are one production.
+  The shared prefix is parsed once, and the parser then branches on the
+  token it must consume next. Nothing is parsed twice and nothing is tried
+  and abandoned, so every delimited group is parsed exactly once. The only
+  lookahead is the next token after a shared prefix, as in any LL(1)
+  parser; nothing peeks past a group.
+- **One cover syntax for patterns and expressions.** The parser builds a
+  term in a cover IR covering what the two share. When a token fixes the
+  role (`=>`, `<-`, `=`, `->`, an argument position), a conversion turns
+  the term into a `SyntaxPattern` or a `SyntaxExpr`. A term the role cannot
+  accept is a precise error, such as "`+` is not allowed in a pattern".
+- **An explicit stack.** A deterministic parser is a stack machine. Groups,
+  pending operators and open keyword forms are frames on a heap stack, so
+  source nesting never becomes Rust recursion. Conversion and later
+  syntax-tree walks are iterative as well.
+
+### The cover IR
+
+The IR covers the overlap between patterns and expressions:
+- names, including `_` and `_name`;
+- number, text and embedded literals;
+- quoted paths;
+- unit, grouping, tuples and operator sections;
+- lists with `++` segments, and dicts with punned (`:x`), optional (`x?:`)
+  and remainder members;
+- static, computed and path tags;
+- juxtaposition, infix operator chains, `as`, `when`, and the view arrows
+  `->` and `<-`.
+
+Forms with an expression-only head become expression terms directly:
+lambdas (`\`), `if`, `match`, `try`, `do`, `let`, `using`, `object`, and
+effects (`.op`). Converting one to a pattern fails, except where a pattern
+holds an expression: a view's function or a predicate.
+
+**Resolved by conversion, not by search:**
+- A pattern `(f x -> P)` is a view of the expression `f x`.
+- A pattern `(P <- f x)` is a view written the other way round.
+- A predicate pattern such as `(Prefix "x-" rest)` is one juxtaposition
+  term. In pattern role its last item is the pattern, and the rest is the
+  predicate application.
+- `a:b` is a tagged value or a tag pattern, and `{x:P, rest}` a dict literal
+  or a dict pattern, by role.
+- A `do` statement parses one term up to its terminator:
+  - a top-level `<-` makes the left side a pattern and the right an
+    operation;
+  - `->` makes the left an operation and the right a pattern;
+  - `=` makes the left a binding pattern;
+  - otherwise the term is an operation.
+
+### Operators and keyword forms
+
+- Infix chains, applications and sections use an iterative precedence
+  parser with an operator stack. This removes the overflows on long flat
+  chains.
+- Keyword forms are productions with frames, not trial parses with
+  extents. These are `if`/`then`/`else`, postfix `if`, `match` and `try`
+  arms, `let`, `where`, `with`, `object`, and `do` blocks. Layout blocks
+  end where the lexer's indentation facts say, much as a closing delimiter
+  ends a group.
+- The structural layer's whole-file scans go (cause 3): a view knows its
+  enclosing group, and line indentation is precomputed.
+
+### What stays
+
+- **Kept:** the lexer, delimiter pairing, declaration staging, macro
+  expansion, and the `SyntaxExpr`/`SyntaxPattern` syntax trees, so lowering
+  is untouched.
+- **Chumsky:** the new parser does not use it. Simple declarations may keep
+  it, or move to the same machine once it exists.
+
+### Diagnostics
+
+A deterministic parser reports at the first token that fits no production,
+with the expected set of the current frame. This should be at least as
+precise as today's merged expectations from abandoned alternatives. Every
+diagnostic change in the invalid-syntax samples is reviewed, not
+rebaselined blindly.
+
+## Slices
+
+1. **Cover IR and conversion.** The IR types; conversion to `SyntaxExpr`
+   and `SyntaxPattern`; unit tests of the role rules.
+2. **Term parser.**
+   - The explicit-stack, prefix-shared parser for atoms, groups,
+     collections, tags, operators and applications.
+   - Expression leaves use it first.
+   - **Differential oracle:** the old parser stays and must produce the
+     same syntax tree for every sample, every test source, and generated
+     programs.
+3. **Patterns.** Pattern positions use the same parser plus conversion.
+   This retires the split-and-retry code for views, predicates, guards and
+   `op -> P`.
+4. **Keyword forms and structural scans.** Move keyword forms into the
+   machine, remove the whole-file scans, and retire Chumsky from
+   expressions.
+5. **Retirement.** Delete the old expression and pattern parsers once the
+   oracle has held across the corpus. Keep the differential corpus as
+   regression tests.
+
+Slices 1 and 2 are additive and low-risk: production keeps the old parser
+until the oracle agrees.
+
 ## Verification
 
-- A regression parses depth-40 nested parentheses and lists. The fixed
-  grammar finishes immediately; a reintroduced exponential would hang the
-  test visibly rather than slowly degrade.
+- The differential oracle above, while both parsers exist.
+- Regressions parse depth-40 nesting of every survey construct, and flat
+  chains of 100k terms. The fixed grammar finishes immediately; a
+  reintroduced exponential would hang the test visibly rather than slowly
+  degrade. The profiling parser workloads must grow linearly.
 - The invalid-syntax samples keep their diagnostics. Chumsky merges expected
   tokens from failed alternatives, so check closest-match wording explicitly.
 - Compare compile time on the samples and the X3 corpus before and after.
