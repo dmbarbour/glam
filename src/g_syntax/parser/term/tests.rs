@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use super::super::expression::term_oracle::{Report, observe};
+use super::super::expression_context::ExpressionContext;
 use super::super::parse_source;
 
 fn source(expression: &str) -> Vec<u8> {
@@ -28,6 +29,10 @@ fn assert_agrees(report: &Report, minimum_compared: usize) {
         report.compared,
         report.unsupported,
         report.unsupported_reasons
+    );
+    eprintln!(
+        "term oracle: {} compared, unsupported {:?}",
+        report.compared, report.unsupported_reasons
     );
 }
 
@@ -219,6 +224,65 @@ const SNIPPETS: &[&str] = &[
     "f(\\x -> x)",
     "\\x -> x y z",
     "a + \\x -> x",
+    // Line breaks: continuation arguments, tail lambdas and anchors.
+    "f\n  x",
+    "f\n  x\n  y",
+    "f x\n  y",
+    "f\n\n  x",
+    "x\n  y\n    z",
+    "f\n  .x",
+    "f\n  (x)",
+    "f\n  [x]",
+    "f\n  :a",
+    "f\n  'a",
+    "f\n  ^a",
+    "f\n  -1",
+    "f\n  - 1",
+    "x\n  .y",
+    "a:\n  b",
+    "f\n  \\x -> x",
+    "f\n  x\n  \\y -> y",
+    "f \\x ->\n  x",
+    "a\n  + b",
+    "a\n  + b\n  + c",
+    "a\n  + b\n    + c",
+    "a +\n  b",
+    "a\n  +\n  b",
+    "a\n  and b",
+    "a\n  or b",
+    "a\n  |> f",
+    "a\n+ b",
+    "\\x ->\n  x",
+    "\\x\n  -> x",
+    "\\\n  x -> x",
+    "\\x -> a\n  + b",
+    "\\x -> a\n  + b\n  + c",
+    "a + \\x -> b\n  + c",
+    // Line breaks inside groups.
+    "(f\n  x)",
+    "(a\n  + b)",
+    "(a\n + b\n + c)",
+    "(a\n + b\n   + c)",
+    "(+ 1\n  )",
+    "(+\n  1)",
+    "(1\n  +)",
+    "(1 +\n  )",
+    "(\n  , 1)",
+    "(\n)",
+    "(\n  1\n)",
+    "(1,\n  2)",
+    "[1,\n  2]",
+    "[\n  1,\n  2,\n]",
+    "[\n1,\n2\n]",
+    "[f\nx]",
+    "[a\n  + b, c\n      + d]",
+    "{a:\n  1}",
+    "{a\n  : 1}",
+    "{a.b\n  :1}",
+    "{[k]\n  :1}",
+    "{\n  a: 1,\n  b: 2\n}",
+    "{:a\n  , :b}",
+    "{:\n  a}",
 ];
 
 #[test]
@@ -278,10 +342,6 @@ fn term_parser_agrees_on_every_sample() {
             .map(|path| std::fs::read(path).expect("samples are readable")),
     );
     assert_agrees(&report, 100);
-    eprintln!(
-        "term oracle over samples: {} compared, unsupported {:?}",
-        report.compared, report.unsupported_reasons
-    );
 }
 
 #[test]
@@ -290,7 +350,7 @@ fn deep_nesting_parses_in_linear_time_without_recursion() {
         let text = nested(2_000, open, close, "1");
         let started = std::time::Instant::now();
         let result = super::super::input::parse_expression_fragment(text.as_bytes(), |view| {
-            super::parse_term_chain(view)
+            super::parse_term_chain(view, ExpressionContext::for_owner(view))
                 .map(|_| ())
                 .map_err(|fail| vec![crate::g_syntax::Diagnostic::error(1, format!("{fail:?}"))])
         });

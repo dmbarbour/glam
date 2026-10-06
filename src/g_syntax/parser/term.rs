@@ -19,10 +19,17 @@
 //! The interpreter is a loop. Lambdas, whose bodies extend to the end of
 //! their item, are a stack of pending levels.
 //!
+//! **Line breaks** follow the grammar's layout rules:
+//! - padding inside groups and around separators, lambda parameters and
+//!   arrows is skipped;
+//! - a line-led atom continues an application, and a line-led `\` is its
+//!   tail lambda;
+//! - a line-led infix operator resumes the chain at its indentation, which is
+//!   checked against the caller's `ExpressionContext`.
+//!
 //! **Coverage.** Constructs not yet covered report `Fail::Unsupported`:
 //! - keyword-headed forms (`if`, `do`, `match`, `try`, `using`,
 //!   `abstract_global_path`, postfix `if`);
-//! - line breaks except as padding inside groups;
 //! - invalid tokens.
 
 use std::cell::RefCell;
@@ -34,6 +41,7 @@ use super::expression::{
     InfixChain, access_if_path, quoted_path, syntax_operator, validate_dict_colon_members,
     validate_expr_name,
 };
+use super::expression_context::ExpressionContext;
 use super::input::TokenView;
 use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
 
@@ -53,10 +61,19 @@ fn error<T>(message: impl Into<String>) -> Parse<T> {
 }
 
 /// Parses `view` as one ordinary expression, returning its unresolved infix
-/// chain, as `parse_expression_chain_view` does.
-pub(super) fn parse_term_chain(view: TokenView<'_, '_>) -> Parse<InfixChain> {
+/// chain, as `parse_expression_chain_view` does. `context` checks the
+/// indentation of line-led infix operators.
+pub(super) fn parse_term_chain(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+) -> Parse<InfixChain> {
     prescan(view)?;
     let covers = Covers::default();
+    let scope = Scope {
+        view,
+        context,
+        covers: &covers,
+    };
     let mut stack = vec![Frame {
         delimiter: None,
         group: None,
@@ -87,7 +104,7 @@ pub(super) fn parse_term_chain(view: TokenView<'_, '_>) -> Parse<InfixChain> {
                     .group(frame.group.expect("a group frame records its group"))
                     .expect("an open frame's group exists")
                     .open_token();
-                let cover = covers.push(interpret_group(view, &covers, &frame, index)?);
+                let cover = covers.push(interpret_group(scope, &frame, index)?);
                 stack
                     .last_mut()
                     .expect("the view frame encloses every group")
@@ -107,22 +124,17 @@ pub(super) fn parse_term_chain(view: TokenView<'_, '_>) -> Parse<InfixChain> {
     if top.pieces.iter().any(|piece| is_symbol(view, piece, ",")) {
         return error("unexpected `,` in an expression");
     }
-    Items::new(view, &covers, &top.pieces).item()
+    // Trailing layout ends the expression; leading layout does not start one.
+    Items::new(scope, trim_trailing_padding(view, &top.pieces)).item()
 }
 
 /// Rejects, before any group is interpreted, constructs this parser does not
 /// cover yet, so an uncovered construct is never misreported as an error.
 fn prescan(view: TokenView<'_, '_>) -> Parse<()> {
-    let mut depth = 0usize;
     for token in view.tokens() {
         match token.kind() {
-            TokenKind::Open { .. } => depth += 1,
-            TokenKind::Close { .. } => depth = depth.saturating_sub(1),
             TokenKind::Name(name) if is_unsupported_keyword(name) => {
                 return Err(Fail::Unsupported("a keyword-headed form"));
-            }
-            TokenKind::LineStart { .. } if depth == 0 => {
-                return Err(Fail::Unsupported("a line break outside a group"));
             }
             TokenKind::InvalidNumber(_) | TokenKind::Unknown(_) => {
                 return Err(Fail::Unsupported("an invalid token"));
@@ -144,6 +156,14 @@ fn token<'lex, 'source>(
 ) -> &'lex SpannedToken<'source> {
     view.token_at(index)
         .expect("term indices stay inside the view")
+}
+
+/// What every interpretation step shares.
+#[derive(Clone, Copy)]
+struct Scope<'s, 'lex, 'source> {
+    view: TokenView<'lex, 'source>,
+    context: ExpressionContext,
+    covers: &'s Covers,
 }
 
 struct Frame {
@@ -287,6 +307,10 @@ fn trim_padding<'a>(view: TokenView<'_, '_>, mut pieces: &'a [Piece]) -> &'a [Pi
     {
         pieces = rest;
     }
+    trim_trailing_padding(view, pieces)
+}
+
+fn trim_trailing_padding<'a>(view: TokenView<'_, '_>, mut pieces: &'a [Piece]) -> &'a [Piece] {
     while let Some((last, rest)) = pieces.split_last()
         && is_line_start(view, last)
     {
@@ -327,22 +351,18 @@ fn separated_items<'a>(
     Ok(items)
 }
 
-fn interpret_group(
-    view: TokenView<'_, '_>,
-    covers: &Covers,
-    frame: &Frame,
-    close: usize,
-) -> Parse<Cover> {
+fn interpret_group(scope: Scope<'_, '_, '_>, frame: &Frame, close: usize) -> Parse<Cover> {
+    let view = scope.view;
     let delimiter = frame.delimiter.expect("only group frames close");
     debug_assert_eq!(frame.close, close);
     match delimiter {
-        Delimiter::Parenthesis => interpret_paren(view, covers, frame, close).map(Cover::Paren),
+        Delimiter::Parenthesis => interpret_paren(scope, frame, close).map(Cover::Paren),
         Delimiter::Bracket => {
             let segments = segments(view, &frame.pieces);
             let items = separated_items(&segments, true, true)?;
             items
                 .into_iter()
-                .map(|item| bracket_item(view, covers, item))
+                .map(|item| bracket_item(scope, item))
                 .collect::<Parse<Vec<_>>>()
                 .map(Cover::Bracket)
         }
@@ -353,19 +373,15 @@ fn interpret_group(
             let items = separated_items(&segments, true, true)?;
             items
                 .into_iter()
-                .map(|member| dict_member(view, covers, member))
+                .map(|member| dict_member(scope, member))
                 .collect::<Parse<Vec<_>>>()
                 .map(Cover::Brace)
         }
     }
 }
 
-fn interpret_paren(
-    view: TokenView<'_, '_>,
-    covers: &Covers,
-    frame: &Frame,
-    close: usize,
-) -> Parse<ParenCover> {
+fn interpret_paren(scope: Scope<'_, '_, '_>, frame: &Frame, close: usize) -> Parse<ParenCover> {
+    let view = scope.view;
     let contents = trim_padding(view, &frame.pieces);
     if contents.is_empty() {
         return if frame.pieces.is_empty() && token(view, close).leading() == LeadingTrivia::Joint {
@@ -378,7 +394,7 @@ fn interpret_paren(
     if is_symbol(view, &contents[0], ",") {
         // A leading tuple: `(, a, b)`. Its items follow the explicit comma.
         let items = separated_items(&segments[1..], false, true)?;
-        return resolved_items(view, covers, items).map(ParenCover::Tuple);
+        return resolved_items(scope, items).map(ParenCover::Tuple);
     }
     if let Some(operator) = piece_operator(view, &contents[0]) {
         if segments.len() > 1 {
@@ -392,7 +408,7 @@ fn interpret_paren(
                 right: None,
             }));
         }
-        let right = resolved(view, covers, operand)?;
+        let right = resolved(scope, operand)?;
         return Ok(ParenCover::Section(SyntaxExpr::OperatorSection {
             operator,
             left: None,
@@ -404,14 +420,14 @@ fn interpret_paren(
             .split_last()
             .expect("non-empty contents have a last piece");
         if let Some(operator) = piece_operator(view, last) {
-            let left = resolved(view, covers, trim_padding(view, before))?;
+            let left = resolved(scope, trim_padding(view, before))?;
             return Ok(ParenCover::Section(SyntaxExpr::OperatorSection {
                 operator,
                 left: Some(Box::new(left)),
                 right: None,
             }));
         }
-        return resolved(view, covers, contents).map(ParenCover::Grouped);
+        return resolved(scope, contents).map(ParenCover::Grouped);
     }
     // A trailing tuple: `(a, b)`, `(a,)`.
     if segments[0].is_empty() {
@@ -419,28 +435,25 @@ fn interpret_paren(
     }
     let mut items = vec![segments[0]];
     items.extend(separated_items(&segments[1..], false, true)?);
-    resolved_items(view, covers, items).map(ParenCover::Tuple)
+    resolved_items(scope, items).map(ParenCover::Tuple)
 }
 
-fn resolved_items(
-    view: TokenView<'_, '_>,
-    covers: &Covers,
-    items: Vec<&[Piece]>,
-) -> Parse<Vec<SyntaxExpr>> {
+fn resolved_items(scope: Scope<'_, '_, '_>, items: Vec<&[Piece]>) -> Parse<Vec<SyntaxExpr>> {
     items
         .into_iter()
-        .map(|item| resolved(view, covers, item))
+        .map(|item| resolved(scope, item))
         .collect()
 }
 
-fn resolved(view: TokenView<'_, '_>, covers: &Covers, pieces: &[Piece]) -> Parse<SyntaxExpr> {
-    Items::new(view, covers, pieces)
+fn resolved(scope: Scope<'_, '_, '_>, pieces: &[Piece]) -> Parse<SyntaxExpr> {
+    Items::new(scope, pieces)
         .item()?
         .resolve()
         .map_err(Fail::Error)
 }
 
-fn bracket_item(view: TokenView<'_, '_>, covers: &Covers, item: &[Piece]) -> Parse<BracketItem> {
+fn bracket_item(scope: Scope<'_, '_, '_>, item: &[Piece]) -> Parse<BracketItem> {
+    let view = scope.view;
     if let [quote, name] = item
         && is_symbol(view, quote, "'")
         && piece_leading(view, name) == LeadingTrivia::Joint
@@ -449,13 +462,14 @@ fn bracket_item(view: TokenView<'_, '_>, covers: &Covers, item: &[Piece]) -> Par
     {
         return Ok(BracketItem::QuotedName((*name).to_owned()));
     }
-    resolved(view, covers, item).map(BracketItem::Expr)
+    resolved(scope, item).map(BracketItem::Expr)
 }
 
 /// A dict member: a pun `:name`, a path member `path: value`, or an
 /// expression. A path member is recognized before anything is consumed: the
 /// path's extent is measured by shape, and only a following `:` commits.
-fn dict_member(view: TokenView<'_, '_>, covers: &Covers, member: &[Piece]) -> Parse<SyntaxExpr> {
+fn dict_member(scope: Scope<'_, '_, '_>, member: &[Piece]) -> Parse<SyntaxExpr> {
+    let view = scope.view;
     if is_symbol(view, &member[0], ":") {
         let Some(TokenKind::Name(name)) = member.get(1).and_then(|piece| piece_kind(view, piece))
         else {
@@ -466,24 +480,25 @@ fn dict_member(view: TokenView<'_, '_>, covers: &Covers, member: &[Piece]) -> Pa
             Box::new(SyntaxExpr::Name((*name).to_owned())),
         ));
     }
-    let mut cursor = Items::new(view, covers, member);
+    let mut cursor = Items::new(scope, member);
     if let Some(end) = cursor.data_path_end()
+        && let colon = end + cursor.line_starts_at(end).0
         && member
-            .get(end)
+            .get(colon)
             .is_some_and(|piece| is_symbol(view, piece, ":"))
     {
         let path = cursor.data_path()?;
         debug_assert_eq!(cursor.position, end);
-        let value = trim_padding(view, &member[end + 1..]);
+        let value = trim_padding(view, &member[colon + 1..]);
         if value.is_empty() {
             return error("a dictionary path member requires a value");
         }
         return Ok(SyntaxExpr::PathDict(
             path,
-            Box::new(resolved(view, covers, value)?),
+            Box::new(resolved(scope, value)?),
         ));
     }
-    resolved(view, covers, member)
+    resolved(scope, member)
 }
 
 fn is_glam_name(name: &str) -> bool {
@@ -492,8 +507,7 @@ fn is_glam_name(name: &str) -> bool {
 
 /// The flat interpreter over one item's pieces.
 struct Items<'p, 'lex, 'source> {
-    view: TokenView<'lex, 'source>,
-    covers: &'p Covers,
+    scope: Scope<'p, 'lex, 'source>,
     pieces: &'p [Piece],
     position: usize,
 }
@@ -509,6 +523,8 @@ struct Chain {
     first: Option<SyntaxExpr>,
     rest: Vec<(SyntaxOperator, SyntaxExpr)>,
     pending: Option<SyntaxOperator>,
+    /// The indentation of each line-led operator, in order.
+    anchors: Vec<usize>,
 }
 
 impl Chain {
@@ -522,14 +538,19 @@ impl Chain {
         }
     }
 
-    fn finish(self) -> Parse<InfixChain> {
+    fn finish(self, context: ExpressionContext) -> Parse<InfixChain> {
         if self.pending.is_some() {
             return error("an infix operator requires a right operand");
         }
         let first = self
             .first
             .ok_or_else(|| Fail::Error("expected an expression".to_owned()))?;
-        Ok(InfixChain::from_parts(first, self.rest))
+        self.anchors
+            .into_iter()
+            .try_fold(InfixChain::from_parts(first, self.rest), |chain, anchor| {
+                chain.with_resumption_anchor(anchor, context)
+            })
+            .map_err(Fail::Error)
     }
 }
 
@@ -542,10 +563,9 @@ enum Attach {
 }
 
 impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
-    fn new(view: TokenView<'lex, 'source>, covers: &'p Covers, pieces: &'p [Piece]) -> Self {
+    fn new(scope: Scope<'p, 'lex, 'source>, pieces: &'p [Piece]) -> Self {
         Self {
-            view,
-            covers,
+            scope,
             pieces,
             position: 0,
         }
@@ -553,7 +573,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
 
     fn shape_at(&self, offset: usize) -> Option<Shape> {
         match self.peek_at(offset) {
-            Some(Piece::Group { cover, .. }) => Some(self.covers.shape(*cover)),
+            Some(Piece::Group { cover, .. }) => Some(self.scope.covers.shape(*cover)),
             _ => None,
         }
     }
@@ -564,7 +584,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             unreachable!("take_group is called on a group");
         };
         self.position += 1;
-        self.covers.take(*cover)
+        self.scope.covers.take(*cover)
     }
 
     fn take_grouped(&mut self) -> SyntaxExpr {
@@ -586,23 +606,21 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     fn data_path_end(&self) -> Option<usize> {
         let mut position = self.position;
         match self.peek() {
-            Some(Piece::Group { cover, .. }) => match self.covers.shape(*cover) {
+            Some(Piece::Group { cover, .. }) => match self.scope.covers.shape(*cover) {
                 Shape::Bracket { empty: false } | Shape::Grouped => return Some(position + 1),
                 _ => return None,
             },
-            Some(piece @ Piece::Token(_)) => match piece_kind(self.view, piece) {
+            Some(piece @ Piece::Token(_)) => match piece_kind(self.scope.view, piece) {
                 Some(TokenKind::Name(name)) if is_glam_name(name) => position += 1,
                 _ => return None,
             },
             None => return None,
         }
-        let cursor = Items {
-            view: self.view,
-            covers: self.covers,
+        let mut cursor = Items {
+            scope: self.scope,
             pieces: self.pieces,
             position,
         };
-        let mut cursor = cursor;
         while let Some(width) = cursor.path_suffix_width() {
             cursor.position += width;
         }
@@ -617,11 +635,11 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         }
         let accepted = match self.peek_at(1) {
             Some(Piece::Group { cover, .. }) => matches!(
-                self.covers.shape(*cover),
+                self.scope.covers.shape(*cover),
                 Shape::Bracket { .. } | Shape::Grouped
             ),
             Some(piece @ Piece::Token(_)) => matches!(
-                piece_kind(self.view, piece),
+                piece_kind(self.scope.view, piece),
                 Some(TokenKind::Name(name)) if is_glam_name(name)
             ),
             None => false,
@@ -638,29 +656,46 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     }
 
     fn kind(&self) -> Option<&'lex TokenKind<'source>> {
-        self.peek().and_then(|piece| piece_kind(self.view, piece))
+        self.peek()
+            .and_then(|piece| piece_kind(self.scope.view, piece))
+    }
+
+    fn leading_at(&self, offset: usize) -> Option<LeadingTrivia> {
+        self.peek_at(offset)
+            .map(|piece| piece_leading(self.scope.view, piece))
     }
 
     fn joint_at(&self, offset: usize) -> bool {
-        self.peek_at(offset)
-            .is_some_and(|piece| piece_leading(self.view, piece) == LeadingTrivia::Joint)
+        self.leading_at(offset) == Some(LeadingTrivia::Joint)
     }
 
     fn symbol_at(&self, offset: usize, symbol: &str) -> bool {
         self.peek_at(offset)
-            .is_some_and(|piece| is_symbol(self.view, piece, symbol))
+            .is_some_and(|piece| is_symbol(self.scope.view, piece, symbol))
+    }
+
+    /// How many line starts follow `offset`, and the indentation of the
+    /// last one.
+    fn line_starts_at(&self, offset: usize) -> (usize, Option<usize>) {
+        let mut count = 0;
+        let mut indentation = None;
+        while let Some(TokenKind::LineStart { indentation: found }) = self
+            .peek_at(offset + count)
+            .and_then(|piece| piece_kind(self.scope.view, piece))
+        {
+            indentation = Some(*found);
+            count += 1;
+        }
+        (count, indentation)
+    }
+
+    fn skip_line_starts(&mut self) {
+        self.position += self.line_starts_at(0).0;
     }
 
     /// Parses the whole item: an infix chain of applications, where a lambda
     /// takes the rest of the item as its body.
     fn item(mut self) -> Parse<InfixChain> {
-        if self
-            .pieces
-            .iter()
-            .any(|piece| is_line_start(self.view, piece))
-        {
-            return Err(Fail::Unsupported("a line break inside an expression"));
-        }
         let mut levels = vec![Level {
             chain: Chain::default(),
             lambda: None,
@@ -676,11 +711,8 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                 continue 'operand;
             }
             let head = self.application_head()?;
-            if self.symbol_at(0, "\\")
-                && self
-                    .peek()
-                    .is_some_and(|piece| piece_leading(self.view, piece) == LeadingTrivia::Space)
-            {
+            if let Some(breaks) = self.tail_lambda_layout() {
+                self.position += breaks;
                 let params = self.lambda_head()?;
                 levels.push(Level {
                     chain: Chain::default(),
@@ -693,19 +725,22 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                 .expect("an item always has a level")
                 .chain
                 .push_operand(head);
-            // After an operand: an infix operator, or the end of the item.
-            match self.peek() {
-                None => break 'operand,
-                Some(piece) => match piece_operator(self.view, piece) {
-                    Some(operator) => {
-                        self.position += 1;
-                        levels.last_mut().expect("levels remain").chain.pending = Some(operator);
-                        if self.peek().is_none() {
-                            return error("an infix operator requires a right operand");
-                        }
-                    }
-                    None => return error("unexpected token after an expression"),
-                },
+            // After an operand: the end of the item, or an infix operator,
+            // which resumes the chain at its indentation when line-led.
+            let (breaks, indentation) = self.line_starts_at(0);
+            let Some(piece) = self.peek_at(breaks) else {
+                break 'operand;
+            };
+            let Some(operator) = piece_operator(self.scope.view, piece) else {
+                return error("unexpected token after an expression");
+            };
+            self.position += breaks + 1;
+            self.skip_line_starts();
+            let chain = &mut levels.last_mut().expect("levels remain").chain;
+            chain.pending = Some(operator);
+            chain.anchors.extend(indentation);
+            if self.peek().is_none() {
+                return error("an infix operator requires a right operand");
             }
         }
         // Close lambdas innermost first; each one ends with the item.
@@ -713,9 +748,13 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             let level = levels.pop().expect("levels remain while closing");
             let Some((params, attach)) = level.lambda else {
                 debug_assert!(levels.is_empty(), "only the item level has no lambda");
-                return level.chain.finish();
+                return level.chain.finish(self.scope.context);
             };
-            let body = level.chain.finish()?.resolve().map_err(Fail::Error)?;
+            let body = level
+                .chain
+                .finish(self.scope.context)?
+                .resolve()
+                .map_err(Fail::Error)?;
             let lambda = SyntaxExpr::Lambda(params, Box::new(body));
             let operand = match attach {
                 Attach::Operand => lambda,
@@ -729,9 +768,18 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         }
     }
 
-    /// `\ name+ ->`, returning the parameters.
+    /// The line starts before a tail lambda argument at the cursor: a `\`
+    /// after a space or after line breaks.
+    fn tail_lambda_layout(&self) -> Option<usize> {
+        let (breaks, _) = self.line_starts_at(0);
+        let spaced = breaks > 0 || self.leading_at(0) == Some(LeadingTrivia::Space);
+        (spaced && self.symbol_at(breaks, "\\")).then_some(breaks)
+    }
+
+    /// `\ name+ ->`, returning the parameters. Line breaks may pad each part.
     fn lambda_head(&mut self) -> Parse<Vec<String>> {
         self.position += 1;
+        self.skip_line_starts();
         let mut params = Vec::new();
         while let Some(TokenKind::Name(name)) = self.kind() {
             let is_local = *name == "_"
@@ -745,6 +793,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             }
             params.push((*name).to_owned());
             self.position += 1;
+            self.skip_line_starts();
         }
         if params.is_empty() {
             return error("a lambda requires a parameter");
@@ -753,19 +802,24 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             return error("expected `->` after lambda parameters");
         }
         self.position += 1;
+        self.skip_line_starts();
         if self.peek().is_none() {
             return error("a lambda requires a body");
         }
         Ok(params)
     }
 
-    /// An atom followed by same-line spaced argument atoms.
+    /// An atom followed by argument atoms, each after a space or after line
+    /// breaks.
     fn application_head(&mut self) -> Parse<SyntaxExpr> {
         let mut function = self.atom()?;
-        while let Some(piece) = self.peek()
-            && piece_leading(self.view, piece) == LeadingTrivia::Space
-            && self.starts_atom()
-        {
+        loop {
+            let (breaks, _) = self.line_starts_at(0);
+            let spaced = breaks > 0 || self.leading_at(0) == Some(LeadingTrivia::Space);
+            if !(spaced && self.starts_atom_at(breaks)) {
+                break;
+            }
+            self.position += breaks;
             if self.symbol_at(0, ".") {
                 return error(
                     "dot-leading application arguments must be parenthesized; write `f (.bar)` or use `<|`",
@@ -777,10 +831,10 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         Ok(function)
     }
 
-    fn starts_atom(&self) -> bool {
-        match self.peek() {
+    fn starts_atom_at(&self, offset: usize) -> bool {
+        match self.peek_at(offset) {
             Some(Piece::Group { .. }) => true,
-            Some(Piece::Token(_)) => match self.kind() {
+            Some(piece @ Piece::Token(_)) => match piece_kind(self.scope.view, piece) {
                 Some(TokenKind::Name(name)) => !matches!(*name, "and" | "or"),
                 Some(TokenKind::Number(_) | TokenKind::Text(_) | TokenKind::Embedded(_)) => true,
                 Some(TokenKind::Symbol(symbol)) => matches!(*symbol, ":" | "'" | "." | "^"),
@@ -920,7 +974,8 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             TokenKind::Number(id) => {
                 self.position += 1;
                 SyntaxExpr::Number(
-                    self.view
+                    self.scope
+                        .view
                         .number(*id)
                         .expect("number tokens refer to lexer-owned values")
                         .clone(),
@@ -929,14 +984,24 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             TokenKind::Text(id) => {
                 self.position += 1;
                 SyntaxExpr::Text(
-                    self.view
+                    self.scope
+                        .view
                         .text(*id)
                         .expect("text tokens refer to lexer-owned values")
                         .value()
                         .to_owned(),
                 )
             }
-            TokenKind::Embedded(_) => return Err(Fail::Unsupported("embedded data")),
+            TokenKind::Embedded(id) => {
+                self.position += 1;
+                SyntaxExpr::Embedded(
+                    self.scope
+                        .view
+                        .embedded_value(*id)
+                        .expect("embedded tokens refer to lexer-owned values")
+                        .clone(),
+                )
+            }
             TokenKind::Symbol("'") => return self.quoted(),
             TokenKind::Symbol(".") => return self.effect(),
             TokenKind::Symbol("^") => return self.escape(),
@@ -979,7 +1044,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             && (path.is_empty() || self.joint_at(0))
             && self.joint_at(1)
             && let Some(Piece::Token(index)) = self.peek_at(1)
-            && let TokenKind::Name(name) = token(self.view, *index).kind()
+            && let TokenKind::Name(name) = token(self.scope.view, *index).kind()
             && is_glam_name(name)
         {
             path.push((*name).to_owned());

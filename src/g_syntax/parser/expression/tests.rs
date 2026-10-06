@@ -91,6 +91,7 @@ fn ordinary_expressions_parse() {
         "(+ 42)",
         "(42 -)",
         "(++ suffix)",
+        "(+ 42\n  )",
         "value |> f",
         "f <| value",
         "f >> g",

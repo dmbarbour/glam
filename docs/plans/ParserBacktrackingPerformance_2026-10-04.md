@@ -278,21 +278,28 @@ test-only so far.
   - lists and dicts, including leading and trailing separators;
   - tags, constructors, path suffixes, quoted literals, effects and
     escapes;
-  - applications, infix chains and lambdas.
-- **Not covered yet** (reported as unsupported):
-  - keyword-headed forms;
-  - line breaks, except as padding inside groups;
-  - embedded data.
+  - applications, infix chains and lambdas;
+  - embedded data;
+  - line breaks: group padding, line-led application arguments and tail
+    lambdas, and line-led operators with their resumption anchors. Anchors
+    are checked against the caller's `ExpressionContext`, so the chains
+    compare equal to the grammar's, anchor included.
+- **Not covered yet** (reported as unsupported): keyword-headed forms.
 - **The oracle:** `expression::term_oracle` re-parses every expression the
   Chumsky grammar parses while a test enables it. It reports an empty
   disagreement list over:
-  - 175 edge-case expressions;
-  - 736 expressions from the samples;
+  - 232 edge-case expressions, including line-break layouts;
+  - 801 expressions from the samples;
   - 66 generated nested expressions.
 
-  A deliberate mutation (reversed tuple items) is caught. In the samples,
-  148 expressions are still unsupported: 79 keyword-headed forms and 69 with
-  line breaks.
+  Deliberate mutations are caught: reversed tuple items, and dropped
+  resumption anchors (10 disagreements). In the samples, 83 expressions
+  are still unsupported, all keyword-headed.
+- **One grammar fix.** The oracle found that the Chumsky grammar rejected a
+  prefix section whose close paren sits on its own line, as in
+  `(+ 1⏎ )`. Every other parenthesized form accepts that layout; the prefix
+  section alone lacked trailing padding. The grammar now pads it, and an
+  expression test keeps the case.
 - **Speed:** 2,000-deep nesting parses in well under two seconds, with no
   Rust recursion across groups.
 

@@ -446,6 +446,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
         let prefix_operator_section = open(Delimiter::Parenthesis)
             .ignore_then(padded(infix_operator.clone()))
             .then(resolved(expr.clone()))
+            .then_ignore(layout_padding())
             .then_ignore(close(Delimiter::Parenthesis))
             .map(|(operator, right)| SyntaxExpr::OperatorSection {
                 operator,
@@ -1151,7 +1152,7 @@ pub(in crate::g_syntax::parser) fn parse_expression_chain_view(
         Err(diagnostics)
     };
     #[cfg(test)]
-    term_oracle::check(view, &result);
+    term_oracle::check(view, context, &result);
     result
 }
 
@@ -1163,7 +1164,7 @@ pub(in crate::g_syntax::parser) mod term_oracle {
     use std::cell::RefCell;
 
     use super::super::term::{Fail, parse_term_chain};
-    use super::{Diagnostic, InfixChain, TokenView};
+    use super::{Diagnostic, ExpressionContext, InfixChain, TokenView};
 
     #[derive(Debug, Default)]
     pub(in crate::g_syntax::parser) struct Report {
@@ -1191,11 +1192,15 @@ pub(in crate::g_syntax::parser) mod term_oracle {
         })
     }
 
-    pub(super) fn check(view: TokenView<'_, '_>, old: &Result<InfixChain, Vec<Diagnostic>>) {
+    pub(super) fn check(
+        view: TokenView<'_, '_>,
+        context: ExpressionContext,
+        old: &Result<InfixChain, Vec<Diagnostic>>,
+    ) {
         if !ACTIVE.with(|active| active.borrow().is_some()) {
             return;
         }
-        let new = parse_term_chain(view);
+        let new = parse_term_chain(view, context);
         ACTIVE.with(|active| {
             let mut active = active.borrow_mut();
             let report = active.as_mut().expect("checked as enabled");
