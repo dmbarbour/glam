@@ -42,6 +42,12 @@ glam-gc = { path = "crates/glam-gc", features = ["deterministic-test-hooks"] }
 quote = "1.0"
 syn = { version = "2.0.106", features = ["full", "visit"] }
 
+# Line tables keep backtraces and profiler line attribution but drop the
+# variable-level debug info that made the debug target tens of gigabytes.
+# Use a full `debug = true` override locally when stepping in a debugger.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 opt-level = 3
 
