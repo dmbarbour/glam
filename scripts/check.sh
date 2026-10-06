@@ -11,7 +11,7 @@
 #
 #   all   (default) Adds the collector's own check suite (glam-gc all-features
 #         tests, persistent-edge codegen latch, unsafe-site audit), the G0
-#         semantic regressions, and the interaction-net profiling fixtures.
+#         semantic regressions, and the glam-prof profiling fixtures.
 #         This is the pre-commit gate for ordinary code changes.
 #
 #   full  Adds the expensive, periodic tier: the aggressive-GC verification
@@ -61,8 +61,8 @@ run_all() {
   crates/glam-gc/scripts/check.sh
   step "G0 semantic regressions"
   crates/glam-gc/scripts/check-g0-semantics.sh
-  step "interaction-net profiling fixtures"
-  scripts/check-interaction-net-profiling.sh
+  step "profiling fixtures (glam-prof)"
+  scripts/check-profiling-fixtures.sh
 }
 
 run_nightly_checks() {

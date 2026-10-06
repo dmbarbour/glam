@@ -670,6 +670,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
 
         while step_budget.remaining() != 0 {
+            // Each pass takes exactly one step of one phase.
+            #[cfg(feature = "glam-prof")]
+            self.eval_context
+                .values()
+                .record_reduction(crate::profiling::EvaluationReduction::ReflectionStep);
             if let Some(controlling) = self.execution.controlling.take() {
                 let previous_remaining = step_budget.remaining();
                 match self.control_step(context, controlling, step_budget) {

@@ -9,6 +9,9 @@ cd "$root"
 # test under an instrumented build.
 tests=(
   api::tests::interaction_net_profiles_are_runtime_local
+  api::tests::runtime_profile_counts_evaluation_and_writes_json
+  profiling::tests::counters_write_as_one_flat_json_object
+  profiling::tests::phases_accumulate_time_and_count_collections
   core_net::tests::profiling_classifies_each_committed_rule_family_exactly_once
   core_net::tests::profiling_semantic_signature_is_independent_of_ready_pair_order
   core_net::tests::profiling_counts_calls_only_when_the_claimed_rewrite_commits
@@ -32,16 +35,21 @@ tests=(
 )
 
 available="$(
-  cargo test --quiet --package glam --features interaction-net-profiling \
+  cargo test --quiet --package glam --features glam-prof \
     --lib -- --list
 )"
 
 for test_name in "${tests[@]}"; do
   if ! grep -Fxq -- "$test_name: test" <<<"$available"; then
-    echo "missing interaction-net profiling regression: $test_name" >&2
+    echo "missing profiling regression: $test_name" >&2
     exit 1
   fi
-  echo "interaction-net profiling regression: $test_name"
-  cargo test --quiet --package glam --features interaction-net-profiling \
+  echo "profiling regression: $test_name"
+  cargo test --quiet --package glam --features glam-prof \
     --lib "$test_name" -- --exact
 done
+
+# The binary's report is an integration test of the `glam-prof` build.
+echo "profiling regression: glam_prof_writes_a_json_report_to_the_requested_path"
+cargo test --quiet --package glam --features glam-prof \
+  --test cli glam_prof_writes_a_json_report_to_the_requested_path -- --exact

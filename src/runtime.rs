@@ -406,9 +406,17 @@ pub(crate) fn collect_under_lease(
     values: &CoreValueFactory,
     before_publication: impl FnOnce(),
 ) -> RuntimeCollectionAttempt {
+    #[cfg(feature = "glam-prof")]
+    let started = std::time::Instant::now();
     let attempted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         values.collect_managed_for_maintenance()
     }));
+    #[cfg(feature = "glam-prof")]
+    if matches!(attempted, Ok(Ok(_))) {
+        values
+            .evaluation_profile()
+            .record_phase(crate::profiling::Phase::Collect, started.elapsed());
+    }
     let heap = values.managed_maintenance_snapshot();
     before_publication();
     match attempted {

@@ -242,7 +242,7 @@ fn runtimes_own_independent_local_identity_domains_and_value_factories() {
     assert_eq!(first_lazy.id().get(), second_lazy.id().get());
 }
 
-#[cfg(feature = "interaction-net-profiling")]
+#[cfg(feature = "glam-prof")]
 #[test]
 fn interaction_net_profiles_are_runtime_local() {
     let first = EvaluationRuntime::new(0).expect("first runtime should build");
@@ -265,6 +265,49 @@ fn interaction_net_profiles_are_runtime_local() {
     );
     assert_eq!(first.coordinator_notifications.calls.notify_all.total(), 0);
     assert_eq!(first.coordinator_notifications.calls.notify_one.total(), 0);
+}
+
+#[cfg(feature = "glam-prof")]
+#[test]
+fn runtime_profile_counts_evaluation_and_writes_json() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .expect("assembler should build");
+    let module = assembler
+        .module(["profiled"])
+        .script(
+            "g",
+            "language g0\nloop n = if n == 0 then 0 else loop (n - 1)\nanswer = loop 3\n",
+        )
+        .build()
+        .expect("module should build");
+    let answer = access_path(&assembler, module.value(), "answer").expect("answer should exist");
+    assembler
+        .evaluator()
+        .eval(&answer)
+        .expect("answer should evaluate");
+
+    let profile = runtime.profile();
+    assert!(profile.reductions.whnf_delegations > 0);
+    assert!(profile.phases.parse_ns > 0 && profile.phases.lower_ns > 0);
+    let heap = profile.heap.expect("a usable heap reports telemetry");
+    assert!(heap.root_registrations() > 0);
+
+    let mut json = String::new();
+    profile.write_json(&mut json);
+    assert!(json.starts_with("{\"reductions\":{\"whnf_delegations\":"));
+    for group in [
+        "\"phases\":{",
+        "\"net_reductions\":{",
+        "\"net_driver\":{",
+        "\"coordinator\":{",
+        "\"heap\":{",
+    ] {
+        assert!(json.contains(group), "missing {group} in {json}");
+    }
+    assert!(json.ends_with("}}"));
 }
 
 #[test]

@@ -619,7 +619,7 @@ impl ReflectionQueryWriter for RuntimeTaskCapability {
 impl EvaluationRuntime {
     /// Returns the current interaction-net accounting snapshot for this
     /// runtime in a profiling build.
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     pub fn interaction_net_profile(
         &self,
     ) -> crate::interaction_net::profiling::InteractionNetProfileSnapshot {
@@ -635,6 +635,20 @@ impl EvaluationRuntime {
             snapshot.coordinator_notifications = work.coordinator_notification_profile();
         }
         snapshot
+    }
+
+    /// Returns every profiling counter and phase timer for this runtime in a
+    /// `glam-prof` build.
+    #[cfg(feature = "glam-prof")]
+    pub fn profile(&self) -> crate::profiling::RuntimeProfileSnapshot {
+        let core = self.state.shared_resources.values.core();
+        let (reductions, phases) = core.evaluation_profile().snapshot();
+        crate::profiling::RuntimeProfileSnapshot {
+            reductions,
+            phases,
+            net: self.interaction_net_profile(),
+            heap: core.managed_heap_metrics(),
+        }
     }
 
     pub fn new(worker_threads: usize) -> Result<Self, Error> {

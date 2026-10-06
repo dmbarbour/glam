@@ -1,6 +1,7 @@
 mod batch;
 mod command_line;
 mod configuration;
+mod profile;
 mod rendering;
 
 use std::env;
@@ -50,6 +51,7 @@ impl DiagnosticBusLocal for DiagnosticBus {
 }
 
 fn main() -> ExitCode {
+    profile::start();
     let command = match dispatch_bootstrap(env::args_os().skip(1)) {
         Ok(command) => command,
         Err(error) => {

@@ -123,7 +123,7 @@ point. Its levels are cumulative:
   workspace test suite at default features. The quick inner-loop gate.
 - `scripts/check.sh` (default `all`) — adds the collector's own `check.sh`
   (glam-gc all-features tests, persistent-edge codegen latch, unsafe-site
-  audit), the G0 semantic regressions, and the interaction-net profiling
+  audit), the G0 semantic regressions, and the `glam-prof` profiling
   fixtures. The pre-commit gate. The profiling check names only the
   profiling-specific and profiling-augmented fixtures; it does not repeat the
   whole suite under instrumentation.
@@ -148,9 +148,12 @@ sanitizer run proves nothing about concurrency order, which still needs forced
 schedules. A target too slow for Miri is recorded as a performance exclusion
 with the matrix in `crates/glam-gc/VERIFY.md`, never counted as a pass.
 
-Aggressive-GC verification collects about once per stable settlement cycle,
-not at each entry or allocation, so a test that needs a collection at a
-specific boundary requests it explicitly. A test whose primary purpose is
+Aggressive-GC verification treats any allocation as pressure. It collects
+wherever production does: at each stable settlement cycle, and whenever
+claimed work releases after allocating. It never collects at entry or
+allocation, so a test that needs a collection at a specific boundary requests
+it explicitly. Test fixtures that hold raw values across evaluation must root
+them. A test whose primary purpose is
 `NoAuto` behaviour does not run under the feature; if only its final
 assertion depends on `NoAuto`, gate just that tail. For scale, `full` took
 911 s on 2026-10-04 (rustc 1.99.0, 8 threads, no nightly tools).
@@ -163,3 +166,33 @@ or source changed.
 Before declaring a large transition complete, audit the final implementation
 against every named invariant and acceptance criterion. Passing tests are
 evidence only for behavior they actually exercise.
+
+## Profiling
+
+`scripts/profile.sh [OUT_DIR] [WORKLOAD...]` builds a release `glam` with the
+`glam-prof` feature and runs the profiling workloads. Each run writes a JSON
+report and checks the workload's output. The script prints a summary table;
+it needs python3. Ordinary builds compile no profiling code. Measure only
+release binaries: test binaries carry the collector's deterministic hooks.
+
+- **Report.** A `glam-prof` binary writes one JSON object to the path in
+  `GLAM_PROF`:
+  - `phases_ns`: the binary's own phases (build, evaluate, settle, total);
+  - `runtime`: the runtime's counters.
+
+  Runtime reductions count the budget's charge sites by kind (decision
+  `reduction-costs-one-budget-unit`). Net rules are counted by kind under
+  `net_reductions`. `heap` holds the collector's allocation, root and
+  access-region totals. Runtime phases (parse, lower, collect) are summed
+  across threads and may overlap the binary's phases, since imports compile
+  lazily during evaluation.
+- **Counters are exact.** For a fixed worker count, a counter change is a
+  real change. Timings are trend data: record them with `rustc --version`,
+  the commit and the CPU.
+- **Baselines** live in the plan or performance review that uses them, not
+  long term. Keep a workload worth reusing in the script or as a samples
+  file.
+- **Adding a counter:** put it on the runtime's `EvaluationProfile`
+  (`src/profiling.rs`) or the net profile, behind `glam-prof`. Count work,
+  not budget units, and add it to `write_json`.
+

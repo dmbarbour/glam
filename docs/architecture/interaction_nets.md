@@ -352,6 +352,6 @@ The rules are in the agent note's "Polarity" and "Runtime Polarity Type".
   net. Logical copies share their source instead.
 - Edge-delta prediction and, in test builds, the O(net size) invariant check
   also run under the lock.
-- The `interaction-net-profiling` feature (`interaction_net/profiling.rs`)
+- The `glam-prof` feature (`interaction_net/profiling.rs`)
   counts committed rewrites and driver events. Ordinary builds compile the
   counters out.

@@ -179,7 +179,10 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
         diagnostics: logger_diagnostics,
         supervisor: logger_supervisor,
     } = logger;
-    operation_failed |= settle_batch_runtime(&assembler.evaluation_runtime(), &logger_supervisor);
+    operation_failed |= super::profile::time("settle", || {
+        settle_batch_runtime(&assembler.evaluation_runtime(), &logger_supervisor)
+    });
+    super::profile::report(&assembler.evaluation_runtime());
 
     logger_thread.join().expect("logger task should not panic");
     if let Err(error) = logger_supervisor.deliver_fallback() {
@@ -468,16 +471,18 @@ fn assemble(
         ("asm", values.record([("args", arguments)])?),
         ("env", environment),
     ])?;
-    let module = assembler
-        .module(["assembly"])
-        .initial_definitions(initial_definitions)
-        .inputs(inputs)
-        .build()?;
+    let module = super::profile::time("build", || {
+        assembler
+            .module(["assembly"])
+            .initial_definitions(initial_definitions)
+            .inputs(inputs)
+            .build()
+    })?;
     let context = assembly_result_context(&values)?;
     let result = values.access_names(module.value(), ["asm", "result"])?;
     values
         .anno_binary(result)
-        .and_then(|binary| assembler.evaluator().eval(&binary))
+        .and_then(|binary| super::profile::time("evaluate", || assembler.evaluator().eval(&binary)))
         .and_then(|binary| {
             binary
                 .as_bytes()?

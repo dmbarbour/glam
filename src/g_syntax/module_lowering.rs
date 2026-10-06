@@ -13,13 +13,40 @@ pub(in crate::g_syntax) fn lower_source(source: &[u8], context: &CompileContext)
     let mut parser = parser::StagedSourceParser::new(source);
     let mut lowerer = ModuleLowerer::new(context);
     let mut language = None;
-    while let Some(declarations) =
-        parser.next_expanded_declarations(context, lowerer.definitions_root(), language.as_ref())
-    {
+    loop {
+        #[cfg(feature = "glam-prof")]
+        let next =
+            context
+                .values()
+                .evaluation_profile()
+                .time(crate::profiling::Phase::Parse, || {
+                    parser.next_expanded_declarations(
+                        context,
+                        lowerer.definitions_root(),
+                        language.as_ref(),
+                    )
+                });
+        #[cfg(not(feature = "glam-prof"))]
+        let next = parser.next_expanded_declarations(
+            context,
+            lowerer.definitions_root(),
+            language.as_ref(),
+        );
+        let Some(declarations) = next else {
+            break;
+        };
         for declaration in declarations {
             if let DeclarationKind::Language(declared) = &declaration.kind {
                 language = Some(declared.clone());
             }
+            #[cfg(feature = "glam-prof")]
+            context
+                .values()
+                .evaluation_profile()
+                .time(crate::profiling::Phase::Lower, || {
+                    lowerer.lower_declaration(declaration)
+                });
+            #[cfg(not(feature = "glam-prof"))]
             lowerer.lower_declaration(declaration);
         }
     }

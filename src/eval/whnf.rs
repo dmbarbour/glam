@@ -365,6 +365,11 @@ fn drive_regional_state_in_place<'scope>(
         match reduce(access, work) {
             RegionalWhnfStep::Delegate(focus) => {
                 budget.consume(1);
+                #[cfg(feature = "glam-prof")]
+                access
+                    .values()
+                    .values()
+                    .record_reduction(crate::profiling::EvaluationReduction::WhnfDelegation);
                 work.focus = focus;
             }
             RegionalWhnfStep::Ready(value) => return RegionalWhnfStatus::Ready(value),

@@ -36,7 +36,7 @@ shared measurement design first, then orders the tracks.
 
 - **An explicit profiling build mode,** the cargo feature `glam-prof`. It
   compiles counters and phase timers in, and ordinary builds pay nothing.
-  It absorbs today's `interaction-net-profiling` feature.
+  It absorbs today's `glam-prof` feature.
 - **A production-representative binary.** Test binaries carry the
   collector's deterministic hooks, so their timings do not represent
   production. Measurements use a release binary built with `glam-prof`.
@@ -107,9 +107,17 @@ gains this consequence when it lands.
 
 ## Tracks, in Order
 
-1. **Profiling harness.** The build mode, counters, report, suite, and a
-   recorded baseline for Hello World and the first microbenchmarks.
-   Everything after this measures against it.
+1. **Profiling harness.** *Done 2026-10-06; see
+   [Baseline](#baseline-2026-10-06).*
+   - The `glam-prof` feature replaces `interaction-net-profiling`.
+   - Per-runtime counters cover reductions by kind, net rules and driver
+     events, collector allocations, roots and access regions, and phase
+     timers.
+   - The binary writes its JSON report to `GLAM_PROF`, and
+     `scripts/profile.sh` runs the workloads.
+   - Usage is in `AgentContext.md` "Profiling".
+   - Not yet counted: net lock acquisitions and checkpoint publications.
+     Add them when a track needs them.
 2. **Collection during foreground work.** *Done 2026-10-05, ahead of the
    harness at the maintainer's request.* Whoever polls claimed work
    collects between the poll and the release when the collector's pressure
@@ -164,6 +172,52 @@ gains this consequence when it lands.
      [Pure Effect Access Fusion](PureEffectAccessFusion_2026-09-23.md).
 
 **Deferred:** JIT compilation. There is much to gain without it.
+
+## Baseline 2026-10-06
+
+Commit `b89c2d78` plus the harness. rustc 1.99.0, Intel Core i7-6700
+(8 threads), release build with `glam-prof`, zero workers. Times are one run
+each and are trend data; the counters reproduced exactly on a second run.
+
+| Workload | Total ms | Reductions | Access regions | Root registrations | Allocations | Collections |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `minimal` | 36.7 | 2,242 | 6,515 | 2,050 | 2,498 | 0 |
+| `hello_do` | 64.2 | 4,581 | 14,248 | 4,048 | 4,866 | 0 |
+| `hello_elf` | 3,448.6 | 303,303 | 846,986 | 200,259 | 222,642 | 2 |
+| `parse_parens_10` | 470.9 | 2,264 | 6,612 | 2,068 | 2,536 | 0 |
+| `parse_lists_16` | 708.9 | 2,264 | 6,612 | 2,068 | 2,568 | 0 |
+| `countdown_100` | 568.4 | 32,443 | 112,535 | 24,200 | 28,959 | 0 |
+| `countdown_200` | 1,496.3 | 61,543 | 214,836 | 45,400 | 54,259 | 1 |
+| `countdown_400` | 4,653.5 | 119,743 | 419,436 | 87,800 | 104,859 | 1 |
+| `list_map_1000` | 830.3 | 47,589 | 180,187 | 23,293 | 29,001 | 0 |
+| `dict_lookup_1000` | 1,148.0 | 27,001 | 123,067 | 26,746 | 33,345 | 0 |
+
+Reductions add the runtime's evaluation reductions and net rules.
+
+**Observations**
+- **Fixed cost.** An empty assembly takes 37 ms and about 2,200 reductions.
+- **Parser.** The nesting workloads spend almost all their time parsing
+  (435 of 471 ms, and 671 of 709 ms) with the same reduction count as
+  `minimal`. This is the exponential backtracking of track 3.
+- **Recursion.** Each countdown level costs a constant ~290 reductions:
+  - 120 WHNF delegations;
+  - 43 builtin steps;
+  - 5 immediate builtins;
+  - 138 net rules.
+
+  Time per level still grows: about 5.7, 7.5 and 11.6 ms at depths 100,
+  200 and 400. So the superlinear cost of track 4 lies outside reduction
+  work. Each level also issues ~360 coordinator `notify_all` calls.
+- **Hello World.** It runs ~300k reductions in 3.4 s, about 11 µs each.
+  Each reduction makes ~2.8 access-region entries, ~0.66 root registrations
+  and ~0.86 coordinator `notify_all` calls. Net rules are 61% of the
+  reductions, mostly cursor materializations and joins, bind joins and
+  operator calls. These are the targets of tracks 5 and 6.
+- **Collections.** CLI assembly now collects: two collections took 71 ms in
+  `hello_elf`.
+- **Lists and dicts.** They cost 47 and 27 reductions per element
+  (lists mapped, dicts built from a literal), plus a parse-and-lower share
+  of the time that grows with the literal.
 
 ## Settled Harness Questions
 

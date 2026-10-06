@@ -131,7 +131,7 @@ impl NetWhnfMachine {
         context: &EvaluatorStepContext<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> Result<NetWhnfPoll, EvaluationHalt> {
-        #[cfg(feature = "interaction-net-profiling")]
+        #[cfg(feature = "glam-prof")]
         context
             .context()
             .values()
@@ -171,14 +171,14 @@ impl NetWhnfMachine {
             step_budget,
         )? {
             NetDriverOutcome::Progressed => {
-                #[cfg(feature = "interaction-net-profiling")]
+                #[cfg(feature = "glam-prof")]
                 context.context().values().record_net_driver(
                     crate::interaction_net::profiling::DriverEvent::RequestRootRestart,
                 );
                 self.driver.restart_from_request_root(access.values());
                 Ok(NetWhnfAccessPoll::Yielded)
             }
-            #[cfg(all(test, feature = "interaction-net-profiling"))]
+            #[cfg(all(test, feature = "glam-prof"))]
             NetDriverOutcome::ProbeBudgetExhausted => Ok(NetWhnfAccessPoll::Yielded),
             NetDriverOutcome::BudgetExhausted => Ok(NetWhnfAccessPoll::Yielded),
             NetDriverOutcome::Root(InterfaceDemand::Data) => {
@@ -438,7 +438,7 @@ enum NetDriverOutcome {
     Contended(NetContention),
     BudgetExhausted,
     Semantic(NetSemanticAction),
-    #[cfg(all(test, feature = "interaction-net-profiling"))]
+    #[cfg(all(test, feature = "glam-prof"))]
     ProbeBudgetExhausted,
 }
 
@@ -531,7 +531,7 @@ fn drive_net_driver_work_with_budget_access(
                 // Retain it before handing contention back to the scheduler,
                 // just as item-level cursor and active-pair contention does.
                 driver.worklist.push(retained_work);
-                #[cfg(feature = "interaction-net-profiling")]
+                #[cfg(feature = "glam-prof")]
                 _context
                     .context()
                     .values()
@@ -604,7 +604,7 @@ fn drive_net_batch(
         if let Some(outcome) = drive_net_work_item(driver, work, access, step_budget)? {
             return Ok(outcome);
         }
-        #[cfg(all(test, feature = "interaction-net-profiling"))]
+        #[cfg(all(test, feature = "glam-prof"))]
         if access.driver_work_item_limit_reached() {
             return Ok(NetBatchOutcome::Driver(
                 NetDriverOutcome::ProbeBudgetExhausted,
@@ -634,11 +634,11 @@ fn drive_net_work_item(
     access: &CoreRuntimeNetAccess<'_, '_>,
     step_budget: &mut crate::evaluation::EvaluationStepBudget,
 ) -> Result<Option<NetBatchOutcome>, EvaluationHalt> {
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     access.record_driver(crate::interaction_net::profiling::DriverEvent::WorkItem);
     match work {
         NetDriverWork::RequestRoot { root, interface } => {
-            #[cfg(feature = "interaction-net-profiling")]
+            #[cfg(feature = "glam-prof")]
             access.record_driver(crate::interaction_net::profiling::DriverEvent::InterfacePoll);
             match access.poll_interface_demand(interface) {
                 terminal @ (InterfaceDemand::Data
@@ -668,7 +668,7 @@ fn drive_net_work_item(
             }
         }
         NetDriverWork::Cursor { root, cursor } => {
-            #[cfg(feature = "interaction-net-profiling")]
+            #[cfg(feature = "glam-prof")]
             access.record_driver(crate::interaction_net::profiling::DriverEvent::CursorStep);
             match access.step_cursor_within(cursor, admit_claim(step_budget)) {
                 CursorStep::Progressed(progress) => {
@@ -676,13 +676,13 @@ fn drive_net_work_item(
                     driver.progressed = true;
                 }
                 CursorStep::Disturbed | CursorStep::Gone => {
-                    #[cfg(feature = "interaction-net-profiling")]
+                    #[cfg(feature = "glam-prof")]
                     access
                         .record_driver(crate::interaction_net::profiling::DriverEvent::Disturbance);
                     driver.progressed = true;
                 }
                 CursorStep::Dependency(dependency) => {
-                    #[cfg(feature = "interaction-net-profiling")]
+                    #[cfg(feature = "glam-prof")]
                     access.record_driver(
                         crate::interaction_net::profiling::DriverEvent::CursorDependency,
                     );
@@ -701,7 +701,7 @@ fn drive_net_work_item(
                     )));
                 }
                 CursorStep::Contended(contention) => {
-                    #[cfg(feature = "interaction-net-profiling")]
+                    #[cfg(feature = "glam-prof")]
                     access
                         .record_driver(crate::interaction_net::profiling::DriverEvent::Contention);
                     driver.worklist.push(NetDriverWork::Cursor { root, cursor });
@@ -715,7 +715,7 @@ fn drive_net_work_item(
             observation,
             cursor,
         } => {
-            #[cfg(feature = "interaction-net-profiling")]
+            #[cfg(feature = "glam-prof")]
             access.record_driver(crate::interaction_net::profiling::DriverEvent::CursorStep);
             match observation.step_cursor(access, cursor, admit_claim(step_budget)) {
                 CursorStep::Progressed(progress) => {
@@ -723,13 +723,13 @@ fn drive_net_work_item(
                     driver.progressed = true;
                 }
                 CursorStep::Disturbed | CursorStep::Gone => {
-                    #[cfg(feature = "interaction-net-profiling")]
+                    #[cfg(feature = "glam-prof")]
                     access
                         .record_driver(crate::interaction_net::profiling::DriverEvent::Disturbance);
                     driver.progressed = true;
                 }
                 CursorStep::Dependency(dependency) => {
-                    #[cfg(feature = "interaction-net-profiling")]
+                    #[cfg(feature = "glam-prof")]
                     access.record_driver(
                         crate::interaction_net::profiling::DriverEvent::CursorDependency,
                     );
@@ -751,7 +751,7 @@ fn drive_net_work_item(
                     )));
                 }
                 CursorStep::Contended(contention) => {
-                    #[cfg(feature = "interaction-net-profiling")]
+                    #[cfg(feature = "glam-prof")]
                     access
                         .record_driver(crate::interaction_net::profiling::DriverEvent::Contention);
                     driver.worklist.push(NetDriverWork::ObservedCursor {
@@ -765,7 +765,7 @@ fn drive_net_work_item(
             }
         }
         NetDriverWork::ActivePair { root, pair } => {
-            #[cfg(feature = "interaction-net-profiling")]
+            #[cfg(feature = "glam-prof")]
             access.record_driver(crate::interaction_net::profiling::DriverEvent::ActivePairStep);
             return prepare_active_pair_step(
                 driver,
@@ -776,7 +776,7 @@ fn drive_net_work_item(
             );
         }
         NetDriverWork::ObservedActivePair { observation, pair } => {
-            #[cfg(feature = "interaction-net-profiling")]
+            #[cfg(feature = "glam-prof")]
             access.record_driver(crate::interaction_net::profiling::DriverEvent::ActivePairStep);
             let step = observation.step_active_pair(access, pair, admit_claim(step_budget));
             return prepare_active_pair_step(
@@ -800,10 +800,10 @@ fn drive_net_work_item(
                 }
             }
             CursorDependencyResolution::Disturbed | CursorDependencyResolution::Gone => {
-                #[cfg(feature = "interaction-net-profiling")]
+                #[cfg(feature = "glam-prof")]
                 access.record_driver(crate::interaction_net::profiling::DriverEvent::Disturbance);
                 driver.progressed = true;
-                #[cfg(feature = "interaction-net-profiling")]
+                #[cfg(feature = "glam-prof")]
                 access.record_driver(
                     crate::interaction_net::profiling::DriverEvent::RequestRootRestart,
                 );
@@ -863,7 +863,7 @@ fn prepare_active_pair_step(
             )));
         }
         ActivePairStep::Contended(contention) => {
-            #[cfg(feature = "interaction-net-profiling")]
+            #[cfg(feature = "glam-prof")]
             access.record_driver(crate::interaction_net::profiling::DriverEvent::Contention);
             driver
                 .worklist
@@ -922,7 +922,7 @@ pub(in crate::eval) fn drive_net_semantic_action(
             _ => unreachable!("only semantic reductions leave a normalization batch"),
         },
         ActivePairStep::BlockedCallableCheckpoint(blocked) => {
-            #[cfg(feature = "interaction-net-profiling")]
+            #[cfg(feature = "glam-prof")]
             context
                 .context()
                 .values()
@@ -1056,7 +1056,7 @@ fn drive_net_interface_with_contention_handoff(
             NetDriverOutcome::Semantic(_) => {
                 unreachable!("the direct driver executes semantic handoffs before returning")
             }
-            #[cfg(all(test, feature = "interaction-net-profiling"))]
+            #[cfg(all(test, feature = "glam-prof"))]
             NetDriverOutcome::ProbeBudgetExhausted => continue,
             NetDriverOutcome::Root(InterfaceDemand::Data) => {
                 return Ok(NetInterfaceOutcome::Data);
@@ -1459,7 +1459,7 @@ fn drive_original_callable_whnf(
     }
 
     let work = crate::eval::whnf::RegionalWhnfWork::from_focus(access, callable);
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     let spent_before = step_budget.spent();
     let outcome = crate::eval::whnf::drive_regional(
         access,
@@ -1467,7 +1467,7 @@ fn drive_original_callable_whnf(
         step_budget,
         crate::eval::whnf::reduce_semantic_shell,
     );
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     _context.context().values().record_net_driver_by(
         crate::interaction_net::profiling::DriverEvent::CallableWhnfInlineTransition,
         (step_budget.spent() - spent_before) as u64,
@@ -2104,7 +2104,7 @@ mod driver_tests {
         assert!(!claim.contains("eval_value_in"));
     }
 
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     #[test]
     fn current_callable_profile_counts_only_terminal_call_rewrites() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
@@ -2141,7 +2141,7 @@ mod driver_tests {
         );
     }
 
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     #[test]
     fn callable_profile_keeps_immediate_and_cached_paths_checkpoint_free() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
@@ -2179,7 +2179,7 @@ mod driver_tests {
         assert_eq!(cached.callable_checkpoint_terminalizations, 0);
     }
 
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     #[test]
     fn callable_profile_records_checkpoint_install_resume_replace_and_terminalize() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
@@ -2224,7 +2224,7 @@ mod driver_tests {
         assert_eq!(finished.callable_checkpoint_dependency_blocks, 0);
     }
 
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     #[test]
     fn callable_profile_records_exact_dependency_retry_and_stale_admission() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
@@ -3005,7 +3005,7 @@ mod driver_tests {
             NetDriverOutcome::Semantic(_) => {
                 unreachable!("the direct driver executes semantic handoffs before returning")
             }
-            #[cfg(all(test, feature = "interaction-net-profiling"))]
+            #[cfg(all(test, feature = "glam-prof"))]
             NetDriverOutcome::ProbeBudgetExhausted => {
                 panic!("the fixture did not install a profiling work budget")
             }
@@ -3954,7 +3954,7 @@ mod driver_tests {
             observe_current_callable_path_in(&runtime, &values, call),
             CurrentCallablePath::Failed
         );
-        #[cfg(feature = "interaction-net-profiling")]
+        #[cfg(feature = "glam-prof")]
         {
             let profile = values.interaction_net_profile_snapshot().driver;
             assert_eq!(profile.callable_checkpoint_installs, 1);

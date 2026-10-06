@@ -284,6 +284,7 @@ pub struct HeapMetrics {
     coalesced_collection_requests: u64,
     outer_mutator_entries: u64,
     recursive_mutator_entries: u64,
+    root_registrations: u64,
     class_cache_hits: u64,
     class_cache_misses: u64,
     arena_chunks: usize,
@@ -327,6 +328,7 @@ metric_accessors! {
     (coalesced_collection_requests, coalesced_collection_requests, u64, "Returns requests observing an already-pending request."),
     (outer_mutator_entries, outer_mutator_entries, u64, "Returns completed outer mutator regions."),
     (recursive_mutator_entries, recursive_mutator_entries, u64, "Returns completed recursive same-heap entries."),
+    (root_registrations, root_registrations, u64, "Returns external roots registered over the heap's life."),
     (class_cache_hits, class_cache_hits, u64, "Returns allocations served by an existing worker-local cursor."),
     (class_cache_misses, class_cache_misses, u64, "Returns allocations requiring cursor refill."),
     (arena_chunks, arena_chunks, usize, "Returns committed arena chunks."),
@@ -804,7 +806,6 @@ pub(crate) struct HeapInner {
     finalizing_phase_probe: Mutex<Option<Arc<FinalizingPhaseProbeState>>>,
     #[cfg(feature = "deterministic-test-hooks")]
     synchronous_collection_wait_probe: Mutex<Option<Arc<SynchronousCollectionWaitProbeState>>>,
-    #[cfg(any(test, feature = "deterministic-test-hooks"))]
     root_registrations: AtomicU64,
     #[cfg(test)]
     allocation_cursor_claims: std::sync::atomic::AtomicUsize,
@@ -886,7 +887,6 @@ impl HeapInner {
             finalizing_phase_probe: Mutex::new(None),
             #[cfg(feature = "deterministic-test-hooks")]
             synchronous_collection_wait_probe: Mutex::new(None),
-            #[cfg(any(test, feature = "deterministic-test-hooks"))]
             root_registrations: AtomicU64::new(0),
             #[cfg(test)]
             allocation_cursor_claims: std::sync::atomic::AtomicUsize::new(0),
@@ -2795,6 +2795,7 @@ impl HeapInner {
                 .load(Ordering::Relaxed),
             outer_mutator_entries: self.outer_mutator_entries.load(Ordering::Relaxed),
             recursive_mutator_entries: self.recursive_mutator_entries.load(Ordering::Relaxed),
+            root_registrations: self.root_registrations.load(Ordering::Relaxed),
             class_cache_hits: self.class_cache_hits.load(Ordering::Relaxed),
             class_cache_misses: self.class_cache_misses.load(Ordering::Relaxed),
             arena_chunks: data.arena.run_capacity() / crate::arena::RUNS_PER_CHUNK,
@@ -3929,7 +3930,6 @@ impl HeapInner {
             .try_reserve(1)
             .expect("root registry capacity exhausted");
         state.roots.push(registration);
-        #[cfg(any(test, feature = "deterministic-test-hooks"))]
         self.root_registrations
             .fetch_add(1, Ordering::Relaxed)
             .checked_add(1)

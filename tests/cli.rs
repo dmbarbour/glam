@@ -428,6 +428,30 @@ fn undefined_configuration_env_defaults_assembly_env_to_empty_object() {
     assert_eq!(output.stderr, b"");
 }
 
+#[cfg(feature = "glam-prof")]
+#[test]
+fn glam_prof_writes_a_json_report_to_the_requested_path() {
+    let report = std::env::temp_dir().join(format!("glam-prof-{}.json", std::process::id()));
+    let output = glam_command()
+        .env("GLAM_PROF", &report)
+        .arg("--script.g")
+        .arg("language g0\nasm.result = \"ok\"\n")
+        .output()
+        .expect("failed to run glam");
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"ok");
+    let json = std::fs::read_to_string(&report).expect("the report should be written");
+    let _ = std::fs::remove_file(&report);
+    assert!(
+        json.starts_with("{\"glam_prof\":1,\"phases_ns\":{"),
+        "{json}"
+    );
+    for phase in ["\"build\":", "\"evaluate\":", "\"settle\":", "\"total\":"] {
+        assert!(json.contains(phase), "missing {phase} in {json}");
+    }
+    assert!(json.contains("\"runtime\":{\"reductions\":"), "{json}");
+}
+
 #[test]
 fn script_extension_without_a_front_end_fails_the_assembly() {
     let output = glam_command()

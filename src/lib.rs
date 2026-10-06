@@ -10,6 +10,15 @@ mod g_syntax;
 mod interaction_net;
 mod list;
 mod number;
+#[cfg(any(test, feature = "glam-prof"))]
+#[cfg_attr(
+    all(test, not(feature = "glam-prof")),
+    expect(
+        dead_code,
+        reason = "without the profiling feature, tests compile this module only for its counter macro, which the net profile shares"
+    )
+)]
+mod profiling;
 pub mod reflection;
 mod runtime;
 mod source;
@@ -34,12 +43,12 @@ pub use api::{
     RuntimeReadiness, RuntimeReadinessStamp, RuntimeSettlementError, RuntimeTaskCapability,
     RuntimeTaskWait, RuntimeWorkKind, RuntimeWorkState, Value, ValueEvaluator, ValueKind, Values,
 };
-#[cfg(feature = "interaction-net-profiling")]
+#[cfg(feature = "glam-prof")]
 pub use api::{
     CoordinatorMutationCounts, CoordinatorNotificationCallCounts,
     CoordinatorNotificationProfileSnapshot, CoordinatorWaiterOutcomeCounts,
-    ExactRouteMutationProfileSnapshot, InteractionNetProfileSnapshot, NetDriverCounts,
-    NetReductionCounts,
+    EvaluationReductionCounts, ExactRouteMutationProfileSnapshot, InteractionNetProfileSnapshot,
+    NetDriverCounts, NetReductionCounts, PhaseTimes, RuntimeProfileSnapshot,
 };
 pub use diagnostic::Severity;
 pub use g_source::{

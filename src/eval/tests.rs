@@ -176,7 +176,7 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
     let _computation_runtime_root = context.values().root_core_net(&computation_runtime);
     let computation = Value::Lazy(computation_lazy.duplicate_for_test(context.values()));
 
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     context.values().set_net_driver_work_item_limit(128);
 
     let demand = context
@@ -196,7 +196,7 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
             "wrapper demand retained no runnable producer"
         );
         machine_polls += 1;
-        #[cfg(feature = "interaction-net-profiling")]
+        #[cfg(feature = "glam-prof")]
         assert!(
             !context.values().net_driver_work_item_limit_reached(),
             "wrapper demand exceeded its deterministic net-work budget: {:?}",
@@ -219,7 +219,7 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
     computation_runtime.test_with(context.values(), |net| {
         assert!(!net.has_in_flight_claims());
     });
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     {
         use crate::interaction_net::profiling::{NetDriverCounts, NetReductionCounts};
 
@@ -261,7 +261,7 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
     }
 }
 
-#[cfg(feature = "interaction-net-profiling")]
+#[cfg(feature = "glam-prof")]
 #[test]
 fn wrapper_application_budget_probe_yields_without_publishing_a_cache() {
     let context = isolated_test_context();

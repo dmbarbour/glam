@@ -7,9 +7,9 @@
 mod builder;
 mod model;
 pub(crate) mod polarity;
-#[cfg(any(test, feature = "interaction-net-profiling"))]
+#[cfg(any(test, feature = "glam-prof"))]
 #[cfg_attr(
-    all(test, not(feature = "interaction-net-profiling")),
+    all(test, not(feature = "glam-prof")),
     expect(
         dead_code,
         reason = "without the profiling feature, tests compile this module only for the coordinator snapshot types; its rewrite and driver counters stay unused"
@@ -19,7 +19,7 @@ pub(crate) mod profiling;
 mod runtime;
 
 pub(crate) use builder::{NetBuildError, NetBuilder};
-#[cfg(all(test, feature = "interaction-net-profiling"))]
+#[cfg(all(test, feature = "glam-prof"))]
 pub(crate) use model::FanIdentity;
 pub(crate) use model::{
     ActivePairKey, InteractionNet, NetSpecialization, NodeId, OperatorYield, Port,

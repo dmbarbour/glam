@@ -1528,7 +1528,7 @@ fn object_checkpoint_does_not_replay_mixin_stages_after_route_loss() {
     );
     let _retained = lazy.root(context.values());
     let object = Value::Lazy(lazy);
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     let profile_before = context.values().interaction_net_profile_snapshot();
 
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &object)
@@ -1560,7 +1560,7 @@ fn object_checkpoint_does_not_replay_mixin_stages_after_route_loss() {
         &Some(&number(42)),
     );
     assert_eq!(defs_demands.load(Ordering::SeqCst), 1);
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     {
         let profile_after = context.values().interaction_net_profile_snapshot();
         assert_eq!(

@@ -128,6 +128,14 @@ original digest and reports a warning during the final consistency check.
 A configured bare command is expanded by Glam code, so its usage errors are
 ordinary error diagnostics and exit 1; only the fixed bootstrap parser exits 2.
 
+### Profiling builds
+
+A `glam` built with the `glam-prof` cargo feature writes a JSON profile of
+each assembly run to the path in `GLAM_PROF`. The profile holds phase timings
+and runtime counters. Ordinary builds ignore `GLAM_PROF`.
+`scripts/profile.sh` runs the profiling workloads; see
+[`AgentContext.md`](AgentContext.md) "Profiling".
+
 ## Configuration
 
 Configuration is ordinary Glam source mixed into a configuration module. Set

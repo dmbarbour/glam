@@ -318,7 +318,7 @@ wait does so as a blocked callable checkpoint, never as a blocked call. Stale
 acquisition is a quiet non-acquisition, not a terminal claim outcome.
 
 Profiling counts outcomes at the mutation boundary. With
-`interaction-net-profiling`, reduction and callable-checkpoint counters are
+`glam-prof`, reduction and callable-checkpoint counters are
 recorded in `CoreRuntimeNetAccess` only after the authoritative runtime
 mutation reports its result. An evaluator's intent is never counted: an
 attempt whose exact pair or generation lost a race records a stale admission

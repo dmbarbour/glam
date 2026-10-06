@@ -10,7 +10,7 @@ use crate::core::{
     ManagedCoreNetEdge, ManagedCoreNetRoot, RuntimeValueAccess, Value,
 };
 use crate::evaluation::EvaluationWaitToken;
-#[cfg(feature = "interaction-net-profiling")]
+#[cfg(feature = "glam-prof")]
 use crate::interaction_net::ReductionKind;
 #[cfg(test)]
 use crate::interaction_net::RuntimeNetRevisions;
@@ -449,7 +449,7 @@ impl CoreRuntimeNet {
 }
 
 impl CoreRuntimeNetAccess<'_, '_> {
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     fn record_reduction(&self, kind: &ReductionKind) {
         use crate::interaction_net::CursorProgress;
         use crate::interaction_net::profiling::ReductionEvent;
@@ -487,7 +487,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
         }
     }
 
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     pub(crate) fn record_driver(&self, event: crate::interaction_net::profiling::DriverEvent) {
         self.values
             .values()
@@ -495,7 +495,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
             .record_driver(event);
     }
 
-    #[cfg(all(test, feature = "interaction-net-profiling"))]
+    #[cfg(all(test, feature = "glam-prof"))]
     pub(crate) fn driver_work_item_limit_reached(&self) -> bool {
         self.values
             .values()
@@ -670,7 +670,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
             admit,
             |source, anchor| self.inspect_source_frontier(source, anchor),
         );
-        #[cfg(feature = "interaction-net-profiling")]
+        #[cfg(feature = "glam-prof")]
         if let CursorStep::Progressed(progress) = &step {
             let kind = ReductionKind::RemoteCursor {
                 cursor,
@@ -694,7 +694,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
             admit,
             |source, anchor| self.inspect_source_frontier(source, anchor),
         );
-        #[cfg(feature = "interaction-net-profiling")]
+        #[cfg(feature = "glam-prof")]
         if let ActivePairStep::Reduction(reduction) = &step {
             self.record_reduction(&reduction.kind);
         }
@@ -721,7 +721,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
             |runtime| runtime.resume_call_with_copy_edge_transition(call),
             |runtime| runtime.resume_claimed_call_with_copy(call, source),
         );
-        #[cfg(feature = "interaction-net-profiling")]
+        #[cfg(feature = "glam-prof")]
         self.values
             .values()
             .interaction_net_profile()
@@ -754,7 +754,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
                 Err(state) => RuntimeNetMutation::Unchanged(Err(state)),
             },
         );
-        #[cfg(feature = "interaction-net-profiling")]
+        #[cfg(feature = "glam-prof")]
         if result.is_ok() {
             self.values.values().record_net_driver(
                 crate::interaction_net::profiling::DriverEvent::CallableCheckpointInstall,
@@ -775,7 +775,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
                 None => RuntimeNetMutation::Unchanged(None),
             },
         );
-        #[cfg(feature = "interaction-net-profiling")]
+        #[cfg(feature = "glam-prof")]
         if result.is_some() {
             self.values.values().record_net_driver(
                 crate::interaction_net::profiling::DriverEvent::CallableCheckpointResumption,
@@ -839,7 +839,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
                 Err(state) => RuntimeNetMutation::Unchanged(Err(state)),
             },
         );
-        #[cfg(feature = "interaction-net-profiling")]
+        #[cfg(feature = "glam-prof")]
         if result.is_ok() {
             self.values.values().record_net_driver(
                 crate::interaction_net::profiling::DriverEvent::CallableCheckpointReplacement,
@@ -859,12 +859,12 @@ impl CoreRuntimeNetAccess<'_, '_> {
             |runtime| runtime.resume_checkpoint_with_copy_edge_transition(call),
             |runtime| runtime.resume_claimed_checkpoint_with_copy(call, source),
         );
-        #[cfg(feature = "interaction-net-profiling")]
+        #[cfg(feature = "glam-prof")]
         self.values
             .values()
             .interaction_net_profile()
             .record_reduction(crate::interaction_net::profiling::ReductionEvent::Call);
-        #[cfg(feature = "interaction-net-profiling")]
+        #[cfg(feature = "glam-prof")]
         self.values.values().record_net_driver(
             crate::interaction_net::profiling::DriverEvent::CallableCheckpointTerminalization,
         );
@@ -880,12 +880,12 @@ impl CoreRuntimeNetAccess<'_, '_> {
             |runtime| runtime.resume_checkpoint_with_operator_edge_transition(call),
             |runtime| runtime.resume_claimed_checkpoint_with_operator(call, operator),
         );
-        #[cfg(feature = "interaction-net-profiling")]
+        #[cfg(feature = "glam-prof")]
         self.values
             .values()
             .interaction_net_profile()
             .record_reduction(crate::interaction_net::profiling::ReductionEvent::Call);
-        #[cfg(feature = "interaction-net-profiling")]
+        #[cfg(feature = "glam-prof")]
         self.values.values().record_net_driver(
             crate::interaction_net::profiling::DriverEvent::CallableCheckpointTerminalization,
         );
@@ -907,7 +907,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
                     RuntimeNetMutation::Unchanged(result)
                 }
             });
-        #[cfg(feature = "interaction-net-profiling")]
+        #[cfg(feature = "glam-prof")]
         self.values.values().record_net_driver(match result {
             crate::interaction_net::CheckpointBlockResult::Blocked => {
                 crate::interaction_net::profiling::DriverEvent::CallableCheckpointDependencyBlock
@@ -933,7 +933,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
                     RuntimeNetMutation::Unchanged(false)
                 }
             });
-        #[cfg(feature = "interaction-net-profiling")]
+        #[cfg(feature = "glam-prof")]
         if result {
             self.values.values().record_net_driver(
                 crate::interaction_net::profiling::DriverEvent::CallableCheckpointDependencyRetry,
@@ -961,7 +961,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
                 Err(error) => RuntimeNetMutation::Unchanged(Err(error)),
             },
         );
-        #[cfg(feature = "interaction-net-profiling")]
+        #[cfg(feature = "glam-prof")]
         if result.is_ok() {
             self.values.values().record_net_driver(
                 crate::interaction_net::profiling::DriverEvent::CallableCheckpointTerminalization,
@@ -995,7 +995,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
                 Err(error) => RuntimeNetMutation::Unchanged(Err(error)),
             },
         );
-        #[cfg(feature = "interaction-net-profiling")]
+        #[cfg(feature = "glam-prof")]
         if result.is_ok() {
             self.values.values().record_net_driver(
                 crate::interaction_net::profiling::DriverEvent::CallableCheckpointTerminalization,
@@ -1023,7 +1023,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
                 Err(error) => RuntimeNetMutation::Unchanged(Err(error)),
             },
         );
-        #[cfg(feature = "interaction-net-profiling")]
+        #[cfg(feature = "glam-prof")]
         self.values.values().record_net_driver(if result.is_ok() {
             crate::interaction_net::profiling::DriverEvent::CallableCheckpointTerminalization
         } else {
@@ -1042,7 +1042,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
             |runtime| runtime.resume_call_with_operator_edge_transition(call),
             |runtime| runtime.resume_claimed_call_with_operator(call, operator),
         );
-        #[cfg(feature = "interaction-net-profiling")]
+        #[cfg(feature = "glam-prof")]
         self.values
             .values()
             .interaction_net_profile()
@@ -1094,7 +1094,7 @@ impl CoreRuntimeNetAccess<'_, '_> {
             |runtime, result| runtime.complete_operator_edge_transition(call, result),
             |runtime, result| runtime.complete_operator_call(call, result),
         );
-        #[cfg(feature = "interaction-net-profiling")]
+        #[cfg(feature = "glam-prof")]
         self.values
             .values()
             .interaction_net_profile()
@@ -1558,7 +1558,7 @@ mod tests {
         })
     }
 
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     fn two_bind_join_template(values: &CoreValueFactory) -> CoreInteractionNet {
         values.with_runtime_value_access(|access| {
             let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
@@ -1751,7 +1751,7 @@ mod tests {
         drop((old_root, new_root, source, copy_call, operator_call));
     }
 
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     #[test]
     fn profiling_classifies_each_committed_rule_family_exactly_once() {
         use crate::interaction_net::profiling::NetReductionCounts;
@@ -1831,7 +1831,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     #[test]
     fn profiling_semantic_signature_is_independent_of_ready_pair_order() {
         let reduce_in_order = |reverse| {
@@ -1862,7 +1862,7 @@ mod tests {
         assert_eq!(forward.reductions.bind_join, 2);
     }
 
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     #[test]
     fn profiling_counts_calls_only_when_the_claimed_rewrite_commits() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
@@ -1915,7 +1915,7 @@ mod tests {
         assert_eq!(values.interaction_net_profile_snapshot().reductions.call, 2);
     }
 
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     #[test]
     fn profiling_counts_operator_calls_only_when_completion_commits() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());

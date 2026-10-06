@@ -273,6 +273,7 @@ impl ManagedLazyCheckpointEdge {
     /// delegation; a step whose operands cost nothing pays one unit for the
     /// machine's own work, unless it only reported a boundary or a failure.
     pub(in crate::eval) fn machine_step<P>(
+        access: &crate::evaluation::EvaluationValueAccess<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
         yielded: impl FnOnce() -> P,
         advanced: impl FnOnce(&P) -> bool,
@@ -285,7 +286,14 @@ impl ManagedLazyCheckpointEdge {
         let poll = step(step_budget);
         if advanced(&poll) {
             step_budget.charge_if_unchanged(before);
+            #[cfg(feature = "glam-prof")]
+            access
+                .values()
+                .values()
+                .record_reduction(crate::profiling::EvaluationReduction::BuiltinStep);
         }
+        #[cfg(not(feature = "glam-prof"))]
+        let _ = access;
         poll
     }
 
@@ -346,6 +354,7 @@ impl ManagedLazyCheckpointEdge {
                 RegionalObjectFixpoint::trace_managed_edges,
                 |state| {
                     Self::machine_step(
+                        authority,
                         step_budget,
                         || RegionalObjectFixpointPoll::Yielded,
                         |poll| {
@@ -391,6 +400,7 @@ impl ManagedLazyCheckpointEdge {
                 RegionalListEffect::trace_managed_edges,
                 |state| {
                     Self::machine_step(
+                        authority,
                         step_budget,
                         || RegionalListEffectPoll::Yielded,
                         |poll| {
@@ -437,6 +447,7 @@ impl ManagedLazyCheckpointEdge {
                 RegionalBuiltinMachine::trace_managed_edges,
                 |state| {
                     Self::machine_step(
+                        authority,
                         step_budget,
                         || RegionalBuiltinPoll::Yielded,
                         |poll| {

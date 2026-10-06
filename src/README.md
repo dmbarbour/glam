@@ -62,7 +62,8 @@ not define language semantics or collect subsystem invariants.
 | `interaction_net/model.rs`, `builder.rs` | Generic topology and checked construction |
 | `interaction_net/runtime/` | Mutable graph, active-pair reduction, logical copies, and a read-only logical payload walk which never reduces or materializes cursors |
 | `interaction_net/polarity.rs` | Polarity and connectivity check of every finished template, in every build; test fixtures may opt out of individual checks |
-| `interaction_net/profiling.rs` | Rewrite counters, compiled only for tests and the `interaction-net-profiling` feature |
+| `profiling.rs` | `glam-prof` only: per-runtime evaluation reduction counters, phase timers, and the runtime profile snapshot with its JSON writer |
+| `interaction_net/profiling.rs` | `glam-prof` only: net rewrite and driver counters |
 | `evaluation.rs`, `evaluation/session.rs`, `evaluation/pump.rs` | Shared demand/profile contracts, session admission, reflection completion-promise reservations, one-use activation permits, cooperative pumping, and runtime pumping |
 | `evaluation/access.rs` | Scoped evaluator authority, thread-bound mutator-free poll and evaluator-step contexts, claim/direct-owner poll admission, scoped wait-completion projection, and post-scope reflection activation; the step context has one poll-derived access route and no direct evaluator compatibility gate |
 | `evaluation/coordinator.rs`, `evaluation/coordinator/` | Authoritative work registry/queues plus task, completion, client-demand, spark, reflection, deferred, and settlement lifecycles; activated reflection machines own transferred effect roots, completed wait observations retain disposition-specific roots, parked demand routing is weak, and detached claims temporarily upgrade the exact registered session/domain |

@@ -765,13 +765,13 @@ impl CoordinatorMutationKind {
     }
 }
 
-#[cfg(any(test, feature = "interaction-net-profiling"))]
+#[cfg(any(test, feature = "glam-prof"))]
 const PRODUCTION_COORDINATOR_MUTATION_KIND_COUNT: usize = 21;
-#[cfg(all(test, feature = "interaction-net-profiling"))]
+#[cfg(all(test, feature = "glam-prof"))]
 const COORDINATOR_MUTATION_KIND_COUNT: usize = 23;
-#[cfg(all(test, not(feature = "interaction-net-profiling")))]
+#[cfg(all(test, not(feature = "glam-prof")))]
 const COORDINATOR_MUTATION_KIND_COUNT: usize = 23;
-#[cfg(all(not(test), feature = "interaction-net-profiling"))]
+#[cfg(all(not(test), feature = "glam-prof"))]
 const COORDINATOR_MUTATION_KIND_COUNT: usize = 21;
 
 impl WorkCoordinatorState {
@@ -811,13 +811,13 @@ pub(crate) struct EvaluationWorkCoordinator {
     terminal_publication_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     reflection_release_status_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
-    #[cfg(any(test, feature = "interaction-net-profiling"))]
+    #[cfg(any(test, feature = "glam-prof"))]
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     exact_route_profile: Mutex<ExactDemandRouteProfile>,
-    #[cfg(any(test, feature = "interaction-net-profiling"))]
+    #[cfg(any(test, feature = "glam-prof"))]
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     exact_route_mutation_profile: Mutex<ExactRouteMutationProfile>,
-    #[cfg(any(test, feature = "interaction-net-profiling"))]
+    #[cfg(any(test, feature = "glam-prof"))]
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     notification_profile: Mutex<CoordinatorNotificationProfile>,
     #[cfg(test)]
@@ -829,7 +829,7 @@ pub(crate) struct EvaluationWorkCoordinator {
 /// Ordinary builds contain neither this state nor updates to it. Tests and the
 /// static interaction-net profiling feature expose it without installing a
 /// dynamic observer on the scheduler path.
-#[cfg(any(test, feature = "interaction-net-profiling"))]
+#[cfg(any(test, feature = "glam-prof"))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct ExactDemandRouteProfile {
     pub(super) complete_searches: usize,
@@ -850,7 +850,7 @@ pub(super) struct ExactDemandRouteProfile {
     pub(super) branched_work_fallbacks: usize,
 }
 
-#[cfg(any(test, feature = "interaction-net-profiling"))]
+#[cfg(any(test, feature = "glam-prof"))]
 #[derive(Debug, Default)]
 struct ExactRouteMutationProfile {
     moved_poll_windows: u64,
@@ -876,7 +876,7 @@ pub(super) enum CoordinatorWaiterOutcome {
     Unrelated,
 }
 
-#[cfg(any(test, feature = "interaction-net-profiling"))]
+#[cfg(any(test, feature = "glam-prof"))]
 #[derive(Debug, Default)]
 struct CoordinatorNotificationProfile {
     notify_one: [u64; COORDINATOR_MUTATION_KIND_COUNT],
@@ -887,7 +887,7 @@ struct CoordinatorNotificationProfile {
     unrelated: [u64; 4],
 }
 
-#[cfg(any(test, feature = "interaction-net-profiling"))]
+#[cfg(any(test, feature = "glam-prof"))]
 impl CoordinatorNotificationProfile {
     fn snapshot(
         &self,
@@ -919,7 +919,7 @@ impl CoordinatorNotificationProfile {
     }
 }
 
-#[cfg(any(test, feature = "interaction-net-profiling"))]
+#[cfg(any(test, feature = "glam-prof"))]
 impl ExactRouteMutationProfile {
     fn snapshot(&self) -> crate::interaction_net::profiling::ExactRouteMutationProfileSnapshot {
         use crate::interaction_net::profiling::ExactRouteMutationProfileSnapshot;
@@ -945,7 +945,7 @@ impl ExactRouteMutationProfile {
     }
 }
 
-#[cfg(any(test, feature = "interaction-net-profiling"))]
+#[cfg(any(test, feature = "glam-prof"))]
 fn mutation_counts_from_array(
     counts: &[u64; COORDINATOR_MUTATION_KIND_COUNT],
 ) -> crate::interaction_net::profiling::CoordinatorMutationCounts {
@@ -1212,11 +1212,11 @@ impl EvaluationWorkCoordinator {
             terminal_publication_probe: Mutex::new(None),
             #[cfg(test)]
             reflection_release_status_probe: Mutex::new(None),
-            #[cfg(any(test, feature = "interaction-net-profiling"))]
+            #[cfg(any(test, feature = "glam-prof"))]
             exact_route_profile: Mutex::new(ExactDemandRouteProfile::default()),
-            #[cfg(any(test, feature = "interaction-net-profiling"))]
+            #[cfg(any(test, feature = "glam-prof"))]
             exact_route_mutation_profile: Mutex::new(ExactRouteMutationProfile::default()),
-            #[cfg(any(test, feature = "interaction-net-profiling"))]
+            #[cfg(any(test, feature = "glam-prof"))]
             notification_profile: Mutex::new(CoordinatorNotificationProfile::default()),
             #[cfg(test)]
             exact_selection_probe: Mutex::new(None),
@@ -1376,7 +1376,7 @@ impl EvaluationWorkCoordinator {
         self.state.try_lock().is_ok() && self.admission.try_settlement_guard().is_some()
     }
 
-    #[cfg(any(test, feature = "interaction-net-profiling"))]
+    #[cfg(any(test, feature = "glam-prof"))]
     pub(super) fn record_complete_exact_route_search(&self, depth: usize) {
         let mut profile = self
             .exact_route_profile
@@ -1387,7 +1387,7 @@ impl EvaluationWorkCoordinator {
         profile.maximum_depth = profile.maximum_depth.max(depth);
     }
 
-    #[cfg(any(test, feature = "interaction-net-profiling"))]
+    #[cfg(any(test, feature = "glam-prof"))]
     pub(super) fn record_exact_route_handoffs(&self, handoffs: usize) {
         self.exact_route_profile
             .lock()
@@ -1395,7 +1395,7 @@ impl EvaluationWorkCoordinator {
             .fast_handoffs += handoffs;
     }
 
-    #[cfg(any(test, feature = "interaction-net-profiling"))]
+    #[cfg(any(test, feature = "glam-prof"))]
     fn record_exact_route_fallback(&self, reason: ExactRouteFallbackReason) {
         let mut profile = self
             .exact_route_profile
@@ -1427,7 +1427,7 @@ impl EvaluationWorkCoordinator {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    #[cfg(any(test, feature = "interaction-net-profiling"))]
+    #[cfg(any(test, feature = "glam-prof"))]
     fn record_exact_route_moved_poll_window(&self) {
         let mut profile = self
             .exact_route_mutation_profile
@@ -1436,7 +1436,7 @@ impl EvaluationWorkCoordinator {
         profile.moved_poll_windows = profile.moved_poll_windows.wrapping_add(1);
     }
 
-    #[cfg(any(test, feature = "interaction-net-profiling"))]
+    #[cfg(any(test, feature = "glam-prof"))]
     fn record_exact_route_reconciliation(
         &self,
         validation: Option<Result<usize, ExactRouteFallbackReason>>,
@@ -1464,7 +1464,7 @@ impl EvaluationWorkCoordinator {
                 None => {}
             }
         }
-        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        #[cfg(any(test, feature = "glam-prof"))]
         {
             let mut route = self
                 .exact_route_profile
@@ -1485,7 +1485,7 @@ impl EvaluationWorkCoordinator {
         }
     }
 
-    #[cfg(any(test, feature = "interaction-net-profiling"))]
+    #[cfg(any(test, feature = "glam-prof"))]
     pub(crate) fn exact_route_mutation_profile(
         &self,
     ) -> crate::interaction_net::profiling::ExactRouteMutationProfileSnapshot {
@@ -1513,7 +1513,7 @@ impl EvaluationWorkCoordinator {
         snapshot
     }
 
-    #[cfg(any(test, feature = "interaction-net-profiling"))]
+    #[cfg(any(test, feature = "glam-prof"))]
     pub(crate) fn coordinator_notification_profile(
         &self,
     ) -> crate::interaction_net::profiling::CoordinatorNotificationProfileSnapshot {
@@ -1527,7 +1527,7 @@ impl EvaluationWorkCoordinator {
         if !kind.notifies_waiters() {
             return;
         }
-        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        #[cfg(any(test, feature = "glam-prof"))]
         {
             let mut profile = self
                 .notification_profile
@@ -1536,13 +1536,13 @@ impl EvaluationWorkCoordinator {
             let index = kind as usize;
             profile.notify_all[index] = profile.notify_all[index].wrapping_add(1);
         }
-        #[cfg(not(any(test, feature = "interaction-net-profiling")))]
+        #[cfg(not(any(test, feature = "glam-prof")))]
         let _ = kind;
         self.work_available.notify_all();
     }
 
     fn record_waiter_release(&self, class: CoordinatorWaiterClass) {
-        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        #[cfg(any(test, feature = "glam-prof"))]
         {
             let mut profile = self
                 .notification_profile
@@ -1551,7 +1551,7 @@ impl EvaluationWorkCoordinator {
             let index = class as usize;
             profile.released[index] = profile.released[index].wrapping_add(1);
         }
-        #[cfg(not(any(test, feature = "interaction-net-profiling")))]
+        #[cfg(not(any(test, feature = "glam-prof")))]
         let _ = class;
     }
 
@@ -1560,7 +1560,7 @@ impl EvaluationWorkCoordinator {
         class: CoordinatorWaiterClass,
         outcome: CoordinatorWaiterOutcome,
     ) {
-        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        #[cfg(any(test, feature = "glam-prof"))]
         {
             let mut profile = self
                 .notification_profile
@@ -1574,7 +1574,7 @@ impl EvaluationWorkCoordinator {
             let index = class as usize;
             counts[index] = counts[index].wrapping_add(1);
         }
-        #[cfg(not(any(test, feature = "interaction-net-profiling")))]
+        #[cfg(not(any(test, feature = "glam-prof")))]
         let _ = (class, outcome);
     }
 
@@ -2274,7 +2274,7 @@ impl EvaluationWorkCoordinator {
             (selection, probe.depth, handoffs, fallback)
         };
         drop(mutation);
-        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        #[cfg(any(test, feature = "glam-prof"))]
         {
             if _depth != 0 {
                 self.record_complete_exact_route_search(_depth);
@@ -2342,7 +2342,7 @@ impl EvaluationWorkCoordinator {
             route.hazard_revision = Some(state.exact_route_hazard_revision);
             (status, probe.depth, handoffs, fallback)
         };
-        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        #[cfg(any(test, feature = "glam-prof"))]
         {
             if _depth != 0 {
                 self.record_complete_exact_route_search(_depth);
@@ -2385,21 +2385,21 @@ impl EvaluationWorkCoordinator {
             }
         };
 
-        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        #[cfg(any(test, feature = "glam-prof"))]
         if route.generation != Some(release.start_generation) {
             self.record_exact_route_moved_poll_window();
         }
 
         if let Some(reason) = reason {
             route.invalidate(reason);
-            #[cfg(any(test, feature = "interaction-net-profiling"))]
+            #[cfg(any(test, feature = "glam-prof"))]
             self.record_exact_route_reconciliation(validation, false);
             return false;
         }
 
-        #[cfg(any(test, feature = "interaction-net-profiling"))]
+        #[cfg(any(test, feature = "glam-prof"))]
         self.record_exact_route_reconciliation(validation, true);
-        #[cfg(not(any(test, feature = "interaction-net-profiling")))]
+        #[cfg(not(any(test, feature = "glam-prof")))]
         let _ = validation;
         route.apply_validated_release(release);
         true

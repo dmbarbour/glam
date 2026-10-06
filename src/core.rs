@@ -349,8 +349,10 @@ pub(crate) struct RuntimeValueDomain {
     managed_promise_allocations: AtomicUsize,
     #[cfg(test)]
     managed_promise_publications: AtomicUsize,
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     interaction_net_profile: crate::interaction_net::profiling::InteractionNetProfile,
+    #[cfg(feature = "glam-prof")]
+    evaluation_profile: crate::profiling::EvaluationProfile,
 }
 
 /// Small canonical value set owned directly by one runtime.
@@ -398,8 +400,10 @@ impl CoreValueFactory {
             managed_promise_allocations: AtomicUsize::new(0),
             #[cfg(test)]
             managed_promise_publications: AtomicUsize::new(0),
-            #[cfg(feature = "interaction-net-profiling")]
+            #[cfg(feature = "glam-prof")]
             interaction_net_profile: Default::default(),
+            #[cfg(feature = "glam-prof")]
+            evaluation_profile: Default::default(),
         });
         debug_assert_eq!(domain.heap.collection_policy(), CollectionPolicy::NoAuto);
         let values = Self {

@@ -482,19 +482,35 @@ pub(crate) struct CoreValueAllocator<'scope, T: ManagedFamily> {
 }
 
 impl CoreValueFactory {
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     pub(crate) fn interaction_net_profile(
         &self,
     ) -> &crate::interaction_net::profiling::InteractionNetProfile {
         &self.domain.interaction_net_profile
     }
 
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
+    pub(crate) fn evaluation_profile(&self) -> &crate::profiling::EvaluationProfile {
+        &self.domain.evaluation_profile
+    }
+
+    #[cfg(feature = "glam-prof")]
+    pub(crate) fn record_reduction(&self, reduction: crate::profiling::EvaluationReduction) {
+        self.domain.evaluation_profile.record_reduction(reduction);
+    }
+
+    /// The heap's cumulative telemetry, or `None` once it is poisoned.
+    #[cfg(feature = "glam-prof")]
+    pub(crate) fn managed_heap_metrics(&self) -> Option<glam_gc::HeapMetrics> {
+        (!self.domain.heap.maintenance_snapshot().is_poisoned()).then(|| self.domain.heap.metrics())
+    }
+
+    #[cfg(feature = "glam-prof")]
     pub(crate) fn record_net_driver(&self, event: crate::interaction_net::profiling::DriverEvent) {
         self.domain.interaction_net_profile.record_driver(event);
     }
 
-    #[cfg(feature = "interaction-net-profiling")]
+    #[cfg(feature = "glam-prof")]
     pub(crate) fn record_net_driver_by(
         &self,
         event: crate::interaction_net::profiling::DriverEvent,
@@ -505,21 +521,21 @@ impl CoreValueFactory {
             .record_driver_by(event, count);
     }
 
-    #[cfg(all(test, feature = "interaction-net-profiling"))]
+    #[cfg(all(test, feature = "glam-prof"))]
     pub(crate) fn interaction_net_profile_snapshot(
         &self,
     ) -> crate::interaction_net::profiling::InteractionNetProfileSnapshot {
         self.domain.interaction_net_profile.snapshot()
     }
 
-    #[cfg(all(test, feature = "interaction-net-profiling"))]
+    #[cfg(all(test, feature = "glam-prof"))]
     pub(crate) fn set_net_driver_work_item_limit(&self, limit: u64) {
         self.domain
             .interaction_net_profile
             .set_driver_work_item_limit(limit);
     }
 
-    #[cfg(all(test, feature = "interaction-net-profiling"))]
+    #[cfg(all(test, feature = "glam-prof"))]
     pub(crate) fn net_driver_work_item_limit_reached(&self) -> bool {
         self.domain
             .interaction_net_profile

@@ -1,10 +1,12 @@
 //! Compile-time interaction-net accounting.
 //!
-//! This module exists only in `interaction-net-profiling` builds. Keeping the
+//! This module exists only in `glam-prof` builds. Keeping the
 //! feature boundary outside the reduction methods makes ordinary builds pay
 //! no observer lookup, branch, or atomic-operation cost.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
+
+use crate::profiling::atomic_counts;
 
 /// Reduction-order-invariant counts of committed interaction-net rewrites.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -187,27 +189,6 @@ pub struct CoordinatorNotificationProfileSnapshot {
     pub task_observers: CoordinatorWaiterOutcomeCounts,
 }
 
-macro_rules! atomic_counts {
-    (
-        $name:ident => $snapshot:ident {
-            $($field:ident),+ $(,)?
-        }
-    ) => {
-        #[derive(Default)]
-        struct $name {
-            $(pub(super) $field: AtomicU64),+
-        }
-
-        impl $name {
-            fn snapshot(&self) -> $snapshot {
-                $snapshot {
-                    $($field: self.$field.load(Ordering::Relaxed)),+
-                }
-            }
-        }
-    };
-}
-
 atomic_counts!(AtomicNetReductionCounts => NetReductionCounts {
     bind_join,
     fan_join,
@@ -251,7 +232,7 @@ pub(crate) struct InteractionNetProfile {
     reductions: AtomicNetReductionCounts,
     driver: AtomicNetDriverCounts,
     #[cfg(test)]
-    driver_work_item_limit: AtomicU64,
+    driver_work_item_limit: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

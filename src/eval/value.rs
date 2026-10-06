@@ -384,6 +384,7 @@ impl LazyTaskMachine {
             }
             match checkpoint.with_access_transition_in(&access, |machine| {
                 ManagedLazyCheckpointEdge::machine_step(
+                    &access,
                     step_budget,
                     || AccessRegionalPoll::Yielded,
                     |poll| {
@@ -774,7 +775,7 @@ impl LazyTaskMachine {
             Replaced(ManagedLazyCheckpointKindTag),
         }
 
-        #[cfg(feature = "interaction-net-profiling")]
+        #[cfg(feature = "glam-prof")]
         context
             .context()
             .values()
@@ -1329,6 +1330,10 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                             if !step_budget.try_consume() {
                                 return EvaluationMachinePoll::Yielded;
                             }
+                            #[cfg(feature = "glam-prof")]
+                            context.context().values().record_reduction(
+                                crate::profiling::EvaluationReduction::ImmediateBuiltin,
+                            );
                             let result = context.with_value_access(|access| {
                                 let mut arguments = call
                                     .arguments

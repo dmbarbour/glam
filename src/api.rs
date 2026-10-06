@@ -11,13 +11,15 @@ mod evaluator;
 mod runtime;
 mod value;
 
-#[cfg(feature = "interaction-net-profiling")]
+#[cfg(feature = "glam-prof")]
 pub use crate::interaction_net::profiling::{
     CoordinatorMutationCounts, CoordinatorNotificationCallCounts,
     CoordinatorNotificationProfileSnapshot, CoordinatorWaiterOutcomeCounts,
     ExactRouteMutationProfileSnapshot, InteractionNetProfileSnapshot, NetDriverCounts,
     NetReductionCounts,
 };
+#[cfg(feature = "glam-prof")]
+pub use crate::profiling::{EvaluationReductionCounts, PhaseTimes, RuntimeProfileSnapshot};
 pub(crate) use assembly::CompilationExecution;
 pub use assembly::{
     Assembler, AssemblerBuilder, BuiltModule, ModuleBuilder, ModuleInput, ReasoningVolume,
