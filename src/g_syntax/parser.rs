@@ -14,6 +14,8 @@ mod logical;
 mod pattern;
 mod source;
 mod structural;
+#[cfg(test)]
+mod term;
 
 pub(in crate::g_syntax) use source::StagedSourceParser;
 pub(crate) use source::inspect_source;

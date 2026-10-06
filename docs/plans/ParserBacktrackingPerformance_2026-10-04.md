@@ -264,6 +264,38 @@ rebaselined blindly.
 Slices 1 and 2 are additive and low-risk: production keeps the old parser
 until the oracle agrees.
 
+**Progress 2026-10-06.** Slice 2's core is in `parser/term.rs`; it is
+test-only so far.
+- **How it works:**
+  - an explicit stack of open groups;
+  - each group's contents interpreted once into a role-neutral cover;
+  - covers held in an arena and taken exactly once by the role that
+    consumes them;
+  - a flat per-group interpreter, with pending lambdas as a stack.
+- **Covered:**
+  - atoms and literals;
+  - unit, grouping, tuples and sections;
+  - lists and dicts, including leading and trailing separators;
+  - tags, constructors, path suffixes, quoted literals, effects and
+    escapes;
+  - applications, infix chains and lambdas.
+- **Not covered yet** (reported as unsupported):
+  - keyword-headed forms;
+  - line breaks, except as padding inside groups;
+  - embedded data.
+- **The oracle:** `expression::term_oracle` re-parses every expression the
+  Chumsky grammar parses while a test enables it. It reports an empty
+  disagreement list over:
+  - 175 edge-case expressions;
+  - 736 expressions from the samples;
+  - 66 generated nested expressions.
+
+  A deliberate mutation (reversed tuple items) is caught. In the samples,
+  148 expressions are still unsupported: 79 keyword-headed forms and 69 with
+  line breaks.
+- **Speed:** 2,000-deep nesting parses in well under two seconds, with no
+  Rust recursion across groups.
+
 ## Verification
 
 - The differential oracle above, while both parsers exist.

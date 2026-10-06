@@ -44,6 +44,20 @@ impl InfixChain {
         }
     }
 
+    /// Builds an unresolved chain from its operands, for the prefix-shared
+    /// term parser.
+    #[cfg(test)]
+    pub(in crate::g_syntax::parser) fn from_parts(
+        first: SyntaxExpr,
+        rest: Vec<(SyntaxOperator, SyntaxExpr)>,
+    ) -> Self {
+        Self {
+            first,
+            rest,
+            resumption_anchor: None,
+        }
+    }
+
     #[cfg(test)]
     pub(in crate::g_syntax::parser) fn single_expression(&self) -> Option<&SyntaxExpr> {
         self.rest.is_empty().then_some(&self.first)
@@ -136,14 +150,14 @@ fn syntax_binary_expr(operator: SyntaxOperator, left: SyntaxExpr, right: SyntaxE
     }
 }
 
-fn access_if_path(base: SyntaxExpr, suffixes: Vec<PathSuffix>) -> SyntaxExpr {
+pub(super) fn access_if_path(base: SyntaxExpr, suffixes: Vec<PathSuffix>) -> SyntaxExpr {
     match flatten_path_suffixes(suffixes) {
         parts if parts.is_empty() => base,
         parts => SyntaxExpr::Access(Box::new(base), parts),
     }
 }
 
-fn quoted_path(suffixes: Vec<PathSuffix>) -> SyntaxExpr {
+pub(super) fn quoted_path(suffixes: Vec<PathSuffix>) -> SyntaxExpr {
     let mut chunks = Vec::new();
     let mut literal = Vec::new();
     let flush_literal = |chunks: &mut Vec<SyntaxExpr>, literal: &mut Vec<SyntaxExpr>| {
@@ -678,7 +692,10 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
     })
 }
 
-fn validate_dict_colon_members(view: TokenView<'_, '_>, group: GroupId) -> Result<(), String> {
+pub(super) fn validate_dict_colon_members(
+    view: TokenView<'_, '_>,
+    group: GroupId,
+) -> Result<(), String> {
     let contents = view
         .group_contents(group)
         .ok_or_else(|| "dictionary literal refers to an unknown delimiter group".to_owned())?;
@@ -986,7 +1003,7 @@ fn expr_name<'lex, 'source: 'lex>()
     })
 }
 
-fn validate_expr_name(name: &str) -> Result<String, String> {
+pub(super) fn validate_expr_name(name: &str) -> Result<String, String> {
     if !name.starts_with(|character: char| character.is_ascii_alphabetic()) {
         return Err("expected name".to_owned());
     }
@@ -1128,10 +1145,78 @@ pub(in crate::g_syntax::parser) fn parse_expression_chain_view(
         .into_output_errors();
     session.record_token_errors(view, errors);
     let diagnostics = session.into_diagnostics();
-    if diagnostics.is_empty() {
+    let result = if diagnostics.is_empty() {
         output.ok_or_else(Vec::new)
     } else {
         Err(diagnostics)
+    };
+    #[cfg(test)]
+    term_oracle::check(view, &result);
+    result
+}
+
+/// The differential oracle for the prefix-shared term parser: while a test
+/// enables it, every expression this grammar parses is parsed again by the
+/// term parser, and any disagreement is recorded.
+#[cfg(test)]
+pub(in crate::g_syntax::parser) mod term_oracle {
+    use std::cell::RefCell;
+
+    use super::super::term::{Fail, parse_term_chain};
+    use super::{Diagnostic, InfixChain, TokenView};
+
+    #[derive(Debug, Default)]
+    pub(in crate::g_syntax::parser) struct Report {
+        pub(in crate::g_syntax::parser) compared: usize,
+        pub(in crate::g_syntax::parser) unsupported: usize,
+        pub(in crate::g_syntax::parser) unsupported_reasons:
+            std::collections::BTreeMap<&'static str, usize>,
+        pub(in crate::g_syntax::parser) disagreements: Vec<String>,
+    }
+
+    thread_local! {
+        static ACTIVE: RefCell<Option<Report>> = const { RefCell::new(None) };
+    }
+
+    /// Runs `work` with the oracle enabled on this thread and returns its
+    /// report.
+    pub(in crate::g_syntax::parser) fn observe(work: impl FnOnce()) -> Report {
+        ACTIVE.with(|active| *active.borrow_mut() = Some(Report::default()));
+        work();
+        ACTIVE.with(|active| {
+            active
+                .borrow_mut()
+                .take()
+                .expect("the oracle stays enabled")
+        })
+    }
+
+    pub(super) fn check(view: TokenView<'_, '_>, old: &Result<InfixChain, Vec<Diagnostic>>) {
+        if !ACTIVE.with(|active| active.borrow().is_some()) {
+            return;
+        }
+        let new = parse_term_chain(view);
+        ACTIVE.with(|active| {
+            let mut active = active.borrow_mut();
+            let report = active.as_mut().expect("checked as enabled");
+            let agree = match (&new, old) {
+                (Err(Fail::Unsupported(reason)), _) => {
+                    report.unsupported += 1;
+                    *report.unsupported_reasons.entry(reason).or_default() += 1;
+                    return;
+                }
+                (Ok(new), Ok(old)) => new == old,
+                (Err(Fail::Error(_)), Err(_)) => true,
+                _ => false,
+            };
+            report.compared += 1;
+            if !agree {
+                report.disagreements.push(format!(
+                    "source: {:?}\n  chumsky: {old:?}\n  term: {new:?}",
+                    view.source_text().unwrap_or("<no text>")
+                ));
+            }
+        });
     }
 }
 
