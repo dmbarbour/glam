@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use super::super::expression::term_oracle::{Report, observe};
 use super::super::expression_context::ExpressionContext;
 use super::super::parse_source;
+use crate::g_syntax::SyntaxExpr;
 
 fn source(expression: &str) -> Vec<u8> {
     format!("language g0\nx = {expression}\n").into_bytes()
@@ -31,8 +32,8 @@ fn assert_agrees(report: &Report, minimum_compared: usize) {
         report.unsupported_reasons
     );
     eprintln!(
-        "term oracle: {} compared, unsupported {:?}",
-        report.compared, report.unsupported_reasons
+        "term oracle: {} compared ({} accepted), unsupported {:?}",
+        report.compared, report.accepted, report.unsupported_reasons
     );
 }
 
@@ -198,6 +199,30 @@ const SNIPPETS: &[&str] = &[
     "a |> f <| b",
     "a >>= b =>> c",
     "x and",
+    "f and:a",
+    "f or.b:a",
+    "f and.b",
+    "and:a",
+    "f\n  and:a",
+    // Quoted-name prefixes in key paths, and operator names at paren edges.
+    "['a b]",
+    "['a b]:v",
+    "['a.b]:v",
+    "{['a b]: 1}",
+    "{['a b]\n  :a}",
+    ":['a b]",
+    "x.['a b]",
+    "x.['a, b c]",
+    "(:and)",
+    "('and)",
+    "(x.and)",
+    "(.and)",
+    "(x and)",
+    "((a)and)",
+    "(x.or y)",
+    "(and:a)",
+    "(and:1)",
+    "(and:a 'a []and)",
     "1 2",
     "\"s\".x",
     "[1, 2].len",
@@ -291,26 +316,33 @@ fn term_parser_agrees_on_edge_cases() {
     assert_agrees(&report, SNIPPETS.len() / 2);
 }
 
-fn nested(depth: usize, open: &str, close: &str, inner: &str) -> String {
+fn nested(depth: usize, (open, close, inner): (&str, &str, &str)) -> String {
     format!("{}{inner}{}", open.repeat(depth), close.repeat(depth))
 }
 
+/// Self-nesting shapes from the parser survey, as open, close and innermost
+/// text. The Chumsky grammar is exponential in the depth of most of them.
+const NESTING_SHAPES: &[(&str, &str, &str)] = &[
+    ("(", ")", "1"),
+    ("[", "]", "1"),
+    ("{a:", "}", "1"),
+    ("([", "])", "x"),
+    ("f (", ")", "x"),
+    ("a:(", ")", "b"),
+    ("[k]:(", ")", "v"),
+    ("{(", ")}", "k"),
+    ("(\\z -> ", ")", "z"),
+    ("(1 + ", ")", "2"),
+    ("(", " +)", "1"),
+];
+
 #[test]
 fn term_parser_agrees_on_nesting() {
-    let mut sources = Vec::new();
-    for depth in 1..=6 {
-        sources.push(source(&nested(depth, "(", ")", "1")));
-        sources.push(source(&nested(depth, "[", "]", "1")));
-        sources.push(source(&nested(depth, "{a:", "}", "1")));
-        sources.push(source(&nested(depth, "([", "])", "x")));
-        sources.push(source(&nested(depth, "f (", ")", "x")));
-        sources.push(source(&nested(depth, "a:(", ")", "b")));
-        sources.push(source(&nested(depth, "[k]:(", ")", "v")));
-        sources.push(source(&nested(depth, "{(", ")}", "k")));
-        sources.push(source(&nested(depth, "(\\z -> ", ")", "z")));
-        sources.push(source(&nested(depth, "(1 + ", ")", "2")));
-        sources.push(source(&nested(depth, "(", " +)", "1")));
-    }
+    let sources = (1..=6).flat_map(|depth| {
+        NESTING_SHAPES
+            .iter()
+            .map(move |shape| source(&nested(depth, *shape)))
+    });
     let report = oracle_over(sources);
     assert_agrees(&report, 50);
 }
@@ -344,21 +376,255 @@ fn term_parser_agrees_on_every_sample() {
     assert_agrees(&report, 100);
 }
 
+/// A seeded xorshift generator, so generated cases are reproducible without a
+/// dependency.
+struct Generator(u64);
+
+impl Generator {
+    fn next(&mut self) -> u64 {
+        let mut state = self.0;
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        self.0 = state;
+        state
+    }
+
+    fn below(&mut self, bound: usize) -> usize {
+        (self.next() % bound as u64) as usize
+    }
+
+    fn chance(&mut self, one_in: usize) -> bool {
+        self.below(one_in) == 0
+    }
+
+    fn pick<'a>(&mut self, items: &[&'a str]) -> &'a str {
+        items[self.below(items.len())]
+    }
+
+    /// Layout between two pieces: mostly a space, sometimes joint, sometimes
+    /// a continuation line.
+    fn layout(&mut self) -> &'static str {
+        self.pick(&[" ", " ", " ", " ", "", "\n  ", "\n    "])
+    }
+
+    /// Balanced token soup: mostly invalid, which tests that both parsers
+    /// reject the same inputs.
+    fn soup(&mut self, depth: usize, out: &mut String) {
+        const TOKENS: &[&str] = &[
+            "a", "b", "f", "1", "\"s\"", "_p", "'", ":", ".", "^", "\\", "->", ",", "+", "*", "-",
+            "==", "and", "|>", "'a", ":a", ".e", "^a", "x.y", "a:b",
+        ];
+        for index in 0..1 + self.below(5) {
+            if index > 0 {
+                out.push_str(self.layout());
+            }
+            if depth < 3 && self.chance(4) {
+                let (open, close) = [("(", ")"), ("[", "]"), ("{", "}")][self.below(3)];
+                out.push_str(open);
+                if !self.chance(6) {
+                    self.soup(depth + 1, out);
+                }
+                out.push_str(close);
+            } else {
+                out.push_str(self.pick(TOKENS));
+            }
+        }
+    }
+
+    /// A grammar-directed expression: mostly valid, which tests that both
+    /// parsers build the same tree.
+    fn expression(&mut self, depth: usize, out: &mut String) {
+        if depth < 3 && self.chance(8) {
+            out.push_str(self.pick(&["\\x -> ", "\\x y -> ", "\\_ ->\n  "]));
+        }
+        self.application(depth, out);
+        while self.chance(3) {
+            out.push_str(self.pick(&[" ", " ", "\n  "]));
+            out.push_str(self.pick(&[
+                "+", "*", "-", "==", "<", "and", "or", "|>", "<|", "++", ">>=",
+            ]));
+            out.push_str(self.pick(&[" ", " ", "\n  "]));
+            self.application(depth, out);
+        }
+    }
+
+    fn application(&mut self, depth: usize, out: &mut String) {
+        self.atom(depth, out);
+        while self.chance(3) {
+            out.push_str(self.pick(&[" ", " ", "\n  "]));
+            self.atom(depth, out);
+        }
+    }
+
+    fn atom(&mut self, depth: usize, out: &mut String) {
+        if depth >= 3 {
+            out.push_str(self.pick(&["a", "b", "1", "\"s\"", "'a", "x.y"]));
+            return;
+        }
+        let depth = depth + 1;
+        match self.below(16) {
+            0 => out.push_str(self.pick(&["a", "b", "f", "x.y", "_p", "^a", "^^a.b"])),
+            1 => out.push_str(self.pick(&["1", "2.5", "\"s\"", "'a", "'.a.b", ":a", ":a.b"])),
+            2 => out.push_str("()"),
+            3 | 4 => {
+                out.push('(');
+                self.expression(depth, out);
+                out.push(')');
+            }
+            5 => {
+                out.push('(');
+                self.expression(depth, out);
+                out.push_str(self.pick(&[", ", ",\n  ", ","]));
+                if !self.chance(3) {
+                    self.expression(depth, out);
+                }
+                out.push(')');
+            }
+            6 => {
+                out.push('(');
+                out.push_str(self.pick(&["+ ", "- ", "|> ", "and "]));
+                self.expression(depth, out);
+                out.push(')');
+            }
+            7 => {
+                out.push('(');
+                self.expression(depth, out);
+                out.push_str(self.pick(&[" +)", " -)", " ++)", " or)"]));
+            }
+            8 | 9 => {
+                out.push('[');
+                for index in 0..self.below(4) {
+                    if index > 0 {
+                        out.push_str(self.pick(&[", ", ",\n  "]));
+                    }
+                    if self.chance(5) {
+                        out.push_str("'k");
+                    } else {
+                        self.expression(depth, out);
+                    }
+                }
+                out.push(']');
+            }
+            10 | 11 => {
+                out.push('{');
+                for index in 0..self.below(4) {
+                    if index > 0 {
+                        out.push_str(self.pick(&[", ", ",\n  "]));
+                    }
+                    match self.below(4) {
+                        0 => out.push_str(self.pick(&[":a", ":b"])),
+                        1 => self.expression(depth, out),
+                        _ => {
+                            out.push_str(self.pick(&["a", "a.b", "[k]", "(k)", "['k, j]"]));
+                            out.push_str(self.pick(&[": ", ":", " : ", ":\n  "]));
+                            self.expression(depth, out);
+                        }
+                    }
+                }
+                out.push('}');
+            }
+            12 => {
+                out.push_str(self.pick(&["a:", "[k]:", "(k):", "a.b:"]));
+                self.atom(depth, out);
+            }
+            13 => {
+                self.atom(depth, out);
+                out.push_str(self.pick(&[".a", ".[k]", ".(k)", ".a.b"]));
+            }
+            14 => {
+                out.push_str("(\\x -> ");
+                self.expression(depth, out);
+                out.push(')');
+            }
+            _ => {
+                out.push_str("(.e");
+                out.push_str(self.pick(&[")", " x)", ".f)"]));
+            }
+        }
+    }
+}
+
+/// Generated cases per test. `GLAM_TERM_FUZZ=<n>` multiplies them for a
+/// deeper local search.
+fn generated_count(base: usize) -> usize {
+    base * std::env::var("GLAM_TERM_FUZZ")
+        .ok()
+        .and_then(|factor| factor.parse().ok())
+        .unwrap_or(1)
+}
+
+fn generated_sources(
+    seed: u64,
+    count: usize,
+    mut make: impl FnMut(&mut Generator, &mut String),
+) -> Vec<Vec<u8>> {
+    let mut generator = Generator(seed);
+    (0..count)
+        .map(|_| {
+            let mut expression = String::new();
+            make(&mut generator, &mut expression);
+            source(&expression)
+        })
+        .collect()
+}
+
+#[test]
+fn term_parser_agrees_on_generated_token_soup() {
+    let report = oracle_over(generated_sources(
+        0x5eed_0001,
+        generated_count(10_000),
+        |generator, out| generator.soup(0, out),
+    ));
+    assert_agrees(&report, 3_000);
+}
+
+#[test]
+fn term_parser_agrees_on_generated_expressions() {
+    let report = oracle_over(generated_sources(
+        0x5eed_0002,
+        generated_count(800),
+        |generator, out| generator.expression(0, out),
+    ));
+    assert_agrees(&report, 600);
+}
+
+/// Parses and resolves `text` with the term parser alone, within `limit`.
+#[track_caller]
+fn assert_term_parses_quickly(text: &str, limit: std::time::Duration) -> SyntaxExpr {
+    let started = std::time::Instant::now();
+    let result = super::super::input::parse_expression_fragment(text.as_bytes(), |view| {
+        super::parse_term_chain(view, ExpressionContext::for_owner(view))
+            .and_then(|chain| chain.resolve().map_err(super::Fail::Error))
+            .map_err(|fail| vec![crate::g_syntax::Diagnostic::error(1, format!("{fail:?}"))])
+    });
+    let elapsed = started.elapsed();
+    let preview: String = text.chars().take(24).collect();
+    assert!(elapsed < limit, "{preview}… took {elapsed:?}");
+    result.unwrap_or_else(|diagnostics| panic!("{preview}…: {diagnostics:?}"))
+}
+
 #[test]
 fn deep_nesting_parses_in_linear_time_without_recursion() {
-    for (open, close) in [("(", ")"), ("[", "]"), ("{a:", "}"), ("f (", ")")] {
-        let text = nested(2_000, open, close, "1");
-        let started = std::time::Instant::now();
-        let result = super::super::input::parse_expression_fragment(text.as_bytes(), |view| {
-            super::parse_term_chain(view, ExpressionContext::for_owner(view))
-                .map(|_| ())
-                .map_err(|fail| vec![crate::g_syntax::Diagnostic::error(1, format!("{fail:?}"))])
-        });
-        assert!(result.is_ok(), "{open}…{close}: {result:?}");
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
-            "{open}…{close} took {:?}",
-            started.elapsed()
-        );
+    for shape in NESTING_SHAPES {
+        assert_term_parses_quickly(&nested(2_000, *shape), std::time::Duration::from_secs(2));
     }
+}
+
+#[test]
+fn long_flat_chains_parse_without_recursion() {
+    const TERMS: usize = 100_000;
+    let limit = std::time::Duration::from_secs(5);
+    let trees = [
+        assert_term_parses_quickly(&vec!["1"; TERMS].join(" + "), limit),
+        assert_term_parses_quickly(&format!("f{}", " x".repeat(TERMS)), limit),
+    ];
+    // Parsing and resolution are iterative, but each tree is 100k deep, and
+    // dropping a syntax tree recurses. Drop them where that fits.
+    std::thread::Builder::new()
+        .stack_size(256 << 20)
+        .spawn(move || drop(trees))
+        .expect("a dropping thread starts")
+        .join()
+        .expect("the trees drop");
 }

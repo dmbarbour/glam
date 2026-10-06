@@ -300,8 +300,46 @@ test-only so far.
   `(+ 1⏎ )`. Every other parenthesized form accepts that layout; the prefix
   section alone lacked trailing padding. The grammar now pads it, and an
   expression test keeps the case.
-- **Speed:** 2,000-deep nesting parses in well under two seconds, with no
-  Rust recursion across groups.
+- **Wider oracle reach:**
+  - **A sweep.** `GLAM_TERM_ORACLE=1 cargo test --lib` checks every
+    expression that any library test parses, and panics on the first
+    disagreement. Across all 1,886 tests it found none.
+  - **Seeded generated programs:**
+    - token soup (10,000 per run) checks that both parsers accept and
+      reject the same inputs;
+    - grammar-directed expressions (800 per run) check that both build the
+      same tree.
+
+    `GLAM_TERM_FUZZ=<n>` multiplies both counts for a deeper local search.
+- **Rules that generation found, now mirrored in the term parser:**
+  - `and` and `or` start an argument when they are a tag's key, as in
+    `f and:a`.
+  - A key path reads a leading `'name` as the whole key. So `['a b]` is a
+    valid list but not a valid key path, which makes `['a b]:v` and
+    `x.['a b]` invalid, and the member `{['a b]⏎ :a}` an expression.
+  - A trailing `and` or `or` that is joint after `.`, `'` or `:` belongs to
+    the expression. `(:and)` is a grouping, not a section.
+- **Open question: a leading `and` or `or` tag inside parens.** The grammar
+  reads `(and:a)` as a prefix section but `(and:1)` as a tag. It tries the
+  section first and falls back when the rest fails to parse. Mirroring that
+  needs a trial parse, so the term parser reports the shape as unsupported.
+  No sample uses it.
+  - **Proposal:** a joint `:` decides. `and:` or `or:` followed by a joint
+    payload is always a tag, as it already is in argument position
+    (`f and:a`), and `(and :a)` stays a section.
+- **Speed and depth:** without Rust recursion in the term parser,
+  - every survey nesting shape parses at depth 2,000 within two seconds;
+  - flat infix and application chains of 100k terms parse and resolve.
+- **Finding: deep syntax trees overflow the stack.** The survey's overflow
+  on 32k-term chains is not only the parser's.
+  - A resolved 100k-term chain is a 100k-deep `SyntaxExpr`, and dropping
+    it overflows the stack, so the test drops it on a large-stack thread.
+  - Later passes over the tree probably recurse as well.
+  - Long chains end to end therefore need one of two things, not yet
+    decided and outside the parser:
+    - iterative drop and traversal;
+    - flatter trees, such as an application holding an argument list, or
+      n-ary chains of associative operators.
 
 ## Verification
 

@@ -1159,6 +1159,13 @@ pub(in crate::g_syntax::parser) fn parse_expression_chain_view(
 /// The differential oracle for the prefix-shared term parser: while a test
 /// enables it, every expression this grammar parses is parsed again by the
 /// term parser, and any disagreement is recorded.
+///
+/// Setting `GLAM_TERM_ORACLE` enables it for every test instead, panicking on
+/// the first disagreement, which sweeps every expression any test parses:
+///
+/// ```sh
+/// GLAM_TERM_ORACLE=1 cargo test --lib
+/// ```
 #[cfg(test)]
 pub(in crate::g_syntax::parser) mod term_oracle {
     use std::cell::RefCell;
@@ -1169,6 +1176,8 @@ pub(in crate::g_syntax::parser) mod term_oracle {
     #[derive(Debug, Default)]
     pub(in crate::g_syntax::parser) struct Report {
         pub(in crate::g_syntax::parser) compared: usize,
+        /// Compared expressions that both parsers accept.
+        pub(in crate::g_syntax::parser) accepted: usize,
         pub(in crate::g_syntax::parser) unsupported: usize,
         pub(in crate::g_syntax::parser) unsupported_reasons:
             std::collections::BTreeMap<&'static str, usize>,
@@ -1177,6 +1186,11 @@ pub(in crate::g_syntax::parser) mod term_oracle {
 
     thread_local! {
         static ACTIVE: RefCell<Option<Report>> = const { RefCell::new(None) };
+    }
+
+    fn sweeping() -> bool {
+        static SWEEPING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *SWEEPING.get_or_init(|| std::env::var_os("GLAM_TERM_ORACLE").is_some())
     }
 
     /// Runs `work` with the oracle enabled on this thread and returns its
@@ -1198,6 +1212,19 @@ pub(in crate::g_syntax::parser) mod term_oracle {
         old: &Result<InfixChain, Vec<Diagnostic>>,
     ) {
         if !ACTIVE.with(|active| active.borrow().is_some()) {
+            if sweeping() {
+                let new = parse_term_chain(view, context);
+                let agree = match (&new, old) {
+                    (Err(Fail::Unsupported(_)), _) | (Err(Fail::Error(_)), Err(_)) => true,
+                    (Ok(new), Ok(old)) => new == old,
+                    _ => false,
+                };
+                assert!(
+                    agree,
+                    "the term parser disagrees with the Chumsky grammar\n  source: {:?}\n  chumsky: {old:?}\n  term: {new:?}",
+                    view.source_text().unwrap_or("<no text>")
+                );
+            }
             return;
         }
         let new = parse_term_chain(view, context);
@@ -1210,7 +1237,10 @@ pub(in crate::g_syntax::parser) mod term_oracle {
                     *report.unsupported_reasons.entry(reason).or_default() += 1;
                     return;
                 }
-                (Ok(new), Ok(old)) => new == old,
+                (Ok(new), Ok(old)) => {
+                    report.accepted += 1;
+                    new == old
+                }
                 (Err(Fail::Error(_)), Err(_)) => true,
                 _ => false,
             };

@@ -29,7 +29,10 @@
 //!
 //! **Coverage.** Constructs not yet covered report `Fail::Unsupported`:
 //! - keyword-headed forms (`if`, `do`, `match`, `try`, `using`,
-//!   `abstract_global_path`, postfix `if`);
+//!   `abstract_global_path`, postfix `if`), and keywords as lambda
+//!   parameters;
+//! - a leading `and` or `or` tag inside parens, which the grammar resolves
+//!   by trial (an open question in the parser plan);
 //! - invalid tokens.
 
 use std::cell::RefCell;
@@ -207,6 +210,7 @@ impl Covers {
         {
             Cover::Bracket(items) => Shape::Bracket {
                 empty: items.is_empty(),
+                keys: items.iter().all(BracketItem::is_key),
             },
             Cover::Paren(ParenCover::Grouped(_)) => Shape::Grouped,
             Cover::Paren(_) | Cover::Brace(_) => Shape::Other,
@@ -217,7 +221,11 @@ impl Covers {
 /// What a cover can become without consuming it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Shape {
-    Bracket { empty: bool },
+    /// `keys`: every item is valid in a key path.
+    Bracket {
+        empty: bool,
+        keys: bool,
+    },
     Grouped,
     Other,
 }
@@ -236,18 +244,27 @@ enum ParenCover {
     Section(SyntaxExpr),
 }
 
-/// A bracket item. An item that is exactly `'name` is a quoted atom in a list
-/// and an atom key in a key path; every other item is an expression in both.
+/// A bracket item, converted by the bracket's role.
 enum BracketItem {
+    /// Exactly `'name`: a quoted atom in a list, an atom key in a key path.
     QuotedName(String),
+    /// An expression that begins with `'name`, as in `'a b`. Valid in a
+    /// list; a key path reads `'name` as the whole key, so it is invalid
+    /// there.
+    QuotedPrefixed(SyntaxExpr),
+    /// Any other expression: a list item, or an index key.
     Expr(SyntaxExpr),
 }
 
 impl BracketItem {
+    fn is_key(&self) -> bool {
+        !matches!(self, Self::QuotedPrefixed(_))
+    }
+
     fn into_list_item(self) -> SyntaxExpr {
         match self {
             Self::QuotedName(name) => SyntaxExpr::Atom(name),
-            Self::Expr(expr) => expr,
+            Self::QuotedPrefixed(expr) | Self::Expr(expr) => expr,
         }
     }
 
@@ -255,6 +272,7 @@ impl BracketItem {
         match self {
             Self::QuotedName(name) => SyntaxKeyExpr::Atom(name),
             Self::Expr(expr) => SyntaxKeyExpr::Index(Box::new(expr)),
+            Self::QuotedPrefixed(_) => unreachable!("key paths are checked by shape"),
         }
     }
 }
@@ -396,6 +414,15 @@ fn interpret_paren(scope: Scope<'_, '_, '_>, frame: &Frame, close: usize) -> Par
         let items = separated_items(&segments[1..], false, true)?;
         return resolved_items(scope, items).map(ParenCover::Tuple);
     }
+    if matches!(
+        piece_kind(view, &contents[0]),
+        Some(TokenKind::Name("and" | "or"))
+    ) && Items::new(scope, contents).named_tag_at(0)
+    {
+        // `(and:a)` reads as a prefix section and `(and:1)` as a tag: the
+        // grammar decides by whether the rest parses, which needs a trial.
+        return Err(Fail::Unsupported("a parenthesized `and` or `or` tag"));
+    }
     if let Some(operator) = piece_operator(view, &contents[0]) {
         if segments.len() > 1 {
             return error("an operator section takes one operand");
@@ -419,7 +446,9 @@ fn interpret_paren(scope: Scope<'_, '_, '_>, frame: &Frame, close: usize) -> Par
         let (last, before) = contents
             .split_last()
             .expect("non-empty contents have a last piece");
-        if let Some(operator) = piece_operator(view, last) {
+        if let Some(operator) = piece_operator(view, last)
+            && !absorbs_operator_name(view, before, last)
+        {
             let left = resolved(scope, trim_padding(view, before))?;
             return Ok(ParenCover::Section(SyntaxExpr::OperatorSection {
                 operator,
@@ -438,6 +467,18 @@ fn interpret_paren(scope: Scope<'_, '_, '_>, frame: &Frame, close: usize) -> Par
     resolved_items(scope, items).map(ParenCover::Tuple)
 }
 
+/// Whether a trailing operator name belongs to the expression before it:
+/// `and` or `or` joint after `.`, `'` or `:`, as in `x.and`, `'and`, `:and`.
+fn absorbs_operator_name(view: TokenView<'_, '_>, before: &[Piece], last: &Piece) -> bool {
+    matches!(piece_kind(view, last), Some(TokenKind::Name(_)))
+        && piece_leading(view, last) == LeadingTrivia::Joint
+        && before.last().is_some_and(|piece| {
+            [".", "'", ":"]
+                .into_iter()
+                .any(|symbol| is_symbol(view, piece, symbol))
+        })
+}
+
 fn resolved_items(scope: Scope<'_, '_, '_>, items: Vec<&[Piece]>) -> Parse<Vec<SyntaxExpr>> {
     items
         .into_iter()
@@ -454,13 +495,16 @@ fn resolved(scope: Scope<'_, '_, '_>, pieces: &[Piece]) -> Parse<SyntaxExpr> {
 
 fn bracket_item(scope: Scope<'_, '_, '_>, item: &[Piece]) -> Parse<BracketItem> {
     let view = scope.view;
-    if let [quote, name] = item
+    if let [quote, name, rest @ ..] = item
         && is_symbol(view, quote, "'")
         && piece_leading(view, name) == LeadingTrivia::Joint
         && let Some(TokenKind::Name(name)) = piece_kind(view, name)
         && is_glam_name(name)
     {
-        return Ok(BracketItem::QuotedName((*name).to_owned()));
+        if rest.is_empty() {
+            return Ok(BracketItem::QuotedName((*name).to_owned()));
+        }
+        return resolved(scope, item).map(BracketItem::QuotedPrefixed);
     }
     resolved(scope, item).map(BracketItem::Expr)
 }
@@ -607,7 +651,11 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         let mut position = self.position;
         match self.peek() {
             Some(Piece::Group { cover, .. }) => match self.scope.covers.shape(*cover) {
-                Shape::Bracket { empty: false } | Shape::Grouped => return Some(position + 1),
+                Shape::Bracket {
+                    empty: false,
+                    keys: true,
+                }
+                | Shape::Grouped => return Some(position + 1),
                 _ => return None,
             },
             Some(piece @ Piece::Token(_)) => match piece_kind(self.scope.view, piece) {
@@ -636,7 +684,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         let accepted = match self.peek_at(1) {
             Some(Piece::Group { cover, .. }) => matches!(
                 self.scope.covers.shape(*cover),
-                Shape::Bracket { .. } | Shape::Grouped
+                Shape::Bracket { keys: true, .. } | Shape::Grouped
             ),
             Some(piece @ Piece::Token(_)) => matches!(
                 piece_kind(self.scope.view, piece),
@@ -831,17 +879,34 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         Ok(function)
     }
 
+    /// Whether an argument atom starts at `offset`. The operator names `and`
+    /// and `or` start one only as a tag's key, as in `and:x`.
     fn starts_atom_at(&self, offset: usize) -> bool {
         match self.peek_at(offset) {
             Some(Piece::Group { .. }) => true,
             Some(piece @ Piece::Token(_)) => match piece_kind(self.scope.view, piece) {
-                Some(TokenKind::Name(name)) => !matches!(*name, "and" | "or"),
+                Some(TokenKind::Name(name)) => {
+                    !matches!(*name, "and" | "or") || self.named_tag_at(offset)
+                }
                 Some(TokenKind::Number(_) | TokenKind::Text(_) | TokenKind::Embedded(_)) => true,
                 Some(TokenKind::Symbol(symbol)) => matches!(*symbol, ":" | "'" | "." | "^"),
                 _ => false,
             },
             None => false,
         }
+    }
+
+    /// Whether a named tag, `name.path:payload`, starts at `offset`.
+    fn named_tag_at(&self, offset: usize) -> bool {
+        let cursor = Items {
+            scope: self.scope,
+            pieces: self.pieces,
+            position: self.position + offset,
+        };
+        cursor.data_path_end().is_some_and(|end| {
+            let colon = end - self.position;
+            self.symbol_at(colon, ":") && self.joint_at(colon) && self.joint_at(colon + 1)
+        })
     }
 
     /// One atom, with any tag prefixes (`a:`, `[k]:`, `(p):`) applied to its
@@ -853,11 +918,14 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             match self.peek() {
                 None => return error("expected an expression"),
                 Some(Piece::Group { .. }) => match self.shape_at(0) {
-                    Some(Shape::Bracket { empty: false }) if tagged => {
+                    Some(Shape::Bracket {
+                        empty: false,
+                        keys: true,
+                    }) if tagged => {
                         tags.push(self.take_keys());
                         self.position += 1;
                     }
-                    Some(Shape::Bracket { empty: true }) if tagged => {
+                    Some(Shape::Bracket { empty: true, .. }) if tagged => {
                         return error("dictionary paths cannot be empty");
                     }
                     Some(Shape::Grouped) if tagged => {
@@ -914,7 +982,10 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     /// path index.
     fn data_path(&mut self) -> Parse<Vec<SyntaxKeyExpr>> {
         match self.shape_at(0) {
-            Some(Shape::Bracket { empty: false }) => Ok(self.take_keys()),
+            Some(Shape::Bracket {
+                empty: false,
+                keys: true,
+            }) => Ok(self.take_keys()),
             Some(Shape::Grouped) => Ok(vec![SyntaxKeyExpr::PathIndex(Box::new(
                 self.take_grouped(),
             ))]),
@@ -932,11 +1003,13 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         while self.path_suffix_width().is_some() {
             self.position += 1;
             let suffix = match self.shape_at(0) {
-                Some(Shape::Bracket { .. }) => PathSuffix::Expand(self.take_keys()),
+                Some(Shape::Bracket { keys: true, .. }) => PathSuffix::Expand(self.take_keys()),
                 Some(Shape::Grouped) => {
                     PathSuffix::Single(SyntaxKeyExpr::PathIndex(Box::new(self.take_grouped())))
                 }
-                Some(Shape::Other) => unreachable!("path_suffix_width accepts no other group"),
+                Some(Shape::Bracket { keys: false, .. } | Shape::Other) => {
+                    unreachable!("path_suffix_width accepts no other group")
+                }
                 None => {
                     let Some(TokenKind::Name(name)) = self.kind() else {
                         unreachable!("path_suffix_width accepts a name");
