@@ -219,6 +219,32 @@ maps the short names used here to file names.
   Ownership"; `architecture/front_end.md` "Built-in `.g` Pipeline".
 - **Recorded in:** holistic review F7, Decision 8; commit `8853d4e8`.
 
+### A joint colon after a name always makes a tag
+`joint-colon-makes-a-tag` · 2026-10-06 · maintainer · accepted
+- **Context:** the parser oracle found that the grammar read `(and:a)` as a
+  prefix section of `and` but `(and:1)` as a tag, choosing by whether the
+  rest parsed. In argument position, `f and:a` was already a tag.
+- **Decision:** a name followed by a joint `:` and a joint payload is always
+  a tag, the operator names `and` and `or` included. Sections are spelled
+  `(and x)`, `(x and)` or `(and)`.
+- **Consequences:** a paren's first token decides its form without a trial
+  parse, and both expression parsers agree.
+- **Rule lives in:** `SyntaxCheatSheet.md` "Atoms, Tagged Data, Dicts".
+- **Recorded in:** parser backtracking plan, "Progress 2026-10-06".
+
+### Only a lone quoted name is an atom key in a key path
+`lone-quoted-name-is-an-atom-key` · 2026-10-06 · maintainer · accepted
+- **Context:** the grammar committed to a leading `'name` as the whole key.
+  So `['a b]` was a valid list but a syntax error as a key path, an
+  artifact of the parser rather than a rule.
+- **Decision:** a key-path item that is exactly `'name` is an atom key. Any
+  other item is an index expression, read as it would be in a list:
+  `['a b]:v` indexes by `'a b`. Applying an atom is an error for a later
+  front-end check, not a parse error.
+- **Consequences:** key paths and lists read their items alike.
+- **Rule lives in:** `SyntaxCheatSheet.md` "Atoms, Tagged Data, Dicts".
+- **Recorded in:** parser backtracking plan, "Progress 2026-10-06".
+
 ### `map` and `list.concat` are structural and non-forcing
 `structural-lazy-map-and-concat` · 2026-09-17 · maintainer · accepted
 - **Context:** recursive list operators forced whole spines on the Rust

@@ -158,6 +158,17 @@ predicate patterns, and `op -> P` statements.
 
 Both are possibly parser bugs unrelated to speed.
 
+**Fixed 2026-10-06.** Both were the structural layer claiming a `match`'s
+own `with` as a record update.
+- `find_structural_body` now follows the documented rule that the first
+  ungrouped `with` after a `match` or `try_match` head belongs to it. That
+  covers lambda bodies and other non-leading positions.
+- A parenthesized group that leads with `match` and holds a top-level comma
+  is a tuple. The expression grammar parses it and delimits the member.
+- **Still unsupported:** a `with` update as a list or tuple member, as in
+  `[d with {…}, 2]`. Only the structural layer knows `with` updates, and it
+  sees whole views. Slice 4 moves keyword forms into the parser machine.
+
 ## Design
 
 ### Principles
@@ -311,22 +322,21 @@ test-only so far.
       same tree.
 
     `GLAM_TERM_FUZZ=<n>` multiplies both counts for a deeper local search.
-- **Rules that generation found, now mirrored in the term parser:**
+- **Rules that generation found:**
   - `and` and `or` start an argument when they are a tag's key, as in
-    `f and:a`.
-  - A key path reads a leading `'name` as the whole key. So `['a b]` is a
-    valid list but not a valid key path, which makes `['a b]:v` and
-    `x.['a b]` invalid, and the member `{['a b]⏎ :a}` an expression.
+    `f and:a`. The term parser mirrors this.
   - A trailing `and` or `or` that is joint after `.`, `'` or `:` belongs to
-    the expression. `(:and)` is a grouping, not a section.
-- **Open question: a leading `and` or `or` tag inside parens.** The grammar
-  reads `(and:a)` as a prefix section but `(and:1)` as a tag. It tries the
-  section first and falls back when the rest fails to parse. Mirroring that
-  needs a trial parse, so the term parser reports the shape as unsupported.
-  No sample uses it.
-  - **Proposal:** a joint `:` decides. `and:` or `or:` followed by a joint
-    payload is always a tag, as it already is in argument position
-    (`f and:a`), and `(and :a)` stays a section.
+    the expression. `(:and)` is a grouping, not a section; mirrored.
+  - The grammar read a leading `'name` in a key path as the whole key, so
+    `['a b]` was a valid list but an invalid key path. **Decided
+    2026-10-06** (`lone-quoted-name-is-an-atom-key`): only a lone `'name`
+    is an atom key. Any other item is an index expression, and a later
+    front-end check can catch applying an atom. Both parsers changed.
+  - The grammar read `(and:a)` as a prefix section but `(and:1)` as a tag,
+    deciding by whether the rest parsed. **Decided 2026-10-06**
+    (`joint-colon-makes-a-tag`): a joint `:` after a name always makes a
+    tag. The grammar now looks ahead for a named tag before a prefix
+    operator; the term parser checks the same shape without a trial.
 - **Speed and depth:** without Rust recursion in the term parser,
   - every survey nesting shape parses at depth 2,000 within two seconds;
   - flat infix and application chains of 100k terms parse and resolve.

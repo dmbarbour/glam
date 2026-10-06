@@ -265,6 +265,38 @@ fn keyword_data_escapes_remain_available() {
 }
 
 #[test]
+fn key_paths_read_only_a_lone_quoted_name_as_an_atom_key() {
+    let SyntaxExpr::PathDict(path, _) = parse_expression_fragment(b"['a, 'b c]:v").unwrap() else {
+        panic!("a computed tag should parse as a path dictionary");
+    };
+    assert_eq!(
+        path,
+        vec![
+            SyntaxKeyExpr::Atom("a".to_owned()),
+            SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Apply(
+                Box::new(SyntaxExpr::Atom("b".to_owned())),
+                Box::new(SyntaxExpr::Name("c".to_owned())),
+            ))),
+        ]
+    );
+}
+
+#[test]
+fn a_joint_colon_after_an_operator_name_makes_a_tag() {
+    assert_eq!(
+        parse_expression_fragment(b"(and:a)").unwrap(),
+        SyntaxExpr::PathDict(
+            vec![SyntaxKeyExpr::Atom("and".to_owned())],
+            Box::new(SyntaxExpr::Name("a".to_owned())),
+        )
+    );
+    assert!(matches!(
+        parse_expression_fragment(b"(and :a)").unwrap(),
+        SyntaxExpr::OperatorSection { left: None, .. }
+    ));
+}
+
+#[test]
 fn ordinary_expression_rejections_are_preserved() {
     for source in [
         "and",

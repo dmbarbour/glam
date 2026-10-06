@@ -125,14 +125,20 @@ gains this consequence when it lands.
    `noauto-runtime-collection-policy`). CLI memory figures now reflect live
    memory.
 3. **Parser.**
-   - Apply the constant-time lookahead fix from
-     [Parser Backtracking Performance](ParserBacktrackingPerformance_2026-10-04.md);
-     today parse time is exponential in nesting depth.
-   - Replace Rust-stack recursion with an explicit-stack parse over the
-     lexer's delimiter groups (maintainer preference over a nesting limit).
-     This closes the parser exception in
+   - [Parser Backtracking Performance](ParserBacktrackingPerformance_2026-10-04.md)
+     replaces the backtracking grammar with a prefix-shared,
+     explicit-stack parser over the lexer's delimiter groups, with a cover
+     IR for patterns and expressions. Today parse time is exponential in
+     nesting depth. The lookahead-guard fix was rejected.
+   - The term parser exists behind a differential oracle (2026-10-06); the
+     production switch, patterns, and keyword forms remain.
+   - This closes the parser exception in
      `no-semantic-recursion-on-rust-stack`.
-   - This track is small, independent, and validates the harness.
+   - **Stack depth before evaluation.** A deep syntax tree overflows the
+     Rust stack when dropped: a 100k-term flat chain, for example.
+     Expected (maintainer, 2026-10-06): every stage before evaluation needs
+     an audit for recursion on user-controlled depth. That covers the
+     syntax tree and its drop, name analysis, resolution, and lowering.
 4. **Evaluation recursion cost.** Diagnose
    [Evaluation Recursion Performance](EvaluationRecursionPerformance_2026-10-04.md)
    before any representation work: a simple countdown costs tens of

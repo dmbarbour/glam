@@ -194,10 +194,20 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
         let key_name = glam_name.clone();
         let local_name = local_name().boxed();
 
+        // An item that is exactly `'name` is an atom key. A longer item that
+        // begins with one, such as `'a b`, is an ordinary index expression.
         let single_key_expr = || {
             choice((
                 symbol("'")
                     .ignore_then(joint(glam_name.clone()))
+                    .then_ignore(
+                        layout_padding()
+                            .then(choice((
+                                symbol(",").ignored(),
+                                close(Delimiter::Bracket).ignored(),
+                            )))
+                            .rewind(),
+                    )
                     .map(SyntaxKeyExpr::Atom),
                 resolved(expr.clone()).map(|expr| SyntaxKeyExpr::Index(Box::new(expr))),
             ))
@@ -443,8 +453,17 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             .map(SyntaxExpr::DictUnion);
 
         let infix_operator = infix_operator().boxed();
+        // A joint `:` after a name always makes a tag, so `(and:a)` is a
+        // grouped tag rather than a section of `and`.
+        let named_tag_ahead = named_path
+            .clone()
+            .then(joint(symbol(":")))
+            .then(joint(any()))
+            .ignored();
         let prefix_operator_section = open(Delimiter::Parenthesis)
-            .ignore_then(padded(infix_operator.clone()))
+            .ignore_then(padded(
+                named_tag_ahead.not().ignore_then(infix_operator.clone()),
+            ))
             .then(resolved(expr.clone()))
             .then_ignore(layout_padding())
             .then_ignore(close(Delimiter::Parenthesis))

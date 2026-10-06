@@ -74,10 +74,13 @@ tag:Data            # tagged data: sugar for { tag:Data }
 foo.bar:Data        # path-tagged data: sugar for { foo.bar:Data }
 :foo.bar            # constructor: \ Data -> foo.bar:Data
 [KeyA,KeyB]:Data    # computed hierarchical path
+['a, x]:Data        # a lone 'name item is an atom key; ['a x] indexes by 'a x
 :[KeyA,KeyB]        # corresponding constructor
 (PathExpr):Data     # splice a computed list-valued path
 :(PathExpr)         # corresponding constructor
 # Colons are tight; tag:f x ≡ (tag:f) x. Use tag:(f x) to tag the call.
+# A joint colon always tags, even after an operator name: (and:x) is a
+# tag; (and x), (x and) and (and) are sections.
 
 {}                  # empty dict; ALSO the 'undefined' value
 {foo:1, bar.baz:2}  # literal; paths ok; {foo:{}} ≡ {}
