@@ -130,8 +130,18 @@ gains this consequence when it lands.
      explicit-stack parser over the lexer's delimiter groups, with a cover
      IR for patterns and expressions. Today parse time is exponential in
      nesting depth. The lookahead-guard fix was rejected.
-   - The term parser exists behind a differential oracle (2026-10-06); the
-     production switch, patterns, and keyword forms remain.
+   - *Production since 2026-10-07:*
+     - the term parser parses every ordinary expression;
+     - keyword forms are delegated to the structural parsers;
+     - the old grammar remains only as a fallback for invalid tokens, and
+       as the differential oracle.
+
+     Nested parens and lists now parse as fast as an empty program.
+   - **Remaining:**
+     - patterns, which need the cover IR below group level;
+     - keyword forms as parser frames, which removes the structural
+       layer's whole-file scans;
+     - retiring the grammar.
    - This closes the parser exception in
      `no-semantic-recursion-on-rust-stack`.
    - **Stack depth before evaluation.** A deep syntax tree overflows the
