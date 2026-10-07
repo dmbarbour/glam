@@ -2,7 +2,8 @@
 
 Status: open. The parser and evaluation inspections are done: F1 is fixed,
 and no further panic was found. The poisoning audit is done, and its
-containment design is decided, and steps 1-5 are implemented. The net
+containment design is decided, and its implementation steps are done
+(`panic-no-regret-changes` through `panic-callback-containment`). The net
 polarity change it waited on has landed: `Bind >< Bind` now joins crossed.
 What remains is the interaction-net inspection.
 
@@ -276,7 +277,10 @@ The panic hook still prints every panic, so each one remains a visible bug.
 
 ### Implementation sequence
 
-1. **No-regret changes**, which every alternative needs. Done on
+Steps are referred to by name; see the plans README, "Step names".
+
+1. **No-regret changes** (`panic-no-regret-changes`), which every
+   alternative needs. Done on
    2026-10-04, except for destructors that reach runtime-core locks:
    - **Collector traces read through poison.** This covers the net cell and
      the lazy producer.
@@ -293,11 +297,12 @@ The panic hook still prints every panic, so each one remains a visible bug.
    - **Client values are dropped after glam locks are released.** This
      covers diagnostic subscribers and effect-token payloads. It also keeps
      a client destructor that re-enters the bus from deadlocking.
-   - **Destructors that reach runtime-core locks are moved to step 4.** These
+   - **Destructors that reach runtime-core locks are moved to
+     `panic-runtime-core-faults`.** These
      are the coordinator, the settlement gate, and the transaction state.
      Their destructors run long call chains shared with normal operation, so
-     a no-op disposition needs the runtime-wide fault signal that step 4
-     introduces.
+     a no-op disposition needs the runtime-wide fault signal that
+     `panic-runtime-core-faults` introduces.
 
    Regressions:
    - A panic under the net lock with an open batch, which reproduces N1's
@@ -308,7 +313,8 @@ The panic hook still prints every panic, so each one remains a visible bug.
 
    Each regression fails with its fix reverted, except the subscriber test:
    leaf recovery alone already keeps the bus usable.
-2. **Poll-boundary containment.** `catch_unwind` at `ClaimedTask::poll`,
+2. **Poll-boundary containment** (`panic-poll-boundary-containment`).
+   `catch_unwind` at `ClaimedTask::poll`,
    `poll_claimed_client_demand`, and `poll_claimed_spark` ends the claim as
    `Panicked` through the existing terminal path. Waiters halt, the client
    API reports the panicked kind, and workers survive. Done on 2026-10-04.
@@ -375,16 +381,17 @@ The panic hook still prints every panic, so each one remains a visible bug.
    acyclic call edges.
 
    Known gaps:
-   - **Step 3, now resolved.** A new demand reran a lazy whose own evaluation
+   - **`panic-lazy-panicked-state`, now resolved.** A new demand reran a lazy whose own evaluation
      panicked, and an interrupted host call became the `EvaluationFailure`
      "refusing to replay".
    - **Release paths can still panic** on coordinator assertions; this is
-     step 4.
+     `panic-runtime-core-faults`.
    - **Unobserved panics** are visible only through the panic hook and
      `.task.status`. `QuiescenceReport` has no panic ledger.
    - **Local promise owners** of direct effect runs are outside the
      boundary.
-3. **The lazy `Panicked` evaluation state**, including torn checkpoints,
+3. **The lazy `Panicked` evaluation state** (`panic-lazy-panicked-state`),
+   including torn checkpoints,
    interrupted host calls (which replaces "refusing to replay"), and poisoned
    per-value cells. Done on 2026-10-04.
    - **Recording.** Every lazy is evaluated in its own route, confirmed by
@@ -429,7 +436,7 @@ The panic hook still prints every panic, so each one remains a visible bug.
    - **Remaining limit.** A net shared by several lazies, once torn, faults
      each later observer with "shared runtime net was poisoned", not the
      original report.
-4. **Runtime-core fault handling.** Done on 2026-10-04, with a narrowed
+4. **Runtime-core fault handling** (`panic-runtime-core-faults`). Done on 2026-10-04, with a narrowed
    surface decided by the maintainer. Instrumenting every core lock site
    (about 130) is unnecessary:
    - **Detection is free.** Std mutexes already record poison when a guard
@@ -486,8 +493,9 @@ The panic hook still prints every panic, so each one remains a visible bug.
      boundary, under a new `RuntimePoison` mutation kind. The executor-drop
      wake uses `ExecutorAvailability`. The RAII inventory classifies the
      settlement guard's new destructor.
-5. **Call-site containment of client callbacks outside polls.** Done on
-   2026-10-04. Callbacks inside polls were already contained by step 2: host
+5. **Call-site containment of client callbacks outside polls**
+   (`panic-callback-containment`). Done on 2026-10-04. Callbacks inside
+   polls were already contained by `panic-poll-boundary-containment`: host
    calls, import resolvers, the conflict index's `begin` and `observe` in
    task journals, and custom reflection hosts. The remaining sites fall into
    two dispositions.

@@ -1,8 +1,9 @@
 //! Prefix-shared term parser for ordinary expressions.
 //!
-//! This is slice 2 of the parser redesign: a deterministic replacement for the
-//! Chumsky expression grammar. Production does not use it yet. Tests check it
-//! against the existing grammar on every expression the corpus parses.
+//! Production parses every ordinary expression with it; the Chumsky grammar
+//! remains only as a fallback for unsupported views and as a differential
+//! oracle, which tests run against every expression the corpus parses. See
+//! the parser backtracking plan, which tracks the remaining steps.
 //!
 //! **Each group is parsed once.** One pass over the view's tokens keeps an
 //! explicit stack of open delimiter groups. When a group closes, its

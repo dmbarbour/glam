@@ -95,7 +95,7 @@ maps the short names used here to file names.
   - Every finding becomes a deterministic regression. No fuzz run joins
     `scripts/check.sh`.
 - **Consequences:** supersedes the P0-2 fuzz target. Net fuzzing (polarity
-  plan slice 6) follows this policy.
+  plan's `polarity-net-fuzzing`) follows this policy.
 - **Recorded in:** panic-safety plan, "Method" and decision 1; commit
   `64092e4b`.
 
@@ -446,7 +446,8 @@ maps the short names used here to file names.
 
 ### Runtime nets carry a remote-polarity type in their link words
 `remote-polarity-runtime-type` · 2026-10-05 · maintainer · accepted
-- **Context:** slice 4 tests polarity-type preservation (subject reduction).
+- **Context:** `polarity-runtime-invariant` tests polarity-type preservation
+  (subject reduction).
   Later rewrites will depend on signs: translating positive erasure into
   error data, and GAL level nodes. Net performance must improve a lot, so
   no new runtime side tables.
@@ -468,7 +469,7 @@ maps the short names used here to file names.
     test layout is 8 bytes larger.
 - **Rule lives in:** `agent_context/interaction_nets.md` "Runtime Polarity
   Type".
-- **Recorded in:** polarity plan, "Slice 4 Design".
+- **Recorded in:** polarity plan, "Runtime Invariant Design".
 
 ### Callable WHNF runs inline first and spills to a linear checkpoint node only on suspension
 `inline-first-callable-spill` · 2026-09-16 · agent · accepted

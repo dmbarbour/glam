@@ -1,14 +1,15 @@
 # Net Polarity Checker Plan — 2026-10-05
 
-Status: slices 1–4 done 2026-10-05:
-- documentation;
-- the test-only checker;
-- enforcement at `try_finish`;
-- a runtime remote-polarity type in port links, with debug checks on every
-  rewrite.
+Status: done 2026-10-05:
+- `polarity-table-doc`, the documentation;
+- `polarity-readonly-checker`, the test-only checker;
+- `polarity-enforce-at-finish`, enforcement at `try_finish`;
+- `polarity-runtime-invariant`, a runtime remote-polarity type in port
+  links, with debug checks on every rewrite;
+- `polarity-net-generator`, the N8 generator and invariant checker.
 
-Slice 5, the N8 generator and invariant checker, is done as well. Next is
-fuzzing (slice 6), which follows the panic-safety plan's discovery policy.
+Next is `polarity-net-fuzzing`, which follows the panic-safety plan's
+discovery policy.
 The positive-erasure translation is deferred to the GAL performance
 adaptation. This plan comes before N8's random closed-net generator and
 before any fuzzing of nets. It follows the crossed `Bind >< Bind` join that
@@ -113,14 +114,16 @@ union-find arrays.
    - a remote cursor takes the sign of the remote port it stands for;
    - a callable checkpoint takes the sign of the application it replaces.
 
-## Slices
+## Steps
 
-1. **Document the table.** Put it in `docs/agent_context/interaction_nets.md`.
+Steps are referred to by name; see the plans README, "Step names".
+
+1. **Document the table** (`polarity-table-doc`). Put it in `docs/agent_context/interaction_nets.md`.
    In `Design.md`, replace "symmetric instead of directional" and "no
    arg-result distinction" with "undirected wiring, polarized ports". Fix the
    stale `Node::Bind` doc comment in `model.rs`, which still says
    `[ap*, arg, result]` for both roles.
-2. **Read-only checker, test-only.** Run it over every lowered g net, every
+2. **Read-only checker, test-only** (`polarity-readonly-checker`). Run it over every lowered g net, every
    core and test template, and the sample nets. Expect all to be polarizable
    today. Fix any glam constructor that is not; the constant-effect template
    is a reminder that hand-built function binds can drift.
@@ -154,9 +157,9 @@ union-find arrays.
          has no polarization;
        - a driver fixture whose deliberate `Data >< Data` stuck pair is the
          point of the test.
-   - **Slice 4 follow-up.** The runtime invariant must skip nets
+   - **`polarity-runtime-invariant` follow-up.** The runtime invariant must skip nets
      instantiated from the four unpolarized fixtures.
-3. **Enforce at `try_finish`.** Add the error variant, user-facing
+3. **Enforce at `try_finish`** (`polarity-enforce-at-finish`). Add the error variant, user-facing
    diagnostics, and invalid samples for each rejection shape:
    - a same-sign wire, such as data wired to data;
    - a function bind wired in application order;
@@ -176,14 +179,14 @@ union-find arrays.
      conflict. It comes from regenerating the earlier constraints and
      searching between the conflicting ports, so it costs nothing until
      something fails.
-4. **Runtime invariant.** *Done 2026-10-05,* as the runtime polarity type in
-   "Slice 4 Design" below. Its first full-suite run found no rewrite that
+4. **Runtime invariant** (`polarity-runtime-invariant`). *Done 2026-10-05,*
+   as the runtime polarity type in "Runtime Invariant Design" below. Its first full-suite run found no rewrite that
    breaks polarity. The only violation came from an unpolarized hand-built
    copy source in one cursor test, which was rewired as a function bind.
    Dedicated tests exercise each structural rule and prove that both checks
    fire. The original wording follows: Check polarity preservation after every rewrite in
    test builds, alongside N8's link-symmetry and active-pair checks.
-5. **N8 generator.** Random polarized closed nets, plus a negative mode that
+5. **N8 generator** (`polarity-net-generator`). Random polarized closed nets, plus a negative mode that
    must be rejected at construction. Compare readback across random pair
    orders.
 
@@ -206,12 +209,12 @@ union-find arrays.
      readback from the exposed port, or all must exceed a 400-step budget.
    - **Negative mode.** It rewires a provider whose sign is fixed to fresh
      data. Construction must reject every such net as unpolarized.
-6. **Fuzzing,** per the panic-safety plan's discovery policy, over polarized
+6. **Fuzzing** (`polarity-net-fuzzing`), per the panic-safety plan's discovery policy, over polarized
    nets only.
 
-## Slice 4 Design — Decided 2026-10-05
+## Runtime Invariant Design — Decided 2026-10-05
 
-Slice 4 tests polarity-type preservation (subject reduction): a polarized net
+`polarity-runtime-invariant` tests polarity-type preservation (subject reduction): a polarized net
 stays polarized under every rewrite. Reducing to an unpolarized net would
 erase the type. Later rewrites will depend on signs, such as translating a
 positive eraser into error `Data` and adding GAL level nodes, so the runtime
@@ -273,7 +276,7 @@ Construction can translate a `+` eraser directly. Reduction also creates
 feeding the dead body, and erasing a copy fan or an operator with an error
 value does the same. Making `Erase` always `−` therefore needs those rules
 to emit error `Data`, through a specialization hook that builds an erased or
-error value. Slice 4's checks guard that change.
+error value. The `polarity-runtime-invariant` checks guard that change.
 
 ## Background: polarity, GAL, and Lafont
 

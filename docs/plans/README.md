@@ -15,12 +15,35 @@ in [`../Decisions.md`](../Decisions.md).
 
 Recover a retired doc with `git show <commit>:<path>`.
 
+## Step names
+
+Every plan step has a **step name**: kebab-case, in backticks, prefixed by
+its plan's topic, and unique across all docs. Examples:
+`perf-evaluation-recursion` and `parser-keyword-frames`.
+- **Refer to steps by name**, in plans, reviews, docs, code comments and
+  commits. Never use a number such as "track 4" or "slice 2": numbers order
+  a list, and they collide across plans.
+- **Commits** that advance a step end with a `Plan-Step: <name>` trailer,
+  one per step, before any attribution lines. Find a step's history with
+  `git log --grep 'Plan-Step: perf-evaluation-recursion'`.
+- **A new step gets its name when it is written down.** Lists may stay
+  numbered for order; older commits that cite a number map to that list.
+- **Review finding IDs** (such as X3, N8 or F1) stay as they are: they are
+  stable references into one review. Qualify them with the review where
+  ambiguity is likely.
+
 ## Active Plans
 
 - [`PerformanceRoadmap_2026-10-05.md`](PerformanceRoadmap_2026-10-05.md):
   the umbrella for performance work, covering shared measurement, how
-  budgets treat batching, and the order of the parser, evaluator,
-  representation, and batching tracks.
+  budgets treat batching, and the order of its `perf-` steps.
+- [`ParserBacktrackingPerformance_2026-10-04.md`](ParserBacktrackingPerformance_2026-10-04.md):
+  `perf-parser`. The prefix-shared term parser parses every ordinary
+  expression in production. `parser-patterns`, `parser-keyword-frames` and
+  `parser-grammar-retirement` remain.
+- [`EvaluationRecursionPerformance_2026-10-04.md`](EvaluationRecursionPerformance_2026-10-04.md):
+  `perf-evaluation-recursion`. Evaluation time grows roughly quadratically
+  with recursion depth.
 - [`NetPolarityChecker_2026-10-05.md`](NetPolarityChecker_2026-10-05.md)
   requires every interaction net to be polarized, with a `+` exposed port,
   and checks it before N8 and net fuzzing.
@@ -36,10 +59,6 @@ Recover a retired doc with `git show <commit>:<path>`.
 
 ## Deferred Plans
 
-- [`EvaluationRecursionPerformance_2026-10-04.md`](EvaluationRecursionPerformance_2026-10-04.md):
-  evaluation time grows roughly quadratically with recursion depth.
-- [`ParserBacktrackingPerformance_2026-10-04.md`](ParserBacktrackingPerformance_2026-10-04.md):
-  exponential parse time on nested groups, and a constant-time lookahead fix.
 - [`ConcurrentGarbageCollection_2026-08-28.md`](ConcurrentGarbageCollection_2026-08-28.md):
   concurrent marking, delayed logical sweep, and epoch-safe run recycling.
 - [`ValueRepresentationRefinement_2026-08-19.md`](ValueRepresentationRefinement_2026-08-19.md):

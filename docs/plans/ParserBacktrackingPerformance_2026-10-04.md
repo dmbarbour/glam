@@ -1,7 +1,9 @@
 # Parser Backtracking Performance Plan — 2026-10-04
 
-Status: design agreed with the maintainer on 2026-10-06; implementation not
-started. This is the parser track of the
+Status: design agreed with the maintainer on 2026-10-06. `parser-term-parser`
+is in production since 2026-10-07 (see [Production switch](#production-switch-2026-10-07));
+`parser-patterns`, `parser-keyword-frames` and `parser-grammar-retirement`
+remain. This is the `perf-parser` step of the
 [performance roadmap](PerformanceRoadmap_2026-10-05.md). The fix is a merged
 grammar with prefix sharing, parsing into a cover syntax (IR) for patterns and
 expressions, implemented with an explicit stack; see [Design](#design). It
@@ -167,7 +169,8 @@ own `with` as a record update.
   is a tuple. The expression grammar parses it and delimits the member.
 - **Still unsupported:** a `with` update as a list or tuple member, as in
   `[d with {…}, 2]`. Only the structural layer knows `with` updates, and it
-  sees whole views. Slice 4 moves keyword forms into the parser machine.
+  sees whole views. `parser-keyword-frames` moves keyword forms into the
+  parser machine.
 
 ## Design
 
@@ -251,32 +254,34 @@ precise as today's merged expectations from abandoned alternatives. Every
 diagnostic change in the invalid-syntax samples is reviewed, not
 rebaselined blindly.
 
-## Slices
+## Steps
 
-1. **Cover IR and conversion.** The IR types; conversion to `SyntaxExpr`
+Steps are referred to by name; see the plans README, "Step names".
+
+1. **Cover IR and conversion** (`parser-cover-ir`). The IR types; conversion to `SyntaxExpr`
    and `SyntaxPattern`; unit tests of the role rules.
-2. **Term parser.**
+2. **Term parser** (`parser-term-parser`).
    - The explicit-stack, prefix-shared parser for atoms, groups,
      collections, tags, operators and applications.
    - Expression leaves use it first.
    - **Differential oracle:** the old parser stays and must produce the
      same syntax tree for every sample, every test source, and generated
      programs.
-3. **Patterns.** Pattern positions use the same parser plus conversion.
+3. **Patterns** (`parser-patterns`). Pattern positions use the same parser plus conversion.
    This retires the split-and-retry code for views, predicates, guards and
    `op -> P`.
-4. **Keyword forms and structural scans.** Move keyword forms into the
+4. **Keyword forms and structural scans** (`parser-keyword-frames`). Move keyword forms into the
    machine, remove the whole-file scans, and retire Chumsky from
    expressions.
-5. **Retirement.** Delete the old expression and pattern parsers once the
+5. **Retirement** (`parser-grammar-retirement`). Delete the old expression and pattern parsers once the
    oracle has held across the corpus. Keep the differential corpus as
    regression tests.
 
-Slices 1 and 2 are additive and low-risk: production keeps the old parser
-until the oracle agrees.
+`parser-cover-ir` and `parser-term-parser` are additive and low-risk:
+production keeps the old parser until the oracle agrees.
 
-**Progress 2026-10-06.** Slice 2's core is in `parser/term.rs`; it is
-test-only so far.
+**Progress 2026-10-06.** The core of `parser-term-parser` is in
+`parser/term.rs`; it is test-only so far.
 - **How it works:**
   - an explicit stack of open groups;
   - each group's contents interpreted once into a role-neutral cover;
@@ -356,7 +361,8 @@ test-only so far.
 
 ## Production switch (2026-10-07)
 
-**Step A, `eb84587c`.** `parse_expression_chain_view` parses every
+**Term parser first** (`parser-term-parser-first`, `eb84587c`).
+`parse_expression_chain_view` parses every
 expression view with the term parser first. The Chumsky grammar parses only
 the views the term parser reports as unsupported. While a test enables the
 oracle, it still parses each covered view with the grammar and compares.
@@ -371,13 +377,14 @@ Three invalid-sample expectations changed with the wording.
 
 Measured in a release `glam-prof` build:
 
-| Workload | Baseline 2026-10-06 | After step A |
+| Workload | Baseline 2026-10-06 | After `parser-term-parser-first` |
 | --- | --- | --- |
 | `parse_parens_10` | 470.9 ms | 36.6 ms |
 | `parse_lists_16` | 708.9 ms | 37.5 ms |
 | `minimal` | 36.7 ms | 36.8 ms |
 
-**Step B: keyword forms in the term parser.**
+**Keyword forms in the term parser** (`parser-keyword-delegation`,
+`adcd994b`).
 - **Delegation.** Keyword heads (`if`, `match`, `try`, `try_match`, `do`,
   `using`) go to the structural parsers through `parse_structural_atom`,
   and postfix `if` goes through `parse_postfix_if_tail`. The Chumsky
@@ -397,7 +404,7 @@ Measured in a release `glam-prof` build:
     errors or rare;
   - the oracle.
 
-  Slice 5 retires the grammar.
+  `parser-grammar-retirement` retires the grammar.
 - **Oracle**, under the final rules:
   - samples: 1,155 expressions compared, nested keyword-form bodies
     included;
@@ -418,7 +425,7 @@ Measured in a release `glam-prof` build:
   - `structural_view_at` scans every group in the source for each keyword
     atom (cause 3).
 
-  Slice 4's frames remove both.
+  The frames of `parser-keyword-frames` remove both.
 
 ## Verification
 

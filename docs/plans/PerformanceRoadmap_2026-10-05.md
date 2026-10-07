@@ -1,9 +1,12 @@
 # Performance Roadmap — 2026-10-05
 
 Status: agreed with the maintainer on 2026-10-05, including the harness
-questions; nothing started. This is
-the umbrella for performance work. Each track gets its own plan when it
-starts; the existing plans it names stay the detailed records.
+questions. `perf-profiling-harness` and `perf-foreground-collection` are
+done, `perf-parser` is in production, and `perf-evaluation-recursion` is
+next. This is the umbrella for performance work. Each step gets its own plan
+when it starts; the existing plans it names stay the detailed records. Steps
+are referred to by name, never by number (see the plans README, "Step
+names").
 
 ## Purpose
 
@@ -14,11 +17,11 @@ programs cheap enough to develop against.
 
 The directions span the parser, the evaluator, interaction nets and the
 runtime, so measurements must cross those boundaries. This roadmap fixes a
-shared measurement design first, then orders the tracks.
+shared measurement design first, then orders the steps.
 
 ## Principles
 
-- **Measure first.** Each track starts from a recorded baseline and ends
+- **Measure first.** Each step starts from a recorded baseline and ends
   with the same measurement.
 - **Exact counters, noisy timings.** Counters are deterministic for a fixed
   worker count and serve as regression oracles. Timings are trend data,
@@ -28,7 +31,7 @@ shared measurement design first, then orders the tracks.
   [Budgets and Batching](#budgets-and-batching)).
 - **Semantics do not move.** An optimization keeps results, failures and
   diagnostics identical. Differential checks against the unoptimized path,
-  or an independent reference, guard each track.
+  or an independent reference, guard each step.
 
 ## Measurement
 
@@ -72,13 +75,13 @@ normal builds exclude it.
 - Workloads mix generated and hand-written sources during development. A
   workload worth keeping goes into a profiling-only test or a samples
   file.
-- Baselines live in the track's plan or in a performance review. They are
+- Baselines live in the step's plan or in a performance review. They are
   working data and need no long-term retention.
 
 - Each workload records its counters exactly and its timings as trends.
 - A counter change is a reviewed baseline update, never noise.
 - **The proximal real workload** is direct-assembly Hello World.
-- **Each track adds microbenchmarks:**
+- **Each step adds microbenchmarks:**
   - deep nesting for the parser;
   - the recursion countdown at several depths;
   - list map and fold, and dict build and lookup, at 10⁴–10⁶ elements;
@@ -105,9 +108,9 @@ Instead:
 batch adds a saturating charge, and `reduction-costs-one-budget-unit`
 gains this consequence when it lands.
 
-## Tracks, in Order
+## Steps, in Order
 
-1. **Profiling harness.** *Done 2026-10-06; see
+1. **Profiling harness** (`perf-profiling-harness`). *Done 2026-10-06; see
    [Baseline](#baseline-2026-10-06).*
    - The `glam-prof` feature replaces `interaction-net-profiling`.
    - Per-runtime counters cover reductions by kind, net rules and driver
@@ -117,14 +120,15 @@ gains this consequence when it lands.
      `scripts/profile.sh` runs the workloads.
    - Usage is in `AgentContext.md` "Profiling".
    - Not yet counted: net lock acquisitions and checkpoint publications.
-     Add them when a track needs them.
-2. **Collection during foreground work.** *Done 2026-10-05, ahead of the
+     Add them when a step needs them.
+2. **Collection during foreground work** (`perf-foreground-collection`).
+   *Done 2026-10-05, ahead of the
    harness at the maintainer's request.* Whoever polls claimed work
    collects between the poll and the release when the collector's pressure
    latch is set (revised
    `noauto-runtime-collection-policy`). CLI memory figures now reflect live
    memory.
-3. **Parser.**
+3. **Parser** (`perf-parser`).
    - [Parser Backtracking Performance](ParserBacktrackingPerformance_2026-10-04.md)
      replaces the backtracking grammar with a prefix-shared,
      explicit-stack parser over the lexer's delimiter groups, with a cover
@@ -137,36 +141,37 @@ gains this consequence when it lands.
        as the differential oracle.
 
      Nested parens and lists now parse as fast as an empty program.
-   - **Remaining:**
-     - patterns, which need the cover IR below group level;
-     - keyword forms as parser frames, which removes the structural
-       layer's whole-file scans;
-     - retiring the grammar.
+   - **Remaining**, as that plan's steps:
+     - `parser-patterns`, which needs the cover IR below group level;
+     - `parser-keyword-frames`, keyword forms as parser frames, which
+       removes the structural layer's whole-file scans;
+     - `parser-grammar-retirement`.
    - This closes the parser exception in
      `no-semantic-recursion-on-rust-stack`.
-   - **Stack depth before evaluation.** A deep syntax tree overflows the
+   - **Stack depth before evaluation** (`perf-pre-eval-stack-depth`). A
+     deep syntax tree overflows the
      Rust stack when dropped: a 100k-term flat chain, for example.
      Expected (maintainer, 2026-10-06): every stage before evaluation needs
      an audit for recursion on user-controlled depth. That covers the
      syntax tree and its drop, name analysis, resolution, and lowering.
-4. **Evaluation recursion cost.** Diagnose
+4. **Evaluation recursion cost** (`perf-evaluation-recursion`). Diagnose
    [Evaluation Recursion Performance](EvaluationRecursionPerformance_2026-10-04.md)
    before any representation work: a simple countdown costs tens of
    milliseconds per call and grows roughly quadratically, which would swamp
    every other measurement.
-5. **Structural overheads.** The holistic pre-performance review's P2:
+5. **Structural overheads** (`perf-structural-overheads`). The holistic pre-performance review's P2:
    scheduler round trips, the allocation and rooting path, the reflection
    branch clone, and obvious algorithmic defects. These would otherwise mask
    representation measurements.
-6. **Representations, two parallel tracks:**
-   - **Values:**
+6. **Representations**, two parallel steps:
+   - **Values** (`perf-value-representation`):
      [Value Representation Refinement](ValueRepresentationRefinement_2026-08-19.md),
      with special focus on lists and dicts and on list processing:
      - contiguous chunks for strict lists;
      - ropes for concatenation;
      - small inline dicts and a persistent map for large ones;
      - shared key shapes where keys are static, as in modules and objects.
-   - **Interaction nets:**
+   - **Interaction nets** (`perf-net-representation`):
      - a slab of nodes with free-slot recycling, in place of hash maps;
      - nodes as four 32-bit words (kind and three typed links) with
        payloads in side tables;
@@ -174,17 +179,17 @@ gains this consequence when it lands.
        histories. The compact node needs those levels, so GAL comes first
        or alongside. It also takes on the deferred positive-erasure
        translation.
-7. **Normal forms and batching:**
-   - **Normal forms at construction.** These make hashing and memoization
+7. **Normal forms and batching**, as separate steps:
+   - **Normal forms at construction** (`perf-normal-forms`). These make hashing and memoization
      possible later, and simplify bulk materialization and multi-step
      evaluation without explicit materialization. Pure nets can diverge,
      so construction-time normalization runs under fuel or only for rule
      patterns known to terminate.
-   - **Cursor materialization batching.** Copy several nodes per lock
+   - **Cursor materialization batching** (`perf-cursor-batching`). Copy several nodes per lock
      round trip when a lightweight analysis shows a source region is inert.
-   - **Net pattern batching.** Claim several pairs that match a known
+   - **Net pattern batching** (`perf-net-pattern-batching`). Claim several pairs that match a known
      pattern and reduce them in one step, under the budget rule above.
-   - **Effect chains:**
+   - **Effect chains** (`perf-effect-chain-fusion`):
      [Pure Effect Access Fusion](PureEffectAccessFusion_2026-09-23.md).
 
 **Deferred:** JIT compilation. There is much to gain without it.
@@ -214,7 +219,7 @@ Reductions add the runtime's evaluation reductions and net rules.
 - **Fixed cost.** An empty assembly takes 37 ms and about 2,200 reductions.
 - **Parser.** The nesting workloads spend almost all their time parsing
   (435 of 471 ms, and 671 of 709 ms) with the same reduction count as
-  `minimal`. This is the exponential backtracking of track 3.
+  `minimal`. This is the exponential backtracking that `perf-parser` removes.
 - **Recursion.** Each countdown level costs a constant ~290 reductions:
   - 120 WHNF delegations;
   - 43 builtin steps;
@@ -222,13 +227,14 @@ Reductions add the runtime's evaluation reductions and net rules.
   - 138 net rules.
 
   Time per level still grows: about 5.7, 7.5 and 11.6 ms at depths 100,
-  200 and 400. So the superlinear cost of track 4 lies outside reduction
+  200 and 400. So the superlinear cost behind `perf-evaluation-recursion` lies outside reduction
   work. Each level also issues ~360 coordinator `notify_all` calls.
 - **Hello World.** It runs ~300k reductions in 3.4 s, about 11 µs each.
   Each reduction makes ~2.8 access-region entries, ~0.66 root registrations
   and ~0.86 coordinator `notify_all` calls. Net rules are 61% of the
   reductions, mostly cursor materializations and joins, bind joins and
-  operator calls. These are the targets of tracks 5 and 6.
+  operator calls. These are the targets of `perf-structural-overheads` and the
+  representation steps.
 - **Collections.** CLI assembly now collects: two collections took 71 ms in
   `hello_elf`.
 - **Lists and dicts.** They cost 47 and 27 reductions per element
@@ -242,7 +248,7 @@ Maintainer answers, 2026-10-05:
 - **Report format:** JSON.
 - **Workloads:** a mix during development. Keepers go into profiling-only
   tests or samples files.
-- **Baselines:** in the track's plan or a performance review, not kept long
+- **Baselines:** in the step's plan or a performance review, not kept long
   term.
 - **Suite location:** wherever is convenient, excluded from normal builds.
-- **Collection during CLI assembly:** required, and done; see track 2.
+- **Collection during CLI assembly:** required, and done; see `perf-foreground-collection`.

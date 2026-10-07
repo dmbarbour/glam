@@ -99,6 +99,8 @@ verify current bootstrap acceptance against tests and samples.
   implicit consumer at once. Partition such a removal from the start by
   production seam, fixture seam, negative compiler contract, and dynamic
   certification.
+- Plan steps have searchable step names, and commits that advance a step
+  carry a `Plan-Step:` trailer; see `docs/plans/README.md` "Step names".
 - Plan and review step IDs (such as `W7B` or `GCI11R-002D.2e.4`) may appear in
   code and comments while their work is active. At the next cleanup, replace
   each one with a reference to its `Decisions.md` entry or with a short

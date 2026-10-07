@@ -1,9 +1,9 @@
 # Evaluation Recursion Performance — 2026-10-04
 
-Status: preliminary and deferred. This is a measured finding to investigate
-in a later performance phase, not current work. It was found during the
-[user-input panic safety](UserInputPanicSafety_2026-10-04.md) evaluation
-inspection. The root cause is not yet established.
+Status: active from 2026-10-07 as the `perf-evaluation-recursion` step of
+the [performance roadmap](PerformanceRoadmap_2026-10-05.md). It was found
+during the [user-input panic safety](UserInputPanicSafety_2026-10-04.md)
+evaluation inspection. The root cause is not yet established.
 
 ## Problem
 
@@ -46,13 +46,18 @@ milliseconds at modest depth, far beyond any plausible constant overhead.
 3. Managed allocation and rooting cost grows with live heap size: holistic
    review V1.
 
-## First steps
+## Steps
 
-- Profile `loop 400` with Callgrind or `perf`, and count coordinator
-  transitions per call. The X3 counters from the holistic review would make
-  this cheap.
-- Check whether time per call scales with the number of pending lazies.
-- Add the countdown to the X3 performance corpus at a few depths.
+Steps are referred to by name; see the plans README, "Step names".
+
+- **Profile the countdown** (`eval-recursion-profile`). Profile `loop 400`
+  with Callgrind or `perf`, and count coordinator transitions per call. The
+  `glam-prof` counters (the holistic review's X3) make this cheap.
+- **Scaling with pending lazies** (`eval-recursion-lazy-scaling`). Check
+  whether time per call scales with the number of pending lazies.
+- **Countdown workloads** (`eval-recursion-workloads`). The countdown at a
+  few depths is in `scripts/profile.sh` as `countdown_100` to
+  `countdown_400`.
 - *Rechecked 2026-10-05:* an old worker stack overflow (the
   `direct_assembly_elf` sample exited with status 134 under `--workers 4` and
   `--workers 1`, before the collector and resumable WHNF) did not reproduce
