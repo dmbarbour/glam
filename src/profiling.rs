@@ -167,6 +167,44 @@ impl RuntimeProfileSnapshot {
                 ("notify_all", calls.notify_all.total()),
             ],
         );
+        // Notifying publications by mutation kind. Kinds that never notify
+        // waiters, such as task-promise index changes, are not counted.
+        out.push_str(",\"coordinator_notify_all_by_kind\":");
+        let kinds = &calls.notify_all;
+        write_counters(
+            out,
+            &[
+                ("executor_availability", kinds.executor_availability),
+                ("fresh_work_admission", kinds.fresh_work_admission),
+                ("work_activation", kinds.work_activation),
+                ("client_demand_admission", kinds.client_demand_admission),
+                ("work_requeue", kinds.work_requeue),
+                ("work_release", kinds.work_release),
+                ("client_demand_release", kinds.client_demand_release),
+                ("dependency_promotion", kinds.dependency_promotion),
+                ("dependency_wake", kinds.dependency_wake),
+                ("observation_wake", kinds.observation_wake),
+                ("cancellation", kinds.cancellation),
+                ("session_closure", kinds.session_closure),
+                ("terminal_settlement", kinds.terminal_settlement),
+                ("work_retirement", kinds.work_retirement),
+                ("stage_settlement", kinds.stage_settlement),
+            ],
+        );
+        out.push_str(",\"exact_routes\":");
+        let routes = &self.net.exact_routes;
+        write_counters(
+            out,
+            &[
+                ("complete_searches", routes.complete_searches),
+                ("records_visited", routes.records_visited),
+                ("maximum_depth", routes.maximum_depth),
+                ("fast_handoffs", routes.fast_handoffs),
+                ("hazard_validations", routes.hazard_validations),
+                ("validated_frames", routes.validated_frames),
+                ("cold_fallbacks", routes.cold_fallbacks),
+            ],
+        );
         out.push_str(",\"heap\":");
         let Some(heap) = self.heap else {
             out.push_str("null}");

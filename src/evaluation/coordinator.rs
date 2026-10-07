@@ -694,6 +694,9 @@ struct WorkCoordinatorState {
     /// Narrow revision for mutations which can invalidate a retained exact
     /// producer route. This is not semantic state and is never exposed.
     exact_route_hazard_revision: u64,
+    /// Profiling: route frames that hazard validations walked.
+    #[cfg(any(test, feature = "glam-prof"))]
+    exact_route_validated_frames: std::sync::atomic::AtomicU64,
 }
 
 /// Factual source of one broad coordinator revision publication.
@@ -941,6 +944,7 @@ impl ExactRouteMutationProfile {
             hazard_validations: self.hazard_validations,
             successful_hazard_validations: self.successful_hazard_validations,
             failed_hazard_validations: self.failed_hazard_validations,
+            validated_frames: 0,
         }
     }
 }
@@ -1494,6 +1498,12 @@ impl EvaluationWorkCoordinator {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .snapshot();
+        snapshot.validated_frames = self
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .exact_route_validated_frames
+            .load(std::sync::atomic::Ordering::Relaxed);
         let route = self
             .exact_route_profile
             .lock()
@@ -3425,6 +3435,11 @@ fn validate_exact_route_locked(
         return Err(ExactRouteFallbackReason::RetiredWork);
     }
     let root = route.parents.first().map_or(current, |frame| frame.work);
+    #[cfg(any(test, feature = "glam-prof"))]
+    state.exact_route_validated_frames.fetch_add(
+        route.parents.len() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     match work_for_wait_locked(state, target) {
         None => return Err(ExactRouteFallbackReason::RetiredWork),
         Some(actual) if actual != root => {

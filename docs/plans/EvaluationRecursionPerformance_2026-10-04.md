@@ -58,7 +58,82 @@ Steps are referred to by name; see the plans README, "Step names".
 - **Countdown workloads** (`eval-recursion-workloads`). The countdown at a
   few depths is in `scripts/profile.sh` as `countdown_100` to
   `countdown_400`.
+- **Fix exact-route validation** (`eval-recursion-route-validation`):
+  proposed below, under "Findings".
+- **Tail-call forwarding** (`eval-recursion-tail-forwarding`): to
+  investigate below, under "Findings".
 - *Rechecked 2026-10-05:* an old worker stack overflow (the
   `direct_assembly_elf` sample exited with status 134 under `--workers 4` and
   `--workers 1`, before the collector and resumable WHNF) did not reproduce
   in 40 release runs with 1, 2, and 4 workers.
+
+## Findings 2026-10-07 (`eval-recursion-profile`)
+
+**Method.**
+- `perf` is unavailable in the dev container (`perf_event_paranoid` is 4),
+  so the profiler was Callgrind (Valgrind 3.24, installed with apt).
+- The binary was a release `glam-prof` build with
+  `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`.
+- Comparing countdown depths 100 and 200 separates linear cost from
+  superlinear cost. Total instructions were 1.75 G and 5.23 G.
+
+**Cause: exact-route hazard validation (hypothesis 1, confirmed).**
+- A client demand keeps an *exact route*: the chain of blocked producers
+  from its target to the runnable tip. The countdown's route grows by one
+  frame per recursion level.
+- Any coordinator mutation that might invalidate a retained route advances
+  one global `exact_route_hazard_revision`. The kinds are release, wake,
+  settlement and retirement. The next probe then calls
+  `validate_exact_route_locked`, which walks every frame of the route,
+  with several SipHash map lookups per frame.
+- Nearly all of the superlinear instructions are in that function and in
+  `work_for_wait_locked`, mostly SipHash.
+
+**Measured** with two new `glam-prof` counters:
+- `exact_routes.validated_frames`;
+- `coordinator_notify_all_by_kind`.
+
+| Depth | Total ms | Frames walked by validation |
+| ---: | ---: | ---: |
+| 100 | 595 | 2.35 M |
+| 200 | 1,514 | 8.88 M |
+| 400 | 4,686 | 34.55 M |
+
+The frames walked are about 235 × depth²: roughly 450 validations per
+level, each over the whole route.
+
+Per level, the countdown makes about:
+- 60 fresh work admissions;
+- 170 work releases;
+- 60 dependency wakes;
+- 60 work retirements.
+
+So most hazards touch short-lived work that is not on the route at all, or
+touch only its tip. Each one still costs a full-route validation.
+
+**Proposed fix** (`eval-recursion-route-validation`, *to discuss*):
+- **A bounded hazard log.** Each hazardous mutation logs the work items it
+  touched, or a global marker when it cannot name them.
+- **Frame indexes.** `route.members` maps each work to its frame index.
+- **Validation from the lowest touched frame.** A route checks only the
+  log entries since its last validation. It revalidates from its lowest
+  touched frame's parent link onward, and does nothing when no member was
+  touched. A route older than the log, or a global marker, falls back to
+  today's full validation.
+
+Validation then costs O(touched route frames) per probe, O(1) in the
+countdown, instead of O(depth). The risk is a mutation site that fails to
+name a work it changed. Unknown sites must log the global marker, and the
+existing exact-route tests guard the policy.
+
+**Also worth investigating** (`eval-recursion-tail-forwarding`): the
+countdown is a tail call, yet each level leaves its caller blocked on the
+callee, so the route and the live work grow linearly. Forwarding a caller's
+waiters to its tail callee would keep tail recursion at constant route
+depth. Non-tail recursion, such as `1 + count (n - 1)`, still needs the
+validation fix.
+
+**Constant factors.** The coordinator's id-keyed maps use SipHash, which
+dominates these profiles. A faster hasher is a cross-cutting
+`perf-structural-overheads` item.
+

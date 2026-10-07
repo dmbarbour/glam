@@ -153,6 +153,9 @@ pub struct ExactRouteMutationProfileSnapshot {
     pub hazard_validations: u64,
     pub successful_hazard_validations: u64,
     pub failed_hazard_validations: u64,
+    /// Route frames walked by hazard validations, at most one route length
+    /// per validation.
+    pub validated_frames: u64,
 }
 
 /// Calls made through the coordinator's shared work condition variable.
