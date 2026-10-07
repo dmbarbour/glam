@@ -13,7 +13,7 @@ use super::conditional::{
     parse_try_expression, parse_try_match_expression,
 };
 use super::declaration::{parse_nonempty_object_body, parse_object_body};
-use super::expression::{parse_expression_chain_view, syntax_operator};
+use super::expression::{ChainTail, parse_expression_chain_view, syntax_operator};
 use super::expression_context::{ExpressionContext, ParsedExpression, validate_expression_floor};
 use super::input::{TokenRange, TokenView};
 use super::layout::LayoutView;
@@ -96,17 +96,8 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
         parse_try_match_expression(view, try_match_index, context.may_yield())?
     } else if let Some(result) = parse_with(view, context) {
         result?
-    } else if let Some(if_index) = postfix_if_suffix(view) {
-        let body = trim_layout(view_between(view, view.range().start(), if_index));
-        if is_layout_empty(body) {
-            return Err(error_at_token(
-                view,
-                view.token_at(if_index)
-                    .expect("selected postfix `if` remains inside its expression view"),
-                "postfix `if` requires a successful result before its guards",
-            ));
-        }
-        parse_expression_extent(body, context.complete())?
+    } else if let Some(body) = parse_postfix_if_body(view, context)? {
+        body
     } else if let Some(where_index) = contextual_keywords(view, "where").into_iter().next() {
         let where_token = view
             .token_at(where_index)
@@ -569,6 +560,31 @@ fn next_resumption_boundary(
                     || token_is_name(token, "if")
             })
     })
+}
+
+/// The expression before a top-level postfix `if`, which
+/// `resume_expression_suffixes` then completes. `None` when there is no such
+/// `if`, or when the expression before it ends in an open lambda. An open
+/// lambda binds a maximal trailing expression, so its body takes the
+/// postfix `if`, and the expression parser reads the whole view.
+fn parse_postfix_if_body(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+) -> ParseResult<Option<ParsedExpression>> {
+    let Some(if_index) = postfix_if_suffix(view) else {
+        return Ok(None);
+    };
+    let body = trim_layout(view_between(view, view.range().start(), if_index));
+    if is_layout_empty(body) {
+        return Err(error_at_token(
+            view,
+            view.token_at(if_index)
+                .expect("selected postfix `if` remains inside its expression view"),
+            "postfix `if` requires a successful result before its guards",
+        ));
+    }
+    let parsed = parse_expression_extent(body, context.complete())?;
+    Ok((parsed.tail() != ChainTail::OpenLambda).then_some(parsed))
 }
 
 fn postfix_if_suffix(view: TokenView<'_, '_>) -> Option<usize> {

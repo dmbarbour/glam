@@ -39,8 +39,14 @@ lists() {
   for ((i = 0; i < depth; i++)); do open+='['; close+=']'; done
   printf 'language g0\nx = %s1%s\nasm.result = "ok"' "$open" "$close"
 }
+ifs() {
+  local depth=$1 open='' close=''
+  for ((i = 0; i < depth; i++)); do open+='(if c then '; close+=' else 0)'; done
+  printf 'language g0\nc = 1 == 1\nx = %s1%s\nasm.result = "ok"' "$open" "$close"
+}
 gen parse_parens_10 "$(parens 10)"
 gen parse_lists_16 "$(lists 16)"
+gen parse_ifs_10 "$(ifs 10)"
 
 countdown() {
   printf 'language g0\nloop n = if n == 0 then 0 else loop (n - 1)\nasm.result = if loop %s == 0 then "ok" else "bad"' "$1"
@@ -74,7 +80,7 @@ add() { names+=("$1"); confs+=("$2"); files+=("$3"); expects+=("$4"); }
 add hello_elf samples/config/direct_assembly.g \
   samples/executable/hello_x86_64_linux/hello.g $'\x7fELF'
 add hello_do '' samples/hello/hello_do.g 'Hello, World!'
-for name in minimal parse_parens_10 parse_lists_16 countdown_100 countdown_200 \
+for name in minimal parse_parens_10 parse_lists_16 parse_ifs_10 countdown_100 countdown_200 \
   countdown_400 list_map_1000 dict_lookup_1000; do
   add "$name" '' "$out/workloads/$name.g" ok
 done

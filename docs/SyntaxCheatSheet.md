@@ -84,6 +84,9 @@ foo.bar:Data        # path-tagged data: sugar for { foo.bar:Data }
 
 {}                  # empty dict; ALSO the 'undefined' value
 {foo:1, bar.baz:2}  # literal; paths ok; {foo:{}} ≡ {}
+{foo:f x}           # member value runs to the member's end: foo:(f x)
+{foo: 1, bar:       # a space or line break may follow a member's `:` ...
+    f x}            # ... but never precede it: {foo :x} applies foo to :x
 {:foo, :bar}        # entry puns: {foo:foo, bar:bar}
 { [0]:'a, [1,2]:'b, ([1] ++ [3,4]):'c } # computed paths
 { D1, D2 }          # union; ERROR if defined keys overlap
@@ -408,6 +411,9 @@ if C then A else B
 A if C else B
 if (a,b) = Expr and a > b then A else B     # C is guard: patterns + effects + 'and'
 value if (value, rest) = split input else fallback
+\x -> b if C else d                  # \x -> (b if C else d): an open lambda's
+                                     #   body takes the trailing postfix if
+(\x -> b) if C else d                # a conditional function
 # Postfix guards bind within the preceding success value, not the else branch.
 
 match Expr with

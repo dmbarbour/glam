@@ -33,6 +33,18 @@ pub(in crate::g_syntax::parser) struct InfixChain {
     first: SyntaxExpr,
     rest: Vec<(SyntaxOperator, SyntaxExpr)>,
     resumption_anchor: Option<usize>,
+    tail: ChainTail,
+}
+
+/// How a chain ends. An open lambda binds a maximal trailing expression, so
+/// a postfix `if` after a chain that ends in one belongs to the lambda's
+/// body: `\x -> b if c else d` is `\x -> (b if c else d)`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::g_syntax::parser) enum ChainTail {
+    #[default]
+    Closed,
+    /// The last operand is an ungrouped lambda, whose body runs to the end.
+    OpenLambda,
 }
 
 impl InfixChain {
@@ -41,7 +53,17 @@ impl InfixChain {
             first: expression,
             rest: Vec::new(),
             resumption_anchor: None,
+            tail: ChainTail::Closed,
         }
+    }
+
+    pub(in crate::g_syntax::parser) fn with_tail(mut self, tail: ChainTail) -> Self {
+        self.tail = tail;
+        self
+    }
+
+    pub(in crate::g_syntax::parser) fn tail(&self) -> ChainTail {
+        self.tail
     }
 
     /// Builds an unresolved chain from its operands, for the prefix-shared
@@ -54,6 +76,7 @@ impl InfixChain {
             first,
             rest,
             resumption_anchor: None,
+            tail: ChainTail::Closed,
         }
     }
 
@@ -77,6 +100,7 @@ impl InfixChain {
         }
         self.rest.push((operator, right.first));
         self.rest.append(&mut right.rest);
+        self.tail = right.tail;
         Ok(())
     }
 
@@ -409,14 +433,20 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
                     Box::new(SyntaxExpr::Name(name)),
                 )
             });
+        // A path member is `path:Expr` with the colon joint to its path; a
+        // space or line break may follow the colon, and the value runs to the
+        // member's end. Once that head is seen the member commits to it; any
+        // other member, such as `f :tag`, is an expression.
+        let path_member_head = data_path.clone().then(joint(symbol(":")));
         let dict_item = choice((
             dict_pun,
             data_path
                 .clone()
-                .then_ignore(padded(symbol(":")))
+                .then_ignore(joint(symbol(":")))
+                .then_ignore(layout_padding())
                 .then(resolved(expr.clone()))
                 .map(|(path, value)| SyntaxExpr::PathDict(path, Box::new(value))),
-            resolved(expr.clone()),
+            path_member_head.not().ignore_then(resolved(expr.clone())),
         ));
         let dict = open(Delimiter::Brace)
             .try_map(move |group, span| {
@@ -434,18 +464,17 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
             .then_ignore(close(Delimiter::Brace))
             .map(SyntaxExpr::DictUnion);
 
-        let infix_operator = infix_operator().boxed();
-        // A joint `:` after a name always makes a tag, so `(and:a)` is a
-        // grouped tag rather than a section of `and`.
+        // A joint `:` after a name always makes a tag, so neither `(and:a)`
+        // nor `x and:y` reads `and` as an operator, even when the tag's
+        // payload then fails.
         let named_tag_ahead = named_path
             .clone()
             .then(joint(symbol(":")))
             .then(joint(any()))
             .ignored();
+        let infix_operator = named_tag_ahead.not().ignore_then(infix_operator()).boxed();
         let prefix_operator_section = open(Delimiter::Parenthesis)
-            .ignore_then(padded(
-                named_tag_ahead.not().ignore_then(infix_operator.clone()),
-            ))
+            .ignore_then(padded(infix_operator.clone()))
             .then(resolved(expr.clone()))
             .then_ignore(layout_padding())
             .then_ignore(close(Delimiter::Parenthesis))
@@ -644,17 +673,25 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
                 .ignored()
                 .ignore_then(lambda.clone()),
         ));
+        // Each operand reports whether it ends in an ungrouped lambda.
         let application = application_head
             .then(tail_lambda_argument.or_not())
             .map(|(function, tail)| match tail {
-                Some(argument) => SyntaxExpr::Apply(Box::new(function), Box::new(argument)),
-                None => function,
+                Some(argument) => (
+                    SyntaxExpr::Apply(Box::new(function), Box::new(argument)),
+                    true,
+                ),
+                None => (function, false),
             })
             .boxed();
-        let tail_infix_operand = choice((lambda.clone(), application.clone())).boxed();
+        let tail_infix_operand = choice((
+            lambda.clone().map(|lambda| (lambda, true)),
+            application.clone(),
+        ))
+        .boxed();
 
         let ordinary = choice((
-            lambda.map(InfixChain::single),
+            lambda.map(|lambda| InfixChain::single(lambda).with_tail(ChainTail::OpenLambda)),
             application
                 .clone()
                 .then(
@@ -663,23 +700,35 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
                         .repeated()
                         .collect::<Vec<_>>(),
                 )
-                .try_map(move |(first, rest), span| {
+                .try_map(move |((first, mut open_lambda), rest), span| {
                     let mut chain = InfixChain::single(first);
-                    for ((operator, indentation), right) in rest {
+                    for ((operator, indentation), (right, right_open_lambda)) in rest {
                         if let Some(indentation) = indentation {
                             chain
                                 .accept_resumption_anchor(indentation, context)
                                 .map_err(|message| Rich::custom(span, message))?;
                         }
                         chain.rest.push((operator, right));
+                        open_lambda = right_open_lambda;
                     }
-                    Ok(chain)
+                    Ok(if open_lambda {
+                        chain.with_tail(ChainTail::OpenLambda)
+                    } else {
+                        chain
+                    })
                 }),
         ))
         .boxed();
 
+        // A postfix `if`, on the same line or a continuation line, takes the
+        // whole chain. Inside a lambda body this is the body's chain.
         ordinary
-            .then(postfix_if_tail(view, context).or_not())
+            .then(
+                line_start()
+                    .repeated()
+                    .ignore_then(postfix_if_tail(view, context))
+                    .or_not(),
+            )
             .try_map(|(left, postfix), span| {
                 let Some(mut postfix) = postfix else {
                     return Ok(left);
@@ -836,27 +885,20 @@ fn postfix_if_tail<'lex, 'source: 'lex>(
         let if_index = next_index
             .and_then(|next| next.checked_sub(1))
             .unwrap_or_else(|| view.range().end().saturating_sub(1));
-        if !is_postfix_if_candidate(view, if_index) {
-            return Err(Rich::custom(
-                input.span_since(&before),
-                "postfix `if` requires guards followed by `else`",
-            ));
-        }
-        let parsed = parse_postfix_if_suffix(view, if_index, context.may_yield(), SyntaxExpr::Unit)
-            .map_err(|diagnostics| {
-                let span = diagnostics
-                    .first()
-                    .and_then(|diagnostic| view.line_span(diagnostic.line))
-                    .unwrap_or_else(|| input.span_since(&before));
-                Rich::custom(
-                    span,
-                    diagnostics
-                        .into_iter()
-                        .map(|diagnostic| diagnostic.message)
-                        .collect::<Vec<_>>()
-                        .join("; "),
-                )
-            })?;
+        let parsed = parse_postfix_if_tail(view, if_index, context).map_err(|diagnostics| {
+            let span = diagnostics
+                .first()
+                .and_then(|diagnostic| view.line_span(diagnostic.line))
+                .unwrap_or_else(|| input.span_since(&before));
+            Rich::custom(
+                span,
+                diagnostics
+                    .into_iter()
+                    .map(|diagnostic| diagnostic.message)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        })?;
         let end = parsed.end();
         for _ in if_index + 1..end {
             if input.next().is_none() {
@@ -876,11 +918,69 @@ fn postfix_if_tail<'lex, 'source: 'lex>(
     }))
 }
 
-type StructuralAtomParser = for<'lex, 'source> fn(
-    TokenView<'lex, 'source>,
-    usize,
-    ExpressionContext,
-) -> Result<ParsedExpression, Vec<Diagnostic>>;
+/// Parses the postfix `if` at `if_index` with a placeholder result, which the
+/// caller replaces with the expression before it. Both expression parsers
+/// delegate the postfix tail here.
+pub(in crate::g_syntax::parser) fn parse_postfix_if_tail(
+    view: TokenView<'_, '_>,
+    if_index: usize,
+    context: ExpressionContext,
+) -> Result<ParsedExpression, Vec<Diagnostic>> {
+    if !is_postfix_if_candidate(view, if_index) {
+        let line = view
+            .token_at(if_index)
+            .and_then(|token| view.line_at_span(token.span()))
+            .unwrap_or(1);
+        return Err(vec![Diagnostic::error(
+            line,
+            "postfix `if` requires guards followed by `else`",
+        )]);
+    }
+    parse_postfix_if_suffix(view, if_index, context.may_yield(), SyntaxExpr::Unit)
+}
+
+pub(in crate::g_syntax::parser) type StructuralAtomParser =
+    for<'lex, 'source> fn(
+        TokenView<'lex, 'source>,
+        usize,
+        ExpressionContext,
+    ) -> Result<ParsedExpression, Vec<Diagnostic>>;
+
+/// The structural parser for a keyword that heads an expression atom.
+pub(in crate::g_syntax::parser) fn structural_atom_parser(
+    keyword: &str,
+) -> Option<StructuralAtomParser> {
+    Some(match keyword {
+        "if" => parse_if_expression,
+        "match" => parse_match_expression,
+        "try" => parse_try_expression,
+        "try_match" => parse_try_match_expression,
+        "using" => parse_using_expression,
+        "do" => parse_do_expression,
+        _ => return None,
+    })
+}
+
+/// Parses the keyword form headed at `head_index` over its group member,
+/// with a physical floor at the head's line. Both expression parsers
+/// delegate keyword forms here.
+pub(in crate::g_syntax::parser) fn parse_structural_atom(
+    view: TokenView<'_, '_>,
+    head_index: usize,
+    context: ExpressionContext,
+    parse: StructuralAtomParser,
+) -> Result<ParsedExpression, Vec<Diagnostic>> {
+    let structural_context = view
+        .line_indentation_at(head_index)
+        .map_or(context, |indentation| {
+            context.with_physical_line_floor(indentation)
+        });
+    parse(
+        structural_view_at(view, head_index),
+        head_index,
+        structural_context.may_yield(),
+    )
+}
 
 /// Consumes a structural expression according to the exact end reported by
 /// its token-range parser.
@@ -905,14 +1005,8 @@ fn structural_atom_after_head<'lex, 'source: 'lex>(
         let head_index = next_index
             .and_then(|next| next.checked_sub(1))
             .unwrap_or_else(|| view.range().end().saturating_sub(1));
-        let structural_context = view
-            .line_indentation_at(head_index)
-            .map_or(context, |indentation| {
-                context.with_physical_line_floor(indentation)
-            });
-        let structural_view = structural_view_at(view, head_index);
-        let parsed = parse(structural_view, head_index, structural_context.may_yield()).map_err(
-            |diagnostics| {
+        let parsed =
+            parse_structural_atom(view, head_index, context, parse).map_err(|diagnostics| {
                 let span = diagnostics
                     .first()
                     .and_then(|diagnostic| view.line_span(diagnostic.line))
@@ -925,8 +1019,7 @@ fn structural_atom_after_head<'lex, 'source: 'lex>(
                         .collect::<Vec<_>>()
                         .join("; "),
                 )
-            },
-        )?;
+            })?;
         let end = parsed.end();
         for _ in head_index + 1..end {
             if input.next().is_none() {
@@ -1150,6 +1243,7 @@ pub(in crate::g_syntax::parser) fn parse_expression_chain_view(
         Err(super::term::Fail::Error { at, message }) => {
             Err(vec![super::term::diagnostic(view, at, message)])
         }
+        Err(super::term::Fail::Reported(diagnostics)) => Err(diagnostics),
         Err(super::term::Fail::Unsupported(_)) => parse_grammar_chain_view(view, context),
     }
 }
@@ -1235,7 +1329,7 @@ pub(in crate::g_syntax::parser) mod term_oracle {
                 let old = parse_grammar_chain_view(view, context);
                 let agree = match (new, &old) {
                     (Ok(new), Ok(old)) => new == old,
-                    (Err(Fail::Error { .. }), Err(_)) => true,
+                    (Err(Fail::Error { .. } | Fail::Reported(_)), Err(_)) => true,
                     _ => false,
                 };
                 assert!(
@@ -1264,7 +1358,7 @@ pub(in crate::g_syntax::parser) mod term_oracle {
                     report.accepted += 1;
                     new == old
                 }
-                (Err(Fail::Error { .. }), Err(_)) => true,
+                (Err(Fail::Error { .. } | Fail::Reported(_)), Err(_)) => true,
                 _ => false,
             };
             report.compared += 1;

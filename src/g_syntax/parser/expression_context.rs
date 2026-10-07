@@ -150,6 +150,10 @@ impl ParsedExpression {
         self.expression.single_expression()
     }
 
+    pub(super) fn tail(&self) -> super::expression::ChainTail {
+        self.expression.tail()
+    }
+
     pub(super) fn into_chain(self) -> InfixChain {
         self.expression
     }

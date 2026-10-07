@@ -223,6 +223,55 @@ const SNIPPETS: &[&str] = &[
     "(and:a)",
     "(and:1)",
     "(and:a 'a []and)",
+    // Keyword forms, delegated to the structural parsers.
+    "if c then a else b",
+    "f if c then a else b",
+    "a if c else b",
+    "f x if c else b",
+    "a + b if c else d",
+    "(a if c else b)",
+    "[a if c else b]",
+    "[if c then a else b, 1]",
+    "(\\a -> b) if c else d",
+    "\\a -> (b if c else d)",
+    "\\a -> b if c else d",
+    "x + \\a -> b if c else d",
+    "f \\a -> b if c else d",
+    "[\\a -> b if c else d]",
+    "a if c else b + 1",
+    "a\n  if c else b",
+    "f x\n  if c else b",
+    "\\a -> b\n  if c else d",
+    "[a\n  if c else b]",
+    "\\a -> \\b -> c if p else q",
+    "a if",
+    "do { .r 1 }",
+    "f do { .r 1 }",
+    "do { .r 1 }.x",
+    "match y with { z => z }",
+    "match y with\n  z => z\n  _ => 1",
+    "[match y with { z => z }, 1]",
+    "(1, match y with { z => z })",
+    "using d in x",
+    "abstract_global_path foo.bar",
+    "abstract_global_path module.foo",
+    "abstract_global_path module",
+    "abstract_global_path foo.[1]",
+    "abstract_global_path\n  foo",
+    "f abstract_global_path foo",
+    "if:()",
+    "if:x.y",
+    "[[] if:a] :a",
+    "f if:a",
+    "f {fx.y :if}",
+    "{a :b}",
+    "_p and:and",
+    "x and:y",
+    "x.if",
+    "'if",
+    ".if",
+    "then",
+    "a then b",
     "1 2",
     "\"s\".x",
     "[1, 2].len",
@@ -413,7 +462,8 @@ impl Generator {
     fn soup(&mut self, depth: usize, out: &mut String) {
         const TOKENS: &[&str] = &[
             "a", "b", "f", "1", "\"s\"", "_p", "'", ":", ".", "^", "\\", "->", ",", "+", "*", "-",
-            "==", "and", "|>", "'a", ":a", ".e", "^a", "x.y", "a:b",
+            "==", "and", "|>", "'a", ":a", ".e", "^a", "x.y", "a:b", "if", "then", "else", "match",
+            "with", "do", "=>", ";",
         ];
         for index in 0..1 + self.below(5) {
             if index > 0 {
@@ -463,7 +513,7 @@ impl Generator {
             return;
         }
         let depth = depth + 1;
-        match self.below(16) {
+        match self.below(19) {
             0 => out.push_str(self.pick(&["a", "b", "f", "x.y", "_p", "^a", "^^a.b"])),
             1 => out.push_str(self.pick(&["1", "2.5", "\"s\"", "'a", "'.a.b", ":a", ":a.b"])),
             2 => out.push_str("()"),
@@ -517,7 +567,7 @@ impl Generator {
                         1 => self.expression(depth, out),
                         _ => {
                             out.push_str(self.pick(&["a", "a.b", "[k]", "(k)", "['k, j]"]));
-                            out.push_str(self.pick(&[": ", ":", " : ", ":\n  "]));
+                            out.push_str(self.pick(&[":", ":", ":", ": ", " :", ":\n  "]));
                             self.expression(depth, out);
                         }
                     }
@@ -537,9 +587,40 @@ impl Generator {
                 self.expression(depth, out);
                 out.push(')');
             }
-            _ => {
+            15 => {
                 out.push_str("(.e");
                 out.push_str(self.pick(&[")", " x)", ".f)"]));
+            }
+            16 => {
+                out.push_str("(if ");
+                self.expression(depth, out);
+                out.push_str(" then ");
+                self.expression(depth, out);
+                out.push_str(self.pick(&[" else ", "\n  else "]));
+                self.expression(depth, out);
+                out.push(')');
+            }
+            17 => {
+                out.push('(');
+                self.application(depth, out);
+                out.push_str(" if ");
+                self.expression(depth, out);
+                out.push_str(" else ");
+                self.expression(depth, out);
+                out.push(')');
+            }
+            _ => {
+                let grouped = self.chance(2);
+                out.push_str(if grouped { "(match " } else { "match " });
+                self.atom(depth, out);
+                out.push_str(" with { z => ");
+                self.expression(depth, out);
+                out.push_str("; _ => ");
+                self.atom(depth, out);
+                out.push_str("; }");
+                if grouped {
+                    out.push(')');
+                }
             }
         }
     }

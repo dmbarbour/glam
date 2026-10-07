@@ -1266,6 +1266,38 @@ mod tests {
     }
 
     #[test]
+    fn an_open_lambda_body_takes_a_postfix_if() {
+        fn innermost_body(mut expr: &SyntaxExpr) -> &SyntaxExpr {
+            loop {
+                expr = match expr {
+                    SyntaxExpr::Lambda(_, body) => return body,
+                    SyntaxExpr::Apply(_, argument) => argument,
+                    SyntaxExpr::OperatorApply { right, .. } => right,
+                    SyntaxExpr::Add(_, right) => right,
+                    SyntaxExpr::List(items) => items.last().expect("a lambda item"),
+                    other => panic!("no lambda in {other:?}"),
+                };
+            }
+        }
+        for source in [
+            "\\a -> b if c else d",
+            "\\a -> b\n  if c else d",
+            "x + \\a -> b if c else d",
+            "f \\a -> b if c else d",
+            "[\\a -> b if c else d]",
+        ] {
+            assert!(
+                matches!(innermost_body(&parse(source)), SyntaxExpr::If(_)),
+                "`{source}` should put the postfix `if` in the lambda body"
+            );
+        }
+        assert!(matches!(
+            parse("(\\a -> b) if c else d"),
+            SyntaxExpr::If(if_expr) if matches!(if_expr.then_result.as_ref(), SyntaxExpr::Lambda(..))
+        ));
+    }
+
+    #[test]
     fn a_match_owns_its_with_inside_a_lambda_or_a_tuple() {
         for source in [
             "\\w -> match w with { z => w }",

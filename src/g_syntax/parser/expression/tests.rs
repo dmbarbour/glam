@@ -285,6 +285,39 @@ fn key_path_items_are_ordinary_expressions() {
 }
 
 #[test]
+fn dict_path_member_colons_are_joint_to_their_paths() {
+    assert_eq!(
+        parse_expression_fragment(b"{a:f x}").unwrap(),
+        SyntaxExpr::DictUnion(vec![SyntaxExpr::PathDict(
+            vec![SyntaxKeyExpr::Atom("a".to_owned())],
+            Box::new(SyntaxExpr::Apply(
+                Box::new(SyntaxExpr::Name("f".to_owned())),
+                Box::new(SyntaxExpr::Name("x".to_owned())),
+            )),
+        )])
+    );
+    // A space may follow the colon, never precede it.
+    assert_eq!(
+        parse_expression_fragment(b"{a: 1}").unwrap(),
+        parse_expression_fragment(b"{a:\n  1}").unwrap(),
+    );
+    // Colon joint to the name instead: an expression member applying `f`
+    // to a constructor.
+    assert_eq!(
+        parse_expression_fragment(b"{f :tag}").unwrap(),
+        SyntaxExpr::DictUnion(vec![SyntaxExpr::Apply(
+            Box::new(SyntaxExpr::Name("f".to_owned())),
+            Box::new(SyntaxExpr::TaggedConstructor(vec![SyntaxKeyExpr::Atom(
+                "tag".to_owned()
+            )])),
+        )])
+    );
+    for source in ["{a : 1}", "{a\n  :1}", "{a\n  : 1}", "{a:}"] {
+        assert_rejects(source);
+    }
+}
+
+#[test]
 fn a_joint_colon_after_an_operator_name_makes_a_tag() {
     assert_eq!(
         parse_expression_fragment(b"(and:a)").unwrap(),

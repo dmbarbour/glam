@@ -354,6 +354,72 @@ test-only so far.
     - flatter trees, such as an application holding an argument list, or
       n-ary chains of associative operators.
 
+## Production switch (2026-10-07)
+
+**Step A, `eb84587c`.** `parse_expression_chain_view` parses every
+expression view with the term parser first. The Chumsky grammar parses only
+the views the term parser reports as unsupported. While a test enables the
+oracle, it still parses each covered view with the grammar and compares.
+
+Term parser errors carry the token where parsing stopped:
+- Diagnostics report that token's line.
+- Messages say what was expected and what was found.
+- A misaligned leading operator is reported at the operator.
+- A space after `.` or `:` gets a message naming the missing adjacency.
+
+Three invalid-sample expectations changed with the wording.
+
+Measured in a release `glam-prof` build:
+
+| Workload | Baseline 2026-10-06 | After step A |
+| --- | --- | --- |
+| `parse_parens_10` | 470.9 ms | 36.6 ms |
+| `parse_lists_16` | 708.9 ms | 37.5 ms |
+| `minimal` | 36.7 ms | 36.8 ms |
+
+**Step B: keyword forms in the term parser.**
+- **Delegation.** Keyword heads (`if`, `match`, `try`, `try_match`, `do`,
+  `using`) go to the structural parsers through `parse_structural_atom`,
+  and postfix `if` goes through `parse_postfix_if_tail`. The Chumsky
+  adapters call the same functions. The cursor then skips to the end the
+  structural parser reports.
+- **`abstract_global_path`** is parsed directly.
+- **Deferred group errors.** A group's error surfaces only if a role
+  consumes it (`parse-errors-surface-on-use`), so a keyword form's own
+  groups raise nothing.
+- **Rules settled along the way:**
+  - `lambda-body-takes-postfix-if`, through `ChainTail`;
+  - `dict-member-colon-joint-to-path`;
+  - the tag lookahead of `joint-colon-makes-a-tag`, now applied to every
+    infix operator.
+- **Chumsky's remaining role:**
+  - views with invalid tokens or keyword lambda parameters, which are
+    errors or rare;
+  - the oracle.
+
+  Slice 5 retires the grammar.
+- **Oracle**, under the final rules:
+  - samples: 1,155 expressions compared, nested keyword-form bodies
+    included;
+  - a 20× generated run, with keyword forms in both generators: 215,614
+    soup cases and 332,342 grammar-directed expressions;
+  - the sweep over all 1,894 library tests.
+
+  None disagree. The only unsupported case left is a keyword lambda
+  parameter.
+- **Measured** in a release `glam-prof` build:
+  - `parse_ifs_10`, a new workload of `(if c then … else 0)` nested ten
+    deep, parses in 2.7 ms and runs 41.8 ms in total, against 35.9 ms for
+    `minimal`. The survey measured ×3 growth per level for this shape under
+    the grammar.
+  - Parsing in `hello_elf` fell from 3.2 ms to 1.7 ms.
+- **Remaining superlinear costs:**
+  - a keyword form nested inside groups re-parses its text once per level;
+  - `structural_view_at` scans every group in the source for each keyword
+    atom (cause 3).
+
+  Slice 4's frames remove both.
+
 ## Verification
 
 - The differential oracle above, while both parsers exist.

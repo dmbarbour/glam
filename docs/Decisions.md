@@ -227,8 +227,12 @@ maps the short names used here to file names.
 - **Decision:** a name followed by a joint `:` and a joint payload is always
   a tag, the operator names `and` and `or` included. Sections are spelled
   `(and x)`, `(x and)` or `(and)`.
-- **Consequences:** a paren's first token decides its form without a trial
-  parse, and both expression parsers agree.
+- **Consequences:**
+  - A paren's first token decides its form without a trial parse, and both
+    expression parsers agree.
+  - The grammar applies the tag lookahead to every infix operator. So
+    `x and:y` is a tag argument even when the payload is invalid, as in
+    `x and:and`, instead of backtracking to the operator (2026-10-07).
 - **Rule lives in:** `SyntaxCheatSheet.md` "Atoms, Tagged Data, Dicts".
 - **Recorded in:** parser backtracking plan, "Progress 2026-10-06".
 
@@ -267,6 +271,59 @@ maps the short names used here to file names.
   key as an index by that atom.
 - **Rule lives in:** `SyntaxCheatSheet.md` "Atoms, Tagged Data, Dicts".
 - **Recorded in:** parser backtracking plan, "Progress 2026-10-06".
+
+### An open lambda's body takes a trailing postfix `if`
+`lambda-body-takes-postfix-if` · 2026-10-07 · maintainer · accepted
+- **Context:** `\a -> b if c else d` read as `(\a -> b) if c else d` at the
+  top of a definition, because the structural layer split the postfix off
+  first. Inside a list it read as `\a -> (b if c else d)`. Forcing grouping
+  was considered and rejected.
+- **Decision:** an open lambda binds a maximal trailing expression, so a
+  postfix `if` after it belongs to its body, whether on the same line or a
+  continuation line: `\a -> b if c else d` is `\a -> (b if c else d)`.
+  Write `(\a -> b) if c else d` for a conditional function.
+- **Consequences:**
+  - The parsed chain records whether it ends in an open lambda
+    (`ChainTail`). When it does, the structural layer no longer splits the
+    postfix `if` off and leaves the whole view to the expression parser.
+  - Both expression parsers accept a postfix `if` on a continuation line,
+    as the structural layer already did at the top of a view.
+- **Rule lives in:** `SyntaxCheatSheet.md` "Conditionals & Patterns".
+- **Recorded in:** parser backtracking plan, "Production switch".
+
+### A dict path member's colon is joint to its path
+`dict-member-colon-joint-to-path` · 2026-10-07 · maintainer · accepted
+- **Context:** the grammar's dict member accepted spaces and line breaks on
+  either side of the colon, because its colon parser never checked
+  adjacency. So `{f :tag}` read as `{f: tag}`, and `{f :if}` reached the
+  expression `f (:if)` only by backtracking.
+- **Decision:**
+  - In braces, a path member is `path:Expr` with the colon joint to its
+    path.
+  - A space or line break may follow the colon, so multi-line literals
+    need no grouping: `{a: 1}` and `{key:⏎ value}` are path members.
+  - The value runs to the member's end.
+  - Any other member is an expression. So `{f :tag}` applies `f` to the
+    constructor `:tag`, and `{a : 1}` is an error.
+  - Outside braces, a tag stays joint on both sides.
+- **Consequences:** both expression parsers commit once they see a path
+  followed by a joint colon, with no trial. A strictly joint rule, which
+  would have required grouping multi-line values, was considered and
+  rejected for multi-line aesthetics.
+- **Rule lives in:** `SyntaxCheatSheet.md` "Atoms, Tagged Data, Dicts".
+- **Recorded in:** parser backtracking plan, "Production switch".
+
+### Group errors surface only when the group is used
+`parse-errors-surface-on-use` · 2026-10-07 · maintainer · accepted
+- **Context:** the prefix-shared term parser interprets each delimiter group
+  once, before knowing its role. A keyword form's own groups, such as a
+  `do` or `match` body, are not expression groups.
+- **Decision:** a group whose contents fail as an expression keeps its
+  error in its cover. The error surfaces only if a role consumes the group,
+  much as macros respect group boundaries so only observed errors matter.
+- **Consequences:** a keyword form's groups raise nothing when the form is
+  delegated. Eager parsing remains in the bootstrap's structural parsers.
+- **Recorded in:** parser backtracking plan, "Production switch".
 
 ### `map` and `list.concat` are structural and non-forcing
 `structural-lazy-map-and-concat` · 2026-09-17 · maintainer · accepted
