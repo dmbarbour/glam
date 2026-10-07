@@ -1,44 +1,33 @@
-//! Hash maps for keys the runtime allocates itself.
+//! Hash maps for keys the collector derives from its own allocations and
+//! types.
 //!
-//! Node, port, copy, fan-site, work, wait, session and task identities come
-//! from runtime counters, so a Glam program cannot choose them to provoke
+//! Heap and chunk addresses, metadata pointers and type ids never come from
+//! data a collector client stores, so nobody can choose them to provoke
 //! collisions. These maps use a minimal integer hasher instead of the
 //! standard library's SipHash. It has no collision resistance, which is
 //! acceptable only for such keys.
 //!
-//! **The key type is checked.** `TrustedState<K>` requires `K: TrustedKey`,
-//! so a trusted map keyed by anything else does not compile. Every
-//! `TrustedKey` implementation lives in this file with its reason, so adding
-//! one is the point where the claim is reviewed. Keys that a Glam program can
-//! influence, such as dictionary keys and names, keep the standard
-//! `RandomState`.
+//! `TrustedState<K>` requires `K: TrustedKey`, and every `TrustedKey`
+//! implementation lives in this file with its reason, so adding a key type is
+//! a reviewed change. The `glam` crate keeps the same design for its runtime
+//! ids in its own `trusted_hash` module.
 
-use std::collections::{HashMap, HashSet};
+use std::any::TypeId;
+use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::marker::PhantomData;
 
-/// An identity the runtime allocates itself, from a counter or an
-/// allocation, which a Glam program cannot choose. Only these may key a
-/// trusted map.
+/// A key derived from the collector's own allocations or types.
 pub(crate) trait TrustedKey: Hash + Eq {}
 
-// Runtime counters, one per id space; never derived from program data.
-impl TrustedKey for crate::evaluation::EvaluationWorkId {}
-impl TrustedKey for crate::evaluation::EvaluationTaskId {}
-impl TrustedKey for crate::evaluation::EvaluationSessionId {}
-// Hashes its wait state's counter id.
-impl TrustedKey for crate::evaluation::EvaluationWaitToken {}
-// The managed lazy or promise cell's runtime id.
-impl TrustedKey for crate::core::DeferredValueId {}
-// Interaction-net node, port, copy and fan-site counters.
-impl TrustedKey for crate::interaction_net::NodeId {}
-impl TrustedKey for crate::interaction_net::Port {}
-impl TrustedKey for crate::interaction_net::CopyId {}
-impl TrustedKey for crate::interaction_net::FanSite {}
-// Counter ids of external owners, effect tokens and captured continuations.
-impl TrustedKey for crate::core::ExternalOwnerKey {}
-impl TrustedKey for crate::api::EffectTokenKey {}
-impl TrustedKey for crate::reflection::ContinuationKey {}
+// The address of a heap's shared state.
+impl TrustedKey for crate::thread_cache::HeapCacheKey {}
+// The aligned base address of an arena chunk.
+impl TrustedKey for crate::arena::ChunkBase {}
+// Compiler-assigned type identities of managed types.
+impl TrustedKey for TypeId {}
+// The address of a type's static metadata.
+impl TrustedKey for crate::class::MetadataIdentity {}
 
 /// The hasher state for one trusted key type.
 pub(crate) struct TrustedState<K: TrustedKey>(PhantomData<fn(&K)>);
@@ -72,14 +61,12 @@ impl<K: TrustedKey> BuildHasher for TrustedState<K> {
 }
 
 pub(crate) type TrustedHashMap<K, V> = HashMap<K, V, TrustedState<K>>;
-pub(crate) type TrustedHashSet<K> = HashSet<K, TrustedState<K>>;
 
 /// One widening multiply per integer written, folded, then one rotation.
 ///
 /// Folding the product's high half into its low half carries every key bit
-/// into the low bits that `hashbrown` uses to pick a bucket. Strided keys
-/// therefore spread as well as consecutive counters do; a plain multiply
-/// would leave their low bits constant.
+/// into the low bits that `hashbrown` uses to pick a bucket, so aligned
+/// addresses spread as well as counters do.
 #[derive(Debug, Default)]
 pub(crate) struct IdHasher(u64);
 
@@ -150,6 +137,8 @@ impl Hasher for IdHasher {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     fn hash(value: u64) -> u64 {
@@ -158,18 +147,14 @@ mod tests {
         hasher.finish()
     }
 
-    /// Distinct low 12-bit buckets among 4,096 keys. Uniform hashing fills
-    /// about 63% of them (1 - 1/e).
-    fn low_bucket_spread(keys: impl Iterator<Item = u64>) -> usize {
-        keys.map(|key| hash(key) & 0xfff)
-            .collect::<HashSet<_>>()
-            .len()
-    }
-
     #[test]
-    fn counters_and_strided_keys_spread_across_buckets() {
-        for stride_bits in [0, 3, 6, 12, 20, 30] {
-            let spread = low_bucket_spread((1..=4096).map(|key| key << stride_bits));
+    fn aligned_addresses_spread_across_buckets() {
+        // Uniform hashing fills about 63% of 4,096 buckets with 4,096 keys.
+        for stride_bits in [3, 6, 12, 20, 30] {
+            let spread = (1..=4096)
+                .map(|key| hash(key << stride_bits) & 0xfff)
+                .collect::<HashSet<_>>()
+                .len();
             assert!(
                 spread > 2_400,
                 "keys strided by 2^{stride_bits} fill {spread} of 4096 buckets"
@@ -177,12 +162,13 @@ mod tests {
         }
     }
 
-    /// Every trusted key is declared in this file, where the claim that a
-    /// program cannot choose it is reviewed.
+    /// Every trusted key is declared in this file, where the claim that no
+    /// client chooses it is reviewed.
     #[test]
     fn trusted_keys_are_declared_only_here() {
         let mut pending = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
-        let this_file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file!());
+        let this_file =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/trusted_hash.rs");
         while let Some(directory) = pending.pop() {
             for entry in std::fs::read_dir(&directory).expect("source directories are readable") {
                 let path = entry.expect("source entries are readable").path();
@@ -195,17 +181,11 @@ mod tests {
                     assert!(
                         !source.contains("TrustedKey for"),
                         "{} declares a trusted key; declare it in src/trusted_hash.rs \
-                         with the reason a program cannot choose it",
+                         with the reason no client chooses it",
                         path.display()
                     );
                 }
             }
         }
-    }
-
-    #[test]
-    fn hashing_is_deterministic() {
-        assert_eq!(hash(42), hash(42));
-        assert_ne!(hash(1), hash(2));
     }
 }

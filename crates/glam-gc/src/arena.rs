@@ -1,7 +1,8 @@
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 #[cfg(test)]
 use std::cell::Cell;
-use std::collections::HashMap;
+
+use crate::trusted_hash::TrustedHashMap;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -64,10 +65,14 @@ impl RunAddress {
     }
 }
 
+/// The aligned base address of an arena chunk, as a trusted map key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ChunkBase(usize);
+
 #[derive(Default)]
 pub(crate) struct Arena {
     chunks: Vec<ArenaChunk>,
-    chunk_indices: HashMap<usize, usize>,
+    chunk_indices: TrustedHashMap<ChunkBase, usize>,
     #[cfg(test)]
     indexed_lookup_count: Cell<usize>,
 }
@@ -710,7 +715,7 @@ impl Arena {
 
     fn publish_chunk(&mut self, candidate: ArenaChunk) -> Result<usize, ArenaError> {
         let base = candidate.range().start;
-        if self.chunk_indices.contains_key(&base) {
+        if self.chunk_indices.contains_key(&ChunkBase(base)) {
             return Err(ArenaError::AddressOverlap);
         }
 
@@ -728,7 +733,7 @@ impl Arena {
 
         let index = self.chunks.len();
         self.chunks.push(candidate);
-        let prior = self.chunk_indices.insert(base, index);
+        let prior = self.chunk_indices.insert(ChunkBase(base), index);
         debug_assert!(prior.is_none());
         debug_assert_eq!(self.chunks.len(), self.chunk_indices.len());
         Ok(index)
@@ -740,7 +745,7 @@ impl Arena {
             .set(self.indexed_lookup_count.get() + 1);
 
         let base = address & !(ARENA_CHUNK_SIZE - 1);
-        let index = *self.chunk_indices.get(&base)?;
+        let index = *self.chunk_indices.get(&ChunkBase(base))?;
         let chunk = self.chunks.get(index)?;
         debug_assert_eq!(chunk.range().start, base);
         chunk.range().contains(address).then_some((index, chunk))

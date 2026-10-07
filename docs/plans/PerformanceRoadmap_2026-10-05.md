@@ -184,10 +184,17 @@ gains this consequence when it lands.
      - Measured times: `hello_elf` went from 3,029 to 2,743 ms, and
        `list_map_1000` from 802 to 674 ms.
      - Keys a program can influence keep `RandomState`.
-     - **Left:** the collector crate's own maps cost about 7% of the
-       countdown's instructions: its thread-local heap cache and its type
-       and class metadata lookups. The crate has no runtime dependencies, so
-       the fix there awaits a maintainer choice.
+     - **The collector crate** keeps its own private copy, so it gains no
+       dependency and exports no hasher. It covers the thread-local heap
+       cache, arena chunk lookup, the type-metadata registry, and classes by
+       metadata. Its cold finalization maps keep SipHash.
+     - **Both hashers end with `rotate_left(26)`.** Folding alone left
+       2^20-aligned keys clustered in the low bucket bits. With the
+       rotation, every tested stride fills buckets at least as evenly as
+       uniform hashing.
+     - Countdown 100 now runs 454 M instructions, and `hello_elf` takes
+       2,646 ms.
+
 6. **Representations**, two parallel steps:
    - **Values** (`perf-value-representation`):
      [Value Representation Refinement](ValueRepresentationRefinement_2026-08-19.md),

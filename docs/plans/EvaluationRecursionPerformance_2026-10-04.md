@@ -263,3 +263,31 @@ constant route depth.
    `InlineForcing` marker, spill on suspension or contention, and cycle
    detection without routes.
 
+### Implementation plan for `eval-recursion-inline-private-lazies`
+
+Approved with the mechanism above (maintainer, 2026-10-07).
+- **Privacy.** A saturated application in the WHNF reducer
+  (`apply_whnf_function`, `apply_whnf_builtin`) creates a fresh
+  function-call or builtin lazy and makes it the focus. The reducer flags
+  that focus as private until the focus changes. Its deferred boundary then
+  carries `Lazy { root, private: true }`. Nothing else references such a
+  lazy: only the forcer's own WHNF state, and later its checkpoint.
+- **Interception.** `interpret_poll` maps a private lazy boundary to a new
+  "inline" outcome instead of reserving the lazy's route.
+- **Inline stack.** The route machine (`LazyTaskMachine`) keeps an explicit
+  stack of inline lazies above the claimed one. It polls the top lazy's
+  family checkpoint with the shared budget:
+  - when the top lazy completes, it is cached, popped, and its parent is
+    re-polled, finding the value cached;
+  - a private boundary from the top pushes again.
+- **Spill.** If any inline lazy suspends, the claimed lazy reserves the route
+  of the first inline lazy and blocks on it. Suspension covers budget
+  exhaustion, a real wait, and a non-private lazy. Every inline lazy's
+  progress already lives in its own checkpoint, so the state is exactly
+  today's, and later polls rebuild the chain through the normal path.
+- **Panics.** A drop guard marks inline lazies `Panicked` if a poll unwinds
+  through them.
+- **Cycles.** A private lazy cannot be reached by anyone but its forcer, so
+  it cannot close a cycle on its own. A cycle through a shared lazy spills
+  and is detected by routes as today.
+

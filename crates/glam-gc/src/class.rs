@@ -1,6 +1,6 @@
+use crate::trusted_hash::TrustedHashMap;
 use std::alloc::Layout;
 use std::any::{TypeId, type_name};
-use std::collections::HashMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
@@ -462,9 +462,10 @@ fn metadata_for_with<T: Trace>(
     metadata
 }
 
-fn metadata_registry() -> &'static Mutex<HashMap<TypeId, &'static ObjectMetadata>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<TypeId, &'static ObjectMetadata>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+fn metadata_registry() -> &'static Mutex<TrustedHashMap<TypeId, &'static ObjectMetadata>> {
+    static REGISTRY: OnceLock<Mutex<TrustedHashMap<TypeId, &'static ObjectMetadata>>> =
+        OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(TrustedHashMap::default()))
 }
 
 unsafe fn trace_erased<T: Trace>(pointer: NonNull<()>, visitor: &mut Visitor<'_>) {

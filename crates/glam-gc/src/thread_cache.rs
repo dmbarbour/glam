@@ -1,5 +1,5 @@
+use crate::trusted_hash::TrustedHashMap;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -208,7 +208,7 @@ impl ThreadHeapState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct HeapCacheKey(usize);
+pub(crate) struct HeapCacheKey(usize);
 
 impl HeapCacheKey {
     fn new(heap: &Arc<HeapInner>) -> Self {
@@ -219,8 +219,8 @@ impl HeapCacheKey {
 type SharedThreadHeapState = Rc<RefCell<ThreadHeapState>>;
 
 thread_local! {
-    static THREAD_HEAPS: RefCell<HashMap<HeapCacheKey, SharedThreadHeapState>> =
-        RefCell::new(HashMap::new());
+    static THREAD_HEAPS: RefCell<TrustedHashMap<HeapCacheKey, SharedThreadHeapState>> =
+        RefCell::new(TrustedHashMap::default());
 }
 
 /// A hash-free handle from one active mutator region to its thread cache.

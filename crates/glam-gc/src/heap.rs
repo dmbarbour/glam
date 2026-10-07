@@ -915,7 +915,7 @@ impl HeapInner {
 #[derive(Default)]
 struct ManagedData {
     arena: Arena,
-    classes_by_metadata: HashMap<MetadataIdentity, AllocationClassId>,
+    classes_by_metadata: crate::trusted_hash::TrustedHashMap<MetadataIdentity, AllocationClassId>,
     classes: Vec<AllocationClassEntry>,
     retired_no_drop_runs: Vec<RetiredNoDropRun>,
     finalization_batch: FinalizationBatch,

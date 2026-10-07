@@ -47,6 +47,7 @@ mod run;
 mod thread_cache;
 #[expect(unsafe_code, reason = "reviewed trace boundary")]
 mod trace;
+mod trusted_hash;
 
 #[cfg(feature = "deterministic-test-hooks")]
 mod deterministic;
