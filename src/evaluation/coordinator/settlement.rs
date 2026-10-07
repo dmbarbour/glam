@@ -13,10 +13,11 @@ use super::{
     CausalBackgroundProbe, ClientDemandRetirement, CompletionWake, CoordinatorMutationKind,
     EvaluationExitBlock, EvaluationSessionId, EvaluationTaskId, EvaluationTaskMachine,
     EvaluationTaskStatus, EvaluationWaitTerminal, EvaluationWaitToken, EvaluationWorkCoordinator,
-    EvaluationWorkId, ExitIntent, ProducerSettlementObligation, TaskOwnedPromiseObligation,
-    TaskStatusPublisher, TaskStatusUpdate, TaskStatusWake, WorkCoordinatorState, WorkDependency,
-    WorkKind, WorkRecord, WorkState, causal_background_probe_locked, task_block, task_for_record,
-    task_observation_epoch, terminal_task_status, work_dependency,
+    EvaluationWorkId, ExitIntent, ProducerSettlementObligation, RouteHazard,
+    TaskOwnedPromiseObligation, TaskStatusPublisher, TaskStatusUpdate, TaskStatusWake,
+    WorkCoordinatorState, WorkDependency, WorkKind, WorkRecord, WorkState,
+    causal_background_probe_locked, task_block, task_for_record, task_observation_epoch,
+    terminal_task_status, work_dependency,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -509,7 +510,10 @@ impl EvaluationWorkCoordinator {
                 });
             }
             if !selected.is_empty() || !client_demands.is_empty() {
-                state.advance_work_generation(CoordinatorMutationKind::StageSettlement);
+                state.advance_work_generation(
+                    CoordinatorMutationKind::StageSettlement,
+                    RouteHazard::All,
+                );
             }
             (selected, client_demands)
         };
@@ -582,7 +586,10 @@ impl EvaluationWorkCoordinator {
                 })
                 .collect::<Vec<_>>();
             if !selected.is_empty() {
-                state.advance_work_generation(CoordinatorMutationKind::StageSettlement);
+                state.advance_work_generation(
+                    CoordinatorMutationKind::StageSettlement,
+                    RouteHazard::All,
+                );
             }
             let blocks = selected
                 .iter_mut()

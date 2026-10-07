@@ -7,8 +7,8 @@ use crate::core::PromiseId;
 use crate::runtime::{EvaluationRuntimeId, RuntimeMutationAuthority};
 
 use super::{
-    CoordinatorMutationKind, EvaluationWorkCoordinator, EvaluationWorkId, WorkDependency,
-    queue_current_registration,
+    CoordinatorMutationKind, EvaluationWorkCoordinator, EvaluationWorkId, RouteHazard,
+    WorkDependency, queue_current_registration,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -299,14 +299,21 @@ impl EvaluationWorkCoordinator {
             .state
             .lock()
             .expect("evaluation work coordinator was poisoned");
-        let mut changed = false;
-        for registration in batch.registrations {
-            changed |= queue_current_registration(&mut state, registration, Some(batch.source));
+        let woken = batch
+            .registrations
+            .into_iter()
+            .filter(|registration| {
+                queue_current_registration(&mut state, *registration, Some(batch.source))
+            })
+            .map(|registration| registration.work)
+            .collect::<Vec<_>>();
+        if !woken.is_empty() {
+            state.advance_work_generation(
+                CoordinatorMutationKind::DependencyWake,
+                RouteHazard::Works(&woken),
+            );
         }
-        if changed {
-            state.advance_work_generation(CoordinatorMutationKind::DependencyWake);
-        }
-        changed
+        !woken.is_empty()
     }
 
     pub(super) fn notify_dependency_wake(&self, changed: bool) {

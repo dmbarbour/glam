@@ -59,7 +59,7 @@ Steps are referred to by name; see the plans README, "Step names".
   few depths is in `scripts/profile.sh` as `countdown_100` to
   `countdown_400`.
 - **Fix exact-route validation** (`eval-recursion-route-validation`):
-  proposed below, under "Findings".
+  *done 2026-10-07*; see "Route validation fix" below.
 - **Tail-call forwarding** (`eval-recursion-tail-forwarding`): to
   investigate below, under "Findings".
 - *Rechecked 2026-10-05:* an old worker stack overflow (the
@@ -136,4 +136,50 @@ validation fix.
 **Constant factors.** The coordinator's id-keyed maps use SipHash, which
 dominates these profiles. A faster hasher is a cross-cutting
 `perf-structural-overheads` item.
+
+## Route validation fix 2026-10-07 (`eval-recursion-route-validation`)
+
+Approved by the maintainer as proposed.
+- **The single boundary takes a hazard.** `advance_work_generation` takes
+  a `RouteHazard`:
+  - `None` for kinds that cannot affect a route;
+  - `Works(&[…])` naming the works whose route-visible state changed (state,
+    subscription epoch, dependency, or a wait-index entry mapping to them);
+  - `All` when a site cannot name them.
+
+  A debug assertion checks that kind and hazard agree.
+- **The hazard log.** Each named work, or `All`, advances the hazard revision
+  by one and enters a log of the last 4,096 hazards.
+- **Frame depths.** A route's `members` maps each work to its frame depth.
+  Depths are stable because the route grows and shrinks only at its tip.
+- **Validation** keeps its O(1) checks of the tip and the target's root.
+  Then it checks frames only from the parent link of the lowest touched
+  member, and nothing when no member was touched. A route older than the
+  log, or an `All` hazard, validates in full as before.
+- **Sites naming their works**, which are the countdown's hot ones:
+  - deferred, lazy-route, reflection and spark releases: the released work
+    plus any lazy cycle it terminalized;
+  - their retirements: the retired work;
+  - dependency wakes: the woken registrations.
+- **Sites left as `All`:** cancellation, session closure, terminal and
+  stage settlement, task-promise index retirement, and observation wakes.
+  None occurs per recursion level.
+
+**Result**, in a release `glam-prof` build:
+
+| Depth | Before | After | Frames validated after |
+| ---: | ---: | ---: | ---: |
+| 100 | 595 ms | 392 ms | 6,788 |
+| 200 | 1,514 ms | 723 ms | 12,788 |
+| 400 | 4,686 ms | 1,362 ms | 24,788 |
+
+Time per level is now flat at about 3.2 ms. The remaining cost is ordinary
+per-reduction overhead: about 290 reductions per level, at about 11 µs
+each. That belongs to `perf-structural-overheads` and the representation
+steps.
+
+**Regression test:**
+`api::tests::exact_route_validation_stays_linear_in_recursion_depth`, in
+the gate's profiling fixtures. It fails, at 243 k against 859 k frames,
+when validation is forced to start from the root.
 

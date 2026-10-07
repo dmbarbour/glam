@@ -303,11 +303,53 @@ fn runtime_profile_counts_evaluation_and_writes_json() {
         "\"net_reductions\":{",
         "\"net_driver\":{",
         "\"coordinator\":{",
+        "\"coordinator_notify_all_by_kind\":{",
+        "\"exact_routes\":{",
         "\"heap\":{",
     ] {
         assert!(json.contains(group), "missing {group} in {json}");
     }
     assert!(json.ends_with("}}"));
+}
+
+/// A countdown's exact route grows one frame per recursion level, and nearly
+/// every evaluation step raises a route hazard. Validation used to walk the
+/// whole route after each hazard, so its cost grew with the square of the
+/// depth. It now starts at the lowest frame a hazard touched.
+#[cfg(feature = "glam-prof")]
+#[test]
+fn exact_route_validation_stays_linear_in_recursion_depth() {
+    let validated_frames = |depth: u32| {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let assembler = Assembler::builder()
+            .evaluation_runtime(runtime.clone())
+            .build()
+            .expect("assembler should build");
+        let source = format!(
+            "language g0\nloop n = if n == 0 then 0 else loop (n - 1)\nanswer = loop {depth}\n"
+        );
+        let module = assembler
+            .module(["countdown"])
+            .script("g", &source)
+            .build()
+            .expect("module should build");
+        let answer =
+            access_path(&assembler, module.value(), "answer").expect("answer should exist");
+        assembler
+            .evaluator()
+            .eval(&answer)
+            .expect("answer should evaluate");
+        runtime.profile().net.exact_routes.validated_frames
+    };
+    let shallow = validated_frames(30);
+    let deep = validated_frames(60);
+    assert!(shallow > 0, "the countdown should validate its exact route");
+    // Twice the depth costs about twice the frames; a whole-route walk per
+    // hazard costs four times as many.
+    assert!(
+        deep < shallow * 3,
+        "validated {shallow} frames at depth 30 but {deep} at depth 60"
+    );
 }
 
 #[test]

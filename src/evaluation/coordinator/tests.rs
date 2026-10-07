@@ -78,8 +78,8 @@ fn trusted_work_id_set_is_deterministic_and_identity_exact() {
 fn exact_release_classification_is_non_overlapping() {
     let work = EvaluationWorkId(NonZeroU64::new(1).expect("one is nonzero"));
     let route = |current, generation| {
-        let mut members = TrustedWorkIdSet::default();
-        members.insert(current);
+        let mut members = TrustedWorkIdMap::default();
+        members.insert(current, 0);
         ExactDemandRoute {
             current: Some(current),
             members,
@@ -118,11 +118,14 @@ fn scheduler_and_exact_route_revisions_wrap_independently() {
         ..WorkCoordinatorState::default()
     };
 
-    state.advance_work_generation(CoordinatorMutationKind::FreshWorkAdmission);
+    state.advance_work_generation(
+        CoordinatorMutationKind::FreshWorkAdmission,
+        RouteHazard::None,
+    );
     assert_eq!(state.work_generation, 0);
     assert_eq!(state.exact_route_hazard_revision, u64::MAX);
 
-    state.advance_work_generation(CoordinatorMutationKind::ObservationWake);
+    state.advance_work_generation(CoordinatorMutationKind::ObservationWake, RouteHazard::All);
     assert_eq!(state.work_generation, 1);
     assert_eq!(state.exact_route_hazard_revision, 0);
 }
@@ -398,7 +401,8 @@ impl EvaluationWorkCoordinator {
                 },
             )
             .expect("the synthetic task block should retain its dependency");
-            state.advance_work_generation(CoordinatorMutationKind::TestTransition);
+            state
+                .advance_work_generation(CoordinatorMutationKind::TestTransition, RouteHazard::All);
             exact
         };
         assert!(dependency.same_source(&source.dependency()));
@@ -476,7 +480,8 @@ impl EvaluationWorkCoordinator {
                 work: claimed.id,
                 subscription_epoch: record.subscription_epoch,
             };
-            state.advance_work_generation(CoordinatorMutationKind::TestTransition);
+            state
+                .advance_work_generation(CoordinatorMutationKind::TestTransition, RouteHazard::All);
             (registration, obsolete_dependency)
         };
 
@@ -3010,7 +3015,12 @@ fn every_suppressed_publication_preserves_the_shared_wait_protocol() {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            state.advance_work_generation(kind);
+            let hazard = if kind.affects_exact_route() {
+                RouteHazard::All
+            } else {
+                RouteHazard::None
+            };
+            state.advance_work_generation(kind, hazard);
         }
         coordinator.notify_all(kind);
         let after_suppressed = coordinator.coordinator_notification_profile();
@@ -3025,7 +3035,8 @@ fn every_suppressed_publication_preserves_the_shared_wait_protocol() {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            state.advance_work_generation(CoordinatorMutationKind::TestTransition);
+            state
+                .advance_work_generation(CoordinatorMutationKind::TestTransition, RouteHazard::All);
         }
         coordinator.notify_all(CoordinatorMutationKind::TestTransition);
         waiter

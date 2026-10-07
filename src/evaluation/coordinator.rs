@@ -139,6 +139,26 @@ impl Hasher for TrustedWorkIdHasher {
 }
 
 type TrustedWorkIdSet = HashSet<EvaluationWorkId, BuildHasherDefault<TrustedWorkIdHasher>>;
+type TrustedWorkIdMap<V> = HashMap<EvaluationWorkId, V, BuildHasherDefault<TrustedWorkIdHasher>>;
+
+/// What a published coordinator mutation can have changed in a retained
+/// exact route.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum RouteHazard<'a> {
+    /// The mutation's kind cannot affect a retained route.
+    None,
+    /// These works' route-visible state changed: their state, subscription
+    /// epoch or dependency, or a wait-index entry that maps to them. A route
+    /// revalidates only from its lowest touched frame.
+    Works(&'a [EvaluationWorkId]),
+    /// The mutation cannot name what it changed; every route revalidates in
+    /// full.
+    All,
+}
+
+/// Route hazards retained for incremental validation. A route whose last
+/// validation predates the oldest retained hazard validates in full.
+const EXACT_ROUTE_HAZARD_LOG_CAPACITY: usize = 4096;
 
 #[cfg(test)]
 pub(crate) fn test_wake_registration() -> WakeRegistration {
@@ -692,8 +712,12 @@ struct WorkCoordinatorState {
     /// Broad scheduler/readiness revision observed by host wait loops.
     work_generation: u64,
     /// Narrow revision for mutations which can invalidate a retained exact
-    /// producer route. This is not semantic state and is never exposed.
+    /// producer route. This is not semantic state and is never exposed. Each
+    /// entry of `exact_route_hazards` advances it by one.
     exact_route_hazard_revision: u64,
+    /// The most recent route hazards, oldest first: a touched work, or `None`
+    /// for a mutation that touched every route.
+    exact_route_hazards: VecDeque<Option<EvaluationWorkId>>,
     /// Profiling: route frames that hazard validations walked.
     #[cfg(any(test, feature = "glam-prof"))]
     exact_route_validated_frames: std::sync::atomic::AtomicU64,
@@ -783,11 +807,55 @@ impl WorkCoordinatorState {
     /// Keep every production revision advance behind this boundary so each
     /// one is classified by a `CoordinatorMutationKind` as coordinator paths
     /// are added or reorganized.
-    fn advance_work_generation(&mut self, kind: CoordinatorMutationKind) {
+    ///
+    /// A route-affecting kind names what it changed, so retained exact routes
+    /// revalidate only from their lowest touched frame; every other kind
+    /// passes `RouteHazard::None`.
+    fn advance_work_generation(&mut self, kind: CoordinatorMutationKind, hazard: RouteHazard<'_>) {
+        debug_assert_eq!(
+            kind.affects_exact_route(),
+            !matches!(hazard, RouteHazard::None),
+            "{kind:?} must name its exact-route hazard exactly when it can affect a route"
+        );
         self.work_generation = self.work_generation.wrapping_add(1);
-        if kind.affects_exact_route() {
-            self.exact_route_hazard_revision = self.exact_route_hazard_revision.wrapping_add(1);
+        match hazard {
+            RouteHazard::None => {}
+            RouteHazard::Works(works) => {
+                for work in works {
+                    self.record_exact_route_hazard(Some(*work));
+                }
+            }
+            RouteHazard::All => self.record_exact_route_hazard(None),
         }
+    }
+
+    fn record_exact_route_hazard(&mut self, work: Option<EvaluationWorkId>) {
+        if self.exact_route_hazards.len() == EXACT_ROUTE_HAZARD_LOG_CAPACITY {
+            self.exact_route_hazards.pop_front();
+        }
+        self.exact_route_hazards.push_back(work);
+        self.exact_route_hazard_revision = self.exact_route_hazard_revision.wrapping_add(1);
+    }
+
+    /// The lowest frame of `route` that a hazard since `validated` may have
+    /// changed, or `None` when no hazard touched a member. Frame `i` is
+    /// `route.parents[i]`, and the current tip is frame `parents.len()`.
+    fn exact_route_hazard_start(&self, route: &ExactDemandRoute, validated: u64) -> Option<usize> {
+        let since = usize::try_from(self.exact_route_hazard_revision.wrapping_sub(validated))
+            .unwrap_or(usize::MAX);
+        if since > self.exact_route_hazards.len() {
+            return Some(0);
+        }
+        let mut lowest = None;
+        for hazard in self.exact_route_hazards.iter().rev().take(since) {
+            let Some(work) = hazard else {
+                return Some(0);
+            };
+            if let Some(depth) = route.members.get(work) {
+                lowest = Some(lowest.map_or(*depth, |lowest: usize| lowest.min(*depth)));
+            }
+        }
+        lowest
     }
 }
 
@@ -1011,7 +1079,10 @@ pub(crate) struct ExactDemandRoute {
     target: Option<(EvaluationRuntimeId, u64)>,
     current: Option<EvaluationWorkId>,
     parents: Vec<ExactDemandRouteFrame>,
-    members: TrustedWorkIdSet,
+    /// Every frame's work with its depth: `parents[depth]`, or the current
+    /// tip at depth `parents.len()`. Depths are stable because the route
+    /// only grows and shrinks at its tip.
+    members: TrustedWorkIdMap<usize>,
     /// Last scheduler revision observed while the route was reconciled.
     generation: Option<u64>,
     /// Last exact-route hazard revision proved by fast acceptance or guarded
@@ -1061,6 +1132,19 @@ impl ExactDemandRoute {
         self.invalidate(ExactRouteFallbackReason::MissingRelease);
     }
 
+    /// Records the current tip's producer, which becomes the new tip once
+    /// the tip's frame is pushed. False when it is already a member: a
+    /// cycle.
+    fn admit_producer(&mut self, producer: EvaluationWorkId) -> bool {
+        match self.members.entry(producer) {
+            std::collections::hash_map::Entry::Occupied(_) => false,
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(self.parents.len() + 1);
+                true
+            }
+        }
+    }
+
     fn apply_validated_release(&mut self, release: ExactRouteRelease) {
         match release.disposition {
             ExactRouteDisposition::Runnable | ExactRouteDisposition::Busy => {}
@@ -1069,7 +1153,7 @@ impl ExactDemandRoute {
                 dependency,
                 producer: Some(producer),
             } => {
-                if !self.members.insert(producer) {
+                if !self.admit_producer(producer) {
                     self.generation = Some(release.end_generation);
                     self.hazard_revision = Some(release.end_hazard_revision);
                     return;
@@ -1844,7 +1928,10 @@ impl EvaluationWorkCoordinator {
             }
             changed |= prune_closed_session_registration(&mut state, session);
             if changed {
-                state.advance_work_generation(CoordinatorMutationKind::SessionClosure);
+                state.advance_work_generation(
+                    CoordinatorMutationKind::SessionClosure,
+                    RouteHazard::All,
+                );
             }
             (
                 reflection,
@@ -1909,7 +1996,10 @@ impl EvaluationWorkCoordinator {
                     retired.push(record);
                 }
             }
-            state.advance_work_generation(CoordinatorMutationKind::ExecutorAvailability);
+            state.advance_work_generation(
+                CoordinatorMutationKind::ExecutorAvailability,
+                RouteHazard::None,
+            );
             retired
         };
         drop(mutation);
@@ -1969,7 +2059,8 @@ impl EvaluationWorkCoordinator {
             let initial_generation = state.work_generation;
             let selection = claim_causal_background(&mut state, self.runtime, true);
             if !matches!(selection, CoordinatorSelection::None) {
-                state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
+                state
+                    .advance_work_generation(CoordinatorMutationKind::WorkClaim, RouteHazard::None);
             }
             (selection, state.work_generation != initial_generation)
         };
@@ -1995,7 +2086,8 @@ impl EvaluationWorkCoordinator {
             let initial_generation = state.work_generation;
             let selection = claim_causal_background(&mut state, self.runtime, false);
             if !matches!(selection, CoordinatorSelection::None) {
-                state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
+                state
+                    .advance_work_generation(CoordinatorMutationKind::WorkClaim, RouteHazard::None);
             }
             (selection, state.work_generation != initial_generation)
         };
@@ -2067,7 +2159,7 @@ impl EvaluationWorkCoordinator {
                 }
             };
             queue_task(&mut state, id);
-            state.advance_work_generation(CoordinatorMutationKind::WorkRequeue);
+            state.advance_work_generation(CoordinatorMutationKind::WorkRequeue, RouteHazard::None);
         }
         drop(mutation);
         self.notify_all(CoordinatorMutationKind::WorkRequeue);
@@ -2089,7 +2181,8 @@ impl EvaluationWorkCoordinator {
                 .expect("evaluation work coordinator was poisoned");
             let selection = claim_causal_session_background(&mut state, self.runtime, session);
             if !matches!(selection, CoordinatorSelection::None) {
-                state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
+                state
+                    .advance_work_generation(CoordinatorMutationKind::WorkClaim, RouteHazard::None);
             }
             match selection {
                 CoordinatorSelection::Task(claimed) => Some(claimed),
@@ -2123,7 +2216,8 @@ impl EvaluationWorkCoordinator {
                 .expect("evaluation work coordinator was poisoned");
             let claimed = claim_ready_task(&mut state, self.runtime, Some(session));
             if claimed.is_some() {
-                state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
+                state
+                    .advance_work_generation(CoordinatorMutationKind::WorkClaim, RouteHazard::None);
             }
             claimed
         };
@@ -2148,7 +2242,8 @@ impl EvaluationWorkCoordinator {
                 .expect("evaluation work coordinator was poisoned");
             let claimed = claim_ready_task(&mut state, self.runtime, None);
             if claimed.is_some() {
-                state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
+                state
+                    .advance_work_generation(CoordinatorMutationKind::WorkClaim, RouteHazard::None);
             }
             claimed
         };
@@ -2183,7 +2278,7 @@ impl EvaluationWorkCoordinator {
                 WorkKind::LazyRoute(_) => None,
                 WorkKind::Spark(_) => None,
             }?;
-            state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
+            state.advance_work_generation(CoordinatorMutationKind::WorkClaim, RouteHazard::None);
             Some(work)
         };
         drop(mutation);
@@ -2201,7 +2296,7 @@ impl EvaluationWorkCoordinator {
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
             let work = claim_task_work_locked(&mut state, self.runtime, id, false)?;
-            state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
+            state.advance_work_generation(CoordinatorMutationKind::WorkClaim, RouteHazard::None);
             Some(work)
         };
         drop(mutation);
@@ -2257,7 +2352,10 @@ impl EvaluationWorkCoordinator {
                     }
                     match claim_task_work_locked(&mut state, self.runtime, id, false) {
                         Some(claimed) => {
-                            state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
+                            state.advance_work_generation(
+                                CoordinatorMutationKind::WorkClaim,
+                                RouteHazard::None,
+                            );
                             route.current = Some(id);
                             route.generation = Some(state.work_generation);
                             route.hazard_revision = Some(state.exact_route_hazard_revision);
@@ -2435,7 +2533,10 @@ impl EvaluationWorkCoordinator {
                     CausalChildProbe::Ready(id) => {
                         let claimed = claim_task_work_locked(&mut state, self.runtime, id, false);
                         if let Some(claimed) = claimed {
-                            state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
+                            state.advance_work_generation(
+                                CoordinatorMutationKind::WorkClaim,
+                                RouteHazard::None,
+                            );
                             break CausalChildSelection::Claimed(claimed);
                         } else {
                             // A demand session can close independently of this
@@ -2578,7 +2679,10 @@ impl EvaluationWorkCoordinator {
                 state.promise_by_wait.insert(wait, work).is_none(),
                 "evaluation wait tokens must be unique"
             );
-            state.advance_work_generation(CoordinatorMutationKind::TaskPromiseIndexAdmission);
+            state.advance_work_generation(
+                CoordinatorMutationKind::TaskPromiseIndexAdmission,
+                RouteHazard::None,
+            );
             producer
         };
         drop(mutation);
@@ -2610,7 +2714,10 @@ impl EvaluationWorkCoordinator {
             .expect("promise wait index must agree with its producer obligation");
         debug_assert_eq!(obligation.promise, promise);
         assert_eq!(state.promise_by_wait.remove(wait), Some(work));
-        state.advance_work_generation(CoordinatorMutationKind::TaskPromiseIndexRetirement);
+        state.advance_work_generation(
+            CoordinatorMutationKind::TaskPromiseIndexRetirement,
+            RouteHazard::All,
+        );
         drop(state);
         Some(obligation.root)
     }
@@ -2691,7 +2798,10 @@ impl EvaluationWorkCoordinator {
             if let Some((owner, task, failure)) = failure {
                 insert_task_failure(&mut state.failures, owner, task, failure.clone());
                 insert_task_failure(&mut state.pending_failure_reports, owner, task, failure);
-                state.advance_work_generation(CoordinatorMutationKind::FailureLedger);
+                state.advance_work_generation(
+                    CoordinatorMutationKind::FailureLedger,
+                    RouteHazard::None,
+                );
             }
             (producer, status_update, promises)
         };
@@ -3000,7 +3110,10 @@ impl EvaluationWorkCoordinator {
             changed |= queue_current_observation(&mut state, registration, epoch);
         }
         if changed {
-            state.advance_work_generation(CoordinatorMutationKind::ObservationWake);
+            state.advance_work_generation(
+                CoordinatorMutationKind::ObservationWake,
+                RouteHazard::All,
+            );
         }
         changed
     }
@@ -3026,7 +3139,10 @@ impl EvaluationWorkCoordinator {
         };
         let changed = queue_current_observation(&mut state, registration, current_epoch);
         if changed {
-            state.advance_work_generation(CoordinatorMutationKind::ObservationWake);
+            state.advance_work_generation(
+                CoordinatorMutationKind::ObservationWake,
+                RouteHazard::All,
+            );
         }
         changed
     }
@@ -3043,7 +3159,7 @@ impl EvaluationWorkCoordinator {
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
             transition(&mut state);
-            state.advance_work_generation(kind);
+            state.advance_work_generation(kind, RouteHazard::None);
         }
         drop(mutation);
         self.notify_all(kind);
@@ -3336,7 +3452,7 @@ fn rebuild_exact_route_locked(
         };
     };
     route.current = Some(root);
-    route.members.insert(root);
+    route.members.insert(root, 0);
     let mut current = root;
     let mut depth = 0;
     loop {
@@ -3384,7 +3500,7 @@ fn rebuild_exact_route_locked(
                         depth,
                     };
                 };
-                if !route.members.insert(producer) {
+                if !route.admit_producer(producer) {
                     return ExactProducerProbe {
                         selection: CausalBackgroundProbe::None,
                         depth,
@@ -3435,11 +3551,6 @@ fn validate_exact_route_locked(
         return Err(ExactRouteFallbackReason::RetiredWork);
     }
     let root = route.parents.first().map_or(current, |frame| frame.work);
-    #[cfg(any(test, feature = "glam-prof"))]
-    state.exact_route_validated_frames.fetch_add(
-        route.parents.len() as u64,
-        std::sync::atomic::Ordering::Relaxed,
-    );
     match work_for_wait_locked(state, target) {
         None => return Err(ExactRouteFallbackReason::RetiredWork),
         Some(actual) if actual != root => {
@@ -3447,7 +3558,22 @@ fn validate_exact_route_locked(
         }
         Some(_) => {}
     }
-    for (index, frame) in route.parents.iter().enumerate() {
+    // Frames above the lowest touched member are unchanged since the route
+    // was last validated. A touched member at depth `d` can change its own
+    // frame and the link into it from frame `d - 1`.
+    let start = match route.hazard_revision {
+        Some(validated) => match state.exact_route_hazard_start(route, validated) {
+            Some(depth) => depth.saturating_sub(1),
+            None => return Ok(0),
+        },
+        None => 0,
+    };
+    #[cfg(any(test, feature = "glam-prof"))]
+    state.exact_route_validated_frames.fetch_add(
+        route.parents.len().saturating_sub(start) as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    for (index, frame) in route.parents.iter().enumerate().skip(start) {
         let Some(record) = state.work.get(&frame.work) else {
             return Err(ExactRouteFallbackReason::RetiredWork);
         };
@@ -3563,7 +3689,7 @@ fn continue_exact_route_locked(
                         handoffs,
                     );
                 };
-                if !route.members.insert(producer) {
+                if !route.admit_producer(producer) {
                     return (
                         ExactProducerProbe {
                             selection: CausalBackgroundProbe::None,

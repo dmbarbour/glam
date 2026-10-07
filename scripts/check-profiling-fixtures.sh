@@ -10,6 +10,7 @@ cd "$root"
 tests=(
   api::tests::interaction_net_profiles_are_runtime_local
   api::tests::runtime_profile_counts_evaluation_and_writes_json
+  api::tests::exact_route_validation_stays_linear_in_recursion_depth
   profiling::tests::counters_write_as_one_flat_json_object
   profiling::tests::phases_accumulate_time_and_count_collections
   core_net::tests::profiling_classifies_each_committed_rule_family_exactly_once

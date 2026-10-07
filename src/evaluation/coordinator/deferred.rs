@@ -12,7 +12,7 @@ use super::task::LazyRouteDemandLease;
 use super::{
     ClaimedDemandSession, CoordinatorMutationKind, EvaluationTaskId, EvaluationTaskMachine,
     EvaluationWaitToken, EvaluationWorkCoordinator, EvaluationWorkId, ExactRouteRelease,
-    ExactRouteReleaseTracker, SettlementObligations, WorkCloseReason, WorkControl,
+    ExactRouteReleaseTracker, RouteHazard, SettlementObligations, WorkCloseReason, WorkControl,
     WorkCoordinatorState, WorkDependency, WorkKind, WorkRecord, WorkState,
     demand_session_is_closed, prune_closed_session_registration, publish_task_block_locked,
     queue_task, remove_ready_task,
@@ -84,7 +84,15 @@ impl EvaluationWorkCoordinator {
             if cycle_terminal {
                 exact_subscription = None;
             }
-            state.advance_work_generation(CoordinatorMutationKind::WorkRelease);
+            // The release changes only the claimed work and any lazy cycle it
+            // terminalized.
+            let touched = std::iter::once(claimed.id)
+                .chain(cycle.iter().map(|member| member.work))
+                .collect::<Vec<_>>();
+            state.advance_work_generation(
+                CoordinatorMutationKind::WorkRelease,
+                RouteHazard::Works(&touched),
+            );
             route_tracker.changed(true);
             (
                 DeferredWorkRelease {
@@ -146,7 +154,10 @@ impl EvaluationWorkCoordinator {
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
             let retired = detach_lazy_route(&mut state, id);
-            state.advance_work_generation(CoordinatorMutationKind::WorkRetirement);
+            state.advance_work_generation(
+                CoordinatorMutationKind::WorkRetirement,
+                RouteHazard::Works(std::slice::from_ref(&id)),
+            );
             retired
         };
         drop(mutation);
@@ -183,7 +194,10 @@ impl EvaluationWorkCoordinator {
                 return;
             }
             let retired = detach_lazy_route(&mut state, id);
-            state.advance_work_generation(CoordinatorMutationKind::WorkRetirement);
+            state.advance_work_generation(
+                CoordinatorMutationKind::WorkRetirement,
+                RouteHazard::Works(std::slice::from_ref(&id)),
+            );
             Some(retired)
         };
         drop(mutation);
@@ -258,7 +272,10 @@ impl EvaluationWorkCoordinator {
                 assert!(state.work.insert(id, record).is_none());
                 assert!(state.deferred.by_wait.insert(wait.clone(), id).is_none());
                 assert!(state.deferred.by_value.insert(value, id).is_none());
-                state.advance_work_generation(CoordinatorMutationKind::FreshWorkAdmission);
+                state.advance_work_generation(
+                    CoordinatorMutationKind::FreshWorkAdmission,
+                    RouteHazard::None,
+                );
                 (id, wait.clone(), true, true)
             }
         };
@@ -332,7 +349,10 @@ impl EvaluationWorkCoordinator {
                     .entry(session.id)
                     .or_default()
                     .insert(id);
-                state.advance_work_generation(CoordinatorMutationKind::FreshWorkAdmission);
+                state.advance_work_generation(
+                    CoordinatorMutationKind::FreshWorkAdmission,
+                    RouteHazard::None,
+                );
                 DeferredWorkReservation::New
             }
         };
@@ -413,7 +433,10 @@ impl EvaluationWorkCoordinator {
             .expect("evaluation work coordinator was poisoned");
         let promoted = promote_deferred_wait_locked(&mut state, wait);
         if promoted {
-            state.advance_work_generation(CoordinatorMutationKind::DependencyPromotion);
+            state.advance_work_generation(
+                CoordinatorMutationKind::DependencyPromotion,
+                RouteHazard::None,
+            );
         }
         promoted
     }
@@ -521,7 +544,15 @@ impl EvaluationWorkCoordinator {
             } else {
                 None
             };
-            state.advance_work_generation(CoordinatorMutationKind::WorkRelease);
+            // The release changes only the claimed work and any lazy cycle it
+            // terminalized.
+            let touched = std::iter::once(claimed.id)
+                .chain(cycle.iter().map(|member| member.work))
+                .collect::<Vec<_>>();
+            state.advance_work_generation(
+                CoordinatorMutationKind::WorkRelease,
+                RouteHazard::Works(&touched),
+            );
             route_tracker.changed(true);
             (
                 DeferredWorkRelease {
@@ -585,7 +616,10 @@ impl EvaluationWorkCoordinator {
                 .expect("terminal deferred work must remain registered");
             assert!(matches!(record.state, WorkState::Terminalizing));
             detach_deferred(&mut state, id);
-            state.advance_work_generation(CoordinatorMutationKind::WorkRetirement);
+            state.advance_work_generation(
+                CoordinatorMutationKind::WorkRetirement,
+                RouteHazard::Works(std::slice::from_ref(&id)),
+            );
         }
         drop(mutation);
         self.notify_all(CoordinatorMutationKind::WorkRetirement);
@@ -610,7 +644,7 @@ impl EvaluationWorkCoordinator {
                 return None;
             }
             let abandoned = begin_deferred_abandonment(&mut state, id);
-            state.advance_work_generation(CoordinatorMutationKind::Cancellation);
+            state.advance_work_generation(CoordinatorMutationKind::Cancellation, RouteHazard::All);
             abandoned
         };
         drop(mutation);
@@ -687,7 +721,7 @@ impl EvaluationWorkCoordinator {
             }
             record.state = WorkState::Dormant;
             remove_ready_deferred(&mut state, id);
-            state.advance_work_generation(CoordinatorMutationKind::WorkPark);
+            state.advance_work_generation(CoordinatorMutationKind::WorkPark, RouteHazard::All);
             true
         };
         drop(mutation);

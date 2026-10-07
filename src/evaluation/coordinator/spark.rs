@@ -10,9 +10,9 @@ use crate::runtime::RuntimeValueRoot;
 use super::super::EvaluationDemandState;
 use super::{
     ClaimedDemandSession, CoordinatorMutationKind, EvaluationWorkCoordinator, EvaluationWorkId,
-    SettlementObligations, WakeRegistration, WorkControl, WorkCoordinatorState, WorkDependency,
-    WorkKind, WorkRecord, WorkState, demand_session_is_closed, prune_closed_session_registration,
-    register_background_root, unregister_background_root,
+    RouteHazard, SettlementObligations, WakeRegistration, WorkControl, WorkCoordinatorState,
+    WorkDependency, WorkKind, WorkRecord, WorkState, demand_session_is_closed,
+    prune_closed_session_registration, register_background_root, unregister_background_root,
 };
 
 pub(super) struct SparkDemand {
@@ -159,7 +159,10 @@ impl EvaluationWorkCoordinator {
                     .or_default()
                     .insert(id);
                 register_background_root(&mut state, id);
-                state.advance_work_generation(CoordinatorMutationKind::FreshWorkAdmission);
+                state.advance_work_generation(
+                    CoordinatorMutationKind::FreshWorkAdmission,
+                    RouteHazard::None,
+                );
                 true
             }
         };
@@ -193,7 +196,10 @@ impl EvaluationWorkCoordinator {
                 .filter_map(|id| detach_spark(&mut state, id))
                 .collect::<Vec<_>>();
             if !retired.is_empty() {
-                state.advance_work_generation(CoordinatorMutationKind::WorkRetirement);
+                state.advance_work_generation(
+                    CoordinatorMutationKind::WorkRetirement,
+                    RouteHazard::All,
+                );
             }
             retired
         };
@@ -335,7 +341,10 @@ impl EvaluationWorkCoordinator {
                 record.state = WorkState::Terminalizing;
                 detach_spark(&mut state, claimed.id)
             };
-            state.advance_work_generation(CoordinatorMutationKind::WorkRelease);
+            state.advance_work_generation(
+                CoordinatorMutationKind::WorkRelease,
+                RouteHazard::Works(std::slice::from_ref(&claimed.id)),
+            );
             (retired, obsolete_dependency, exact_subscription)
         };
 

@@ -11,8 +11,8 @@ use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeValueRoot};
 use super::super::EvaluationDemandState;
 use super::{
     CausalChildProbe, ClaimedDemandSession, CoordinatorMutationKind, EvaluationTaskId,
-    EvaluationWorkCoordinator, EvaluationWorkId, WakeRegistration, WorkCloseReason, WorkControl,
-    WorkCoordinatorState, WorkDependency, WorkState, causal_child_probe_locked,
+    EvaluationWorkCoordinator, EvaluationWorkId, RouteHazard, WakeRegistration, WorkCloseReason,
+    WorkControl, WorkCoordinatorState, WorkDependency, WorkState, causal_child_probe_locked,
     demand_session_is_closed, dependency_has_causal_progress_locked,
     prune_closed_session_registration, queue_current_registration,
 };
@@ -393,7 +393,10 @@ impl EvaluationWorkCoordinator {
                 .or_default()
                 .insert(id);
             queue_client_demand(&mut state, id);
-            state.advance_work_generation(CoordinatorMutationKind::ClientDemandAdmission);
+            state.advance_work_generation(
+                CoordinatorMutationKind::ClientDemandAdmission,
+                RouteHazard::None,
+            );
         }
         drop(mutation);
         // Workers and foreground drivers share the coordinator condition
@@ -415,7 +418,8 @@ impl EvaluationWorkCoordinator {
                 .expect("evaluation work coordinator was poisoned");
             let claimed = claim_client_demand(&mut state, self.runtime, id);
             if claimed.is_some() {
-                state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
+                state
+                    .advance_work_generation(CoordinatorMutationKind::WorkClaim, RouteHazard::None);
             }
             claimed
         };
@@ -444,7 +448,8 @@ impl EvaluationWorkCoordinator {
                 .expect("evaluation work coordinator was poisoned");
             let claimed = claim_ready_client_demand(&mut state, self.runtime);
             if claimed.is_some() {
-                state.advance_work_generation(CoordinatorMutationKind::WorkClaim);
+                state
+                    .advance_work_generation(CoordinatorMutationKind::WorkClaim, RouteHazard::None);
             }
             claimed
         };
@@ -607,7 +612,10 @@ impl EvaluationWorkCoordinator {
                     }
                 }
             };
-            state.advance_work_generation(CoordinatorMutationKind::ClientDemandRelease);
+            state.advance_work_generation(
+                CoordinatorMutationKind::ClientDemandRelease,
+                RouteHazard::None,
+            );
             (retirement, obsolete_subscription, exact_subscription)
         };
         if let Some(subscription) = obsolete_subscription {
@@ -648,12 +656,18 @@ impl EvaluationWorkCoordinator {
                     .control
                     .close_reason
                     .get_or_insert(WorkCloseReason::ClientDemandAbandoned);
-                state.advance_work_generation(CoordinatorMutationKind::Cancellation);
+                state.advance_work_generation(
+                    CoordinatorMutationKind::Cancellation,
+                    RouteHazard::All,
+                );
                 (true, None)
             } else {
                 let retirement =
                     detach_client_demand(&mut state, id, None, None, ClientDemandResult::Abandoned);
-                state.advance_work_generation(CoordinatorMutationKind::Cancellation);
+                state.advance_work_generation(
+                    CoordinatorMutationKind::Cancellation,
+                    RouteHazard::All,
+                );
                 (true, Some(retirement))
             }
         };
@@ -701,7 +715,10 @@ impl EvaluationWorkCoordinator {
                 let queued =
                     queue_current_registration(&mut state, registration, Some(dependency.key()));
                 if queued {
-                    state.advance_work_generation(CoordinatorMutationKind::DependencyWake);
+                    state.advance_work_generation(
+                        CoordinatorMutationKind::DependencyWake,
+                        RouteHazard::Works(std::slice::from_ref(&registration.work)),
+                    );
                 }
                 queued
             };
@@ -749,7 +766,7 @@ impl EvaluationWorkCoordinator {
             }
             let retirement =
                 detach_client_demand(&mut state, id, None, None, ClientDemandResult::Abandoned);
-            state.advance_work_generation(CoordinatorMutationKind::Cancellation);
+            state.advance_work_generation(CoordinatorMutationKind::Cancellation, RouteHazard::All);
             (dependency, retirement)
         };
         drop(mutation);
@@ -786,7 +803,7 @@ impl EvaluationWorkCoordinator {
                     failure,
                 )),
             );
-            state.advance_work_generation(CoordinatorMutationKind::Cancellation);
+            state.advance_work_generation(CoordinatorMutationKind::Cancellation, RouteHazard::All);
             retirement
         };
         drop(mutation);
