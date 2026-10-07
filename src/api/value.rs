@@ -189,8 +189,12 @@ pub struct EffectTokenDomain<T> {
 pub(super) struct EffectTokenDomainState<T> {
     next_id: AtomicU64,
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
-    payloads: Mutex<TrustedHashMap<NonZeroU64, Arc<T>>>,
+    payloads: Mutex<TrustedHashMap<EffectTokenKey, Arc<T>>>,
 }
+
+/// An effect token's counter id, as a trusted map key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct EffectTokenKey(NonZeroU64);
 
 struct EffectToken<T> {
     id: NonZeroU64,
@@ -256,7 +260,7 @@ where
             .payloads
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(id, Arc::new(payload));
+            .insert(EffectTokenKey(id), Arc::new(payload));
         assert!(replaced.is_none(), "effect token IDs remain unique");
         self.values.with_access(|access| {
             access.wrap(CoreValue::Opaque(crate::core::OpaqueValue::new(
@@ -298,7 +302,7 @@ where
                 .payloads
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .get(&token.id)
+                .get(&EffectTokenKey(token.id))
                 .cloned()
         })
     }
@@ -315,7 +319,7 @@ impl<T> Drop for EffectToken<T> {
             .payloads
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .remove(&self.id);
+            .remove(&EffectTokenKey(self.id));
         drop(payload);
     }
 }

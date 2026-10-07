@@ -2918,7 +2918,7 @@ impl EvaluationWorkCoordinator {
     }
 
     pub(super) fn dependency_observes_runtime(&self, target: &EvaluationWaitToken) -> bool {
-        let mut seen = TrustedHashSet::default();
+        let mut seen = std::collections::HashSet::new();
         let mut wait = target.clone();
         while seen.insert(wait.get()) {
             let Some(work) = self.work_for_wait(&wait) else {

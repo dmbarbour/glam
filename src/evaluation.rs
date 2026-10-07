@@ -30,6 +30,7 @@ mod pump;
 mod session;
 mod whnf;
 pub(crate) use access::{EvaluationPollContext, EvaluationValueAccess, EvaluatorStepContext};
+pub(crate) use coordinator::EvaluationWorkId;
 #[cfg(test)]
 pub(crate) use coordinator::{ClientDemandHandle, ClientDemandResult};
 pub(crate) use coordinator::{

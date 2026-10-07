@@ -165,11 +165,21 @@ gains this consequence when it lands.
    representation measurements.
    - **Fast id hashing** (`perf-fast-id-hashing`). *Done 2026-10-07 for
      glam itself.*
-     - Maps keyed by runtime-allocated ids use `crate::trusted_hash`, which
-       is foldhash's fast fixed-seed state, instead of SipHash. That covers
-       the net runtime's node, copy and port maps, the net builder, the
-       coordinator, managed external owners, value payloads and reflection
-       continuations.
+     - Maps keyed by runtime-allocated ids use `crate::trusted_hash` instead
+       of SipHash. That covers the net runtime's node, copy and port maps,
+       the net builder, the coordinator, managed external owners, effect
+       tokens and reflection continuations.
+     - **Its hasher** does one widening multiply per integer, folded so that
+       strided keys spread across buckets as well as counters do. It has no
+       collision resistance.
+     - **Keys are checked statically.** `TrustedState<K>` requires
+       `K: TrustedKey`, which is implemented only in `trusted_hash.rs`, with
+       a reason for each key type. A test fails if `TrustedKey` is
+       implemented anywhere else, so a new key type gets reviewed.
+     - **Compared with foldhash** in the same structure, it ran 0.4–0.6%
+       fewer instructions, and its hasher state is zero-sized. Wall-time
+       differences were within run-to-run noise. foldhash was used briefly
+       (`d80bbb7c`) and dropped.
      - Countdown 100 fell from 735 M to 494 M instructions.
      - Measured times: `hello_elf` went from 3,029 to 2,743 ms, and
        `list_map_1000` from 802 to 674 ms.

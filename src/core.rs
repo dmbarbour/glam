@@ -34,11 +34,11 @@ pub(crate) use managed::{
     reset_runtime_value_access_depth_for_test, thread_has_runtime_value_access_for_test,
 };
 pub(crate) use managed::{
-    ExternalOwnerHandle, ExternalOwnerRegistry, ManagedCoreNetAccess, ManagedCoreNetEdge,
-    ManagedCoreNetRoot, ManagedDropRecord, ManagedFamily, ManagedLazyAccess, ManagedLazyRoot,
-    ManagedPromiseAccess, ManagedPromisePublication, ManagedPromiseRoot, OpaquePayloadFamily,
-    OpaquePayloadRecord, PreparedRuntimeValueRoot, RuntimeValueAccess, RuntimeValueObserver,
-    managed_slot_extent, trace_compatibility_value_managed_edges,
+    ExternalOwnerHandle, ExternalOwnerKey, ExternalOwnerRegistry, ManagedCoreNetAccess,
+    ManagedCoreNetEdge, ManagedCoreNetRoot, ManagedDropRecord, ManagedFamily, ManagedLazyAccess,
+    ManagedLazyRoot, ManagedPromiseAccess, ManagedPromisePublication, ManagedPromiseRoot,
+    OpaquePayloadFamily, OpaquePayloadRecord, PreparedRuntimeValueRoot, RuntimeValueAccess,
+    RuntimeValueObserver, managed_slot_extent, trace_compatibility_value_managed_edges,
 };
 use runtime_cache::{RuntimeCacheEntry, RuntimeCacheMap, SharedRuntimeCacheMap};
 pub(crate) use runtime_cache::{RuntimeCacheFamily, RuntimeCacheFamilyRecord};

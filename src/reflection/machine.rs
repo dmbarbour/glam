@@ -38,6 +38,11 @@ mod reset_stack;
 
 use reset_stack::{ResetStackMachine, ResetStackPoll};
 
+/// A captured continuation's counter id within one reflection task, as a
+/// trusted map key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ContinuationKey(u64);
+
 #[derive(Clone)]
 struct Tags {
     r: Key,
@@ -109,7 +114,7 @@ pub(super) struct EffectTask<S: TaskSpecialization> {
     api: RuntimeValueRoot,
     next_continuation: u64,
     next_control_order: usize,
-    continuations: TrustedHashMap<u64, CapturedContinuation>,
+    continuations: TrustedHashMap<ContinuationKey, CapturedContinuation>,
     search: SearchPolicy<Branch<S>, IsolatedSearchBranch<S>>,
     execution: TaskExecution<S>,
     blocked: Option<BlockedExecution<S>>,
@@ -474,7 +479,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .next_continuation
             .checked_add(1)
             .ok_or_else(|| TaskHalt::new("reflection continuation IDs exhausted"))?;
-        self.continuations.insert(id, continuation);
+        self.continuations.insert(ContinuationKey(id), continuation);
         Ok(self
             .eval_context
             .values()
@@ -2492,7 +2497,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
                 let captured = self
                     .continuations
-                    .get(&id)
+                    .get(&ContinuationKey(id))
                     .cloned()
                     .ok_or_else(|| TaskHalt::new("unknown reflection continuation"))?;
                 let stack = context.evaluate(&self.eval_context, |evaluator| {

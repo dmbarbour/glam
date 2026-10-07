@@ -20,6 +20,10 @@ pub(crate) struct ExternalOwnerHandle {
     lease: Arc<()>,
 }
 
+/// An external owner's counter id, as a trusted map key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ExternalOwnerKey(NonZeroU64);
+
 struct ExternalOwnerEntry {
     family: TypeId,
     lease: Weak<()>,
@@ -30,7 +34,7 @@ pub(crate) struct ExternalOwnerRegistry {
     runtime: EvaluationRuntimeId,
     next_id: AtomicU64,
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
-    owners: Mutex<TrustedHashMap<NonZeroU64, ExternalOwnerEntry>>,
+    owners: Mutex<TrustedHashMap<ExternalOwnerKey, ExternalOwnerEntry>>,
 }
 
 impl ExternalOwnerRegistry {
@@ -54,7 +58,7 @@ impl ExternalOwnerRegistry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(
-                id,
+                ExternalOwnerKey(id),
                 ExternalOwnerEntry {
                     family: TypeId::of::<T>(),
                     lease: Arc::downgrade(&lease),
@@ -79,7 +83,7 @@ impl ExternalOwnerRegistry {
         );
         let owners = self.owners.lock().unwrap_or_else(PoisonError::into_inner);
         let entry = owners
-            .get(&handle.id)
+            .get(&ExternalOwnerKey(handle.id))
             .expect("a live external owner lease must retain its registry entry");
         assert!(
             std::ptr::eq(entry.lease.as_ptr(), Arc::as_ptr(&handle.lease)),
@@ -105,7 +109,7 @@ impl ExternalOwnerRegistry {
             return None;
         }
         let owners = self.owners.lock().unwrap_or_else(PoisonError::into_inner);
-        let entry = owners.get(&handle.id)?;
+        let entry = owners.get(&ExternalOwnerKey(handle.id))?;
         if !std::ptr::eq(entry.lease.as_ptr(), Arc::as_ptr(&handle.lease))
             || entry.family != TypeId::of::<T>()
         {

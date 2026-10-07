@@ -1422,8 +1422,8 @@ const _: () = {
     assert!(std::mem::size_of::<ManagedPromiseCell>() == 104);
     assert!(std::mem::align_of::<ManagedPromiseCell>() == 8);
     // Test builds add the runtime net's polarity-check flag. The runtime
-    // net's three node maps use the 8-byte trusted hasher state.
-    assert!(std::mem::size_of::<ManagedCoreNetCell>() == 224 + if cfg!(test) { 8 } else { 0 });
+    // net's three node maps use the zero-sized trusted hasher state.
+    assert!(std::mem::size_of::<ManagedCoreNetCell>() == 200 + if cfg!(test) { 8 } else { 0 });
     assert!(std::mem::align_of::<ManagedCoreNetCell>() == 8);
     assert!(std::mem::size_of::<ManagedLazyRoot>() == 32);
     assert!(std::mem::align_of::<ManagedLazyRoot>() == 8);
@@ -1741,9 +1741,9 @@ mod tests {
                 ManagedPromiseCell,
             >())
         );
-        // 224 bytes in production; test builds add the runtime net's
+        // 200 bytes in production; test builds add the runtime net's
         // polarity-check flag.
-        assert_eq!(std::mem::size_of::<ManagedCoreNetCell>(), 232);
+        assert_eq!(std::mem::size_of::<ManagedCoreNetCell>(), 208);
         assert_eq!(std::mem::align_of::<ManagedCoreNetCell>(), 8);
         assert_eq!(
             <ManagedCoreNetCell as Trace>::REQUESTED_SLOT_SIZE,

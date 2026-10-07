@@ -22,7 +22,7 @@ pub(crate) use builder::{NetBuildError, NetBuilder};
 #[cfg(all(test, feature = "glam-prof"))]
 pub(crate) use model::FanIdentity;
 pub(crate) use model::{
-    ActivePairKey, InteractionNet, NetSpecialization, NodeId, OperatorYield, Port,
+    ActivePairKey, CopyId, FanSite, InteractionNet, NetSpecialization, NodeId, OperatorYield, Port,
 };
 pub(crate) use runtime::{
     ActivePairStep, BlockedCallableCheckpoint, Call, CallableCheckpointCall, CheckpointBlockResult,

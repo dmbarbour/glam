@@ -171,7 +171,6 @@ dependencies = [
  "bytes",
  "chumsky",
  "fingertrees",
- "foldhash",
  "glam-gc",
  "internment",
  "num-bigint",
