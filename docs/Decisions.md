@@ -253,7 +253,9 @@ maps the short names used here to file names.
   read it separately. Supersedes `lone-quoted-name-is-an-atom-key`. The
   declaration and pattern parsers already parsed key items as expressions
   and normalized a constant atom afterwards; only the expression grammar
-  had a separate `'name` alternative.
+  had a separate `'name` alternative. That alternative was most likely a
+  vestige of the bootstrap phase: paths such as `foo.[42,'name]` were
+  parsed before evaluation existed.
 - **Decision:**
   - Every key-path item is parsed as an expression, exactly as in a list.
   - A constant atom result becomes a static key through one helper,
