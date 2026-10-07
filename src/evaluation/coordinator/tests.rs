@@ -52,29 +52,6 @@ fn dry_run_background_candidates(coordinator: &EvaluationWorkCoordinator) -> Vec
 }
 
 #[test]
-fn trusted_work_id_set_is_deterministic_and_identity_exact() {
-    fn hash(work: EvaluationWorkId) -> u64 {
-        let mut hasher = TrustedWorkIdHasher::default();
-        std::hash::Hash::hash(&work, &mut hasher);
-        hasher.finish()
-    }
-
-    let first = EvaluationWorkId(NonZeroU64::new(1).expect("one is nonzero"));
-    let second = EvaluationWorkId(NonZeroU64::new(2).expect("two is nonzero"));
-    assert_eq!(hash(first), hash(first));
-    assert_ne!(hash(first), hash(second));
-
-    let mut set = TrustedWorkIdSet::default();
-    for raw in 1..=4096 {
-        assert!(set.insert(EvaluationWorkId(
-            NonZeroU64::new(raw).expect("the test range is nonzero")
-        )));
-    }
-    assert_eq!(set.len(), 4096);
-    assert!(!set.insert(first));
-}
-
-#[test]
 fn exact_release_classification_is_non_overlapping() {
     let work = EvaluationWorkId(NonZeroU64::new(1).expect("one is nonzero"));
     let route = |current, generation| {

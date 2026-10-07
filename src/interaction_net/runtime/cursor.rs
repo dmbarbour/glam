@@ -172,8 +172,8 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                     copy,
                     CopyState {
                         source,
-                        frontiers: HashMap::new(),
-                        fan_sites: HashMap::new(),
+                        frontiers: TrustedHashMap::default(),
+                        fan_sites: TrustedHashMap::default(),
                     },
                 )
                 .is_none()
@@ -466,7 +466,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         let mut principal_anchors = Vec::new();
         let mut terminal_pair = None;
         let mut node = port.node();
-        let mut visited = HashSet::new();
+        let mut visited = TrustedHashSet::default();
         while visited.insert(node) {
             let Some(neighbor) = self.neighbor(Port::principal(node)) else {
                 break;

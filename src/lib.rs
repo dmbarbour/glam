@@ -25,6 +25,7 @@ mod source;
 #[cfg(test)]
 mod test_support;
 mod text_pattern;
+mod trusted_hash;
 
 pub use api::{
     Assembler, AssemblerBuilder, BackgroundPumpReport, BackgroundPumpState, BuiltModule,

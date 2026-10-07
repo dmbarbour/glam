@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::trusted_hash::TrustedHashMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
@@ -189,7 +189,7 @@ pub struct EffectTokenDomain<T> {
 pub(super) struct EffectTokenDomainState<T> {
     next_id: AtomicU64,
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
-    payloads: Mutex<HashMap<NonZeroU64, Arc<T>>>,
+    payloads: Mutex<TrustedHashMap<NonZeroU64, Arc<T>>>,
 }
 
 struct EffectToken<T> {
@@ -242,7 +242,7 @@ where
             values: values.clone(),
             state: Arc::new(EffectTokenDomainState {
                 next_id: AtomicU64::new(1),
-                payloads: Mutex::new(HashMap::new()),
+                payloads: Mutex::new(TrustedHashMap::default()),
             }),
         }
     }

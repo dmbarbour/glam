@@ -163,6 +163,21 @@ gains this consequence when it lands.
    scheduler round trips, the allocation and rooting path, the reflection
    branch clone, and obvious algorithmic defects. These would otherwise mask
    representation measurements.
+   - **Fast id hashing** (`perf-fast-id-hashing`). *Done 2026-10-07 for
+     glam itself.*
+     - Maps keyed by runtime-allocated ids use `crate::trusted_hash`, which
+       is foldhash's fast fixed-seed state, instead of SipHash. That covers
+       the net runtime's node, copy and port maps, the net builder, the
+       coordinator, managed external owners, value payloads and reflection
+       continuations.
+     - Countdown 100 fell from 735 M to 494 M instructions.
+     - Measured times: `hello_elf` went from 3,029 to 2,743 ms, and
+       `list_map_1000` from 802 to 674 ms.
+     - Keys a program can influence keep `RandomState`.
+     - **Left:** the collector crate's own maps cost about 7% of the
+       countdown's instructions: its thread-local heap cache and its type
+       and class metadata lookups. The crate has no runtime dependencies, so
+       the fix there awaits a maintainer choice.
 6. **Representations**, two parallel steps:
    - **Values** (`perf-value-representation`):
      [Value Representation Refinement](ValueRepresentationRefinement_2026-08-19.md),

@@ -219,10 +219,10 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
         &u64,
         &u64,
         &Option<Port>,
-        &HashMap<NodeId, RuntimeEntry<S>>,
+        &TrustedHashMap<NodeId, RuntimeEntry<S>>,
         &u64,
-        &HashMap<CopyId, CopyState<S>>,
-        &HashMap<NodeId, PairlessCursorObligation<S>>,
+        &TrustedHashMap<CopyId, CopyState<S>>,
+        &TrustedHashMap<NodeId, PairlessCursorObligation<S>>,
         &BTreeMap<ActivePairKey, ActivePairState<S>>,
     ) = (
         next_node_id,
@@ -275,8 +275,8 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
     } = copy;
     let _: (
         &S::RuntimeSource,
-        &HashMap<Port, NodeId>,
-        &HashMap<FanSite, FanSite>,
+        &TrustedHashMap<Port, NodeId>,
+        &TrustedHashMap<FanSite, FanSite>,
     ) = (source, frontiers, fan_sites);
     let _copy_cycle = I5_REMOTE_CURSOR_SOURCE_CYCLE;
 

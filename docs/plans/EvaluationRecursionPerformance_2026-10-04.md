@@ -183,3 +183,83 @@ steps.
 the gate's profiling fixtures. It fails, at 243 k against 859 k frames,
 when validation is forced to start from the root.
 
+## Inline-first lazy forcing: proposed mechanism 2026-10-07
+
+Approved in principle by the maintainer as the tail-call equivalent; this
+section is for review before implementation. It addresses holistic review
+decision 3 and `eval-recursion-tail-forwarding`.
+
+**Today.**
+- **The cell.** A lazy cell holds a producer, which is `Source`,
+  `Checkpoint` (partial progress) or `Panicked`, and a one-time result.
+  Partial progress lives in the lazy (`lazy-owns-partial-progress`). The
+  cell has no "being evaluated" marker.
+- **Forcing.** When WHNF reaches an uncached lazy, it returns a deferred
+  boundary. The forcer then reserves the lazy's coordinator route and
+  blocks on its wait. Exclusion and sharing come only from that route: one
+  route per lazy, claimed while it runs.
+- **Cycle detection** walks blocked routes.
+- **Measured per countdown level:**
+  - 60 routes are created, and none is ever shared.
+  - 34 are pure forwards: the forcer had no pending frames, so its result
+    is the inner lazy's result.
+  - 17 are lazies the WHNF reducer creates and forces at once (function
+    and builtin calls), so they are private by construction.
+  - 7 routes per level stay blocked, which is the growing chain.
+  - About 50 polls per level also end in `Yielded` with budget remaining,
+    at family handoffs (holistic review E1 and E2).
+
+**Proposed mechanism.** "Every uncached lazy is a route" becomes "every
+*suspended* lazy is a route".
+1. **Inline claim.** When an evaluation meets an uncached lazy `B` that has
+   no route, it claims `B` inline. It marks `B`'s producer
+   `InlineForcing`, under the producer mutex `B` already has, then
+   continues evaluating `B`'s source or checkpoint in its own WHNF state.
+   No coordinator work is created.
+2. **Tail forwarding.** If the forcer `A` had no pending frames, its value
+   *is* `B`'s value. `A`'s producer becomes `Forward(B)`, an indirection,
+   and evaluation continues in `B`. Each further tail call replaces the
+   target, so the indirections compress to the newest one. Nothing stays
+   blocked per level, and an unreferenced `A` is garbage. A later observer
+   of `A` follows the indirection and caches the value in `A` then. So
+   "every member caches" becomes "caches when observed".
+3. **Update frames.** If `A` has pending frames, `B` is evaluated beneath an
+   update frame. When `B` reaches a value, the value is cached into `B` and
+   `A`'s frames continue. This is the existing frame stack plus a "cache
+   into `B`" step.
+4. **Spill on suspension.** If an inlined lazy must suspend, its progress is
+   written back into its own checkpoint, as today. That covers both budget
+   exhaustion and a real wait on a promise or route. Only then does it get
+   a route, and the forcer blocks on that route as it does now. The
+   suspended state is therefore exactly today's state.
+5. **Contention.** A second demander that finds `B` marked
+   `InlineForcing` requests `B`'s spill and waits on its route. The inline
+   owner checks for the request at each step boundary.
+6. **Cycles.** Meeting a lazy already marked `InlineForcing` within the same
+   evaluation is a cycle. It gives the existing `DependencyCycle` failure,
+   with member labels, so it does not loop.
+
+**Never inlined:** host calls, reflection tasks and sparks. Their sources
+must not run twice, so they keep routes.
+
+**Panics:** the inline frames name every claimed lazy, so a caught panic
+marks each of them `Panicked`.
+
+**Rooting:** inline state lives in the forcer's managed WHNF state, which
+collection already traces at each quantum end.
+
+**Expected effect.** Most of the 60 routes per level disappear: the 17
+private lazies and most of the 34 forwards. Each one costs an admission,
+claim, release, retirement and notifications. Tail recursion stays at a
+constant route depth.
+
+**Proposed steps:**
+1. **`eval-recursion-inline-private-lazies`.** Inline the lazies the WHNF
+   reducer creates and forces at once. They are unshared, so this needs no
+   marker. It is the smallest and safest win.
+2. **`eval-recursion-tail-forwarding`.** Add `Forward` indirections with
+   compression for tail-position forcing.
+3. **`eval-recursion-inline-forcing`.** General inline claims, with the
+   `InlineForcing` marker, spill on suspension or contention, and cycle
+   detection without routes.
+

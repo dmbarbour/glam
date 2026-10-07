@@ -5,8 +5,8 @@
 //! lease is detached while the registry is locked and destroyed afterward,
 //! keeping callback and runtime retirement outside collector finalization.
 
+use crate::trusted_hash::TrustedHashMap;
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -30,7 +30,7 @@ pub(crate) struct ExternalOwnerRegistry {
     runtime: EvaluationRuntimeId,
     next_id: AtomicU64,
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
-    owners: Mutex<HashMap<NonZeroU64, ExternalOwnerEntry>>,
+    owners: Mutex<TrustedHashMap<NonZeroU64, ExternalOwnerEntry>>,
 }
 
 impl ExternalOwnerRegistry {
@@ -38,7 +38,7 @@ impl ExternalOwnerRegistry {
         Self {
             runtime,
             next_id: AtomicU64::new(1),
-            owners: Mutex::new(HashMap::new()),
+            owners: Mutex::new(TrustedHashMap::default()),
         }
     }
 

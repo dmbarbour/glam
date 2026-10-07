@@ -1,4 +1,6 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
+
+use crate::trusted_hash::{TrustedHashMap, TrustedHashSet};
 use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -1892,8 +1894,8 @@ impl<S: NetSpecialization> Eq for SharedRuntimeNet<S> {}
 
 struct CopyState<S: NetSpecialization> {
     source: S::RuntimeSource,
-    frontiers: HashMap<Port, NodeId>,
-    fan_sites: HashMap<FanSite, FanSite>,
+    frontiers: TrustedHashMap<Port, NodeId>,
+    fan_sites: TrustedHashMap<FanSite, FanSite>,
 }
 
 struct CursorClaim<S: NetSpecialization> {
@@ -2069,13 +2071,13 @@ pub struct RuntimeNet<S: NetSpecialization> {
     next_node_id: u64,
     next_fan_site: u64,
     exposed: Option<Port>,
-    nodes: HashMap<NodeId, RuntimeEntry<S>>,
+    nodes: TrustedHashMap<NodeId, RuntimeEntry<S>>,
     next_copy_id: u64,
-    copies: HashMap<CopyId, CopyState<S>>,
+    copies: TrustedHashMap<CopyId, CopyState<S>>,
     // Pairless cursor demand is owned here until the cursor participates in
     // an active pair, at which point `connect` transfers the state into the
     // pair's authoritative record.
-    cursor_obligations: HashMap<NodeId, PairlessCursorObligation<S>>,
+    cursor_obligations: TrustedHashMap<NodeId, PairlessCursorObligation<S>>,
 
     // Every live principal-principal wire has exactly one authoritative state.
     // External work changes Ready to Claimed while the runtime lock is held,
@@ -2130,8 +2132,8 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             exposed: None,
             nodes,
             next_copy_id: 0,
-            copies: HashMap::new(),
-            cursor_obligations: HashMap::new(),
+            copies: TrustedHashMap::default(),
+            cursor_obligations: TrustedHashMap::default(),
             active: BTreeMap::new(),
             #[cfg(test)]
             polarity_checked: net.polarized,
@@ -2427,10 +2429,10 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             next_node_id: 0,
             next_fan_site: 0,
             exposed: None,
-            nodes: HashMap::new(),
+            nodes: TrustedHashMap::default(),
             next_copy_id: 0,
-            copies: HashMap::new(),
-            cursor_obligations: HashMap::new(),
+            copies: TrustedHashMap::default(),
+            cursor_obligations: TrustedHashMap::default(),
             active: BTreeMap::new(),
             #[cfg(test)]
             polarity_checked: true,
@@ -3279,7 +3281,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
 
         let mut port = neighbor;
-        let mut visited = HashSet::new();
+        let mut visited = TrustedHashSet::default();
         let pair = loop {
             if port.is_principal() || !visited.insert(port.node()) {
                 break None;

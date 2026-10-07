@@ -1,6 +1,8 @@
 //! Reflection-task payloads, indexes, and lifecycle-local transitions.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+
+use crate::trusted_hash::TrustedHashMap;
 use std::sync::Arc;
 
 use crate::core::EvaluationPanic;
@@ -783,14 +785,14 @@ pub(super) struct ReflectionWork {
 #[derive(Default)]
 pub(super) struct ReflectionIndexes {
     pub(super) by_task: BTreeMap<EvaluationTaskId, EvaluationWorkId>,
-    pub(super) by_wait: HashMap<EvaluationWaitToken, EvaluationWorkId>,
+    pub(super) by_wait: TrustedHashMap<EvaluationWaitToken, EvaluationWorkId>,
     /// Activated children only. Retiring an intermediate task promotes its
     /// still-live descendants to its own helping parent. This is a causal
     /// route, never an implicit join or owner.
-    pub(super) children_by_parent: HashMap<EvaluationTaskId, Vec<EvaluationWorkId>>,
+    pub(super) children_by_parent: TrustedHashMap<EvaluationTaskId, Vec<EvaluationWorkId>>,
     /// Effective helping parent; may differ from immutable launch provenance
     /// after an intermediate task retires.
-    pub(super) helping_parent_by_child: HashMap<EvaluationWorkId, EvaluationTaskId>,
+    pub(super) helping_parent_by_child: TrustedHashMap<EvaluationWorkId, EvaluationTaskId>,
 }
 
 pub(in crate::evaluation) struct ClaimedReflectionWork {

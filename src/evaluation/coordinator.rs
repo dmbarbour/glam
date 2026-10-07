@@ -1,8 +1,9 @@
 //! Runtime-owned work coordination independent of worker ownership.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
+
+use crate::trusted_hash::{TrustedHashMap, TrustedHashSet};
 use std::fmt;
-use std::hash::{BuildHasherDefault, Hasher};
 use std::num::NonZeroU64;
 #[cfg(test)]
 use std::sync::OnceLock;
@@ -109,37 +110,8 @@ impl EvaluationWorkId {
     }
 }
 
-/// Deterministic hashing for bounded traversals over runtime-allocated IDs.
-///
-/// These IDs are allocated monotonically by the runtime and cannot be chosen
-/// by Glam programs. This hasher deliberately provides no collision-resistance
-/// policy and must not be used for user-controlled keys or persistent
-/// coordinator indexes.
-#[derive(Debug, Default)]
-struct TrustedWorkIdHasher(u64);
-
-impl TrustedWorkIdHasher {
-    const MULTIPLIER: u64 = 0x9e37_79b1_85eb_ca87;
-}
-
-impl Hasher for TrustedWorkIdHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.0 = (self.0 ^ u64::from(*byte)).wrapping_mul(Self::MULTIPLIER);
-        }
-    }
-
-    fn write_u64(&mut self, value: u64) {
-        self.0 = (self.0 ^ value).wrapping_mul(Self::MULTIPLIER);
-    }
-}
-
-type TrustedWorkIdSet = HashSet<EvaluationWorkId, BuildHasherDefault<TrustedWorkIdHasher>>;
-type TrustedWorkIdMap<V> = HashMap<EvaluationWorkId, V, BuildHasherDefault<TrustedWorkIdHasher>>;
+type TrustedWorkIdSet = TrustedHashSet<EvaluationWorkId>;
+type TrustedWorkIdMap<V> = TrustedHashMap<EvaluationWorkId, V>;
 
 /// What a published coordinator mutation can have changed in a retained
 /// exact route.
@@ -691,22 +663,23 @@ impl ClaimedClientDemand {
 
 #[derive(Default)]
 struct WorkCoordinatorState {
-    demand_sessions: HashMap<EvaluationSessionId, Weak<EvaluationDemandState>>,
+    demand_sessions: TrustedHashMap<EvaluationSessionId, Weak<EvaluationDemandState>>,
     failures: RuntimeFailureLedger,
     pending_failure_reports: RuntimeFailureLedger,
-    work: HashMap<EvaluationWorkId, WorkRecord>,
-    work_by_session: HashMap<EvaluationSessionId, HashSet<EvaluationWorkId>>,
-    client_demands: HashMap<EvaluationWorkId, ClientDemandRecord>,
-    client_demands_by_session: HashMap<EvaluationSessionId, HashSet<EvaluationWorkId>>,
+    work: TrustedHashMap<EvaluationWorkId, WorkRecord>,
+    work_by_session: TrustedHashMap<EvaluationSessionId, TrustedHashSet<EvaluationWorkId>>,
+    client_demands: TrustedHashMap<EvaluationWorkId, ClientDemandRecord>,
+    client_demands_by_session:
+        TrustedHashMap<EvaluationSessionId, TrustedHashSet<EvaluationWorkId>>,
     ready_tasks: VecDeque<EvaluationWorkId>,
-    ready_task_set: HashSet<EvaluationWorkId>,
+    ready_task_set: TrustedHashSet<EvaluationWorkId>,
     background_roots: VecDeque<EvaluationWorkId>,
     ready_client_demands: VecDeque<EvaluationWorkId>,
-    ready_client_demand_set: HashSet<EvaluationWorkId>,
+    ready_client_demand_set: TrustedHashSet<EvaluationWorkId>,
     reflection: ReflectionIndexes,
     deferred: DeferredIndexes,
-    promise_by_wait: HashMap<EvaluationWaitToken, EvaluationWorkId>,
-    observation_waiters: HashMap<EvaluationWorkId, ObservationRegistration>,
+    promise_by_wait: TrustedHashMap<EvaluationWaitToken, EvaluationWorkId>,
+    observation_waiters: TrustedHashMap<EvaluationWorkId, ObservationRegistration>,
     spark_workers: usize,
     prefer_spark: bool,
     /// Broad scheduler/readiness revision observed by host wait loops.
@@ -2527,7 +2500,7 @@ impl EvaluationWorkCoordinator {
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            let mut excluded = HashSet::new();
+            let mut excluded = TrustedHashSet::default();
             loop {
                 match causal_child_probe_locked(&state, target, caller_tasks, &excluded) {
                     CausalChildProbe::Ready(id) => {
@@ -2566,7 +2539,7 @@ impl EvaluationWorkCoordinator {
             .lock()
             .expect("evaluation work coordinator was poisoned");
         matches!(
-            causal_child_probe_locked(&state, target, caller_tasks, &HashSet::new()),
+            causal_child_probe_locked(&state, target, caller_tasks, &TrustedHashSet::default()),
             CausalChildProbe::Busy
         )
     }
@@ -2945,7 +2918,7 @@ impl EvaluationWorkCoordinator {
     }
 
     pub(super) fn dependency_observes_runtime(&self, target: &EvaluationWaitToken) -> bool {
-        let mut seen = HashSet::new();
+        let mut seen = TrustedHashSet::default();
         let mut wait = target.clone();
         while seen.insert(wait.get()) {
             let Some(work) = self.work_for_wait(&wait) else {
@@ -3826,17 +3799,17 @@ fn causal_child_probe_locked(
     state: &WorkCoordinatorState,
     target: Option<&EvaluationWaitToken>,
     caller_tasks: [Option<EvaluationTaskId>; 2],
-    excluded: &HashSet<EvaluationWorkId>,
+    excluded: &TrustedHashSet<EvaluationWorkId>,
 ) -> CausalChildProbe {
     let mut tasks = VecDeque::new();
-    let mut seen_tasks = HashSet::new();
+    let mut seen_tasks = TrustedHashSet::default();
     for task in caller_tasks.into_iter().flatten() {
         if seen_tasks.insert(task) {
             tasks.push_back(task);
         }
     }
 
-    let mut seen_exact = HashSet::new();
+    let mut seen_exact = TrustedHashSet::default();
     let mut wait = target.cloned();
     while let Some(work) = wait
         .as_ref()
@@ -3859,7 +3832,7 @@ fn causal_child_probe_locked(
         wait = Some(next.clone());
     }
 
-    let mut seen_child_work = HashSet::new();
+    let mut seen_child_work = TrustedHashSet::default();
     let mut busy = false;
     while let Some(parent) = tasks.pop_front() {
         let Some(children) = state.reflection.children_by_parent.get(&parent) else {
@@ -4013,7 +3986,7 @@ fn dependency_has_causal_progress_locked(
     current_epoch: RuntimeObservationEpoch,
 ) -> bool {
     let mut dependency = Some(dependency.clone());
-    let mut seen = HashSet::new();
+    let mut seen = TrustedHashSet::default();
     while let Some(current) = dependency {
         if current.is_terminal() {
             return true;

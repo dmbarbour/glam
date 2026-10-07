@@ -1,6 +1,8 @@
 //! Deferred producer claims and pure-lazy cycle handling.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+
+use crate::trusted_hash::TrustedHashMap;
 use std::sync::Arc;
 
 use crate::core::{DeferredValueId, EvaluationPanic, ManagedLazyRoot, ManagedPromiseRoot};
@@ -772,8 +774,8 @@ pub(super) struct LazyRouteWork {
 #[derive(Default)]
 pub(super) struct DeferredIndexes {
     pub(super) by_task: BTreeMap<EvaluationTaskId, EvaluationWorkId>,
-    pub(super) by_wait: HashMap<EvaluationWaitToken, EvaluationWorkId>,
-    pub(super) by_value: HashMap<DeferredValueId, EvaluationWorkId>,
+    pub(super) by_wait: TrustedHashMap<EvaluationWaitToken, EvaluationWorkId>,
+    pub(super) by_value: TrustedHashMap<DeferredValueId, EvaluationWorkId>,
 }
 
 pub(in crate::evaluation) struct ClaimedDeferredWork {
@@ -1074,7 +1076,7 @@ fn deferred_dependency_cycle(
     start: EvaluationWorkId,
 ) -> Option<DeferredDependencyCycle> {
     let mut path: Vec<EvaluationWorkId> = Vec::new();
-    let mut positions = HashMap::new();
+    let mut positions = TrustedHashMap::default();
     let mut current = start;
     loop {
         if let Some(first) = positions.insert(current, path.len()) {

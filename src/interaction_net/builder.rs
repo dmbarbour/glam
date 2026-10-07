@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use crate::trusted_hash::{TrustedHashMap, TrustedHashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -337,7 +337,7 @@ impl<S: NetSpecialization> NetBuilder<S> {
             .wires
             .iter()
             .flat_map(|wire| [(wire.left, wire.right), (wire.right, wire.left)])
-            .collect::<HashMap<_, _>>();
+            .collect::<TrustedHashMap<_, _>>();
 
         let mut runtime_nodes = Vec::with_capacity(self.nodes.len() - tunnel_count);
         let mut node_map = vec![None; self.nodes.len()];
@@ -349,7 +349,7 @@ impl<S: NetSpecialization> NetBuilder<S> {
             }
         }
 
-        let mut visited_tunnels = HashSet::new();
+        let mut visited_tunnels = TrustedHashSet::default();
         let exposed_runtime = if is_tunnel[exposed.node().index()] {
             let terminal =
                 follow_tunnels(exposed, exposed, &links, &is_tunnel, &mut visited_tunnels)?;
@@ -464,11 +464,11 @@ impl<S: NetSpecialization> NetBuilder<S> {
 fn follow_tunnels(
     mut port: Port,
     exposed: Port,
-    links: &HashMap<Port, Port>,
+    links: &TrustedHashMap<Port, Port>,
     is_tunnel: &[bool],
-    visited_tunnels: &mut HashSet<NodeId>,
+    visited_tunnels: &mut TrustedHashSet<NodeId>,
 ) -> Result<Port, NetBuildError> {
-    let mut path = HashSet::new();
+    let mut path = TrustedHashSet::default();
     loop {
         let Some(is_tunnel) = is_tunnel.get(port.node().index()) else {
             return Err(NetBuildError::InvalidPort(port));

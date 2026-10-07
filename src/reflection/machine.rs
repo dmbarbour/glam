@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::trusted_hash::TrustedHashMap;
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -109,7 +109,7 @@ pub(super) struct EffectTask<S: TaskSpecialization> {
     api: RuntimeValueRoot,
     next_continuation: u64,
     next_control_order: usize,
-    continuations: HashMap<u64, CapturedContinuation>,
+    continuations: TrustedHashMap<u64, CapturedContinuation>,
     search: SearchPolicy<Branch<S>, IsolatedSearchBranch<S>>,
     execution: TaskExecution<S>,
     blocked: Option<BlockedExecution<S>>,
@@ -345,7 +345,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             api,
             next_continuation: 1,
             next_control_order: 1,
-            continuations: HashMap::new(),
+            continuations: TrustedHashMap::default(),
             search,
             execution: TaskExecution {
                 work: MachineWork::Drive {
