@@ -241,6 +241,30 @@ Reductions add the runtime's evaluation reductions and net rules.
   (lists mapped, dicts built from a literal), plus a parse-and-lower share
   of the time that grows with the literal.
 
+## Snapshot 2026-10-07
+
+After `perf-parser` (`parser-term-parser-first`, `parser-keyword-delegation`)
+and `eval-recursion-route-validation`, on the same machine and build
+settings as the baseline. Reduction counts are unchanged.
+
+| Workload | Baseline ms | Now ms | Mostly from |
+| --- | ---: | ---: | --- |
+| `minimal` | 36.7 | 36.9 | — |
+| `hello_do` | 64.2 | 62.4 | — |
+| `hello_elf` | 3,448.6 | 3,029.0 | both steps |
+| `parse_parens_10` | 470.9 | 37.6 | the parser |
+| `parse_lists_16` | 708.9 | 36.9 | the parser |
+| `parse_ifs_10` (new) | — | 46.1 | the parser |
+| `countdown_100` | 568.4 | 366.2 | route validation |
+| `countdown_200` | 1,496.3 | 816.8 | route validation |
+| `countdown_400` | 4,653.5 | 1,363.8 | route validation |
+| `list_map_1000` | 830.3 | 801.5 | — |
+| `dict_lookup_1000` | 1,148.0 | 416.1 | the parser, on the 1,000-entry literal |
+
+The countdown is now linear, at about 3.2 ms and 290 reductions per level,
+or about 11 µs per reduction. That per-reduction cost is the next target
+everywhere, including Hello World's 300k reductions.
+
 ## Settled Harness Questions
 
 Maintainer answers, 2026-10-05:
