@@ -513,7 +513,8 @@ fn leading_infix_operators_must_align() {
             "  |> decode\n",
             "    |> finish\n",
         ),
-        2,
+        // Reported at the misaligned operator.
+        4,
         "leading infix operators must align",
     );
 }

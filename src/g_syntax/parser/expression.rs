@@ -46,7 +46,6 @@ impl InfixChain {
 
     /// Builds an unresolved chain from its operands, for the prefix-shared
     /// term parser.
-    #[cfg(test)]
     pub(in crate::g_syntax::parser) fn from_parts(
         first: SyntaxExpr,
         rest: Vec<(SyntaxOperator, SyntaxExpr)>,
@@ -1136,7 +1135,28 @@ pub(in crate::g_syntax::parser) fn parse_expression_view(
     })
 }
 
+/// Parses `view` as one ordinary expression, returning its unresolved infix
+/// chain. The prefix-shared term parser handles every construct it covers;
+/// the Chumsky grammar handles the rest until keyword forms move over.
 pub(in crate::g_syntax::parser) fn parse_expression_chain_view(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+) -> Result<InfixChain, Vec<Diagnostic>> {
+    let term = super::term::parse_term_chain(view, context);
+    #[cfg(test)]
+    term_oracle::check(view, context, &term);
+    match term {
+        Ok(chain) => Ok(chain),
+        Err(super::term::Fail::Error { at, message }) => {
+            Err(vec![super::term::diagnostic(view, at, message)])
+        }
+        Err(super::term::Fail::Unsupported(_)) => parse_grammar_chain_view(view, context),
+    }
+}
+
+/// The Chumsky expression grammar, for views the term parser does not
+/// cover yet.
+fn parse_grammar_chain_view(
     view: TokenView<'_, '_>,
     context: ExpressionContext,
 ) -> Result<InfixChain, Vec<Diagnostic>> {
@@ -1148,19 +1168,16 @@ pub(in crate::g_syntax::parser) fn parse_expression_chain_view(
         .into_output_errors();
     session.record_token_errors(view, errors);
     let diagnostics = session.into_diagnostics();
-    let result = if diagnostics.is_empty() {
+    if diagnostics.is_empty() {
         output.ok_or_else(Vec::new)
     } else {
         Err(diagnostics)
-    };
-    #[cfg(test)]
-    term_oracle::check(view, context, &result);
-    result
+    }
 }
 
 /// The differential oracle for the prefix-shared term parser: while a test
-/// enables it, every expression this grammar parses is parsed again by the
-/// term parser, and any disagreement is recorded.
+/// enables it, every expression the term parser covers is parsed again by
+/// the Chumsky grammar, and any disagreement is recorded.
 ///
 /// Setting `GLAM_TERM_ORACLE` enables it for every test instead, panicking on
 /// the first disagreement, which sweeps every expression any test parses:
@@ -1172,8 +1189,8 @@ pub(in crate::g_syntax::parser) fn parse_expression_chain_view(
 pub(in crate::g_syntax::parser) mod term_oracle {
     use std::cell::RefCell;
 
-    use super::super::term::{Fail, parse_term_chain};
-    use super::{Diagnostic, ExpressionContext, InfixChain, TokenView};
+    use super::super::term::Fail;
+    use super::{ExpressionContext, InfixChain, TokenView, parse_grammar_chain_view};
 
     #[derive(Debug, Default)]
     pub(in crate::g_syntax::parser) struct Report {
@@ -1211,14 +1228,14 @@ pub(in crate::g_syntax::parser) mod term_oracle {
     pub(super) fn check(
         view: TokenView<'_, '_>,
         context: ExpressionContext,
-        old: &Result<InfixChain, Vec<Diagnostic>>,
+        new: &Result<InfixChain, Fail>,
     ) {
         if !ACTIVE.with(|active| active.borrow().is_some()) {
-            if sweeping() {
-                let new = parse_term_chain(view, context);
-                let agree = match (&new, old) {
-                    (Err(Fail::Unsupported(_)), _) | (Err(Fail::Error(_)), Err(_)) => true,
+            if sweeping() && !matches!(new, Err(Fail::Unsupported(_))) {
+                let old = parse_grammar_chain_view(view, context);
+                let agree = match (new, &old) {
                     (Ok(new), Ok(old)) => new == old,
+                    (Err(Fail::Error { .. }), Err(_)) => true,
                     _ => false,
                 };
                 assert!(
@@ -1229,21 +1246,25 @@ pub(in crate::g_syntax::parser) mod term_oracle {
             }
             return;
         }
-        let new = parse_term_chain(view, context);
+        if let Err(Fail::Unsupported(reason)) = new {
+            ACTIVE.with(|active| {
+                let mut active = active.borrow_mut();
+                let report = active.as_mut().expect("checked as enabled");
+                report.unsupported += 1;
+                *report.unsupported_reasons.entry(reason).or_default() += 1;
+            });
+            return;
+        }
+        let old = parse_grammar_chain_view(view, context);
         ACTIVE.with(|active| {
             let mut active = active.borrow_mut();
             let report = active.as_mut().expect("checked as enabled");
-            let agree = match (&new, old) {
-                (Err(Fail::Unsupported(reason)), _) => {
-                    report.unsupported += 1;
-                    *report.unsupported_reasons.entry(reason).or_default() += 1;
-                    return;
-                }
+            let agree = match (new, &old) {
                 (Ok(new), Ok(old)) => {
                     report.accepted += 1;
                     new == old
                 }
-                (Err(Fail::Error(_)), Err(_)) => true,
+                (Err(Fail::Error { .. }), Err(_)) => true,
                 _ => false,
             };
             report.compared += 1;

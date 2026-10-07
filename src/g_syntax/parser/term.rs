@@ -51,14 +51,50 @@ use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
 pub(super) enum Fail {
     /// The view uses a construct this parser does not cover yet.
     Unsupported(&'static str),
-    /// The view is not a valid expression.
-    Error(String),
+    /// The view is not a valid expression. `at` is the token where parsing
+    /// stopped, when known.
+    Error { at: Option<usize>, message: String },
+}
+
+impl Fail {
+    fn error(message: impl Into<String>) -> Self {
+        Self::Error {
+            at: None,
+            message: message.into(),
+        }
+    }
+
+    /// Locates an error that has no location yet.
+    fn or_at(self, location: Option<usize>) -> Self {
+        match self {
+            Self::Error { at: None, message } => Self::Error {
+                at: location,
+                message,
+            },
+            fail => fail,
+        }
+    }
 }
 
 type Parse<T> = Result<T, Fail>;
 
 fn error<T>(message: impl Into<String>) -> Parse<T> {
-    Err(Fail::Error(message.into()))
+    Err(Fail::error(message))
+}
+
+/// A term parser error as a diagnostic on the line of its token, or of the
+/// view's first token when it has no location.
+pub(super) fn diagnostic(
+    view: TokenView<'_, '_>,
+    at: Option<usize>,
+    message: String,
+) -> crate::g_syntax::Diagnostic {
+    let line = at
+        .and_then(|index| view.token_at(index))
+        .or_else(|| view.first_significant().map(|(_, token)| token))
+        .and_then(|token| view.line_at_span(token.span()))
+        .unwrap_or(1);
+    crate::g_syntax::Diagnostic::error(line, message)
 }
 
 /// Parses `view` as one ordinary expression, returning its unresolved infix
@@ -105,7 +141,9 @@ pub(super) fn parse_term_chain(
                     .group(frame.group.expect("a group frame records its group"))
                     .expect("an open frame's group exists")
                     .open_token();
-                let cover = covers.push(interpret_group(scope, &frame, index)?);
+                let cover = covers.push(
+                    interpret_group(scope, &frame, index).map_err(|fail| fail.or_at(Some(open)))?,
+                );
                 stack
                     .last_mut()
                     .expect("the view frame encloses every group")
@@ -122,8 +160,11 @@ pub(super) fn parse_term_chain(
     }
     let top = stack.pop().expect("the view frame remains");
     debug_assert!(stack.is_empty(), "every group closes inside the view");
-    if top.pieces.iter().any(|piece| is_symbol(view, piece, ",")) {
-        return error("unexpected `,` in an expression");
+    if let Some(Piece::Token(comma)) = top.pieces.iter().find(|piece| is_symbol(view, piece, ",")) {
+        return Err(Fail::Error {
+            at: Some(*comma),
+            message: "unexpected `,` in an expression; parenthesize a tuple".to_owned(),
+        });
     }
     // Trailing layout ends the expression; leading layout does not start one.
     Items::new(scope, trim_trailing_padding(view, &top.pieces)).item()
@@ -238,6 +279,14 @@ enum ParenCover {
     Section(SyntaxExpr),
 }
 
+/// The token that starts a piece: the token itself, or a group's open.
+fn piece_token(piece: &Piece) -> usize {
+    match piece {
+        Piece::Token(index) => *index,
+        Piece::Group { open, .. } => *open,
+    }
+}
+
 fn piece_leading(view: TokenView<'_, '_>, piece: &Piece) -> LeadingTrivia {
     match piece {
         Piece::Token(index) => token(view, *index).leading(),
@@ -343,7 +392,7 @@ fn interpret_group(scope: Scope<'_, '_, '_>, frame: &Frame, close: usize) -> Par
         }
         Delimiter::Brace => {
             let group = frame.group.expect("a brace frame records its group");
-            validate_dict_colon_members(view, group).map_err(Fail::Error)?;
+            validate_dict_colon_members(view, group).map_err(Fail::error)?;
             let segments = segments(view, &frame.pieces);
             let items = separated_items(&segments, true, true)?;
             items
@@ -442,7 +491,7 @@ fn resolved(scope: Scope<'_, '_, '_>, pieces: &[Piece]) -> Parse<SyntaxExpr> {
     Items::new(scope, pieces)
         .item()?
         .resolve()
-        .map_err(Fail::Error)
+        .map_err(Fail::error)
 }
 
 /// A dict member: a pun `:name`, a path member `path: value`, or an
@@ -503,8 +552,8 @@ struct Chain {
     first: Option<SyntaxExpr>,
     rest: Vec<(SyntaxOperator, SyntaxExpr)>,
     pending: Option<SyntaxOperator>,
-    /// The indentation of each line-led operator, in order.
-    anchors: Vec<usize>,
+    /// The indentation and token of each line-led operator, in order.
+    anchors: Vec<(usize, usize)>,
 }
 
 impl Chain {
@@ -524,13 +573,18 @@ impl Chain {
         }
         let first = self
             .first
-            .ok_or_else(|| Fail::Error("expected an expression".to_owned()))?;
-        self.anchors
-            .into_iter()
-            .try_fold(InfixChain::from_parts(first, self.rest), |chain, anchor| {
-                chain.with_resumption_anchor(anchor, context)
-            })
-            .map_err(Fail::Error)
+            .ok_or_else(|| Fail::error("expected an expression"))?;
+        self.anchors.into_iter().try_fold(
+            InfixChain::from_parts(first, self.rest),
+            |chain, (indentation, operator)| {
+                chain
+                    .with_resumption_anchor(indentation, context)
+                    .map_err(|message| Fail::Error {
+                        at: Some(operator),
+                        message,
+                    })
+            },
+        )
     }
 }
 
@@ -673,6 +727,28 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         self.position += self.line_starts_at(0).0;
     }
 
+    /// The token an error at the cursor is reported at: the current piece,
+    /// or the item's last piece at its end.
+    fn here(&self) -> Option<usize> {
+        self.peek().or_else(|| self.pieces.last()).map(piece_token)
+    }
+
+    fn error_here<T>(&self, message: impl Into<String>) -> Parse<T> {
+        Err(Fail::error(message).or_at(self.here()))
+    }
+
+    /// Reports what the cursor expected and what it found instead.
+    fn expected<T>(&self, expected: &str) -> Parse<T> {
+        let found = match self.peek() {
+            Some(piece) => {
+                let view = self.scope.view;
+                view.display(view.token_at(piece_token(piece))).to_string()
+            }
+            None => "the end of the expression".to_owned(),
+        };
+        self.error_here(format!("expected {expected}, found {found}"))
+    }
+
     /// Parses the whole item: an infix chain of applications, where a lambda
     /// takes the rest of the item as its body.
     fn item(mut self) -> Parse<InfixChain> {
@@ -712,15 +788,28 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                 break 'operand;
             };
             let Some(operator) = piece_operator(self.scope.view, piece) else {
-                return error("unexpected token after an expression");
+                self.position += breaks;
+                // A path or tag separated from its continuation by a space.
+                if self.symbol_at(0, ".") {
+                    self.position += 1;
+                    return self.expected("a name, bracket or parenthesis adjacent to `.`");
+                }
+                if self.symbol_at(0, ":") {
+                    self.position += 1;
+                    return self.expected("a tag payload adjacent to `:`");
+                }
+                return self.expected("an infix operator or the end of the expression");
             };
+            let operator_token = piece_token(piece);
             self.position += breaks + 1;
             self.skip_line_starts();
             let chain = &mut levels.last_mut().expect("levels remain").chain;
             chain.pending = Some(operator);
-            chain.anchors.extend(indentation);
+            chain
+                .anchors
+                .extend(indentation.map(|indentation| (indentation, operator_token)));
             if self.peek().is_none() {
-                return error("an infix operator requires a right operand");
+                return self.error_here("an infix operator requires a right operand");
             }
         }
         // Close lambdas innermost first; each one ends with the item.
@@ -728,13 +817,16 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             let level = levels.pop().expect("levels remain while closing");
             let Some((params, attach)) = level.lambda else {
                 debug_assert!(levels.is_empty(), "only the item level has no lambda");
-                return level.chain.finish(self.scope.context);
+                return level
+                    .chain
+                    .finish(self.scope.context)
+                    .map_err(|fail| fail.or_at(self.here()));
             };
             let body = level
                 .chain
-                .finish(self.scope.context)?
-                .resolve()
-                .map_err(Fail::Error)?;
+                .finish(self.scope.context)
+                .and_then(|chain| chain.resolve().map_err(Fail::error))
+                .map_err(|fail| fail.or_at(self.here()))?;
             let lambda = SyntaxExpr::Lambda(params, Box::new(body));
             let operand = match attach {
                 Attach::Operand => lambda,
@@ -766,7 +858,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                 || is_glam_name(name)
                 || name.strip_prefix('_').is_some_and(is_glam_name);
             if !is_local {
-                return error("expected local name");
+                return self.expected("a lambda parameter");
             }
             if canonical_keyword(name).is_some() {
                 return Err(Fail::Unsupported("a keyword lambda parameter"));
@@ -776,15 +868,15 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             self.skip_line_starts();
         }
         if params.is_empty() {
-            return error("a lambda requires a parameter");
+            return self.expected("a lambda parameter");
         }
         if !self.symbol_at(0, "->") {
-            return error("expected `->` after lambda parameters");
+            return self.expected("`->` after the lambda parameters");
         }
         self.position += 1;
         self.skip_line_starts();
         if self.peek().is_none() {
-            return error("a lambda requires a body");
+            return self.error_here("a lambda requires a body");
         }
         Ok(params)
     }
@@ -801,7 +893,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             }
             self.position += breaks;
             if self.symbol_at(0, ".") {
-                return error(
+                return self.error_here(
                     "dot-leading application arguments must be parenthesized; write `f (.bar)` or use `<|`",
                 );
             }
@@ -848,14 +940,14 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         let base = loop {
             let tagged = self.symbol_at(1, ":") && self.joint_at(1) && self.joint_at(2);
             match self.peek() {
-                None => return error("expected an expression"),
+                None => return self.expected("an expression"),
                 Some(Piece::Group { .. }) => match self.shape_at(0) {
                     Some(Shape::Bracket { empty: false }) if tagged => {
                         tags.push(self.take_keys());
                         self.position += 1;
                     }
                     Some(Shape::Bracket { empty: true }) if tagged => {
-                        return error("dictionary paths cannot be empty");
+                        return self.error_here("dictionary paths cannot be empty");
                     }
                     Some(Shape::Grouped) if tagged => {
                         let index = self.take_grouped();
@@ -887,8 +979,11 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     /// `:path`, a tag constructor.
     fn constructor(&mut self) -> Parse<SyntaxExpr> {
         self.position += 1;
-        if !self.joint_at(0) || self.data_path_end().is_none() {
-            return error("expected a path after `:`");
+        if !self.joint_at(0) {
+            return self.expected("a path adjacent to `:`");
+        }
+        if self.data_path_end().is_none() {
+            return self.expected("a path after `:`");
         }
         self.data_path().map(SyntaxExpr::TaggedConstructor)
     }
@@ -915,10 +1010,10 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             Some(Shape::Grouped) => Ok(vec![SyntaxKeyExpr::PathIndex(Box::new(
                 self.take_grouped(),
             ))]),
-            Some(_) => error("expected a dictionary path"),
+            Some(_) => self.expected("a dictionary path"),
             None => match self.kind() {
                 Some(TokenKind::Name(name)) if is_glam_name(name) => self.named_path(name),
-                _ => error("expected a dictionary path"),
+                _ => self.expected("a dictionary path"),
             },
         }
     }
@@ -963,7 +1058,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
 
     fn base_atom(&mut self) -> Parse<SyntaxExpr> {
         let Some(kind) = self.kind() else {
-            return error("expected an expression");
+            return self.expected("an expression");
         };
         let base = match kind {
             TokenKind::Number(id) => {
@@ -1001,7 +1096,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             TokenKind::Symbol(".") => return self.effect(),
             TokenKind::Symbol("^") => return self.escape(),
             TokenKind::Name(name) => return self.rooted_name(name),
-            _ => return error("expected an expression"),
+            _ => return self.expected("an expression"),
         };
         let suffixes = self.path_suffixes()?;
         Ok(access_if_path(base, suffixes))
@@ -1011,12 +1106,12 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     fn quoted(&mut self) -> Parse<SyntaxExpr> {
         self.position += 1;
         if !self.joint_at(0) {
-            return error("expected a quoted name or path after `'`");
+            return self.expected("a quoted name or path after `'`");
         }
         let base = if self.symbol_at(0, ".") {
             let suffixes = self.path_suffixes()?;
             if suffixes.is_empty() {
-                return error("expected a quoted path after `'`");
+                return self.expected("a quoted path after `'`");
             }
             quoted_path(suffixes)
         } else {
@@ -1025,7 +1120,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                     self.position += 1;
                     SyntaxExpr::Atom((*name).to_owned())
                 }
-                _ => return error("expected a quoted name or path after `'`"),
+                _ => return self.expected("a quoted name or path after `'`"),
             }
         };
         let suffixes = self.path_suffixes()?;
@@ -1046,7 +1141,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             self.position += 2;
         }
         if path.is_empty() {
-            return error("expected an effect name after `.`");
+            return self.expected("an effect name after `.`");
         }
         Ok(SyntaxExpr::Effect(path))
     }
@@ -1060,7 +1155,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             self.position += 1;
         }
         if !self.joint_at(0) {
-            return error("expected an escaped name or group");
+            return self.expected("an escaped name or group");
         }
         let target = match self.peek() {
             Some(Piece::Group { .. }) if self.shape_at(0) == Some(Shape::Grouped) => {
@@ -1068,14 +1163,15 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             }
             Some(Piece::Token(_)) => match self.kind() {
                 Some(TokenKind::Name(name)) => {
-                    let name = validate_expr_name(name).map_err(Fail::Error)?;
+                    let name = validate_expr_name(name)
+                        .map_err(|message| Fail::error(message).or_at(self.here()))?;
                     self.position += 1;
                     let suffixes = self.path_suffixes()?;
                     access_if_path(SyntaxExpr::Name(name), suffixes)
                 }
-                _ => return error("expected an escaped name or group"),
+                _ => return self.expected("an escaped name or group"),
             },
-            _ => return error("expected an escaped name or group"),
+            _ => return self.expected("an escaped name or group"),
         };
         let suffixes = self.path_suffixes()?;
         Ok(access_if_path(
@@ -1087,15 +1183,16 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     /// A prior name `_name`, with path suffixes.
     fn rooted_name(&mut self, name: &str) -> Parse<SyntaxExpr> {
         let Some(prior) = name.strip_prefix('_') else {
-            return error("expected name");
+            return self.expected("a name");
         };
         if !is_glam_name(prior) {
-            return error("expected name after `_`");
+            return self.expected("a name after `_`");
         }
         if prior == "module_origin" {
-            return error("`module_origin` is reserved");
+            return self.error_here("`module_origin` is reserved");
         }
-        let prior = validate_expr_name(prior).map_err(Fail::Error)?;
+        let prior =
+            validate_expr_name(prior).map_err(|message| Fail::error(message).or_at(self.here()))?;
         self.position += 1;
         let suffixes = self.path_suffixes()?;
         Ok(access_if_path(SyntaxExpr::PriorName(prior), suffixes))
@@ -1107,7 +1204,7 @@ fn name_with_path(mut path: Vec<SyntaxKeyExpr>) -> Parse<SyntaxExpr> {
     let SyntaxKeyExpr::Atom(name) = path.remove(0) else {
         unreachable!("named paths begin with an atom key");
     };
-    let base = SyntaxExpr::Name(validate_expr_name(&name).map_err(Fail::Error)?);
+    let base = SyntaxExpr::Name(validate_expr_name(&name).map_err(Fail::error)?);
     Ok(if path.is_empty() {
         base
     } else {

@@ -1,1 +1,1 @@
-error|3|found end of input|expected|name|bracket|brace|number
+error|3|an infix operator requires a right operand

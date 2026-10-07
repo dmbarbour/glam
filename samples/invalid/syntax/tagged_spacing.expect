@@ -1,2 +1,2 @@
-error|3|expected adjacent token|found `value`
-error|4|expected adjacent token|found `tag`
+error|3|adjacent to `:`|found `value`
+error|4|adjacent to `:`|found `tag`

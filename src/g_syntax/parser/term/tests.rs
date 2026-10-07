@@ -595,7 +595,11 @@ fn assert_term_parses_quickly(text: &str, limit: std::time::Duration) -> SyntaxE
     let started = std::time::Instant::now();
     let result = super::super::input::parse_expression_fragment(text.as_bytes(), |view| {
         super::parse_term_chain(view, ExpressionContext::for_owner(view))
-            .and_then(|chain| chain.resolve().map_err(super::Fail::Error))
+            .and_then(|chain| {
+                chain
+                    .resolve()
+                    .map_err(|message| super::Fail::Error { at: None, message })
+            })
             .map_err(|fail| vec![crate::g_syntax::Diagnostic::error(1, format!("{fail:?}"))])
     });
     let elapsed = started.elapsed();
