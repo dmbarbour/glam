@@ -391,10 +391,7 @@ fn parse_definition_target(
                 {
                     let expr = parse_expression_in_context(item, context.complete())
                         .map_err(|errors| combine_parse_errors(line, errors))?;
-                    parts.push(match expr {
-                        SyntaxExpr::Atom(name) => SyntaxKeyExpr::Atom(name),
-                        expr => SyntaxKeyExpr::Index(Box::new(expr)),
-                    });
+                    parts.push(SyntaxKeyExpr::from_item(expr));
                 }
             }
             TokenKind::Open {

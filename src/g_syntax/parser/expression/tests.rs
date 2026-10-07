@@ -265,17 +265,20 @@ fn keyword_data_escapes_remain_available() {
 }
 
 #[test]
-fn key_paths_read_only_a_lone_quoted_name_as_an_atom_key() {
-    let SyntaxExpr::PathDict(path, _) = parse_expression_fragment(b"['a, 'b c]:v").unwrap() else {
+fn key_path_items_are_ordinary_expressions() {
+    let SyntaxExpr::PathDict(path, _) = parse_expression_fragment(b"['a, ('b), 'c d]:v").unwrap()
+    else {
         panic!("a computed tag should parse as a path dictionary");
     };
+    // Constant atoms become static keys however they are written.
     assert_eq!(
         path,
         vec![
             SyntaxKeyExpr::Atom("a".to_owned()),
+            SyntaxKeyExpr::Atom("b".to_owned()),
             SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Apply(
-                Box::new(SyntaxExpr::Atom("b".to_owned())),
-                Box::new(SyntaxExpr::Name("c".to_owned())),
+                Box::new(SyntaxExpr::Atom("c".to_owned())),
+                Box::new(SyntaxExpr::Name("d".to_owned())),
             ))),
         ]
     );

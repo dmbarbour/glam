@@ -233,7 +233,7 @@ maps the short names used here to file names.
 - **Recorded in:** parser backtracking plan, "Progress 2026-10-06".
 
 ### Only a lone quoted name is an atom key in a key path
-`lone-quoted-name-is-an-atom-key` · 2026-10-06 · maintainer · accepted
+`lone-quoted-name-is-an-atom-key` · 2026-10-06 · maintainer · superseded
 - **Context:** the grammar committed to a leading `'name` as the whole key.
   So `['a b]` was a valid list but a syntax error as a key path, an
   artifact of the parser rather than a rule.
@@ -242,6 +242,27 @@ maps the short names used here to file names.
   `['a b]:v` indexes by `'a b`. Applying an atom is an error for a later
   front-end check, not a parse error.
 - **Consequences:** key paths and lists read their items alike.
+- **Rule lives in:** `SyntaxCheatSheet.md` "Atoms, Tagged Data, Dicts".
+- **Recorded in:** parser backtracking plan, "Progress 2026-10-06".
+- **Superseded by:** `key-path-items-are-expressions`.
+
+### Key-path items are ordinary expressions
+`key-path-items-are-expressions` · 2026-10-07 · maintainer · accepted
+- **Context:** the maintainer clarified that `'name` is itself an ordinary
+  expression, one that evaluates to an atom, so a key path has no reason to
+  read it separately. Supersedes `lone-quoted-name-is-an-atom-key`. The
+  declaration and pattern parsers already parsed key items as expressions
+  and normalized a constant atom afterwards; only the expression grammar
+  had a separate `'name` alternative.
+- **Decision:**
+  - Every key-path item is parsed as an expression, exactly as in a list.
+  - A constant atom result becomes a static key through one helper,
+    `SyntaxKeyExpr::from_item`; any other result is an index.
+  - Applying an atom, as in `'a b`, is an error for a later front-end
+    check.
+- **Consequences:** all three parsers share the conversion. A grouped atom,
+  `[('a)]`, is now a static key in expressions as well; that means the same
+  key as an index by that atom.
 - **Rule lives in:** `SyntaxCheatSheet.md` "Atoms, Tagged Data, Dicts".
 - **Recorded in:** parser backtracking plan, "Progress 2026-10-06".
 

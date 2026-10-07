@@ -226,7 +226,8 @@ enum Shape {
 /// A group's contents, interpreted once and converted by the parent's role.
 enum Cover {
     Paren(ParenCover),
-    Bracket(Vec<BracketItem>),
+    /// A list, or a key path whose items convert by `SyntaxKeyExpr::from_item`.
+    Bracket(Vec<SyntaxExpr>),
     Brace(Vec<SyntaxExpr>),
 }
 
@@ -235,31 +236,6 @@ enum ParenCover {
     Grouped(SyntaxExpr),
     Tuple(Vec<SyntaxExpr>),
     Section(SyntaxExpr),
-}
-
-/// A bracket item, converted by the bracket's role.
-enum BracketItem {
-    /// Exactly `'name`: a quoted atom in a list, an atom key in a key path.
-    QuotedName(String),
-    /// Any other expression, including one that begins with `'name`, such
-    /// as `'a b`: a list item, or an index key.
-    Expr(SyntaxExpr),
-}
-
-impl BracketItem {
-    fn into_list_item(self) -> SyntaxExpr {
-        match self {
-            Self::QuotedName(name) => SyntaxExpr::Atom(name),
-            Self::Expr(expr) => expr,
-        }
-    }
-
-    fn into_key(self) -> SyntaxKeyExpr {
-        match self {
-            Self::QuotedName(name) => SyntaxKeyExpr::Atom(name),
-            Self::Expr(expr) => SyntaxKeyExpr::Index(Box::new(expr)),
-        }
-    }
 }
 
 fn piece_leading(view: TokenView<'_, '_>, piece: &Piece) -> LeadingTrivia {
@@ -363,11 +339,7 @@ fn interpret_group(scope: Scope<'_, '_, '_>, frame: &Frame, close: usize) -> Par
         Delimiter::Bracket => {
             let segments = segments(view, &frame.pieces);
             let items = separated_items(&segments, true, true)?;
-            items
-                .into_iter()
-                .map(|item| bracket_item(scope, item))
-                .collect::<Parse<Vec<_>>>()
-                .map(Cover::Bracket)
+            resolved_items(scope, items).map(Cover::Bracket)
         }
         Delimiter::Brace => {
             let group = frame.group.expect("a brace frame records its group");
@@ -471,19 +443,6 @@ fn resolved(scope: Scope<'_, '_, '_>, pieces: &[Piece]) -> Parse<SyntaxExpr> {
         .item()?
         .resolve()
         .map_err(Fail::Error)
-}
-
-fn bracket_item(scope: Scope<'_, '_, '_>, item: &[Piece]) -> Parse<BracketItem> {
-    let view = scope.view;
-    if let [quote, name] = item
-        && is_symbol(view, quote, "'")
-        && piece_leading(view, name) == LeadingTrivia::Joint
-        && let Some(TokenKind::Name(name)) = piece_kind(view, name)
-        && is_glam_name(name)
-    {
-        return Ok(BracketItem::QuotedName((*name).to_owned()));
-    }
-    resolved(scope, item).map(BracketItem::Expr)
 }
 
 /// A dict member: a pun `:name`, a path member `path: value`, or an
@@ -617,7 +576,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
 
     fn take_keys(&mut self) -> Vec<SyntaxKeyExpr> {
         match self.take_group() {
-            Cover::Bracket(items) => items.into_iter().map(BracketItem::into_key).collect(),
+            Cover::Bracket(items) => items.into_iter().map(SyntaxKeyExpr::from_item).collect(),
             _ => unreachable!("the shape was checked as a bracket"),
         }
     }
@@ -992,9 +951,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     /// section, with path suffixes.
     fn literal_group(&mut self) -> Parse<SyntaxExpr> {
         let base = match self.take_group() {
-            Cover::Bracket(items) => {
-                SyntaxExpr::List(items.into_iter().map(BracketItem::into_list_item).collect())
-            }
+            Cover::Bracket(items) => SyntaxExpr::List(items),
             Cover::Brace(members) => SyntaxExpr::DictUnion(members),
             Cover::Paren(ParenCover::Unit) => SyntaxExpr::Unit,
             Cover::Paren(ParenCover::Grouped(expr) | ParenCover::Section(expr)) => expr,

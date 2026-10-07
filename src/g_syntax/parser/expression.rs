@@ -194,24 +194,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
         let key_name = glam_name.clone();
         let local_name = local_name().boxed();
 
-        // An item that is exactly `'name` is an atom key. A longer item that
-        // begins with one, such as `'a b`, is an ordinary index expression.
-        let single_key_expr = || {
-            choice((
-                symbol("'")
-                    .ignore_then(joint(glam_name.clone()))
-                    .then_ignore(
-                        layout_padding()
-                            .then(choice((
-                                symbol(",").ignored(),
-                                close(Delimiter::Bracket).ignored(),
-                            )))
-                            .rewind(),
-                    )
-                    .map(SyntaxKeyExpr::Atom),
-                resolved(expr.clone()).map(|expr| SyntaxKeyExpr::Index(Box::new(expr))),
-            ))
-        };
+        let single_key_expr = || resolved(expr.clone()).map(SyntaxKeyExpr::from_item);
 
         let path_list_shorthand = open(Delimiter::Bracket)
             .ignore_then(

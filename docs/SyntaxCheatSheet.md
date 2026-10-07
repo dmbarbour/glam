@@ -74,7 +74,7 @@ tag:Data            # tagged data: sugar for { tag:Data }
 foo.bar:Data        # path-tagged data: sugar for { foo.bar:Data }
 :foo.bar            # constructor: \ Data -> foo.bar:Data
 [KeyA,KeyB]:Data    # computed hierarchical path
-['a, x]:Data        # a lone 'name item is an atom key; ['a x] indexes by 'a x
+['a, x]:Data        # keys are ordinary expressions; 'a evaluates to an atom
 :[KeyA,KeyB]        # corresponding constructor
 (PathExpr):Data     # splice a computed list-valued path
 :(PathExpr)         # corresponding constructor

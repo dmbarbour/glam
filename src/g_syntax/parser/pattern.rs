@@ -695,10 +695,7 @@ fn parse_pattern_path_list(
             ));
         }
         let expr = parse_expression_in_context(part, ExpressionContext::for_owner(part))?;
-        keys.push(match expr {
-            SyntaxExpr::Atom(name) => SyntaxKeyExpr::Atom(name),
-            expr => SyntaxKeyExpr::Index(Box::new(expr)),
-        });
+        keys.push(SyntaxKeyExpr::from_item(expr));
     }
     Ok(keys)
 }

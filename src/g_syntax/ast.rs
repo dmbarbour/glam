@@ -664,6 +664,17 @@ pub enum SyntaxKeyExpr {
     PathIndex(Box<SyntaxExpr>),
 }
 
+impl SyntaxKeyExpr {
+    /// A key-path item, which is an ordinary expression. A constant atom,
+    /// such as `'name`, becomes a static key; any other expression indexes.
+    pub(super) fn from_item(expr: SyntaxExpr) -> Self {
+        match expr {
+            SyntaxExpr::Atom(name) => Self::Atom(name),
+            expr => Self::Index(Box::new(expr)),
+        }
+    }
+}
+
 pub(super) fn is_comparison_operator(operator: SyntaxOperator) -> bool {
     matches!(
         operator,

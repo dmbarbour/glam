@@ -329,9 +329,12 @@ test-only so far.
     the expression. `(:and)` is a grouping, not a section; mirrored.
   - The grammar read a leading `'name` in a key path as the whole key, so
     `['a b]` was a valid list but an invalid key path. **Decided
-    2026-10-06** (`lone-quoted-name-is-an-atom-key`): only a lone `'name`
-    is an atom key. Any other item is an index expression, and a later
-    front-end check can catch applying an atom. Both parsers changed.
+    2026-10-07** (`key-path-items-are-expressions`):
+    - every key-path item is an ordinary expression, since `'name` itself
+      evaluates to an atom;
+    - a constant atom becomes a static key through the helper the
+      declaration and pattern parsers now share;
+    - a later front-end check can catch applying an atom.
   - The grammar read `(and:a)` as a prefix section but `(and:1)` as a tag,
     deciding by whether the rest parsed. **Decided 2026-10-06**
     (`joint-colon-makes-a-tag`): a joint `:` after a name always makes a
