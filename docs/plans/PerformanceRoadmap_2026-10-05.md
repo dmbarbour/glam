@@ -158,7 +158,10 @@ gains this consequence when it lands.
    [Evaluation Recursion Performance](EvaluationRecursionPerformance_2026-10-04.md)
    before any representation work: a simple countdown costs tens of
    milliseconds per call and grows roughly quadratically, which would swamp
-   every other measurement.
+   every other measurement. `eval-recursion-route-validation` made it
+   linear, and `eval-recursion-inline-forcing` (2026-10-07) removed most
+   per-lazy routes: `countdown_400` takes 788 ms and `hello_elf` 1,874 ms.
+   `eval-recursion-tail-forwarding` is next.
 5. **Structural overheads** (`perf-structural-overheads`). The holistic pre-performance review's P2:
    scheduler round trips, the allocation and rooting path, the reflection
    branch clone, and obvious algorithmic defects. These would otherwise mask

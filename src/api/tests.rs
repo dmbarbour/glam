@@ -352,6 +352,96 @@ fn exact_route_validation_stays_linear_in_recursion_depth() {
     );
 }
 
+/// Each countdown level used to admit about 60 lazy routes, one per forced
+/// lazy. A route now forces the lazies it needs inline, and only a lazy that
+/// suspends or exceeds the inline depth gets a route.
+#[cfg(feature = "glam-prof")]
+#[test]
+fn inline_forcing_admits_few_routes_per_recursion_level() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .expect("assembler should build");
+    let module = assembler
+        .module(["countdown"])
+        .script(
+            "g",
+            "language g0\nloop n = if n == 0 then 0 else loop (n - 1)\nanswer = loop 60\n",
+        )
+        .build()
+        .expect("module should build");
+    let answer = access_path(&assembler, module.value(), "answer").expect("answer should exist");
+    assembler
+        .evaluator()
+        .eval(&answer)
+        .expect("answer should evaluate");
+    let admissions = runtime
+        .profile()
+        .net
+        .coordinator_notifications
+        .calls
+        .notify_all
+        .fresh_work_admission;
+    assert!(
+        admissions < 60 * 10,
+        "60 countdown levels admitted {admissions} routes"
+    );
+}
+
+/// A non-tail recursion nests deeper than one route may force inline and
+/// runs longer than one quantum, so its inline lazies spill to routes.
+#[test]
+fn deep_non_tail_recursion_spills_inline_lazies_to_routes() {
+    let assembler = Assembler::new();
+    let module = assembler
+        .module(["count"])
+        .script(
+            "g",
+            concat!(
+                "language g0\n",
+                "count n = if n == 0 then 0 else 1 + count (n - 1)\n",
+                "answer = if count 200 == 200 then \"ok\" else \"bad\"\n",
+            ),
+        )
+        .build()
+        .expect("module should build");
+    assert_eq!(
+        binary_at(&assembler, module.value(), "answer")
+            .expect("answer should evaluate")
+            .as_ref(),
+        b"ok"
+    );
+}
+
+/// Lazies a route forces inline can close a cycle among themselves; it is
+/// still reported as a dependency cycle rather than looping.
+#[test]
+fn a_cycle_among_inline_forced_lazies_is_a_dependency_cycle() {
+    let assembler = Assembler::new();
+    let module = assembler
+        .module(["cycle"])
+        .script(
+            "g",
+            "language g0\nx = y + 1\ny = z + 1\nz = x + 1\nanswer = x\n",
+        )
+        .build()
+        .expect("module should build");
+    let answer = access_path(&assembler, module.value(), "answer").expect("answer should exist");
+    let error = assembler
+        .evaluator()
+        .eval(&answer)
+        .expect_err_without_debug("a lazy cycle cannot evaluate");
+    let diagnostic = error
+        .diagnostic(&assembler.values())
+        .expect("the cycle failure should have a diagnostic");
+    assert!(
+        diagnostic.message().contains("lazy dependency cycle"),
+        "{}",
+        diagnostic.message()
+    );
+}
+
 #[test]
 fn runtime_shared_resources_do_not_retain_runtime_lifecycle_owners() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");

@@ -10,8 +10,8 @@ use crate::core::{
 use crate::core_net::CoreDataKey;
 use crate::evaluation::{
     EvalContext, EvaluationMachinePoll, EvaluationTaskBlock, EvaluationTaskMachine,
-    EvaluatorStepContext, WhnfOwnerPoll, WorkDependency, interpret_whnf_poll, poll_lazy_checkpoint,
-    poll_whnf_computation,
+    EvaluatorStepContext, LazyCheckpointPoll, WhnfOwnerPoll, WorkDependency, interpret_whnf_poll,
+    poll_lazy_checkpoint, poll_whnf_computation,
 };
 #[cfg(test)]
 use crate::list::ListItem;
@@ -154,29 +154,276 @@ struct LazyTaskMachine {
     context: EvalContext,
     lazy: ManagedLazyRoot,
     work: LazyTaskWork,
+    /// This machine's depth on its route's inline stack, the claimed lazy's
+    /// being zero; `None` when no route loop drives it, so it never inlines.
+    inline_depth: Option<usize>,
+    /// A lazy this machine claimed for inline forcing at its last poll,
+    /// which returned `Yielded`.
+    inline_request: Option<ManagedLazyRoot>,
+}
+
+impl LazyTaskMachine {
+    #[cfg(test)]
+    fn new(context: EvalContext, lazy: ManagedLazyRoot) -> Self {
+        Self::at_inline_depth(context, lazy, None)
+    }
+
+    fn at_inline_depth(
+        context: EvalContext,
+        lazy: ManagedLazyRoot,
+        inline_depth: Option<usize>,
+    ) -> Self {
+        Self {
+            context,
+            lazy,
+            work: LazyTaskWork::Produce,
+            inline_depth,
+            inline_request: None,
+        }
+    }
+
+    /// Claims a lazy this machine waits on for inline forcing by its route
+    /// loop, if eligible, and returns `Yielded` for the loop to push it.
+    /// Returns any other request, or an ineligible lazy, for the machine's
+    /// own interpretation: a wait on the lazy's route.
+    fn offer_inline(
+        &mut self,
+        context: &EvaluatorStepContext<'_>,
+        request: super::whnf::WhnfDeferredRequest,
+    ) -> Result<EvaluationMachinePoll, super::whnf::WhnfDeferredRequest> {
+        let super::whnf::WhnfDeferredRequest::Lazy(lazy) = &request else {
+            return Err(request);
+        };
+        let Some(depth) = self.inline_depth else {
+            return Err(request);
+        };
+        if depth >= INLINE_LAZY_DEPTH
+            || !forceable_inline(context, lazy)
+            || !self.context.try_claim_inline_lazy(lazy)
+        {
+            return Err(request);
+        }
+        self.inline_request = Some(lazy.clone());
+        Ok(EvaluationMachinePoll::Yielded)
+    }
+
+    /// One poll, including the host-call permit's immediate second poll.
+    fn poll_route_step(
+        &mut self,
+        poll_context: &crate::evaluation::EvaluationPollContext,
+        budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> EvaluationMachinePoll {
+        let poll = self.poll(poll_context, budget);
+        if matches!(self.work, LazyTaskWork::HostCallInvoke) {
+            debug_assert!(matches!(poll, EvaluationMachinePoll::Yielded));
+            return self.poll(poll_context, budget);
+        }
+        poll
+    }
+}
+
+/// Inline lazies stacked above the claimed one. Deeper forcing takes a route,
+/// which bounds the work a later poll repeats.
+const INLINE_LAZY_DEPTH: usize = 32;
+
+/// Consecutive polls that may yield with budget left but none consumed, at
+/// family handoffs, before the top lazy suspends instead of being polled
+/// again.
+const IDLE_YIELD_REPOLLS: usize = 8;
+
+/// Whether a route may force `lazy` inline: it has a source or checkpoint
+/// that a later route can resume if the inline poll is abandoned. Host calls
+/// and reflection tasks run exactly once, under their own route; a cached or
+/// panicked lazy has nothing to force.
+fn forceable_inline(context: &EvaluatorStepContext<'_>, lazy: &ManagedLazyRoot) -> bool {
+    context.with_value_access(|access| {
+        let lazy = access.lazy_root(lazy);
+        match lazy.checkpoint_snapshot() {
+            Some(checkpoint) => checkpoint.kind() != ManagedLazyCheckpointKindTag::HostCall,
+            None => matches!(
+                lazy.source_snapshot(),
+                Some(source)
+                    if !matches!(source, LazySource::HostCall(_) | LazySource::ReflectionTask(_))
+            ),
+        }
+    })
+}
+
+/// The route's inline claims, released when its poll ends however it ends.
+struct InlineClaims<'context> {
+    context: &'context EvalContext,
+    lazies: Vec<ManagedLazyRoot>,
+}
+
+impl InlineClaims<'_> {
+    fn release(&mut self, lazy: &ManagedLazyRoot) {
+        if let Some(index) = self
+            .lazies
+            .iter()
+            .rposition(|claimed| claimed.id() == lazy.id())
+        {
+            self.lazies.remove(index);
+            self.context.release_inline_lazy(lazy);
+        }
+    }
+}
+
+impl Drop for InlineClaims<'_> {
+    fn drop(&mut self) {
+        for lazy in self.lazies.drain(..) {
+            self.context.release_inline_lazy(&lazy);
+        }
+    }
+}
+
+/// Suspends a route's inline stack at its top lazy, which yielded or blocked,
+/// and whose inline claim has ended: the claimed lazy blocks on the top
+/// lazy's route, which resumes the top from its checkpoint. The lazies in
+/// between are polled again once, when the top completes, instead of after
+/// every quantum or wake. If no route can be admitted, the claimed lazy
+/// reports the top's own suspension.
+fn spill_inline(
+    context: &EvalContext,
+    top: &ManagedLazyRoot,
+    suspension: EvaluationMachinePoll,
+) -> EvaluationMachinePoll {
+    match lazy_root_wait(context, top) {
+        Ok(wait) => EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+            dependency: Some(WorkDependency::Wait(wait)),
+            observed_epoch: None,
+            error: None,
+        }),
+        Err(_) => suspension,
+    }
 }
 
 /// Polls the authoritative lazy checkpoint through a transient route shell.
 /// The shell never survives the claim. The only transition which requires
 /// shell-local authority is the one-shot host-call permit, consumed before
 /// releasing the claim even when its installation returned `Yielded`.
+///
+/// **Inline forcing.** When the claimed lazy needs another uncached lazy that
+/// has no route, the route claims it inline and forces it on an explicit
+/// stack, instead of admitting a route and waiting:
+/// - a completed inline lazy is cached and popped, and its parent is polled
+///   again, finding the value cached;
+/// - a lazy that yields at a family handoff is polled again, up to
+///   [`IDLE_YIELD_REPOLLS`] times in a row without consuming budget;
+/// - an inline lazy that suspends, because the budget ran out or it blocks,
+///   spills: it gets a route, and the claimed lazy blocks on that route (see
+///   [`spill_inline`]);
+/// - an inline lazy's spark request passes through the claimed lazy.
+///
+/// A lazy with a route or another inline claim, a source that must run
+/// exactly once (a host call or reflection task), or a lazy beyond
+/// [`INLINE_LAZY_DEPTH`] is forced through its route as before. Every inline lazy's progress lives in its own checkpoint, and
+/// claims end with the poll, so suspended state is exactly what it would
+/// have been without inlining. A panic inside an inline lazy marks that lazy
+/// panicked before the scheduler's boundary records it for the claimed one.
 pub(crate) fn poll_lazy_route(
     poll_context: &crate::evaluation::EvaluationPollContext,
     demand: Arc<crate::evaluation::EvaluationDemandState>,
     lazy: &ManagedLazyRoot,
     budget: &mut crate::evaluation::EvaluationStepBudget,
+    origin: crate::core::EvaluationPanicOrigin,
 ) -> EvaluationMachinePoll {
-    let mut machine = LazyTaskMachine {
-        context: EvalContext::for_lazy_route(demand),
-        lazy: lazy.clone(),
-        work: LazyTaskWork::Produce,
+    let context = EvalContext::for_lazy_route(demand);
+    let mut stack = vec![LazyTaskMachine::at_inline_depth(
+        context.clone(),
+        lazy.clone(),
+        Some(0),
+    )];
+    let mut claims = InlineClaims {
+        context: &context,
+        lazies: Vec::new(),
     };
-    let mut poll = machine.poll(poll_context, budget);
-    if matches!(machine.work, LazyTaskWork::HostCallInvoke) {
-        debug_assert!(matches!(poll, EvaluationMachinePoll::Yielded));
-        poll = machine.poll(poll_context, budget);
+    let mut idle_yields = 0;
+    loop {
+        let inline = stack.len() > 1;
+        let top = stack
+            .last_mut()
+            .expect("the claimed lazy stays at the base");
+        let before = budget.remaining();
+        let poll = if inline {
+            let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                top.poll_route_step(poll_context, budget)
+            }));
+            match polled {
+                Ok(poll) => poll,
+                Err(payload) => {
+                    let report =
+                        crate::core::EvaluationPanic::from_payload(payload.as_ref(), origin);
+                    context.values().with_runtime_value_access(|access| {
+                        top.lazy.enter_panicked(&access, &report);
+                    });
+                    drop(claims);
+                    report.resume();
+                }
+            }
+        } else {
+            top.poll_route_step(poll_context, budget)
+        };
+        if let Some(child) = top.inline_request.take() {
+            debug_assert!(matches!(poll, EvaluationMachinePoll::Yielded));
+            claims.lazies.push(child.clone());
+            let depth = stack.len();
+            stack.push(LazyTaskMachine::at_inline_depth(
+                context.clone(),
+                child,
+                Some(depth),
+            ));
+            idle_yields = 0;
+            continue;
+        }
+        match poll {
+            // A family handoff: poll again rather than suspend.
+            EvaluationMachinePoll::Yielded
+                if budget.remaining() > 0 && budget.remaining() < before =>
+            {
+                idle_yields = 0;
+                continue;
+            }
+            EvaluationMachinePoll::Yielded
+                if budget.remaining() > 0 && idle_yields < IDLE_YIELD_REPOLLS =>
+            {
+                idle_yields += 1;
+                continue;
+            }
+            poll if !inline => return poll,
+            EvaluationMachinePoll::Complete(_) => {
+                let finished = stack.pop().expect("an inline lazy sits above the base");
+                claims.release(&finished.lazy);
+                idle_yields = 0;
+            }
+            EvaluationMachinePoll::Failed(failure) => {
+                let finished = stack.pop().expect("an inline lazy sits above the base");
+                let cached = context.values().with_runtime_value_access(|access| {
+                    finished
+                        .lazy
+                        .access(&access)
+                        .is_some_and(|lazy| lazy.cached().is_some())
+                });
+                if !cached {
+                    // An uncached failure, such as a refused admission, ends
+                    // the claimed lazy too, as its waiter would have seen.
+                    return EvaluationMachinePoll::Failed(failure);
+                }
+                claims.release(&finished.lazy);
+                idle_yields = 0;
+            }
+            poll @ (EvaluationMachinePoll::Yielded | EvaluationMachinePoll::Blocked(_)) => {
+                let top = top.lazy.clone();
+                claims.release(&top);
+                return spill_inline(&context, &top, poll);
+            }
+            poll @ EvaluationMachinePoll::ScheduleSpark(_) => return poll,
+            EvaluationMachinePoll::Exit(_)
+            | EvaluationMachinePoll::Cancelled
+            | EvaluationMachinePoll::Panicked { .. } => {
+                unreachable!("an inline lazy only completes, fails, yields, blocks or sparks")
+            }
+        }
     }
-    poll
 }
 
 impl LazyTaskMachine {
@@ -264,7 +511,7 @@ impl LazyTaskMachine {
     }
 
     fn poll_whnf_checkpoint(
-        &self,
+        &mut self,
         context: &EvaluatorStepContext<'_>,
         poll_context: &crate::evaluation::EvaluationPollContext,
         durable_context: &EvalContext,
@@ -274,6 +521,19 @@ impl LazyTaskMachine {
             poll_lazy_checkpoint(&self.lazy, poll_context, durable_context, step_budget)
         else {
             return self.cached_poll(context);
+        };
+        let poll = match poll {
+            LazyCheckpointPoll::Owner(poll) => poll,
+            LazyCheckpointPoll::Inline(lazy) => {
+                let request = super::whnf::WhnfDeferredRequest::Lazy(lazy);
+                match self.offer_inline(context, request) {
+                    Ok(poll) => return poll,
+                    Err(request) => interpret_whnf_poll(
+                        super::whnf::WhnfPoll::Deferred(request),
+                        durable_context,
+                    ),
+                }
+            }
         };
         match poll {
             WhnfOwnerPoll::Ready(value) => self.complete_root(context, &value),
@@ -463,6 +723,10 @@ impl LazyTaskMachine {
             }
             Transition::Boundary(request) => {
                 let super::whnf::RegionalBoundaryRequest::Deferred(deferred) = request;
+                let deferred = match self.offer_inline(context, deferred) {
+                    Ok(poll) => return poll,
+                    Err(deferred) => deferred,
+                };
                 let poll = super::whnf::WhnfPoll::Deferred(deferred);
                 match interpret_whnf_poll(poll, context.context()) {
                     WhnfOwnerPoll::Pending(dependency) => {
@@ -545,6 +809,10 @@ impl LazyTaskMachine {
             }
             Transition::Boundary(request) => {
                 let super::whnf::RegionalBoundaryRequest::Deferred(deferred) = request;
+                let deferred = match self.offer_inline(context, deferred) {
+                    Ok(poll) => return poll,
+                    Err(deferred) => deferred,
+                };
                 let poll = super::whnf::WhnfPoll::Deferred(deferred);
                 match interpret_whnf_poll(poll, context.context()) {
                     WhnfOwnerPoll::Pending(dependency) => {
@@ -649,6 +917,10 @@ impl LazyTaskMachine {
             }
             Transition::Boundary(request) => {
                 let super::whnf::RegionalBoundaryRequest::Deferred(deferred) = request;
+                let deferred = match self.offer_inline(context, deferred) {
+                    Ok(poll) => return poll,
+                    Err(deferred) => deferred,
+                };
                 let poll = super::whnf::WhnfPoll::Deferred(deferred);
                 match interpret_whnf_poll(poll, context.context()) {
                     WhnfOwnerPoll::Pending(dependency) => {
@@ -744,6 +1016,10 @@ impl LazyTaskMachine {
             }
             Transition::Boundary(request) => {
                 let super::whnf::RegionalBoundaryRequest::Deferred(deferred) = request;
+                let deferred = match self.offer_inline(context, deferred) {
+                    Ok(poll) => return poll,
+                    Err(deferred) => deferred,
+                };
                 let poll = super::whnf::WhnfPoll::Deferred(deferred);
                 match interpret_whnf_poll(poll, context.context()) {
                     WhnfOwnerPoll::Pending(dependency) => {
@@ -1690,10 +1966,14 @@ mod ownership_tests {
             context,
             lazy: lazy_root,
             work,
+            inline_depth,
+            inline_request,
         } = lazy;
         let _: &EvalContext = context;
         let _: &ManagedLazyRoot = lazy_root;
         let _: &LazyTaskWork = work;
+        let _: &Option<usize> = inline_depth;
+        let _: &Option<ManagedLazyRoot> = inline_request;
 
         let PromiseFollower {
             context,
@@ -1784,11 +2064,15 @@ mod ownership_tests {
             context: (*context).clone(),
             lazy: source.root(context.values()),
             work: LazyTaskWork::Produce,
+            inline_depth: None,
+            inline_request: None,
         };
         let mut stale = LazyTaskMachine {
             context: (*context).clone(),
             lazy: source.root(context.values()),
             work: LazyTaskWork::Produce,
+            inline_depth: None,
+            inline_request: None,
         };
         let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
         let step = |machine: &mut LazyTaskMachine| {
@@ -1859,6 +2143,8 @@ mod ownership_tests {
             context: (*context).clone(),
             lazy: source.root(context.values()),
             work: LazyTaskWork::NetWhnfCheckpoint,
+            inline_depth: None,
+            inline_request: None,
         };
         let result = crate::core::cache_test_lazy(
             context.values(),

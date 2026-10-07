@@ -3,7 +3,10 @@
 Status: active from 2026-10-07 as the `perf-evaluation-recursion` step of
 the [performance roadmap](PerformanceRoadmap_2026-10-05.md). It was found
 during the [user-input panic safety](UserInputPanicSafety_2026-10-04.md)
-evaluation inspection. The root cause is not yet established.
+evaluation inspection. The quadratic cost was exact-route validation, fixed
+by `eval-recursion-route-validation`. The large constant was one coordinator
+route per forced lazy, mostly removed by `eval-recursion-inline-forcing`.
+`eval-recursion-tail-forwarding` is next.
 
 ## Problem
 
@@ -291,3 +294,76 @@ Approved with the mechanism above (maintainer, 2026-10-07).
   it cannot close a cycle on its own. A cycle through a shared lazy spills
   and is detected by routes as today.
 
+**Result (2026-10-07).** Inlining only private lazies left about 60 routes
+per countdown level, so it gave no benefit. It was not committed; at the
+maintainer's direction the general claim below replaced it.
+
+## Inline forcing as built 2026-10-07 (`eval-recursion-inline-forcing`)
+
+Recorded as `inline-lazy-forcing` in `Decisions.md`. The mechanism follows
+the proposal above, with these differences:
+- **The claim lives in the coordinator.** An inline set beside the
+  lazy-to-route index replaces the `InlineForcing` cell marker. A lazy is
+  claimable only with neither a route nor another inline claim, both
+  decided under one lock, and a route admitted for an inline lazy cannot be
+  claimed until the claim ends. Claims end with the forcer's poll, so the
+  cell needs no marker, recovery or tracing.
+- **Where it is decided.** A route's lazy machine offers each lazy boundary
+  inline only when the route's loop drives it (`LazyTaskMachine` with an
+  inline depth). Otherwise, as when tests poll a machine directly, the
+  boundary keeps its old route-and-wait path. That path also covers every
+  ineligible lazy: a host call or reflection task, a routed or claimed lazy,
+  or one more than `INLINE_LAZY_DEPTH` (32) above the route's lazy.
+- **Spill target.** A suspended inline lazy spills *itself*, the top of the
+  stack, not the first inline lazy. The lazies between are then polled again
+  once, when the top completes. Spilling the first one, or yielding with the
+  stack, re-walked up to 32 lazies on every quantum; a measured variant that
+  yielded raised access regions by 40%.
+- **No spill request, no inline cycle check.** A second demander simply
+  admits the lazy's route and waits, which resolves at the end of the
+  forcer's poll rather than at its next step. A cycle through inline lazies
+  meets an already-claimed lazy, admits its route and blocks; spilling turns
+  the cycle into routes, and the existing detection reports it with every
+  member's label.
+- **Handoff re-polls.** A poll that yields with budget left, at a family
+  handoff, is polled again rather than suspended, at most 8 times in a row
+  without consuming budget. This also applies to the route's own lazy, which
+  used to return to the scheduler at every handoff (part of holistic review
+  E1). Without it, spilled routes multiplied scheduler round trips.
+- **Panics.** Inline polls run under `catch_unwind`. A panic marks the
+  inline lazy that panicked, ends the claims, and resumes unwinding to the
+  scheduler boundary, which marks the route's lazy. Lazies between keep
+  their checkpoints and observe the panicked lazy when next forced.
+
+**Measured** with `scripts/profile.sh`, against the snapshot after
+`perf-fast-id-hashing`:
+
+| Workload | Before ms | After ms | Route admissions before | After |
+| --- | ---: | ---: | ---: | ---: |
+| `countdown_100` | 333 | 217 | 6,540 | 487 |
+| `countdown_400` | 1,234 | 788 | 24,540 | 1,687 |
+| `hello_elf` | 2,646 | 1,874 | 44,092 | 5,332 |
+| `list_map_1000` | 661 | 429 | 7,572 | 605 |
+
+Reductions, allocations and access regions are within a few percent of
+before. Route admissions are counted as `fresh_work_admission`
+notifications.
+
+**What remains per countdown level:** about 4 route admissions. Without
+tail forwarding, the chain of lazies a countdown level leaves pending is
+about 58 deep, so the stack reaches its depth limit about every half level
+and spills. Each spilled route also stays blocked until the recursion
+returns. `eval-recursion-tail-forwarding` removes that chain for tail
+calls.
+
+**Tests:**
+- `inline_forcing_admits_few_routes_per_recursion_level`, a `glam-prof`
+  fixture: under 10 admissions per countdown level, against about 65
+  without inlining.
+- `deep_non_tail_recursion_spills_inline_lazies_to_routes`.
+- `a_cycle_among_inline_forced_lazies_is_a_dependency_cycle`.
+- `a_panic_in_an_inline_forced_lazy_is_recorded_in_it_and_ends_the_claims`.
+- The net driver's test-only work-item probe now spends the step budget,
+  and also fires before a new batch. Otherwise a route re-polling a
+  handoff ran past the limit. A wrapper fixture's scheduler polls fell from
+  17 to 3, with its reduction and driver counts unchanged.

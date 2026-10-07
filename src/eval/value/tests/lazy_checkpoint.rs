@@ -14,11 +14,7 @@ fn isolated_context() -> crate::evaluation::OwnedEvalContext {
 }
 
 fn lazy_machine(context: &EvalContext, lazy: LazyValue) -> LazyTaskMachine {
-    LazyTaskMachine {
-        context: context.clone(),
-        lazy: lazy.root(context.values()),
-        work: LazyTaskWork::Produce,
-    }
+    LazyTaskMachine::new(context.clone(), lazy.root(context.values()))
 }
 
 fn number(value: i64) -> Value {
@@ -658,6 +654,49 @@ fn a_builtin_machine_step_on_evaluated_operands_costs_one_unit() {
         complete_in_one_unit_polls(&context, builtin_lazy(&context, Builtin::Add, operands())),
         steps
     );
+}
+
+/// A panic in a lazy that a route forces inline is recorded in that lazy as
+/// well as in the claimed one, and the route's inline claims end.
+#[test]
+fn a_panic_in_an_inline_forced_lazy_is_recorded_in_it_and_ends_the_claims() {
+    let context = EvalContext::standalone();
+    let claims_while_forced = Arc::new(AtomicUsize::new(usize::MAX));
+    let observed = Arc::clone(&claims_while_forced);
+    let inner = LazyValue::semantic_thunk(context.values(), "panicking inline lazy", move |step| {
+        observed.store(step.context().inline_lazy_claim_count(), Ordering::SeqCst);
+        panic!("inline fixture panic")
+    });
+    let inner_root = inner.root(context.values());
+    let focus = crate::runtime::RuntimeValueRoot::new(context.values(), Value::Lazy(inner));
+    let outer = LazyValue::semantic_thunk(context.values(), "outer lazy", move |_| {
+        Ok(focus.clone_core_for_test())
+    });
+    let outer_root = outer.root(context.values());
+    let wait = lazy_root_wait(&context, &outer_root).expect("the outer route should be admitted");
+
+    context.pump_wait(&wait, 256);
+
+    assert!(matches!(
+        context.poll_wait(&wait),
+        crate::evaluation::EvaluationWaitPoll::Panicked(_)
+    ));
+    context.values().with_runtime_value_access(|access| {
+        for (label, root) in [("inner", &inner_root), ("outer", &outer_root)] {
+            assert!(
+                root.access(&access)
+                    .and_then(|lazy| lazy.panic_report())
+                    .is_some(),
+                "the {label} lazy should record the panic"
+            );
+        }
+    });
+    assert_eq!(
+        claims_while_forced.load(Ordering::SeqCst),
+        1,
+        "the outer route should force the inner lazy inline"
+    );
+    assert_eq!(context.inline_lazy_claim_count(), 0);
 }
 
 #[test]

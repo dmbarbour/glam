@@ -760,6 +760,19 @@ impl EvalContext {
         self.session.coordinator()
     }
 
+    /// Claims `lazy` for inline forcing by the route being polled; see
+    /// [`EvaluationWorkCoordinator::try_claim_inline_lazy`].
+    pub(crate) fn try_claim_inline_lazy(&self, lazy: &ManagedLazyRoot) -> bool {
+        self.coordinator()
+            .is_some_and(|coordinator| coordinator.try_claim_inline_lazy(lazy.id().into()))
+    }
+
+    pub(crate) fn release_inline_lazy(&self, lazy: &ManagedLazyRoot) {
+        if let Some(coordinator) = self.coordinator() {
+            coordinator.release_inline_lazy(lazy.id().into());
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn publish_private_runtime_observation_for_test(&self) {
         self.coordinator()
@@ -2269,6 +2282,13 @@ impl EvalContext {
     #[cfg(test)]
     pub(crate) fn reflection_task_count(&self) -> usize {
         self.task_registry_counts().reflection_active
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inline_lazy_claim_count(&self) -> usize {
+        self.coordinator()
+            .expect("test demand must retain its coordinator")
+            .inline_claim_count()
     }
 
     #[cfg(test)]

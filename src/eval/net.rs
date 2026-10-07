@@ -518,6 +518,16 @@ fn drive_net_driver_work_with_budget_access(
     step_budget: &mut crate::evaluation::EvaluationStepBudget,
 ) -> Result<NetDriverOutcome, EvaluationHalt> {
     while let Some(work) = driver.worklist.pop() {
+        #[cfg(all(test, feature = "glam-prof"))]
+        if values
+            .values()
+            .values()
+            .net_driver_work_item_limit_reached()
+        {
+            // Retain the unstarted item, as batch contention does below.
+            driver.worklist.push(work);
+            return Ok(probe_budget_exhausted(step_budget));
+        }
         let retained_work = work.duplicate_in(values.values());
         let work_runtime = work.runtime(values.values());
         let access = values.net(&work_runtime);
@@ -560,6 +570,17 @@ fn drive_net_driver_work_with_budget_access(
         "request driver exhausted without progress or a root result"
     );
     Ok(NetDriverOutcome::Progressed)
+}
+
+/// Ends a poll at the profiling work-item limit, wherever the driver is. The
+/// probe stands in for real budget exhaustion, so the poll's owner sees the
+/// budget spent rather than polling again.
+#[cfg(all(test, feature = "glam-prof"))]
+fn probe_budget_exhausted(
+    step_budget: &mut crate::evaluation::EvaluationStepBudget,
+) -> NetDriverOutcome {
+    step_budget.consume(step_budget.remaining());
+    NetDriverOutcome::ProbeBudgetExhausted
 }
 
 enum NetBatchOutcome {
@@ -606,9 +627,7 @@ fn drive_net_batch(
         }
         #[cfg(all(test, feature = "glam-prof"))]
         if access.driver_work_item_limit_reached() {
-            return Ok(NetBatchOutcome::Driver(
-                NetDriverOutcome::ProbeBudgetExhausted,
-            ));
+            return Ok(NetBatchOutcome::Driver(probe_budget_exhausted(step_budget)));
         }
         let Some(next) = driver.worklist.pop() else {
             assert!(

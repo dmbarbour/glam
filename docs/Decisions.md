@@ -679,6 +679,38 @@ maps the short names used here to file names.
 - **Consequences:** a test-only spawn-failure hook covers the failure path.
 - **Recorded in:** parallel review AR-002; commit `1f58d0f0`.
 
+### A route forces the lazies it needs inline; only a suspended lazy gets a route
+`inline-lazy-forcing` · 2026-10-07 · maintainer and agent · accepted
+- **Context:** every forced lazy got its own coordinator route, about 60 per
+  countdown level, each costing an admission, claims, releases, retirement
+  and notifications. The maintainer asked for the easiest equivalent of
+  tail-call optimization and approved the inline mechanism.
+- **Decision:**
+  - A claimed route forces an uncached lazy inline when the lazy has no
+    route, no other inline claim, and a resumable source or checkpoint.
+    Host calls and reflection tasks keep their routes. At most 32 inline
+    lazies stack above the route's lazy.
+  - The claim is a coordinator set beside the route index, not an
+    `InlineForcing` marker in the lazy cell as first proposed. One lock
+    then decides both "has a route" and "is claimed inline", and a claim
+    ends with the poll, so no cell state needs recovery or tracing.
+  - An inline lazy that suspends spills: its claim ends, it gets a route,
+    and the route's lazy blocks on it. Spilling the top lazy means the
+    lazies between are polled again once, when it completes, not after
+    every quantum.
+  - Contention and cycles need no new protocol. A second demander admits
+    the lazy's route, which becomes claimable when the inline claim ends.
+    A cycle through inline lazies spills into routes, where the existing
+    cycle detection reports it.
+- **Consequences:** route admissions fell 7 to 15 times on the profiling
+  workloads, and countdown_400 fell from 1.23 s to 0.79 s. Polls at family
+  handoffs with budget left now continue in the route instead of yielding to
+  the scheduler (part of holistic review E1). A non-tail chain still spills
+  about every 32 lazies; tail forwarding is the next step.
+- **Rule lives in:** `architecture/evaluation.md`, the paragraph on claimed
+  routes forcing lazies inline.
+- **Recorded in:** evaluation-recursion plan, `eval-recursion-inline-forcing`.
+
 ## Assembly
 
 ### Manifest writes are identity-checked and atomically published

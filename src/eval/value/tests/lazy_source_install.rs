@@ -6,11 +6,7 @@ use crate::test_support::ResultTestExt as _;
 
 fn lazy_machine(context: &EvalContext, lazy: LazyValue) -> (LazyValue, LazyTaskMachine) {
     let root = lazy.root(context.values());
-    let machine = LazyTaskMachine {
-        context: context.clone(),
-        lazy: root.clone(),
-        work: LazyTaskWork::Produce,
-    };
+    let machine = LazyTaskMachine::new(context.clone(), root.clone());
     (lazy, machine)
 }
 

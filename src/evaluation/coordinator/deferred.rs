@@ -207,6 +207,42 @@ impl EvaluationWorkCoordinator {
         self.notify_all(CoordinatorMutationKind::WorkRetirement);
     }
 
+    /// Claims `lazy` for inline forcing by the route being polled. This
+    /// succeeds only when the lazy has neither a route nor another inline
+    /// claim. The claim lasts one poll; see [`Self::release_inline_lazy`].
+    pub(in crate::evaluation) fn try_claim_inline_lazy(&self, lazy: DeferredValueId) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        !state.deferred.by_value.contains_key(&lazy) && state.deferred.inline.insert(lazy)
+    }
+
+    /// Ends an inline claim. If a route was admitted for the lazy meanwhile,
+    /// its claim was refused, so waiters are told it may now be claimed.
+    pub(in crate::evaluation) fn release_inline_lazy(&self, lazy: DeferredValueId) {
+        let routed = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            state.deferred.inline.remove(&lazy);
+            state.deferred.by_value.contains_key(&lazy)
+        };
+        if routed {
+            let mutation = self.admission.mutation_guard();
+            self.state
+                .lock()
+                .expect("evaluation work coordinator was poisoned")
+                .advance_work_generation(
+                    CoordinatorMutationKind::WorkActivation,
+                    RouteHazard::None,
+                );
+            drop(mutation);
+            self.notify_all(CoordinatorMutationKind::WorkActivation);
+        }
+    }
+
     /// Admits one runtime-owned route for a lazy. The background demand is an
     /// execution capability, not the route's owner or a synthetic task.
     pub(in crate::evaluation) fn reserve_lazy_route(
@@ -655,6 +691,16 @@ impl EvaluationWorkCoordinator {
     }
 
     #[cfg(test)]
+    pub(in crate::evaluation) fn inline_claim_count(&self) -> usize {
+        self.state
+            .lock()
+            .expect("evaluation work coordinator was poisoned")
+            .deferred
+            .inline
+            .len()
+    }
+
+    #[cfg(test)]
     pub(in crate::evaluation) fn deferred_counts(
         &self,
         session: EvaluationSessionId,
@@ -776,6 +822,11 @@ pub(super) struct DeferredIndexes {
     pub(super) by_task: BTreeMap<EvaluationTaskId, EvaluationWorkId>,
     pub(super) by_wait: TrustedHashMap<EvaluationWaitToken, EvaluationWorkId>,
     pub(super) by_value: TrustedHashMap<DeferredValueId, EvaluationWorkId>,
+    /// Lazies a claimed route is forcing inline during its current poll.
+    /// Such a lazy has no route of its own when claimed, and a route admitted
+    /// for it meanwhile cannot be claimed until the inline claim ends, so
+    /// exactly one party polls its checkpoint.
+    pub(super) inline: crate::trusted_hash::TrustedHashSet<DeferredValueId>,
 }
 
 pub(in crate::evaluation) struct ClaimedDeferredWork {
@@ -825,7 +876,13 @@ impl ClaimedLazyRoute {
         context: &super::super::EvaluationPollContext,
         step_budget: &mut super::super::EvaluationStepBudget,
     ) -> super::EvaluationMachinePoll {
-        crate::eval::poll_lazy_route(context, self.demand.demand(), &self.lazy, step_budget)
+        crate::eval::poll_lazy_route(
+            context,
+            self.demand.demand(),
+            &self.lazy,
+            step_budget,
+            crate::core::EvaluationPanicOrigin::LazyRoute(self.id.get()),
+        )
     }
 }
 
@@ -1013,7 +1070,9 @@ pub(super) fn claim_lazy_route(
         let WorkKind::LazyRoute(route) = &mut record.kind else {
             return None;
         };
-        if !matches!(record.state, WorkState::Dormant | WorkState::Queued) {
+        if !matches!(record.state, WorkState::Dormant | WorkState::Queued)
+            || state.deferred.inline.contains(&route.lazy.id().into())
+        {
             return None;
         }
         let was_queued = matches!(record.state, WorkState::Queued);

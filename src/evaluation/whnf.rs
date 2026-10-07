@@ -36,17 +36,27 @@ pub(crate) fn poll_computation(
     interpret_poll(poll, context)
 }
 
+/// How a lazy route's own WHNF checkpoint wants to proceed.
+pub(crate) enum LazyCheckpointPoll {
+    Owner(WhnfOwnerPoll),
+    /// An uncached lazy the checkpoint needs. The route forces it inline when
+    /// it may, or admits its route and waits on it.
+    Inline(ManagedLazyRoot),
+}
+
 /// Polls the canonical WHNF checkpoint retained by one managed lazy.
 ///
 /// The lazy root is the liveness authority. Its checkpoint edge is duplicated
 /// and consumed only inside this matching access region, then orchestration is
-/// interpreted after the region closes just like an ordinary computation.
+/// interpreted after the region closes just like an ordinary computation. A
+/// lazy boundary is returned to the route, which decides between forcing it
+/// inline and admitting its route.
 pub(crate) fn poll_lazy_checkpoint(
     lazy: &ManagedLazyRoot,
     poll_context: &EvaluationPollContext,
     context: &EvalContext,
     step_budget: &mut crate::evaluation::EvaluationStepBudget,
-) -> Option<WhnfOwnerPoll> {
+) -> Option<LazyCheckpointPoll> {
     let poll = poll_context.with_value_access(context, |access| {
         let checkpoint = access.lazy_root(lazy).checkpoint_snapshot()?;
         checkpoint.poll_semantic_in(&access, step_budget)
@@ -56,7 +66,10 @@ pub(crate) fn poll_lazy_checkpoint(
         !thread_has_runtime_value_access_for_test(),
         "lazy-checkpoint orchestration must begin only after managed access closes"
     );
-    poll.map(|poll| interpret_poll(poll, context))
+    poll.map(|poll| match poll {
+        WhnfPoll::Deferred(WhnfDeferredRequest::Lazy(lazy)) => LazyCheckpointPoll::Inline(lazy),
+        poll => LazyCheckpointPoll::Owner(interpret_poll(poll, context)),
+    })
 }
 
 pub(crate) fn interpret_poll(poll: WhnfPoll, context: &EvalContext) -> WhnfOwnerPoll {

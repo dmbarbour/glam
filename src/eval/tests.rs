@@ -224,7 +224,9 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
         use crate::interaction_net::profiling::{NetDriverCounts, NetReductionCounts};
 
         let profile = context.values().interaction_net_profile_snapshot();
-        assert_eq!(machine_polls, 17);
+        // The route forces the wrapper's lazies inline and polls again at
+        // family handoffs, so few scheduler polls remain.
+        assert_eq!(machine_polls, 3);
         assert_eq!(
             profile.reductions,
             NetReductionCounts {

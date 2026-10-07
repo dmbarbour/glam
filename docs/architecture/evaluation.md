@@ -662,6 +662,9 @@ interruption:
   never replayed, and every later route re-raises the original report. A
   poisoned per-value cell holds torn progress; observing it is likewise a
   fault, never a failure.
+- A route forcing lazies inline catches a panic in one of them only to
+  record it in that lazy, then resumes unwinding to the boundary, which
+  records it in the route's own lazy.
 - A panic that tears runtime-core state poisons the whole runtime. Core state
   means the scheduler, the transactions, or the settlement gate. The mutation
   and settlement authorities detect it while unwinding, and the worker loop
@@ -874,6 +877,20 @@ reconstructs one transient poll adapter, but neither record nor adapter owns a
 duplicate focus or continuation: semantic progress is read from the managed
 lazy checkpoint. The route is session-neutral and retires when its demand
 count reaches zero unless a claim is still completing.
+
+A claimed route forces inline the lazies its lazy needs, instead of admitting
+a route for each one (`inline-lazy-forcing`). At a lazy boundary, an uncached
+lazy with no route, no other inline claim, and a resumable source or
+checkpoint is claimed in the coordinator and polled on an explicit stack
+above the route's lazy, sharing its budget. A host call or reflection task
+must run exactly once, so it always keeps its route. The claim lasts until
+the lazy completes or the poll ends, and a route admitted for the lazy
+meanwhile cannot be claimed until then. A completed inline lazy is cached
+and popped, and its parent finds the value. An inline lazy that suspends,
+because the budget runs out or it blocks, spills: its claim ends, it is given
+a route, and the route's lazy blocks on that route. Progress already lives in
+each lazy's checkpoint, so suspended state is what it would have been without
+inlining, and cycles are found among the spilled routes as before.
 
 Work that must survive route loss falls into three ownership classes.
 Demand-driven resumable state (WHNF, access, object, list, builtin, and
