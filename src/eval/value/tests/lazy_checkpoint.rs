@@ -656,6 +656,136 @@ fn a_builtin_machine_step_on_evaluated_operands_costs_one_unit() {
     );
 }
 
+/// A semantic thunk whose value is the lazy published later in `target`.
+fn thunk_to(
+    context: &EvalContext,
+    label: &'static str,
+    target: &Arc<std::sync::OnceLock<crate::runtime::RuntimeValueRoot>>,
+) -> LazyValue {
+    let target = Arc::clone(target);
+    LazyValue::semantic_thunk(context.values(), label, move |_| {
+        Ok(target
+            .get()
+            .expect("the fixture publishes its target before forcing")
+            .clone_core_for_test())
+    })
+}
+
+/// Two lazies whose values are each other reach each other in tail position
+/// and forward to each other. Following the forwards closes the cycle, which
+/// fails both lazies with one dependency cycle naming both, instead of
+/// looping.
+#[test]
+fn a_cycle_of_tail_forwards_fails_both_lazies_with_one_dependency_cycle() {
+    let context = isolated_context();
+    let to_y = Arc::new(std::sync::OnceLock::new());
+    let x = thunk_to(&context, "forward x", &to_y);
+    let x_root = x.root(context.values());
+    let to_x = Arc::new(std::sync::OnceLock::new());
+    let y = thunk_to(&context, "forward y", &to_x);
+    let y_root = y.root(context.values());
+    let _ = to_x.set(crate::runtime::RuntimeValueRoot::new(
+        context.values(),
+        Value::Lazy(x.duplicate_for_test(context.values())),
+    ));
+    let _ = to_y.set(crate::runtime::RuntimeValueRoot::new(
+        context.values(),
+        Value::Lazy(y.duplicate_for_test(context.values())),
+    ));
+
+    let wait = lazy_root_wait(&context, &x_root).expect("the route should be admitted");
+    pump_to_ready(&context, &wait);
+
+    let failures = context.values().with_runtime_value_access(|access| {
+        [&x_root, &y_root].map(|root| {
+            match root
+                .access(&access)
+                .and_then(|lazy| lazy.cached())
+                .expect("each forward on the cycle should be cached")
+            {
+                Err(failure) => failure,
+                Ok(_) => panic!("a forward cycle has no value"),
+            }
+        })
+    });
+    assert!(Arc::ptr_eq(&failures[0], &failures[1]));
+    let cycle = failures[0]
+        .dependency_cycle_value()
+        .expect("the failure should be a dependency cycle");
+    let mut members = cycle
+        .members
+        .iter()
+        .map(|member| member.id)
+        .collect::<Vec<_>>();
+    members.sort();
+    let mut expected = vec![x_root.id(), y_root.id()];
+    expected.sort();
+    assert_eq!(members, expected);
+}
+
+/// Forcing the head of a tail chain forwards the head past the lazies
+/// between, which stay forwards until observed; observing one then caches
+/// the chain's value in it.
+#[test]
+fn a_lazy_left_forwarding_in_a_tail_chain_caches_its_value_when_observed() {
+    let context = isolated_context();
+    let end = LazyValue::semantic_thunk(context.values(), "chain end", |_| Ok(number(5)));
+    let to_end = Arc::new(std::sync::OnceLock::new());
+    let _ = to_end.set(crate::runtime::RuntimeValueRoot::new(
+        context.values(),
+        Value::Lazy(end),
+    ));
+    let middle = thunk_to(&context, "chain middle", &to_end);
+    let middle_root = middle.root(context.values());
+    let to_middle = Arc::new(std::sync::OnceLock::new());
+    let _ = to_middle.set(crate::runtime::RuntimeValueRoot::new(
+        context.values(),
+        Value::Lazy(middle),
+    ));
+    let head = thunk_to(&context, "chain head", &to_middle);
+    let head_root = head.root(context.values());
+
+    let wait = lazy_root_wait(&context, &head_root).expect("the head route should be admitted");
+    pump_to_ready(&context, &wait);
+
+    let (head_cached, middle_cached, middle_forwards) =
+        context.values().with_runtime_value_access(|access| {
+            let middle = middle_root.access(&access).expect("the middle stays live");
+            (
+                head_root
+                    .access(&access)
+                    .and_then(|lazy| lazy.cached())
+                    .is_some(),
+                middle.cached().is_some(),
+                middle.forward_target().is_some(),
+            )
+        });
+    assert!(head_cached);
+    assert!(
+        !middle_cached && middle_forwards,
+        "the middle should be left forwarding"
+    );
+
+    let wait = lazy_root_wait(&context, &middle_root).expect("the middle route should be admitted");
+    pump_to_ready(&context, &wait);
+    let cached = context.values().with_runtime_value_access(|access| {
+        middle_root
+            .access(&access)
+            .and_then(|lazy| lazy.cached())
+            .is_some_and(|result| result.is_ok())
+    });
+    assert!(cached, "observing the middle should cache it");
+    let middle = context.values().with_runtime_value_access(|access| {
+        Value::Lazy(LazyValue::from_root(&middle_root, &access))
+    });
+    assert_same_value(
+        &context,
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &middle)
+            .expect_without_debug("the cached middle should evaluate"),
+        &number(5),
+    );
+}
+
 /// A panic in a lazy that a route forces inline is recorded in that lazy as
 /// well as in the claimed one, and the route's inline claims end.
 #[test]

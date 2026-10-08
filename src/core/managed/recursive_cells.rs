@@ -57,6 +57,10 @@ pub(crate) struct ManagedLazyCell {
 enum ManagedLazyProducerState {
     Source(LazySource),
     Checkpoint(ManagedLazyCheckpointEdge),
+    /// The lazy's value is exactly the target lazy's value: its evaluation
+    /// reached the target in tail position. Observers follow the forward and
+    /// cache the target's result here.
+    Forward(ManagedLazyEdge),
     /// The lazy's own evaluation was interrupted by a panic, or a panic tore
     /// its progress. This is evaluation state, never a result: every later
     /// observer halts with the report, and the work is never replayed.
@@ -714,7 +718,9 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
             .expect("an unresolved managed lazy must retain producer state")
         {
             ManagedLazyProducerState::Source(source) => Some(source.duplicate_in(self.authority)),
-            ManagedLazyProducerState::Checkpoint(_) | ManagedLazyProducerState::Panicked(_) => None,
+            ManagedLazyProducerState::Checkpoint(_)
+            | ManagedLazyProducerState::Forward(_)
+            | ManagedLazyProducerState::Panicked(_) => None,
         }
     }
 
@@ -735,7 +741,9 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
             .as_ref()
             .expect("an unresolved managed lazy must retain producer state")
         {
-            ManagedLazyProducerState::Source(_) | ManagedLazyProducerState::Panicked(_) => None,
+            ManagedLazyProducerState::Source(_)
+            | ManagedLazyProducerState::Forward(_)
+            | ManagedLazyProducerState::Panicked(_) => None,
             ManagedLazyProducerState::Checkpoint(checkpoint) => {
                 Some(checkpoint.duplicate_in(self.authority))
             }
@@ -754,7 +762,9 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
             .unwrap_or_else(PoisonError::into_inner);
         match producer.as_ref()? {
             ManagedLazyProducerState::Panicked(report) => Some(report.clone()),
-            ManagedLazyProducerState::Source(_) | ManagedLazyProducerState::Checkpoint(_) => None,
+            ManagedLazyProducerState::Source(_)
+            | ManagedLazyProducerState::Checkpoint(_)
+            | ManagedLazyProducerState::Forward(_) => None,
         }
     }
 
@@ -775,7 +785,11 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
         if self.cell.result.get().is_some()
             || !matches!(
                 producer.as_ref(),
-                Some(ManagedLazyProducerState::Source(_) | ManagedLazyProducerState::Checkpoint(_))
+                Some(
+                    ManagedLazyProducerState::Source(_)
+                        | ManagedLazyProducerState::Checkpoint(_)
+                        | ManagedLazyProducerState::Forward(_)
+                )
             )
         {
             return false;
@@ -930,6 +944,128 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
             )
         }
         Ok(())
+    }
+
+    /// The lazy this one forwards to, if its producer is a forward.
+    pub(crate) fn forward_target(&self) -> Option<ManagedLazyRoot> {
+        if self.cell.result.get().is_some() {
+            return None;
+        }
+        let target = {
+            let producer = self
+                .cell
+                .producer
+                .lock()
+                .expect("managed lazy producer cell was poisoned");
+            if self.cell.result.get().is_some() {
+                return None;
+            }
+            match producer.as_ref()? {
+                ManagedLazyProducerState::Forward(target) => target.duplicate_in(self.authority),
+                ManagedLazyProducerState::Source(_)
+                | ManagedLazyProducerState::Checkpoint(_)
+                | ManagedLazyProducerState::Panicked(_) => return None,
+            }
+        };
+        Some(self.authority.root_managed_lazy(&target))
+    }
+
+    /// Replaces the exact `expected` checkpoint with a forward to `target`.
+    /// The checkpoint's evaluation reached `target` with nothing left to do,
+    /// so this lazy's value is exactly the target's.
+    pub(crate) fn forward_checkpoint(
+        &self,
+        expected: &ManagedLazyCheckpointEdge,
+        target: &ManagedLazyRoot,
+    ) -> bool {
+        self.transition_producer(
+            |current| {
+                matches!(
+                    current,
+                    ManagedLazyProducerState::Checkpoint(current)
+                        if current.same_checkpoint_in(expected, self.authority)
+                )
+            },
+            target.edge(self.authority),
+        )
+    }
+
+    /// Shortens a forward from `expected` to `target`, which `expected`
+    /// itself forwards to. Fails if the forward changed meanwhile.
+    pub(crate) fn retarget_forward(
+        &self,
+        expected: &ManagedLazyRoot,
+        target: &ManagedLazyRoot,
+    ) -> bool {
+        let expected = expected.edge(self.authority);
+        self.transition_producer(
+            |current| {
+                matches!(
+                    current,
+                    ManagedLazyProducerState::Forward(current)
+                        if current.same_allocation_in(&expected, self.authority)
+                )
+            },
+            target.edge(self.authority),
+        )
+    }
+
+    /// Installs a forward to `target` when the current producer satisfies
+    /// `expected`.
+    fn transition_producer(
+        &self,
+        expected: impl FnOnce(&ManagedLazyProducerState) -> bool,
+        target: ManagedLazyEdge,
+    ) -> bool {
+        if self.cell.result.get().is_some() {
+            return false;
+        }
+        let producer = self
+            .cell
+            .producer
+            .lock()
+            .expect("managed lazy producer cell was poisoned");
+        if self.cell.result.get().is_some() || !producer.as_ref().is_some_and(expected) {
+            return false;
+        }
+        let producer = RefCell::new(producer);
+        let proposed = RefCell::new(Some(target));
+        // SAFETY: the lazy cell and target edge belong to this exact access
+        // region. The producer mutex excludes another transition, and the
+        // visitors report the complete leaving and adding identities before
+        // the closure atomically replaces the state.
+        unsafe {
+            self.authority.with_managed_edge_transition(
+                &self.owner.0,
+                |visitor| {
+                    trace_lazy_producer_state(
+                        producer
+                            .borrow()
+                            .as_ref()
+                            .expect("unresolved lazy must retain producer state"),
+                        visitor,
+                    );
+                },
+                |visitor| {
+                    proposed
+                        .borrow()
+                        .as_ref()
+                        .expect("forward transition must retain its proposed edge")
+                        .trace(visitor);
+                },
+                || {
+                    let target = proposed
+                        .borrow_mut()
+                        .take()
+                        .expect("forward transition must consume its edge once");
+                    let prior = producer
+                        .borrow_mut()
+                        .replace(ManagedLazyProducerState::Forward(target));
+                    drop(prior);
+                },
+            )
+        }
+        true
     }
 
     pub(crate) fn cached(&self) -> Option<LazyResult> {
@@ -1271,6 +1407,7 @@ fn trace_lazy_producer_state(state: &ManagedLazyProducerState, visitor: &mut Vis
     match state {
         ManagedLazyProducerState::Source(source) => trace_lazy_source(source, visitor),
         ManagedLazyProducerState::Checkpoint(checkpoint) => checkpoint.trace(visitor),
+        ManagedLazyProducerState::Forward(target) => target.trace(visitor),
         // A panic report holds no managed edges.
         ManagedLazyProducerState::Panicked(_) => {}
     }
@@ -2517,6 +2654,58 @@ mod tests {
             .expect("an unrooted managed-lazy self-cycle should be reclaimed");
         assert_eq!(dead.root_entries(), baseline.root_entries());
         assert_eq!(dead.finalized_slots(), 1);
+    }
+
+    #[test]
+    fn managed_lazy_forward_keeps_its_target_live_and_is_reclaimed_with_it() {
+        let values = new_values();
+        let baseline = values
+            .collect_managed_for_test()
+            .expect("the managed-lazy forward fixture should start collectible");
+        let root = values.with_runtime_value_access(|access| {
+            let target = access
+                .allocate_managed_lazy("forward target", LazySource::Error)
+                .expect("the managed lazy cell should fit a run");
+            let forward = access
+                .allocate_managed_lazy("forward", LazySource::Error)
+                .expect("the managed lazy cell should fit a run");
+            let root = access.root_managed_lazy(&forward);
+
+            // SAFETY: both edges are live in this access region's exact heap
+            // and representation. The closure replaces the edge-free
+            // placeholder with precisely the target edge reported to the
+            // collector gateway.
+            unsafe {
+                let cell = access.scope.get_traced_edge(&forward.0);
+                let mut stored = cell
+                    .producer
+                    .lock()
+                    .expect("managed lazy producer cell should not be poisoned");
+                let edge = target.duplicate_in(&access);
+                access.scope.mutator.with_edge_replacement(
+                    &forward.0,
+                    None,
+                    Some(&target.0),
+                    || {
+                        *stored = Some(ManagedLazyProducerState::Forward(edge));
+                    },
+                );
+            }
+            root
+        });
+
+        let live = values
+            .collect_managed_for_test()
+            .expect("a rooted forward and its target should survive");
+        assert_eq!(live.root_entries(), baseline.root_entries() + 1);
+        assert_eq!(live.marked_slots(), baseline.marked_slots() + 2);
+
+        drop(root);
+        let dead = values
+            .collect_managed_for_test()
+            .expect("an unrooted forward and its target should be reclaimed");
+        assert_eq!(dead.root_entries(), baseline.root_entries());
+        assert_eq!(dead.finalized_slots(), 2);
     }
 
     #[test]

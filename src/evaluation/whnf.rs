@@ -40,8 +40,12 @@ pub(crate) fn poll_computation(
 pub(crate) enum LazyCheckpointPoll {
     Owner(WhnfOwnerPoll),
     /// An uncached lazy the checkpoint needs. The route forces it inline when
-    /// it may, or admits its route and waits on it.
-    Inline(ManagedLazyRoot),
+    /// it may, or admits its route and waits on it. In `tail` position no
+    /// continuation remains, so the checkpoint's value is exactly the lazy's.
+    Inline {
+        lazy: ManagedLazyRoot,
+        tail: bool,
+    },
 }
 
 /// Polls the canonical WHNF checkpoint retained by one managed lazy.
@@ -66,8 +70,10 @@ pub(crate) fn poll_lazy_checkpoint(
         !thread_has_runtime_value_access_for_test(),
         "lazy-checkpoint orchestration must begin only after managed access closes"
     );
-    poll.map(|poll| match poll {
-        WhnfPoll::Deferred(WhnfDeferredRequest::Lazy(lazy)) => LazyCheckpointPoll::Inline(lazy),
+    poll.map(|(poll, tail)| match poll {
+        WhnfPoll::Deferred(WhnfDeferredRequest::Lazy(lazy)) => {
+            LazyCheckpointPoll::Inline { lazy, tail }
+        }
         poll => LazyCheckpointPoll::Owner(interpret_poll(poll, context)),
     })
 }

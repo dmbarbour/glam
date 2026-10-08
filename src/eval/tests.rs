@@ -294,10 +294,21 @@ fn wrapper_application_budget_probe_yields_without_publishing_a_cache() {
     assert_eq!(context.client_demand_count_for_test(), 1);
     assert!(computation_lazy.source_snapshot(context.values()).is_none());
     context.values().with_runtime_value_access(|access| {
-        let checkpoint = computation_lazy
-            .access(&access)
-            .checkpoint_snapshot()
-            .expect("bounded net work must remain in its managed checkpoint");
+        // The computation may have reached a lazy in tail position and
+        // forwarded to it (`lazy-tail-forwarding`); the bounded net work
+        // then lives in that lazy's checkpoint.
+        let lazy = computation_lazy.access(&access);
+        let checkpoint = match lazy.forward_target() {
+            Some(target) => {
+                let target = target
+                    .access(&access)
+                    .expect("the forward target shares the value domain");
+                assert!(target.cached().is_none());
+                target.checkpoint_snapshot()
+            }
+            None => lazy.checkpoint_snapshot(),
+        }
+        .expect("bounded net work must remain in a managed checkpoint");
         assert_eq!(
             checkpoint.kind(),
             crate::eval::lazy_checkpoint::ManagedLazyCheckpointKindTag::Whnf
@@ -2877,8 +2888,11 @@ fn lazy_aliases_share_and_cache_their_final_whnf() {
     );
 }
 
+/// Demanding the root caches the chain's ends. A member between may be left
+/// forwarding to the leaf (`eval-recursion-tail-forwarding`); it caches the
+/// same value when it is observed.
 #[test]
-fn demanded_forwarding_chain_caches_whnf_in_every_lazy_member() {
+fn demanded_forwarding_chain_caches_its_ends_and_members_on_observation() {
     let context = test_context();
     let values = crate::core::test_value_factory();
     let (leaf, middle, root, root_owner) = values.with_runtime_value_access(|access| {
@@ -2911,10 +2925,18 @@ fn demanded_forwarding_chain_caches_whnf_in_every_lazy_member() {
         .assert_same_representation_for_test(&cached_value(&leaf), &n(42));
     context
         .values()
-        .assert_same_representation_for_test(&cached_value(&middle), &n(42));
+        .assert_same_representation_for_test(&cached_value(&root), &n(42));
+    let observed = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &context,
+        &Value::Lazy(middle.duplicate_for_test(context.values())),
+    )
+    .expect_without_debug("the middle member should evaluate");
     context
         .values()
-        .assert_same_representation_for_test(&cached_value(&root), &n(42));
+        .assert_same_representation_for_test(&observed, &n(42));
+    context
+        .values()
+        .assert_same_representation_for_test(&cached_value(&middle), &n(42));
 }
 
 #[test]

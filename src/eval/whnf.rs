@@ -51,6 +51,8 @@ enum DurableWhnfCheckpoint {
 #[derive(Clone, Copy, Default)]
 struct WhnfPollObservation {
     application_frame_pending: bool,
+    /// No continuation frame remains: the state's value is its focus's.
+    frames_empty: bool,
 }
 
 /// Complete raw-edge WHNF state shared by regional execution and net-owned
@@ -237,6 +239,7 @@ impl WhnfState {
                 .frames
                 .iter()
                 .any(|frame| matches!(frame, WhnfContinuation::Application { .. })),
+            frames_empty: self.frames.is_empty(),
         }
     }
 
@@ -747,19 +750,29 @@ impl WhnfComputation {
 impl ManagedLazyCheckpointEdge {
     /// Polls the exact state installed beneath a managed lazy without creating
     /// another registered root or rebuilding its continuation containers.
+    /// The flag reports a tail boundary: a lazy boundary with no continuation
+    /// frame left, so the lazy's value is exactly the boundary lazy's.
     pub(crate) fn poll_semantic_in(
         &self,
         access: &EvaluationValueAccess<'_>,
         budget: &mut WhnfStepBudget,
-    ) -> Option<WhnfPoll> {
+    ) -> Option<(WhnfPoll, bool)> {
         let _ = self.duplicate_whnf_in(access.values())?;
         let managed = self.access(access);
         let mut reduce = reduce_semantic_shell;
-        let (status, _) = match drive_managed_state_in(&managed, access, budget, &mut reduce) {
-            Ok(result) => result,
-            Err(error) => managed_state_error(error),
-        };
-        Some(regional_status_poll(access, status))
+        let (status, observation) =
+            match drive_managed_state_in(&managed, access, budget, &mut reduce) {
+                Ok(result) => result,
+                Err(error) => managed_state_error(error),
+            };
+        let tail = observation.frames_empty
+            && matches!(
+                status,
+                RegionalWhnfStatus::Boundary(RegionalBoundaryRequest::Deferred(
+                    WhnfDeferredRequest::Lazy(_)
+                ))
+            );
+        Some((regional_status_poll(access, status), tail))
     }
 }
 

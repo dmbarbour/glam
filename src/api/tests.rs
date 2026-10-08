@@ -391,6 +391,48 @@ fn inline_forcing_admits_few_routes_per_recursion_level() {
     );
 }
 
+/// A tail call forwards the calling lazy to the called one, so the lazies a
+/// tail-recursive loop leaves behind are garbage and the heap it needs does
+/// not grow with its depth.
+#[cfg(feature = "glam-prof")]
+#[test]
+fn tail_recursion_runs_in_a_constant_heap() {
+    let heap_runs = |depth: u32| {
+        let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+        let assembler = Assembler::builder()
+            .evaluation_runtime(runtime.clone())
+            .build()
+            .expect("assembler should build");
+        let source = format!(
+            "language g0\nloop n = if n == 0 then 0 else loop (n - 1)\nanswer = loop {depth}\n"
+        );
+        let module = assembler
+            .module(["countdown"])
+            .script("g", &source)
+            .build()
+            .expect("module should build");
+        let answer =
+            access_path(&assembler, module.value(), "answer").expect("answer should exist");
+        assembler
+            .evaluator()
+            .eval(&answer)
+            .expect("answer should evaluate");
+        let heap = runtime
+            .profile()
+            .heap
+            .expect("a usable heap reports telemetry");
+        heap.assigned_runs() + heap.free_runs()
+    };
+    let shallow = heap_runs(250);
+    let deep = heap_runs(1000);
+    // Without forwarding the heap more than doubles; collection timing
+    // alone moves it by a few runs.
+    assert!(
+        deep <= shallow + shallow / 2,
+        "the heap grew from {shallow} runs at depth 250 to {deep} at depth 1000"
+    );
+}
+
 /// A non-tail recursion nests deeper than one route may force inline and
 /// runs longer than one quantum, so its inline lazies spill to routes.
 #[test]

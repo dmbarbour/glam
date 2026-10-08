@@ -6,7 +6,8 @@ during the [user-input panic safety](UserInputPanicSafety_2026-10-04.md)
 evaluation inspection. The quadratic cost was exact-route validation, fixed
 by `eval-recursion-route-validation`. The large constant was one coordinator
 route per forced lazy, mostly removed by `eval-recursion-inline-forcing`.
-`eval-recursion-tail-forwarding` is next.
+`eval-recursion-tail-forwarding` made tail recursion run in constant space.
+The performance review is next.
 
 ## Problem
 
@@ -488,3 +489,66 @@ mutex. `countdown_400` now makes no `futex` calls at all.
 Coalescing per quantum is the separate experiment `perf-coalesced-wakeups`.
 It only matters once threads are parked, so it needs a profile with
 workers enabled.
+
+## Tail forwarding as built 2026-10-08 (`eval-recursion-tail-forwarding`)
+
+Recorded as `lazy-tail-forwarding` in `Decisions.md`. In `countdown_400`, 63%
+of the lazies a route forced inline were reached in tail position by a WHNF
+checkpoint. The mechanism follows the proposal above:
+- **Forward state.** `ManagedLazyProducerState::Forward` holds a traced edge
+  to the target, installed only over the exact checkpoint the claimed route
+  just polled. A second transition shortens a forward to a later target.
+- **Where it is decided.** The checkpoint poll reports whether a lazy
+  boundary left no continuation frame. Only a route-driven machine forwards,
+  like inline offering, so directly polled machines keep their checkpoints.
+- **Followers.** A forwarding lazy's machine follows the chain, shortens its
+  own forward to the end, then caches a cached end's result or forces an
+  uncached end as a boundary. The WHNF reducer does not follow forwards; a
+  consumer in tail position forwards itself, and the stack shortening
+  removes the extra entry.
+- **Stack.** When the top of the inline stack forwards and the lazy below
+  forwarded to it, the lower forward is shortened and the top leaves the
+  stack. Pure tail recursion keeps the stack at two entries.
+- **Suspension.** If every lazy below a suspended top forwards, the route
+  suspends in place: resuming refollows one shortened forward. Otherwise
+  the top still spills. Re-walking up to 2, 4, 8 or 16 non-forwarding lazies
+  instead of spilling cost more instructions in every case measured, so
+  spilling stays.
+- **Cycles.** Following detects a repeated lazy and fails every member with
+  one dependency cycle, starting from its lowest lazy id. `x = y; y = x` at
+  module level does not reach this path, since definitions are net
+  computations; the existing route cycle detection reports it.
+
+**Measured** against `cae1b592` (instructions, `perf`):
+
+| Workload | M instructions before | After | Route admissions before | After |
+| --- | ---: | ---: | ---: | ---: |
+| `countdown_100` | 341.9 | 322.9 | 487 | 286 |
+| `countdown_400` | 1,264.0 | 1,190.1 | 1,687 | 886 |
+| `hello_elf` | 3,639.3 | 3,492.9 | 5,332 | 3,974 |
+| `list_map_1000` | 1,282.0 | 1,283.2 | 605 | 601 |
+| countdown, depth 10,000 | 33,097 | 29,587 | 40,160 | 20,142 |
+
+At depth 10,000, peak memory fell from 175 MB to 46 MB, the same as at
+depth 2,000, and CPU time from 7.8 to 6.4 s. The remaining admissions, about
+2 per level, are spills at budget exhaustion while non-tail work sits below
+the top; they do not accumulate.
+
+**Behavior change.** A lazy between a chain's ends is cached when observed,
+not when the chain completes. The test asserting that every member caches
+now asserts that the ends cache and an observed member caches then. A
+budget-probe fixture expected its computation lazy to keep a WHNF checkpoint;
+the lazy now forwards, and the fixture finds the checkpoint at the forward
+target.
+
+**Tests:**
+- `tail_recursion_runs_in_a_constant_heap` (`glam-prof`): the heap at depth
+  1,000 stays within 1.5 times the heap at depth 250. Without forwarding it
+  grew from 112 to 253 runs; with forwarding, 112 to 130.
+- `a_cycle_of_tail_forwards_fails_both_lazies_with_one_dependency_cycle`.
+- `a_lazy_left_forwarding_in_a_tail_chain_caches_its_value_when_observed`.
+- `managed_lazy_forward_keeps_its_target_live_and_is_reclaimed_with_it`.
+
+**What remains** is the per-reduction cost: about 11,000 instructions per
+reduction in the countdown, the subject of the performance review.
+

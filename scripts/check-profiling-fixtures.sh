@@ -12,6 +12,7 @@ tests=(
   api::tests::runtime_profile_counts_evaluation_and_writes_json
   api::tests::exact_route_validation_stays_linear_in_recursion_depth
   api::tests::inline_forcing_admits_few_routes_per_recursion_level
+  api::tests::tail_recursion_runs_in_a_constant_heap
   profiling::tests::counters_write_as_one_flat_json_object
   profiling::tests::phases_accumulate_time_and_count_collections
   core_net::tests::profiling_classifies_each_committed_rule_family_exactly_once

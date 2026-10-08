@@ -144,6 +144,8 @@ enum LazyTaskWork {
     ObjectFixpointCheckpoint,
     ListEffectCheckpoint,
     BuiltinCheckpoint,
+    /// The lazy forwards to another; see [`LazyTaskMachine::poll_forward`].
+    Forward,
     /// Transient one-shot authority held only by the route which installed an
     /// `Invoking` host-call checkpoint.
     HostCallInvoke,
@@ -222,6 +224,94 @@ impl LazyTaskMachine {
     }
 }
 
+/// Where a lazy's forwards lead.
+enum ForwardEnd {
+    /// The lazy has no forward: it is cached, or another producer replaced
+    /// the forward.
+    NotForward,
+    /// The last lazy in the chain has this result.
+    Cached(crate::core::LazyResult),
+    /// The last lazy in the chain has no result yet.
+    Uncached(ManagedLazyRoot),
+    /// The chain returns to a lazy it already passed; every lazy on the
+    /// cycle has been failed with this dependency cycle.
+    Cycle(Arc<EvaluationFailure>),
+}
+
+/// Follows `lazy`'s forwards to the first lazy that does not forward, and
+/// shortens `lazy`'s own forward to point there.
+fn follow_forwards(
+    access: &crate::evaluation::EvaluationValueAccess<'_>,
+    lazy: &ManagedLazyRoot,
+) -> ForwardEnd {
+    let Some(first) = access.lazy_root(lazy).forward_target() else {
+        return ForwardEnd::NotForward;
+    };
+    let mut path = vec![lazy.clone()];
+    let mut seen = crate::trusted_hash::TrustedHashSet::default();
+    seen.insert(crate::core::DeferredValueId::from(lazy.id()));
+    let mut end = first.clone();
+    loop {
+        if !seen.insert(crate::core::DeferredValueId::from(end.id())) {
+            return ForwardEnd::Cycle(fail_forward_cycle(access, &path, &end));
+        }
+        let Some(next) = access.lazy_root(&end).forward_target() else {
+            break;
+        };
+        path.push(end);
+        end = next;
+    }
+    if end.id() != first.id() {
+        // A lost race only leaves the longer, still correct, forward.
+        let _ = access.lazy_root(lazy).retarget_forward(&first, &end);
+    }
+    match access.lazy_root(&end).cached() {
+        Some(result) => ForwardEnd::Cached(result),
+        None => ForwardEnd::Uncached(end),
+    }
+}
+
+/// Fails the forward cycle that `path` closed by reaching `repeated` again.
+/// The cycle's members are the lazies from `repeated` to the end of `path`;
+/// lazies before it only lead into the cycle. Each member caches the same
+/// failure, so the cycle is reported once however it is entered.
+fn fail_forward_cycle(
+    access: &crate::evaluation::EvaluationValueAccess<'_>,
+    path: &[ManagedLazyRoot],
+    repeated: &ManagedLazyRoot,
+) -> Arc<EvaluationFailure> {
+    let start = path
+        .iter()
+        .position(|lazy| lazy.id() == repeated.id())
+        .expect("a repeated forward is on the followed path");
+    let mut members = path[start..].to_vec();
+    // Report members from the lowest id, whichever member was entered.
+    let lowest = members
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, lazy)| lazy.id().get())
+        .map(|(index, _)| index)
+        .expect("a forward cycle has a member");
+    members.rotate_left(lowest);
+    let cycle = Arc::new(crate::core::LazyCycle {
+        members: members
+            .iter()
+            .map(|lazy| crate::core::LazyCycleMember {
+                id: lazy.id(),
+                label: lazy.label().clone(),
+            })
+            .collect(),
+    });
+    let failure = Arc::new(EvaluationFailure::dependency_cycle(cycle));
+    let mut canonical = None;
+    for member in &members {
+        if let Err(cached) = member.cache(access.values(), Err(Arc::clone(&failure))) {
+            canonical.get_or_insert(cached);
+        }
+    }
+    canonical.unwrap_or(failure)
+}
+
 /// Inline lazies stacked above the claimed one. Deeper forcing takes a route,
 /// which bounds the work a later poll repeats.
 const INLINE_LAZY_DEPTH: usize = 32;
@@ -240,6 +330,7 @@ fn forceable_inline(context: &EvaluatorStepContext<'_>, lazy: &ManagedLazyRoot) 
         let lazy = access.lazy_root(lazy);
         match lazy.checkpoint_snapshot() {
             Some(checkpoint) => checkpoint.kind() != ManagedLazyCheckpointKindTag::HostCall,
+            None if lazy.forward_target().is_some() => true,
             None => matches!(
                 lazy.source_snapshot(),
                 Some(source)
@@ -274,6 +365,23 @@ impl Drop for InlineClaims<'_> {
             self.context.release_inline_lazy(&lazy);
         }
     }
+}
+
+/// Shortens `below`'s forward from `replaced` to `child`, which `replaced`
+/// now forwards to, if `below` is a forwarder pointing at `replaced`.
+fn forwards_past(
+    context: &EvalContext,
+    below: &LazyTaskMachine,
+    replaced: &LazyTaskMachine,
+    child: &ManagedLazyRoot,
+) -> bool {
+    matches!(below.work, LazyTaskWork::Forward)
+        && context.values().with_runtime_value_access(|access| {
+            below
+                .lazy
+                .access(&access)
+                .is_some_and(|lazy| lazy.retarget_forward(&replaced.lazy, child))
+        })
 }
 
 /// Suspends a route's inline stack at its top lazy, which yielded or blocked,
@@ -366,6 +474,17 @@ pub(crate) fn poll_lazy_route(
         if let Some(child) = top.inline_request.take() {
             debug_assert!(matches!(poll, EvaluationMachinePoll::Yielded));
             claims.lazies.push(child.clone());
+            let top_forwards = matches!(top.work, LazyTaskWork::Forward);
+            // A tail call: the top forwards to `child`. A forwarder below
+            // that pointed at the top can point at `child` instead, and the
+            // top leaves the stack, so tail calls do not deepen it.
+            if top_forwards
+                && let [.., below, replaced] = stack.as_slice()
+                && forwards_past(&context, below, replaced, &child)
+            {
+                let replaced = stack.pop().expect("the replaced forwarder is the top");
+                claims.release(&replaced.lazy);
+            }
             let depth = stack.len();
             stack.push(LazyTaskMachine::at_inline_depth(
                 context.clone(),
@@ -412,6 +531,17 @@ pub(crate) fn poll_lazy_route(
                 idle_yields = 0;
             }
             poll @ (EvaluationMachinePoll::Yielded | EvaluationMachinePoll::Blocked(_)) => {
+                let (top, below) = stack
+                    .split_last()
+                    .expect("an inline lazy sits above the base");
+                if below
+                    .iter()
+                    .all(|machine| matches!(machine.work, LazyTaskWork::Forward))
+                {
+                    // Every lazy below forwards to the top, so resuming
+                    // refollows one shortened forward: suspend in place.
+                    return poll;
+                }
                 let top = top.lazy.clone();
                 claims.release(&top);
                 return spill_inline(&context, &top, poll);
@@ -452,12 +582,15 @@ impl LazyTaskMachine {
         }
     }
 
+    /// The work for this lazy's current producer: a checkpoint family or a
+    /// forward. `None` means the lazy has a result or a recorded panic.
     fn checkpoint_work(&self, context: &EvaluatorStepContext<'_>) -> Option<LazyTaskWork> {
         context.with_value_access(|access| {
-            access
-                .lazy_root(&self.lazy)
-                .checkpoint_snapshot()
-                .map(|checkpoint| Self::work_for_checkpoint_kind(checkpoint.kind()))
+            let lazy = access.lazy_root(&self.lazy);
+            match lazy.checkpoint_snapshot() {
+                Some(checkpoint) => Some(Self::work_for_checkpoint_kind(checkpoint.kind())),
+                None => lazy.forward_target().map(|_| LazyTaskWork::Forward),
+            }
         })
     }
 
@@ -510,6 +643,82 @@ impl LazyTaskMachine {
         }
     }
 
+    /// Replaces this lazy's WHNF checkpoint, which reached `target` with no
+    /// continuation left, by a forward to `target`. Only a route-driven
+    /// machine forwards: its route holds the lazy's only claim.
+    fn forward_to(&mut self, context: &EvaluatorStepContext<'_>, target: &ManagedLazyRoot) -> bool {
+        if self.inline_depth.is_none() {
+            return false;
+        }
+        let forwarded = context.with_value_access(|access| {
+            let lazy = access.lazy_root(&self.lazy);
+            lazy.checkpoint_snapshot()
+                .is_some_and(|checkpoint| lazy.forward_checkpoint(&checkpoint, target))
+        });
+        if forwarded {
+            self.work = LazyTaskWork::Forward;
+        }
+        forwarded
+    }
+
+    /// Follows this lazy's forwards to the first lazy that does not forward,
+    /// shortening the forward to it. A cached end gives this lazy its result.
+    /// An uncached end is forced like any lazy boundary: inline when it may
+    /// be, otherwise by waiting on its route. Forwards that close a cycle
+    /// fail every member, and this lazy, with a dependency cycle.
+    fn poll_forward(&mut self, context: &EvaluatorStepContext<'_>) -> EvaluationMachinePoll {
+        let followed = context.with_value_access(|access| follow_forwards(&access, &self.lazy));
+        match followed {
+            ForwardEnd::NotForward => {
+                // The lazy was cached, or its forward was replaced, meanwhile.
+                self.work = LazyTaskWork::Produce;
+                EvaluationMachinePoll::Yielded
+            }
+            ForwardEnd::Cached(result) => {
+                let result =
+                    context.with_value_access(|access| self.lazy.cache(access.values(), result));
+                match result {
+                    Ok(value) => EvaluationMachinePoll::Complete(
+                        context.root_value(|access| value.into_value_in(access.values())),
+                    ),
+                    Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
+                }
+            }
+            ForwardEnd::Uncached(end) => {
+                let request = super::whnf::WhnfDeferredRequest::Lazy(end);
+                match self.offer_inline(context, request) {
+                    Ok(poll) => poll,
+                    Err(request) => match interpret_whnf_poll(
+                        super::whnf::WhnfPoll::Deferred(request),
+                        context.context(),
+                    ) {
+                        WhnfOwnerPoll::Pending(dependency) => {
+                            EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                                dependency: Some(dependency),
+                                observed_epoch: None,
+                                error: None,
+                            })
+                        }
+                        WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
+                        WhnfOwnerPoll::Ready(_) | WhnfOwnerPoll::Yielded => {
+                            unreachable!("a lazy boundary is pending or refused")
+                        }
+                    },
+                }
+            }
+            ForwardEnd::Cycle(failure) => {
+                let result = context
+                    .with_value_access(|access| self.lazy.cache(access.values(), Err(failure)));
+                match result {
+                    Ok(value) => EvaluationMachinePoll::Complete(
+                        context.root_value(|access| value.into_value_in(access.values())),
+                    ),
+                    Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
+                }
+            }
+        }
+    }
+
     fn poll_whnf_checkpoint(
         &mut self,
         context: &EvaluatorStepContext<'_>,
@@ -524,7 +733,10 @@ impl LazyTaskMachine {
         };
         let poll = match poll {
             LazyCheckpointPoll::Owner(poll) => poll,
-            LazyCheckpointPoll::Inline(lazy) => {
+            LazyCheckpointPoll::Inline { lazy, tail } => {
+                if tail && self.forward_to(context, &lazy) {
+                    return self.poll_forward(context);
+                }
                 let request = super::whnf::WhnfDeferredRequest::Lazy(lazy);
                 match self.offer_inline(context, request) {
                     Ok(poll) => return poll,
@@ -1692,6 +1904,10 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 return self.poll_builtin_checkpoint(context, step_budget);
             }
 
+            if matches!(self.work, LazyTaskWork::Forward) {
+                return self.poll_forward(context);
+            }
+
             let LazyTaskWork::WhnfCheckpoint = self.work else {
                 unreachable!("non-producing lazy work must demand a value or construct a net")
             };
@@ -1959,6 +2175,8 @@ mod ownership_tests {
             LazyTaskWork::ObjectFixpointCheckpoint => {}
             LazyTaskWork::ListEffectCheckpoint => {}
             LazyTaskWork::BuiltinCheckpoint => {}
+            // A forward is lazy-owned producer state, not machine state.
+            LazyTaskWork::Forward => {}
             LazyTaskWork::HostCallInvoke | LazyTaskWork::HostCallCheckpoint => {}
         }
 

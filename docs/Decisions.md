@@ -763,6 +763,34 @@ maps the short names used here to file names.
   routes forcing lazies inline.
 - **Recorded in:** evaluation-recursion plan, `eval-recursion-inline-forcing`.
 
+### A lazy reached in tail position forwards to its target
+`lazy-tail-forwarding` · 2026-10-08 · maintainer and agent · accepted
+- **Context:** the maintainer wanted whatever equivalent of tail-call
+  optimization could be had easily. A tail-recursive countdown kept every
+  level's lazies alive through a chain of checkpoints and blocked routes:
+  175 MB at depth 10,000.
+- **Decision:**
+  - A route-driven WHNF checkpoint that reaches an uncached lazy with no
+    continuation left becomes `Forward(target)`, a fourth lazy producer
+    state holding a traced edge.
+  - A forwarding lazy's machine follows the chain to its end, shortens its
+    own forward, and caches a cached end's result. Tail calls on the inline
+    stack shorten the forward below and leave the stack; a route whose
+    suspended top has only forwarders below suspends in place.
+  - A lazy between a chain's ends is no longer cached when the chain
+    completes. It stays a forward and caches its value when observed, as
+    the approved proposal said.
+  - A forward chain that closes a cycle fails each member with one
+    dependency cycle. Followers detect cycles, rather than installation,
+    since two routes may close one concurrently.
+- **Consequences:** memory at depth 10,000 is constant (46 MB, the same as
+  at depth 2,000), and instructions fall 11%. Non-tail recursion still
+  grows the stack and spills.
+- **Rule lives in:** `architecture/evaluation.md`, the paragraph on tail
+  calls in constant space.
+- **Recorded in:** evaluation-recursion plan,
+  `eval-recursion-tail-forwarding`.
+
 ## Assembly
 
 ### Manifest writes are identity-checked and atomically published

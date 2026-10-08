@@ -893,6 +893,21 @@ a route, and the route's lazy blocks on that route. Progress already lives in
 each lazy's checkpoint, so suspended state is what it would have been without
 inlining, and cycles are found among the spilled routes as before.
 
+A route also makes tail calls run in constant space (`lazy-tail-forwarding`).
+When a route-driven WHNF checkpoint reaches an uncached lazy with no
+continuation frame left, the lazy's value is exactly that lazy's: the
+checkpoint is replaced by a fourth producer state, `Forward`, a traced edge to
+the target. A machine for a forwarding lazy follows the chain to its end and
+shortens its own forward there. A cached end gives it its result; an
+uncached end is forced like any lazy boundary. When the lazy below the top
+of the inline stack forwards to the top, and the top forwards in turn, the
+lower forward is shortened and the top leaves the stack. If every lazy below
+a suspended top forwards, the route suspends in place instead of spilling.
+A tail-recursive loop therefore keeps a two-entry stack, and the lazies
+between become garbage, or cache their value when observed later. Following
+a forward chain that closes a cycle fails every member with one dependency
+cycle.
+
 Work that must survive route loss falls into three ownership classes.
 Demand-driven resumable state (WHNF, access, object, list, builtin, and
 net-WHNF progress) lives in traced managed checkpoints beneath the lazy.
