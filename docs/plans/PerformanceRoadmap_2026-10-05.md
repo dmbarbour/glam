@@ -3,7 +3,9 @@
 Status: agreed with the maintainer on 2026-10-05, including the harness
 questions. `perf-profiling-harness` and `perf-foreground-collection` are
 done, `perf-parser` is in production, and `perf-evaluation-recursion` is
-next. This is the umbrella for performance work. Each step gets its own plan
+done (2026-10-08). The
+[2026-10-08 review](../reviews/PerformanceAfterRecursionWork_2026-10-08.md)
+set the next steps, listed under `perf-structural-overheads`. This is the umbrella for performance work. Each step gets its own plan
 when it starts; the existing plans it names stay the detailed records. Steps
 are referred to by name, never by number (see the plans README, "Step
 names").
@@ -168,6 +170,22 @@ gains this consequence when it lands.
    scheduler round trips, the allocation and rooting path, the reflection
    branch clone, and obvious algorithmic defects. These would otherwise mask
    representation measurements.
+   - **Findings of the 2026-10-08 review.**
+     [Performance After the Recursion Work](../reviews/PerformanceAfterRecursionWork_2026-10-08.md)
+     names these steps, in its recommended order:
+     - `perf-access-region-cost`: about 640 instructions of collector
+       admission per access region, 11–20% of every workload;
+     - `perf-scaling-workloads`: a second size per profiling workload, so
+       superlinear costs show;
+     - `perf-interface-demand-walk`, `perf-lowering-free-bindings` and
+       `perf-list-front-walk`: the quadratics behind `list_map` and
+       `dict_lookup`;
+     - `perf-root-registration` and `perf-runtime-net-attach`: a few
+       percent each;
+     - `perf-net-node-storage`: hash lookups per port access, with the
+       representation work.
+     `perf-net-builder-wired-ports` was fixed with the review: a quadratic
+     scan in net building, 79% of a 4,000-element literal.
    - **Admission wake-ups** (`perf-admission-wakeups`). *Done 2026-10-08.*
      Every outer access region ended with a condvar `notify_all`, a `futex`
      syscall even with no waiter: about a third of the CPU time in the

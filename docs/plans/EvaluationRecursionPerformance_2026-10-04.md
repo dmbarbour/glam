@@ -1,13 +1,15 @@
 # Evaluation Recursion Performance — 2026-10-04
 
-Status: active from 2026-10-07 as the `perf-evaluation-recursion` step of
-the [performance roadmap](PerformanceRoadmap_2026-10-05.md). It was found
+Status: done 2026-10-08, as the `perf-evaluation-recursion` step of the
+[performance roadmap](PerformanceRoadmap_2026-10-05.md), active from
+2026-10-07. It was found
 during the [user-input panic safety](UserInputPanicSafety_2026-10-04.md)
 evaluation inspection. The quadratic cost was exact-route validation, fixed
 by `eval-recursion-route-validation`. The large constant was one coordinator
 route per forced lazy, mostly removed by `eval-recursion-inline-forcing`.
 `eval-recursion-tail-forwarding` made tail recursion run in constant space.
-The performance review is next.
+The [follow-up review](../reviews/PerformanceAfterRecursionWork_2026-10-08.md)
+found the costs that remain.
 
 ## Problem
 
