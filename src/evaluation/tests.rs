@@ -7683,6 +7683,8 @@ fn zero_worker_executor_drops_sparks_without_forcing_them() {
     let session = EvaluationSession::shared(&coordinator);
     let context = EvalContext::new(&session);
     let (lazy, value) = rooted_inert_lazy_value(context.values(), "unforced spark");
+    // The dropped spark takes its root along; the test inspects the lazy.
+    let _lazy_root = lazy.root(context.values());
 
     context.spark_root(value);
 
@@ -9730,6 +9732,9 @@ fn closing_a_session_abandons_a_blocked_spark_and_releases_its_lazy_claim() {
                     followed_promise.duplicate_for_test(&values),
                 ))
         });
+    // The abandoned spark releases its root, and the test reclaims the lazy
+    // afterwards, so it keeps its own.
+    let _lazy_root = lazy.root(context.values());
     context.spark_root(root);
     wait_for_spark_work_counts(
         &coordinator,

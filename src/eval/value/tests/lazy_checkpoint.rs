@@ -660,7 +660,8 @@ fn a_builtin_machine_step_on_evaluated_operands_costs_one_unit() {
 /// well as in the claimed one, and the route's inline claims end.
 #[test]
 fn a_panic_in_an_inline_forced_lazy_is_recorded_in_it_and_ends_the_claims() {
-    let context = EvalContext::standalone();
+    // A private coordinator: the claim counts must not see other tests.
+    let context = isolated_context();
     let claims_while_forced = Arc::new(AtomicUsize::new(usize::MAX));
     let observed = Arc::clone(&claims_while_forced);
     let inner = LazyValue::semantic_thunk(context.values(), "panicking inline lazy", move |step| {
