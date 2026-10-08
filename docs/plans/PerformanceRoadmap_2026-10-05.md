@@ -166,6 +166,10 @@ gains this consequence when it lands.
    scheduler round trips, the allocation and rooting path, the reflection
    branch clone, and obvious algorithmic defects. These would otherwise mask
    representation measurements.
+   - **Admission wake-ups** (`perf-admission-wakeups`), candidate. Every
+     outer access region ends with a condvar `notify_all`, which is a
+     `futex` syscall even with no waiter: about a third of the CPU time in
+     the countdown. See the evaluation-recursion plan, "Finding 2026-10-08".
    - **Fast id hashing** (`perf-fast-id-hashing`). *Done 2026-10-07 for
      glam itself.*
      - Maps keyed by runtime-allocated ids use `crate::trusted_hash` instead

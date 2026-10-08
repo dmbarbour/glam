@@ -337,19 +337,29 @@ the proposal above, with these differences:
   scheduler boundary, which marks the route's lazy. Lazies between keep
   their checkpoints and observe the panicked lazy when next forced.
 
-**Measured** with `scripts/profile.sh`, against the snapshot after
-`perf-fast-id-hashing`:
+**Measured** with `scripts/profile.sh`, which now counts user-space
+instructions with `perf` (repeat runs agree within 0.01%). Before is
+`3791da97`, after `perf-fast-id-hashing`; after is `20c5598a`:
 
-| Workload | Before ms | After ms | Route admissions before | After |
+| Workload | M instructions before | After | Route admissions before | After |
 | --- | ---: | ---: | ---: | ---: |
-| `countdown_100` | 333 | 217 | 6,540 | 487 |
-| `countdown_400` | 1,234 | 788 | 24,540 | 1,687 |
-| `hello_elf` | 2,646 | 1,874 | 44,092 | 5,332 |
-| `list_map_1000` | 661 | 429 | 7,572 | 605 |
+| `minimal` | 38.9 | 34.9 | 328 | 63 |
+| `countdown_100` | 420.3 | 344.2 | 6,540 | 487 |
+| `countdown_400` | 1,556.0 | 1,272.4 | 24,540 | 1,687 |
+| `hello_elf` | 4,133.8 | 3,656.6 | 44,092 | 5,332 |
+| `list_map_1000` | 1,439.3 | 1,285.6 | 7,572 | 605 |
+| `dict_lookup_1000` | 577.1 | 497.2 | 6,473 | 317 |
 
 Reductions, allocations and access regions are within a few percent of
 before. Route admissions are counted as `fresh_work_admission`
 notifications.
+
+CPU time fell further than instructions: `countdown_400` from 1,286 to
+854 ms and `hello_elf` from 2,890 to 1,937 ms (`perf` task clock, three
+runs each). A third of that time is in the kernel, nearly all of it
+`futex` wake-ups (see the finding below), and fewer routes mean fewer
+coordinator wake-ups. Wall times from `scripts/profile.sh` are trend data
+only on a shared machine.
 
 **What remains per countdown level:** about 4 route admissions. Without
 tail forwarding, the chain of lazies a countdown level leaves pending is
@@ -394,22 +404,21 @@ for inline lazies.
 
 Every claimed poll gets `TASK_POLL_QUANTUM` = 64 steps, and foreground
 pumping reserves 4,096 steps per round. With inline forcing in place, the
-workloads ran at larger quanta. The allowance was raised to match at 16,384.
-Times are the minimum of two runs; the 1,024 column ran under extra machine
-load.
+workloads ran at larger quanta. The allowance was raised to match at
+16,384.
 
 | Workload | 64 | 256 | 1,024 | 4,096 | 16,384 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `hello_elf` ms | 1,948 | 1,906 | 1,941 | 1,869 | 1,831 |
-| `countdown_400` ms | 816 | 814 | 1,043 | 788 | 782 |
-| `list_map_1000` ms | 444 | 436 | 494 | 412 | 407 |
+| `hello_elf` M instructions | 3,656.6 | 3,668.7 | 3,549.6 | 3,595.9 | 3,610.4 |
+| `countdown_400` M instructions | 1,272.4 | 1,281.6 | 1,274.5 | 1,266.9 | 1,267.0 |
+| `list_map_1000` M instructions | 1,285.6 | 1,272.8 | 1,271.3 | 1,271.1 | 1,270.6 |
 | `hello_elf` route admissions | 5,332 | 3,493 | 2,267 | 2,700 | 2,838 |
 | `hello_elf` route releases | 11,646 | 6,479 | 4,480 | 4,754 | 4,876 |
 | `countdown_400` route admissions | 1,687 | 1,303 | 1,250 | 1,200 | 1,200 |
 
-- A larger quantum halves scheduler traffic or better, but saves only 2% to
-  8% of time. Once inline forcing removed most routes, the quantum stopped
-  being a large lever.
+- A larger quantum halves scheduler traffic or better, but changes
+  instructions by 3% at most. Once inline forcing removed most routes, the
+  quantum stopped being a lever.
 - From 1,024 up, the countdown's admissions are its depth-limit spills,
   about 3 per level, which tail forwarding addresses.
 - Reductions fall by under 0.5% at larger quanta, the work repeated after
@@ -417,3 +426,19 @@ load.
 - The quantum stays at 64 for now. Revisit it in the performance review,
   together with fairness between demands.
 
+## Finding 2026-10-08: a futex wake per access region
+
+In `countdown_400`, `strace` counts 518,114 `futex` calls, nearly all of
+the process's syscalls, with a single evaluating thread. `getrusage`
+puts system time at 0.25 s of 0.85 s CPU.
+
+The source is the collector's admission. `release_outer_mutator` in
+`crates/glam-gc/src/heap.rs` calls `notify_all` on `admission_changed`
+whenever the active mutator count reaches zero. Single-threaded, that is
+the end of every outer access region, about 437,000 of them here. The
+standard library's futex condvar makes a `FUTEX_WAKE` syscall on every
+notify, waiter or not.
+
+A waiter count kept under the coordinator mutex would skip the syscall
+when nobody waits. Candidate step `perf-admission-wakeups`, for the
+performance review.
