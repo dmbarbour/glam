@@ -10,9 +10,10 @@
 #
 # Counters are exact and comparable between runs; timings are trend data,
 # easily disturbed by other load on the machine. Where `perf` can count
-# user-space instructions, each workload also reports them: nearly as
-# stable as the counters, at full speed. GLAM_PROFILE_REPEAT=N averages N
-# runs of each workload. Record baselines in the relevant plan or
+# user-space instructions, each workload also reports them, nearly as
+# stable as the counters, and its CPU time, kernel included. Instructions
+# miss kernel work such as futex wake-ups; CPU time includes it but varies
+# with load. GLAM_PROFILE_REPEAT=N averages N runs of each workload. Record baselines in the relevant plan or
 # performance review.
 set -euo pipefail
 
@@ -31,7 +32,7 @@ glam="$root/target/release/glam"
 counter=()
 if command -v perf >/dev/null &&
   perf stat -x, -e instructions:u -o /dev/null true 2>/dev/null; then
-  counter=(perf stat -x, -e instructions:u -r "${GLAM_PROFILE_REPEAT:-1}" -o)
+  counter=(perf stat -x, -e instructions:u,task-clock -r "${GLAM_PROFILE_REPEAT:-1}" -o)
 else
   printf 'perf cannot count instructions here; reporting times only\n' >&2
 fi
@@ -136,17 +137,26 @@ for path in sorted(out.glob("*.json")):
     runtime = report["runtime"]
     reductions = sum(runtime["reductions"].values()) + sum(runtime["net_reductions"].values())
     heap = runtime["heap"] or {}
-    # perf's CSV line: count, unit, event, variance, ...
-    instructions = None
+    # perf's CSV lines: count, unit, event, variance, ...
+    instructions = cpu = None
     counts = path.with_suffix(".perf")
     if counts.exists():
         for line in counts.read_text().splitlines():
             fields = line.split(",")
-            if len(fields) > 2 and fields[2].startswith("instructions") and fields[0].isdigit():
-                instructions = int(fields[0]) / 1e6
+            if len(fields) < 3:
+                continue
+            try:
+                value = float(fields[0])
+            except ValueError:
+                continue
+            if fields[2].startswith("instructions"):
+                instructions = value / 1e6
+            elif fields[2].startswith("task-clock"):
+                cpu = value
     rows.append((
         path.stem,
         instructions,
+        cpu,
         report["phases_ns"]["total"] / 1e6,
         reductions,
         heap.get("outer_access_regions", 0),
@@ -154,10 +164,11 @@ for path in sorted(out.glob("*.json")):
         heap.get("allocations", 0),
         runtime["phases"]["collections"],
     ))
-header = ("workload", "M instr", "total ms", "reductions", "access", "roots", "allocs", "GCs")
-print(f"{header[0]:<18}{header[1]:>10}{header[2]:>11}{header[3]:>12}{header[4]:>10}{header[5]:>10}{header[6]:>10}{header[7]:>5}")
+header = ("workload", "M instr", "cpu ms", "total ms", "reductions", "access", "roots", "allocs", "GCs")
+print(f"{header[0]:<18}{header[1]:>10}{header[2]:>9}{header[3]:>11}{header[4]:>12}{header[5]:>10}{header[6]:>10}{header[7]:>10}{header[8]:>5}")
 for row in rows:
     instructions = "-" if row[1] is None else f"{row[1]:.1f}"
-    print(f"{row[0]:<18}{instructions:>10}{row[2]:>11.1f}{row[3]:>12}{row[4]:>10}{row[5]:>10}{row[6]:>10}{row[7]:>5}")
+    cpu = "-" if row[2] is None else f"{row[2]:.1f}"
+    print(f"{row[0]:<18}{instructions:>10}{cpu:>9}{row[3]:>11.1f}{row[4]:>12}{row[5]:>10}{row[6]:>10}{row[7]:>10}{row[8]:>5}")
 print(f"\nreports: {out}")
 EOF

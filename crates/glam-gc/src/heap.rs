@@ -940,6 +940,10 @@ struct MutatorCoordinator {
     active_collection: Option<CollectionEpoch>,
     completed_collection_epoch: u64,
     latest_collection_report: Option<CollectionReport>,
+    /// Threads waiting on `admission_changed`. A notification with no
+    /// waiter is skipped: the condvar would make a futex syscall anyway, and
+    /// one ended every outer access region.
+    admission_waiters: usize,
     #[cfg(test)]
     blocked_outer_mutators: usize,
     #[cfg(test)]
@@ -1015,7 +1019,7 @@ impl Drop for SyntheticExclusiveAdmission<'_> {
         assert_eq!(coordinator.phase, AdmissionPhase::Exclusive);
         assert_eq!(coordinator.active_outer_mutators, 0);
         coordinator.phase = AdmissionPhase::Ordinary;
-        self.heap.notify_coordinator_waiters();
+        self.heap.notify_coordinator_waiters(&coordinator);
     }
 }
 
@@ -2637,7 +2641,7 @@ impl HeapInner {
                         let requested = self.collection_policy == CollectionPolicy::Automatic
                             && self.collection_requested.load(Ordering::Acquire);
                         if let Some(epoch) = coordinator.elect_idle_collection(requested) {
-                            self.notify_coordinator_waiters();
+                            self.notify_coordinator_waiters(&coordinator);
                             break Some(epoch);
                         }
                         coordinator.active_outer_mutators = coordinator
@@ -2657,16 +2661,15 @@ impl HeapInner {
                         #[cfg(test)]
                         {
                             coordinator.blocked_outer_mutators += 1;
-                            self.notify_coordinator_waiters();
+                            self.notify_coordinator_waiters(&coordinator);
                         }
                         coordinator = self
-                            .admission_changed
-                            .wait(coordinator)
+                            .wait_for_admission_change(coordinator)
                             .expect("mutator coordinator should not be poisoned");
                         #[cfg(test)]
                         {
                             coordinator.blocked_outer_mutators -= 1;
-                            self.notify_coordinator_waiters();
+                            self.notify_coordinator_waiters(&coordinator);
                         }
                     }
                     AdmissionPhase::Poisoned => {
@@ -2718,7 +2721,7 @@ impl HeapInner {
             coordinator.active_collection = None;
         }
         coordinator.phase = AdmissionPhase::Poisoned;
-        self.notify_coordinator_waiters();
+        self.notify_coordinator_waiters(&coordinator);
     }
 
     fn activity(&self) -> HeapActivity {
@@ -2851,11 +2854,35 @@ impl HeapInner {
         })
     }
 
-    fn notify_coordinator_waiters(&self) {
+    /// Wakes every thread waiting on an admission change. Requiring the
+    /// locked coordinator makes the waiter count exact: a waiter registers
+    /// under the same lock before it sleeps.
+    fn notify_coordinator_waiters(&self, coordinator: &MutatorCoordinator) {
         #[cfg(test)]
         self.coordinator_notifications
             .fetch_add(1, Ordering::Relaxed);
-        self.admission_changed.notify_all();
+        if coordinator.admission_waiters != 0 {
+            self.admission_changed.notify_all();
+        }
+    }
+
+    /// Waits for an admission change, counted in `admission_waiters`.
+    fn wait_for_admission_change<'a>(
+        &self,
+        mut coordinator: std::sync::MutexGuard<'a, MutatorCoordinator>,
+    ) -> std::sync::LockResult<std::sync::MutexGuard<'a, MutatorCoordinator>> {
+        coordinator.admission_waiters += 1;
+        let woken = self.admission_changed.wait(coordinator);
+        let mut coordinator = match woken {
+            Ok(coordinator) => coordinator,
+            Err(poisoned) => {
+                let mut coordinator = poisoned.into_inner();
+                coordinator.admission_waiters -= 1;
+                return Err(std::sync::PoisonError::new(coordinator));
+            }
+        };
+        coordinator.admission_waiters -= 1;
+        Ok(coordinator)
     }
 
     fn collect_full(self: &Arc<Self>) -> Result<CollectionReport, CollectionError> {
@@ -2909,7 +2936,7 @@ impl HeapInner {
                     }
                     let requested = self.collection_requested.load(Ordering::Acquire);
                     if let Some(elected) = coordinator.elect_idle_collection(requested) {
-                        self.notify_coordinator_waiters();
+                        self.notify_coordinator_waiters(&coordinator);
                         break elected;
                     }
                     #[cfg(feature = "deterministic-test-hooks")]
@@ -2933,16 +2960,15 @@ impl HeapInner {
                     #[cfg(test)]
                     {
                         coordinator.blocked_collection_waiters += 1;
-                        self.notify_coordinator_waiters();
+                        self.notify_coordinator_waiters(&coordinator);
                     }
                     coordinator = self
-                        .admission_changed
-                        .wait(coordinator)
+                        .wait_for_admission_change(coordinator)
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     #[cfg(test)]
                     {
                         coordinator.blocked_collection_waiters -= 1;
-                        self.notify_coordinator_waiters();
+                        self.notify_coordinator_waiters(&coordinator);
                     }
                 }
             };
@@ -3110,7 +3136,7 @@ impl HeapInner {
             assert_eq!(coordinator.active_collection, Some(epoch));
             coordinator.phase = AdmissionPhase::Finalizing;
             coordinator.active_outer_mutators = 1;
-            self.notify_coordinator_waiters();
+            self.notify_coordinator_waiters(&coordinator);
             MutatorAdmission { heap: self }
         };
         let pause_duration = collection_started.elapsed();
@@ -3244,7 +3270,7 @@ impl HeapInner {
             .checked_sub(1)
             .expect("active mutator count underflow");
         if coordinator.active_outer_mutators == 0 {
-            self.notify_coordinator_waiters();
+            self.notify_coordinator_waiters(&coordinator);
         }
     }
 
@@ -3258,12 +3284,11 @@ impl HeapInner {
             || coordinator.active_outer_mutators != 0
         {
             coordinator = self
-                .admission_changed
-                .wait(coordinator)
+                .wait_for_admission_change(coordinator)
                 .expect("mutator coordinator should not be poisoned");
         }
         coordinator.phase = AdmissionPhase::Exclusive;
-        self.notify_coordinator_waiters();
+        self.notify_coordinator_waiters(&coordinator);
         SyntheticExclusiveAdmission { heap: self }
     }
 
@@ -3415,8 +3440,7 @@ impl HeapInner {
             .expect("mutator coordinator should not be poisoned");
         while coordinator.blocked_outer_mutators != expected {
             coordinator = self
-                .admission_changed
-                .wait(coordinator)
+                .wait_for_admission_change(coordinator)
                 .expect("mutator coordinator should not be poisoned");
         }
     }
@@ -3429,8 +3453,7 @@ impl HeapInner {
             .expect("mutator coordinator should not be poisoned");
         while coordinator.blocked_collection_waiters != expected {
             coordinator = self
-                .admission_changed
-                .wait(coordinator)
+                .wait_for_admission_change(coordinator)
                 .expect("mutator coordinator should not be poisoned");
         }
     }
@@ -4157,7 +4180,7 @@ impl<'heap> CollectionAttempt<'heap> {
                 .store(self.epoch.get(), Ordering::Release);
             coordinator.active_collection = None;
             coordinator.phase = AdmissionPhase::Ordinary;
-            self.heap.notify_coordinator_waiters();
+            self.heap.notify_coordinator_waiters(&coordinator);
         }
         add_metric(&self.heap.successful_collections, 1);
         self.state = CollectionAttemptState::Completed;
@@ -4213,7 +4236,7 @@ impl Drop for CollectionAttempt<'_> {
             coordinator.active_collection = None;
             coordinator.phase = AdmissionPhase::Ordinary;
         }
-        self.heap.notify_coordinator_waiters();
+        self.heap.notify_coordinator_waiters(&coordinator);
     }
 }
 

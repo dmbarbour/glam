@@ -439,6 +439,34 @@ the end of every outer access region, about 437,000 of them here. The
 standard library's futex condvar makes a `FUTEX_WAKE` syscall on every
 notify, waiter or not.
 
-A waiter count kept under the coordinator mutex would skip the syscall
-when nobody waits. Candidate step `perf-admission-wakeups`, for the
-performance review.
+**Fixed** (`perf-admission-wakeups`, 2026-10-08). The coordinator counts
+its waiters, each registered under the lock before it sleeps, and a
+notification with none is skipped. Notification therefore requires the
+locked coordinator, which every caller already held.
+
+| `countdown_400` | Before | After |
+| --- | ---: | ---: |
+| `futex` calls | 518,114 | 75,019 |
+| User CPU | 0.60 s | 0.34 s |
+| System CPU | 0.25 s | 0.07 s |
+
+- User time fell too: each syscall also costs the code around it.
+- `hello_elf` fell from 1.93 to 1.13 s of CPU, and `list_map_1000` from
+  about 445 to 310 ms.
+- User-space instructions fell under 1%. Instruction counts alone would
+  have hidden the change, so `scripts/profile.sh` now also reports CPU
+  time.
+
+**Remaining wake-ups** in `countdown_400`, 75,000 in all:
+- about 16,000 on one condvar, most likely the runtime activity condvar
+  (`RuntimeActivityState::changed`), notified by every guarded runtime
+  transition;
+- about 8,900 on the coordinator's shared condvar;
+- about 50,000 spread over 7,500 addresses, so probably condvars in
+  per-net or per-wait cells.
+
+The same waiter count applies to each. The maintainer also suggested
+coalescing: a notify flag set by mutations and flushed once per quantum,
+trading latency for throughput. That suits the coordinator's condvar, where
+a quantum makes bursts of mutations and parked workers can wait a quantum.
+It must flush before the notifying thread parks or blocks itself.
