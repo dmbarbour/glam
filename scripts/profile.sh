@@ -8,8 +8,12 @@
 # and prints a summary table. Requires python3 for the table. With
 # WORKLOAD arguments, runs only those workloads.
 #
-# Counters are exact and comparable between runs; timings are trend data.
-# Record baselines in the relevant plan or performance review.
+# Counters are exact and comparable between runs; timings are trend data,
+# easily disturbed by other load on the machine. Where `perf` can count
+# user-space instructions, each workload also reports them: nearly as
+# stable as the counters, at full speed. GLAM_PROFILE_REPEAT=N averages N
+# runs of each workload. Record baselines in the relevant plan or
+# performance review.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -21,6 +25,16 @@ mkdir -p "$out/workloads"
 
 cargo build --release --features glam-prof --bin glam -q
 glam="$root/target/release/glam"
+
+# A rootless container needs the host's kernel.perf_event_paranoid at 2 or
+# less for this.
+counter=()
+if command -v perf >/dev/null &&
+  perf stat -x, -e instructions:u -o /dev/null true 2>/dev/null; then
+  counter=(perf stat -x, -e instructions:u -r "${GLAM_PROFILE_REPEAT:-1}" -o)
+else
+  printf 'perf cannot count instructions here; reporting times only\n' >&2
+fi
 
 # Generated sources. Keep each workload small enough to finish in seconds;
 # the parser and recursion workloads are exponential or superlinear today.
@@ -97,8 +111,12 @@ for index in "${!names[@]}"; do
   name=${names[$index]}
   wanted "$name" || continue
   printf 'running %s\n' "$name" >&2
+  run=("$glam" --file "${files[$index]}")
+  if [[ ${#counter[@]} -gt 0 ]]; then
+    run=("${counter[@]}" "$out/$name.perf" "${run[@]}")
+  fi
   if ! GLAM_CONF="${confs[$index]}" GLAM_PROF="$out/$name.json" \
-    "$glam" --file "${files[$index]}" >"$out/$name.out" 2>"$out/$name.err"; then
+    "${run[@]}" >"$out/$name.out" 2>"$out/$name.err"; then
     printf '  %s failed; see %s\n' "$name" "$out/$name.err" >&2
   fi
   expected=${expects[$index]}
@@ -118,8 +136,17 @@ for path in sorted(out.glob("*.json")):
     runtime = report["runtime"]
     reductions = sum(runtime["reductions"].values()) + sum(runtime["net_reductions"].values())
     heap = runtime["heap"] or {}
+    # perf's CSV line: count, unit, event, variance, ...
+    instructions = None
+    counts = path.with_suffix(".perf")
+    if counts.exists():
+        for line in counts.read_text().splitlines():
+            fields = line.split(",")
+            if len(fields) > 2 and fields[2].startswith("instructions") and fields[0].isdigit():
+                instructions = int(fields[0]) / 1e6
     rows.append((
         path.stem,
+        instructions,
         report["phases_ns"]["total"] / 1e6,
         reductions,
         heap.get("outer_access_regions", 0),
@@ -127,9 +154,10 @@ for path in sorted(out.glob("*.json")):
         heap.get("allocations", 0),
         runtime["phases"]["collections"],
     ))
-header = ("workload", "total ms", "reductions", "access", "roots", "allocs", "GCs")
-print(f"{header[0]:<18}{header[1]:>11}{header[2]:>12}{header[3]:>10}{header[4]:>10}{header[5]:>10}{header[6]:>5}")
+header = ("workload", "M instr", "total ms", "reductions", "access", "roots", "allocs", "GCs")
+print(f"{header[0]:<18}{header[1]:>10}{header[2]:>11}{header[3]:>12}{header[4]:>10}{header[5]:>10}{header[6]:>10}{header[7]:>5}")
 for row in rows:
-    print(f"{row[0]:<18}{row[1]:>11.1f}{row[2]:>12}{row[3]:>10}{row[4]:>10}{row[5]:>10}{row[6]:>5}")
+    instructions = "-" if row[1] is None else f"{row[1]:.1f}"
+    print(f"{row[0]:<18}{instructions:>10}{row[2]:>11.1f}{row[3]:>12}{row[4]:>10}{row[5]:>10}{row[6]:>10}{row[7]:>5}")
 print(f"\nreports: {out}")
 EOF
