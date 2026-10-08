@@ -480,7 +480,9 @@ or accidental under the same policy as the integration plan.
   be scanned, and do not retain a raw state plus parallel root record merely as
   migration scaffolding.
 - Record baseline pause, throughput, run pressure, lease retention, and memory
-  behavior under the reference collector.
+  behavior under the reference collector. For scale, on 2026-10-08 two
+  collections took 65 ms of `hello_elf`'s 794 ms, and collection plus the
+  finalization batch were about 6% of a recursion countdown.
 
 Hard gate: concurrent marking may not begin until every pre-existing local
 managed reference is either discoverable or protected by a proven SATB origin

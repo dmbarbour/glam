@@ -41,9 +41,13 @@ its plan's topic, and unique across all docs. Examples:
   `perf-parser`. The prefix-shared term parser parses every ordinary
   expression in production. `parser-patterns`, `parser-keyword-frames` and
   `parser-grammar-retirement` remain.
+- [`StructuralOverheads_2026-10-08.md`](StructuralOverheads_2026-10-08.md):
+  `perf-structural-overheads`. Costs that are not representation: access
+  regions, rooting, wake-ups, and algorithmic defects such as quadratic
+  walks.
 - [`EvaluationRecursionPerformance_2026-10-04.md`](EvaluationRecursionPerformance_2026-10-04.md):
-  `perf-evaluation-recursion`. Evaluation time grows roughly quadratically
-  with recursion depth.
+  `perf-evaluation-recursion`, done 2026-10-08. Recursion is linear, and
+  tail recursion runs in constant space.
 - [`NetPolarityChecker_2026-10-05.md`](NetPolarityChecker_2026-10-05.md)
   requires every interaction net to be polarized, with a `+` exposed port,
   and checks it before N8 and net fuzzing.
@@ -174,3 +178,4 @@ Each line moves into a plan as soon as one owns it.
 | `plans/GarbageCollectorOwnershipLedger_2026-08-20.md` | `8ad63790` | GC integration (`I…`) |
 | `reviews/ArchitectureAndVerification_2026-10-03.md` | `8b1ace22` | parallel review (`AR-…`, `RF-…`) |
 | `plans/DocumentationDisposition_2026-10-05.md` | `f53e9b51` | documentation cleanup (its maintainer answers are in `Decisions.md`) |
+| `reviews/PerformanceAfterRecursionWork_2026-10-08.md` | `b2ee16c9` | performance steps (`perf-…`); its findings are in `plans/StructuralOverheads_2026-10-08.md` |

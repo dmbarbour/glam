@@ -3,12 +3,11 @@
 Status: agreed with the maintainer on 2026-10-05, including the harness
 questions. `perf-profiling-harness` and `perf-foreground-collection` are
 done, `perf-parser` is in production, and `perf-evaluation-recursion` is
-done (2026-10-08). The
-[2026-10-08 review](../reviews/PerformanceAfterRecursionWork_2026-10-08.md)
-set the next steps, listed under `perf-structural-overheads`. This is the umbrella for performance work. Each step gets its own plan
-when it starts; the existing plans it names stay the detailed records. Steps
-are referred to by name, never by number (see the plans README, "Step
-names").
+done (2026-10-08). `perf-structural-overheads` is active, with its own
+[plan](StructuralOverheads_2026-10-08.md). This is the umbrella for
+performance work. Each step gets its own plan when it starts; the existing
+plans it names stay the detailed records. Steps are referred to by name,
+never by number (see the plans README, "Step names").
 
 ## Purpose
 
@@ -156,6 +155,8 @@ gains this consequence when it lands.
      Expected (maintainer, 2026-10-06): every stage before evaluation needs
      an audit for recursion on user-controlled depth. That covers the
      syntax tree and its drop, name analysis, resolution, and lowering.
+     Known instance: lowering's `collect_free_bindings` recurses to a
+     dictionary literal's depth (see `perf-lowering-free-bindings`).
 4. **Evaluation recursion cost** (`perf-evaluation-recursion`). Diagnose
    [Evaluation Recursion Performance](EvaluationRecursionPerformance_2026-10-04.md)
    before any representation work: a simple countdown costs tens of
@@ -165,74 +166,24 @@ gains this consequence when it lands.
    per-lazy routes: `countdown_400` takes 788 ms and `hello_elf` 1,874 ms.
    `eval-recursion-tail-forwarding` (2026-10-08) made tail recursion run in
    constant space: depth 10,000 peaks at 46 MB instead of 175 MB. The
-   performance review is next.
-5. **Structural overheads** (`perf-structural-overheads`). The holistic pre-performance review's P2:
-   scheduler round trips, the allocation and rooting path, the reflection
-   branch clone, and obvious algorithmic defects. These would otherwise mask
-   representation measurements.
-   - **Findings of the 2026-10-08 review.**
-     [Performance After the Recursion Work](../reviews/PerformanceAfterRecursionWork_2026-10-08.md)
-     names these steps, in its recommended order:
-     - `perf-access-region-cost`: about 640 instructions of collector
-       admission per access region, 11–20% of every workload;
-     - `perf-scaling-workloads`: a second size per profiling workload, so
-       superlinear costs show;
-     - `perf-interface-demand-walk`, `perf-lowering-free-bindings` and
-       `perf-list-front-walk`: the quadratics behind `list_map` and
-       `dict_lookup`;
-     - `perf-root-registration` and `perf-runtime-net-attach`: a few
-       percent each;
-     - `perf-net-node-storage`: hash lookups per port access, with the
-       representation work.
-     `perf-net-builder-wired-ports` was fixed with the review: a quadratic
-     scan in net building, 79% of a 4,000-element literal.
-   - **Admission wake-ups** (`perf-admission-wakeups`). *Done 2026-10-08.*
-     Every outer access region ended with a condvar `notify_all`, a `futex`
-     syscall even with no waiter: about a third of the CPU time in the
-     countdown. The collector now notifies only registered waiters, which
-     halves the countdown's CPU time. See the evaluation-recursion plan,
-     "Finding 2026-10-08".
-   - **Idle wake-ups elsewhere** (`perf-idle-wakeups`). *Done 2026-10-08.*
-     Every glam condvar counts its waiters (`CountedCondvar`), removing the
-     remaining 75,000 `futex` calls in `countdown_400`: CPU time 407 to
-     330 ms, `hello_elf` 1,129 to 827 ms.
-   - **Coalesced wake-ups** (`perf-coalesced-wakeups`), experiment. The
-     maintainer's suggestion: coordinator mutations set a notify flag that
-     is flushed once per quantum, trading up to a quantum of latency for
-     fewer wakes of parked threads. The notifying thread must flush before
-     it parks or blocks itself. It matters only with threads parked, so it
-     starts with a profile that has workers enabled.
-   - **Fast id hashing** (`perf-fast-id-hashing`). *Done 2026-10-07 for
-     glam itself.*
-     - Maps keyed by runtime-allocated ids use `crate::trusted_hash` instead
-       of SipHash. That covers the net runtime's node, copy and port maps,
-       the net builder, the coordinator, managed external owners, effect
-       tokens and reflection continuations.
-     - **Its hasher** does one widening multiply per integer, folded so that
-       strided keys spread across buckets as well as counters do. It has no
-       collision resistance.
-     - **Keys are checked statically.** `TrustedState<K>` requires
-       `K: TrustedKey`, which is implemented only in `trusted_hash.rs`, with
-       a reason for each key type. A test fails if `TrustedKey` is
-       implemented anywhere else, so a new key type gets reviewed.
-     - **Compared with foldhash** in the same structure, it ran 0.4–0.6%
-       fewer instructions, and its hasher state is zero-sized. Wall-time
-       differences were within run-to-run noise. foldhash was used briefly
-       (`d80bbb7c`) and dropped.
-     - Countdown 100 fell from 735 M to 494 M instructions.
-     - Measured times: `hello_elf` went from 3,029 to 2,743 ms, and
-       `list_map_1000` from 802 to 674 ms.
-     - Keys a program can influence keep `RandomState`.
-     - **The collector crate** keeps its own private copy, so it gains no
-       dependency and exports no hasher. It covers the thread-local heap
-       cache, arena chunk lookup, the type-metadata registry, and classes by
-       metadata. Its cold finalization maps keep SipHash.
-     - **Both hashers end with `rotate_left(26)`.** Folding alone left
-       2^20-aligned keys clustered in the low bucket bits. With the
-       rotation, every tested stride fills buckets at least as evenly as
-       uniform hashing.
-     - Countdown 100 now runs 454 M instructions, and `hello_elf` takes
-       2,646 ms.
+   review that followed opened the next steps of
+   `perf-structural-overheads`.
+5. **Structural overheads** (`perf-structural-overheads`).
+   [Structural Overheads](StructuralOverheads_2026-10-08.md) holds the
+   steps, their evidence and the results. It started as the holistic
+   pre-performance review's P2 (scheduler round trips, the allocation and
+   rooting path, the reflection branch clone, and obvious algorithmic
+   defects), which would otherwise mask representation measurements. The
+   review after the recursion work (2026-10-08) added the open steps.
+   - *Done:* `perf-admission-wakeups`, `perf-idle-wakeups`,
+     `perf-fast-id-hashing` and `perf-net-builder-wired-ports`. The
+     scheduler round trips were `perf-evaluation-recursion`.
+   - *Open, in order:* `perf-scaling-workloads`, `perf-access-region-cost`,
+     `perf-interface-demand-walk`, `perf-lowering-free-bindings`,
+     `perf-list-front-walk`, `perf-root-registration`,
+     `perf-runtime-net-attach` and `perf-reflection-step-cost`.
+   - *Experiments:* `perf-coalesced-wakeups` (open) and
+     `perf-mimalloc-allocator` (not adopted).
 
 6. **Representations**, two parallel steps:
    - **Values** (`perf-value-representation`):
@@ -243,7 +194,12 @@ gains this consequence when it lands.
      - small inline dicts and a persistent map for large ones;
      - shared key shapes where keys are static, as in modules and objects.
    - **Interaction nets** (`perf-net-representation`):
-     - a slab of nodes with free-slot recycling, in place of hash maps;
+     - a slab of nodes with free-slot recycling, in place of hash maps.
+       `RuntimeNet::reference` resolves every port through the `nodes`
+       hash map: 3–5% of samples in every workload on 2026-10-08, from
+       cursor claims, wiring, disconnection and frontier inspection, apart
+       from `perf-interface-demand-walk`. NodeIds are referenced outside
+       the graph and never reused, so slots need generations (holistic N3);
      - nodes as four 32-bit words (kind and three typed links) with
        payloads in side tables;
      - the GAL adaptation, whose fixed-size levels replace growing fan

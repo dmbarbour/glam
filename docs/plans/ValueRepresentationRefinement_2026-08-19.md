@@ -70,6 +70,17 @@ common atom, builtin, small integer, or managed-pointer cases. It also combines
 semantic value classification with Rust ownership glue such as `Arc`, making
 trivial reclamation and compact copying difficult.
 
+**Allocation volume, measured 2026-10-08.** After the recursion work, the
+allocator (`malloc`, `free`, `memmove`) takes about 14% of samples in the
+countdown. It is diffuse: root registration, vector growth, finalization,
+persistent-map nodes and continuation frames. A faster allocator is not a
+free win: mimalloc ran 9–16% fewer instructions but used more CPU in this
+container (`perf-mimalloc-allocator` in the
+[structural overheads plan](StructuralOverheads_2026-10-08.md)). Compact
+values and list and dictionary representations should allocate less.
+Root registration is the clearest single source, and is
+`perf-root-registration` there.
+
 The eventual representation should separate:
 
 ```text
@@ -220,7 +231,8 @@ wasteful trace, and avoidable per-construction costs rather than the
 representation itself. The holistic pre-performance review's findings V1–V3 and V5
 are the source.
 
-- **Allocation and root registration without global locks.** Each managed
+- **Allocation and root registration without global locks**, now part of
+  `perf-root-registration` in the structural overheads plan. Each managed
   allocation re-acquires an allocator. That locks a process-wide `TypeId`
   metadata map and the heap's data mutex, and root registration repeats the
   lookup. Use a per-family static or per-thread class cache keyed by
@@ -236,7 +248,8 @@ are the source.
 - **Stack-safe core walks and destruction.**
   - Give `ListNode` an iterative `Drop`.
   - Lower list literals with `List::from_values` rather than left-deep
-    concatenation.
+    concatenation. This is `perf-list-front-walk` in the structural
+    overheads plan: the spine makes each front pop O(n).
   - Make the key conversions iterative: `Key::to_value_in`,
     `key_from_value` and `value_from_key`.
   - Add small-stack tests that build, trace, collect and drop a 100k-deep

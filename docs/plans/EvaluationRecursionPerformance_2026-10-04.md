@@ -8,8 +8,8 @@ evaluation inspection. The quadratic cost was exact-route validation, fixed
 by `eval-recursion-route-validation`. The large constant was one coordinator
 route per forced lazy, mostly removed by `eval-recursion-inline-forcing`.
 `eval-recursion-tail-forwarding` made tail recursion run in constant space.
-The [follow-up review](../reviews/PerformanceAfterRecursionWork_2026-10-08.md)
-found the costs that remain.
+The review that followed found the costs that remain; they are steps of
+[Structural Overheads](StructuralOverheads_2026-10-08.md).
 
 ## Problem
 
