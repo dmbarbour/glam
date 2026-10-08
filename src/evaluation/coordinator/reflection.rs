@@ -470,6 +470,7 @@ impl EvaluationWorkCoordinator {
                     ReflectionCancellation::Terminalize
                 }
                 WorkState::Terminalizing => ReflectionCancellation::Late,
+                WorkState::InlineForced => unreachable!("only a lazy route is forced inline"),
             };
             if !matches!(outcome, ReflectionCancellation::Late) {
                 state.advance_work_generation(
@@ -670,6 +671,9 @@ impl EvaluationWorkCoordinator {
                             | WorkState::Queued
                             | WorkState::Running => Some(EvaluationTaskStatus::Launched),
                             WorkState::ExitWaiting | WorkState::Terminalizing => None,
+                            WorkState::InlineForced => {
+                                unreachable!("only a lazy route is forced inline")
+                            }
                         }?;
                         record
                             .obligations
@@ -1012,6 +1016,7 @@ pub(super) fn reflection_state(record: &WorkRecord) -> ReflectionWorkState {
         WorkState::Reserved => ReflectionWorkState::Reserved,
         WorkState::Queued => ReflectionWorkState::Queued,
         WorkState::Running => ReflectionWorkState::Running,
+        WorkState::InlineForced => unreachable!("only a lazy route is forced inline"),
         WorkState::Blocked => ReflectionWorkState::Blocked(
             reflection_work(record)
                 .block

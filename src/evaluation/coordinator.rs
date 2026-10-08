@@ -355,6 +355,10 @@ enum WorkState {
     Reserved,
     Queued,
     Running,
+    /// A lazy route admitted while another route forces its lazy inline. It
+    /// is busy, like `Running`, until that inline claim ends; see
+    /// `EvaluationWorkCoordinator::release_inline_lazy`.
+    InlineForced,
     Blocked,
     ExitWaiting,
     Terminalizing,
@@ -2897,7 +2901,10 @@ impl EvaluationWorkCoordinator {
         state.work.get(&id).is_some_and(|record| {
             matches!(
                 record.state,
-                WorkState::Reserved | WorkState::Running | WorkState::Terminalizing
+                WorkState::Reserved
+                    | WorkState::Running
+                    | WorkState::InlineForced
+                    | WorkState::Terminalizing
             )
         })
     }
@@ -3237,6 +3244,7 @@ impl EvaluationWorkCoordinator {
                 WorkState::Blocked => blocked += 1,
                 WorkState::Dormant
                 | WorkState::Reserved
+                | WorkState::InlineForced
                 | WorkState::ExitWaiting
                 | WorkState::Terminalizing => {}
             }
@@ -3302,7 +3310,9 @@ fn exact_route_disposition_locked(
     };
     match record.state {
         WorkState::Queued | WorkState::Dormant => ExactRouteDisposition::Runnable,
-        WorkState::Reserved | WorkState::Running => ExactRouteDisposition::Busy,
+        WorkState::Reserved | WorkState::Running | WorkState::InlineForced => {
+            ExactRouteDisposition::Busy
+        }
         WorkState::Blocked => {
             let Some(dependency) = work_dependency(record) else {
                 return ExactRouteDisposition::Parked;
@@ -3486,7 +3496,10 @@ fn rebuild_exact_route_locked(
                 });
                 current = producer;
             }
-            WorkState::Reserved | WorkState::Running | WorkState::Terminalizing => {
+            WorkState::Reserved
+            | WorkState::Running
+            | WorkState::InlineForced
+            | WorkState::Terminalizing => {
                 return ExactProducerProbe {
                     selection: CausalBackgroundProbe::Busy(current),
                     depth,
@@ -3679,7 +3692,10 @@ fn continue_exact_route_locked(
                 route.current = Some(producer);
                 handoffs += 1;
             }
-            WorkState::Reserved | WorkState::Running | WorkState::Terminalizing => {
+            WorkState::Reserved
+            | WorkState::Running
+            | WorkState::InlineForced
+            | WorkState::Terminalizing => {
                 return (
                     ExactProducerProbe {
                         selection: CausalBackgroundProbe::Busy(current),
@@ -3747,7 +3763,10 @@ fn exact_producer_probe_locked(
                 };
                 current = producer;
             }
-            WorkState::Reserved | WorkState::Running | WorkState::Terminalizing => {
+            WorkState::Reserved
+            | WorkState::Running
+            | WorkState::InlineForced
+            | WorkState::Terminalizing => {
                 return ExactProducerProbe {
                     selection: CausalBackgroundProbe::Busy(current),
                     depth: seen.len(),
@@ -3865,7 +3884,10 @@ fn causal_child_probe_locked(
                     {
                         return CausalChildProbe::Ready(current);
                     }
-                    WorkState::Reserved | WorkState::Running | WorkState::Terminalizing => {
+                    WorkState::Reserved
+                    | WorkState::Running
+                    | WorkState::InlineForced
+                    | WorkState::Terminalizing => {
                         busy = true;
                         break;
                     }
@@ -4008,6 +4030,7 @@ fn dependency_has_causal_progress_locked(
             | WorkState::Reserved
             | WorkState::Queued
             | WorkState::Running
+            | WorkState::InlineForced
             | WorkState::Terminalizing => return true,
             WorkState::Blocked | WorkState::ExitWaiting => {
                 if task_observation_epoch(record).is_some_and(|epoch| epoch < current_epoch) {

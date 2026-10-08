@@ -321,7 +321,9 @@ the proposal above, with these differences:
   yielded raised access regions by 40%.
 - **No spill request, no inline cycle check.** A second demander simply
   admits the lazy's route and waits, which resolves at the end of the
-  forcer's poll rather than at its next step. A cycle through inline lazies
+  forcer's poll rather than at its next step. That route is `InlineForced`
+  meanwhile, a busy work state, so probes report it busy rather than
+  runnable; the release makes it dormant, or queued if it was demanded. A cycle through inline lazies
   meets an already-claimed lazy, admits its route and blocks; spilling turns
   the cycle into routes, and the existing detection reports it with every
   member's label.
@@ -367,3 +369,51 @@ calls.
   and also fires before a new batch. Otherwise a route re-polling a
   handoff ran past the limit. A wrapper fixture's scheduler polls fell from
   17 to 3, with its reduction and driver counts unchanged.
+
+**Uncached failures** (reviewed with the maintainer, 2026-10-08). An inline
+lazy whose poll fails without caching ends the route's poll, uncached. A
+lazy machine fails uncached only for an observer-relative refusal:
+- admission refused, because the demand closed or the coordinator expired;
+- a reflection promise observed by its own producer task, which a lazy
+  route cannot hit, having no task identity.
+
+Routes run in the runtime's background demand, so in practice this is
+shutdown. The test
+`an_uncached_failure_in_an_inline_forced_lazy_ends_the_route_uncached`
+covers it, and resumes both lazies with a later route.
+
+**Finding: refusals are cached at the WHNF boundary.** Without inlining,
+the same refusal *was* cached in the route's lazy. The WHNF checkpoint
+boundary passes every interpretation failure to `fail`, which caches it,
+while the family boundaries pass them on uncached. `WhnfOwnerPoll::Failed`
+conflates permanent evaluation failures with observer-relative refusals.
+Separating them is a candidate follow-up; inlining already avoids the cache
+for inline lazies.
+
+## Poll quantum comparison 2026-10-08
+
+Every claimed poll gets `TASK_POLL_QUANTUM` = 64 steps, and foreground
+pumping reserves 4,096 steps per round. With inline forcing in place, the
+workloads ran at larger quanta. The allowance was raised to match at 16,384.
+Times are the minimum of two runs; the 1,024 column ran under extra machine
+load.
+
+| Workload | 64 | 256 | 1,024 | 4,096 | 16,384 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `hello_elf` ms | 1,948 | 1,906 | 1,941 | 1,869 | 1,831 |
+| `countdown_400` ms | 816 | 814 | 1,043 | 788 | 782 |
+| `list_map_1000` ms | 444 | 436 | 494 | 412 | 407 |
+| `hello_elf` route admissions | 5,332 | 3,493 | 2,267 | 2,700 | 2,838 |
+| `hello_elf` route releases | 11,646 | 6,479 | 4,480 | 4,754 | 4,876 |
+| `countdown_400` route admissions | 1,687 | 1,303 | 1,250 | 1,200 | 1,200 |
+
+- A larger quantum halves scheduler traffic or better, but saves only 2% to
+  8% of time. Once inline forcing removed most routes, the quantum stopped
+  being a large lever.
+- From 1,024 up, the countdown's admissions are its depth-limit spills,
+  about 3 per level, which tail forwarding addresses.
+- Reductions fall by under 0.5% at larger quanta, the work repeated after
+  suspensions. Access regions vary within a few percent.
+- The quantum stays at 64 for now. Revisit it in the performance review,
+  together with fairness between demands.
+

@@ -884,8 +884,9 @@ lazy with no route, no other inline claim, and a resumable source or
 checkpoint is claimed in the coordinator and polled on an explicit stack
 above the route's lazy, sharing its budget. A host call or reflection task
 must run exactly once, so it always keeps its route. The claim lasts until
-the lazy completes or the poll ends, and a route admitted for the lazy
-meanwhile cannot be claimed until then. A completed inline lazy is cached
+the lazy completes or the poll ends. A route admitted for the lazy meanwhile
+is busy (`InlineForced`) until then, and is queued at the release if it was
+demanded meanwhile. A completed inline lazy is cached
 and popped, and its parent finds the value. An inline lazy that suspends,
 because the budget runs out or it blocks, spills: its claim ends, it is given
 a route, and the route's lazy blocks on that route. Progress already lives in

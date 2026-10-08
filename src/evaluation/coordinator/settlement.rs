@@ -200,7 +200,10 @@ fn runtime_readiness_locked(state: &WorkCoordinatorState) -> RuntimeCoordinatorR
     for record in state.work.values() {
         if matches!(
             record.state,
-            WorkState::Queued | WorkState::Running | WorkState::Terminalizing
+            WorkState::Queued
+                | WorkState::Running
+                | WorkState::InlineForced
+                | WorkState::Terminalizing
         ) || matches!(record.kind, WorkKind::Spark(_))
         {
             return RuntimeCoordinatorReadiness::Busy;
@@ -228,6 +231,7 @@ fn runtime_readiness_locked(state: &WorkCoordinatorState) -> RuntimeCoordinatorR
             WorkState::Blocked => RuntimeWorkStateSnapshot::Blocked,
             WorkState::Queued
             | WorkState::Running
+            | WorkState::InlineForced
             | WorkState::ExitWaiting
             | WorkState::Terminalizing => unreachable!("handled above"),
         };

@@ -1037,6 +1037,60 @@ fn exact_claimed_work_families_publish_release_observations() {
     );
 }
 
+/// A route admitted while its lazy is forced inline is busy until the inline
+/// claim ends. A demand meanwhile is remembered, so the release queues it.
+#[test]
+fn a_route_admitted_during_an_inline_claim_is_busy_until_the_claim_ends() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test resources should build");
+    let session = TestDemand::new(&coordinator);
+    let lazy = LazyValue::semantic_thunk(&session.demand.values, "inline-forced lazy", |_| {
+        panic!("coordinator route test never evaluates its synthetic lazy")
+    });
+    let root = lazy.root(&session.demand.values);
+    let value = crate::core::DeferredValueId::from(root.id());
+    assert!(coordinator.try_claim_inline_lazy(value));
+    let task = super::super::allocate_task_id(&session.demand.values)
+        .expect("lazy route task identity should allocate");
+    let wait = super::super::allocate_wait_token(&session.demand, task)
+        .expect("lazy route wait identity should allocate");
+    let wait = coordinator
+        .reserve_lazy_route(root, wait)
+        .expect("the lazy route should reserve");
+    let work = coordinator
+        .deferred_work_for_wait(&wait)
+        .expect("the lazy route should index its wait");
+    let work_state = || {
+        coordinator
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned")
+            .work
+            .get(&work)
+            .map(|record| record.state)
+    };
+    assert_eq!(work_state(), Some(WorkState::InlineForced));
+    assert!(!coordinator.try_claim_inline_lazy(value));
+    let mut route = ExactDemandRoute::default();
+    assert!(matches!(
+        coordinator.claim_exact_target_on_route(&wait, &mut route),
+        ExactTargetSelection::Busy
+    ));
+    assert!(coordinator.claim_work(work).is_none());
+    assert!(coordinator.promote_deferred_wait(&wait));
+    assert_eq!(work_state(), Some(WorkState::InlineForced));
+
+    coordinator.release_inline_lazy(value);
+
+    assert_eq!(work_state(), Some(WorkState::Queued));
+    let ExactTargetSelection::Claimed(ClaimedTaskWork::LazyRoute(claimed)) =
+        coordinator.claim_exact_target_on_route(&wait, &mut route)
+    else {
+        panic!("the released route should be claimable")
+    };
+    drop(coordinator.release_lazy_route(claimed, DeferredWorkPoll::Yielded));
+}
+
 #[test]
 fn foreground_route_retains_a_busy_candidate_across_its_release() {
     let (coordinator, _executor) =

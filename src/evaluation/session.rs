@@ -2285,6 +2285,11 @@ impl EvalContext {
     }
 
     #[cfg(test)]
+    pub(crate) fn demand_state_for_test(&self) -> Arc<EvaluationDemandState> {
+        self.session.clone()
+    }
+
+    #[cfg(test)]
     pub(crate) fn inline_lazy_claim_count(&self) -> usize {
         self.coordinator()
             .expect("test demand must retain its coordinator")

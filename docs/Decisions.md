@@ -699,7 +699,8 @@ maps the short names used here to file names.
     lazies between are polled again once, when it completes, not after
     every quantum.
   - Contention and cycles need no new protocol. A second demander admits
-    the lazy's route, which becomes claimable when the inline claim ends.
+    the lazy's route, which stays busy (`InlineForced`) and becomes
+    claimable when the inline claim ends.
     A cycle through inline lazies spills into routes, where the existing
     cycle detection reports it.
 - **Consequences:** route admissions fell 7 to 15 times on the profiling

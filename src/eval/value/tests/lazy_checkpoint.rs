@@ -699,6 +699,75 @@ fn a_panic_in_an_inline_forced_lazy_is_recorded_in_it_and_ends_the_claims() {
     assert_eq!(context.inline_lazy_claim_count(), 0);
 }
 
+/// A lazy machine fails without caching only when an observer-relative
+/// condition refuses it: a closed demand refusing admission, or a reflection
+/// promise observed by its own producer task. A lazy route has no task
+/// identity, so only admission refusal reaches an inline lazy. Its failure
+/// ends the route's poll uncached, as a refusal at the route's own family
+/// boundary does, and both lazies stay resumable by a later route.
+#[test]
+fn an_uncached_failure_in_an_inline_forced_lazy_ends_the_route_uncached() {
+    let (coordinator, _executor) = crate::evaluation::test_execution_resources(0)
+        .expect("same-runtime evaluator resources should build");
+    let live = crate::evaluation::OwnedEvalContext::new(
+        crate::evaluation::EvaluationSession::shared(&coordinator),
+    );
+    let closing = crate::evaluation::OwnedEvalContext::new(
+        crate::evaluation::EvaluationSession::shared(&coordinator),
+    );
+    // A lazy with a route cannot be forced inline, so the inline lazy must
+    // admit a wait on it.
+    let routed = LazyValue::semantic_thunk(live.values(), "routed operand", |_| Ok(number(1)));
+    let routed_root = routed.root(live.values());
+    let _routed_wait =
+        lazy_root_wait(&live, &routed_root).expect("the operand route should be admitted");
+    let sum = builtin_lazy(&live, Builtin::Add, [Value::Lazy(routed), number(1)]);
+    let sum_root = sum.root(live.values());
+    let focus = crate::runtime::RuntimeValueRoot::new(live.values(), Value::Lazy(sum));
+    let outer = LazyValue::semantic_thunk(live.values(), "outer lazy", move |_| {
+        Ok(focus.clone_core_for_test())
+    });
+    let outer_root = outer.root(live.values());
+    // The route runs in the closing demand, as a route runs in the runtime's
+    // background demand; closing it refuses every later admission.
+    let closed = closing.demand_state_for_test();
+    let poll_context = crate::evaluation::EvaluationPollContext::for_context(&closing);
+    drop(closing);
+
+    let poll = poll_lazy_route(
+        &poll_context,
+        closed,
+        &outer_root,
+        &mut crate::evaluation::EvaluationStepBudget::new(64),
+        crate::core::EvaluationPanicOrigin::LazyRoute(0),
+    );
+
+    let EvaluationMachinePoll::Failed(failure) = poll else {
+        panic!("a refused admission in the inline lazy should end the route's poll")
+    };
+    assert!(failure.to_string().contains("closed"), "{failure}");
+    live.values().with_runtime_value_access(|access| {
+        for (label, root) in [("inline", &sum_root), ("outer", &outer_root)] {
+            let lazy = root.access(&access).expect("the fixture lazies stay live");
+            assert!(
+                lazy.cached().is_none(),
+                "the {label} lazy must stay uncached"
+            );
+            assert!(lazy.panic_report().is_none());
+        }
+    });
+    assert_eq!(live.inline_lazy_claim_count(), 0);
+
+    let wait = lazy_root_wait(&live, &outer_root).expect("a live route should be admitted");
+    pump_to_ready(&live, &wait);
+    assert_same_value(
+        &live,
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&live, &Value::Lazy(outer))
+            .expect_without_debug("the resumed route should cache the sum"),
+        &number(2),
+    );
+}
+
 #[test]
 fn semantic_thunk_result_survives_route_loss_without_callback_replay() {
     let context = isolated_context();

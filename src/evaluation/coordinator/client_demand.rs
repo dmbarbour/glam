@@ -485,6 +485,7 @@ impl EvaluationWorkCoordinator {
             }
             WorkState::Dormant
             | WorkState::Reserved
+            | WorkState::InlineForced
             | WorkState::ExitWaiting
             | WorkState::Terminalizing => {
                 unreachable!("client demand entered an unsupported work state")

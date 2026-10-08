@@ -218,8 +218,9 @@ impl EvaluationWorkCoordinator {
         !state.deferred.by_value.contains_key(&lazy) && state.deferred.inline.insert(lazy)
     }
 
-    /// Ends an inline claim. If a route was admitted for the lazy meanwhile,
-    /// its claim was refused, so waiters are told it may now be claimed.
+    /// Ends an inline claim. A route admitted for the lazy meanwhile waited
+    /// in `InlineForced`; it is released as a yielded route would be,
+    /// queued if it was demanded meanwhile and dormant otherwise.
     pub(in crate::evaluation) fn release_inline_lazy(&self, lazy: DeferredValueId) {
         let routed = {
             let mut state = self
@@ -229,17 +230,20 @@ impl EvaluationWorkCoordinator {
             state.deferred.inline.remove(&lazy);
             state.deferred.by_value.contains_key(&lazy)
         };
-        if routed {
-            let mutation = self.admission.mutation_guard();
-            self.state
+        if !routed {
+            return;
+        }
+        let mutation = self.admission.mutation_guard();
+        let released = {
+            let mut state = self
+                .state
                 .lock()
-                .expect("evaluation work coordinator was poisoned")
-                .advance_work_generation(
-                    CoordinatorMutationKind::WorkActivation,
-                    RouteHazard::None,
-                );
-            drop(mutation);
-            self.notify_all(CoordinatorMutationKind::WorkActivation);
+                .expect("evaluation work coordinator was poisoned");
+            release_inline_forced_route_locked(&mut state, lazy)
+        };
+        drop(mutation);
+        if released {
+            self.notify_all(CoordinatorMutationKind::WorkRelease);
         }
     }
 
@@ -286,6 +290,13 @@ impl EvaluationWorkCoordinator {
                 }
             } else {
                 let id = EvaluationWorkId(self.ids.evaluation_work());
+                // A lazy forced inline keeps its new route busy until the
+                // inline claim ends.
+                let initial = if state.deferred.inline.contains(&value) {
+                    WorkState::InlineForced
+                } else {
+                    WorkState::Dormant
+                };
                 let record = WorkRecord {
                     id,
                     // Only used to select a matching value-domain execution
@@ -298,7 +309,7 @@ impl EvaluationWorkCoordinator {
                         wait.clone(),
                         DeferredProducer::Lazy(lazy.clone()),
                     ),
-                    state: WorkState::Dormant,
+                    state: initial,
                     kind: WorkKind::LazyRoute(LazyRouteWork {
                         wait: wait.clone(),
                         lazy,
@@ -824,7 +835,7 @@ pub(super) struct DeferredIndexes {
     pub(super) by_value: TrustedHashMap<DeferredValueId, EvaluationWorkId>,
     /// Lazies a claimed route is forcing inline during its current poll.
     /// Such a lazy has no route of its own when claimed, and a route admitted
-    /// for it meanwhile cannot be claimed until the inline claim ends, so
+    /// for it meanwhile stays `InlineForced` until the inline claim ends, so
     /// exactly one party polls its checkpoint.
     pub(super) inline: crate::trusted_hash::TrustedHashSet<DeferredValueId>,
 }
@@ -975,6 +986,42 @@ pub(super) fn producer_wait(record: &WorkRecord) -> EvaluationWaitToken {
     }
 }
 
+/// Makes an `InlineForced` lazy route claimable once its inline claim has
+/// ended. Its lazy can gain no new inline claim meanwhile, since it has a
+/// route, but the route may have retired.
+fn release_inline_forced_route_locked(
+    state: &mut WorkCoordinatorState,
+    lazy: DeferredValueId,
+) -> bool {
+    let Some(id) = state.deferred.by_value.get(&lazy).copied() else {
+        return false;
+    };
+    let record = state
+        .work
+        .get_mut(&id)
+        .expect("indexed lazy route must remain registered");
+    if !matches!(record.state, WorkState::InlineForced) {
+        return false;
+    }
+    let WorkKind::LazyRoute(route) = &mut record.kind else {
+        unreachable!("only a lazy route is forced inline")
+    };
+    let demanded = std::mem::take(&mut route.demand_while_running);
+    record.state = if demanded {
+        WorkState::Queued
+    } else {
+        WorkState::Dormant
+    };
+    if demanded {
+        queue_deferred(state, id);
+    }
+    state.advance_work_generation(
+        CoordinatorMutationKind::WorkRelease,
+        RouteHazard::Works(&[id]),
+    );
+    true
+}
+
 pub(super) fn queue_deferred(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
     assert!(matches!(
         state
@@ -1070,9 +1117,7 @@ pub(super) fn claim_lazy_route(
         let WorkKind::LazyRoute(route) = &mut record.kind else {
             return None;
         };
-        if !matches!(record.state, WorkState::Dormant | WorkState::Queued)
-            || state.deferred.inline.contains(&route.lazy.id().into())
-        {
+        if !matches!(record.state, WorkState::Dormant | WorkState::Queued) {
             return None;
         }
         let was_queued = matches!(record.state, WorkState::Queued);
@@ -1113,11 +1158,11 @@ pub(super) fn promote_deferred_wait_locked(
             queue_deferred(state, id);
             true
         }
-        Some(WorkState::Running) => {
+        Some(WorkState::Running | WorkState::InlineForced) => {
             match &mut state
                 .work
                 .get_mut(&id)
-                .expect("running deferred work must remain registered")
+                .expect("busy deferred work must remain registered")
                 .kind
             {
                 WorkKind::Deferred(work) => work.demand_while_running = true,
