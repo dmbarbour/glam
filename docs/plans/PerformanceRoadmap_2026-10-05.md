@@ -172,10 +172,16 @@ gains this consequence when it lands.
      countdown. The collector now notifies only registered waiters, which
      halves the countdown's CPU time. See the evaluation-recursion plan,
      "Finding 2026-10-08".
-   - **Idle wake-ups elsewhere** (`perf-idle-wakeups`), candidate. The same
-     waiter count for the runtime activity, coordinator, and per-net or
-     per-cell condvars: 75,000 remaining `futex` calls in `countdown_400`.
-     Possibly coalesced per quantum for the coordinator.
+   - **Idle wake-ups elsewhere** (`perf-idle-wakeups`). *Done 2026-10-08.*
+     Every glam condvar counts its waiters (`CountedCondvar`), removing the
+     remaining 75,000 `futex` calls in `countdown_400`: CPU time 407 to
+     330 ms, `hello_elf` 1,129 to 827 ms.
+   - **Coalesced wake-ups** (`perf-coalesced-wakeups`), experiment. The
+     maintainer's suggestion: coordinator mutations set a notify flag that
+     is flushed once per quantum, trading up to a quantum of latency for
+     fewer wakes of parked threads. The notifying thread must flush before
+     it parks or blocks itself. It matters only with threads parked, so it
+     starts with a profile that has workers enabled.
    - **Fast id hashing** (`perf-fast-id-hashing`). *Done 2026-10-07 for
      glam itself.*
      - Maps keyed by runtime-allocated ids use `crate::trusted_hash` instead

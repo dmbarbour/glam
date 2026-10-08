@@ -7,9 +7,9 @@
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{
-    Arc, Condvar, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak,
-};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
+
+use crate::counted_condvar::CountedCondvar;
 
 use glam_gc::HeapMaintenanceSnapshot;
 
@@ -541,7 +541,7 @@ impl Drop for RuntimeSettlementGuard<'_> {
 pub(crate) struct RuntimeActivityState {
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     state: Mutex<RuntimeActivityData>,
-    changed: Condvar,
+    changed: CountedCondvar,
     #[cfg(test)]
     waits: AtomicU64,
 }
@@ -568,7 +568,7 @@ impl RuntimeActivityState {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(RuntimeActivityData::default()),
-            changed: Condvar::new(),
+            changed: CountedCondvar::new(),
             #[cfg(test)]
             waits: AtomicU64::new(0),
         })

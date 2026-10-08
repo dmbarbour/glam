@@ -646,7 +646,7 @@ maps the short names used here to file names.
 - **Recorded in:** resumable-WHNF plan W9C.4 and W9D.4.
 
 ### Deterministic hashing only for bounded runtime work-ID sets
-`trusted-hasher-scope` · 2026-09-28 · agent · accepted
+`trusted-hasher-scope` · 2026-09-28 · agent · superseded
 - **Context:** randomized hashing costs show up in hot scheduler
   traversals, but deterministic hashing over user-influenced keys invites
   pathological collisions.
@@ -657,6 +657,57 @@ maps the short names used here to file names.
   runtime-allocated and its set is bounded.
 - **Rule lives in:** `agent_context/evaluation.md` "Sessions and Workers".
 - **Recorded in:** resumable-WHNF plan, exact-route work.
+- **Superseded by:** `trusted-key-hashing`.
+
+### Maps keyed by runtime-allocated ids use a checked trusted hasher
+`trusted-key-hashing` · 2026-10-07 · maintainer and agent · accepted
+- **Context:** SipHash showed up in hot maps keyed by runtime ids. The
+  maintainer asked for trusted-key hashing widely and opportunistically,
+  with drift caught by static checks or a review latch.
+- **Decision:**
+  - Maps keyed by runtime-allocated ids use `crate::trusted_hash`: one
+    folded widening multiply per integer, then a rotation. It has no
+    collision resistance.
+  - `TrustedState<K>` requires `K: TrustedKey`, implemented only in
+    `trusted_hash.rs` with the reason a program cannot choose the key; a
+    test rejects implementations elsewhere.
+  - Keys a program can influence keep `RandomState`. The collector crate
+    keeps its own private copy.
+  - Supersedes `trusted-hasher-scope`, which allowed deterministic hashing
+    only for bounded traversal sets of work ids.
+- **Consequences:** the countdown at depth 100 fell from 735 M to 454 M
+  instructions.
+- **Rule lives in:** `agent_context/evaluation.md` "Sessions and Workers";
+  `src/trusted_hash.rs`.
+- **Recorded in:** performance roadmap `perf-fast-id-hashing`; commits
+  `d80bbb7c`, `5847644f`, `3791da97`.
+
+### Condvars notify only registered waiters
+`counted-condvar-notifications` · 2026-10-08 · maintainer and agent · accepted
+- **Context:** the standard futex condvar makes a syscall on every
+  notification, waiter or not. Single-threaded `countdown_400` made about
+  600,000 such syscalls, half of its CPU time. The maintainer had suspected
+  excessive `notify_all`.
+- **Decision:**
+  - Every glam condvar is a `CountedCondvar`. It counts waiters, each
+    registered under the waited mutex before it sleeps, and skips a
+    notification with none. A test rejects the standard condvar elsewhere
+    in the crate.
+  - The collector's admission condvar counts waiters in its locked
+    coordinator, so notifying requires the lock.
+  - The maintainer's alternative, one coalesced notification per quantum,
+    is the separate experiment `perf-coalesced-wakeups`. It waits for a
+    profile with workers that shows wake storms.
+- **Consequences:**
+  - Single-threaded evaluation makes no futex syscalls.
+  - `countdown_400` fell from 854 to 330 ms of CPU, `hello_elf` from 1,937
+    to 827 ms.
+  - `shared-condvar-notification-policy` still holds for notifications
+    that reach waiters.
+- **Rule lives in:** `src/counted_condvar.rs`; `agent_context/evaluation.md`
+  "Sessions and Workers".
+- **Recorded in:** evaluation-recursion plan, "Finding 2026-10-08";
+  `perf-admission-wakeups`, `perf-idle-wakeups`.
 
 ### A `TaskHalt` is only a failure or a panic
 `taskhalt-is-failure-or-panic` · 2026-10-05 · agent · accepted

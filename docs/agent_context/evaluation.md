@@ -414,9 +414,13 @@ control-flow overview.
   wake may be suppressed only for mutation kinds that cannot enable a parked
   waiter (`notifies_waiters`); the `work_generation` advance is never
   suppressed, and a waiter rechecks it under the coordinator mutex.
-- The deterministic `TrustedWorkIdHasher` is only for bounded traversal sets
-  of runtime-allocated work IDs. Indexes keyed by user data, and persistent
-  coordinator indexes, keep randomized hashing.
+- Every condvar is a `crate::counted_condvar::CountedCondvar`, so a
+  notification with no waiter costs nothing. That relies on the notifier
+  changing the awaited state under the waiter's mutex before notifying.
+- Maps keyed by runtime-allocated ids use `crate::trusted_hash`. A key type
+  must implement `TrustedKey` in `trusted_hash.rs`, with the reason a
+  program cannot choose it. Keys a program can influence keep
+  `RandomState`.
 - Workers opportunistically poll reflection tasks and are the only consumers
   of sparks. Workers and the runtime background pump follow exact producer
   chains from permitted roots, not globally ready deferred work. An explicit

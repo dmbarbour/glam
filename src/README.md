@@ -95,6 +95,8 @@ not define language semantics or collect subsystem invariants.
 | `reflection/store.rs` | Journaled volume roots, edits, snapshots, commits, and query lifetime |
 | `reflection/store/conflict.rs` | Conflict paths plus exact, fingerprint, coarse, and client-defined observation strategies |
 | `runtime.rs` | Runtime identity, mutation admission, activity accounting |
+| `counted_condvar.rs` | The crate's only condvar: notifications without a registered waiter are skipped instead of making a futex syscall |
+| `trusted_hash.rs` | Minimal hashing for maps keyed by runtime-allocated ids; key types are declared there, with a latch |
 
 `interaction_net.rs`, `eval.rs`, `g_syntax.rs`, and `reflection.rs` are facades
 over their submodules rather than additional implementation layers.

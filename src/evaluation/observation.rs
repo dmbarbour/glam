@@ -10,7 +10,9 @@ use std::num::NonZeroU64;
 use std::sync::MutexGuard;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
+
+use crate::counted_condvar::CountedCondvar;
 
 /// Runtime-wide semantic-state revision observed by retryable evaluation.
 ///
@@ -45,7 +47,7 @@ impl RuntimeObservationEpoch {
 pub(crate) struct RuntimeObservationState {
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     epoch: Mutex<RuntimeObservationEpoch>,
-    changed: Condvar,
+    changed: CountedCondvar,
     #[cfg(test)]
     waits: AtomicU64,
 }
@@ -54,7 +56,7 @@ impl RuntimeObservationState {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             epoch: Mutex::new(RuntimeObservationEpoch::from_raw(1)),
-            changed: Condvar::new(),
+            changed: CountedCondvar::new(),
             #[cfg(test)]
             waits: AtomicU64::new(0),
         })

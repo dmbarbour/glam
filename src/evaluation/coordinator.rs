@@ -7,7 +7,9 @@ use std::fmt;
 use std::num::NonZeroU64;
 #[cfg(test)]
 use std::sync::OnceLock;
-use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
+
+use crate::counted_condvar::CountedCondvar;
 use std::time::Duration;
 
 #[cfg(test)]
@@ -850,7 +852,7 @@ pub(crate) struct EvaluationWorkCoordinator {
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     background_demand: Mutex<Option<Arc<EvaluationDemandState>>>,
     state: Mutex<WorkCoordinatorState>,
-    work_available: Condvar,
+    work_available: CountedCondvar,
     #[cfg(test)]
     work_wait_probe: OnceLock<std::sync::mpsc::Sender<()>>,
     #[cfg(test)]
@@ -1268,7 +1270,7 @@ impl EvaluationWorkCoordinator {
             observations,
             background_demand: Mutex::new(None),
             state: Mutex::new(WorkCoordinatorState::default()),
-            work_available: Condvar::new(),
+            work_available: CountedCondvar::new(),
             #[cfg(test)]
             work_wait_probe: OnceLock::new(),
             #[cfg(test)]
@@ -1395,7 +1397,7 @@ impl EvaluationWorkCoordinator {
             observations: RuntimeObservationState::new(),
             background_demand: Mutex::new(None),
             state: Mutex::new(WorkCoordinatorState::default()),
-            work_available: Condvar::new(),
+            work_available: CountedCondvar::new(),
             work_wait_probe: OnceLock::new(),
             test_values: Some(values.clone()),
             terminal_publication_probe: Mutex::new(None),

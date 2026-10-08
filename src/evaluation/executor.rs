@@ -231,7 +231,7 @@ struct WorkerStartGate {
     /// `None` while pending; `Some(true)` releases, `Some(false)` aborts.
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     decision: Mutex<Option<bool>>,
-    decided: std::sync::Condvar,
+    decided: crate::counted_condvar::CountedCondvar,
 }
 
 impl WorkerStartGate {

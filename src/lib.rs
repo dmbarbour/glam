@@ -2,6 +2,7 @@ mod api;
 mod compiler;
 mod core;
 mod core_net;
+mod counted_condvar;
 pub mod diagnostic;
 mod eval;
 mod evaluation;

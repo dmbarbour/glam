@@ -3013,7 +3013,10 @@ fn concurrent_host_calls_share_one_rooted_producer_across_patient_client_demands
         crate::runtime::RuntimeIds::new(),
     );
     let context = EvalContext::isolated(values.clone());
-    let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let release = Arc::new((
+        std::sync::Mutex::new(false),
+        crate::counted_condvar::CountedCondvar::new(),
+    ));
     let producer_release = release.clone();
     let (started_sender, started_receiver) = std::sync::mpsc::channel();
     let producer_values = values.clone();

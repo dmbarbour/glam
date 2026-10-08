@@ -5,7 +5,9 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError, TryLockError};
+use std::sync::{Arc, Mutex, PoisonError, TryLockError};
+
+use crate::counted_condvar::CountedCondvar;
 
 use super::model::*;
 
@@ -542,7 +544,7 @@ pub(crate) struct RuntimeNetDisturbance {
 }
 
 struct RuntimeNetDisturbanceInner {
-    changed: Condvar,
+    changed: CountedCondvar,
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     wait: Mutex<()>,
     epoch: AtomicU64,
@@ -914,7 +916,7 @@ impl RuntimeNetDisturbance {
     fn new() -> Self {
         Self {
             inner: Arc::new(RuntimeNetDisturbanceInner {
-                changed: Condvar::new(),
+                changed: CountedCondvar::new(),
                 wait: Mutex::new(()),
                 epoch: AtomicU64::new(0),
                 closed: AtomicBool::new(false),

@@ -1,7 +1,9 @@
 use super::*;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
+
+use crate::counted_condvar::CountedCondvar;
 
 use crate::core::{
     Dict, EvaluationHalt, Key, LazyValue, List, OpaqueValue, Value as CoreValue, keys,
@@ -2309,7 +2311,7 @@ fn synchronous_assembler_evaluation_waits_for_a_worker_claim() {
         .evaluation_runtime(runtime)
         .build()
         .expect("assembler should build");
-    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let release = Arc::new((Mutex::new(false), CountedCondvar::new()));
     let producer_release = release.clone();
     let (started_sender, started_receiver) = std::sync::mpsc::channel();
     let value = public_semantic_thunk(
@@ -2503,7 +2505,7 @@ fn scheduler_panic_poisons_the_runtime_without_hanging_waiters() {
         .evaluation_runtime(runtime.clone())
         .build()
         .expect("assembler should build");
-    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let release = Arc::new((Mutex::new(false), CountedCondvar::new()));
     let producer_release = release.clone();
     let (started_sender, started_receiver) = std::sync::mpsc::channel();
     let value = public_semantic_thunk(&assembler.core_values(), "parked worker value", move |_| {

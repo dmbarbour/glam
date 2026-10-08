@@ -466,7 +466,25 @@ locked coordinator, which every caller already held.
   per-net or per-wait cells.
 
 The same waiter count applies to each. The maintainer also suggested
-coalescing: a notify flag set by mutations and flushed once per quantum,
-trading latency for throughput. That suits the coordinator's condvar, where
-a quantum makes bursts of mutations and parked workers can wait a quantum.
-It must flush before the notifying thread parks or blocks itself.
+coalescing, now the separate experiment `perf-coalesced-wakeups` in the
+performance roadmap: a notify flag set by mutations and flushed once per
+quantum, trading latency for throughput. That suits the coordinator's
+condvar, where a quantum makes bursts of mutations and parked workers can
+wait a quantum. It must flush before the notifying thread parks or blocks
+itself.
+
+**Fixed** (`perf-idle-wakeups`, 2026-10-08). Every glam condvar is now a
+`CountedCondvar` (`src/counted_condvar.rs`), with the same waiter count;
+a test rejects the standard condvar elsewhere. Every condvar already met
+the protocol: the notifier changes the awaited state under the waiter's
+mutex. `countdown_400` now makes no `futex` calls at all.
+
+| CPU ms | Before inline forcing | Inline forcing | Admission wake-ups | Idle wake-ups |
+| --- | ---: | ---: | ---: | ---: |
+| `countdown_400` | 1,286 | 854 | 407 | 330 |
+| `hello_elf` | 2,890 | 1,937 | 1,129 | 827 |
+| `list_map_1000` | — | — | 310 | 273 |
+
+Coalescing per quantum is the separate experiment `perf-coalesced-wakeups`.
+It only matters once threads are parked, so it needs a profile with
+workers enabled.

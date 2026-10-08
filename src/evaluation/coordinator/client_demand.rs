@@ -1,6 +1,8 @@
 //! Runtime-owned pure client demand lifecycle.
 
-use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
+
+use crate::counted_condvar::CountedCondvar;
 
 #[cfg(test)]
 use crate::core::EvaluationFailure;
@@ -53,7 +55,7 @@ pub(crate) enum ClientDemandResult {
 pub(crate) struct ClientDemandResultCell {
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     result: Mutex<Option<ClientDemandResult>>,
-    changed: Condvar,
+    changed: CountedCondvar,
     #[cfg(test)]
     before_publish_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
@@ -64,7 +66,7 @@ impl ClientDemandResultCell {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             result: Mutex::new(None),
-            changed: Condvar::new(),
+            changed: CountedCondvar::new(),
             #[cfg(test)]
             before_publish_probe: Mutex::new(None),
             #[cfg(test)]

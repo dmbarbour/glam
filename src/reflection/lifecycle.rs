@@ -1,4 +1,6 @@
-use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
+
+use crate::counted_condvar::CountedCondvar;
 
 use super::machine::{ContextualValueEffectTask, EffectTask, UnitEffectTask, ValueEffectTask};
 use super::protocol::{StandardEffects, TaskHalt, TaskHost, TaskOutcome, TaskSpecialization};
@@ -28,7 +30,7 @@ pub struct EffectLifecycle {
 struct EffectLifecycleState {
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     status: Mutex<EffectLifecycleStatus>,
-    changed: Condvar,
+    changed: CountedCondvar,
 }
 
 /// The last committed scheduler status published for a composed effect root.
@@ -91,7 +93,7 @@ impl EffectLifecycle {
         Self {
             inner: Arc::new(EffectLifecycleState {
                 status: Mutex::new(EffectLifecycleStatus::Launched),
-                changed: Condvar::new(),
+                changed: CountedCondvar::new(),
             }),
             terminal: None,
         }
@@ -114,7 +116,7 @@ impl EffectLifecycle {
         Self {
             inner: Arc::new(EffectLifecycleState {
                 status: Mutex::new(EffectLifecycleStatus::Launched),
-                changed: Condvar::new(),
+                changed: CountedCondvar::new(),
             }),
             terminal: Some(terminal),
         }
@@ -729,7 +731,7 @@ mod root_inventory_tests {
             changed,
         } = state;
         let _: &Mutex<EffectLifecycleStatus> = stored_status;
-        let _: &Condvar = changed;
+        let _: &CountedCondvar = changed;
 
         match status {
             EffectLifecycleStatus::Launched
@@ -815,7 +817,7 @@ mod root_inventory_tests {
         let domain = crate::api::EffectTokenDomain::new(&public_values);
         let state = EffectLifecycleState {
             status: Mutex::new(EffectLifecycleStatus::Launched),
-            changed: Condvar::new(),
+            changed: CountedCondvar::new(),
         };
 
         for failed in [true, false] {
