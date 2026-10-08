@@ -171,12 +171,21 @@ evidence only for behavior they actually exercise.
 
 ## Profiling
 
-`scripts/profile.sh [OUT_DIR] [WORKLOAD...]` builds a release `glam` with the
-`glam-prof` feature and runs the profiling workloads. Each run writes a JSON
-report and checks the workload's output. The script prints a summary table;
-it needs python3. Ordinary builds compile no profiling code. Measure only
-release binaries: test binaries carry the collector's deterministic hooks.
+`scripts/profile.sh [OUT_DIR] [WORKLOAD|FAMILY...]` builds a release `glam`
+with the `glam-prof` feature and runs the profiling workloads. Each run
+writes a JSON report and checks the workload's output. The script prints a
+summary table; it needs python3. Ordinary builds compile no profiling code.
+Measure only release binaries: test binaries carry the collector's
+deterministic hooks.
 
+- **Families and growth.** Most workloads are families run at n, 2n and
+  4n, because a superlinear cost looks constant at one size. A growth
+  table fits each cost to a + b·n^k and reports k (1 linear, 2 quadratic).
+  `GLAM_PROFILE_SCALE=N` multiplies the sizes; small sizes understate
+  growth. `GLAM_PROFILE_TIMEOUT` (seconds, default 120) stops a runaway
+  workload.
+- **Instructions and CPU time** come from `perf stat` where it works. They
+  are the comparison metrics on a shared machine; wall time is trend data.
 - **Report.** A `glam-prof` binary writes one JSON object to the path in
   `GLAM_PROF`:
   - `phases_ns`: the binary's own phases (build, evaluate, settle, total);
@@ -194,6 +203,9 @@ release binaries: test binaries carry the collector's deterministic hooks.
 - **Baselines** live in the plan or performance review that uses them, not
   long term. Keep a workload worth reusing in the script or as a samples
   file.
+- **Adding a workload:** write a generator function that prints the source
+  for size n, and register it with `family NAME BASE`; the function shares
+  the family's name.
 - **Adding a counter:** put it on the runtime's `EvaluationProfile`
   (`src/profiling.rs`) or the net profile, behind `glam-prof`. Count work,
   not budget units, and add it to `write_json`.

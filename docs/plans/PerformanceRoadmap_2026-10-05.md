@@ -145,7 +145,9 @@ gains this consequence when it lands.
    - **Remaining**, as that plan's steps:
      - `parser-patterns`, which needs the cover IR below group level;
      - `parser-keyword-frames`, keyword forms as parser frames, which
-       removes the structural layer's whole-file scans;
+       removes the structural layer's whole-file scans. It also removes
+       an exponential found on 2026-10-08: a keyword form inside
+       parentheses, nested in another, doubles parse time per level;
      - `parser-grammar-retirement`.
    - This closes the parser exception in
      `no-semantic-recursion-on-rust-stack`.
@@ -176,11 +178,12 @@ gains this consequence when it lands.
    defects), which would otherwise mask representation measurements. The
    review after the recursion work (2026-10-08) added the open steps.
    - *Done:* `perf-admission-wakeups`, `perf-idle-wakeups`,
-     `perf-fast-id-hashing` and `perf-net-builder-wired-ports`. The
-     scheduler round trips were `perf-evaluation-recursion`.
-   - *Open, in order:* `perf-scaling-workloads`, `perf-access-region-cost`,
-     `perf-interface-demand-walk`, `perf-lowering-free-bindings`,
-     `perf-list-front-walk`, `perf-root-registration`,
+     `perf-fast-id-hashing`, `perf-net-builder-wired-ports` and
+     `perf-scaling-workloads`. The scheduler round trips were
+     `perf-evaluation-recursion`.
+   - *Open, in order:* `perf-access-region-cost`, `perf-list-front-walk`,
+     `perf-lowering-free-bindings`, `perf-interface-demand-walk`,
+     `perf-module-definition-cost`, `perf-allocation-path`,
      `perf-runtime-net-attach` and `perf-reflection-step-cost`.
    - *Experiments:* `perf-coalesced-wakeups` (open) and
      `perf-mimalloc-allocator` (not adopted).

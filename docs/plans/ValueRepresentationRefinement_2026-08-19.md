@@ -78,8 +78,8 @@ free win: mimalloc ran 9–16% fewer instructions but used more CPU in this
 container (`perf-mimalloc-allocator` in the
 [structural overheads plan](StructuralOverheads_2026-10-08.md)). Compact
 values and list and dictionary representations should allocate less.
-Root registration is the clearest single source, and is
-`perf-root-registration` there.
+Root registration is the clearest single source, and is part of
+`perf-allocation-path` there.
 
 The eventual representation should separate:
 
@@ -231,8 +231,8 @@ wasteful trace, and avoidable per-construction costs rather than the
 representation itself. The holistic pre-performance review's findings V1–V3 and V5
 are the source.
 
-- **Allocation and root registration without global locks**, now part of
-  `perf-root-registration` in the structural overheads plan. Each managed
+- **Allocation and root registration without global locks**, now
+  `perf-allocation-path` in the structural overheads plan. Each managed
   allocation re-acquires an allocator. That locks a process-wide `TypeId`
   metadata map and the heap's data mutex, and root registration repeats the
   lookup. Use a per-family static or per-thread class cache keyed by

@@ -2,8 +2,8 @@
 
 Status: active, as the `perf-structural-overheads` step of the
 [performance roadmap](PerformanceRoadmap_2026-10-05.md). Done:
-`perf-admission-wakeups`, `perf-idle-wakeups`, `perf-fast-id-hashing` and
-`perf-net-builder-wired-ports`. Next: `perf-scaling-workloads`, then
+`perf-admission-wakeups`, `perf-idle-wakeups`, `perf-fast-id-hashing`,
+`perf-net-builder-wired-ports` and `perf-scaling-workloads`. Next:
 `perf-access-region-cost`.
 
 ## Purpose
@@ -32,8 +32,9 @@ Costs that belong to a representation go to its plan instead:
   tables and frame pointers. Allocator samples need DWARF unwinding, since
   libc has no frame pointers.
 - **Scaling series.** A cost that looks constant at one size can be
-  quadratic. Each workload family runs at several sizes (see
-  `perf-scaling-workloads`).
+  quadratic. `scripts/profile.sh` runs each workload family at n, 2n and
+  4n and reports each cost's growth exponent (see `perf-scaling-workloads`
+  and [Scaling 2026-10-08](#scaling-2026-10-08)).
 
 ## Baseline 2026-10-08
 
@@ -64,12 +65,6 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 
 ## Open Steps, in Order
 
-### Scaling workloads (`perf-scaling-workloads`)
-
-`scripts/profile.sh` ran each family at one size, where a quadratic looks
-like a large constant. Three of the four quadratics above were invisible to
-it. Run each family at several sizes and report how each cost grows.
-
 ### Access-region cost (`perf-access-region-cost`)
 
 Every outer access region enters and leaves the collector's mutator
@@ -95,35 +90,7 @@ Candidate remedies, each measurable alone:
 
 This is the largest broad cost: every workload pays it.
 
-### Interface demand walk (`perf-interface-demand-walk`)
-
-`RuntimeNet::poll_interface_demand` walks from an interface along auxiliary
-to principal ports until it finds an active pair. Each poll starts again at
-the interface and records every visited node in a freshly allocated hash
-set, so repeated polls of a long chain are quadratic. At `list_map_4000`,
-the node lookups (`RuntimeNet::reference`, 20%), the set inserts (10%) and
-their rehashing (8.4%) are almost 40% of samples. (The rehash appears under
-an `EvaluationTaskId` symbol only because identical generic code was
-folded.)
-
-Candidate remedies: detect cycles without allocating (Brent's algorithm),
-and remember the frontier found for an interface, revalidated against the
-net's topology revision, so that a poll resumes where the last one stopped.
-
-### Free bindings in lowering (`perf-lowering-free-bindings`)
-
-`ResolvedNetLowerer::lower_code_in` calls `body.free_bindings()` for each
-nested lambda or lazy body, and each call walks that body's whole subtree.
-A large dictionary literal nests about as deeply as it has entries, so
-lowering is quadratic: `collect_free_bindings` is 40% of
-`dict_lookup_4000`. The walk also recurses on the Rust stack to the
-literal's depth, an instance of the roadmap's `perf-pre-eval-stack-depth`.
-
-Candidate remedies: derive each body's captures from the uses the lowerer
-already records, or compute every body's free set in one bottom-up pass.
-The first needs care with parameters that `ApplyLambda` binds inline.
-
-### Front of a mapped list (`perf-list-front-walk`)
+### Front of a list (`perf-list-front-walk`)
 
 At `list_map_4000`, `List::pop_front_step_by` (9.4%), `ListNode` drops
 (6.6%) and collecting `Vec<Value>` (5.5%) come together, reached from the
@@ -142,16 +109,83 @@ with `List::from_values` from the operand vector. A spine that a program
 builds by appending stays slow to pop; that belongs to the value
 representation's ropes.
 
-### Root registration and the allocation path (`perf-root-registration`)
+**Cubic in the `list_sum` workload.** A loop of `len`, `head` and `tail`
+over a literal costs 272 G instructions at 1,600 elements (exponent 2.95),
+and its builtin steps grow superlinearly too. The list observation
+machine's `len` (like `at`, `split` and `slice`) walks one item per step,
+and each step pops the front of the spine in O(n). So each `len` is O(n²),
+and the loop calls it n times. A flat literal makes each pop O(1), which
+leaves `len` linear per call and the loop quadratic; counting a strict
+leaf's items at once (`known_len` when no chunk is deferred) makes it
+linear.
 
-Each registered root allocates an `Arc<RootCell>`, and `countdown_400`
-registers about 100,000. Remedies: register fewer transient roots (code
-inside one access region can use edges), and pool `RootCell`s.
+### Free bindings in lowering (`perf-lowering-free-bindings`)
 
-The allocation path's per-allocation locks belong here too (holistic V1,
-listed in the value-representation plan's V-1 prework): `metadata_for`
-locks a process-wide registry, and `discover_class` locks the heap's data
-mutex, on every allocator acquisition.
+`ResolvedNetLowerer::lower_code_in` calls `body.free_bindings()` for each
+nested lambda or lazy body, and each call walks that body's whole subtree.
+A large dictionary literal nests about as deeply as it has entries, so
+lowering is quadratic: `collect_free_bindings` is 40% of
+`dict_lookup_4000`. A `do` block nests each step's continuation the same
+way: `collect_free_bindings` and its `BTreeSet` updates are about 45% of
+`do_chain_1600`, a 1,600-step chain, whose cost per step grows with
+exponent 1.6. The walk also recurses on the Rust stack to the
+literal's depth, an instance of the roadmap's `perf-pre-eval-stack-depth`.
+
+Candidate remedies: derive each body's captures from the uses the lowerer
+already records, or compute every body's free set in one bottom-up pass.
+The first needs care with parameters that `ApplyLambda` binds inline.
+
+### Interface demand walk (`perf-interface-demand-walk`)
+
+`RuntimeNet::poll_interface_demand` walks from an interface along auxiliary
+to principal ports until it finds an active pair. Each poll starts again at
+the interface and records every visited node in a freshly allocated hash
+set, so repeated polls of a long chain are quadratic. At `list_map_4000`,
+the node lookups (`RuntimeNet::reference`, 20%), the set inserts (10%) and
+their rehashing (8.4%) are almost 40% of samples. (The rehash appears under
+an `EvaluationTaskId` symbol only because identical generic code was
+folded.)
+
+Candidate remedies: detect cycles without allocating (Brent's algorithm),
+and remember the frontier found for an interface, revalidated against the
+net's topology revision, so that a poll resumes where the last one stopped.
+
+### Module definition demand (`perf-module-definition-cost`)
+
+Found by the `chain` workload, a chain of module definitions
+`x2 = x1 + 1`, … Each demanded module definition costs about 1,500
+reductions, 97 of them reflection steps, and 6.5 M instructions at 400
+definitions: more than twice a countdown level, which also adds one. A
+definition that nothing demands costs almost nothing. The reflection steps
+probably come from the module's shared reflection boundary for final
+`refl.*` (`g_syntax/module_lowering`), which every named module definition
+passes through, though no `refl` task exists here; this is from reading
+the code, not yet confirmed. `hello_elf` runs 7,834 reflection steps.
+
+The cost also grows mildly with the number of definitions (exponent 1.24;
+8.9 M instructions per definition at 1,600). At that size exact-route
+validation (`validate_exact_route_locked`, 4%) and `work_for_wait_locked`
+(2%) lead the profile, and each collection traces the whole definitions
+dictionary (`visit_dict_edges`, 2%).
+
+The step starts by confirming where the reflection steps come from and
+what the boundary does per definition, then asks whether a module without
+`refl` tasks can skip it.
+
+### Allocation and rooting path (`perf-allocation-path`)
+
+Holistic V1, listed in the value-representation plan's V-1 prework, plus
+the root registrations measured since:
+- **Class lookup per allocation.** Every allocator acquisition locks the
+  process-wide metadata registry (`metadata_for`), derives the run
+  geometry again, and locks the heap's data mutex (`discover_class`).
+  These three are about 4.4% of `chain_400`'s samples.
+- **Root registration.** Each registered root allocates an
+  `Arc<RootCell>`, and `countdown_400` registers about 100,000.
+
+Remedies: a per-family static or per-thread class cache keyed by metadata
+address, shared by allocators and roots; register fewer transient roots
+(code inside one access region can use edges); and pool `RootCell`s.
 
 ### Operator nets (`perf-runtime-net-attach`)
 
@@ -169,7 +203,9 @@ Holistic R1, R2 and R6, still open: the reflection store's change log grows
 without bound and each validation scans it; the reflection machine
 deep-clones its active branch every step, so a `do` chain costs O(n²); and
 captured continuations are never released. No profile has measured them
-yet; the scaling workloads should include an effect chain that would.
+yet. The `do_chain` workload does not: its pure effects reduce in nets, and
+its reflection-step count stays constant. A workload that runs a long chain
+of reflection effects would.
 
 ## Experiments
 
@@ -194,6 +230,17 @@ yet; the scaling workloads should include an effect chain that would.
   Allocating less is the better lever.
 
 ## Done
+
+- **Scaling workloads** (`perf-scaling-workloads`), 2026-10-08.
+  `scripts/profile.sh` ran each family at one size, where a quadratic looks
+  like a large constant: three of the four quadratics in the review were
+  invisible to it. Families now run at n, 2n and 4n, and the summary fits
+  each cost to a + b·n^k, reporting k, with fixed costs cancelled.
+  `GLAM_PROFILE_SCALE` multiplies the sizes, and `GLAM_PROFILE_TIMEOUT`
+  stops a runaway workload. New families: non-tail recursion (`sum`), a
+  chain of module definitions, a list walked with `len`, `head` and
+  `tail`, a long `do` chain, and a flat list literal for the front end.
+  Findings are in [Scaling 2026-10-08](#scaling-2026-10-08).
 
 - **Admission wake-ups** (`perf-admission-wakeups`), 2026-10-08. Every
   outer access region ended with a condvar `notify_all`, a `futex` syscall
@@ -253,6 +300,48 @@ yet; the scaling workloads should include an effect chain that would.
   `perf-evaluation-recursion` step; see
   [Evaluation Recursion Performance](EvaluationRecursionPerformance_2026-10-04.md).
   Coordinator work is now under 2% of the countdown.
+
+## Scaling 2026-10-08
+
+At `64ba1c00`, rustc 1.99.0, Intel Core i7-6700, release build with
+`glam-prof`, zero workers. Growth exponents k (cost ≈ a + b·n^k) with
+`GLAM_PROFILE_SCALE=4`, and the marginal instructions per unit of size
+between the two largest sizes:
+
+| Family | Sizes | k instructions | k reductions | K instr per unit |
+| --- | --- | ---: | ---: | ---: |
+| `countdown` | 400/800/1,600 | 0.98 | 1.00 | 2,925 |
+| `sum` (not in tail position) | 400/800/1,600 | 1.04 | 1.00 | 3,412 |
+| `chain` (module definitions) | 400/800/1,600 | 1.24 | 1.00 | 8,913 |
+| `do_chain` | 400/800/1,600 | 1.62 | 1.00 | 4,556 |
+| `dict_lookup` | 1,000/2,000/4,000 | 1.48 | 1.00 | 919 |
+| `list_map` | 1,000/2,000/4,000 | 1.91 | 1.00 | 5,219 |
+| `list_sum` | 400/800/1,600 | 2.95 | 1.70 | 294,957 |
+| `list_literal` (front end) | 4,000/8,000/16,000 | 1.03 | flat | 15 |
+| `parse_lists` (depth) | 400/800/1,600 | 1.48 | flat | 77 |
+| `parse_parens` (depth) | 400/800/1,600 | flat | flat | 3 |
+| `parse_ifs` (depth, default scale) | 4/8/16 | 7.71 | flat | 173,584 |
+
+- **Linear:** recursion in and out of tail position, and the front end on
+  large flat literals and nested parentheses.
+- **Exponential:** `parse_ifs`, a keyword form inside parentheses nested in
+  another keyword form, as in `f (if c then f (if …) else 0)`. Depth 16
+  parses in 178 ms, and depth 100 did not finish in ten minutes. Each such
+  `if` parses its branches with a fresh term parse, which covers the inner
+  groups again, though the enclosing term parse has covered them already.
+  Without the parentheses (else-if chains, `then if …`) parsing stays
+  linear. This belongs to the parser plan's `parser-keyword-frames`.
+- **Superlinear, each named in a step above:** `list_sum` and `list_map`
+  (`perf-list-front-walk`, `perf-interface-demand-walk`), `do_chain` and
+  `dict_lookup` (`perf-lowering-free-bindings`), `chain`
+  (`perf-module-definition-cost`).
+- **Mild:** nested brackets cost 77 K instructions per level at depth
+  1,600 (k = 1.48). Not yet a step.
+
+At the default scale, the suite takes about 10 s of CPU (42 G
+instructions). Its exponents use smaller sizes, so they understate growth
+(`list_map` reads 1.82, `do_chain` 1.48), and collections that land at
+different sizes make the smallest families read a little above or below 1.
 
 ## Not a Step
 

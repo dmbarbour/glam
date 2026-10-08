@@ -426,6 +426,19 @@ Measured in a release `glam-prof` build:
     atom (cause 3).
 
   The frames of `parser-keyword-frames` remove both.
+- **Correction 2026-10-08: the nested keyword form is exponential.** The
+  scaling workloads of `perf-scaling-workloads` measured
+  `(if c then … else 0)` nested 4, 8 and 16 deep: parsing doubles with
+  each level, 0.8 ms at depth 8 and 178 ms at depth 16, and depth 100 did
+  not finish in ten minutes. A keyword atom inside a group delegates to the
+  structural parser, which parses each branch with a fresh term parse. That
+  parse covers the branch's groups again, though the enclosing term parse
+  has already covered them, so each level costs twice the one inside it.
+  The same holds for a keyword form inside an argument,
+  `f (if c then f (if …) else 0)`, and inside a lambda body. Without the
+  parentheses, else-if chains and `then if …` parse linearly.
+  `parser-keyword-frames` removes it; until then, real code with a few
+  levels of parenthesized `if` or `match` pays a factor of 2 per level.
 
 ## Verification
 
@@ -434,6 +447,9 @@ Measured in a release `glam-prof` build:
   chains of 100k terms. The fixed grammar finishes immediately; a
   reintroduced exponential would hang the test visibly rather than slowly
   degrade. The profiling parser workloads must grow linearly.
+  `NESTING_SHAPES` in the term parser's tests holds no keyword form, which
+  is how the exponential above went unnoticed: `parser-keyword-frames` adds
+  parenthesized `if`, `match`, `try` and `let` shapes to it.
 - The invalid-syntax samples keep their diagnostics. Chumsky merges expected
   tokens from failed alternatives, so check closest-match wording explicitly.
 - Compare compile time on the samples and the X3 corpus before and after.
