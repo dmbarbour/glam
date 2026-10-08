@@ -8,6 +8,9 @@ use super::polarity::{PolarityViolation, Shape, TemplateChecks, Topology, solved
 pub struct NetBuilder<S: NetSpecialization> {
     nodes: Vec<BuilderNode<S>>,
     wires: Vec<Wire>,
+    /// Both ends of every wire, so checking a port is constant time rather
+    /// than a scan of the wires.
+    wired_ports: TrustedHashSet<Port>,
     next_fan_site: u64,
     /// Every finished template is checked for polarity and connectivity. A
     /// test may opt out to model a deliberately malformed net.
@@ -108,6 +111,7 @@ impl<S: NetSpecialization> NetBuilder<S> {
         Self {
             nodes: Vec::new(),
             wires: Vec::new(),
+            wired_ports: TrustedHashSet::default(),
             next_fan_site: 0,
             #[cfg(test)]
             checks: TemplateChecks::ALL,
@@ -272,6 +276,8 @@ impl<S: NetSpecialization> NetBuilder<S> {
             return Err(NetBuildError::SelfWire(left));
         }
         self.wires.push(Wire { left, right });
+        self.wired_ports.insert(left);
+        self.wired_ports.insert(right);
         Ok(())
     }
 
@@ -455,9 +461,7 @@ impl<S: NetSpecialization> NetBuilder<S> {
     }
 
     fn port_is_wired(&self, port: Port) -> bool {
-        self.wires
-            .iter()
-            .any(|wire| wire.left == port || wire.right == port)
+        self.wired_ports.contains(&port)
     }
 }
 

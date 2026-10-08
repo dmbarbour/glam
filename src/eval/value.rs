@@ -247,6 +247,14 @@ fn follow_forwards(
     let Some(first) = access.lazy_root(lazy).forward_target() else {
         return ForwardEnd::NotForward;
     };
+    // Shortening keeps nearly every chain to one forward, to a lazy that
+    // does not forward: nothing to shorten and no cycle to look for.
+    if first.id() != lazy.id() && access.lazy_root(&first).forward_target().is_none() {
+        return match access.lazy_root(&first).cached() {
+            Some(result) => ForwardEnd::Cached(result),
+            None => ForwardEnd::Uncached(first),
+        };
+    }
     let mut path = vec![lazy.clone()];
     let mut seen = crate::trusted_hash::TrustedHashSet::default();
     seen.insert(crate::core::DeferredValueId::from(lazy.id()));
