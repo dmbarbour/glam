@@ -3,8 +3,9 @@
 Status: active, as the `perf-structural-overheads` step of the
 [performance roadmap](PerformanceRoadmap_2026-10-05.md). Done:
 `perf-admission-wakeups`, `perf-idle-wakeups`, `perf-fast-id-hashing`,
-`perf-net-builder-wired-ports` and `perf-scaling-workloads`. Next:
-`perf-access-region-cost`.
+`perf-net-builder-wired-ports`, `perf-scaling-workloads` and
+`perf-list-front-walk`. Next: `perf-list-index-descent`, once its design is
+agreed.
 
 ## Purpose
 
@@ -90,34 +91,49 @@ Candidate remedies, each measurable alone:
 
 This is the largest broad cost: every workload pays it.
 
-### Front of a list (`perf-list-front-walk`)
+### Index descent in list observers (`perf-list-index-descent`)
 
-At `list_map_4000`, `List::pop_front_step_by` (9.4%), `ListNode` drops
-(6.6%) and collecting `Vec<Value>` (5.5%) come together, reached from the
-list comparison's builtin checkpoint. Slicing a value leaf is O(1)
-(`SharedSlice`), so the cost is the list's shape.
+Proposed 2026-10-08; the design needs discussion before it starts. It
+finishes the `list_sum` cubic that `perf-list-front-walk` cut to
+superlinear.
 
-**Likely cause, from reading the code:** the core list operator builds a
-literal as a left-deep spine of one-element concatenations
-(`eval/operator.rs`, `CoreOperator::List`). Popping the front walks the
-whole spine, and `join_logical_suffix` rebuilds it, one `Concat` node per
-remaining item, so each pop costs O(n). The same operator copies every
-supplied operand at each partial application, which is O(n²) to build a
-literal. Both are holistic E8 and V3, listed in its P2 under "obvious
-algorithmic defects"; the recommendation there is to build the literal
-with `List::from_values` from the operand vector. A spine that a program
-builds by appending stays slow to pop; that belongs to the value
-representation's ropes.
+The list observation machine's `len`, `at`, `split`, `slice` and
+`split_end` advance one item per builtin step, restarting the front (or
+back) projection at each item. Pops are now O(1), but `len` still takes n
+steps, so a loop that tests `len` each iteration is quadratic: at 1,600
+items `list_sum` costs 11 G instructions, and its reductions grow with
+exponent 1.70. `split` and `slice` also copy the taken items into a new
+value leaf, even from one large leaf whose slice would be O(1).
 
-**Cubic in the `list_sum` workload.** A loop of `len`, `head` and `tail`
-over a literal costs 272 G instructions at 1,600 elements (exponent 2.95),
-and its builtin steps grow superlinearly too. The list observation
-machine's `len` (like `at`, `split` and `slice`) walks one item per step,
-and each step pops the front of the spine in O(n). So each `len` is O(n²),
-and the loop calls it n times. A flat literal makes each pop O(1), which
-leaves `len` linear per call and the loop quadratic; counting a strict
-leaf's items at once (`known_len` when no chunk is deferred) makes it
-linear.
+Proposal, in the maintainer's direction that observers shape lists rather
+than relying on construction:
+- **Cached lengths.** A `Concat` node records its length when both
+  children's lengths are known, that is, when no lazy chunk lies beneath
+  it. `known_len` becomes O(1) and stops recursing.
+- **Descent by length.** A non-forcing step descends to an index, skipping
+  every subtree of known length whole, and stops at the index or at the
+  first lazy chunk before it, which the caller forces and resumes after.
+  Each observer then takes one step per lazy chunk it crosses, plus one,
+  rather than one per item.
+- **Balanced taken part.** What `split` or `slice` takes is strict, since
+  every chunk before the cut was forced. It comes back as a finger tree of
+  the leaves it spans, sharing them rather than copying items, so later
+  index operations on it are logarithmic. What is left keeps its sharing
+  and lazy chunks, shaped toward the cut as a pop shapes it.
+
+Notes for the discussion:
+- Building the taken part's finger tree costs one push per leaf it spans,
+  at most its length, where the current copy costs one per item.
+- The cache costs no memory: a `ListNode` is 40 bytes, sized by
+  its byte and value leaves (32 bytes each), and a `Concat` uses 16, so a
+  cached length fits. Each concatenation adds two lengths.
+- `at` returns no list, so repeated `at` on one unbalanced list pays the
+  descent each time. Balancing that persists would mean memoizing a
+  balanced form in the node, or lists that are finger trees throughout,
+  with lazy chunks as finger-tree elements. The second belongs to the
+  value representation plan's V3 list checkpoint, and would also fix pops
+  that alternate between the two ends (see `perf-list-front-walk` under
+  Done).
 
 ### Free bindings in lowering (`perf-lowering-free-bindings`)
 
@@ -149,6 +165,13 @@ folded.)
 Candidate remedies: detect cycles without allocating (Brent's algorithm),
 and remember the frontier found for an interface, revalidated against the
 net's topology revision, so that a poll resumes where the last one stopped.
+
+After `perf-list-front-walk`, `list_map` is still quadratic (exponent 1.92
+from 2,000 to 8,000 items) at half its former cost. At `list_map_8000` the
+largest self costs are `memset` (7%), `NetWhnfMachine::poll_in` (5.8%),
+`Topology::check` (4.5%) and `RuntimeNet::wire` (4.3%). Which of them
+grows has not been measured yet; profile two sizes before choosing a
+remedy.
 
 ### Module definition demand (`perf-module-definition-cost`)
 
@@ -230,6 +253,45 @@ of reflection effects would.
   Allocating less is the better lever.
 
 ## Done
+
+- **Front of a list** (`perf-list-front-walk`), 2026-10-08.
+  - **Cause.** Popping the front of a strict left-deep spine rebuilt the
+    remaining spine in the same shape (`List::join_logical_suffix`), so
+    every pop cost O(n). The core list operator built every literal as
+    such a spine, one `Concat` per item.
+  - **Pops reshape.** A front pop now returns its tail as a right-leaning
+    spine, and a back pop its init as a left-leaning one, without forcing
+    a lazy chunk. A walk from one end takes each `Concat` apart once:
+    O(depth) on the first pop, then O(1) amortized. This is the
+    maintainer's direction: lazily concatenated lists are the normal case,
+    so observers shape lists rather than relying on construction. See
+    `list-pop-reshapes-remainder` in `docs/Decisions.md`.
+  - **Flat literals.** The list operator now builds one value leaf
+    (`List::from_values`), as request payloads already did. The operator
+    still copies its supplied operands at each partial application, O(n²)
+    for a literal of n items, though cheaply: the flat-literal family
+    stays linear to 16,000 items.
+  - **A program-built family.** `append_walk` builds a list with
+    `build n = build (n - 1) ++ [n]` and walks it with `head`, `tail` and
+    `ys == []`. It was already linear: `++` keeps an unevaluated operand
+    as a lazy chunk, and forcing chunks one at a time joined short
+    suffixes. Only strict spines, such as the literals, were quadratic.
+    Unit tests cover strict spines in both directions.
+
+  Instructions (default and four-times sizes):
+
+  | Workload | Before | After |
+  | --- | ---: | ---: |
+  | `list_sum_400` | 5,933 M | 1,911 M |
+  | `list_sum_1600` | 272 G | 10,958 M |
+  | `list_map_2000` | 4,000 M | 2,773 M |
+  | `list_map_4000` | 14,438 M | 9,605 M |
+  | `append_walk_800` | 6,382 M | 6,385 M |
+
+  `list_sum`'s exponent fell from 2.95 to 1.39 (400 to 1,600 items); the
+  rest is `len` counting item by item, `perf-list-index-descent`.
+  `list_map` remains quadratic (1.92 at 2,000 to 8,000); see
+  `perf-interface-demand-walk`.
 
 - **Scaling workloads** (`perf-scaling-workloads`), 2026-10-08.
   `scripts/profile.sh` ran each family at one size, where a quadratic looks

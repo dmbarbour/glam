@@ -718,11 +718,18 @@ impl<V, T> List<V, T> {
         ListFrontStep::Empty
     }
 
-    fn join_logical_suffix(mut prefix: Self, pending: &[Self]) -> Self {
-        for suffix in pending.iter().rev() {
-            prefix = Self::concat(prefix, suffix.clone());
-        }
-        prefix
+    /// Rejoins what a front pop left behind as a right-leaning spine.
+    ///
+    /// `pending` holds the right siblings met on the way down, nearest last.
+    /// Leaning right keeps the next front item near the root, so a walk from
+    /// the front takes each original `Concat` apart once: a left-deep spine
+    /// costs O(n) on the first pop and O(1) per pop after that, rather than
+    /// O(n) on every pop. No deferred chunk is forced.
+    fn join_logical_suffix(prefix: Self, pending: &[Self]) -> Self {
+        let suffix = pending.iter().fold(Self::empty(), |suffix, sibling| {
+            Self::concat(sibling.clone(), suffix)
+        });
+        Self::concat(prefix, suffix)
     }
 
     /// Removes the final item while forcing only lazy chunks which must be
@@ -860,11 +867,13 @@ impl<V, T> List<V, T> {
         ListBackStep::Empty
     }
 
-    fn join_logical_prefix(mut suffix: Self, pending: &[Self]) -> Self {
-        for prefix in pending.iter().rev() {
-            suffix = Self::concat(prefix.clone(), suffix);
-        }
-        suffix
+    /// Rejoins what a back pop left behind as a left-leaning spine, the
+    /// mirror of [`Self::join_logical_suffix`].
+    fn join_logical_prefix(suffix: Self, pending: &[Self]) -> Self {
+        let prefix = pending.iter().fold(Self::empty(), |prefix, sibling| {
+            Self::concat(prefix, sibling.clone())
+        });
+        Self::concat(prefix, suffix)
     }
 
     #[cfg(test)]
@@ -1619,6 +1628,107 @@ mod tests {
         // contract and will disappear with managed list spines.
         std::mem::forget(list);
         std::mem::forget(tail);
+    }
+
+    /// Counts the `Concat` nodes above a list's first item (`front`) or last.
+    fn edge_depth<V, T>(mut list: &List<V, T>, front: bool) -> usize {
+        let mut depth = 0;
+        while let ListNode::Concat(left, right) = list.0.as_ref() {
+            depth += 1;
+            list = if front { left } else { right };
+        }
+        depth
+    }
+
+    #[test]
+    fn front_walk_reshapes_a_left_deep_spine_once() {
+        // Appending one item at a time builds a left-deep spine.
+        let mut list = TestList::from_values(vec![0]);
+        for value in 1..64 {
+            list = TestList::concat(list, TestList::from_values(vec![value]));
+        }
+        let mut duplicate_value = |value: &u32| *value;
+        let mut duplicate_deferred = |deferred: &&'static str| *deferred;
+
+        let mut items = Vec::new();
+        while let ListFrontStep::Item { item, tail } =
+            list.pop_front_step_by(&mut duplicate_value, &mut duplicate_deferred)
+        {
+            assert!(
+                edge_depth(&tail, true) <= 1,
+                "the next front item must sit just below the root"
+            );
+            items.push(item);
+            list = tail;
+        }
+        assert_eq!(items, (0..64).map(ListItem::Value).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn back_walk_reshapes_a_right_deep_spine_once() {
+        // Prepending one item at a time builds a right-deep spine.
+        let mut list = TestList::from_values(vec![63]);
+        for value in (0..63).rev() {
+            list = TestList::concat(TestList::from_values(vec![value]), list);
+        }
+        let mut duplicate_value = |value: &u32| *value;
+        let mut duplicate_deferred = |deferred: &&'static str| *deferred;
+
+        let mut items = Vec::new();
+        while let ListBackStep::Item { init, item } =
+            list.pop_back_step_by(&mut duplicate_value, &mut duplicate_deferred)
+        {
+            assert!(
+                edge_depth(&init, false) <= 1,
+                "the next back item must sit just below the root"
+            );
+            items.push(item);
+            list = init;
+        }
+        assert_eq!(
+            items,
+            (0..64).rev().map(ListItem::Value).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn front_walk_keeps_deferred_chunks_in_order_while_reshaping() {
+        let list = TestList::concat(
+            TestList::concat(
+                TestList::concat(TestList::from_values(vec![1]), TestList::from_thunk("a")),
+                TestList::from_values(vec![2]),
+            ),
+            TestList::from_thunk("b"),
+        );
+        let mut duplicate_value = |value: &u32| *value;
+        let mut duplicate_deferred = |deferred: &&'static str| *deferred;
+
+        let ListFrontStep::Item { item, tail } =
+            list.pop_front_step_by(&mut duplicate_value, &mut duplicate_deferred)
+        else {
+            panic!("the strict first item must be returned")
+        };
+        assert_eq!(item, ListItem::Value(1));
+        assert_eq!(edge_depth(&tail, true), 1);
+        let ListFrontStep::Deferred { deferred, suffix } =
+            tail.pop_front_step_by(&mut duplicate_value, &mut duplicate_deferred)
+        else {
+            panic!("the first deferred chunk must be reported unforced")
+        };
+        assert_eq!(deferred, "a");
+        let ListFrontStep::Item { item, tail } =
+            suffix.pop_front_step_by(&mut duplicate_value, &mut duplicate_deferred)
+        else {
+            panic!("the strict item between the chunks must follow")
+        };
+        assert_eq!(item, ListItem::Value(2));
+        let ListFrontStep::Deferred { deferred, suffix } =
+            tail.pop_front_step_by(&mut duplicate_value, &mut duplicate_deferred)
+        else {
+            panic!("the last deferred chunk must be reported unforced")
+        };
+        assert_eq!(deferred, "b");
+        assert!(suffix.is_empty());
     }
 
     #[test]

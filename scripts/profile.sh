@@ -126,6 +126,13 @@ list_sum() {
   printf 'language g0\nimport '"'"'std as std\nxs = [%s]\ngo acc ys = if std.list.len ys == 0 then acc else go (acc + std.list.head ys) (std.list.tail ys)\nasm.result = if go 0 xs == %s then "ok" else "bad"' \
     "$(seq -s ', ' 1 "$1")" "$(($1 * ($1 + 1) / 2))"
 }
+append_walk() {
+  # A list the program builds by appending one item at a time is a
+  # left-deep spine, unlike a literal; the walk then takes it from the
+  # front. `ys == []` pops one item, where `len` would count them all.
+  printf 'language g0\nimport '"'"'std as std\nbuild n = if n == 0 then [] else build (n - 1) ++ [n]\ngo acc ys = if ys == [] then acc else go (acc + std.list.head ys) (std.list.tail ys)\nasm.result = if go 0 (build %s) == %s then "ok" else "bad"' \
+    "$1" "$(($1 * ($1 + 1) / 2))"
+}
 dict_lookup() {
   local n=$1 entries='' i
   for ((i = 1; i <= n; i++)); do entries+="k$i:$i,"; done
@@ -134,6 +141,7 @@ dict_lookup() {
 }
 family list_map 500
 family list_sum 100
+family append_walk 200
 family dict_lookup 500
 
 # A long effect chain: one `do` block binding each step's result.

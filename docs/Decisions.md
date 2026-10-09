@@ -341,6 +341,30 @@ maps the short names used here to file names.
 - **Rule lives in:** `agent_context/evaluation.md` "Values and Forcing".
 - **Recorded in:** resumable-WHNF plan W6D.4a and W6D.4b.
 
+### List pops reshape the remainder toward the popped end
+`list-pop-reshapes-remainder` · 2026-10-08 · maintainer · accepted
+- **Context:** popping the front of a strict left-deep spine rebuilt the
+  remaining spine in the same shape, so every pop cost O(n). The core list
+  operator built literals as such spines, which made a loop of `len`,
+  `head` and `tail` cubic.
+- **Decision:**
+  - Lists built lazily by concatenation are the normal case, so the list
+    observers shape lists on demand rather than relying on construction to
+    produce good shapes (maintainer direction).
+  - A front pop returns its tail as a right-leaning spine, and a back pop
+    its init as a left-leaning one. Neither forces a lazy chunk.
+  - A walk from one end takes each `Concat` apart once: O(depth) for the
+    first pop, then O(1) amortized.
+  - Core list literals are one value leaf.
+- **Consequences:**
+  - Pops that alternate between the two ends of one list reshape it each
+    time, O(n) per pop.
+  - Popping the same unshaped list again pays the first pop's cost again,
+    since the reshaped remainder is not remembered in the original.
+  - Index operations still walk; see the structural overheads plan's
+    `perf-list-index-descent`.
+- **Recorded in:** structural overheads plan, `perf-list-front-walk`.
+
 ## Diagnostics
 
 ### A failure's cause is a nested `msg` frame; the headline states only its own finding
@@ -1175,6 +1199,9 @@ Short names used under **Recorded in**, with their files under `docs/`.
 | aggressive-GC regression plan | `plans/GarbageCollectorAggressiveVerificationRegression_2026-10-03.md` |
 | concurrent-GC plan | `plans/ConcurrentGarbageCollection_2026-08-28.md` |
 | VRR plan | `plans/ValueRepresentationRefinement_2026-08-19.md` |
+| performance roadmap | `plans/PerformanceRoadmap_2026-10-05.md` |
+| evaluation-recursion plan | `plans/EvaluationRecursionPerformance_2026-10-04.md` |
+| structural overheads plan | `plans/StructuralOverheads_2026-10-08.md` |
 | C2C review | `reviews/GarbageCollectorC2C_2026-08-22.md` |
 | C6 review | `reviews/GarbageCollectorC6_2026-08-24.md` |
 | C8 review | `reviews/GarbageCollectorC8_2026-10-03.md` |

@@ -245,10 +245,9 @@ pub(super) fn apply_core_operator(
                     Arc::from(arguments),
                 )));
             }
-            let list = arguments.into_iter().fold(List::empty(), |list, value| {
-                List::concat(list, List::from_values(vec![value]))
-            });
-            Ok(OperatorYield::Data(Value::List(list)))
+            Ok(OperatorYield::Data(Value::List(List::from_values(
+                arguments,
+            ))))
         }
         CoreOperator::Access { path, supplied } => {
             let arity = 1 + path

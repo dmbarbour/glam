@@ -3396,14 +3396,16 @@ fn evaluates_mixed_list_segments() {
     )
     .expect("should walk list");
 
+    // A literal is one value leaf; its binary items stay whole items rather
+    // than splicing into byte segments.
     crate::core::test_value_factory().assert_same_representation_for_test(
         &saw_values,
-        &vec![
-            vec![n(1)],
-            vec![Value::binary_from_text("Hi")],
-            vec![n(2)],
-            vec![Value::binary_from_text("!")],
-        ],
+        &vec![vec![
+            n(1),
+            Value::binary_from_text("Hi"),
+            n(2),
+            Value::binary_from_text("!"),
+        ]],
     );
     assert!(saw_bytes.is_empty());
 }

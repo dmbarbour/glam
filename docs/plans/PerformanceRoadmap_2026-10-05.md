@@ -178,10 +178,10 @@ gains this consequence when it lands.
    defects), which would otherwise mask representation measurements. The
    review after the recursion work (2026-10-08) added the open steps.
    - *Done:* `perf-admission-wakeups`, `perf-idle-wakeups`,
-     `perf-fast-id-hashing`, `perf-net-builder-wired-ports` and
-     `perf-scaling-workloads`. The scheduler round trips were
-     `perf-evaluation-recursion`.
-   - *Open, in order:* `perf-access-region-cost`, `perf-list-front-walk`,
+     `perf-fast-id-hashing`, `perf-net-builder-wired-ports`,
+     `perf-scaling-workloads` and `perf-list-front-walk`. The scheduler
+     round trips were `perf-evaluation-recursion`.
+   - *Open, in order:* `perf-list-index-descent`, `perf-access-region-cost`,
      `perf-lowering-free-bindings`, `perf-interface-demand-walk`,
      `perf-module-definition-cost`, `perf-allocation-path`,
      `perf-runtime-net-attach` and `perf-reflection-step-cost`.

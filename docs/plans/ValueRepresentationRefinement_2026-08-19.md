@@ -247,9 +247,9 @@ are the source.
   - Replace value recursion with an explicit worklist.
 - **Stack-safe core walks and destruction.**
   - Give `ListNode` an iterative `Drop`.
-  - Lower list literals with `List::from_values` rather than left-deep
-    concatenation. This is `perf-list-front-walk` in the structural
-    overheads plan: the spine makes each front pop O(n).
+  - Done in the structural overheads plan's `perf-list-front-walk`: list
+    literals are one value leaf, and pops reshape a deep spine toward the
+    popped end. A deep spine still drops recursively.
   - Make the key conversions iterative: `Key::to_value_in`,
     `key_from_value` and `value_from_key`.
   - Add small-stack tests that build, trace, collect and drop a 100k-deep
@@ -336,6 +336,12 @@ are the source.
   length information without requiring ordinary thunks to promise a length.
   Do not split large strict leaves or add these nodes merely as part of the
   resumable-WHNF migration.
+- Consider lists that are finger trees throughout, with lazy chunks as
+  elements measured by known length and count of lazy chunks. Concatenation
+  would cost O(log n) rather than O(1), but both ends and index operations
+  would stay logarithmic without the observers' reshaping
+  (`list-pop-reshapes-remainder`, and the structural overheads plan's
+  `perf-list-index-descent`).
 - Migrate functions, partial calls, failures, metadata, and deferred values in
   independently testable checkpoints.
 
