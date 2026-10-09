@@ -7,8 +7,9 @@ during the [user-input panic safety](UserInputPanicSafety_2026-10-04.md)
 evaluation inspection. The quadratic cost was exact-route validation, fixed
 by `eval-recursion-route-validation`. The large constant was one coordinator
 route per forced lazy, mostly removed by `eval-recursion-inline-forcing`.
-`eval-recursion-tail-forwarding` made tail recursion run in constant space.
-The review that followed found the costs that remain; they are steps of
+`eval-recursion-tail-forwarding` made tail recursion run in constant space;
+`eval-recursion-forward-resync` (2026-10-09) fixed a race in it between
+sessions. The review that followed found the costs that remain; they are steps of
 [Structural Overheads](StructuralOverheads_2026-10-08.md).
 
 ## Problem
@@ -553,4 +554,30 @@ target.
 
 **What remains** is the per-reduction cost: about 11,000 instructions per
 reduction in the countdown, the subject of the performance review.
+
+## Forwards between sessions 2026-10-09 (`eval-recursion-forward-resync`)
+
+`cached_macro_environment_is_safe_under_forced_concurrency` failed about
+4 runs in 10 at `c65f9cfd` and 8 in 10 once list literals became flat,
+which shifted its timing. Earlier gates passed by luck.
+
+- **Cause.** The test runs 8 evaluation sessions over one cached macro
+  environment, so they share its lazies. Inline claims live in each
+  session's coordinator and exclude nothing in another session: two
+  sessions may each drive the same lazy, as checkpoint mutexes and
+  `Contended` already allow. When one session forwarded a shared lazy, a
+  machine in the other still held work for a checkpoint family. It found
+  neither checkpoint nor result, and the net-WHNF poller's assertion or
+  `cached_poll`'s `expect` fired. "Only a route-driven machine forwards:
+  its route holds the lazy's only claim" was true within one session only.
+- **Fix.** Every checkpoint poller already handled a checkpoint replaced
+  by another family (`Replaced`). A checkpoint that is gone, or a rejected
+  handoff, now goes through one resync, `resume_moved`, which rederives the
+  machine's work from the lazy as `Produce` does: a checkpoint family, a
+  forward, or the cached result. It runs only on that rare path. The
+  asserting and `unreachable!` branches it replaces are gone.
+- **Test.** `a_machine_whose_lazy_was_forwarded_meanwhile_follows_the_forward`
+  gives a machine stale work for each of the seven checkpoint families over
+  a lazy left forwarding, and expects the forward's value. It fails without
+  the fix; the concurrency test then passed 20 runs in 20.
 

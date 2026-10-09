@@ -723,30 +723,39 @@ fn a_cycle_of_tail_forwards_fails_both_lazies_with_one_dependency_cycle() {
     assert_eq!(members, expected);
 }
 
-/// Forcing the head of a tail chain forwards the head past the lazies
-/// between, which stay forwards until observed; observing one then caches
-/// the chain's value in it.
-#[test]
-fn a_lazy_left_forwarding_in_a_tail_chain_caches_its_value_when_observed() {
-    let context = isolated_context();
+/// A tail chain `head -> middle -> end` whose head has been forced, which
+/// leaves `middle` forwarding and uncached. The chain's value is 5.
+fn forwarded_chain_middle(
+    context: &EvalContext,
+) -> (crate::core::ManagedLazyRoot, crate::core::ManagedLazyRoot) {
     let end = LazyValue::semantic_thunk(context.values(), "chain end", |_| Ok(number(5)));
     let to_end = Arc::new(std::sync::OnceLock::new());
     let _ = to_end.set(crate::runtime::RuntimeValueRoot::new(
         context.values(),
         Value::Lazy(end),
     ));
-    let middle = thunk_to(&context, "chain middle", &to_end);
+    let middle = thunk_to(context, "chain middle", &to_end);
     let middle_root = middle.root(context.values());
     let to_middle = Arc::new(std::sync::OnceLock::new());
     let _ = to_middle.set(crate::runtime::RuntimeValueRoot::new(
         context.values(),
         Value::Lazy(middle),
     ));
-    let head = thunk_to(&context, "chain head", &to_middle);
+    let head = thunk_to(context, "chain head", &to_middle);
     let head_root = head.root(context.values());
 
-    let wait = lazy_root_wait(&context, &head_root).expect("the head route should be admitted");
-    pump_to_ready(&context, &wait);
+    let wait = lazy_root_wait(context, &head_root).expect("the head route should be admitted");
+    pump_to_ready(context, &wait);
+    (head_root, middle_root)
+}
+
+/// Forcing the head of a tail chain forwards the head past the lazies
+/// between, which stay forwards until observed; observing one then caches
+/// the chain's value in it.
+#[test]
+fn a_lazy_left_forwarding_in_a_tail_chain_caches_its_value_when_observed() {
+    let context = isolated_context();
+    let (head_root, middle_root) = forwarded_chain_middle(&context);
 
     let (head_cached, middle_cached, middle_forwards) =
         context.values().with_runtime_value_access(|access| {
@@ -784,6 +793,46 @@ fn a_lazy_left_forwarding_in_a_tail_chain_caches_its_value_when_observed() {
             .expect_without_debug("the cached middle should evaluate"),
         &number(5),
     );
+}
+
+/// Inline claims are per session, so a lazy shared between sessions may be
+/// forwarded by one session's driver while another session's machine still
+/// holds work for one of its checkpoint families. That machine follows the
+/// forward, whichever family its work names.
+#[test]
+fn a_machine_whose_lazy_was_forwarded_meanwhile_follows_the_forward() {
+    let stale_works = [
+        ("WHNF", LazyTaskWork::WhnfCheckpoint),
+        ("net WHNF", LazyTaskWork::NetWhnfCheckpoint),
+        ("access", LazyTaskWork::AccessCheckpoint),
+        ("object fixpoint", LazyTaskWork::ObjectFixpointCheckpoint),
+        ("list effect", LazyTaskWork::ListEffectCheckpoint),
+        ("builtin", LazyTaskWork::BuiltinCheckpoint),
+        ("host call", LazyTaskWork::HostCallCheckpoint),
+    ];
+    for (family, stale) in stale_works {
+        let context = isolated_context();
+        let (_, middle_root) = forwarded_chain_middle(&context);
+        let mut machine =
+            LazyTaskMachine::at_inline_depth(EvalContext::clone(&context), middle_root, Some(1));
+        machine.work = stale;
+        let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+
+        let mut polls = 0;
+        let value = loop {
+            polls += 1;
+            assert!(
+                polls < 8,
+                "a {family} machine must reach the forward's value"
+            );
+            match machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(8)) {
+                EvaluationMachinePoll::Complete(value) => break value,
+                EvaluationMachinePoll::Yielded => {}
+                _ => panic!("a {family} machine must follow the forward to a cached end"),
+            }
+        };
+        assert_same_value(&context, &value.clone_core_for_test(), &number(5));
+    }
 }
 
 /// A panic in a lazy that a route forces inline is recorded in that lazy as

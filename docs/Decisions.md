@@ -785,11 +785,14 @@ maps the short names used here to file names.
     since two routes may close one concurrently.
 - **Consequences:** memory at depth 10,000 is constant (46 MB, the same as
   at depth 2,000), and instructions fall 11%. Non-tail recursion still
-  grows the stack and spills.
+  grows the stack and spills. Inline claims are per session, so a lazy
+  shared between sessions may be forwarded under another session's
+  machine; every checkpoint poller resyncs from the lazy when its
+  checkpoint is gone (2026-10-09, `eval-recursion-forward-resync`).
 - **Rule lives in:** `architecture/evaluation.md`, the paragraph on tail
   calls in constant space.
 - **Recorded in:** evaluation-recursion plan,
-  `eval-recursion-tail-forwarding`.
+  `eval-recursion-tail-forwarding` and `eval-recursion-forward-resync`.
 
 ## Assembly
 

@@ -906,7 +906,10 @@ a suspended top forwards, the route suspends in place instead of spilling.
 A tail-recursive loop therefore keeps a two-entry stack, and the lazies
 between become garbage, or cache their value when observed later. Following
 a forward chain that closes a cycle fails every member with one dependency
-cycle.
+cycle. Inline claims belong to one session's coordinator, so a lazy shared
+between sessions may be driven in each: a machine that finds its lazy's
+checkpoint gone or replaced rederives its work from the lazy, a forward
+included.
 
 Work that must survive route loss falls into three ownership classes.
 Demand-driven resumable state (WHNF, access, object, list, builtin, and

@@ -632,6 +632,22 @@ impl LazyTaskMachine {
         )
     }
 
+    /// Continues after this lazy's checkpoint is gone or was replaced. A
+    /// lazy shared between evaluation sessions may have a driver in each,
+    /// since inline claims are per session, so another driver may have
+    /// published its result, replaced its checkpoint, or forwarded it
+    /// meanwhile. Rederives this machine's work from the lazy, as `Produce`
+    /// does.
+    fn resume_moved(&mut self, context: &EvaluatorStepContext<'_>) -> EvaluationMachinePoll {
+        match self.checkpoint_work(context) {
+            Some(work) => {
+                self.work = work;
+                EvaluationMachinePoll::Yielded
+            }
+            None => self.cached_poll(context),
+        }
+    }
+
     fn cached_poll(&self, context: &EvaluatorStepContext<'_>) -> EvaluationMachinePoll {
         let result = context.with_value_access(|access| access.lazy_root(&self.lazy).cached());
         let Some(result) = result else {
@@ -652,8 +668,9 @@ impl LazyTaskMachine {
     }
 
     /// Replaces this lazy's WHNF checkpoint, which reached `target` with no
-    /// continuation left, by a forward to `target`. Only a route-driven
-    /// machine forwards: its route holds the lazy's only claim.
+    /// continuation left, by a forward to `target`. Only a machine on a
+    /// route's stack forwards. A driver in another session that shares the
+    /// lazy finds the forward and follows it (see [`Self::resume_moved`]).
     fn forward_to(&mut self, context: &EvaluatorStepContext<'_>, target: &ManagedLazyRoot) -> bool {
         if self.inline_depth.is_none() {
             return false;
@@ -737,7 +754,7 @@ impl LazyTaskMachine {
         let Some(poll) =
             poll_lazy_checkpoint(&self.lazy, poll_context, durable_context, step_budget)
         else {
-            return self.cached_poll(context);
+            return self.resume_moved(context);
         };
         let poll = match poll {
             LazyCheckpointPoll::Owner(poll) => poll,
@@ -778,15 +795,15 @@ impl LazyTaskMachine {
         enum Transition {
             Interrupted,
             Whnf,
-            Terminal,
+            Moved,
             Replaced(ManagedLazyCheckpointKindTag),
         }
 
         let transition = context.with_value_access(|access| {
             let lazy = access.lazy_root(&self.lazy);
-            let checkpoint = lazy
-                .checkpoint_snapshot()
-                .expect("host-call route must retain its managed checkpoint");
+            let Some(checkpoint) = lazy.checkpoint_snapshot() else {
+                return Transition::Moved;
+            };
             if checkpoint.kind() != ManagedLazyCheckpointKindTag::HostCall {
                 return Transition::Replaced(checkpoint.kind());
             }
@@ -798,21 +815,12 @@ impl LazyTaskMachine {
                         .expect("canonical WHNF state must fit its reviewed managed slot");
                     match lazy.replace_checkpoint(&checkpoint, next) {
                         Ok(()) => Transition::Whnf,
-                        Err(_) => {
-                            if lazy.cached().is_some() {
-                                Transition::Terminal
-                            } else {
-                                match lazy.checkpoint_snapshot() {
-                                    Some(current) => Transition::Replaced(current.kind()),
-                                    None => Transition::Terminal,
-                                }
-                            }
-                        }
+                        Err(_) => Transition::Moved,
                     }
                 }
                 HostCallCheckpointObservation::After(Err(failure)) => {
                     let _ = self.lazy.cache(access.values(), Err(failure));
-                    Transition::Terminal
+                    Transition::Moved
                 }
             }
         });
@@ -831,7 +839,7 @@ impl LazyTaskMachine {
                 self.work = LazyTaskWork::WhnfCheckpoint;
                 EvaluationMachinePoll::Yielded
             }
-            Transition::Terminal => self.cached_poll(context),
+            Transition::Moved => self.resume_moved(context),
             Transition::Replaced(kind) => {
                 self.work = Self::work_for_checkpoint_kind(kind);
                 EvaluationMachinePoll::Yielded
@@ -848,7 +856,7 @@ impl LazyTaskMachine {
             Complete(crate::runtime::RuntimeValueRoot),
             Failed(crate::runtime::RuntimeFailureRoot),
             Whnf,
-            Terminal,
+            Moved,
             Boundary(super::whnf::RegionalBoundaryRequest),
             Yielded,
             Replaced(ManagedLazyCheckpointKindTag),
@@ -856,9 +864,9 @@ impl LazyTaskMachine {
 
         let transition = context.with_value_access(|access| {
             let lazy = access.lazy_root(&self.lazy);
-            let checkpoint = lazy
-                .checkpoint_snapshot()
-                .expect("computed-access route must retain its managed checkpoint");
+            let Some(checkpoint) = lazy.checkpoint_snapshot() else {
+                return Transition::Moved;
+            };
             if checkpoint.kind() != ManagedLazyCheckpointKindTag::Access {
                 return Transition::Replaced(checkpoint.kind());
             }
@@ -898,18 +906,7 @@ impl LazyTaskMachine {
                         .expect("canonical WHNF state must fit its reviewed managed slot");
                     match lazy.replace_checkpoint(&checkpoint, next) {
                         Ok(()) => Transition::Whnf,
-                        Err(_) => {
-                            if lazy.cached().is_some() {
-                                Transition::Terminal
-                            } else {
-                                match lazy.checkpoint_snapshot() {
-                                    Some(current) => Transition::Replaced(current.kind()),
-                                    None => unreachable!(
-                                        "a rejected access handoff must find a checkpoint or cache"
-                                    ),
-                                }
-                            }
-                        }
+                        Err(_) => Transition::Moved,
                     }
                 }
                 AccessRegionalPoll::Yielded => Transition::Yielded,
@@ -936,7 +933,7 @@ impl LazyTaskMachine {
                 self.work = LazyTaskWork::WhnfCheckpoint;
                 EvaluationMachinePoll::Yielded
             }
-            Transition::Terminal => self.cached_poll(context),
+            Transition::Moved => self.resume_moved(context),
             Transition::Replaced(kind) => {
                 self.work = Self::work_for_checkpoint_kind(kind);
                 EvaluationMachinePoll::Yielded
@@ -976,14 +973,15 @@ impl LazyTaskMachine {
             Failed(crate::runtime::RuntimeFailureRoot),
             Boundary(super::whnf::RegionalBoundaryRequest),
             Yielded,
+            Moved,
             Replaced(ManagedLazyCheckpointKindTag),
         }
 
         let transition = context.with_value_access(|access| {
             let lazy = access.lazy_root(&self.lazy);
-            let checkpoint = lazy
-                .checkpoint_snapshot()
-                .expect("object-fixpoint route must retain its managed checkpoint");
+            let Some(checkpoint) = lazy.checkpoint_snapshot() else {
+                return Transition::Moved;
+            };
             if checkpoint.kind() != ManagedLazyCheckpointKindTag::ObjectFixpoint {
                 return Transition::Replaced(checkpoint.kind());
             }
@@ -1023,6 +1021,7 @@ impl LazyTaskMachine {
             Transition::Complete(value) => EvaluationMachinePoll::Complete(value),
             Transition::Failed(failure) => EvaluationMachinePoll::Failed(failure),
             Transition::Yielded => EvaluationMachinePoll::Yielded,
+            Transition::Moved => self.resume_moved(context),
             Transition::Replaced(kind) => {
                 self.work = Self::work_for_checkpoint_kind(kind);
                 EvaluationMachinePoll::Yielded
@@ -1065,14 +1064,15 @@ impl LazyTaskMachine {
             Failed(crate::runtime::RuntimeFailureRoot),
             Boundary(super::whnf::RegionalBoundaryRequest),
             Yielded,
+            Moved,
             Replaced(ManagedLazyCheckpointKindTag),
         }
 
         let transition = context.with_value_access(|access| {
             let lazy = access.lazy_root(&self.lazy);
-            let checkpoint = lazy
-                .checkpoint_snapshot()
-                .expect("list-effect route must retain its managed checkpoint");
+            let Some(checkpoint) = lazy.checkpoint_snapshot() else {
+                return Transition::Moved;
+            };
             if checkpoint.kind() != ManagedLazyCheckpointKindTag::ListEffect {
                 return Transition::Replaced(checkpoint.kind());
             }
@@ -1131,6 +1131,7 @@ impl LazyTaskMachine {
             }
             Transition::Failed(failure) => EvaluationMachinePoll::Failed(failure),
             Transition::Yielded => EvaluationMachinePoll::Yielded,
+            Transition::Moved => self.resume_moved(context),
             Transition::Replaced(kind) => {
                 self.work = Self::work_for_checkpoint_kind(kind);
                 EvaluationMachinePoll::Yielded
@@ -1169,7 +1170,7 @@ impl LazyTaskMachine {
             Whnf,
             Spark(crate::runtime::RuntimeValueRoot),
             Failed(crate::runtime::RuntimeFailureRoot),
-            Terminal,
+            Moved,
             Boundary(super::whnf::RegionalBoundaryRequest),
             Yielded,
             Replaced(ManagedLazyCheckpointKindTag),
@@ -1177,9 +1178,9 @@ impl LazyTaskMachine {
 
         let transition = context.with_value_access(|access| {
             let lazy = access.lazy_root(&self.lazy);
-            let checkpoint = lazy
-                .checkpoint_snapshot()
-                .expect("builtin route must retain its managed checkpoint");
+            let Some(checkpoint) = lazy.checkpoint_snapshot() else {
+                return Transition::Moved;
+            };
             if checkpoint.kind() != ManagedLazyCheckpointKindTag::Builtin {
                 return Transition::Replaced(checkpoint.kind());
             }
@@ -1191,18 +1192,7 @@ impl LazyTaskMachine {
                         .expect("canonical WHNF state must fit its reviewed managed slot");
                     match lazy.replace_checkpoint(&checkpoint, next) {
                         Ok(()) => Transition::Whnf,
-                        Err(_) => {
-                            if lazy.cached().is_some() {
-                                Transition::Terminal
-                            } else {
-                                match lazy.checkpoint_snapshot() {
-                                    Some(current) => Transition::Replaced(current.kind()),
-                                    None => unreachable!(
-                                        "a rejected builtin handoff must find a checkpoint or cache"
-                                    ),
-                                }
-                            }
-                        }
+                        Err(_) => Transition::Moved,
                     }
                 }
                 RegionalBuiltinPoll::SparkIntent(value) => {
@@ -1212,7 +1202,7 @@ impl LazyTaskMachine {
                 RegionalBuiltinPoll::Yielded => Transition::Yielded,
                 RegionalBuiltinPoll::Failed(failure) => {
                     match self.lazy.cache(access.values(), Err(failure)) {
-                        Ok(_) => Transition::Terminal,
+                        Ok(_) => Transition::Moved,
                         Err(failure) => {
                             Transition::Failed(access.values().root_runtime_failure(failure))
                         }
@@ -1228,7 +1218,7 @@ impl LazyTaskMachine {
             }
             Transition::Spark(value) => EvaluationMachinePoll::ScheduleSpark(value),
             Transition::Failed(failure) => EvaluationMachinePoll::Failed(failure),
-            Transition::Terminal => self.cached_poll(context),
+            Transition::Moved => self.resume_moved(context),
             Transition::Yielded => EvaluationMachinePoll::Yielded,
             Transition::Replaced(kind) => {
                 self.work = Self::work_for_checkpoint_kind(kind);
@@ -1267,7 +1257,7 @@ impl LazyTaskMachine {
         enum Transition {
             Pending(Result<NetWhnfAccessPoll, EvaluationHalt>),
             Whnf,
-            Terminal,
+            Moved,
             Replaced(ManagedLazyCheckpointKindTag),
         }
 
@@ -1280,11 +1270,7 @@ impl LazyTaskMachine {
             let (transition, failure_context) = context.with_value_access(|access| {
                 let lazy = access.lazy_root(&self.lazy);
                 let Some(checkpoint) = lazy.checkpoint_snapshot() else {
-                    assert!(
-                        lazy.cached().is_some(),
-                        "a net-WHNF route may lose its checkpoint only to terminal publication"
-                    );
-                    return (Transition::Terminal, None);
+                    return (Transition::Moved, None);
                 };
                 if checkpoint.kind() != ManagedLazyCheckpointKindTag::NetWhnf {
                     return (Transition::Replaced(checkpoint.kind()), None);
@@ -1315,16 +1301,7 @@ impl LazyTaskMachine {
                             );
                         match lazy.replace_checkpoint(&checkpoint, next) {
                             Ok(()) => Transition::Whnf,
-                            Err(_) => {
-                                if lazy.cached().is_some() {
-                                    Transition::Terminal
-                                } else {
-                                    match lazy.checkpoint_snapshot() {
-                                        Some(current) => Transition::Replaced(current.kind()),
-                                        None => Transition::Terminal,
-                                    }
-                                }
-                            }
+                            Err(_) => Transition::Moved,
                         }
                     }
                     outcome => Transition::Pending(outcome),
@@ -1336,7 +1313,7 @@ impl LazyTaskMachine {
                     self.work = LazyTaskWork::WhnfCheckpoint;
                     return EvaluationMachinePoll::Yielded;
                 }
-                Transition::Terminal => return self.cached_poll(context),
+                Transition::Moved => return self.resume_moved(context),
                 Transition::Replaced(kind) => {
                     self.work = Self::work_for_checkpoint_kind(kind);
                     return EvaluationMachinePoll::Yielded;
