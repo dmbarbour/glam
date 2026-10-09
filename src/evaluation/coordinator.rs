@@ -3346,6 +3346,36 @@ fn work_for_wait_locked(
         .copied()
 }
 
+/// Where an exact walk goes from a blocked record's dependency.
+enum DependencyEdge {
+    /// The registered work producing the dependency.
+    Producer(EvaluationWorkId),
+    /// The dependency is terminal, but the record has not been woken yet.
+    /// Publication sets a terminal before it wakes subscribers, and a
+    /// release may block on a dependency that completes before it
+    /// subscribes. Either way the publishing or releasing thread owns the
+    /// wake, so the record is busy rather than stuck.
+    WakePending,
+    /// The route ends here.
+    End,
+}
+
+fn dependency_edge_locked(
+    state: &WorkCoordinatorState,
+    dependency: &WorkDependency,
+) -> DependencyEdge {
+    if let Some(producer) = dependency
+        .producer_wait()
+        .and_then(|wait| work_for_wait_locked(state, &wait))
+    {
+        DependencyEdge::Producer(producer)
+    } else if dependency.is_terminal() {
+        DependencyEdge::WakePending
+    } else {
+        DependencyEdge::End
+    }
+}
+
 /// Finds the first claimable item on one background root's exact producer
 /// chain. A queued root runs before its old block is followed; a blocked root
 /// can reach a dormant deferred producer without promoting unrelated work.
@@ -3473,17 +3503,20 @@ fn rebuild_exact_route_locked(
                         depth,
                     };
                 };
-                let Some(wait) = dependency.producer_wait() else {
-                    return ExactProducerProbe {
-                        selection: CausalBackgroundProbe::None,
-                        depth,
-                    };
-                };
-                let Some(producer) = work_for_wait_locked(state, &wait) else {
-                    return ExactProducerProbe {
-                        selection: CausalBackgroundProbe::None,
-                        depth,
-                    };
+                let producer = match dependency_edge_locked(state, dependency) {
+                    DependencyEdge::Producer(producer) => producer,
+                    DependencyEdge::WakePending => {
+                        return ExactProducerProbe {
+                            selection: CausalBackgroundProbe::Busy(current),
+                            depth,
+                        };
+                    }
+                    DependencyEdge::End => {
+                        return ExactProducerProbe {
+                            selection: CausalBackgroundProbe::None,
+                            depth,
+                        };
+                    }
                 };
                 if !route.admit_producer(producer) {
                     return ExactProducerProbe {
@@ -3523,19 +3556,23 @@ fn validate_exact_route_locked(
     route: &mut ExactDemandRoute,
     recover_missing_tip: bool,
 ) -> Result<usize, ExactRouteFallbackReason> {
-    let Some(current) = route.current else {
+    let Some(mut current) = route.current else {
         return Err(ExactRouteFallbackReason::RetiredWork);
     };
+    // The route shrinks at its tip: retired work returns it to the nearest
+    // registered parent. That parent's own frame no longer matters; its
+    // current state decides what comes next.
+    let mut handoffs = 0;
+    while recover_missing_tip && !state.work.contains_key(&current) {
+        let Some(parent) = route.parents.pop() else {
+            break;
+        };
+        route.members.remove(&current);
+        current = parent.work;
+        route.current = Some(current);
+        handoffs += 1;
+    }
     if !state.work.contains_key(&current) {
-        if recover_missing_tip && route.parents.len() == 1 {
-            let root = route.parents[0].work;
-            if work_for_wait_locked(state, target) == Some(root) && state.work.contains_key(&root) {
-                route.members.remove(&current);
-                route.parents.clear();
-                route.current = Some(root);
-                return Ok(1);
-            }
-        }
         return Err(ExactRouteFallbackReason::RetiredWork);
     }
     let root = route.parents.first().map_or(current, |frame| frame.work);
@@ -3552,7 +3589,7 @@ fn validate_exact_route_locked(
     let start = match route.hazard_revision {
         Some(validated) => match state.exact_route_hazard_start(route, validated) {
             Some(depth) => depth.saturating_sub(1),
-            None => return Ok(0),
+            None => return Ok(handoffs),
         },
         None => 0,
     };
@@ -3591,7 +3628,7 @@ fn validate_exact_route_locked(
             return Err(ExactRouteFallbackReason::BranchedWork);
         }
     }
-    Ok(0)
+    Ok(handoffs)
 }
 
 /// Advances a route already known to describe the coordinator's current
@@ -3659,23 +3696,26 @@ fn continue_exact_route_locked(
                         handoffs,
                     );
                 };
-                let Some(wait) = dependency.producer_wait() else {
-                    return (
-                        ExactProducerProbe {
-                            selection: CausalBackgroundProbe::None,
-                            depth: 0,
-                        },
-                        handoffs,
-                    );
-                };
-                let Some(producer) = work_for_wait_locked(state, &wait) else {
-                    return (
-                        ExactProducerProbe {
-                            selection: CausalBackgroundProbe::None,
-                            depth: 0,
-                        },
-                        handoffs,
-                    );
+                let producer = match dependency_edge_locked(state, dependency) {
+                    DependencyEdge::Producer(producer) => producer,
+                    DependencyEdge::WakePending => {
+                        return (
+                            ExactProducerProbe {
+                                selection: CausalBackgroundProbe::Busy(current),
+                                depth: 0,
+                            },
+                            handoffs,
+                        );
+                    }
+                    DependencyEdge::End => {
+                        return (
+                            ExactProducerProbe {
+                                selection: CausalBackgroundProbe::None,
+                                depth: 0,
+                            },
+                            handoffs,
+                        );
+                    }
                 };
                 if !route.admit_producer(producer) {
                     return (
@@ -3750,20 +3790,24 @@ fn exact_producer_probe_locked(
                 };
             }
             WorkState::Blocked => {
-                let Some(wait) = work_dependency(record).and_then(WorkDependency::producer_wait)
-                else {
-                    return ExactProducerProbe {
-                        selection: CausalBackgroundProbe::None,
-                        depth: seen.len(),
-                    };
-                };
-                let Some(producer) = work_for_wait_locked(state, &wait) else {
-                    return ExactProducerProbe {
-                        selection: CausalBackgroundProbe::None,
-                        depth: seen.len(),
-                    };
-                };
-                current = producer;
+                let edge = work_dependency(record).map_or(DependencyEdge::End, |dependency| {
+                    dependency_edge_locked(state, dependency)
+                });
+                match edge {
+                    DependencyEdge::Producer(producer) => current = producer,
+                    DependencyEdge::WakePending => {
+                        return ExactProducerProbe {
+                            selection: CausalBackgroundProbe::Busy(current),
+                            depth: seen.len(),
+                        };
+                    }
+                    DependencyEdge::End => {
+                        return ExactProducerProbe {
+                            selection: CausalBackgroundProbe::None,
+                            depth: seen.len(),
+                        };
+                    }
+                }
             }
             WorkState::Reserved
             | WorkState::Running
@@ -3894,13 +3938,18 @@ fn causal_child_probe_locked(
                         break;
                     }
                     WorkState::Blocked => {
-                        let Some(next) = work_dependency(record)
-                            .and_then(WorkDependency::producer_wait)
-                            .and_then(|wait| work_for_wait_locked(state, &wait))
-                        else {
-                            break;
-                        };
-                        current = next;
+                        let edge = work_dependency(record)
+                            .map_or(DependencyEdge::End, |dependency| {
+                                dependency_edge_locked(state, dependency)
+                            });
+                        match edge {
+                            DependencyEdge::Producer(next) => current = next,
+                            DependencyEdge::WakePending => {
+                                busy = true;
+                                break;
+                            }
+                            DependencyEdge::End => break,
+                        }
                     }
                     WorkState::Dormant | WorkState::Queued | WorkState::ExitWaiting => break,
                 }

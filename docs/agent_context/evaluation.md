@@ -459,6 +459,12 @@ control-flow overview.
 - Claimed interaction-net pairs are live work, not quiescence. An observer must
   wait for that runtime's generation to change before deciding the net is
   blocked or complete.
+- A blocked record whose dependency is terminal but which has not yet been
+  woken is `Busy`, never `NoProgress`: the publishing thread owns its wake.
+  Exact walks classify that edge through `dependency_edge_locked`. A client
+  that sees `NoProgress` while progress is latent retries without waiting,
+  and each retry walks the chain under the coordinator lock the publisher
+  needs (`perf-worker-scaling`).
 - Runtime readiness covers all demand sessions in the runtime. Runnable or
   claimed producer work is `Busy`; a stable set in which every unfinished
   record is blocked is a typed deadlock snapshot. Pure deferred-value cycles

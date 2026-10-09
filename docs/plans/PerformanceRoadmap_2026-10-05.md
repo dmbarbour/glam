@@ -180,15 +180,16 @@ gains this consequence when it lands.
    - *Done:* `perf-admission-wakeups`, `perf-idle-wakeups`,
      `perf-fast-id-hashing`, `perf-net-builder-wired-ports`,
      `perf-scaling-workloads`, `perf-list-front-walk`,
-     `perf-list-leaf-walk` and `perf-access-region-cost`. The scheduler
-     round trips were `perf-evaluation-recursion`.
-   - *Open, in order:* `perf-worker-scaling`, `gc-one-heap-per-thread`,
+     `perf-list-leaf-walk`, `perf-access-region-cost` and
+     `perf-worker-scaling`. The scheduler round trips were
+     `perf-evaluation-recursion`.
+   - *Open, in order:* `gc-one-heap-per-thread`,
      `gc-bounded-collection-wait`, `perf-quantum-region`,
      `perf-collection-growth`, `perf-list-map-growth`,
      `perf-lowering-free-bindings`,
      `perf-interface-demand-walk`, `perf-module-definition-cost`,
-     `perf-allocation-path`, `perf-runtime-net-attach` and
-     `perf-reflection-step-cost`.
+     `perf-allocation-path`, `perf-runtime-net-attach`,
+     `perf-reflection-step-cost` and `perf-worker-route-walks`.
    - *Experiments:* `perf-coalesced-wakeups` (open) and
      `perf-mimalloc-allocator` (not adopted).
 

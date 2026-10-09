@@ -203,6 +203,24 @@ impl RuntimeProfileSnapshot {
                 ("hazard_validations", routes.hazard_validations),
                 ("validated_frames", routes.validated_frames),
                 ("cold_fallbacks", routes.cold_fallbacks),
+                (
+                    "missing_release_fallbacks",
+                    routes.missing_release_fallbacks,
+                ),
+                (
+                    "current_work_mismatch_fallbacks",
+                    routes.current_work_mismatch_fallbacks,
+                ),
+                (
+                    "guarded_release_mutation_fallbacks",
+                    routes.guarded_release_mutation_fallbacks,
+                ),
+                (
+                    "changed_dependency_fallbacks",
+                    routes.changed_dependency_fallbacks,
+                ),
+                ("retired_work_fallbacks", routes.retired_work_fallbacks),
+                ("branched_work_fallbacks", routes.branched_work_fallbacks),
             ],
         );
         out.push_str(",\"heap\":");

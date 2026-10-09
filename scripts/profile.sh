@@ -14,7 +14,8 @@
 # size. The summary's growth table fits each cost to a + b·n^k over the
 # three sizes and reports k: 1 is linear, 2 quadratic. Fixed costs cancel.
 # GLAM_PROFILE_SCALE=N multiplies every family's sizes, for a closer look at
-# large inputs.
+# large inputs. A family named <name>_w<N>, such as chain_w4, runs with N
+# background workers; every other workload runs with none.
 #
 # Counters are exact and comparable between runs; timings are trend data,
 # easily disturbed by other load on the machine. Where `perf` can count
@@ -48,23 +49,27 @@ else
   printf 'perf cannot count instructions here; reporting times only\n' >&2
 fi
 
-# Each workload: name, GLAM_CONF, source file, and the start of its expected
-# output, so a broken workload cannot produce a bogus baseline.
-declare -a names=() confs=() files=() expects=()
-add() { names+=("$1"); confs+=("$2"); files+=("$3"); expects+=("$4"); }
+# Each workload: name, GLAM_CONF, source file, the start of its expected
+# output, so a broken workload cannot produce a bogus baseline, and its
+# background worker count (default none).
+declare -a names=() confs=() files=() expects=() workers=()
+add() { names+=("$1"); confs+=("$2"); files+=("$3"); expects+=("$4"); workers+=("${5:-0}"); }
 
-# A generated workload with a fixed source.
+# A generated workload with a fixed source, and optionally a worker count.
 gen() {
   printf '%s\n' "$2" >"$out/workloads/$1.g"
-  add "$1" '' "$out/workloads/$1.g" ok
+  add "$1" '' "$out/workloads/$1.g" ok "${3:-0}"
 }
 
 # A family: the generator function of the same name, run at n, 2n and 4n.
+# A third argument runs it with that many background workers, as the family
+# <name>_w<workers>.
 family() {
-  local name=$1 base=$2 factor size
+  local name=$1 base=$2 count=${3:-0} label=$1 factor size
+  if [[ $count -gt 0 ]]; then label=${name}_w$count; fi
   for factor in 1 2 4; do
     size=$((base * scale * factor))
-    gen "${name}_$size" "$("$name" "$size")"
+    gen "${label}_$size" "$("$name" "$size")" "$count"
   done
 }
 
@@ -111,6 +116,9 @@ chain() {
 family countdown 200
 family sum 200
 family chain 200
+# Workers follow the same producer chain as the foreground, so a scheduling
+# defect shows as superlinear growth here (`perf-worker-scaling`).
+family chain 200 4
 
 # Lists and dicts.
 list_map() {
@@ -173,7 +181,7 @@ for index in "${!names[@]}"; do
     run=("${counter[@]}" "$out/$name.perf" "${run[@]}")
   fi
   status=0
-  GLAM_CONF="${confs[$index]}" GLAM_PROF="$out/$name.json" \
+  GLAM_CONF="${confs[$index]}" GLAM_PROF="$out/$name.json" GLAM_WORKERS="${workers[$index]}" \
     "${run[@]}" >"$out/$name.out" 2>"$out/$name.err" || status=$?
   if [[ $status -eq 124 ]]; then
     printf '  %s timed out after %s s\n' "$name" "$limit" >&2

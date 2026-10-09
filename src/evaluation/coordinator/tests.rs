@@ -1271,6 +1271,86 @@ fn foreground_route_recovers_its_root_when_the_child_completes_first() {
     );
 }
 
+/// A dependency becomes terminal before its subscribers are woken. Until the
+/// wake arrives, every exact walk must report the blocked record as busy:
+/// reporting no progress sent the foreground client around its demand loop
+/// without waiting, starving the thread that owed the wake.
+#[test]
+fn exact_walks_report_a_blocked_record_awaiting_its_wake_as_busy() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test resources should build");
+    let session = TestDemand::new(&coordinator);
+    let dependency_task = super::super::allocate_task_id(&session.demand.values)
+        .expect("dependency task identity should allocate");
+    let dependency = super::super::allocate_wait_token(&session.demand, dependency_task)
+        .expect("dependency wait identity should allocate");
+    let (blocked_wait, blocked) =
+        block_test_reflection_on(&coordinator, &session, dependency.clone(), None);
+    let launcher = super::super::allocate_task_id(&session.demand.values)
+        .expect("launcher task identity should allocate");
+    coordinator
+        .state
+        .lock()
+        .expect("evaluation work coordinator was poisoned")
+        .reflection
+        .children_by_parent
+        .insert(launcher, vec![blocked]);
+    let child_probe = || {
+        let state = coordinator
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        causal_child_probe_locked(
+            &state,
+            None,
+            [Some(launcher), None],
+            &TrustedHashSet::default(),
+        )
+    };
+
+    // No registered work produces the dependency, so each walk ends.
+    let mut route = ExactDemandRoute::default();
+    assert!(matches!(
+        coordinator.claim_exact_target_on_route(&blocked_wait, &mut route),
+        ExactTargetSelection::None
+    ));
+    assert_eq!(
+        coordinator.exact_target_status(&blocked_wait),
+        ExactTargetStatus::None
+    );
+    assert_eq!(child_probe(), CausalChildProbe::None);
+
+    dependency.publish_terminal(EvaluationWaitTerminal::Complete(rooted_unit(
+        &session.demand.values,
+    )));
+    assert!(matches!(
+        coordinator.claim_exact_target_on_route(&blocked_wait, &mut route),
+        ExactTargetSelection::Busy
+    ));
+    assert_eq!(
+        coordinator.exact_target_status(&blocked_wait),
+        ExactTargetStatus::Busy
+    );
+    assert_eq!(child_probe(), CausalChildProbe::Busy);
+
+    dependency.notify_terminal();
+    assert_eq!(child_probe(), CausalChildProbe::Ready(blocked));
+    let ExactTargetSelection::Claimed(claimed) =
+        coordinator.claim_exact_target_on_route(&blocked_wait, &mut route)
+    else {
+        panic!("the woken record should be claimable")
+    };
+    assert_eq!(claimed.id(), blocked);
+    coordinator.requeue_unpolled_task(claimed);
+    coordinator
+        .state
+        .lock()
+        .expect("evaluation work coordinator was poisoned")
+        .reflection
+        .children_by_parent
+        .remove(&launcher);
+}
+
 #[test]
 fn foreground_route_falls_back_when_an_observation_wakes_its_parent() {
     let (coordinator, _executor) =

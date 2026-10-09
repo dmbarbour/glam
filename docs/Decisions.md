@@ -850,6 +850,32 @@ maps the short names used here to file names.
 - **Recorded in:** evaluation-recursion plan,
   `eval-recursion-tail-forwarding` and `eval-recursion-forward-resync`.
 
+### A blocked record awaiting its wake is busy
+`pending-wake-is-busy` · 2026-10-09 · agent · accepted
+- **Context:** with workers, `chain_800` took 108 to 283 s of CPU against
+  1.25 s without them. Publication sets a terminal before it wakes the
+  blocked dependents. In between, the exact walks found no producer and
+  reported `NoProgress`; the client retried at once, walking the chain
+  under the coordinator mutex the worker needed for the wake.
+- **Decision:** a blocked record whose dependency is terminal is `Busy`:
+  the publishing or releasing thread owns its wake, and the client waits
+  on the work generation. One classifier, `dependency_edge_locked`, serves
+  the exact route, the background probe and the causal-child probe. Route
+  validation also returns a route with a retired tip to its nearest
+  registered parent, extending `validated-exact-route-hint`, which
+  recovered only a route with one parent. Rejected: making the client wait
+  whenever the abandon check declines. It would hide a misclassification
+  rather than fix it, and `NoProgress` also drives retryable halts
+  elsewhere.
+- **Consequences:** `chain_w4_800` takes 2.7 s of CPU and 8% more
+  instructions than without workers. Workers still walk from the root on
+  each claim, and a mid-route mismatch still rebuilds the route
+  (`perf-worker-route-walks`).
+- **Rule lives in:** `agent_context/evaluation.md` "Sessions and
+  Workers"; `architecture/evaluation.md`, the exact-demand zipper
+  paragraphs.
+- **Recorded in:** structural overheads plan, `perf-worker-scaling`.
+
 ## Assembly
 
 ### Manifest writes are identity-checked and atomically published

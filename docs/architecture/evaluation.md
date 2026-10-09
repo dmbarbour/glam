@@ -217,7 +217,10 @@ has launched a child before publishing a join, the coordinator's activation
 index also lets that demand help the parent's still-live causal descendants,
 including children in another demand session. It never substitutes arbitrary
 same-session work. A claimed causal descendant is a `Busy` wait on the work
-generation; an unrelated unresolved promise remains `NoProgress`. Child
+generation; an unrelated unresolved promise remains `NoProgress`. So is a
+blocked record whose dependency is already terminal but which has not been
+woken: publication sets the terminal before it wakes subscribers, and the
+publisher owns that wake. Child
 retirement promotes its live descendants to the nearest surviving helping
 route, without making launch an implicit join or transferring task ownership.
 
@@ -231,9 +234,11 @@ route-hazard revision advances only for the mutation kinds that can change a
 retained tip, ancestor, or projection (`affects_exact_route`). If the hazard
 revision is unchanged and the claimed tip matches, the release hands off in
 O(1) even though the generation moved. Otherwise the driver revalidates every
-frame under the coordinator lock and keeps the route if validation passes; a
-mismatch or an interrupted release falls back to the complete guarded
-traversal from the original wait. No descendant index or
+frame under the coordinator lock and keeps the route if validation passes.
+Retired work at the tip returns the route to its nearest registered parent,
+since the route grows and shrinks only at its tip; a mismatch or an
+interrupted release falls back to the complete guarded traversal from the
+original wait. No descendant index or
 back-pointer is needed: a one-shot completion queues only registrations that
 still match its exact subscription epoch and dependency key, so completing the
 claimed tip can expose only its immediate parent. Causal `.task.new`

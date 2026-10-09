@@ -4,8 +4,8 @@ Status: active, as the `perf-structural-overheads` step of the
 [performance roadmap](PerformanceRoadmap_2026-10-05.md). Done:
 `perf-admission-wakeups`, `perf-idle-wakeups`, `perf-fast-id-hashing`,
 `perf-net-builder-wired-ports`, `perf-scaling-workloads`,
-`perf-list-front-walk`, `perf-list-leaf-walk` and
-`perf-access-region-cost`. Next: `perf-worker-scaling`.
+`perf-list-front-walk`, `perf-list-leaf-walk`, `perf-access-region-cost`
+and `perf-worker-scaling`. Next: `gc-one-heap-per-thread`.
 
 ## Purpose
 
@@ -65,27 +65,6 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 | Coordinator claims, releases and admissions | under 2% |
 
 ## Open Steps, in Order
-
-### Worker scaling (`perf-worker-scaling`)
-
-Found 2026-10-09 while comparing builds with `GLAM_WORKERS=4`; the
-profiling workloads run without workers, so nothing measured this before.
-CPU time at four workers, against none:
-
-| Workload | No workers | Four workers |
-| --- | ---: | ---: |
-| `chain_200` | 0.44 s | 1.84 s |
-| `chain_400` | about 0.6 s | 4.2 s |
-| `chain_800` | 1.25 s | 108 to 283 s |
-
-One and two workers already cost 1.1 and 1.3 s at `chain_200`. With
-workers, exact routing falls back to complete searches (5 at no workers,
-2,315 at four, 3,704 at `chain_400`), each visiting a few hundred records
-(480 K and 1.4 M in all). That is quadratic, but too small for the jump
-from 400 to 800, and the spread between runs at 800 suggests something
-schedule-dependent as well. Investigate before measuring anything else
-with workers: the admission gate's benefit under contention, and
-`perf-quantum-region`, both need workers that scale.
 
 ### One open heap per thread (`gc-one-heap-per-thread`)
 
@@ -257,6 +236,25 @@ yet. The `do_chain` workload does not: its pure effects reduce in nets, and
 its reflection-step count stays constant. A workload that runs a long chain
 of reflection effects would.
 
+### Route walks with workers (`perf-worker-route-walks`)
+
+After `perf-worker-scaling`, `chain_w4_800` still runs 8% more
+instructions than `chain_800` and 2.3 times its CPU time, growing as
+n^1.27 against n^1.23. Two walks remain quadratic:
+- **Workers walk from the root.** A worker finds work by walking each
+  reflection root's exact producer chain from the top on every claim
+  (`exact_producer_probe_locked`). The profiling counters do not see these
+  walks. A worker could keep a route as the foreground does.
+- **Mid-route mismatches rebuild.** When a worker changes a record in the
+  middle of the foreground's route, validation falls back to a complete
+  search (781 `changed_dependency_fallbacks` and 290
+  `guarded_release_mutation_fallbacks` at `chain_w4_800`). The frames above
+  the mismatch are proven, so the route could shrink to them, as it now
+  does for a retired tip, and reach the same tip a rebuild would.
+
+Walks are about 8% of samples and lock contention 4%. Workers are opt-in
+and help only programs with parallel work, so this comes last.
+
 ## Experiments
 
 - **Coalesced wake-ups** (`perf-coalesced-wakeups`), open. The maintainer's
@@ -280,6 +278,48 @@ of reflection effects would.
   Allocating less is the better lever.
 
 ## Done
+
+- **Worker scaling** (`perf-worker-scaling`), 2026-10-09.
+  - **Found** while comparing builds with `GLAM_WORKERS=4`: the profiling
+    workloads ran without workers, so nothing had measured it.
+    `chain_800` took 108 to 283 s of CPU at four workers, against 1.25 s
+    at none. Even one worker cost 4.2 times the instructions at
+    `chain_300`.
+  - **Cause: a client spin.** A worker finishes a record on the chain the
+    foreground demands. Publication sets the record's terminal before it
+    wakes the blocked dependent, and in that window the exact walks found
+    no producer and reported `NoProgress`. The client's abandon check saw
+    the progress was latent and declined, and the client loop retried at
+    once. Each retry walked the whole chain under the coordinator mutex,
+    which the worker needed to deliver the wake, so the window stretched:
+    119,000 retries at `chain_300` with one worker, where the wake was
+    late only 66 times once the client waited. Cost grew as chain depth
+    times retries, and lock order made it vary between runs.
+  - **Busy, not stuck.** `dependency_edge_locked` classifies the edge out
+    of a blocked record: its registered producer, a pending wake (the
+    dependency is terminal but the record not yet woken), or the end of
+    the route. The exact route, the background probe and the causal-child
+    probe report a pending wake as `Busy`, so the client waits on the work
+    generation. Test:
+    `exact_walks_report_a_blocked_record_awaiting_its_wake_as_busy`.
+  - **Retired tips.** When a worker retires the route's tip, validation
+    returns the route to its nearest registered parent instead of
+    rebuilding it from the root; only a route with one parent recovered
+    before. At `chain_w4_800`, complete searches fell from 9,197 to 1,193
+    and records visited from 7.3 M to 0.96 M.
+  - **Profiling.** `family NAME BASE WORKERS` in `scripts/profile.sh` runs
+    a family with background workers; `chain_w4` is `chain` at four. The
+    JSON report now gives exact-route fallbacks by reason.
+  - Results, instructions and CPU time:
+
+    | Workload | Before | After | No workers |
+    | --- | ---: | ---: | ---: |
+    | `chain_w4_200` | 3,571 M, 1.6 s | 1,239 M, 0.68 s | 1,183 M, 0.28 s |
+    | `chain_w4_400` | 59,684 M, 21.9 s | 2,579 M, 1.31 s | 2,429 M, 0.56 s |
+    | `chain_w4_800` | 108 to 283 s | 5,783 M, 2.72 s | 5,356 M, 1.20 s |
+
+    Workloads without workers are unchanged (`countdown_800` 2,226 M).
+    What remains is `perf-worker-route-walks`.
 
 - **Access-region cost** (`perf-access-region-cost`), 2026-10-09.
   - **Cause.** Every outer access region entered and left the collector's
