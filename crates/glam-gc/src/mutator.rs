@@ -63,10 +63,18 @@ impl<'heap> Mutator<'heap> {
     /// });
     /// ```
     pub fn allocator<T: Trace>(&self) -> Result<Allocator<'_, T>, UnsupportedLayout> {
-        let metadata = metadata_for::<T>();
-        let geometry = RunGeometry::derive(metadata.layout(), metadata.requested_slot_size())
-            .map_err(UnsupportedLayout::from_validated_geometry)?;
-        let class = self.heap.discover_class(metadata, geometry);
+        let class = match self.cache.cached_class::<T>(self.heap) {
+            Some(class) => class,
+            None => {
+                let metadata = metadata_for::<T>();
+                let geometry =
+                    RunGeometry::derive(metadata.layout(), metadata.requested_slot_size())
+                        .map_err(UnsupportedLayout::from_validated_geometry)?;
+                let class = self.heap.discover_class(metadata, geometry);
+                self.cache.remember_class(&class);
+                class
+            }
+        };
         Ok(Allocator {
             heap: self.heap.as_ref(),
             cache: &self.cache,

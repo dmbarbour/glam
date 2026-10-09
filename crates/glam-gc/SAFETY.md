@@ -547,6 +547,12 @@ the separate liveness and exactly-once obligations at each call site.
   Collector-private `AllocationClass<T>` values carry a non-owning heap pointer,
   exact metadata address, dense class ID, and a clone of that stable frontier
   cell. They retain neither the heap nor any managed allocation.
+- Each thread's heap cache remembers the classes it resolved, by managed
+  type: metadata address, dense ID and frontier cell, without a heap pointer.
+  A heap never removes a class, so an entry stays valid for the heap's life;
+  it dies with the thread's cache record. Acquiring an allocator for a
+  remembered type takes neither the metadata registry nor the managed-data
+  mutex.
 - A public `Allocator<'mutator, T>` is constructible only through an admitted
   `Mutator` after metadata and geometry agreement. Its real heap/cache borrows
   make reuse after that region impossible in safe Rust. Repeated scoped

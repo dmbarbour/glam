@@ -1,4 +1,5 @@
 use crate::trusted_hash::TrustedHashMap;
+use std::any::TypeId;
 use std::cell::RefCell;
 use std::num::NonZeroU64;
 use std::ptr::NonNull;
@@ -9,6 +10,7 @@ use std::sync::{Arc, Weak};
 use crate::{
     Trace,
     arena::{RunAddress, RunLocation},
+    class::{AllocationClass, AllocationClassShared, ObjectMetadata},
     heap::{HeapInner, HeldAdmission, MutatorAdmission},
     run::{AllocationClassId, RunGeometry},
 };
@@ -169,9 +171,21 @@ fn cursor_slot(class_id: AllocationClassId) -> usize {
         .expect("bounded cursor slot always fits usize")
 }
 
+/// A class this thread already resolved for its heap. A heap never removes a
+/// class, so an entry stays valid for the heap's lifetime.
+struct CachedClass {
+    metadata: &'static ObjectMetadata,
+    id: AllocationClassId,
+    shared: Arc<AllocationClassShared>,
+}
+
 struct ThreadHeapState {
     heap: Weak<HeapInner>,
     recursive_depth: usize,
+    /// Classes by managed type, so acquiring an allocator for a known type
+    /// takes neither the process-wide metadata registry nor the heap's data
+    /// mutex.
+    classes: TrustedHashMap<TypeId, CachedClass>,
     /// The outer admission of a held region (`Heap::with_held_region`),
     /// while one is active and not yet released.
     held: Option<HeldAdmission>,
@@ -248,6 +262,7 @@ impl ThreadHeapState {
         Self {
             heap: Arc::downgrade(heap),
             recursive_depth: 0,
+            classes: TrustedHashMap::default(),
             held: None,
             captured_epoch,
             cursors: ClassCursorCache::default(),
@@ -375,6 +390,29 @@ impl ThreadCacheHandle {
             return Err(value);
         };
         cursor.try_allocate_with(value, before_initialize)
+    }
+
+    /// The class this thread resolved earlier for `T` in its heap, if any.
+    pub(crate) fn cached_class<T: Trace>(&self, heap: &HeapInner) -> Option<AllocationClass<T>> {
+        let state = self.state.borrow();
+        let class = state.classes.get(&TypeId::of::<T>())?;
+        Some(AllocationClass::new(
+            heap,
+            class.metadata,
+            class.id,
+            Arc::clone(&class.shared),
+        ))
+    }
+
+    pub(crate) fn remember_class<T: Trace>(&self, class: &AllocationClass<T>) {
+        self.state.borrow_mut().classes.insert(
+            TypeId::of::<T>(),
+            CachedClass {
+                metadata: class.metadata(),
+                id: class.id(),
+                shared: Arc::clone(class.shared()),
+            },
+        );
     }
 
     pub(crate) fn install(&self, cursor: AllocationCursor) {

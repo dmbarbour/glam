@@ -6963,6 +6963,34 @@ mod tests {
     }
 
     #[test]
+    fn a_thread_resolves_each_class_through_the_heap_once() {
+        let heap = Heap::new();
+        let _ = allocate(&heap, 1_u64);
+        let _ = allocate(&heap, 2_u64);
+        let metrics = heap.metrics();
+        assert_eq!(metrics.cold_class_discoveries(), 1);
+        assert_eq!(metrics.retained_class_lookups(), 0);
+
+        // Another thread has its own cache, so it looks the class up once.
+        std::thread::spawn({
+            let heap = heap.clone();
+            move || {
+                let _ = allocate(&heap, 3_u64);
+                let _ = allocate(&heap, 4_u64);
+            }
+        })
+        .join()
+        .unwrap();
+        assert_eq!(heap.metrics().retained_class_lookups(), 1);
+
+        // Releasing this thread's caches forgets its classes too.
+        assert_eq!(Heap::release_current_thread_caches(), 1);
+        let _ = allocate(&heap, 5_u64);
+        assert_eq!(heap.metrics().retained_class_lookups(), 2);
+        assert_eq!(heap.metrics().cold_class_discoveries(), 1);
+    }
+
+    #[test]
     fn c7_allocation_metrics_batch_hot_path_observations_per_region() {
         let heap = Heap::new();
         heap.with_mutator(|mutator| {
@@ -6992,7 +7020,9 @@ mod tests {
         assert_eq!(metrics.recycled_run_activations(), 0);
         assert_eq!(metrics.allocation_classes(), 1);
         assert_eq!(metrics.cold_class_discoveries(), 1);
-        assert_eq!(metrics.retained_class_lookups(), 1);
+        // The thread's class cache serves the second allocator acquisition
+        // without a heap lookup.
+        assert_eq!(metrics.retained_class_lookups(), 0);
         assert_eq!(metrics.assigned_slot_capacity(), geometry.slot_count);
         assert_eq!(metrics.allocated_slots(), 71);
         assert_eq!(metrics.partial_run_free_slots(), geometry.slot_count - 71);

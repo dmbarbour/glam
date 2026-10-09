@@ -85,8 +85,17 @@ Remedies: a per-family static or per-thread class cache keyed by metadata
 address, shared by allocators and roots; register fewer transient roots
 (code inside one access region can use edges); and pool `RootCell`s.
 On 2026-10-09 class discovery was still about 4% of `countdown_800`
-(`discover_class_with`, `RunGeometry::derive`, `metadata_for_with`). The
-class cache may later move into a hold (`gc-hold-class-cache`).
+(`discover_class_with`, `RunGeometry::derive`, `metadata_for_with`).
+
+Progress:
+- **Class cache, done.** Each thread's heap cache remembers resolved
+  classes by type, so a remembered type's allocator takes neither the
+  metadata registry, the geometry derivation, nor the heap's data mutex.
+  Instructions fell 4.7% (`countdown_800`), 4.4% (`sum_800`), 4.2%
+  (`chain_800`), 4.0% (`append_walk_800`), 3.2% (`hello_elf`) and 0.7%
+  (`list_map_2000`). The cache may later move into a hold
+  (`gc-hold-class-cache`).
+- **Root registration**, open.
 
 ### `list_map` growth (`perf-list-map-growth`)
 
