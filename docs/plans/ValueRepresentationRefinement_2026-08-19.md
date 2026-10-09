@@ -85,10 +85,14 @@ Root registration is the clearest single source, and is part of
 and dictionaries are still `Arc` structure. Each collection traces them,
 but they occupy no managed runs, so they do not raise the next collection's
 threshold. A program that holds a growing list collects at a rate set by
-its managed allocation, and each collection traces the whole list. This is
-one cause of `append_walk`'s collection growth, `perf-collection-growth` in
-the [structural overheads plan](StructuralOverheads_2026-10-08.md). Managed
-list nodes would count toward the threshold.
+its managed allocation, and each collection traces the whole list:
+`append_walk` collects 4, 8 and 14 times at 800, 1,600 and 3,200 items.
+Managed list nodes would count toward the threshold, so that collections
+grow with the live data rather than with the run. Generational collection
+is the eventual mitigation for long-lived structure that every full
+collection traces (maintainer, 2026-10-09). The cost of each collection is
+`perf-collection-growth` in the
+[structural overheads plan](StructuralOverheads_2026-10-08.md).
 
 The eventual representation should separate:
 

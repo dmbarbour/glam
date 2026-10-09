@@ -5,7 +5,7 @@ Status: active, as the `perf-structural-overheads` step of the
 `perf-admission-wakeups`, `perf-idle-wakeups`, `perf-fast-id-hashing`,
 `perf-net-builder-wired-ports`, `perf-scaling-workloads`,
 `perf-list-front-walk` and `perf-list-leaf-walk`. Next:
-`perf-collection-growth`.
+`perf-access-region-cost`.
 
 ## Purpose
 
@@ -66,30 +66,6 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 
 ## Open Steps, in Order
 
-### Collection growth (`perf-collection-growth`)
-
-Found 2026-10-09 by `append_walk` at four-times sizes (800 to 3,200
-items), whose instructions grow with exponent 1.70 while every counter
-grows linearly. Outside collection the workload is linear: its CPU time
-less collection time grows 1.95 times per doubling. Collection takes 174,
-789 and 3,829 ms at the three sizes, 45% of CPU time at 3,200. Both the
-number of collections (4, 8 and 14) and the cost of each (43, 99 and
-273 ms) grow:
-- **Count.** Collection is triggered by managed run assignment. The
-  program's list is `Arc` structure, which every collection traces but
-  which occupies no runs, so it does not raise the next threshold (value
-  representation plan, "Current Pressure").
-- **Cost of each.** It grows faster than the live list. A candidate, from
-  reading the code and not yet confirmed: resolving a slot
-  (`resolve_slot_topology_in`, the top symbol at 9.8% self time) checks
-  run membership with `AllocationClassEntry::contains_run`, a linear scan
-  over the class's runs, for every marked edge and every root
-  validation.
-
-The step starts by profiling collections alone to confirm the per-collection
-cause. Any program that holds a large live structure pays this, which is
-why it leads the open steps.
-
 ### Access-region cost (`perf-access-region-cost`)
 
 Every outer access region enters and leaves the collector's mutator
@@ -114,6 +90,48 @@ Candidate remedies, each measurable alone:
   probes), which could share a region.
 
 This is the largest broad cost: every workload pays it.
+
+### Cost per collection (`perf-collection-growth`)
+
+Found 2026-10-09 by `append_walk` at four-times sizes (800 to 3,200
+items), whose instructions grow with exponent 1.70 while every counter
+grows linearly. Outside collection the workload is linear: its CPU time
+less collection time grows 1.95 times per doubling. Collection takes 174,
+789 and 3,829 ms at the three sizes, 45% of CPU time at 3,200.
+
+Two growths multiply, and this step owns only the second:
+- **Number of collections** (4, 8 and 14). Expected, per the maintainer: a
+  periodic full collection traces every live item, so a program that
+  holds a growing list pays O(n²) over its run. Here the count also grows
+  because the list is `Arc` structure that occupies no managed runs, so it
+  never raises the survivor-scaled threshold; managed list nodes in the
+  value representation plan would count it. Generational collection is
+  the eventual mitigation; neither belongs to this step.
+- **Cost of each collection** (43, 99 and 273 ms). This grows 2.3 and 2.8
+  times per doubling, faster than the live list it traces, so something
+  beyond tracing grows with the heap. A candidate, from reading the code
+  and not yet confirmed: resolving a slot (`resolve_slot_topology_in`, the
+  top symbol at 9.8% self time) checks run membership with
+  `AllocationClassEntry::contains_run`, a linear scan over the class's
+  runs, for every marked edge and every root validation.
+
+The step starts by profiling collections alone to confirm the cause.
+
+### `list_map` growth (`perf-list-map-growth`)
+
+Split from `perf-interface-demand-walk` on 2026-10-09, since nothing yet
+shows that walk is the cause. After `perf-list-front-walk`, `list_map` is
+still quadratic (exponent 1.92 from 2,000 to 8,000 items) at half its
+former cost; its reductions, accesses, roots and allocations all grow
+linearly, so the growth is in the cost per operation. At `list_map_8000`
+the largest self costs are `memset` (7%), `NetWhnfMachine::poll_in`
+(5.8%), `Topology::check` (4.5%) and `RuntimeNet::wire` (4.3%). Before
+`perf-list-front-walk`, at `list_map_4000`, the interface walk's node
+lookups and hash-set inserts were almost 40% of samples.
+
+The step starts by profiling two sizes to find which costs grow, then
+decides whether the remedy is `perf-interface-demand-walk` or a step of
+its own.
 
 ### Free bindings in lowering (`perf-lowering-free-bindings`)
 
@@ -146,12 +164,8 @@ Candidate remedies: detect cycles without allocating (Brent's algorithm),
 and remember the frontier found for an interface, revalidated against the
 net's topology revision, so that a poll resumes where the last one stopped.
 
-After `perf-list-front-walk`, `list_map` is still quadratic (exponent 1.92
-from 2,000 to 8,000 items) at half its former cost. At `list_map_8000` the
-largest self costs are `memset` (7%), `NetWhnfMachine::poll_in` (5.8%),
-`Topology::check` (4.5%) and `RuntimeNet::wire` (4.3%). Which of them
-grows has not been measured yet; profile two sizes before choosing a
-remedy.
+`list_map` is no longer attributed to this walk; see
+`perf-list-map-growth`.
 
 ### Module definition demand (`perf-module-definition-cost`)
 
@@ -313,7 +327,7 @@ of reflection effects would.
   `list_sum`'s exponent fell from 2.95 to 1.39 (400 to 1,600 items); the
   rest is `len` counting item by item, `perf-list-leaf-walk`.
   `list_map` remains quadratic (1.92 at 2,000 to 8,000); see
-  `perf-interface-demand-walk`.
+  `perf-list-map-growth`.
 
 - **Scaling workloads** (`perf-scaling-workloads`), 2026-10-08.
   `scripts/profile.sh` ran each family at one size, where a quadratic looks
@@ -416,7 +430,7 @@ between the two largest sizes:
   Without the parentheses (else-if chains, `then if …`) parsing stays
   linear. This belongs to the parser plan's `parser-keyword-frames`.
 - **Superlinear, each named in a step above:** `list_sum` and `list_map`
-  (`perf-list-front-walk`, `perf-interface-demand-walk`), `do_chain` and
+  (`perf-list-front-walk`, `perf-list-map-growth`), `do_chain` and
   `dict_lookup` (`perf-lowering-free-bindings`), `chain`
   (`perf-module-definition-cost`).
 - **Mild:** nested brackets cost 77 K instructions per level at depth

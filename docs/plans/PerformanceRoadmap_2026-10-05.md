@@ -182,10 +182,11 @@ gains this consequence when it lands.
      `perf-scaling-workloads`, `perf-list-front-walk` and
      `perf-list-leaf-walk`. The scheduler round trips were
      `perf-evaluation-recursion`.
-   - *Open, in order:* `perf-collection-growth`, `perf-access-region-cost`,
-     `perf-lowering-free-bindings`, `perf-interface-demand-walk`,
-     `perf-module-definition-cost`, `perf-allocation-path`,
-     `perf-runtime-net-attach` and `perf-reflection-step-cost`.
+   - *Open, in order:* `perf-access-region-cost`, `perf-collection-growth`,
+     `perf-list-map-growth`, `perf-lowering-free-bindings`,
+     `perf-interface-demand-walk`, `perf-module-definition-cost`,
+     `perf-allocation-path`, `perf-runtime-net-attach` and
+     `perf-reflection-step-cost`.
    - *Experiments:* `perf-coalesced-wakeups` (open) and
      `perf-mimalloc-allocator` (not adopted).
 

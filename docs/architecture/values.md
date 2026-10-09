@@ -306,5 +306,7 @@ is in [`VERIFY.md`](../../crates/glam-gc/VERIFY.md).
   yield, no data beside a parallel root, no `CompatibilityValueEdges`, and
   rewritable persistent edges.
 - Accepted: a task result holding its own handle lives until teardown;
-  retired external owners wait for a host call. Weak references and
-  generational collection are not planned.
+  retired external owners wait for a host call. Weak references are not
+  planned. Generational collection is not planned either, but is the
+  eventual mitigation for long-lived structure that every full collection
+  traces (maintainer, 2026-10-09).
