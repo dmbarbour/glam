@@ -1265,6 +1265,22 @@ maps the short names used here to file names.
   `crates/glam-gc/SAFETY.md` "Regional Mutator Admission Invariants".
 - **Recorded in:** structural overheads plan, `gc-bounded-collection-wait`.
 
+### Holding a heap is separate from accessing it
+`explicit-heap-holds` · 2026-10-09 · maintainer · accepted (planned)
+- **Context:** any `with_mutator` deep in a call stack may become an outer
+  entry, so the points where admission can block on a collection are not
+  enumerable. Arbitrary recursive entry serves almost no Glam use.
+- **Decision:** a hold is the only admission, taken explicitly at
+  boundaries, one per thread; a second hold panics. Access requires a hold
+  and panics without one in every build; its token derives from the
+  thread-local hold, and nested accesses are plain scope proofs.
+  `Hold::suspend` is a scoped GC safepoint, valid only with no access
+  open. Holds cache allocation classes.
+- **Consequences:** about 80 production and 290 test sites need explicit
+  holds, so the work is its own plan, after lower-hanging steps. It
+  replaces `gc-two-level-mutator-access`.
+- **Recorded in:** explicit heap holds plan.
+
 ### Clear mark bitmaps before marking
 `clear-before-mark-bitmaps` · 2026-08-22 · agent · accepted
 - **Context:** the collector's correctness surface should stay small.
@@ -1371,6 +1387,7 @@ Short names used under **Recorded in**, with their files under `docs/`.
 | evaluation-recursion plan | `plans/EvaluationRecursionPerformance_2026-10-04.md` |
 | structural overheads plan | `plans/StructuralOverheads_2026-10-08.md` |
 | fast checks plan | `plans/FastChecks_2026-10-09.md` |
+| explicit heap holds plan | `plans/ExplicitHeapHolds_2026-10-09.md` |
 | C2C review | `reviews/GarbageCollectorC2C_2026-08-22.md` |
 | C6 review | `reviews/GarbageCollectorC6_2026-08-24.md` |
 | C8 review | `reviews/GarbageCollectorC8_2026-10-03.md` |

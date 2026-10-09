@@ -185,15 +185,15 @@ gains this consequence when it lands.
      `gc-one-heap-per-thread`, `perf-quantum-region` and
      `gc-bounded-collection-wait`. The scheduler round trips were
      `perf-evaluation-recursion`.
-   - *Open, in order:* `gc-two-level-mutator-access`,
-     `gc-thread-local-heap-context`,
-     `perf-list-map-growth`,
+   - *Open, in order:* `perf-allocation-path`, `perf-list-map-growth`,
      `perf-lowering-free-bindings`,
      `perf-interface-demand-walk`, `perf-module-definition-cost`,
-     `perf-allocation-path`, `perf-runtime-net-attach`,
+     `perf-runtime-net-attach`,
      `perf-reflection-step-cost` and `perf-worker-route-walks`.
    - *Experiments:* `perf-coalesced-wakeups` (open) and
      `perf-mimalloc-allocator` (not adopted).
+   - *Planned separately:* [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md)
+     separates holding a heap from accessing it, after lower-hanging work.
 
 6. **Representations**, two parallel steps:
    - **Values** (`perf-value-representation`):

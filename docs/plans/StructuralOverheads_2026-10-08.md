@@ -7,7 +7,9 @@ Status: active, as the `perf-structural-overheads` step of the
 `perf-list-front-walk`, `perf-list-leaf-walk`, `perf-access-region-cost`,
 `perf-worker-scaling`, `perf-collection-growth`,
 `gc-one-heap-per-thread`, `perf-quantum-region` and
-`gc-bounded-collection-wait`. Next: `gc-two-level-mutator-access`.
+`gc-bounded-collection-wait`. Next: `perf-allocation-path`.
+`gc-two-level-mutator-access` and `gc-thread-local-heap-context` moved to
+[Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md).
 
 ## Purpose
 
@@ -68,23 +70,23 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 
 ## Open Steps, in Order
 
-### Two-level mutator access (`gc-two-level-mutator-access`)
+### Allocation and rooting path (`perf-allocation-path`)
 
-Arbitrary recursive same-heap entry was introduced for possible Glam uses
-that never appeared: before held regions, Glam made about 104 recursive
-entries per run (maintainer, 2026-10-09). Held regions now need exactly one
-level beneath them. Restrict entry to a held region with plain accesses
-inside it, and reject nesting a mutator inside a mutator, which may
-simplify the collector's reasoning and tests.
+Holistic V1, listed in the value-representation plan's V-1 prework, plus
+the root registrations measured since:
+- **Class lookup per allocation.** Every allocator acquisition locks the
+  process-wide metadata registry (`metadata_for`), derives the run
+  geometry again, and locks the heap's data mutex (`discover_class`).
+  These three are about 4.4% of `chain_400`'s samples.
+- **Root registration.** Each registered root allocates an
+  `Arc<RootCell>`, and `countdown_400` registers about 100,000.
 
-### Heap context from thread-local storage (`gc-thread-local-heap-context`)
-
-With one heap per thread, the current heap is known from thread-local
-storage, so carriers need not thread heap identity through every frame
-(maintainer, 2026-10-09). Investigate the trade: a thread-local lookup
-against passing heap references down the stack, and which same-heap
-validations it makes redundant. Pairs with
-`gc-two-level-mutator-access`.
+Remedies: a per-family static or per-thread class cache keyed by metadata
+address, shared by allocators and roots; register fewer transient roots
+(code inside one access region can use edges); and pool `RootCell`s.
+On 2026-10-09 class discovery was still about 4% of `countdown_800`
+(`discover_class_with`, `RunGeometry::derive`, `metadata_for_with`). The
+class cache may later move into a hold (`gc-hold-class-cache`).
 
 ### `list_map` growth (`perf-list-map-growth`)
 
@@ -157,21 +159,6 @@ dictionary (`visit_dict_edges`, 2%).
 The step starts by confirming where the reflection steps come from and
 what the boundary does per definition, then asks whether a module without
 `refl` tasks can skip it.
-
-### Allocation and rooting path (`perf-allocation-path`)
-
-Holistic V1, listed in the value-representation plan's V-1 prework, plus
-the root registrations measured since:
-- **Class lookup per allocation.** Every allocator acquisition locks the
-  process-wide metadata registry (`metadata_for`), derives the run
-  geometry again, and locks the heap's data mutex (`discover_class`).
-  These three are about 4.4% of `chain_400`'s samples.
-- **Root registration.** Each registered root allocates an
-  `Arc<RootCell>`, and `countdown_400` registers about 100,000.
-
-Remedies: a per-family static or per-thread class cache keyed by metadata
-address, shared by allocators and roots; register fewer transient roots
-(code inside one access region can use edges); and pool `RootCell`s.
 
 ### Operator nets (`perf-runtime-net-attach`)
 

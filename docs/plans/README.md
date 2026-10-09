@@ -51,6 +51,9 @@ its plan's topic, and unique across all docs. Examples:
 - [`NetPolarityChecker_2026-10-05.md`](NetPolarityChecker_2026-10-05.md)
   requires every interaction net to be polarized, with a `+` exposed port,
   and checks it before N8 and net fuzzing.
+- [`ExplicitHeapHolds_2026-10-09.md`](ExplicitHeapHolds_2026-10-09.md)
+  separates holding a heap from accessing it, so admission happens only at
+  explicit boundaries. Planned, not started.
 - [`FastChecks_2026-10-09.md`](FastChecks_2026-10-09.md) keeps
   `scripts/check.sh fast` quick: per-thread test runtimes and an optimized
   dev profile. `test-slow-tier` waits until a test needs it.
