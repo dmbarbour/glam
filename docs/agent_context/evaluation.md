@@ -32,6 +32,11 @@ control-flow overview.
   locks the coordinator there to retire the producer and publish the wait
   terminal. There is no lock-order table yet; moving that coordinator work
   after access closes is a concurrent-GC prerequisite.
+- A thread holds one runtime's managed access at a time: `glam-gc` panics
+  on entering a second heap while the thread holds a mutator for another
+  (`gc-one-heap-per-thread`). Close one runtime's access before entering
+  another's. The rule keeps a collection waiting on one heap from depending
+  on a thread blocked entering a different heap.
 - Shared runtime mutation admission may be taken inside a managed-access
   region; promise publication does. This cannot deadlock because settlement
   never collects, and a pending collection blocks no mutator entry: the

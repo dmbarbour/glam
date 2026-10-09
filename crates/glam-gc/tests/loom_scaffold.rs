@@ -411,42 +411,6 @@ fn lock_free_entry_after_collection_observes_its_work() {
 }
 
 #[test]
-fn reciprocal_nested_admission_passes_uncommitted_requests() {
-    loom::model(|| {
-        let first = Arc::new(Coordinator::new(false));
-        let second = Arc::new(Coordinator::new(false));
-        admit_mutator(&first);
-        admit_mutator(&second);
-        request_collection(&first);
-        request_collection(&second);
-
-        let first_then_second = loom::thread::spawn({
-            let first = Arc::clone(&first);
-            let second = Arc::clone(&second);
-            move || {
-                assert!(!admit_mutator(&second));
-                release_mutator(&second);
-                release_mutator(&first);
-            }
-        });
-        let second_then_first = loom::thread::spawn({
-            let first = Arc::clone(&first);
-            let second = Arc::clone(&second);
-            move || {
-                assert!(!admit_mutator(&first));
-                release_mutator(&first);
-                release_mutator(&second);
-            }
-        });
-
-        first_then_second.join().unwrap();
-        second_then_first.join().unwrap();
-        assert_eq!(first.gate.lock().unwrap().active_outer_mutators(), 0);
-        assert_eq!(second.gate.lock().unwrap().active_outer_mutators(), 0);
-    });
-}
-
-#[test]
 fn exclusive_to_finalizer_handoff_never_publishes_an_authority_gap() {
     loom::model(|| {
         let coordinator = Arc::new(Coordinator::new(false));

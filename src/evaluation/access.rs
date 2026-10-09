@@ -607,17 +607,22 @@ mod tests {
             assert!(std::ptr::eq(first_access.values(), &first_scoped));
             assert!(first_access.belongs_to(&first));
             assert!(!first_access.belongs_to(&second));
-            second.with_runtime_value_access(|second_access| {
-                assert!(second_access.belongs_to(&second));
-                assert!(!second_access.belongs_to(&first));
-                assert!(first_access.belongs_to(&first));
-            });
+            // A thread holds one runtime's value access at a time.
+            let nested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                second.with_runtime_value_access(|_| {});
+            }));
+            assert!(nested.is_err());
+            assert!(first_access.belongs_to(&first));
+        });
+        second.with_runtime_value_access(|second_access| {
+            assert!(second_access.belongs_to(&second));
+            assert!(!second_access.belongs_to(&first));
         });
 
         assert_eq!(
             glam_gc::Heap::release_current_thread_caches(),
             2,
-            "nested runtime access should create one independent TLS cache per heap"
+            "access to two runtimes in turn should create one independent TLS cache per heap"
         );
     }
 

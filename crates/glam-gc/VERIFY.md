@@ -57,7 +57,9 @@ past the same exhausted-frontier observation and verify one synchronized
 advance or publication plus seven winner-frontier rechecks. C3 adds Loom models
 for mutator-exit visibility, unique idle-entry election, reciprocal nested
 admission with requests latched, and the no-gap
-exclusive-to-finalizer-to-entry handoff. Native forced schedules exercise
+exclusive-to-finalizer-to-entry handoff. `gc-one-heap-per-thread` retired the
+reciprocal model: a thread may no longer hold two heaps' mutators. Native
+forced schedules exercise
 production request epochs, idle-entry and synchronous election, waiter
 coalescing, direct admission transfer, collector-local cache reset, the absence
 of exit-time service, the finalizer mutator, request/pressure acknowledgement,
@@ -878,9 +880,11 @@ behavior.
 
 C7 adds six named worker-shaped fixtures. Three force root handoff, independent
 heap-facade release, immutable-reader drain, and repeated shared-graph
-collection. Three force exhausted allocator reconstruction, cross-heap unwind
-followed by external parking, and bounded allocator/coordinator scale with
-free-run reuse. Every semantic ordering uses barriers or channels; the scale
+collection. Three force exhausted allocator reconstruction, unwind followed
+by external parking, and bounded allocator/coordinator scale with free-run
+reuse. The unwind fixture crossed heaps until `gc-one-heap-per-thread`; it
+now unwinds a recursive region, and the scale fixture enters its second heap
+after leaving the first. Every semantic ordering uses barriers or channels; the scale
 fixture is supplementary composition evidence rather than a substitute for an
 exact schedule.
 
@@ -1151,7 +1155,7 @@ beneath an abstract copy of the coordinator's phases:
   collection;
 - `lock_free_entry_after_collection_observes_its_work`: an entry after the
   bit clears sees the collector's writes;
-- the election, reciprocal-nesting, and handoff models, now over the gate.
+- the election and handoff models, now over the gate.
 
 Four planted faults were each caught: an exit that never takes the lock, a
 count read that does not set `COORDINATED`, a relaxed lock-free entry, and

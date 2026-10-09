@@ -1200,6 +1200,28 @@ maps the short names used here to file names.
   Invariants".
 - **Recorded in:** structural overheads plan, `perf-access-region-cost`.
 
+### A thread holds mutators for one heap at a time
+`one-heap-per-thread` · 2026-10-09 · maintainer · accepted
+- **Context:** a thread could hold mutators for several heaps at once. That
+  nesting is what made a draining collection request too complex
+  (`idle-entry-election-and-condvar-admission`): a thread waiting to enter
+  one heap could hold a mutator another heap's collection waits for. Glam's
+  runtimes never nest heaps, and the collector need serve only Glam.
+- **Decision:** a thread holds mutators for at most one heap at a time,
+  enforced in every build. A thread-local current-heap slot names the heap
+  the thread entered last; preparing an entry for another heap while that
+  one is active panics before any TLS record or admission. The maintainer
+  suggested debug-only enforcement; the slot makes the check one comparison,
+  cheap enough to keep, and also serves repeated entries without a registry
+  lookup. Rejected: supporting nesting, which only tests used.
+- **Consequences:** the cross-heap nesting tests and the reciprocal Loom
+  model retired or became tests of the rule; no production path nested.
+  A collection that holds back new entrants while it waits becomes
+  possible; that is `gc-bounded-collection-wait`, still to be designed.
+- **Rule lives in:** `crates/glam-gc/SAFETY.md` "Regional Mutator Admission
+  Invariants"; `agent_context/evaluation.md` "Values and Forcing".
+- **Recorded in:** structural overheads plan, `gc-one-heap-per-thread`.
+
 ### Clear mark bitmaps before marking
 `clear-before-mark-bitmaps` · 2026-08-22 · agent · accepted
 - **Context:** the collector's correctness surface should stay small.

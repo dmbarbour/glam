@@ -181,10 +181,11 @@ gains this consequence when it lands.
      `perf-fast-id-hashing`, `perf-net-builder-wired-ports`,
      `perf-scaling-workloads`, `perf-list-front-walk`,
      `perf-list-leaf-walk`, `perf-access-region-cost`,
-     `perf-worker-scaling` and `perf-collection-growth`. The scheduler
-     round trips were `perf-evaluation-recursion`.
-   - *Open, in order:* `gc-one-heap-per-thread`,
-     `gc-bounded-collection-wait`, `perf-quantum-region`,
+     `perf-worker-scaling`, `perf-collection-growth` and
+     `gc-one-heap-per-thread`. The scheduler round trips were
+     `perf-evaluation-recursion`.
+   - *Open, in order:* `gc-bounded-collection-wait`,
+     `perf-quantum-region`,
      `perf-list-map-growth`,
      `perf-lowering-free-bindings`,
      `perf-interface-demand-walk`, `perf-module-definition-cost`,

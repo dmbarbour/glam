@@ -277,6 +277,41 @@ type SharedThreadHeapState = Rc<RefCell<ThreadHeapState>>;
 thread_local! {
     static THREAD_HEAPS: RefCell<TrustedHashMap<HeapCacheKey, SharedThreadHeapState>> =
         RefCell::new(TrustedHashMap::default());
+    /// The heap this thread entered last, and its cache state. A thread holds
+    /// mutators for at most one heap at a time, so any active mutator on this
+    /// thread belongs to this heap. Entering it again needs no registry
+    /// lookup.
+    static CURRENT_HEAP: RefCell<Option<(HeapCacheKey, SharedThreadHeapState)>> =
+        const { RefCell::new(None) };
+}
+
+/// The cache state for `heap`, which becomes the thread's current heap.
+///
+/// Panics if the thread holds another heap's mutator: a thread holds
+/// mutators for at most one heap at a time.
+fn enter_current_heap(heap: &Arc<HeapInner>, epoch: AllocationLeaseEpoch) -> SharedThreadHeapState {
+    let key = HeapCacheKey::new(heap);
+    CURRENT_HEAP.with_borrow_mut(|current| {
+        if let Some((current_key, state)) = current.as_ref() {
+            if *current_key == key {
+                return Rc::clone(state);
+            }
+            assert_eq!(
+                state.borrow().recursive_depth,
+                0,
+                "a thread may hold mutators for only one heap at a time"
+            );
+        }
+        let state = THREAD_HEAPS.with_borrow_mut(|registry| {
+            Rc::clone(
+                registry
+                    .entry(key)
+                    .or_insert_with(|| Rc::new(RefCell::new(ThreadHeapState::new(heap, epoch)))),
+            )
+        });
+        *current = Some((key, Rc::clone(&state)));
+        state
+    })
 }
 
 /// A hash-free handle from one active mutator region to its thread cache.
@@ -356,15 +391,7 @@ pub(crate) struct PreparedThreadHeapEntry {
 
 impl PreparedThreadHeapEntry {
     pub(crate) fn prepare(heap: &Arc<HeapInner>, epoch: AllocationLeaseEpoch) -> Self {
-        let key = HeapCacheKey::new(heap);
-        let state = THREAD_HEAPS.with_borrow_mut(|registry| {
-            Rc::clone(
-                registry
-                    .entry(key)
-                    .or_insert_with(|| Rc::new(RefCell::new(ThreadHeapState::new(heap, epoch)))),
-            )
-        });
-
+        let state = enter_current_heap(heap, epoch);
         let outer = {
             let state = state.borrow();
             // The cached `Weak` keeps the heap's allocation, so no other heap
@@ -493,16 +520,27 @@ pub(crate) fn release_current_thread_caches() -> usize {
 
         let released = registry.len();
         registry.clear();
+        CURRENT_HEAP.set(None);
         released
     })
 }
 
 pub(crate) fn thread_has_any_active_mutator() -> bool {
-    THREAD_HEAPS.with_borrow(|registry| {
-        registry
-            .values()
-            .any(|state| state.borrow().recursive_depth != 0)
-    })
+    let active = CURRENT_HEAP.with_borrow(|current| {
+        current
+            .as_ref()
+            .is_some_and(|(_, state)| state.borrow().recursive_depth != 0)
+    });
+    debug_assert_eq!(
+        active,
+        THREAD_HEAPS.with_borrow(|registry| {
+            registry
+                .values()
+                .any(|state| state.borrow().recursive_depth != 0)
+        }),
+        "an active mutator belongs to a heap other than the thread's current heap"
+    );
+    active
 }
 
 pub(crate) fn remove_inactive_thread_cache(heap: &Arc<HeapInner>) {
@@ -517,6 +555,14 @@ pub(crate) fn remove_inactive_thread_cache(heap: &Arc<HeapInner>) {
             "collector cannot remove an active thread cache"
         );
         registry.remove(&key);
+    });
+    CURRENT_HEAP.with_borrow_mut(|current| {
+        if current
+            .as_ref()
+            .is_some_and(|(current_key, _)| *current_key == key)
+        {
+            *current = None;
+        }
     });
 }
 

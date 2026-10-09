@@ -163,24 +163,32 @@ mod tests {
     }
 
     #[test]
-    fn nested_heap_entries_keep_their_authority_separate() {
+    fn a_thread_holds_mutators_for_one_heap_at_a_time() {
         let first_heap = Heap::new();
         let second_heap = Heap::new();
 
         first_heap.with_mutator(|first_mutator| {
-            let first_allocator = first_mutator.allocator::<u64>().unwrap();
-            let first = first_allocator.alloc(11_u64);
-            second_heap.with_mutator(|second_mutator| {
-                let second_allocator = second_mutator.allocator::<u64>().unwrap();
-                let second = second_allocator.alloc(22_u64);
+            let first = first_mutator.allocator::<u64>().unwrap().alloc(11_u64);
+            let nested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                second_heap.with_mutator(|_| {});
+            }))
+            .expect_err("entering a second heap inside the first should panic");
+            assert!(panic_message(nested).contains("only one heap at a time"));
 
-                // SAFETY: each pointer is paired with the mutator for the heap
-                // which allocated it, and both arena allocations are live.
-                let first = unsafe { *first.get_unchecked(first_mutator) };
-                // SAFETY: as above, for the second heap and allocation.
-                let second = unsafe { *second.get_unchecked(second_mutator) };
-                assert_eq!((first, second), (11, 22));
-            });
+            // SAFETY: `first` was allocated by this heap's mutator and is live.
+            assert_eq!(unsafe { *first.get_unchecked(first_mutator) }, 11);
+        });
+
+        // Entered one after the other, each heap keeps its own authority.
+        second_heap.with_mutator(|second_mutator| {
+            let second = second_mutator.allocator::<u64>().unwrap().alloc(22_u64);
+            // SAFETY: `second` was allocated by this heap's mutator and is live.
+            assert_eq!(unsafe { *second.get_unchecked(second_mutator) }, 22);
+        });
+        first_heap.with_mutator(|first_mutator| {
+            let first = first_mutator.allocator::<u64>().unwrap().alloc(33_u64);
+            // SAFETY: as above, for the first heap.
+            assert_eq!(unsafe { *first.get_unchecked(first_mutator) }, 33);
         });
     }
 

@@ -5,8 +5,8 @@ Status: active, as the `perf-structural-overheads` step of the
 `perf-admission-wakeups`, `perf-idle-wakeups`, `perf-fast-id-hashing`,
 `perf-net-builder-wired-ports`, `perf-scaling-workloads`,
 `perf-list-front-walk`, `perf-list-leaf-walk`, `perf-access-region-cost`,
-`perf-worker-scaling` and `perf-collection-growth`. Next:
-`gc-one-heap-per-thread`.
+`perf-worker-scaling`, `perf-collection-growth` and
+`gc-one-heap-per-thread`. Next: `gc-bounded-collection-wait`.
 
 ## Purpose
 
@@ -66,19 +66,6 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 | Coordinator claims, releases and admissions | under 2% |
 
 ## Open Steps, in Order
-
-### One open heap per thread (`gc-one-heap-per-thread`)
-
-A thread may now hold mutators for several heaps at once, which is what
-made a draining collection request too complex
-(`idle-entry-election-and-condvar-admission`). Glam's runtimes never nest
-heaps, and the collector need serve only Glam, so tighten the contract: a
-thread holds at most one heap's outer mutator at a time (maintainer,
-2026-10-09). The maintainer suggested enforcing it in debug builds; a
-thread-local current-heap slot makes the check one comparison, cheap
-enough to keep always, and doubles as the most-recently-used entry for the
-thread-cache lookup (about 1.4% of `countdown_800`). The reciprocal
-cross-heap Loom model and tests become contract tests.
 
 ### Bounded collection wait (`gc-bounded-collection-wait`)
 
@@ -253,6 +240,27 @@ and help only programs with parallel work, so this comes last.
   Allocating less is the better lever.
 
 ## Done
+
+- **One open heap per thread** (`gc-one-heap-per-thread`), 2026-10-09.
+  - **Why.** A thread could hold mutators for several heaps at once, which
+    is what made a draining collection request too complex
+    (`idle-entry-election-and-condvar-admission`). Glam's runtimes never
+    nest heaps, and the collector need serve only Glam, so the contract
+    tightens: a thread holds mutators for at most one heap at a time
+    (maintainer; `one-heap-per-thread` in `docs/Decisions.md`).
+  - **Enforcement, in every build.** A thread-local current-heap slot names
+    the heap the thread entered last. Preparing an entry for another heap
+    while that one is active panics before any TLS record or admission.
+    Entering the current heap again reuses its record without a registry
+    lookup, and `thread_has_any_active_mutator` reads the slot; debug builds
+    check it against the registry.
+  - **Tests.** No production path nested heaps; only tests did. Two became
+    tests of the rule, in `glam-gc` and in glam's access layer. Three that
+    tested nesting itself retired, with the reciprocal Loom model. Three
+    adapted: an unwind fixture now unwinds a recursive region, a scale
+    fixture enters its second heap after leaving the first, and a request
+    survives an unwind on one heap.
+  - Instructions fall 0.8% at `countdown_800` and 0.6% at `hello_elf`.
 
 - **Cost per collection** (`perf-collection-growth`), 2026-10-09.
   - **Found** by `append_walk` at 800 to 3,200 items: instructions grow

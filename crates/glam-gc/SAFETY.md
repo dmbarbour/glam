@@ -460,10 +460,14 @@ the separate liveness and exactly-once obligations at each call site.
 - Recursive same-heap entry observes nonzero thread-local depth and reuses the
   outer coordinator obligation. It remains available while exclusive work is
   requested so an already-admitted mutator can finish its bounded region.
-  Entry into a different heap uses that heap's independent TLS record and
-  admission count. No dependent category is needed: an uncommitted request
-  never blocks cross-heap entry, while an authoritative `Exclusive` phase
-  blocks every outer entrant.
+- A thread holds mutators for at most one heap at a time; Glam's runtimes
+  never nest heaps, and the collector serves only Glam (maintainer,
+  2026-10-09). A thread-local current-heap slot names the heap the thread
+  entered last, so any active mutator on the thread belongs to it.
+  Preparing an entry for another heap while that one is active panics before
+  it creates a TLS record or takes admission; entering the current heap again
+  reuses its record without a registry lookup. A collection can therefore
+  never wait on a thread that is itself blocked entering another heap.
 - Entry destruction first decrements recursive depth and makes the outer cache
   quiescent, then retires the coordinator obligation with a Release
   decrement. Consequently, observing zero active mutators through the gate's
@@ -473,8 +477,7 @@ the separate liveness and exactly-once obligations at each call site.
 - Outermost exit only makes its TLS cache inactive and retires its
   coordinator obligation. Only while `COORDINATED` is set does it take the
   mutex, waking waiters when the active count reaches zero. It neither scans
-  TLS records nor services collection. This makes nested cross-heap exit
-  identical to every other outer exit.
+  TLS records nor services collection.
 - Before exclusive work, the collecting thread clears its complete inactive
   cursor cache for the target heap. The collector-to-finalizer handoff then
   changes `Exclusive` directly to `Finalizing` while installing one active
@@ -609,9 +612,9 @@ the separate liveness and exactly-once obligations at each call site.
   registry, while `Heap::release_current_thread_caches` validates that every
   recursive depth is zero before clearing all records without heap access.
 - Same-heap recursive regions share one TLS entry and checked depth. An RAII
-  entry guard balances normal return and unwinding. Different heaps use
-  independent records even when their mutator regions are nested on one host
-  thread.
+  entry guard balances normal return and unwinding. Different heaps entered
+  in turn on one thread keep independent records; their regions never
+  nest.
 - Only outer entry compares the heap's current lease epoch. Mismatch clears the
   entire cursor array and captures the new epoch. Clearing, collision eviction,
   ordinary exit, and TLS destruction do not dereference runs, return leases, or
@@ -1407,8 +1410,8 @@ mutation closure runs.
   five ordinary traits. The unit test
   `persistent_edge_standard_trait_cutover_is_closed` rejects their
   reintroduction, or a `ptr_eq`, in production source.
-  Unit tests cover pointer identity, cross-thread handle transfer, nested
-  separate heaps, debug rejection of wrong heap and representation, exact
+  Unit tests cover pointer identity, cross-thread handle transfer, one heap
+  per thread, debug rejection of wrong heap and representation, exact
   recursive edge sequences with duplicate pointers, full retracing after an
   injected visitor panic, exact edge replacement, and rejection before
   foreign-heap mutation.
@@ -1423,14 +1426,13 @@ mutation closure runs.
   repeated initialization.
 - C3 tests force class discovery behind exclusive admission,
   prepare/admit/activate state, rollback before activation, same-heap recursive
-  entry with a request latched, independent cross-heap counts, authoritative
-  exclusion of fresh outer entry, mutator-exit visibility, idle-entry election,
-  direct admission handoff, collector-cache reset, request coalescing,
-  any-mutator synchronous rejection, reciprocal nested entry, already-exclusive
-  targets, no exit-time service, the no-gap finalizer handoff, pressure
-  acknowledgement, and panic restoration. Coordinator Loom models cover
-  visibility, unique idle-entry election, reciprocal requested-heap admission,
-  and exclusive-to-finalizer-to-entry authority transfer.
+  entry with a request latched, one heap per thread, authoritative exclusion
+  of fresh outer entry, mutator-exit visibility, idle-entry election, direct
+  admission handoff, collector-cache reset, request coalescing, any-mutator
+  synchronous rejection, no exit-time service, the no-gap finalizer handoff,
+  pressure acknowledgement, and panic restoration. Coordinator Loom models
+  cover visibility, unique idle-entry election, and
+  exclusive-to-finalizer-to-entry authority transfer.
 - C4A tests the root handle's one-word and `Send + Sync` contracts, exact
   allocated-slot and representation validation, all-build foreign-heap
   rejection during construction and access, later-region and cross-thread
@@ -1560,9 +1562,10 @@ create no competing semantic rules.
   then finalizes. Allocation requires mutator authority, so no allocation can
   race a trace or sweep. Allocated payloads never move.
 - **One heap per runtime; no cross-heap edge.** In Glam each
-  `EvaluationRuntime` value domain owns one heap. Mutator authority, recursive
-  depth, and allocation caches are heap-qualified even when one thread holds
-  several heaps. Root construction and access reject a foreign heap in every
+  `EvaluationRuntime` value domain owns one heap, and a thread holds at most
+  one heap's mutator at a time. Mutator authority, recursive depth, and
+  allocation caches are heap-qualified. Root construction and access reject a
+  foreign heap in every
   build. Tracing rejects a foreign, stale, interior, or unallocated edge before
   dispatch. Debug access and the mutation gateways validate ownership.
 - **Roots are explicit; there is no stack scan.** Only registered `Root<T>`

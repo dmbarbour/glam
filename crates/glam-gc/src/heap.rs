@@ -513,13 +513,15 @@ impl Heap {
     /// Runs `operation` inside a scoped mutator region for this heap.
     ///
     /// The outermost entry obtains one coordinator admission obligation.
-    /// Recursive same-heap entries reuse that obligation, while entries into
-    /// different heaps remain independent.
+    /// Recursive same-heap entries reuse that obligation. A thread holds
+    /// mutators for at most one heap at a time; different heaps may be
+    /// entered in turn.
     ///
     /// # Panics
     ///
-    /// Panics if a prior collection crossed an irreversible mutation boundary
-    /// and then panicked, permanently poisoning this heap.
+    /// Panics if this thread holds another heap's mutator, before entering
+    /// this heap. Panics if a prior collection crossed an irreversible
+    /// mutation boundary and then panicked, permanently poisoning this heap.
     pub fn with_mutator<R>(&self, operation: impl for<'heap> FnOnce(&Mutator<'heap>) -> R) -> R {
         self.with_mutator_after_admission(|| {}, operation)
     }
@@ -5777,24 +5779,26 @@ mod tests {
     }
 
     #[test]
-    fn c7_external_blocking_after_nested_unwind_holds_no_gc_obligation() {
-        let outer = Heap::new();
-        let nested = Heap::new();
+    fn c7_external_blocking_after_recursive_unwind_holds_no_gc_obligation() {
+        let heap = Heap::new();
         let (parked_tx, parked_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let worker = std::thread::spawn({
-            let outer = outer.clone();
-            let nested = nested.clone();
+            let heap = heap.clone();
             move || {
                 let panic = catch_unwind(AssertUnwindSafe(|| {
-                    outer.with_mutator(|_| {
-                        nested.with_mutator(|mutator| {
+                    heap.with_mutator(|_| {
+                        heap.with_mutator(|mutator| {
                             let _ = mutator.allocator::<u64>().unwrap().alloc(7);
-                            panic!("injected cross-heap worker unwind");
+                            panic!("injected recursive worker unwind");
                         });
                     });
-                }));
-                assert!(panic.is_err());
+                }))
+                .expect_err("the injected unwind should escape both regions");
+                assert_eq!(
+                    panic.downcast_ref::<&str>(),
+                    Some(&"injected recursive worker unwind")
+                );
                 assert!(!thread_has_any_active_mutator());
                 parked_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
@@ -5803,10 +5807,9 @@ mod tests {
         parked_rx.recv().unwrap();
 
         // The worker is still externally parked, but its regional obligations
-        // ended during unwind. Neither heap may confuse that host wait for an
+        // ended during unwind. The heap must not confuse that host wait for an
         // admitted mutator.
-        assert_eq!(outer.collect_full().unwrap().epoch(), 1);
-        assert_eq!(nested.collect_full().unwrap().epoch(), 1);
+        assert_eq!(heap.collect_full().unwrap().epoch(), 1);
 
         release_tx.send(()).unwrap();
         worker.join().expect("externally parked worker panicked");
@@ -5818,12 +5821,12 @@ mod tests {
         const VALUES_PER_WORKER: usize = 384;
 
         let heap = Heap::new();
-        let nested = Heap::new();
+        let second = Heap::new();
         let start = Arc::new(Barrier::new(WORKERS + 1));
         let workers = (0..WORKERS)
             .map(|worker_index| {
                 let heap = heap.clone();
-                let nested = nested.clone();
+                let second = second.clone();
                 let start = Arc::clone(&start);
                 std::thread::spawn(move || {
                     start.wait();
@@ -5833,12 +5836,12 @@ mod tests {
                             let value = worker_index * VALUES_PER_WORKER + offset;
                             let _ = allocator.alloc(value as u64);
                         }
-                        nested.with_mutator(|nested_mutator| {
-                            let _ = nested_mutator
-                                .allocator::<u64>()
-                                .unwrap()
-                                .alloc(worker_index as u64);
-                        });
+                    });
+                    second.with_mutator(|second_mutator| {
+                        let _ = second_mutator
+                            .allocator::<u64>()
+                            .unwrap()
+                            .alloc(worker_index as u64);
                     });
                 })
             })
@@ -5866,9 +5869,9 @@ mod tests {
             free_before_reuse.contains(&location)
         }));
 
-        // The independent nested heap remains coordinated by its own request
-        // and collection epoch.
-        assert_eq!(nested.collect_full().unwrap().reclaimed_slots(), WORKERS);
+        // The second heap, which each worker entered after leaving the
+        // first, remains coordinated by its own request and collection epoch.
+        assert_eq!(second.collect_full().unwrap().reclaimed_slots(), WORKERS);
     }
 
     #[test]
@@ -6032,160 +6035,25 @@ mod tests {
     }
 
     #[test]
-    fn reciprocal_nested_entries_pass_two_uncommitted_collection_requests() {
-        let first = Heap::new();
-        let second = Heap::new();
-        let active = Arc::new(Barrier::new(3));
-        let enter_nested = Arc::new(Barrier::new(3));
-        let nested_entries = Arc::new(AtomicUsize::new(0));
+    fn caught_unwind_preserves_request_for_a_later_entry() {
+        let heap = Heap::new();
 
-        let first_then_second = std::thread::spawn({
-            let first = first.clone();
-            let second = second.clone();
-            let active = Arc::clone(&active);
-            let enter_nested = Arc::clone(&enter_nested);
-            let nested_entries = Arc::clone(&nested_entries);
-            move || {
-                first.with_mutator(|_| {
-                    active.wait();
-                    enter_nested.wait();
-                    second.with_mutator(|_| {
-                        nested_entries.fetch_add(1, Ordering::Relaxed);
-                    });
-                });
-            }
-        });
-        let second_then_first = std::thread::spawn({
-            let first = first.clone();
-            let second = second.clone();
-            let active = Arc::clone(&active);
-            let enter_nested = Arc::clone(&enter_nested);
-            let nested_entries = Arc::clone(&nested_entries);
-            move || {
-                second.with_mutator(|_| {
-                    active.wait();
-                    enter_nested.wait();
-                    first.with_mutator(|_| {
-                        nested_entries.fetch_add(1, Ordering::Relaxed);
-                    });
-                });
-            }
-        });
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            heap.with_mutator(|_| {
+                heap.request_collection();
+                panic!("injected unwind");
+            });
+        }));
+        assert!(panic.is_err());
 
-        active.wait();
-        let first_collector = std::thread::spawn({
-            let first = first.clone();
-            move || first.collect_full().unwrap()
-        });
-        let second_collector = std::thread::spawn({
-            let second = second.clone();
-            move || second.collect_full().unwrap()
-        });
-        first.inner.wait_for_collection_waiters(1);
-        second.inner.wait_for_collection_waiters(1);
-
-        enter_nested.wait();
-        first_then_second.join().unwrap();
-        second_then_first.join().unwrap();
-        assert_eq!(nested_entries.load(Ordering::Relaxed), 2);
-        assert_eq!(first_collector.join().unwrap().epoch(), 1);
-        assert_eq!(second_collector.join().unwrap().epoch(), 1);
-    }
-
-    #[test]
-    fn nested_heap_request_waits_for_a_later_nested_heap_entry() {
-        let outer = Heap::new();
-        let nested = Heap::new();
-
-        outer.with_mutator(|_| {
-            nested.with_mutator(|_| nested.request_collection());
-            let pending = nested.inner.coordinator_snapshot();
-            assert!(pending.collection_requested);
-            assert_eq!(pending.completed_collection_epoch, 0);
-        });
-
-        let pending = nested.inner.coordinator_snapshot();
+        let pending = heap.inner.coordinator_snapshot();
         assert!(pending.collection_requested);
         assert_eq!(pending.completed_collection_epoch, 0);
-
-        nested.with_mutator(|_| {});
-        let completed = nested.inner.coordinator_snapshot();
-        assert!(!completed.collection_requested);
-        assert_eq!(completed.completed_collection_epoch, 1);
-    }
-
-    #[test]
-    fn caught_nested_unwind_preserves_request_for_a_later_entry() {
-        let outer = Heap::new();
-        let nested = Heap::new();
-
-        outer.with_mutator(|_| {
-            let panic = catch_unwind(AssertUnwindSafe(|| {
-                nested.with_mutator(|_| {
-                    nested.request_collection();
-                    panic!("injected nested unwind");
-                });
-            }));
-            assert!(panic.is_err());
-            assert_eq!(
-                nested
-                    .inner
-                    .coordinator_snapshot()
-                    .completed_collection_epoch,
-                0
-            );
-        });
-
-        let pending = nested.inner.coordinator_snapshot();
-        assert!(pending.collection_requested);
-        assert_eq!(pending.completed_collection_epoch, 0);
-        nested.with_mutator(|_| {});
+        heap.with_mutator(|_| {});
         assert_eq!(
-            nested
-                .inner
-                .coordinator_snapshot()
-                .completed_collection_epoch,
+            heap.inner.coordinator_snapshot().completed_collection_epoch,
             1
         );
-    }
-
-    #[test]
-    fn cross_heap_entry_waits_while_the_target_collector_is_exclusive() {
-        let held = Heap::new();
-        let target = Heap::new();
-        let (exclusive_tx, exclusive_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel();
-        let collector = std::thread::spawn({
-            let target = target.clone();
-            move || {
-                let exclusive = target.inner.enter_synthetic_exclusive();
-                exclusive_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-                drop(exclusive);
-            }
-        });
-        exclusive_rx.recv().unwrap();
-
-        let (attempt_tx, attempt_rx) = mpsc::channel();
-        let (entered_tx, entered_rx) = mpsc::channel();
-        let entrant = std::thread::spawn({
-            let held = held.clone();
-            let target = target.clone();
-            move || {
-                held.with_mutator(|_| {
-                    attempt_tx.send(()).unwrap();
-                    target.with_mutator(|_| entered_tx.send(()).unwrap());
-                });
-            }
-        });
-        attempt_rx.recv().unwrap();
-        target.inner.wait_for_blocked_outer_mutators(1);
-        assert!(entered_rx.try_recv().is_err());
-
-        release_tx.send(()).unwrap();
-        collector.join().unwrap();
-        entrant.join().unwrap();
-        entered_rx.recv().unwrap();
     }
 
     #[test]
@@ -11602,7 +11470,7 @@ mod tests {
     }
 
     #[test]
-    fn mutator_entries_track_same_heap_recursion_and_separate_heaps() {
+    fn mutator_entries_track_same_heap_recursion_and_one_heap_per_thread() {
         let first = Heap::new();
         let second = Heap::new();
         let class = internal_class::<FirstType>(&first);
@@ -11620,16 +11488,22 @@ mod tests {
             });
             assert_eq!(cache_snapshot(&first.inner).unwrap().recursive_depth, 1);
 
-            second.with_mutator(|_| {
-                assert_eq!(cache_snapshot(&first.inner).unwrap().recursive_depth, 1);
-                assert_eq!(cache_snapshot(&second.inner).unwrap().recursive_depth, 1);
-                assert_eq!(first.inner.coordinator_snapshot().active_outer_mutators, 1);
-                assert_eq!(second.inner.coordinator_snapshot().active_outer_mutators, 1);
-            });
+            // A second heap's entry panics before it prepares or admits
+            // anything.
+            let nested = catch_unwind(AssertUnwindSafe(|| second.with_mutator(|_| {})));
+            assert!(nested.is_err());
+            assert_eq!(cache_snapshot(&first.inner).unwrap().recursive_depth, 1);
+            assert!(cache_snapshot(&second.inner).is_none());
             assert_eq!(second.inner.coordinator_snapshot().active_outer_mutators, 0);
-            assert_eq!(cache_snapshot(&second.inner).unwrap().recursive_depth, 0);
         });
 
+        second.with_mutator(|_| {
+            assert_eq!(cache_snapshot(&second.inner).unwrap().recursive_depth, 1);
+            assert_eq!(second.inner.coordinator_snapshot().active_outer_mutators, 1);
+        });
+        assert_eq!(cache_snapshot(&second.inner).unwrap().recursive_depth, 0);
+
+        // The first heap's inactive cache outlives the switch to the second.
         let retained = cache_snapshot(&first.inner).unwrap();
         assert_eq!(retained.recursive_depth, 0);
         assert_eq!(retained.cursor_count, 1);
