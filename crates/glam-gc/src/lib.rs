@@ -28,6 +28,7 @@
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+mod admission;
 #[expect(unsafe_code, reason = "reviewed arena and run topology")]
 mod arena;
 #[expect(unsafe_code, reason = "reviewed canonical metadata dispatch")]

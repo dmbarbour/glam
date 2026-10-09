@@ -1134,3 +1134,28 @@ AddressSanitizer and ThreadSanitizer filters: `value_node::tests::prepared_root`
 
 `checked_nonrecursive_marking_handles_wide_shared_spines` uses width 64 only
 under `cfg(miri)`; the native 2,048-wide proof is unchanged.
+
+## Admission gate
+
+`perf-access-region-cost` moved the active-outer-mutator count out of the
+coordinator mutex into the admission gate's atomic word
+(`src/admission/gate.rs`). The Loom models now compile that file against
+Loom's primitives through a `#[path]` module, so they check the gate itself
+beneath an abstract copy of the coordinator's phases:
+
+- `mutator_release_publishes_prior_work_to_exclusive_admission`: a lock-free
+  exit wakes a collector waiting for zero and publishes its work;
+- `waiting_collector_wakes_after_the_last_of_several_exits`: an exit that
+  unlocks while the collector still waits leaves the next exit coordinated;
+- `election_excludes_a_racing_lock_free_entry`: no entry joins an exclusive
+  collection;
+- `lock_free_entry_after_collection_observes_its_work`: an entry after the
+  bit clears sees the collector's writes;
+- the election, reciprocal-nesting, and handoff models, now over the gate.
+
+Four planted faults were each caught: an exit that never takes the lock, a
+count read that does not set `COORDINATED`, a relaxed lock-free entry, and
+waiters that do not keep the bit set. The last needs the three-party model.
+The two models with two-sided coordinator traffic run with a preemption bound
+of three, which still catches every planted fault; exhaustive search took
+over a minute. The Loom suite runs in about three seconds.

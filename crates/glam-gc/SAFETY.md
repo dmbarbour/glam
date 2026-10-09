@@ -402,10 +402,25 @@ the separate liveness and exactly-once obligations at each call site.
 
 ## Regional Mutator Admission Invariants
 
-- One coordinator mutex protects the admission phase, active-outer-mutator
-  count, active/completed collection epochs, and every condition-variable
-  predicate. Its sibling condition variable supplies wakeups only; every
-  waiter loops and rechecks its complete predicate under that mutex.
+- One admission gate (`src/admission/gate.rs`) is the coordinator lock. Its
+  mutex protects the admission phase, active/completed collection epochs,
+  waiter count, and every condition-variable predicate. Its sibling condition
+  variable supplies wakeups only; every waiter loops and rechecks its
+  complete predicate under that mutex. The active-outer-mutator count lives
+  beside them in one atomic word, which is part of the coordinator rather
+  than a second lock.
+- The word's top bit, `COORDINATED`, is set while outer entries and exits
+  must take the mutex: whenever the phase is not `Ordinary` or a thread
+  waits. While it is clear, an outer entry is one compare-and-swap that
+  requires the bit clear, and an exit one Release decrement. A mutex holder
+  reads the count by setting the bit in the same atomic step, so no
+  lock-free entry can join a count it has seen, and every later exit takes
+  the mutex and wakes waiters at zero. The guard settles the bit under the
+  mutex as it unlocks. Every operation on the word is a read-modify-write, so
+  a release sequence runs through all of them: an Acquire count read sees
+  the work of every exit it counts, and a lock-free entry's Acquire sees all
+  that was published before the bit last cleared. Every phase change is a
+  method of the locked guard in `src/admission.rs`.
 - A separate managed-data mutex protects arena, class/run topology, allocation
   pressure, external-root registrations, and future mark/sweep state. No
   production path holds the coordinator and managed-data mutexes together. A
@@ -429,9 +444,11 @@ the separate liveness and exactly-once obligations at each call site.
   Admission and synchronous collection load it with Acquire ordering before
   attempting election under the coordinator mutex.
 - `Ordinary` admits outer mutators. A nonblocking collection request is only a
-  coalesced hint and denies no admission. An outer entry which observes
-  `Ordinary`, zero active mutators, and a request atomically publishes
-  `Exclusive`; otherwise it enters normally and leaves the hint latched. One
+  coalesced hint and denies no admission. A lock-free entry consults it only
+  when it would be the sole active mutator, and then takes the mutex instead.
+  An outer entry which observes `Ordinary`, zero active mutators, and a
+  request under the mutex atomically publishes `Exclusive`; otherwise it
+  enters normally and leaves the hint latched. One
   epoch identifies the active collection, and synchronous waiters join it
   rather than requiring a follow-up epoch.
 - Preparing a thread-local heap entry obtains or validates its weak heap-
@@ -447,13 +464,15 @@ the separate liveness and exactly-once obligations at each call site.
   never blocks cross-heap entry, while an authoritative `Exclusive` phase
   blocks every outer entrant.
 - Entry destruction first decrements recursive depth and makes the outer cache
-  quiescent, then retires the coordinator obligation. Consequently, observing
-  zero active mutators after acquiring the coordinator mutex also observes all
-  work sequenced before those outer exits. C3's native forced schedules and
-  Loom model latch this visibility edge.
-- Outermost exit only makes its TLS cache inactive, retires its coordinator
-  obligation, and wakes waiters when the active count reaches zero. It neither
-  scans TLS records nor services collection. This makes nested cross-heap exit
+  quiescent, then retires the coordinator obligation with a Release
+  decrement. Consequently, observing zero active mutators through the gate's
+  Acquire count read also observes all work sequenced before those outer
+  exits. C3's native forced schedules and the Loom models, which compile the
+  gate itself against Loom's primitives, latch this visibility edge.
+- Outermost exit only makes its TLS cache inactive and retires its
+  coordinator obligation. Only while `COORDINATED` is set does it take the
+  mutex, waking waiters when the active count reaches zero. It neither scans
+  TLS records nor services collection. This makes nested cross-heap exit
   identical to every other outer exit.
 - Before exclusive work, the collecting thread clears its complete inactive
   cursor cache for the target heap. The collector-to-finalizer handoff then
@@ -490,7 +509,9 @@ the separate liveness and exactly-once obligations at each call site.
   needed a dependent admission category for cross-heap nesting, thread-local
   deferred-service records, exit-time scans, and follow-up epochs.
   Idle-entry election needs none of these. Its accepted cost is that
-  continuously overlapping mutators can starve collection.
+  continuously overlapping mutators can starve collection. The gate's
+  lock-free path is not a third design: it changes no admission decision,
+  and keeps the count with the state that decides (maintainer, 2026-10-09).
 
 ## Heap-Local Allocation-Class Invariants
 
@@ -922,6 +943,7 @@ for later allocation, so ordinary retry is forbidden.
 
 The attempt guard permanently poisons such a heap without reading managed
 data. Poison is linearized with outer admission under the coordinator mutex,
+which a collection's phase already makes every outer entrant take. It
 wakes every blocked mutator and synchronous collector, and prevents later
 mutator admission, collection requests, or collection. Poison does not revoke
 a Rust borrow established before that linearization, so its scope can passively

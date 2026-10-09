@@ -4,8 +4,8 @@ Status: active, as the `perf-structural-overheads` step of the
 [performance roadmap](PerformanceRoadmap_2026-10-05.md). Done:
 `perf-admission-wakeups`, `perf-idle-wakeups`, `perf-fast-id-hashing`,
 `perf-net-builder-wired-ports`, `perf-scaling-workloads`,
-`perf-list-front-walk` and `perf-list-leaf-walk`. In progress:
-`perf-access-region-cost`.
+`perf-list-front-walk`, `perf-list-leaf-walk` and
+`perf-access-region-cost`. Next: `perf-worker-scaling`.
 
 ## Purpose
 
@@ -66,65 +66,63 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 
 ## Open Steps, in Order
 
-### Access-region cost (`perf-access-region-cost`)
+### Worker scaling (`perf-worker-scaling`)
 
-Every outer access region enters and leaves the collector's mutator
-admission: about 640 instructions per region, 20% of `countdown_2000`
-(1.9 M regions) and 11% of `hello_elf`'s self time. Per region, the path:
-- looks up the thread's heap state in a thread-local hash map, clones an
-  `Rc`, and creates and drops a `Weak` only to compare heap identity
-  (`ThreadHeapEntry::prepare`);
-- locks and unlocks the admission mutex on entry (`admit_outer_mutator`)
-  and again on exit (`MutatorAdmission::drop`);
-- upgrades a `Weak` on exit and adds four metrics with separate atomic
-  read-modify-write loops (`record_thread_region_metrics`, 4.3% alone).
+Found 2026-10-09 while comparing builds with `GLAM_WORKERS=4`; the
+profiling workloads run without workers, so nothing measured this before.
+CPU time at four workers, against none:
 
-Candidate remedies, each measurable alone:
-- accumulate region metrics in the thread-local state, and publish them
-  when read or at quantum boundaries;
-- compare heap identity by pointer, without creating a `Weak`;
-- an atomic fast path for admission in the ordinary phase, keeping the
-  mutex for collection elections and exclusive phases;
-- fewer regions: the evaluator opens about 3.6 regions per reduction, many
-  for one small check each (cache, checkpoint, forward and eligibility
-  probes), which could share a region.
+| Workload | No workers | Four workers |
+| --- | ---: | ---: |
+| `chain_200` | 0.44 s | 1.84 s |
+| `chain_400` | about 0.6 s | 4.2 s |
+| `chain_800` | 1.25 s | 108 to 283 s |
 
-This is the largest broad cost: every workload pays it.
+One and two workers already cost 1.1 and 1.3 s at `chain_200`. With
+workers, exact routing falls back to complete searches (5 at no workers,
+2,315 at four, 3,704 at `chain_400`), each visiting a few hundred records
+(480 K and 1.4 M in all). That is quadratic, but too small for the jump
+from 400 to 800, and the spread between runs at 800 suggests something
+schedule-dependent as well. Investigate before measuring anything else
+with workers: the admission gate's benefit under contention, and
+`perf-quantum-region`, both need workers that scale.
 
-Progress 2026-10-09:
-- **Per-thread region counters.** Each thread cache now has its own
-  counters, written with plain loads and stores at an outer region's exit
-  and summed when metrics are read. A released cache's counters fold into
-  the heap's totals at the next registration or read. This removes four
-  atomic read-modify-write loops and a `Weak` upgrade per region.
-- **Heap identity by pointer.** `PreparedThreadHeapEntry::prepare`
-  compares addresses instead of creating and dropping a `Weak`; the cached
-  `Weak` keeps the heap's address from being reused.
-- **One region to start a `Produce` poll.** Every lazy-machine poll opened
-  a region only to check the cache, and a `Produce` poll a second for the
-  source. Now `Produce` reads cache, source, checkpoint and forward in one
-  region, and checkpoint pollers skip the check: a lazy cached meanwhile
-  has lost its checkpoint, which they already handle (`resume_moved`).
+### One open heap per thread (`gc-one-heap-per-thread`)
 
-  Outer regions fell 16–22% in every workload, and instructions 1–5%
-  (`countdown_800` 2,375 M to 2,255 M, 753 K to 601 K regions; `sum_800`
-  2,665 M to 2,528 M; `hello_elf` 3,503 M to 3,385 M). CPU time fell more
-  than instructions in single runs, as expected when atomic
-  read-modify-writes go.
+A thread may now hold mutators for several heaps at once, which is what
+made a draining collection request too complex
+(`idle-entry-election-and-condvar-admission`). Glam's runtimes never nest
+heaps, and the collector need serve only Glam, so tighten the contract: a
+thread holds at most one heap's outer mutator at a time (maintainer,
+2026-10-09). The maintainer suggested enforcing it in debug builds; a
+thread-local current-heap slot makes the check one comparison, cheap
+enough to keep always, and doubles as the most-recently-used entry for the
+thread-cache lookup (about 1.4% of `countdown_800`). The reciprocal
+cross-heap Loom model and tests become contract tests.
 
-Remaining, in `countdown_800` after these changes:
-- The admission mutex, locked on entry and exit, is about 5% of samples
-  (`admit_outer_mutator`, `MutatorAdmission::drop`). An atomic fast path
-  changes the collector's coordinator protocol: discuss before starting.
-- Region counts by caller (one instrumented run): `forceable_inline`
-  opens one per inline offer (about 9% of the remaining regions), and
-  `drive_net_semantic_action` one only to turn the action's net root back
-  into a handle (about 6%). Each could share the region that produced its
-  input; the second carries a non-rooting handle beside its root.
-- Holding one outer region for a driver's whole quantum would make every
-  inner region a cheap recursive entry, but delays collection to quantum
-  boundaries and needs every blocking point and host call inside a
-  quantum to leave the region first. That is an architecture change.
+### Bounded collection wait (`gc-bounded-collection-wait`)
+
+Collection waits for an idle heap, so overlapping mutators can starve it;
+glam's `collect_full` at a driver boundary waits for other threads' regions
+to end. With one open heap per thread, a waiting collection can turn new
+outer entrants away while active regions drain, without the cross-heap
+deadlock that sank the queued writer. The gate's word can carry the drain
+request. Before building it, audit lock order: an entrant held at the gate
+must hold no lock that a thread inside a region may wait for, or the drain
+deadlocks. Recursive entry stays admitted. Discuss the design before
+starting.
+
+### One region per quantum (`perf-quantum-region`)
+
+Hold one outer access region for a driver's whole quantum, making every
+inner region a cheap recursive entry. Collection then waits for quantum
+boundaries, which `gc-bounded-collection-wait` bounds, and every blocking
+point and host call inside a quantum must leave the region first. Region
+counts by caller (one instrumented run): `forceable_inline` opens one per
+inline offer (about 9% of the remaining regions), and
+`drive_net_semantic_action` one only to turn the action's net root back
+into a handle (about 6%). Merging those into the regions that produced
+their inputs remains a small fallback if this step stalls.
 
 ### Cost per collection (`perf-collection-growth`)
 
@@ -282,6 +280,46 @@ of reflection effects would.
   Allocating less is the better lever.
 
 ## Done
+
+- **Access-region cost** (`perf-access-region-cost`), 2026-10-09.
+  - **Cause.** Every outer access region entered and left the collector's
+    mutator admission: about 640 instructions per region, 20% of
+    `countdown_2000` and 11% of `hello_elf`'s self time. Per region it
+    looked up the thread's heap state and created and dropped a `Weak` to
+    compare heap identity, locked the admission mutex on entry and exit,
+    and on exit upgraded a `Weak` and added four metrics with atomic
+    read-modify-write loops. The evaluator opened about 3.6 regions per
+    reduction.
+  - **Per-thread region counters.** Each thread cache has its own
+    counters, written with plain stores at an outer region's exit and
+    summed when metrics are read; a released cache's counters fold into the
+    heap's totals.
+  - **Heap identity by pointer.** `PreparedThreadHeapEntry::prepare`
+    compares addresses; the cached `Weak` keeps the heap's address from
+    being reused.
+  - **One region to start a `Produce` poll.** It reads cache, source,
+    checkpoint and forward together. Checkpoint pollers skip the cache
+    check: a lazy cached meanwhile has lost its checkpoint, which they
+    already handle (`resume_moved`).
+  - These three cut outer regions 16–22% in every workload, and
+    instructions 1–5% (`countdown_800` 2,375 M to 2,255 M; `sum_800`
+    2,665 M to 2,528 M; `hello_elf` 3,503 M to 3,385 M).
+  - **Admission gate** (`admission-gate-fast-path` in
+    `docs/Decisions.md`). The active outer-mutator count moved from the
+    coordinator mutex into an atomic word beside it: in `Ordinary`
+    admission with nobody waiting, entry is one compare-and-swap and exit
+    one decrement. One module, `glam-gc/src/admission.rs`, owns the gate
+    and every phase change, and the Loom models compile the gate itself;
+    four planted faults were each caught. Instructions fell a further
+    1.0–1.3% (`countdown_800` 2,255 M to 2,226 M, `hello_elf` 3,385 M to
+    3,354 M), but cycles and CPU time did not change measurably in pinned,
+    interleaved single-thread runs (`chain_800` −0.2%, `countdown_800`
+    +0.8%, medians of six). The profile's 5% for the mutex overstated what
+    a fast path saves: an uncontended lock is mostly its atomic operations,
+    and the gate keeps two of the four. Its benefit under contention is
+    unmeasured, pending `perf-worker-scaling`.
+  - Region merges and a quantum-wide region moved to
+    `perf-quantum-region`.
 
 - **Leaf walks in list observers** (`perf-list-leaf-walk`), 2026-10-09.
   - **Cause.** `len`, `at`, `split`, `slice` and `split_end` advanced one

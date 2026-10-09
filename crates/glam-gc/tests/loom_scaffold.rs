@@ -1,13 +1,26 @@
 //! Loom models for the current collector coordination surface.
 //!
-//! The heap-entry test remains an API smoke model. Abstract coordinator models
-//! cover the ordering edges of the stop-the-world state machine, while the
+//! The heap-entry test remains an API smoke model. The coordinator models
+//! drive the collector's own admission gate, compiled here against Loom's
+//! primitives, beneath an abstract copy of the coordinator's phases. The
 //! atomic lease-bit transition remains independent of the raw arena-pointer
 //! integration exercised by native forced schedules.
 
 use glam_gc::Heap;
-use loom::sync::atomic::{AtomicU64, Ordering};
-use loom::sync::{Arc, Condvar, Mutex};
+use loom::sync::Arc;
+use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// The primitives the admission gate is built on.
+mod sync {
+    pub(crate) use loom::sync::atomic::{AtomicUsize, Ordering};
+    pub(crate) use loom::sync::{Condvar, Mutex, MutexGuard};
+}
+
+#[path = "../src/admission/gate.rs"]
+#[allow(dead_code, reason = "the models use only part of the gate")]
+mod gate;
+
+use gate::{AdmissionGate, GateState};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum AdmissionPhase {
@@ -20,67 +33,114 @@ enum AdmissionPhase {
 #[derive(Debug, Default)]
 struct CoordinatorState {
     phase: AdmissionPhase,
-    active: usize,
-    requested: bool,
     completed: u64,
 }
 
-type Coordinator = (Mutex<CoordinatorState>, Condvar);
-
-fn admit_mutator(coordinator: &Coordinator) {
-    let (state, changed) = coordinator;
-    let mut state = state.lock().unwrap();
-    while state.phase == AdmissionPhase::Exclusive {
-        state = changed.wait(state).unwrap();
+impl GateState for CoordinatorState {
+    fn coordinates_mutators(&self) -> bool {
+        self.phase != AdmissionPhase::Ordinary
     }
-    state.active += 1;
+}
+
+/// One heap's admission: the gate, and the collection request beside it.
+struct Coordinator {
+    gate: AdmissionGate<CoordinatorState>,
+    requested: AtomicBool,
+    /// Whether an idle entry elects itself to collect, as under
+    /// `CollectionPolicy::Automatic`.
+    automatic: bool,
+}
+
+impl Coordinator {
+    fn new(automatic: bool) -> Self {
+        Self {
+            gate: AdmissionGate::new(CoordinatorState::default()),
+            requested: AtomicBool::new(false),
+            automatic,
+        }
+    }
+
+    fn collection_requested(&self) -> bool {
+        self.automatic && self.requested.load(Ordering::Acquire)
+    }
+}
+
+/// Admits an outer mutator, returning whether it was elected to collect
+/// first instead.
+fn admit_mutator(coordinator: &Coordinator) -> bool {
+    if coordinator
+        .gate
+        .try_enter(|| coordinator.collection_requested())
+    {
+        return false;
+    }
+    let mut state = coordinator.gate.lock().unwrap();
+    loop {
+        match state.phase {
+            AdmissionPhase::Ordinary => {
+                if coordinator.collection_requested() && state.active_outer_mutators() == 0 {
+                    state.phase = AdmissionPhase::Exclusive;
+                    state.notify();
+                    return true;
+                }
+                state.admit_outer_mutator();
+                return false;
+            }
+            AdmissionPhase::Finalizing => {
+                state.admit_outer_mutator();
+                return false;
+            }
+            AdmissionPhase::Exclusive => state = state.wait().unwrap(),
+        }
+    }
 }
 
 fn release_mutator(coordinator: &Coordinator) {
-    let (state, changed) = coordinator;
-    let mut state = state.lock().unwrap();
-    state.active -= 1;
-    if state.active == 0 {
-        changed.notify_all();
-    }
+    drop(coordinator.gate.exit());
 }
 
 fn request_collection(coordinator: &Coordinator) {
-    let (state, changed) = coordinator;
-    state.lock().unwrap().requested = true;
-    changed.notify_all();
+    coordinator.requested.store(true, Ordering::Release);
 }
 
-fn elect_idle_collection(coordinator: &Coordinator) -> bool {
-    let (state, changed) = coordinator;
-    let mut state = state.lock().unwrap();
-    if state.phase == AdmissionPhase::Ordinary && state.active == 0 && state.requested {
-        state.phase = AdmissionPhase::Exclusive;
-        changed.notify_all();
-        true
-    } else {
-        false
+/// Waits for an idle heap and elects the caller, like `Heap::collect_full`.
+fn collect_when_idle(coordinator: &Coordinator) {
+    let mut state = coordinator.gate.lock().unwrap();
+    while state.phase != AdmissionPhase::Ordinary || state.active_outer_mutators() != 0 {
+        state = state.wait().unwrap();
     }
+    state.phase = AdmissionPhase::Exclusive;
+    state.notify();
 }
 
+/// Hands exclusive authority to the collector's own mutator, then completes
+/// the collection; the collector still holds that mutator afterwards.
 fn complete_collection_as_entry(coordinator: &Coordinator) {
-    let (state, changed) = coordinator;
     {
-        let mut state = state.lock().unwrap();
+        let mut state = coordinator.gate.lock().unwrap();
         assert_eq!(state.phase, AdmissionPhase::Exclusive);
-        assert_eq!(state.active, 0);
+        assert_eq!(state.active_outer_mutators(), 0);
         state.phase = AdmissionPhase::Finalizing;
-        state.active = 1;
-        changed.notify_all();
+        state.admit_outer_mutator();
+        state.notify();
     }
     loom::thread::yield_now();
-    let mut state = state.lock().unwrap();
+    let mut state = coordinator.gate.lock().unwrap();
     assert_eq!(state.phase, AdmissionPhase::Finalizing);
-    assert_ne!(state.active, 0);
+    assert_ne!(state.active_outer_mutators(), 0);
+    coordinator.requested.store(false, Ordering::Release);
     state.phase = AdmissionPhase::Ordinary;
-    state.requested = false;
     state.completed += 1;
-    changed.notify_all();
+    state.notify();
+}
+
+/// Runs a model whose two-sided coordinator traffic makes exhaustive search
+/// slow. Three preemptions still cover every planted gate fault the models
+/// were checked against.
+fn bounded_model(model: impl Fn() + Sync + Send + 'static) {
+    let mut builder = loom::model::Builder::new();
+    builder.preemption_bound = Some(3);
+    builder.check(model);
 }
 
 fn claim_bit(lease: &AtomicU64, valid_bits: u32) -> Option<u32> {
@@ -213,20 +273,19 @@ fn finalized_word_release_preserves_neighbor_and_has_one_visible_winner() {
 #[test]
 fn mutator_release_publishes_prior_work_to_exclusive_admission() {
     loom::model(|| {
-        let coordinator = Arc::new(Coordinator::default());
+        let coordinator = Arc::new(Coordinator::new(false));
         let published = Arc::new(AtomicU64::new(0));
 
         admit_mutator(&coordinator);
         request_collection(&coordinator);
         published.store(73, Ordering::Relaxed);
 
-        let observer = loom::thread::spawn({
+        // A lock-free exit must still wake the collector waiting for zero.
+        let collector = loom::thread::spawn({
             let coordinator = Arc::clone(&coordinator);
             let published = Arc::clone(&published);
             move || {
-                while !elect_idle_collection(&coordinator) {
-                    loom::thread::yield_now();
-                }
+                collect_when_idle(&coordinator);
                 let observed = published.load(Ordering::Relaxed);
                 complete_collection_as_entry(&coordinator);
                 release_mutator(&coordinator);
@@ -235,60 +294,127 @@ fn mutator_release_publishes_prior_work_to_exclusive_admission() {
         });
 
         release_mutator(&coordinator);
-        assert_eq!(observer.join().unwrap(), 73);
+        assert_eq!(collector.join().unwrap(), 73);
+    });
+}
+
+#[test]
+fn waiting_collector_wakes_after_the_last_of_several_exits() {
+    bounded_model(|| {
+        let coordinator = Arc::new(Coordinator::new(false));
+        admit_mutator(&coordinator);
+        admit_mutator(&coordinator);
+
+        // The first exit takes the lock and unlocks again while the
+        // collector still waits; the second must then wake it.
+        let collector = loom::thread::spawn({
+            let coordinator = Arc::clone(&coordinator);
+            move || {
+                collect_when_idle(&coordinator);
+                complete_collection_as_entry(&coordinator);
+                release_mutator(&coordinator);
+            }
+        });
+        let other = loom::thread::spawn({
+            let coordinator = Arc::clone(&coordinator);
+            move || release_mutator(&coordinator)
+        });
+
+        release_mutator(&coordinator);
+        other.join().unwrap();
+        collector.join().unwrap();
+        assert_eq!(coordinator.gate.lock().unwrap().active_outer_mutators(), 0);
     });
 }
 
 #[test]
 fn simultaneous_idle_entries_elect_exactly_one_collector() {
-    loom::model(|| {
-        let coordinator = Arc::new(Coordinator::default());
+    bounded_model(|| {
+        let coordinator = Arc::new(Coordinator::new(true));
         let collectors = Arc::new(AtomicU64::new(0));
         request_collection(&coordinator);
 
-        let first = loom::thread::spawn({
-            let coordinator = Arc::clone(&coordinator);
-            let collectors = Arc::clone(&collectors);
+        let entrant = |coordinator: Arc<Coordinator>, collectors: Arc<AtomicU64>| {
             move || {
-                if elect_idle_collection(&coordinator) {
+                if admit_mutator(&coordinator) {
                     collectors.fetch_add(1, Ordering::Relaxed);
                     complete_collection_as_entry(&coordinator);
-                } else {
-                    admit_mutator(&coordinator);
                 }
                 release_mutator(&coordinator);
             }
-        });
-        let second = loom::thread::spawn({
-            let coordinator = Arc::clone(&coordinator);
-            let collectors = Arc::clone(&collectors);
-            move || {
-                if elect_idle_collection(&coordinator) {
-                    collectors.fetch_add(1, Ordering::Relaxed);
-                    complete_collection_as_entry(&coordinator);
-                } else {
-                    admit_mutator(&coordinator);
-                }
-                release_mutator(&coordinator);
-            }
-        });
+        };
+        let first = loom::thread::spawn(entrant(Arc::clone(&coordinator), Arc::clone(&collectors)));
+        let second =
+            loom::thread::spawn(entrant(Arc::clone(&coordinator), Arc::clone(&collectors)));
 
         first.join().unwrap();
         second.join().unwrap();
         assert_eq!(collectors.load(Ordering::Relaxed), 1);
-        let state = coordinator.0.lock().unwrap();
+        assert!(!coordinator.requested.load(Ordering::Acquire));
+        let state = coordinator.gate.lock().unwrap();
         assert_eq!(state.phase, AdmissionPhase::Ordinary);
-        assert_eq!(state.active, 0);
+        assert_eq!(state.active_outer_mutators(), 0);
         assert_eq!(state.completed, 1);
-        assert!(!state.requested);
+    });
+}
+
+#[test]
+fn election_excludes_a_racing_lock_free_entry() {
+    bounded_model(|| {
+        let coordinator = Arc::new(Coordinator::new(false));
+        request_collection(&coordinator);
+
+        let entrant = loom::thread::spawn({
+            let coordinator = Arc::clone(&coordinator);
+            move || {
+                admit_mutator(&coordinator);
+                release_mutator(&coordinator);
+            }
+        });
+
+        collect_when_idle(&coordinator);
+        assert_eq!(
+            coordinator.gate.lock().unwrap().active_outer_mutators(),
+            0,
+            "a mutator entered during exclusive collection"
+        );
+        complete_collection_as_entry(&coordinator);
+        release_mutator(&coordinator);
+        entrant.join().unwrap();
+        assert_eq!(coordinator.gate.lock().unwrap().active_outer_mutators(), 0);
+    });
+}
+
+#[test]
+fn lock_free_entry_after_collection_observes_its_work() {
+    loom::model(|| {
+        let coordinator = Arc::new(Coordinator::new(false));
+        coordinator.gate.lock().unwrap().phase = AdmissionPhase::Exclusive;
+        let published = Arc::new(AtomicU64::new(0));
+
+        let entrant = loom::thread::spawn({
+            let coordinator = Arc::clone(&coordinator);
+            let published = Arc::clone(&published);
+            move || {
+                admit_mutator(&coordinator);
+                let observed = published.load(Ordering::Relaxed);
+                release_mutator(&coordinator);
+                observed
+            }
+        });
+
+        published.store(29, Ordering::Relaxed);
+        complete_collection_as_entry(&coordinator);
+        release_mutator(&coordinator);
+        assert_eq!(entrant.join().unwrap(), 29);
     });
 }
 
 #[test]
 fn reciprocal_nested_admission_passes_uncommitted_requests() {
     loom::model(|| {
-        let first = Arc::new(Coordinator::default());
-        let second = Arc::new(Coordinator::default());
+        let first = Arc::new(Coordinator::new(false));
+        let second = Arc::new(Coordinator::new(false));
         admit_mutator(&first);
         admit_mutator(&second);
         request_collection(&first);
@@ -298,7 +424,7 @@ fn reciprocal_nested_admission_passes_uncommitted_requests() {
             let first = Arc::clone(&first);
             let second = Arc::clone(&second);
             move || {
-                admit_mutator(&second);
+                assert!(!admit_mutator(&second));
                 release_mutator(&second);
                 release_mutator(&first);
             }
@@ -307,7 +433,7 @@ fn reciprocal_nested_admission_passes_uncommitted_requests() {
             let first = Arc::clone(&first);
             let second = Arc::clone(&second);
             move || {
-                admit_mutator(&first);
+                assert!(!admit_mutator(&first));
                 release_mutator(&first);
                 release_mutator(&second);
             }
@@ -315,41 +441,38 @@ fn reciprocal_nested_admission_passes_uncommitted_requests() {
 
         first_then_second.join().unwrap();
         second_then_first.join().unwrap();
-        assert_eq!(first.0.lock().unwrap().active, 0);
-        assert_eq!(second.0.lock().unwrap().active, 0);
+        assert_eq!(first.gate.lock().unwrap().active_outer_mutators(), 0);
+        assert_eq!(second.gate.lock().unwrap().active_outer_mutators(), 0);
     });
 }
 
 #[test]
 fn exclusive_to_finalizer_handoff_never_publishes_an_authority_gap() {
     loom::model(|| {
-        let coordinator = Arc::new(Coordinator::default());
-        {
-            let mut state = coordinator.0.lock().unwrap();
-            state.phase = AdmissionPhase::Exclusive;
-        }
+        let coordinator = Arc::new(Coordinator::new(false));
+        coordinator.gate.lock().unwrap().phase = AdmissionPhase::Exclusive;
         let stage = Arc::new(AtomicU64::new(0));
         let collector = loom::thread::spawn({
             let coordinator = Arc::clone(&coordinator);
             let stage = Arc::clone(&stage);
             move || {
                 {
-                    let mut state = coordinator.0.lock().unwrap();
+                    let mut state = coordinator.gate.lock().unwrap();
                     assert_eq!(state.phase, AdmissionPhase::Exclusive);
-                    assert_eq!(state.active, 0);
+                    assert_eq!(state.active_outer_mutators(), 0);
                     state.phase = AdmissionPhase::Finalizing;
-                    state.active = 1;
+                    state.admit_outer_mutator();
                     stage.store(1, Ordering::Release);
-                    coordinator.1.notify_all();
+                    state.notify();
                 }
                 loom::thread::yield_now();
-                let mut state = coordinator.0.lock().unwrap();
+                let mut state = coordinator.gate.lock().unwrap();
                 assert_eq!(state.phase, AdmissionPhase::Finalizing);
-                assert_eq!(state.active, 1);
+                assert_eq!(state.active_outer_mutators(), 1);
                 state.phase = AdmissionPhase::Ordinary;
                 state.completed = 1;
                 stage.store(2, Ordering::Release);
-                coordinator.1.notify_all();
+                state.notify();
             }
         });
         let observer = loom::thread::spawn({
@@ -359,13 +482,13 @@ fn exclusive_to_finalizer_handoff_never_publishes_an_authority_gap() {
                 while stage.load(Ordering::Acquire) == 0 {
                     loom::thread::yield_now();
                 }
-                let state = coordinator.0.lock().unwrap();
+                let state = coordinator.gate.lock().unwrap();
                 if state.phase == AdmissionPhase::Finalizing {
-                    assert_ne!(state.active, 0);
+                    assert_ne!(state.active_outer_mutators(), 0);
                 } else {
                     assert_eq!(state.phase, AdmissionPhase::Ordinary);
                     assert_eq!(state.completed, 1);
-                    assert_ne!(state.active, 0);
+                    assert_ne!(state.active_outer_mutators(), 0);
                 }
             }
         });

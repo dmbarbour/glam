@@ -179,11 +179,13 @@ gains this consequence when it lands.
    review after the recursion work (2026-10-08) added the open steps.
    - *Done:* `perf-admission-wakeups`, `perf-idle-wakeups`,
      `perf-fast-id-hashing`, `perf-net-builder-wired-ports`,
-     `perf-scaling-workloads`, `perf-list-front-walk` and
-     `perf-list-leaf-walk`. The scheduler round trips were
-     `perf-evaluation-recursion`.
-   - *Open, in order:* `perf-access-region-cost`, `perf-collection-growth`,
-     `perf-list-map-growth`, `perf-lowering-free-bindings`,
+     `perf-scaling-workloads`, `perf-list-front-walk`,
+     `perf-list-leaf-walk` and `perf-access-region-cost`. The scheduler
+     round trips were `perf-evaluation-recursion`.
+   - *Open, in order:* `perf-worker-scaling`, `gc-one-heap-per-thread`,
+     `gc-bounded-collection-wait`, `perf-quantum-region`,
+     `perf-collection-growth`, `perf-list-map-growth`,
+     `perf-lowering-free-bindings`,
      `perf-interface-demand-walk`, `perf-module-definition-cost`,
      `perf-allocation-path`, `perf-runtime-net-attach` and
      `perf-reflection-step-cost`.

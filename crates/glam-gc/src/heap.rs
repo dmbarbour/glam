@@ -4,11 +4,12 @@ use std::ops::Range;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use crate::{
     Mutator, Root, Trace, Visitor,
+    admission::{AdmissionGate, AdmissionPhase, CollectionEpoch, MutatorCoordinator},
     arena::{Arena, RunClaimTarget, RunLocation, RunOwner, RunPublicationError},
     class::{
         AllocationClass, AllocationClassEntry, MetadataIdentity, ObjectMetadata, metadata_for,
@@ -779,13 +780,12 @@ impl Heap {
 }
 
 pub(crate) struct HeapInner {
-    coordinator: Mutex<MutatorCoordinator>,
+    admission: AdmissionGate<MutatorCoordinator>,
     data: Mutex<ManagedData>,
     collection_policy: CollectionPolicy,
     poisoned: AtomicBool,
     collection_requested: AtomicBool,
     completed_collection_epoch: AtomicU64,
-    admission_changed: Condvar,
     allocation_lease_epoch: AtomicU64,
     collection_attempts: AtomicU64,
     successful_collections: AtomicU64,
@@ -822,8 +822,6 @@ pub(crate) struct HeapInner {
     panic_after_finalizer_terminal_recording: AtomicBool,
     #[cfg(test)]
     poisoned_outer_mutator_releases: std::sync::atomic::AtomicUsize,
-    #[cfg(test)]
-    coordinator_notifications: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
@@ -857,13 +855,12 @@ impl Default for HeapInner {
 impl HeapInner {
     fn new(collection_policy: CollectionPolicy) -> Self {
         Self {
-            coordinator: Mutex::new(MutatorCoordinator::default()),
+            admission: AdmissionGate::new(MutatorCoordinator::default()),
             data: Mutex::new(ManagedData::default()),
             collection_policy,
             poisoned: AtomicBool::new(false),
             collection_requested: AtomicBool::new(false),
             completed_collection_epoch: AtomicU64::new(0),
-            admission_changed: Condvar::new(),
             allocation_lease_epoch: AtomicU64::new(AllocationLeaseEpoch::INITIAL.get()),
             collection_attempts: AtomicU64::new(0),
             successful_collections: AtomicU64::new(0),
@@ -900,8 +897,6 @@ impl HeapInner {
             panic_after_finalizer_terminal_recording: AtomicBool::new(false),
             #[cfg(test)]
             poisoned_outer_mutator_releases: std::sync::atomic::AtomicUsize::new(0),
-            #[cfg(test)]
-            coordinator_notifications: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -927,23 +922,6 @@ struct ManagedData {
     eagerly_swept_slots: u64,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct MutatorCoordinator {
-    phase: AdmissionPhase,
-    active_outer_mutators: usize,
-    active_collection: Option<CollectionEpoch>,
-    completed_collection_epoch: u64,
-    latest_collection_report: Option<CollectionReport>,
-    /// Threads waiting on `admission_changed`. A notification with no
-    /// waiter is skipped: the condvar would make a futex syscall anyway, and
-    /// one ended every outer access region.
-    admission_waiters: usize,
-    #[cfg(test)]
-    blocked_outer_mutators: usize,
-    #[cfg(test)]
-    blocked_collection_waiters: usize,
-}
-
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CoordinatorSnapshot {
@@ -954,32 +932,6 @@ struct CoordinatorSnapshot {
     completed_collection_epoch: u64,
     latest_collection_report: Option<CollectionReport>,
     blocked_outer_mutators: usize,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum AdmissionPhase {
-    #[default]
-    Ordinary,
-    Exclusive,
-    Finalizing,
-    Poisoned,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-struct CollectionEpoch(NonZeroU64);
-
-impl CollectionEpoch {
-    fn after(completed: u64) -> Self {
-        let next = completed
-            .checked_add(1)
-            .and_then(NonZeroU64::new)
-            .expect("collection epoch exhausted");
-        Self(next)
-    }
-
-    const fn get(self) -> u64 {
-        self.0.get()
-    }
 }
 
 /// Every thread cache's region counters, and the totals of released caches.
@@ -1026,15 +978,11 @@ impl Drop for MutatorAdmission<'_> {
 #[cfg(test)]
 impl Drop for SyntheticExclusiveAdmission<'_> {
     fn drop(&mut self) {
-        let mut coordinator = self
-            .heap
-            .coordinator
+        self.heap
+            .admission
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(coordinator.phase, AdmissionPhase::Exclusive);
-        assert_eq!(coordinator.active_outer_mutators, 0);
-        coordinator.phase = AdmissionPhase::Ordinary;
-        self.heap.notify_coordinator_waiters(&coordinator);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .end_synthetic_exclusive();
     }
 }
 
@@ -1573,38 +1521,6 @@ impl ManagedData {
             collection_requested.store(true, Ordering::Release);
         }
         Ok(location)
-    }
-}
-
-impl MutatorCoordinator {
-    fn request_synchronous_collection(&self) -> (CollectionEpoch, bool) {
-        match self.phase {
-            AdmissionPhase::Ordinary => (
-                CollectionEpoch::after(self.completed_collection_epoch),
-                true,
-            ),
-            AdmissionPhase::Exclusive | AdmissionPhase::Finalizing => (
-                self.active_collection
-                    .expect("active collection phase must have an epoch"),
-                false,
-            ),
-            AdmissionPhase::Poisoned => {
-                unreachable!("poisoned heaps reject collection before requesting an epoch")
-            }
-        }
-    }
-
-    fn elect_idle_collection(&mut self, collection_requested: bool) -> Option<CollectionEpoch> {
-        if self.phase != AdmissionPhase::Ordinary
-            || self.active_outer_mutators != 0
-            || !collection_requested
-        {
-            return None;
-        }
-        let epoch = CollectionEpoch::after(self.completed_collection_epoch);
-        self.active_collection = Some(epoch);
-        self.phase = AdmissionPhase::Exclusive;
-        Some(epoch)
     }
 }
 
@@ -2641,9 +2557,16 @@ impl MarkAttempt {
 
 impl HeapInner {
     fn admit_outer_mutator(self: &Arc<Self>) -> (MutatorAdmission<'_>, bool) {
+        let collection_requested = || {
+            self.collection_policy == CollectionPolicy::Automatic
+                && self.collection_requested.load(Ordering::Acquire)
+        };
+        if self.admission.try_enter(collection_requested) {
+            return (MutatorAdmission { heap: self }, false);
+        }
         let elected = {
             let mut coordinator = self
-                .coordinator
+                .admission
                 .lock()
                 .expect("mutator coordinator should not be poisoned");
             loop {
@@ -2651,40 +2574,33 @@ impl HeapInner {
                     drop(coordinator);
                     panic!("managed heap is permanently poisoned");
                 }
-                match coordinator.phase {
+                match coordinator.phase() {
                     AdmissionPhase::Ordinary => {
-                        let requested = self.collection_policy == CollectionPolicy::Automatic
-                            && self.collection_requested.load(Ordering::Acquire);
-                        if let Some(epoch) = coordinator.elect_idle_collection(requested) {
-                            self.notify_coordinator_waiters(&coordinator);
+                        if let Some(epoch) =
+                            coordinator.elect_idle_collection(collection_requested())
+                        {
                             break Some(epoch);
                         }
-                        coordinator.active_outer_mutators = coordinator
-                            .active_outer_mutators
-                            .checked_add(1)
-                            .expect("active mutator count exhausted");
+                        coordinator.admit_outer_mutator();
                         break None;
                     }
                     AdmissionPhase::Finalizing => {
-                        coordinator.active_outer_mutators = coordinator
-                            .active_outer_mutators
-                            .checked_add(1)
-                            .expect("active mutator count exhausted");
+                        coordinator.admit_outer_mutator();
                         break None;
                     }
                     AdmissionPhase::Exclusive => {
                         #[cfg(test)]
                         {
                             coordinator.blocked_outer_mutators += 1;
-                            self.notify_coordinator_waiters(&coordinator);
+                            coordinator.notify();
                         }
-                        coordinator = self
-                            .wait_for_admission_change(coordinator)
+                        coordinator = coordinator
+                            .wait()
                             .expect("mutator coordinator should not be poisoned");
                         #[cfg(test)]
                         {
                             coordinator.blocked_outer_mutators -= 1;
-                            self.notify_coordinator_waiters(&coordinator);
+                            coordinator.notify();
                         }
                     }
                     AdmissionPhase::Poisoned => {
@@ -2724,19 +2640,17 @@ impl HeapInner {
 
     fn poison_collection(&self, epoch: CollectionEpoch) {
         let mut coordinator = self
-            .coordinator
+            .admission
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Coordinator ownership linearizes poison against new outer mutator
-        // admission and synchronous collection. The atomic publication keeps
-        // the nonblocking request and terminal-drop paths cheap.
+        // admission and synchronous collection: only a collection poisons,
+        // and its phase already sends every entrant to this lock. The atomic
+        // publication keeps the nonblocking request and terminal-drop paths
+        // cheap.
         self.poisoned.store(true, Ordering::Release);
         self.collection_requested.store(false, Ordering::Release);
-        if coordinator.active_collection == Some(epoch) {
-            coordinator.active_collection = None;
-        }
-        coordinator.phase = AdmissionPhase::Poisoned;
-        self.notify_coordinator_waiters(&coordinator);
+        coordinator.poison(epoch);
     }
 
     fn activity(&self) -> HeapActivity {
@@ -2887,42 +2801,11 @@ impl HeapInner {
         })
     }
 
-    /// Wakes every thread waiting on an admission change. Requiring the
-    /// locked coordinator makes the waiter count exact: a waiter registers
-    /// under the same lock before it sleeps.
-    fn notify_coordinator_waiters(&self, coordinator: &MutatorCoordinator) {
-        #[cfg(test)]
-        self.coordinator_notifications
-            .fetch_add(1, Ordering::Relaxed);
-        if coordinator.admission_waiters != 0 {
-            self.admission_changed.notify_all();
-        }
-    }
-
-    /// Waits for an admission change, counted in `admission_waiters`.
-    fn wait_for_admission_change<'a>(
-        &self,
-        mut coordinator: std::sync::MutexGuard<'a, MutatorCoordinator>,
-    ) -> std::sync::LockResult<std::sync::MutexGuard<'a, MutatorCoordinator>> {
-        coordinator.admission_waiters += 1;
-        let woken = self.admission_changed.wait(coordinator);
-        let mut coordinator = match woken {
-            Ok(coordinator) => coordinator,
-            Err(poisoned) => {
-                let mut coordinator = poisoned.into_inner();
-                coordinator.admission_waiters -= 1;
-                return Err(std::sync::PoisonError::new(coordinator));
-            }
-        };
-        coordinator.admission_waiters -= 1;
-        Ok(coordinator)
-    }
-
     fn collect_full(self: &Arc<Self>) -> Result<CollectionReport, CollectionError> {
         add_metric(&self.synchronous_collection_requests, 1);
         let target = {
             let coordinator = self
-                .coordinator
+                .admission
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if self.is_poisoned() {
@@ -2945,20 +2828,20 @@ impl HeapInner {
         loop {
             let elected = {
                 let mut coordinator = self
-                    .coordinator
+                    .admission
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 loop {
                     if self.is_poisoned() {
                         return Err(CollectionError::Poisoned);
                     }
-                    if coordinator.completed_collection_epoch >= target.get() {
+                    if coordinator.completed_collection_epoch() >= target.get() {
                         let report = coordinator
-                            .latest_collection_report
+                            .latest_collection_report()
                             .expect("completed collection must publish its scalar report");
                         assert_eq!(
                             report.epoch(),
-                            coordinator.completed_collection_epoch,
+                            coordinator.completed_collection_epoch(),
                             "latest report and completed epoch must publish together"
                         );
                         assert!(
@@ -2969,13 +2852,12 @@ impl HeapInner {
                     }
                     let requested = self.collection_requested.load(Ordering::Acquire);
                     if let Some(elected) = coordinator.elect_idle_collection(requested) {
-                        self.notify_coordinator_waiters(&coordinator);
                         break elected;
                     }
                     #[cfg(feature = "deterministic-test-hooks")]
                     if !wait_probe_checked
-                        && coordinator.phase == AdmissionPhase::Ordinary
-                        && coordinator.active_outer_mutators != 0
+                        && coordinator.phase() == AdmissionPhase::Ordinary
+                        && coordinator.active_outer_mutators() != 0
                     {
                         // Do not nest the test-probe mutex beneath the
                         // authoritative coordinator mutex. The observed state
@@ -2985,7 +2867,7 @@ impl HeapInner {
                         self.announce_synchronous_collection_wait();
                         wait_probe_checked = true;
                         coordinator = self
-                            .coordinator
+                            .admission
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
                         continue;
@@ -2993,15 +2875,15 @@ impl HeapInner {
                     #[cfg(test)]
                     {
                         coordinator.blocked_collection_waiters += 1;
-                        self.notify_coordinator_waiters(&coordinator);
+                        coordinator.notify();
                     }
-                    coordinator = self
-                        .wait_for_admission_change(coordinator)
+                    coordinator = coordinator
+                        .wait()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     #[cfg(test)]
                     {
                         coordinator.blocked_collection_waiters -= 1;
-                        self.notify_coordinator_waiters(&coordinator);
+                        coordinator.notify();
                     }
                 }
             };
@@ -3038,20 +2920,20 @@ impl HeapInner {
         finalizer_work: impl for<'mutator> FnOnce(&Mutator<'mutator>),
     ) -> Option<MutatorAdmission<'heap>> {
         let coordinator = self
-            .coordinator
+            .admission
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(
-            coordinator.active_collection,
+            coordinator.active_collection(),
             Some(epoch),
             "collector epoch is no longer authoritative"
         );
         assert_eq!(
-            coordinator.phase,
+            coordinator.phase(),
             AdmissionPhase::Exclusive,
             "elected collector must begin exclusive"
         );
-        assert_eq!(coordinator.active_outer_mutators, 0);
+        assert_eq!(coordinator.active_outer_mutators(), 0);
         drop(coordinator);
 
         add_metric(&self.collection_attempts, 1);
@@ -3160,16 +3042,10 @@ impl HeapInner {
             "collector thread unexpectedly holds a mutator for its target heap"
         );
         let admission = {
-            let mut coordinator = self
-                .coordinator
+            self.admission
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            assert_eq!(coordinator.phase, AdmissionPhase::Exclusive);
-            assert_eq!(coordinator.active_outer_mutators, 0);
-            assert_eq!(coordinator.active_collection, Some(epoch));
-            coordinator.phase = AdmissionPhase::Finalizing;
-            coordinator.active_outer_mutators = 1;
-            self.notify_coordinator_waiters(&coordinator);
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .begin_finalizing(epoch);
             MutatorAdmission { heap: self }
         };
         let pause_duration = collection_started.elapsed();
@@ -3289,62 +3165,53 @@ impl HeapInner {
     }
 
     fn release_outer_mutator(&self) {
-        let mut coordinator = self
-            .coordinator
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(_coordinator) = self.admission.exit() else {
+            return;
+        };
         #[cfg(test)]
-        if coordinator.phase == AdmissionPhase::Poisoned {
+        if _coordinator.phase() == AdmissionPhase::Poisoned {
             self.poisoned_outer_mutator_releases
                 .fetch_add(1, Ordering::Relaxed);
-        }
-        coordinator.active_outer_mutators = coordinator
-            .active_outer_mutators
-            .checked_sub(1)
-            .expect("active mutator count underflow");
-        if coordinator.active_outer_mutators == 0 {
-            self.notify_coordinator_waiters(&coordinator);
         }
     }
 
     #[cfg(test)]
     fn enter_synthetic_exclusive(&self) -> SyntheticExclusiveAdmission<'_> {
         let mut coordinator = self
-            .coordinator
+            .admission
             .lock()
             .expect("mutator coordinator should not be poisoned");
-        while coordinator.phase != AdmissionPhase::Ordinary
-            || coordinator.active_outer_mutators != 0
+        while coordinator.phase() != AdmissionPhase::Ordinary
+            || coordinator.active_outer_mutators() != 0
         {
-            coordinator = self
-                .wait_for_admission_change(coordinator)
+            coordinator = coordinator
+                .wait()
                 .expect("mutator coordinator should not be poisoned");
         }
-        coordinator.phase = AdmissionPhase::Exclusive;
-        self.notify_coordinator_waiters(&coordinator);
+        coordinator.begin_synthetic_exclusive();
         SyntheticExclusiveAdmission { heap: self }
     }
 
     #[cfg(test)]
     fn coordinator_snapshot(&self) -> CoordinatorSnapshot {
-        let coordinator = *self
-            .coordinator
+        let coordinator = self
+            .admission
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         CoordinatorSnapshot {
-            phase: coordinator.phase,
-            active_outer_mutators: coordinator.active_outer_mutators,
+            phase: coordinator.phase(),
+            active_outer_mutators: coordinator.active_outer_mutators(),
             collection_requested: self.collection_requested.load(Ordering::Acquire),
-            active_collection: coordinator.active_collection,
-            completed_collection_epoch: coordinator.completed_collection_epoch,
-            latest_collection_report: coordinator.latest_collection_report,
+            active_collection: coordinator.active_collection(),
+            completed_collection_epoch: coordinator.completed_collection_epoch(),
+            latest_collection_report: coordinator.latest_collection_report(),
             blocked_outer_mutators: coordinator.blocked_outer_mutators,
         }
     }
 
     #[cfg(test)]
     fn coordinator_notification_count(&self) -> usize {
-        self.coordinator_notifications.load(Ordering::Relaxed)
+        self.admission.notification_count()
     }
 
     #[cfg(test)]
@@ -3457,7 +3324,7 @@ impl HeapInner {
     #[cfg(test)]
     fn elect_idle_collection_for_test(&self) -> CollectionEpoch {
         let mut coordinator = self
-            .coordinator
+            .admission
             .lock()
             .expect("mutator coordinator should not be poisoned");
         coordinator
@@ -3468,12 +3335,12 @@ impl HeapInner {
     #[cfg(test)]
     fn wait_for_blocked_outer_mutators(&self, expected: usize) {
         let mut coordinator = self
-            .coordinator
+            .admission
             .lock()
             .expect("mutator coordinator should not be poisoned");
         while coordinator.blocked_outer_mutators != expected {
-            coordinator = self
-                .wait_for_admission_change(coordinator)
+            coordinator = coordinator
+                .wait()
                 .expect("mutator coordinator should not be poisoned");
         }
     }
@@ -3481,12 +3348,12 @@ impl HeapInner {
     #[cfg(test)]
     fn wait_for_collection_waiters(&self, expected: usize) {
         let mut coordinator = self
-            .coordinator
+            .admission
             .lock()
             .expect("mutator coordinator should not be poisoned");
         while coordinator.blocked_collection_waiters != expected {
-            coordinator = self
-                .wait_for_admission_change(coordinator)
+            coordinator = coordinator
+                .wait()
                 .expect("mutator coordinator should not be poisoned");
         }
     }
@@ -3966,10 +3833,10 @@ impl HeapInner {
 
     #[cfg(feature = "deterministic-test-hooks")]
     fn completed_collection_epoch_for_verification(&self) -> u64 {
-        self.coordinator
+        self.admission
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .completed_collection_epoch
+            .completed_collection_epoch()
     }
 
     pub(crate) fn register_root<T: Trace>(self: &Arc<Self>, value: crate::Gc<T>) -> Root<T> {
@@ -3997,15 +3864,15 @@ impl HeapInner {
     fn visit_registered_roots(&self, visit: impl FnMut(crate::trace::ErasedGc)) -> usize {
         {
             let coordinator = self
-                .coordinator
+                .admission
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert_eq!(
-                coordinator.phase,
+                coordinator.phase(),
                 AdmissionPhase::Exclusive,
                 "root traversal requires exclusive collection authority"
             );
-            assert_eq!(coordinator.active_outer_mutators, 0);
+            assert_eq!(coordinator.active_outer_mutators(), 0);
         }
 
         let mut data = self
@@ -4181,13 +4048,11 @@ impl<'heap> CollectionAttempt<'heap> {
         {
             let mut coordinator = self
                 .heap
-                .coordinator
+                .admission
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            assert_eq!(coordinator.phase, AdmissionPhase::Finalizing);
-            assert_eq!(coordinator.active_collection, Some(self.epoch));
             let report = CollectionReport {
-                epoch: self.epoch.0,
+                epoch: self.epoch.non_zero(),
                 root_entries: summary.mark.root_entries,
                 traced_objects: summary.mark.traced_objects,
                 marked_slots: summary.mark.marked_slots,
@@ -4206,14 +4071,10 @@ impl<'heap> CollectionAttempt<'heap> {
                 finalization_duration: summary.finalization_duration,
                 total_duration: summary.total_duration,
             };
-            coordinator.latest_collection_report = Some(report);
-            coordinator.completed_collection_epoch = self.epoch.get();
             self.heap
                 .completed_collection_epoch
                 .store(self.epoch.get(), Ordering::Release);
-            coordinator.active_collection = None;
-            coordinator.phase = AdmissionPhase::Ordinary;
-            self.heap.notify_coordinator_waiters(&coordinator);
+            coordinator.complete_collection(self.epoch, report);
         }
         add_metric(&self.heap.successful_collections, 1);
         self.state = CollectionAttemptState::Completed;
@@ -4260,16 +4121,11 @@ impl Drop for CollectionAttempt<'_> {
         self.heap
             .collection_requested
             .store(true, Ordering::Release);
-        let mut coordinator = self
-            .heap
-            .coordinator
+        self.heap
+            .admission
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if coordinator.active_collection == Some(self.epoch) {
-            coordinator.active_collection = None;
-            coordinator.phase = AdmissionPhase::Ordinary;
-        }
-        self.heap.notify_coordinator_waiters(&coordinator);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .abandon_collection(self.epoch);
     }
 }
 

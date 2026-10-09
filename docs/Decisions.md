@@ -1129,6 +1129,28 @@ maps the short names used here to file names.
   Invariants".
 - **Recorded in:** collector implementation plan C3E; C2C review GC2C-003.
 
+### Admission is one gate: the coordinator mutex with a lock-free count
+`admission-gate-fast-path` · 2026-10-09 · maintainer · accepted
+- **Context:** every outer access region locked the coordinator mutex on
+  entry and again on exit, about 5% of a reduction-heavy workload's samples.
+  `idle-entry-election-and-condvar-admission` required one coordinator
+  mutex; its purpose is that no second lock can deadlock against it.
+- **Decision:** the active-outer-mutator count moves from the mutex into an
+  atomic word beside it, with a `COORDINATED` bit. While the phase is
+  `Ordinary` and nobody waits, an outer entry is one compare-and-swap and an
+  exit one decrement; otherwise both take the mutex. One module owns the
+  gate and every phase change, as a specialized mutex rather than a second
+  lock (maintainer). No admission decision changes: election stays idle-only.
+- **Consequences:**
+  - Reading the count under the mutex sets the bit, so elections and
+    waiters see every entry and exit; the Loom models compile the gate
+    itself.
+  - Overlapping mutators can still starve collection; bounding that is
+    planned separately, on top of one open heap per thread.
+- **Rule lives in:** `crates/glam-gc/SAFETY.md` "Regional Mutator Admission
+  Invariants".
+- **Recorded in:** structural overheads plan, `perf-access-region-cost`.
+
 ### Clear mark bitmaps before marking
 `clear-before-mark-bitmaps` · 2026-08-22 · agent · accepted
 - **Context:** the collector's correctness surface should stay small.
