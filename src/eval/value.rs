@@ -152,6 +152,17 @@ enum LazyTaskWork {
     HostCallCheckpoint,
 }
 
+/// What a `Produce` poll finds when it starts.
+enum ProduceStart {
+    Cached(crate::core::LazyResult),
+    Source(LazySource),
+    /// A checkpoint or forward is installed already.
+    Work(LazyTaskWork),
+    /// No source, checkpoint, forward or result: the lazy's evaluation
+    /// panicked.
+    Released,
+}
+
 struct LazyTaskMachine {
     context: EvalContext,
     lazy: ManagedLazyRoot,
@@ -1431,28 +1442,46 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             return EvaluationMachinePoll::Yielded;
         }
         poll_context.evaluate(&durable_context, |context| {
-            if let Some(result) =
-                context.with_value_access(|access| access.lazy_root(&self.lazy).cached())
-            {
-                return match result {
-                    Ok(value) => {
-                        EvaluationMachinePoll::Complete(
-                            context.root_value(|access| value.into_value_in(access.values())),
-                        )
-                    }
-                    Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
-                };
-            }
-
+            // Only `Produce` reads the lazy's state up front, in one access
+            // region. Every other poller notices a lazy cached meanwhile,
+            // since its checkpoint or forward is gone, and resumes from what
+            // it finds (see `resume_moved`), so it needs no cache check of
+            // its own.
             if matches!(self.work, LazyTaskWork::Produce) {
-                let source = context
-                    .with_value_access(|access| access.lazy_root(&self.lazy).source_snapshot());
-                if source.is_none() {
-                    let Some(work) = self.checkpoint_work(context) else {
-                        return self.cached_poll(context);
-                    };
-                    self.work = work;
-                }
+                let start = context.with_value_access(|access| {
+                    let lazy = access.lazy_root(&self.lazy);
+                    if let Some(result) = lazy.cached() {
+                        return ProduceStart::Cached(result);
+                    }
+                    match lazy.source_snapshot() {
+                        Some(source) => ProduceStart::Source(source),
+                        None => match lazy.checkpoint_snapshot() {
+                            Some(checkpoint) => ProduceStart::Work(Self::work_for_checkpoint_kind(
+                                checkpoint.kind(),
+                            )),
+                            None if lazy.forward_target().is_some() => {
+                                ProduceStart::Work(LazyTaskWork::Forward)
+                            }
+                            None => ProduceStart::Released,
+                        },
+                    }
+                });
+                let source = match start {
+                    ProduceStart::Cached(Ok(value)) => {
+                        return EvaluationMachinePoll::Complete(
+                            context.root_value(|access| value.into_value_in(access.values())),
+                        );
+                    }
+                    ProduceStart::Cached(Err(error)) => {
+                        return EvaluationMachinePoll::Failed(context.root_failure(error));
+                    }
+                    ProduceStart::Released => return self.cached_poll(context),
+                    ProduceStart::Work(work) => {
+                        self.work = work;
+                        None
+                    }
+                    ProduceStart::Source(source) => Some(source),
+                };
                 if let Some(source) = source {
                     self.work = match source {
                         LazySource::HostCall(producer) => {

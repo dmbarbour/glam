@@ -4,7 +4,7 @@ Status: active, as the `perf-structural-overheads` step of the
 [performance roadmap](PerformanceRoadmap_2026-10-05.md). Done:
 `perf-admission-wakeups`, `perf-idle-wakeups`, `perf-fast-id-hashing`,
 `perf-net-builder-wired-ports`, `perf-scaling-workloads`,
-`perf-list-front-walk` and `perf-list-leaf-walk`. Next:
+`perf-list-front-walk` and `perf-list-leaf-walk`. In progress:
 `perf-access-region-cost`.
 
 ## Purpose
@@ -90,6 +90,41 @@ Candidate remedies, each measurable alone:
   probes), which could share a region.
 
 This is the largest broad cost: every workload pays it.
+
+Progress 2026-10-09:
+- **Per-thread region counters.** Each thread cache now has its own
+  counters, written with plain loads and stores at an outer region's exit
+  and summed when metrics are read. A released cache's counters fold into
+  the heap's totals at the next registration or read. This removes four
+  atomic read-modify-write loops and a `Weak` upgrade per region.
+- **Heap identity by pointer.** `PreparedThreadHeapEntry::prepare`
+  compares addresses instead of creating and dropping a `Weak`; the cached
+  `Weak` keeps the heap's address from being reused.
+- **One region to start a `Produce` poll.** Every lazy-machine poll opened
+  a region only to check the cache, and a `Produce` poll a second for the
+  source. Now `Produce` reads cache, source, checkpoint and forward in one
+  region, and checkpoint pollers skip the check: a lazy cached meanwhile
+  has lost its checkpoint, which they already handle (`resume_moved`).
+
+  Outer regions fell 16–22% in every workload, and instructions 1–5%
+  (`countdown_800` 2,375 M to 2,255 M, 753 K to 601 K regions; `sum_800`
+  2,665 M to 2,528 M; `hello_elf` 3,503 M to 3,385 M). CPU time fell more
+  than instructions in single runs, as expected when atomic
+  read-modify-writes go.
+
+Remaining, in `countdown_800` after these changes:
+- The admission mutex, locked on entry and exit, is about 5% of samples
+  (`admit_outer_mutator`, `MutatorAdmission::drop`). An atomic fast path
+  changes the collector's coordinator protocol: discuss before starting.
+- Region counts by caller (one instrumented run): `forceable_inline`
+  opens one per inline offer (about 9% of the remaining regions), and
+  `drive_net_semantic_action` one only to turn the action's net root back
+  into a handle (about 6%). Each could share the region that produced its
+  input; the second carries a non-rooting handle beside its root.
+- Holding one outer region for a driver's whole quantum would make every
+  inner region a cheap recursive entry, but delays collection to quantum
+  boundaries and needs every blocking point and host call inside a
+  quantum to leave the region first. That is an architecture change.
 
 ### Cost per collection (`perf-collection-growth`)
 

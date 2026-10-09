@@ -175,6 +175,7 @@ struct ThreadHeapState {
     captured_epoch: AllocationLeaseEpoch,
     cursors: ClassCursorCache,
     region_metrics: ThreadRegionMetrics,
+    counters: Arc<ThreadRegionCounters>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -185,6 +186,60 @@ pub(crate) struct ThreadRegionMetrics {
     pub(crate) class_cache_misses: u64,
 }
 
+impl ThreadRegionMetrics {
+    pub(crate) fn add(&mut self, other: Self) {
+        fn add(total: &mut u64, amount: u64) {
+            *total = total
+                .checked_add(amount)
+                .expect("collector metric exhausted");
+        }
+        add(&mut self.outer_entries, other.outer_entries);
+        add(&mut self.recursive_entries, other.recursive_entries);
+        add(&mut self.class_cache_hits, other.class_cache_hits);
+        add(&mut self.class_cache_misses, other.class_cache_misses);
+    }
+}
+
+/// One thread's completed-region metrics for one heap.
+///
+/// Only the owning thread's cache writes these counters, so completing a
+/// region takes plain loads and stores rather than contended atomic
+/// read-modify-writes. The heap sums every thread's counters when its
+/// metrics are read, and folds a thread's counters into its own totals once
+/// that thread's cache is gone.
+#[derive(Default)]
+pub(crate) struct ThreadRegionCounters {
+    outer_entries: AtomicU64,
+    recursive_entries: AtomicU64,
+    class_cache_hits: AtomicU64,
+    class_cache_misses: AtomicU64,
+}
+
+impl ThreadRegionCounters {
+    /// Adds one completed outer region. Only the owning thread calls this.
+    fn publish(&self, metrics: ThreadRegionMetrics) {
+        let mut total = self.snapshot();
+        total.add(metrics);
+        self.outer_entries
+            .store(total.outer_entries, Ordering::Relaxed);
+        self.recursive_entries
+            .store(total.recursive_entries, Ordering::Relaxed);
+        self.class_cache_hits
+            .store(total.class_cache_hits, Ordering::Relaxed);
+        self.class_cache_misses
+            .store(total.class_cache_misses, Ordering::Relaxed);
+    }
+
+    pub(crate) fn snapshot(&self) -> ThreadRegionMetrics {
+        ThreadRegionMetrics {
+            outer_entries: self.outer_entries.load(Ordering::Relaxed),
+            recursive_entries: self.recursive_entries.load(Ordering::Relaxed),
+            class_cache_hits: self.class_cache_hits.load(Ordering::Relaxed),
+            class_cache_misses: self.class_cache_misses.load(Ordering::Relaxed),
+        }
+    }
+}
+
 impl ThreadHeapState {
     fn new(heap: &Arc<HeapInner>, captured_epoch: AllocationLeaseEpoch) -> Self {
         Self {
@@ -193,6 +248,7 @@ impl ThreadHeapState {
             captured_epoch,
             cursors: ClassCursorCache::default(),
             region_metrics: ThreadRegionMetrics::default(),
+            counters: heap.register_region_counters(),
         }
     }
 
@@ -311,8 +367,10 @@ impl PreparedThreadHeapEntry {
 
         let outer = {
             let state = state.borrow();
+            // The cached `Weak` keeps the heap's allocation, so no other heap
+            // can reuse its address while this entry exists.
             assert!(
-                state.heap.ptr_eq(&Arc::downgrade(heap)),
+                std::ptr::eq(state.heap.as_ptr(), Arc::as_ptr(heap)),
                 "thread heap-cache identity collision"
             );
             state.recursive_depth == 0
@@ -400,27 +458,21 @@ impl<'heap> ThreadHeapEntry<'heap> {
 
     fn deactivate(&mut self) -> bool {
         assert!(self.active, "mutator entry is already inactive");
-        let (prior_depth, completed_metrics, heap) = {
-            let mut state = self.state.borrow_mut();
-            let prior_depth = state.recursive_depth;
-            state.recursive_depth = prior_depth
-                .checked_sub(1)
-                .expect("mutator entry depth underflow");
-            let completed_metrics =
-                (prior_depth == 1).then(|| std::mem::take(&mut state.region_metrics));
-            let heap = completed_metrics
-                .is_some()
-                .then(|| state.heap.upgrade().expect("active mutator lost its heap"));
-            (prior_depth, completed_metrics, heap)
-        };
+        let mut state = self.state.borrow_mut();
+        let prior_depth = state.recursive_depth;
+        state.recursive_depth = prior_depth
+            .checked_sub(1)
+            .expect("mutator entry depth underflow");
         assert_eq!(
             self.outer_admission.is_some(),
             prior_depth == 1,
             "coordinator obligation does not match outer mutator exit"
         );
-        if let (Some(metrics), Some(heap)) = (completed_metrics, heap) {
-            heap.record_thread_region_metrics(metrics);
+        if prior_depth == 1 {
+            let metrics = std::mem::take(&mut state.region_metrics);
+            state.counters.publish(metrics);
         }
+        drop(state);
         self.active = false;
         prior_depth == 1
     }

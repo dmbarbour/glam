@@ -16,8 +16,8 @@ use crate::{
     root::RootCell,
     run::{AllocationClassId, RunGeometry},
     thread_cache::{
-        AllocationCursor, AllocationLeaseEpoch, ThreadHeapEntry, remove_inactive_thread_cache,
-        thread_has_any_active_mutator,
+        AllocationCursor, AllocationLeaseEpoch, ThreadHeapEntry, ThreadRegionCounters,
+        ThreadRegionMetrics, remove_inactive_thread_cache, thread_has_any_active_mutator,
     },
     trace::ErasedGc,
 };
@@ -796,10 +796,7 @@ pub(crate) struct HeapInner {
     synchronous_collection_joins: AtomicU64,
     explicit_collection_requests: AtomicU64,
     coalesced_collection_requests: AtomicU64,
-    outer_mutator_entries: AtomicU64,
-    recursive_mutator_entries: AtomicU64,
-    class_cache_hits: AtomicU64,
-    class_cache_misses: AtomicU64,
+    region_counters: Mutex<RegionCounterRegistry>,
     #[cfg(feature = "deterministic-test-hooks")]
     edge_transition_probe: Mutex<Option<Arc<EdgeTransitionProbeState>>>,
     #[cfg(feature = "deterministic-test-hooks")]
@@ -877,10 +874,7 @@ impl HeapInner {
             synchronous_collection_joins: AtomicU64::new(0),
             explicit_collection_requests: AtomicU64::new(0),
             coalesced_collection_requests: AtomicU64::new(0),
-            outer_mutator_entries: AtomicU64::new(0),
-            recursive_mutator_entries: AtomicU64::new(0),
-            class_cache_hits: AtomicU64::new(0),
-            class_cache_misses: AtomicU64::new(0),
+            region_counters: Mutex::new(RegionCounterRegistry::default()),
             #[cfg(feature = "deterministic-test-hooks")]
             edge_transition_probe: Mutex::new(None),
             #[cfg(feature = "deterministic-test-hooks")]
@@ -985,6 +979,27 @@ impl CollectionEpoch {
 
     const fn get(self) -> u64 {
         self.0.get()
+    }
+}
+
+/// Every thread cache's region counters, and the totals of released caches.
+#[derive(Default)]
+struct RegionCounterRegistry {
+    live: Vec<Arc<ThreadRegionCounters>>,
+    retired: ThreadRegionMetrics,
+}
+
+impl RegionCounterRegistry {
+    /// Folds the counters of released thread caches into `retired`. Only the
+    /// registry still holds those, and `Arc::try_unwrap` synchronizes with
+    /// their thread's last update.
+    fn retire_released(&mut self) {
+        for counters in std::mem::take(&mut self.live) {
+            match Arc::try_unwrap(counters) {
+                Ok(released) => self.retired.add(released.snapshot()),
+                Err(counters) => self.live.push(counters),
+            }
+        }
     }
 }
 
@@ -2744,6 +2759,8 @@ impl HeapInner {
 
     fn metrics(&self) -> HeapMetrics {
         assert!(!self.is_poisoned(), "managed heap is permanently poisoned");
+        // Taken before the data lock: the two locks are never held together.
+        let region_metrics = self.region_metrics();
         let data = self
             .data
             .lock()
@@ -2796,11 +2813,11 @@ impl HeapInner {
             coalesced_collection_requests: self
                 .coalesced_collection_requests
                 .load(Ordering::Relaxed),
-            outer_mutator_entries: self.outer_mutator_entries.load(Ordering::Relaxed),
-            recursive_mutator_entries: self.recursive_mutator_entries.load(Ordering::Relaxed),
+            outer_mutator_entries: region_metrics.outer_entries,
+            recursive_mutator_entries: region_metrics.recursive_entries,
             root_registrations: self.root_registrations.load(Ordering::Relaxed),
-            class_cache_hits: self.class_cache_hits.load(Ordering::Relaxed),
-            class_cache_misses: self.class_cache_misses.load(Ordering::Relaxed),
+            class_cache_hits: region_metrics.class_cache_hits,
+            class_cache_misses: region_metrics.class_cache_misses,
             arena_chunks: data.arena.run_capacity() / crate::arena::RUNS_PER_CHUNK,
             assigned_runs: data.allocation_pressure.assigned_runs,
             free_runs: data.free_runs.len(),
@@ -2817,14 +2834,30 @@ impl HeapInner {
         }
     }
 
-    pub(crate) fn record_thread_region_metrics(
-        &self,
-        metrics: crate::thread_cache::ThreadRegionMetrics,
-    ) {
-        add_metric(&self.outer_mutator_entries, metrics.outer_entries);
-        add_metric(&self.recursive_mutator_entries, metrics.recursive_entries);
-        add_metric(&self.class_cache_hits, metrics.class_cache_hits);
-        add_metric(&self.class_cache_misses, metrics.class_cache_misses);
+    /// Registers one thread cache's region counters.
+    pub(crate) fn register_region_counters(&self) -> Arc<ThreadRegionCounters> {
+        let counters = Arc::new(ThreadRegionCounters::default());
+        let mut registry = self
+            .region_counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        registry.retire_released();
+        registry.live.push(Arc::clone(&counters));
+        counters
+    }
+
+    /// Sums the region metrics of every thread cache, live or released.
+    fn region_metrics(&self) -> ThreadRegionMetrics {
+        let mut registry = self
+            .region_counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        registry.retire_released();
+        let mut total = registry.retired;
+        for counters in &registry.live {
+            total.add(counters.snapshot());
+        }
+        total
     }
 
     fn maintenance_snapshot(&self) -> HeapMaintenanceSnapshot {
@@ -7089,6 +7122,34 @@ mod tests {
         assert_eq!(heap.metrics().eagerly_swept_words(), 1);
         assert_eq!(heap.metrics().eagerly_swept_slots(), 4);
         heap.with_mutator(|mutator| assert_eq!(*live.get(mutator), 1));
+    }
+
+    #[test]
+    fn region_metrics_survive_released_thread_caches_without_accumulating_them() {
+        let heap = Heap::new();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..3 {
+                    heap.with_mutator(|_| {});
+                }
+                // A join may return before thread-local destructors run, so
+                // release this thread's cache before the thread finishes.
+                assert_eq!(Heap::release_current_thread_caches(), 1);
+            });
+        });
+        heap.with_mutator(|_| {});
+        let _ = Heap::release_current_thread_caches();
+        heap.with_mutator(|_| heap.with_mutator(|_| {}));
+
+        let metrics = heap.metrics();
+        assert_eq!(metrics.outer_mutator_entries(), 5);
+        assert_eq!(metrics.recursive_mutator_entries(), 1);
+        let registry = heap.inner.region_counters.lock().unwrap();
+        assert_eq!(
+            registry.live.len(),
+            1,
+            "only this thread's current cache keeps live counters"
+        );
     }
 
     #[test]
