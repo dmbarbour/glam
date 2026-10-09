@@ -1245,6 +1245,26 @@ maps the short names used here to file names.
   Invariants"; `agent_context/evaluation.md` "Values and Forcing".
 - **Recorded in:** structural overheads plan, `perf-quantum-region`.
 
+### A waiting collection is bounded at quantum boundaries
+`quantum-boundary-collection-join` · 2026-10-09 · maintainer and agent · accepted
+- **Context:** with one held region per evaluation quantum, overlapping
+  quanta could starve a collection that waits for an idle heap. The
+  maintainer chose to hold back new entrants at the quantum boundary, where
+  a driver holds no lock.
+- **Decision:** no change to the collector's admission. A waiting
+  `collect_full` already sets the heap's request, and every driver services
+  pressure at each quantum boundary after its region ends, so drivers join
+  the collection there rather than start another quantum. Aggressive-GC
+  verification's pressure input now honors a request too. Rejected:
+  draining entrants in the gate, which the convergence makes unnecessary and
+  which would hold back settlement while it holds the runtime mutation gate.
+- **Consequences:** under two busy workers, a collection took 5 to 15 ms;
+  with joining disabled, 0.5 to 15 s. The bound is Glam's: `glam-gc` still
+  elects only at an idle heap, so a driver loop must keep its boundary.
+- **Rule lives in:** `agent_context/evaluation.md` "Values and Forcing";
+  `crates/glam-gc/SAFETY.md` "Regional Mutator Admission Invariants".
+- **Recorded in:** structural overheads plan, `gc-bounded-collection-wait`.
+
 ### Clear mark bitmaps before marking
 `clear-before-mark-bitmaps` · 2026-08-22 · agent · accepted
 - **Context:** the collector's correctness surface should stay small.

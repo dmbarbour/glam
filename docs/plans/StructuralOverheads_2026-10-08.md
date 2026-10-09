@@ -6,8 +6,8 @@ Status: active, as the `perf-structural-overheads` step of the
 `perf-net-builder-wired-ports`, `perf-scaling-workloads`,
 `perf-list-front-walk`, `perf-list-leaf-walk`, `perf-access-region-cost`,
 `perf-worker-scaling`, `perf-collection-growth`,
-`gc-one-heap-per-thread` and `perf-quantum-region`. Next:
-`gc-bounded-collection-wait`.
+`gc-one-heap-per-thread`, `perf-quantum-region` and
+`gc-bounded-collection-wait`. Next: `gc-two-level-mutator-access`.
 
 ## Purpose
 
@@ -67,20 +67,6 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 | Coordinator claims, releases and admissions | under 2% |
 
 ## Open Steps, in Order
-
-### Bounded collection wait (`gc-bounded-collection-wait`)
-
-Collection waits for an idle heap, and since `perf-quantum-region` each
-evaluation quantum holds the heap, so overlapping quanta can starve it
-(accepted for that step's commit, maintainer). Design (maintainer,
-2026-10-09): while a collection waits, hold back new held regions at the
-quantum boundary, the three polls that call `with_held_region`, and admit
-every other entry as now. The boundary holds no glam lock, which matters:
-settlement holds the runtime mutation gate for writing while it constructs
-values, and promise publication takes that gate for reading inside a
-region, so holding settlement's entry back would deadlock. A collection
-then waits at most for the quanta in flight, and drivers converge on it at
-their next boundary. The gate's word can carry the request.
 
 ### Two-level mutator access (`gc-two-level-mutator-access`)
 
@@ -207,6 +193,11 @@ yet. The `do_chain` workload does not: its pure effects reduce in nets, and
 its reflection-step count stays constant. A workload that runs a long chain
 of reflection effects would.
 
+Reflection task polls hold no heap region (`perf-quantum-region`), since
+they call into their host between steps. Their pure steps, such as local
+state, could hold one, provided no client callback runs inside it
+(maintainer, 2026-10-09).
+
 ### Route walks with workers (`perf-worker-route-walks`)
 
 After `perf-worker-scaling`, `chain_w4_800` still runs 8% more
@@ -249,6 +240,26 @@ and help only programs with parallel work, so this comes last.
   Allocating less is the better lever.
 
 ## Done
+
+- **Bounded collection wait** (`gc-bounded-collection-wait`), 2026-10-09.
+  - **Design** (maintainer): hold back new entrants at the quantum
+    boundary, where a driver holds no lock. A lock audit had found why
+    holding back other entries would deadlock: settlement holds the runtime
+    mutation gate for writing while it constructs values, and promise
+    publication takes that gate for reading inside a region.
+  - **Already true, once each quantum holds one region.** A waiting
+    `collect_full` sets the heap's request, and every driver services
+    pressure at each quantum boundary after its region ends, so drivers
+    join the collection there rather than start another quantum. The
+    admission gate needed no draining mode.
+  - **Fix.** Aggressive-GC verification's pressure input counted only new
+    allocations, so a worker that allocated nothing in a quantum would not
+    join; it now honors a request too.
+  - **Evidence.** `a_quantum_boundary_joins_a_waiting_collection` checks
+    the ordering: a driver's next quantum begins after the waiting
+    collection. With joining disabled it failed 19 of 20 runs. Under two
+    busy workers, a collection took 5 to 15 ms, against 0.5 to 15 s with
+    joining disabled (debug build, five runs each).
 
 - **One region per quantum** (`perf-quantum-region`), 2026-10-09. Done
   before `gc-bounded-collection-wait`, accepting starvation in between

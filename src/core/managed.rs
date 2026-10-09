@@ -717,10 +717,10 @@ impl CoreValueFactory {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Whether collector pressure has latched a collection request. Lock-free
-    /// and advisory; see `glam_gc::Heap::collection_requested`. Aggressive
-    /// verification substitutes its own pressure input.
-    #[cfg(not(feature = "aggressive-gc-verification"))]
+    /// Whether collector pressure or a waiting collection has latched a
+    /// collection request. Lock-free and advisory; see
+    /// `glam_gc::Heap::collection_requested`. Aggressive verification adds
+    /// its own pressure input but still honors a request.
     pub(crate) fn managed_collection_requested(&self) -> bool {
         self.domain.heap.collection_requested()
     }
@@ -734,7 +734,7 @@ impl CoreValueFactory {
     /// Returns cumulative managed allocations. Every production allocation
     /// records exactly one worker-cache hit or miss. Call only on a usable
     /// heap: collector metrics panic after poison.
-    #[cfg(feature = "aggressive-gc-verification")]
+    #[cfg(any(test, feature = "aggressive-gc-verification"))]
     pub(crate) fn managed_allocation_count(&self) -> u64 {
         let metrics = self.domain.heap.metrics();
         metrics.class_cache_hits() + metrics.class_cache_misses()

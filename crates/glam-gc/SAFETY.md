@@ -524,7 +524,10 @@ the separate liveness and exactly-once obligations at each call site.
   needed a dependent admission category for cross-heap nesting, thread-local
   deferred-service records, exit-time scans, and follow-up epochs.
   Idle-entry election needs none of these. Its accepted cost is that
-  continuously overlapping mutators can starve collection. The gate's
+  continuously overlapping mutators can starve collection. Glam bounds that
+  wait above the collector: each evaluation quantum holds one region, and at
+  every quantum boundary a driver joins a requested collection before it
+  starts another (`gc-bounded-collection-wait`). The gate's
   lock-free path is not a third design: it changes no admission decision,
   and keeps the count with the state that decides (maintainer, 2026-10-09).
 

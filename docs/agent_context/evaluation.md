@@ -48,6 +48,12 @@ control-flow overview.
   released region is never reacquired. A forced collection inside a held
   poll reports an active mutator; probe for open value access with
   `thread_has_runtime_value_access_for_test` instead.
+- Every driver services collection pressure at each quantum boundary, after
+  the poll's held region ends. A waiting `collect_full` sets the heap's
+  request, which every pressure input honors, so drivers join it there
+  instead of starting another quantum; that bounds a collection's wait to
+  the quanta in flight (`gc-bounded-collection-wait`). A new driver loop
+  must keep this boundary.
 - Shared runtime mutation admission may be taken inside a managed-access
   region; promise publication does. This cannot deadlock because settlement
   never collects, and a pending collection blocks no mutator entry: the

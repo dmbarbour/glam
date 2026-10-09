@@ -2498,6 +2498,69 @@ fn panicking_host_call_is_never_replayed() {
     );
 }
 
+/// A collection completes while workers keep evaluating. This is a smoke
+/// test of the whole path; the ordering evidence is
+/// `runtime::tests::a_quantum_boundary_joins_a_waiting_collection`. Joining
+/// at the boundary took the collection here from seconds to milliseconds
+/// (`gc-bounded-collection-wait`).
+#[test]
+fn a_collection_completes_while_workers_keep_evaluating() {
+    let runtime = EvaluationRuntime::new(2).expect("worker runtime should build");
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .expect("assembler should build");
+    let module = assembler
+        .module(["busy"])
+        .script(
+            "g",
+            concat!(
+                "language g0\n",
+                "loop n = if n == 0 then 0 else loop (n - 1)\n",
+                "first = loop 1000000\n",
+                "second = loop 1000001\n",
+            ),
+        )
+        .build()
+        .expect("module should build");
+    let busy = ["first", "second"]
+        .map(|name| access_path(&assembler, module.value(), name).expect("binding should exist"));
+    let core_values = assembler.core_values();
+    let started = core_values.managed_allocation_count();
+    for value in &busy {
+        assembler.eval_context().spark(value.clone_core_for_test());
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while core_values.managed_allocation_count() < started + 10_000 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "workers should start evaluating"
+        );
+        std::thread::yield_now();
+    }
+
+    let (collected_sender, collected_receiver) = std::sync::mpsc::channel();
+    let collector = std::thread::spawn({
+        let runtime = runtime.clone();
+        move || {
+            let _ = collected_sender.send(runtime.service_managed_collection().is_ok());
+        }
+    });
+    assert_eq!(
+        collected_receiver.recv_timeout(std::time::Duration::from_secs(30)),
+        Ok(true),
+        "the collection should complete while the workers evaluate"
+    );
+    collector.join().expect("collector thread should finish");
+    // Neither loop had finished, so the workers kept polling throughout.
+    for value in &busy {
+        let CoreValue::Lazy(lazy) = value.clone_core_for_test() else {
+            panic!("a module binding should be lazy");
+        };
+        assert!(lazy.cached(&core_values).is_none());
+    }
+}
+
 #[test]
 fn worker_survives_a_panicking_sparked_value() {
     let runtime = EvaluationRuntime::new(1).expect("worker runtime should build");

@@ -250,16 +250,20 @@ impl RuntimeMutationAdmission {
     /// Recording the count even when promotion is then refused is safe:
     /// refusal means a pending or retry-required collection already covers
     /// these allocations.
+    ///
+    /// A requested collection still counts: another thread may be waiting
+    /// for it, and drivers join it at their quantum boundaries.
     #[cfg(feature = "aggressive-gc-verification")]
     fn gc_pressure_requested(&self, values: &CoreValueFactory) -> bool {
         if values.managed_maintenance_snapshot().is_poisoned() {
             return false;
         }
         let allocations = values.managed_allocation_count();
-        allocations
+        let allocated = allocations
             > self
                 .aggressive_promoted_allocations
-                .swap(allocations, Ordering::Relaxed)
+                .swap(allocations, Ordering::Relaxed);
+        allocated || values.managed_collection_requested()
     }
 
     pub(crate) fn record_gc_request_failure(
@@ -1150,6 +1154,46 @@ mod tests {
 
     fn usable_empty_heap() -> HeapMaintenanceSnapshot {
         glam_gc::Heap::new_with_policy(glam_gc::CollectionPolicy::NoAuto).maintenance_snapshot()
+    }
+
+    /// A driver ends its quantum's held region at the boundary and joins a
+    /// collection another thread waits for before it starts its next
+    /// quantum, so held regions cannot starve that collection
+    /// (`gc-bounded-collection-wait`).
+    #[test]
+    fn a_quantum_boundary_joins_a_waiting_collection() {
+        let admission = RuntimeMutationAdmission::new();
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let (quantum_tx, quantum_rx) = std::sync::mpsc::channel();
+        let (boundary_tx, boundary_rx) = std::sync::mpsc::channel();
+        let driver = std::thread::spawn({
+            let admission = admission.clone();
+            let values = values.clone();
+            move || {
+                values.with_held_region(|| {
+                    quantum_tx.send(()).unwrap();
+                    boundary_rx.recv().unwrap();
+                });
+                admission.service_collection_pressure(&values);
+                values.with_held_region(|| values.completed_collection_epoch_for_test())
+            }
+        });
+        quantum_rx.recv().unwrap();
+        let collector = std::thread::spawn({
+            let values = values.clone();
+            move || values.collect_managed_for_maintenance().unwrap()
+        });
+        while !values.managed_collection_requested() {
+            std::thread::yield_now();
+        }
+
+        boundary_tx.send(()).unwrap();
+        assert_eq!(
+            driver.join().unwrap(),
+            1,
+            "the next quantum must begin after the waiting collection"
+        );
+        assert_eq!(collector.join().unwrap().epoch(), 1);
     }
 
     #[test]
