@@ -1,4 +1,4 @@
-use crate::trusted_hash::TrustedHashMap;
+use crate::trusted_hash::{TrustedHashMap, TrustedHashSet};
 use std::alloc::Layout;
 use std::any::{TypeId, type_name};
 use std::fmt;
@@ -226,6 +226,9 @@ pub(crate) struct AllocationClassEntry {
         reason = "frontier atomics require stable run-record addresses across vector growth"
     )]
     runs: Vec<Box<RunClaimTarget>>,
+    /// The locations in `runs`. Resolving a slot checks membership for every
+    /// marked edge and validated root, so it must not scan the pool.
+    run_locations: TrustedHashSet<RunLocation>,
     frontier_index: Option<usize>,
 }
 
@@ -275,6 +278,7 @@ impl AllocationClassEntry {
             geometry,
             shared: Arc::new(AllocationClassShared::new()),
             runs: Vec::new(),
+            run_locations: TrustedHashSet::default(),
             frontier_index: None,
         }
     }
@@ -295,8 +299,11 @@ impl AllocationClassEntry {
         &self.runs
     }
 
+    /// Whether `location` is one of this class's runs. A run detached for
+    /// finalization keeps its header, so this is not implied by the header's
+    /// class.
     pub(crate) fn contains_run(&self, location: RunLocation) -> bool {
-        self.runs.iter().any(|run| run.location == location)
+        self.run_locations.contains(&location)
     }
 
     pub(crate) fn contains_target(&self, target: RunClaimTarget) -> bool {
@@ -311,9 +318,16 @@ impl AllocationClassEntry {
         self.runs
             .try_reserve(1)
             .expect("allocation-class run pool capacity exhausted");
+        self.run_locations
+            .try_reserve(1)
+            .expect("allocation-class run pool capacity exhausted");
     }
 
     pub(crate) fn publish_run(&mut self, run: RunClaimTarget) {
+        assert!(
+            self.run_locations.insert(run.location),
+            "run published twice to its allocation class"
+        );
         self.runs.push(Box::new(run));
         if self.frontier_index.is_none() {
             self.publish_frontier(0);
@@ -410,6 +424,7 @@ impl AllocationClassEntry {
             .iter()
             .position(|run| **run == target)
             .expect("retired run is absent from its allocation class");
+        self.run_locations.remove(&target.location);
         (index, self.runs.remove(index))
     }
 
@@ -489,7 +504,9 @@ mod tests {
 
     use crate::{Gc, Heap, Trace, Visitor};
 
-    use super::{ObjectMetadata, metadata_for, metadata_for_with};
+    use super::{AllocationClassEntry, ObjectMetadata, metadata_for, metadata_for_with};
+    use crate::arena::{RunAddress, RunClaimTarget, RunLocation};
+    use crate::run::RunGeometry;
 
     struct Leaf {
         _value: u8,
@@ -524,6 +541,33 @@ mod tests {
     // SAFETY: `DropProbe` contains no managed edge.
     unsafe impl Trace for DropProbe {
         fn trace(&self, _visitor: &mut Visitor<'_>) {}
+    }
+
+    #[test]
+    fn run_membership_follows_publication_and_retirement() {
+        let metadata = metadata_for::<Leaf>();
+        let geometry = RunGeometry::derive(metadata.layout(), metadata.requested_slot_size())
+            .expect("a leaf should have run geometry");
+        let target = |run| RunClaimTarget {
+            location: RunLocation { chunk: 0, run },
+            run: RunAddress::dangling_for_cache_test(),
+            geometry,
+        };
+        let mut entry = AllocationClassEntry::new(metadata, geometry);
+        for run in 0..3 {
+            entry.reserve_run();
+            entry.publish_run(target(run));
+        }
+        assert!((0..3).all(|run| entry.contains_run(target(run).location)));
+        assert!(!entry.contains_run(target(3).location));
+
+        // A run detached for finalization keeps its header, which still
+        // names this class; it must stop counting as a member.
+        entry.withdraw_frontier();
+        assert_eq!(*entry.retire_withdrawn_run(target(1)), target(1));
+        assert!(!entry.contains_run(target(1).location));
+        assert!(entry.contains_run(target(0).location));
+        assert!(entry.contains_run(target(2).location));
     }
 
     #[test]

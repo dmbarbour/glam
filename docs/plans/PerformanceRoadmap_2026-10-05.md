@@ -180,12 +180,12 @@ gains this consequence when it lands.
    - *Done:* `perf-admission-wakeups`, `perf-idle-wakeups`,
      `perf-fast-id-hashing`, `perf-net-builder-wired-ports`,
      `perf-scaling-workloads`, `perf-list-front-walk`,
-     `perf-list-leaf-walk`, `perf-access-region-cost` and
-     `perf-worker-scaling`. The scheduler round trips were
-     `perf-evaluation-recursion`.
+     `perf-list-leaf-walk`, `perf-access-region-cost`,
+     `perf-worker-scaling` and `perf-collection-growth`. The scheduler
+     round trips were `perf-evaluation-recursion`.
    - *Open, in order:* `gc-one-heap-per-thread`,
      `gc-bounded-collection-wait`, `perf-quantum-region`,
-     `perf-collection-growth`, `perf-list-map-growth`,
+     `perf-list-map-growth`,
      `perf-lowering-free-bindings`,
      `perf-interface-demand-walk`, `perf-module-definition-cost`,
      `perf-allocation-path`, `perf-runtime-net-attach`,
@@ -200,7 +200,12 @@ gains this consequence when it lands.
      - contiguous chunks for strict lists;
      - ropes for concatenation;
      - small inline dicts and a persistent map for large ones;
-     - shared key shapes where keys are static, as in modules and objects.
+     - shared key shapes where keys are static, as in modules and objects;
+     - no `Arc` in basic data types (maintainer, 2026-10-09). Marking
+       traces shared `Arc` list structure once per path, so
+       `append_walk_3200` resolves each live slot 120 to 150 times per
+       collection (`perf-collection-growth`); managed nodes would be
+       marked once.
    - **Interaction nets** (`perf-net-representation`):
      - a slab of nodes with free-slot recycling, in place of hash maps.
        `RuntimeNet::reference` resolves every port through the `nodes`

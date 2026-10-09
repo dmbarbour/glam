@@ -90,7 +90,10 @@ its managed allocation, and each collection traces the whole list:
 Managed list nodes would count toward the threshold, so that collections
 grow with the live data rather than with the run. Generational collection
 is the eventual mitigation for long-lived structure that every full
-collection traces (maintainer, 2026-10-09). The cost of each collection is
+collection traces (maintainer, 2026-10-09). `Arc` structure also has no
+mark bits, so marking traces shared structure once per path:
+`append_walk_3200` resolves each live slot 120 to 150 times per collection.
+Basic data types should stop using `Arc` (maintainer, 2026-10-09); see
 `perf-collection-growth` in the
 [structural overheads plan](StructuralOverheads_2026-10-08.md).
 

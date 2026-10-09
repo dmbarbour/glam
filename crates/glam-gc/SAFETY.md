@@ -214,7 +214,8 @@ and every unsafe function, implementation, and block are checked into
   mark, touched-word journal, or failure-time bitmap pass.
 - Collector lookup starts from the erased integer address, finds its owning
   live chunk and exact slot-start through the indexed arena, validates header
-  class and geometry against the dense class entry and run pool, loads the
+  class and geometry against the dense class entry and its run pool (a
+  location set kept with the pool, so the check does not scan), loads the
   allocation bit with Acquire, and recovers the class's canonical static
   metadata. Foreign, interior, unallocated, absent-class, and unpublished-run
   addresses produce no `CollectorSlot`.

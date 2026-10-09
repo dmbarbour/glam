@@ -13,7 +13,7 @@
 //! ids in its own `trusted_hash` module.
 
 use std::any::TypeId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::marker::PhantomData;
 
@@ -28,6 +28,8 @@ impl TrustedKey for crate::arena::ChunkBase {}
 impl TrustedKey for TypeId {}
 // The address of a type's static metadata.
 impl TrustedKey for crate::class::MetadataIdentity {}
+// The arena's own chunk and run indices for a run.
+impl TrustedKey for crate::arena::RunLocation {}
 
 /// The hasher state for one trusted key type.
 pub(crate) struct TrustedState<K: TrustedKey>(PhantomData<fn(&K)>);
@@ -61,6 +63,7 @@ impl<K: TrustedKey> BuildHasher for TrustedState<K> {
 }
 
 pub(crate) type TrustedHashMap<K, V> = HashMap<K, V, TrustedState<K>>;
+pub(crate) type TrustedHashSet<K> = HashSet<K, TrustedState<K>>;
 
 /// One widening multiply per integer written, folded, then one rotation.
 ///

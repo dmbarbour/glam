@@ -4,8 +4,9 @@ Status: active, as the `perf-structural-overheads` step of the
 [performance roadmap](PerformanceRoadmap_2026-10-05.md). Done:
 `perf-admission-wakeups`, `perf-idle-wakeups`, `perf-fast-id-hashing`,
 `perf-net-builder-wired-ports`, `perf-scaling-workloads`,
-`perf-list-front-walk`, `perf-list-leaf-walk`, `perf-access-region-cost`
-and `perf-worker-scaling`. Next: `gc-one-heap-per-thread`.
+`perf-list-front-walk`, `perf-list-leaf-walk`, `perf-access-region-cost`,
+`perf-worker-scaling` and `perf-collection-growth`. Next:
+`gc-one-heap-per-thread`.
 
 ## Purpose
 
@@ -102,53 +103,6 @@ inline offer (about 9% of the remaining regions), and
 `drive_net_semantic_action` one only to turn the action's net root back
 into a handle (about 6%). Merging those into the regions that produced
 their inputs remains a small fallback if this step stalls.
-
-### Cost per collection (`perf-collection-growth`)
-
-Found 2026-10-09 by `append_walk` at four-times sizes (800 to 3,200
-items), whose instructions grow with exponent 1.70 while every counter
-grows linearly. Outside collection the workload is linear: its CPU time
-less collection time grows 1.95 times per doubling. Collection takes 174,
-789 and 3,829 ms at the three sizes, 45% of CPU time at 3,200.
-
-Two growths multiply, and this step owns only the second:
-- **Number of collections** (4, 8 and 14). Expected, per the maintainer: a
-  periodic full collection traces every live item, so a program that
-  holds a growing list pays O(n²) over its run. Here the count also grows
-  because the list is `Arc` structure that occupies no managed runs, so it
-  never raises the survivor-scaled threshold; managed list nodes in the
-  value representation plan would count it. Generational collection is
-  the eventual mitigation; neither belongs to this step.
-- **Cost of each collection** (43, 99 and 273 ms). This grows 2.3 and 2.8
-  times per doubling, faster than the live list it traces, so something
-  beyond tracing grows with the heap.
-
-Profile 2026-10-09, at `9e651b11`, before any collector change, so later
-changes can be attributed. Collection is 47% of `append_walk_3200`'s
-samples. A collection's cost is its slot resolutions times the cost of
-each; both grow:
-- **Resolutions repeat.** The last six collections resolve 1.5 to 5.2 M
-  edges into 23,000 to 43,000 distinct slots: each slot 120 to 150 times
-  on average, and up to 3,201 times, one per list item. List values are
-  `Arc` structure with no mark bits, so marking traces shared list
-  structure once per path that reaches it. Visiting list edges
-  (`visit_list_edges`, `trace_direct_compatibility_managed_edges`) is 31%
-  of collection self time, and resolution (`resolve_slot_topology_in`,
-  with `checked_slot_owner`) 27%.
-- **Each resolution scans the class's runs.**
-  `AllocationClassEntry::contains_run` compares run records one by one:
-  9.5 per resolution in the first collection, 33 to 38 in the last, when
-  the largest class holds 148 runs. The loop is 60% of
-  `resolve_slot_topology_in`'s self time, about 11% of collection time;
-  counted comparisons put it near 20% of the last collection.
-
-Candidate changes, each attributable against these counts: deduplicate
-shared `Arc` structure within one collection; make run membership O(1),
-for example with each run's index in its class pool; managed list nodes
-(value representation) would also give the list mark bits. In debug
-builds the same resolution runs on every managed access
-(`debug_assert_access`), which locks the heap; with per-thread test
-runtimes it is about 3% of the test suite, not a reason to change it.
 
 ### `list_map` growth (`perf-list-map-growth`)
 
@@ -299,6 +253,48 @@ and help only programs with parallel work, so this comes last.
   Allocating less is the better lever.
 
 ## Done
+
+- **Cost per collection** (`perf-collection-growth`), 2026-10-09.
+  - **Found** by `append_walk` at 800 to 3,200 items: instructions grow
+    with exponent 1.70 while every counter grows linearly, and collection
+    took 45% of CPU time at 3,200. Two growths multiply. The number of
+    collections (4, 8 and 14) is expected: a periodic full collection
+    traces every live item, so a program holding a growing list pays
+    O(n²); generational collection is the eventual mitigation. This step
+    took the cost of each collection (43, 99 and 273 ms), which grows 2.3
+    and 2.8 times per doubling.
+  - **Profile** at `9e651b11`, before any collector change. Collection is
+    47% of `append_walk_3200`'s samples; its cost is slot resolutions
+    times the cost of each, and both grow:
+    - **Resolutions repeat.** The last six collections resolve 1.5 to
+      5.2 M edges into 23,000 to 43,000 distinct slots: each slot 120 to
+      150 times on average, and up to 3,201 times, one per list item.
+      List values are `Arc` structure with no mark bits, so marking traces
+      shared list structure once per path that reaches it. Visiting list
+      edges is 31% of collection self time, and slot resolution 27%. Each
+      list is also walked twice per visit, once for thunk edges and once
+      for value edges.
+    - **Each resolution scanned its class's runs.**
+      `AllocationClassEntry::contains_run` compared run records one by
+      one: 9.5 per resolution in the first collection, 33 to 38 in the
+      last, when the largest class held 148 runs; about 11 to 20% of
+      collection time.
+  - **O(1) run membership.** Each class keeps a set of its run locations
+    beside its ordered run pool, updated where the pool gains or loses a
+    run. A run detached for finalization keeps its header but leaves the
+    set, as it left the pool. At `append_walk_3200`, over three
+    interleaved runs, instructions fell 12.6% (41.2 G to 36.0 G), cycles
+    and CPU time 7.7% (8.30 s to 7.71 s), and collection time 11% (4.08 s
+    to 3.58 s). `countdown_800` and `hello_elf` are unchanged.
+  - **Repeated traversal moves to value representation.** The maintainer
+    expects it to remain until basic data types stop using `Arc`
+    (2026-10-09). Deduplicating shared `Arc` structure within a collection
+    is not a local change: `glam_gc::Visitor` carries no per-collection
+    state, and list and dict traversals would need node identities.
+    Recorded under `perf-value-representation` in the roadmap.
+  - In debug builds the same resolution runs on every managed access
+    (`debug_assert_access`), which locks the heap. With per-thread test
+    runtimes it is about 3% of the test suite.
 
 - **Worker scaling** (`perf-worker-scaling`), 2026-10-09.
   - **Found** while comparing builds with `GLAM_WORKERS=4`: the profiling
