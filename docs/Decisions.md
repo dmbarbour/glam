@@ -361,9 +361,41 @@ maps the short names used here to file names.
     time, O(n) per pop.
   - Popping the same unshaped list again pays the first pop's cost again,
     since the reshaped remainder is not remembered in the original.
-  - Index operations still walk; see the structural overheads plan's
-    `perf-list-index-descent`.
+  - Index operations still walk; see `list-observers-walk-leaves`.
 - **Recorded in:** structural overheads plan, `perf-list-front-walk`.
+
+### List observers walk leaves; what they take is a flat slice or a rope
+`list-observers-walk-leaves` · 2026-10-09 · maintainer · accepted
+- **Context:** `len`, `at`, `split`, `slice` and `split_end` advanced one
+  item per builtin step, and `split` and `slice` copied what they took into
+  a new value leaf. A loop that tested `len` stayed quadratic after
+  `list-pop-reshapes-remainder`. Caching lengths in `Concat` nodes was
+  proposed and rejected.
+- **Decision:**
+  - These observers take one strict leaf (a byte slice, value slice or
+    finger tree) per step of the list projection, and every strict leaf in
+    one builtin step. They stop only to force a deferred chunk. `head` and
+    `tail` still take one item.
+  - What `split`, `split_end` and `slice` take comes back as a flat slice
+    when it lies within one leaf, and otherwise as a finger-tree rope that
+    shares the leaves it spans. Runs of pieces under 32 items are copied
+    into one chunk. The remainder is shaped as a pop leaves it.
+  - List nodes hold no cached lengths: value representation will make them
+    much smaller, with pointer-tagged singleton lists, concatenation pairs
+    and other tagged shapes (maintainer).
+  - A program that indexes one list repeatedly asks for an indexable form
+    with the `array` or `deque` annotation; `at` itself does not rebalance
+    (maintainer).
+- **Consequences:**
+  - An observer's builtin steps grow with the lazy chunks it crosses, and
+    its work with the strict leaves it passes, not with items.
+  - `len` and `at` on a list of many small leaves still pass each leaf
+    every call.
+  - A small slice taken from one large leaf keeps that leaf's storage alive,
+    as a `tail` already did.
+  - The 32-item run size is a heuristic, not a measured one.
+- **Rule lives in:** `src/eval/list_observation_machine.rs` module docs.
+- **Recorded in:** structural overheads plan, `perf-list-leaf-walk`.
 
 ## Diagnostics
 

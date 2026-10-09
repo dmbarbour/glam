@@ -18,7 +18,7 @@ use crate::evaluation::{
     EvalContext, EvaluationPollContext, EvaluationValueAccess, EvaluatorStepContext, WhnfOwnerPoll,
     interpret_whnf_poll,
 };
-use crate::list::{ListBackStep, ListFrontStep, ListItem};
+use crate::list::{ListBackLeafStep, ListBackStep, ListFrontLeafStep, ListFrontStep, ListItem};
 use crate::number::Number;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
@@ -65,8 +65,10 @@ pub(in crate::eval) struct RegionalListFront {
     source_owner: Option<LazyId>,
 }
 
-pub(in crate::eval) enum RegionalListFrontPoll {
-    Ready(Option<(Value, Value)>),
+/// A front step's outcome: the first item, or with
+/// [`RegionalListFront::poll_leaf_in`] the first strict leaf, and the tail.
+pub(in crate::eval) enum RegionalListFrontPoll<Item = Value> {
+    Ready(Option<(Item, Value)>),
     Boundary(RegionalBoundaryRequest),
     Yielded,
     Failed(Arc<EvaluationFailure>),
@@ -85,8 +87,10 @@ pub(in crate::eval) struct RegionalListBack {
     source_owner: Option<LazyId>,
 }
 
-pub(in crate::eval) enum RegionalListBackPoll {
-    Ready(Option<(Value, Value)>),
+/// A back step's outcome: the init, and the last item, or with
+/// [`RegionalListBack::poll_leaf_in`] the last strict leaf.
+pub(in crate::eval) enum RegionalListBackPoll<Item = Value> {
+    Ready(Option<(Value, Item)>),
     Boundary(RegionalBoundaryRequest),
     Yielded,
     Failed(Arc<EvaluationFailure>),
@@ -156,28 +160,8 @@ impl RegionalListFront {
         access: &EvaluationValueAccess<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> RegionalListFrontPoll {
-        if let Some(chunk) = &mut self.chunk {
-            let value =
-                match drive_regional_in_place(access, chunk, step_budget, reduce_semantic_shell) {
-                    RegionalWhnfStatus::Ready(value) => value,
-                    RegionalWhnfStatus::Boundary(request) => {
-                        return RegionalListFrontPoll::Boundary(request);
-                    }
-                    RegionalWhnfStatus::Yielded => return RegionalListFrontPoll::Yielded,
-                    RegionalWhnfStatus::Failed(failure) => {
-                        return RegionalListFrontPoll::Failed(failure);
-                    }
-                };
-            let suffix = self
-                .suffix
-                .take()
-                .expect("deferred list work must retain its exact suffix");
-            self.current = match combine_regional_chunk_and_suffix(access, value, suffix) {
-                Ok(list) => list,
-                Err(error) => return RegionalListFrontPoll::Failed(error),
-            };
-            self.chunk = None;
-            return RegionalListFrontPoll::Yielded;
+        if let Some(poll) = self.drive_chunk_in(access, step_budget) {
+            return poll;
         }
 
         let Value::List(list) = access.values().duplicate_value(&self.current) else {
@@ -189,22 +173,84 @@ impl RegionalListFront {
         ) {
             ListFrontStep::Empty => RegionalListFrontPoll::Ready(None),
             ListFrontStep::Item { item, tail } => {
-                let value = match item {
-                    ListItem::Byte(byte) => Value::Number(Number::from_u8(byte)),
-                    ListItem::Value(value) => value,
-                };
-                RegionalListFrontPoll::Ready(Some((value, Value::List(tail))))
+                RegionalListFrontPoll::Ready(Some((item_value_in(access, item), Value::List(tail))))
             }
             ListFrontStep::Deferred { deferred, suffix } => {
-                let mut chunk = RegionalWhnfWork::from_focus(access, deferred);
-                if let Some(source_owner) = self.source_owner {
-                    chunk = chunk.with_source_owner(source_owner);
-                }
-                self.chunk = Some(chunk);
-                self.suffix = Some(Value::List(suffix));
+                self.defer_chunk_in(access, deferred, suffix);
                 RegionalListFrontPoll::Yielded
             }
         }
+    }
+
+    /// Takes the first strict leaf rather than the first item, forcing
+    /// deferred chunks before it as [`Self::poll_in`] does.
+    pub(in crate::eval) fn poll_leaf_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> RegionalListFrontPoll<List> {
+        if let Some(poll) = self.drive_chunk_in(access, step_budget) {
+            return poll;
+        }
+
+        let Value::List(list) = access.values().duplicate_value(&self.current) else {
+            unreachable!("logical-list-front work must retain a list value")
+        };
+        match list.pop_front_leaf_step(&mut |thunk| thunk.duplicate_as_value_in(access.values())) {
+            ListFrontLeafStep::Empty => RegionalListFrontPoll::Ready(None),
+            ListFrontLeafStep::Leaf { leaf, tail } => {
+                RegionalListFrontPoll::Ready(Some((leaf, Value::List(tail))))
+            }
+            ListFrontLeafStep::Deferred { deferred, suffix } => {
+                self.defer_chunk_in(access, deferred, suffix);
+                RegionalListFrontPoll::Yielded
+            }
+        }
+    }
+
+    /// Drives a deferred chunk this projection met, if any, and rejoins it
+    /// with its suffix once ready. `None` means no chunk is pending.
+    fn drive_chunk_in<Item>(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> Option<RegionalListFrontPoll<Item>> {
+        let chunk = self.chunk.as_mut()?;
+        let value = match drive_regional_in_place(access, chunk, step_budget, reduce_semantic_shell)
+        {
+            RegionalWhnfStatus::Ready(value) => value,
+            RegionalWhnfStatus::Boundary(request) => {
+                return Some(RegionalListFrontPoll::Boundary(request));
+            }
+            RegionalWhnfStatus::Yielded => return Some(RegionalListFrontPoll::Yielded),
+            RegionalWhnfStatus::Failed(failure) => {
+                return Some(RegionalListFrontPoll::Failed(failure));
+            }
+        };
+        let suffix = self
+            .suffix
+            .take()
+            .expect("deferred list work must retain its exact suffix");
+        self.current = match combine_regional_chunk_and_suffix(access, value, suffix) {
+            Ok(list) => list,
+            Err(error) => return Some(RegionalListFrontPoll::Failed(error)),
+        };
+        self.chunk = None;
+        Some(RegionalListFrontPoll::Yielded)
+    }
+
+    fn defer_chunk_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        deferred: Value,
+        suffix: List,
+    ) {
+        let mut chunk = RegionalWhnfWork::from_focus(access, deferred);
+        if let Some(source_owner) = self.source_owner {
+            chunk = chunk.with_source_owner(source_owner);
+        }
+        self.chunk = Some(chunk);
+        self.suffix = Some(Value::List(suffix));
     }
 
     pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
@@ -238,28 +284,8 @@ impl RegionalListBack {
         access: &EvaluationValueAccess<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> RegionalListBackPoll {
-        if let Some(chunk) = &mut self.chunk {
-            let value =
-                match drive_regional_in_place(access, chunk, step_budget, reduce_semantic_shell) {
-                    RegionalWhnfStatus::Ready(value) => value,
-                    RegionalWhnfStatus::Boundary(request) => {
-                        return RegionalListBackPoll::Boundary(request);
-                    }
-                    RegionalWhnfStatus::Yielded => return RegionalListBackPoll::Yielded,
-                    RegionalWhnfStatus::Failed(failure) => {
-                        return RegionalListBackPoll::Failed(failure);
-                    }
-                };
-            let prefix = self
-                .prefix
-                .take()
-                .expect("deferred back-list work must retain its exact prefix");
-            self.current = match combine_regional_prefix_and_chunk(access, prefix, value) {
-                Ok(list) => list,
-                Err(error) => return RegionalListBackPoll::Failed(error),
-            };
-            self.chunk = None;
-            return RegionalListBackPoll::Yielded;
+        if let Some(poll) = self.drive_chunk_in(access, step_budget) {
+            return poll;
         }
 
         let Value::List(list) = access.values().duplicate_value(&self.current) else {
@@ -271,22 +297,84 @@ impl RegionalListBack {
         ) {
             ListBackStep::Empty => RegionalListBackPoll::Ready(None),
             ListBackStep::Item { init, item } => {
-                let value = match item {
-                    ListItem::Byte(byte) => Value::Number(Number::from_u8(byte)),
-                    ListItem::Value(value) => value,
-                };
-                RegionalListBackPoll::Ready(Some((Value::List(init), value)))
+                RegionalListBackPoll::Ready(Some((Value::List(init), item_value_in(access, item))))
             }
             ListBackStep::Deferred { prefix, deferred } => {
-                let mut chunk = RegionalWhnfWork::from_focus(access, deferred);
-                if let Some(source_owner) = self.source_owner {
-                    chunk = chunk.with_source_owner(source_owner);
-                }
-                self.chunk = Some(chunk);
-                self.prefix = Some(Value::List(prefix));
+                self.defer_chunk_in(access, prefix, deferred);
                 RegionalListBackPoll::Yielded
             }
         }
+    }
+
+    /// Takes the last strict leaf rather than the last item, the mirror of
+    /// [`RegionalListFront::poll_leaf_in`].
+    pub(in crate::eval) fn poll_leaf_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> RegionalListBackPoll<List> {
+        if let Some(poll) = self.drive_chunk_in(access, step_budget) {
+            return poll;
+        }
+
+        let Value::List(list) = access.values().duplicate_value(&self.current) else {
+            unreachable!("logical-list-back work must retain a list value")
+        };
+        match list.pop_back_leaf_step(&mut |thunk| thunk.duplicate_as_value_in(access.values())) {
+            ListBackLeafStep::Empty => RegionalListBackPoll::Ready(None),
+            ListBackLeafStep::Leaf { init, leaf } => {
+                RegionalListBackPoll::Ready(Some((Value::List(init), leaf)))
+            }
+            ListBackLeafStep::Deferred { prefix, deferred } => {
+                self.defer_chunk_in(access, prefix, deferred);
+                RegionalListBackPoll::Yielded
+            }
+        }
+    }
+
+    /// Drives a deferred chunk this projection met, if any, and rejoins it
+    /// with its prefix once ready. `None` means no chunk is pending.
+    fn drive_chunk_in<Item>(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> Option<RegionalListBackPoll<Item>> {
+        let chunk = self.chunk.as_mut()?;
+        let value = match drive_regional_in_place(access, chunk, step_budget, reduce_semantic_shell)
+        {
+            RegionalWhnfStatus::Ready(value) => value,
+            RegionalWhnfStatus::Boundary(request) => {
+                return Some(RegionalListBackPoll::Boundary(request));
+            }
+            RegionalWhnfStatus::Yielded => return Some(RegionalListBackPoll::Yielded),
+            RegionalWhnfStatus::Failed(failure) => {
+                return Some(RegionalListBackPoll::Failed(failure));
+            }
+        };
+        let prefix = self
+            .prefix
+            .take()
+            .expect("deferred back-list work must retain its exact prefix");
+        self.current = match combine_regional_prefix_and_chunk(access, prefix, value) {
+            Ok(list) => list,
+            Err(error) => return Some(RegionalListBackPoll::Failed(error)),
+        };
+        self.chunk = None;
+        Some(RegionalListBackPoll::Yielded)
+    }
+
+    fn defer_chunk_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        prefix: List,
+        deferred: Value,
+    ) {
+        let mut chunk = RegionalWhnfWork::from_focus(access, deferred);
+        if let Some(source_owner) = self.source_owner {
+            chunk = chunk.with_source_owner(source_owner);
+        }
+        self.chunk = Some(chunk);
+        self.prefix = Some(Value::List(prefix));
     }
 
     pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
@@ -382,6 +470,17 @@ fn interpret_durable_list_front(
         }
         DurableListFrontPoll::Yielded => ListFrontPoll::Yielded,
         DurableListFrontPoll::Failed(failure) => ListFrontPoll::Failed(failure),
+    }
+}
+
+/// A list item as a value; a byte item is a number.
+pub(in crate::eval) fn item_value_in(
+    _access: &EvaluationValueAccess<'_>,
+    item: ListItem<Value>,
+) -> Value {
+    match item {
+        ListItem::Byte(byte) => Value::Number(Number::from_u8(byte)),
+        ListItem::Value(value) => value,
     }
 }
 

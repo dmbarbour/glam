@@ -5987,6 +5987,66 @@ fn split_end_resumes_from_the_back_without_forcing_an_unrelated_prefix() {
 }
 
 #[test]
+fn position_observers_take_whole_leaves_across_a_lazy_chunk() {
+    // Value leaves, a lazy chunk and a byte leaf: each observer cuts the
+    // leaves its positions fall in and joins what it takes across them.
+    let (_owner, observer, _executor) = same_runtime_contexts();
+    let list = || {
+        let chunk =
+            LazyValue::semantic_thunk(observer.values(), "observed lazy chunk", |_context| {
+                Ok(Value::List(List::from_values((41..=45).map(n).collect())))
+            });
+        Value::List(List::concat(
+            List::concat(
+                List::from_values((1..=40).map(n).collect()),
+                List::from_thunk(chunk.into()),
+            ),
+            List::concat(
+                List::from_bytes(Bytes::from_static(&[46, 47, 48])),
+                List::from_values((49..=90).map(n).collect()),
+            ),
+        ))
+    };
+    let observe = |builtin, mut arguments: Vec<Value>| {
+        arguments.push(list());
+        let application = apply_values(&observer, Value::Builtin(builtin), arguments)
+            .expect("the observation should build");
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
+            .expect("the observation should evaluate")
+    };
+    let assert_items = |value: Option<&Value>, expected: std::ops::RangeInclusive<i64>| {
+        let Some(Value::List(list)) = value else {
+            panic!("the observation should produce a list")
+        };
+        observer.values().assert_same_representation_for_test(
+            &list_to_value_items(&observer, list).expect("a taken list is strict"),
+            &expected.map(n).collect::<Vec<_>>(),
+        );
+    };
+
+    observer
+        .values()
+        .assert_same_representation_for_test(&observe(Builtin::ListLen, vec![]), &n(90));
+    for (index, expected) in [(0, 1), (44, 45), (46, 47), (89, 90)] {
+        observer.values().assert_same_representation_for_test(
+            &observe(Builtin::ListAt, vec![n(index)]),
+            &n(expected),
+        );
+    }
+    let Value::Dict(split) = observe(Builtin::ListSplit, vec![n(50)]) else {
+        panic!("split should produce a dictionary")
+    };
+    assert_items(split.get(&Key::atom_from_text("left")), 1..=50);
+    assert_items(split.get(&Key::atom_from_text("right")), 51..=90);
+    let Value::Dict(split_end) = observe(Builtin::ListSplitEnd, vec![n(45)]) else {
+        panic!("split_end should produce a dictionary")
+    };
+    assert_items(split_end.get(&Key::atom_from_text("left")), 1..=45);
+    assert_items(split_end.get(&Key::atom_from_text("right")), 46..=90);
+    assert_items(Some(&observe(Builtin::Slice, vec![n(39), n(47)])), 40..=47);
+}
+
+#[test]
 fn dictionary_unions_defer_ambiguous_keys_until_observed() {
     let key = Key::atom_from_text("greeting");
     let expr = dict_union_expr(

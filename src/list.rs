@@ -41,6 +41,30 @@ pub(crate) enum ListBackStep<U, D, V, T> {
     Deferred { prefix: List<V, T>, deferred: D },
 }
 
+/// One non-forcing decomposition of the logical front of a persistent list
+/// into its first strict leaf: a byte slice, a value slice or a finger tree.
+///
+/// Observers that count or cut by position take a whole leaf per step, where
+/// [`ListFrontStep`] takes one item. The tail is shaped as a front pop leaves
+/// it.
+pub(crate) enum ListFrontLeafStep<D, V, T> {
+    Empty,
+    Leaf { leaf: List<V, T>, tail: List<V, T> },
+    Deferred { deferred: D, suffix: List<V, T> },
+}
+
+/// The back-oriented counterpart to [`ListFrontLeafStep`].
+pub(crate) enum ListBackLeafStep<D, V, T> {
+    Empty,
+    Leaf { init: List<V, T>, leaf: List<V, T> },
+    Deferred { prefix: List<V, T>, deferred: D },
+}
+
+/// Pieces shorter than this are copied into shared runs when strict pieces
+/// are joined into a rope, so a list built one item at a time does not come
+/// back as a finger tree of single items. A heuristic, not a tuned size.
+const ROPE_RUN_ITEMS: usize = 32;
+
 #[cfg(test)]
 enum ListLookup<V> {
     Found(ListItem<V>),
@@ -653,61 +677,53 @@ impl<V, T> List<V, T> {
 
     /// Decomposes one logical front item without forcing a deferred chunk.
     ///
-    /// The explicit local worklist bounds Rust-stack use for arbitrarily deep
-    /// `Concat` spines. Only the selected strict value or deferred chunk is
-    /// duplicated; the returned tail continues to share all list structure.
+    /// Only the selected strict value or deferred chunk is duplicated; the
+    /// returned tail continues to share all list structure.
     pub(crate) fn pop_front_step_by<U, D>(
         &self,
         duplicate_value: &mut impl FnMut(&V) -> U,
         duplicate_deferred: &mut impl FnMut(&T) -> D,
     ) -> ListFrontStep<U, D, V, T> {
+        match self.pop_front_leaf_step(duplicate_deferred) {
+            ListFrontLeafStep::Empty => ListFrontStep::Empty,
+            ListFrontLeafStep::Leaf { leaf, tail } => {
+                let (item, rest) = leaf.pop_leaf_front_by(duplicate_value);
+                ListFrontStep::Item {
+                    item,
+                    tail: Self::concat(rest, tail),
+                }
+            }
+            ListFrontLeafStep::Deferred { deferred, suffix } => {
+                ListFrontStep::Deferred { deferred, suffix }
+            }
+        }
+    }
+
+    /// Decomposes the first strict leaf without forcing a deferred chunk.
+    ///
+    /// The explicit local worklist bounds Rust-stack use for arbitrarily deep
+    /// `Concat` spines. The leaf and tail share all list structure.
+    pub(crate) fn pop_front_leaf_step<D>(
+        &self,
+        duplicate_deferred: &mut impl FnMut(&T) -> D,
+    ) -> ListFrontLeafStep<D, V, T> {
         let mut worklist = vec![self.clone()];
 
         while let Some(list) = worklist.pop() {
             match list.0.as_ref() {
                 ListNode::Empty => {}
-                ListNode::Bytes(bytes) => {
-                    let item = ListItem::Byte(
-                        *bytes.first().expect("a canonical byte leaf is never empty"),
-                    );
-                    let local_tail = Self::from_bytes(bytes.slice(1..bytes.len()));
-                    return ListFrontStep::Item {
-                        item,
-                        tail: Self::join_logical_suffix(local_tail, &worklist),
-                    };
-                }
-                ListNode::Values(values) => {
-                    let first = values
-                        .as_slice()
-                        .first()
-                        .expect("a canonical value leaf is never empty");
-                    let local_tail = Self::from_value_slice(values.slice(1, values.len()));
-                    return ListFrontStep::Item {
-                        item: ListItem::Value(duplicate_value(first)),
-                        tail: Self::join_logical_suffix(local_tail, &worklist),
+                ListNode::Bytes(_) | ListNode::Values(_) | ListNode::Finger(_) => {
+                    return ListFrontLeafStep::Leaf {
+                        tail: Self::join_logical_suffix(Self::empty(), &worklist),
+                        leaf: list,
                     };
                 }
                 ListNode::Concat(left, right) => {
                     worklist.push(right.clone());
                     worklist.push(left.clone());
                 }
-                ListNode::Finger(finger) => {
-                    let (chunk, mut rest) = finger
-                        .view_left()
-                        .expect("a canonical finger-tree node is never empty");
-                    let item = chunk
-                        .item_at_by(0, duplicate_value)
-                        .expect("finger trees do not store empty chunks");
-                    if let Some(chunk_tail) = chunk.slice(1, chunk.len()) {
-                        rest = rest.push_left(chunk_tail);
-                    }
-                    return ListFrontStep::Item {
-                        item,
-                        tail: Self::join_logical_suffix(Self::from_finger(rest), &worklist),
-                    };
-                }
                 ListNode::Thunk(thunk) => {
-                    return ListFrontStep::Deferred {
+                    return ListFrontLeafStep::Deferred {
                         deferred: duplicate_deferred(thunk),
                         suffix: Self::join_logical_suffix(Self::empty(), &worklist),
                     };
@@ -715,7 +731,7 @@ impl<V, T> List<V, T> {
             }
         }
 
-        ListFrontStep::Empty
+        ListFrontLeafStep::Empty
     }
 
     /// Rejoins what a front pop left behind as a right-leaning spine.
@@ -807,56 +823,43 @@ impl<V, T> List<V, T> {
         duplicate_value: &mut impl FnMut(&V) -> U,
         duplicate_deferred: &mut impl FnMut(&T) -> D,
     ) -> ListBackStep<U, D, V, T> {
+        match self.pop_back_leaf_step(duplicate_deferred) {
+            ListBackLeafStep::Empty => ListBackStep::Empty,
+            ListBackLeafStep::Leaf { init, leaf } => {
+                let (rest, item) = leaf.pop_leaf_back_by(duplicate_value);
+                ListBackStep::Item {
+                    init: Self::concat(init, rest),
+                    item,
+                }
+            }
+            ListBackLeafStep::Deferred { prefix, deferred } => {
+                ListBackStep::Deferred { prefix, deferred }
+            }
+        }
+    }
+
+    /// Decomposes the last strict leaf without forcing a deferred chunk, the
+    /// mirror of [`Self::pop_front_leaf_step`].
+    pub(crate) fn pop_back_leaf_step<D>(
+        &self,
+        duplicate_deferred: &mut impl FnMut(&T) -> D,
+    ) -> ListBackLeafStep<D, V, T> {
         let mut worklist = vec![self.clone()];
         while let Some(current) = worklist.pop() {
             match current.0.as_ref() {
                 ListNode::Empty => {}
-                ListNode::Bytes(bytes) => {
-                    let index = bytes.len() - 1;
-                    return ListBackStep::Item {
-                        init: Self::join_logical_prefix(
-                            Self::from_bytes(bytes.slice(0..index)),
-                            &worklist,
-                        ),
-                        item: ListItem::Byte(bytes[index]),
-                    };
-                }
-                ListNode::Values(values) => {
-                    let index = values.len() - 1;
-                    let last = values
-                        .as_slice()
-                        .last()
-                        .expect("a canonical value leaf is never empty");
-                    return ListBackStep::Item {
-                        init: Self::join_logical_prefix(
-                            Self::from_value_slice(values.slice(0, index)),
-                            &worklist,
-                        ),
-                        item: ListItem::Value(duplicate_value(last)),
+                ListNode::Bytes(_) | ListNode::Values(_) | ListNode::Finger(_) => {
+                    return ListBackLeafStep::Leaf {
+                        init: Self::join_logical_prefix(Self::empty(), &worklist),
+                        leaf: current,
                     };
                 }
                 ListNode::Concat(left, right) => {
                     worklist.push(left.clone());
                     worklist.push(right.clone());
                 }
-                ListNode::Finger(finger) => {
-                    let (chunk, mut rest) = finger
-                        .view_right()
-                        .expect("a canonical finger-tree node is never empty");
-                    let index = chunk.len() - 1;
-                    let item = chunk
-                        .item_at_by(index, duplicate_value)
-                        .expect("finger trees do not store empty chunks");
-                    if let Some(chunk_init) = chunk.slice(0, index) {
-                        rest = rest.push_right(chunk_init);
-                    }
-                    return ListBackStep::Item {
-                        init: Self::join_logical_prefix(Self::from_finger(rest), &worklist),
-                        item,
-                    };
-                }
                 ListNode::Thunk(thunk) => {
-                    return ListBackStep::Deferred {
+                    return ListBackLeafStep::Deferred {
                         prefix: Self::join_logical_prefix(Self::empty(), &worklist),
                         deferred: duplicate_deferred(thunk),
                     };
@@ -864,7 +867,208 @@ impl<V, T> List<V, T> {
             }
         }
 
-        ListBackStep::Empty
+        ListBackLeafStep::Empty
+    }
+
+    /// Splits a strict leaf's first item from the rest of it.
+    fn pop_leaf_front_by<U>(
+        &self,
+        duplicate_value: &mut impl FnMut(&V) -> U,
+    ) -> (ListItem<U>, Self) {
+        match self.0.as_ref() {
+            ListNode::Bytes(bytes) => (
+                ListItem::Byte(bytes[0]),
+                Self::from_bytes(bytes.slice(1..bytes.len())),
+            ),
+            ListNode::Values(values) => (
+                ListItem::Value(duplicate_value(&values.as_slice()[0])),
+                Self::from_value_slice(values.slice(1, values.len())),
+            ),
+            ListNode::Finger(finger) => {
+                let (chunk, mut rest) = finger
+                    .view_left()
+                    .expect("a canonical finger-tree node is never empty");
+                let item = chunk
+                    .item_at_by(0, duplicate_value)
+                    .expect("finger trees do not store empty chunks");
+                if let Some(chunk_tail) = chunk.slice(1, chunk.len()) {
+                    rest = rest.push_left(chunk_tail);
+                }
+                (item, Self::from_finger(rest))
+            }
+            ListNode::Empty | ListNode::Concat(_, _) | ListNode::Thunk(_) => {
+                unreachable!("a list leaf is a non-empty byte slice, value slice or finger tree")
+            }
+        }
+    }
+
+    /// Splits a strict leaf's last item from the rest of it.
+    fn pop_leaf_back_by<U>(
+        &self,
+        duplicate_value: &mut impl FnMut(&V) -> U,
+    ) -> (Self, ListItem<U>) {
+        match self.0.as_ref() {
+            ListNode::Bytes(bytes) => {
+                let index = bytes.len() - 1;
+                (
+                    Self::from_bytes(bytes.slice(0..index)),
+                    ListItem::Byte(bytes[index]),
+                )
+            }
+            ListNode::Values(values) => {
+                let index = values.len() - 1;
+                (
+                    Self::from_value_slice(values.slice(0, index)),
+                    ListItem::Value(duplicate_value(&values.as_slice()[index])),
+                )
+            }
+            ListNode::Finger(finger) => {
+                let (chunk, mut rest) = finger
+                    .view_right()
+                    .expect("a canonical finger-tree node is never empty");
+                let index = chunk.len() - 1;
+                let item = chunk
+                    .item_at_by(index, duplicate_value)
+                    .expect("finger trees do not store empty chunks");
+                if let Some(chunk_init) = chunk.slice(0, index) {
+                    rest = rest.push_right(chunk_init);
+                }
+                (Self::from_finger(rest), item)
+            }
+            ListNode::Empty | ListNode::Concat(_, _) | ListNode::Thunk(_) => {
+                unreachable!("a list leaf is a non-empty byte slice, value slice or finger tree")
+            }
+        }
+    }
+
+    /// Returns the item at `index` within a strict leaf.
+    pub(crate) fn leaf_item_at_by<U>(
+        &self,
+        index: usize,
+        duplicate_value: &mut impl FnMut(&V) -> U,
+    ) -> ListItem<U> {
+        match self.0.as_ref() {
+            ListNode::Bytes(bytes) => ListItem::Byte(bytes[index]),
+            ListNode::Values(values) => ListItem::Value(duplicate_value(&values.as_slice()[index])),
+            ListNode::Finger(finger) => {
+                let (_, right) = Self::split_finger_at(finger, index);
+                let (chunk, _) = right
+                    .view_left()
+                    .expect("an in-bounds finger-tree index leaves a right chunk");
+                chunk
+                    .item_at_by(0, duplicate_value)
+                    .expect("finger trees do not store empty chunks")
+            }
+            ListNode::Empty | ListNode::Concat(_, _) | ListNode::Thunk(_) => {
+                unreachable!("a list leaf is a non-empty byte slice, value slice or finger tree")
+            }
+        }
+    }
+
+    /// Splits a strict leaf at `index`, sharing its storage on both sides.
+    pub(crate) fn split_leaf_at(&self, index: usize) -> (Self, Self) {
+        match self.0.as_ref() {
+            ListNode::Empty => {
+                assert_eq!(index, 0);
+                (Self::empty(), Self::empty())
+            }
+            ListNode::Bytes(bytes) => (
+                Self::from_bytes(bytes.slice(0..index)),
+                Self::from_bytes(bytes.slice(index..bytes.len())),
+            ),
+            ListNode::Values(values) => (
+                Self::from_value_slice(values.slice(0, index)),
+                Self::from_value_slice(values.slice(index, values.len())),
+            ),
+            ListNode::Finger(finger) => {
+                let (left, right) = Self::split_finger_at(finger, index);
+                (Self::from_finger(left), Self::from_finger(right))
+            }
+            ListNode::Concat(_, _) | ListNode::Thunk(_) => {
+                unreachable!("only a strict leaf splits in place")
+            }
+        }
+    }
+
+    /// Joins strict leaves cut from one list, in order, into a list shaped
+    /// for indexing.
+    ///
+    /// One piece comes back as it is: a flat slice or a finger tree. Several
+    /// become a finger-tree rope that shares their storage, except that runs
+    /// of pieces shorter than [`ROPE_RUN_ITEMS`] are copied into one chunk.
+    /// A rope of a single chunk is returned as a flat slice.
+    pub(crate) fn join_strict_pieces(
+        mut pieces: Vec<Self>,
+        duplicate_value: &mut impl FnMut(&V) -> V,
+    ) -> Self {
+        pieces.retain(|piece| !piece.is_empty());
+        if pieces.len() <= 1 {
+            return pieces.pop().unwrap_or_else(Self::empty);
+        }
+
+        let mut rope = FingerList::new();
+        let mut byte_run = Vec::new();
+        let mut value_run = Vec::new();
+        for piece in pieces {
+            match piece.0.as_ref() {
+                ListNode::Bytes(bytes) if bytes.len() < ROPE_RUN_ITEMS => {
+                    Self::flush_value_run(&mut rope, &mut value_run);
+                    byte_run.extend_from_slice(bytes);
+                    if byte_run.len() >= ROPE_RUN_ITEMS {
+                        Self::flush_byte_run(&mut rope, &mut byte_run);
+                    }
+                }
+                ListNode::Values(values) if values.len() < ROPE_RUN_ITEMS => {
+                    Self::flush_byte_run(&mut rope, &mut byte_run);
+                    value_run.extend(values.as_slice().iter().map(&mut *duplicate_value));
+                    if value_run.len() >= ROPE_RUN_ITEMS {
+                        Self::flush_value_run(&mut rope, &mut value_run);
+                    }
+                }
+                ListNode::Bytes(bytes) => {
+                    Self::flush_byte_run(&mut rope, &mut byte_run);
+                    Self::flush_value_run(&mut rope, &mut value_run);
+                    rope = rope.push_right(ListChunk::Bytes(bytes.clone()));
+                }
+                ListNode::Values(values) => {
+                    Self::flush_byte_run(&mut rope, &mut byte_run);
+                    Self::flush_value_run(&mut rope, &mut value_run);
+                    rope = rope.push_right(ListChunk::Values(values.clone()));
+                }
+                ListNode::Finger(finger) => {
+                    Self::flush_byte_run(&mut rope, &mut byte_run);
+                    Self::flush_value_run(&mut rope, &mut value_run);
+                    rope = rope.concat(finger);
+                }
+                ListNode::Empty | ListNode::Concat(_, _) | ListNode::Thunk(_) => {
+                    unreachable!("joined pieces are non-empty strict leaves")
+                }
+            }
+        }
+        Self::flush_byte_run(&mut rope, &mut byte_run);
+        Self::flush_value_run(&mut rope, &mut value_run);
+
+        match rope.view_left() {
+            Some((ListChunk::Bytes(bytes), rest)) if rest.is_empty() => Self::from_bytes(bytes),
+            Some((ListChunk::Values(values), rest)) if rest.is_empty() => {
+                Self::from_value_slice(values)
+            }
+            _ => Self::from_finger(rope),
+        }
+    }
+
+    fn flush_byte_run(rope: &mut FingerList<V>, run: &mut Vec<u8>) {
+        if !run.is_empty() {
+            *rope = rope.push_right(ListChunk::Bytes(Bytes::from(std::mem::take(run))));
+        }
+    }
+
+    fn flush_value_run(rope: &mut FingerList<V>, run: &mut Vec<V>) {
+        if !run.is_empty() {
+            *rope = rope.push_right(ListChunk::Values(SharedSlice::from_vec(std::mem::take(
+                run,
+            ))));
+        }
     }
 
     /// Rejoins what a back pop left behind as a left-leaning spine, the
@@ -1173,18 +1377,9 @@ impl<V, T> List<V, T> {
     #[cfg(test)]
     fn split_at_checked(&self, index: usize) -> (Self, Self) {
         match self.0.as_ref() {
-            ListNode::Empty => {
-                assert_eq!(index, 0);
-                (Self::empty(), Self::empty())
+            ListNode::Empty | ListNode::Bytes(_) | ListNode::Values(_) | ListNode::Finger(_) => {
+                self.split_leaf_at(index)
             }
-            ListNode::Bytes(bytes) => (
-                Self::from_bytes(bytes.slice(0..index)),
-                Self::from_bytes(bytes.slice(index..bytes.len())),
-            ),
-            ListNode::Values(values) => (
-                Self::from_value_slice(values.slice(0, index)),
-                Self::from_value_slice(values.slice(index, values.len())),
-            ),
             ListNode::Concat(left, right) => {
                 let left_len = left.len();
                 if index < left_len {
@@ -1196,10 +1391,6 @@ impl<V, T> List<V, T> {
                     let (right_left, right_right) = right.split_at_checked(index - left_len);
                     (Self::concat(left.clone(), right_left), right_right)
                 }
-            }
-            ListNode::Finger(finger) => {
-                let (left, right) = Self::split_finger_at(finger, index);
-                (Self::from_finger(left), Self::from_finger(right))
             }
             ListNode::Thunk(_) => {
                 panic!("list split requires all lazy list chunks to be forced")
@@ -1296,7 +1487,6 @@ impl<V, T> List<V, T> {
         Self::from_finger(middle)
     }
 
-    #[cfg(test)]
     fn split_finger_at(finger: &FingerList<V>, index: usize) -> (FingerList<V>, FingerList<V>) {
         let len = finger.measure().0;
         assert!(index <= len);
@@ -1729,6 +1919,148 @@ mod tests {
         };
         assert_eq!(deferred, "b");
         assert!(suffix.is_empty());
+    }
+
+    fn rope_chunk_lens(list: &TestList) -> Vec<usize> {
+        let ListNode::Finger(finger) = list.0.as_ref() else {
+            panic!("a joined list of several chunks is a finger-tree rope")
+        };
+        finger.iter().map(|chunk| chunk.len()).collect()
+    }
+
+    fn value_items(range: std::ops::Range<u32>) -> Vec<ListItem<u32>> {
+        range.map(ListItem::Value).collect()
+    }
+
+    #[test]
+    fn leaf_steps_take_whole_leaves_from_either_end_without_forcing() {
+        let list = TestList::concat(
+            TestList::concat(
+                TestList::from_values(vec![1, 2]),
+                TestList::from_thunk("lazy"),
+            ),
+            TestList::from_bytes(vec![3_u8, 4]),
+        );
+        let mut duplicate_deferred = |deferred: &&'static str| *deferred;
+
+        let ListFrontLeafStep::Leaf { leaf, tail } =
+            list.pop_front_leaf_step(&mut duplicate_deferred)
+        else {
+            panic!("the first strict leaf must be returned whole")
+        };
+        assert_eq!(leaf.items_for_eq(), value_items(1..3));
+        let ListFrontLeafStep::Deferred { deferred, suffix } =
+            tail.pop_front_leaf_step(&mut duplicate_deferred)
+        else {
+            panic!("the deferred chunk must be reported unforced")
+        };
+        assert_eq!(deferred, "lazy");
+        let ListFrontLeafStep::Leaf { leaf, tail } =
+            suffix.pop_front_leaf_step(&mut duplicate_deferred)
+        else {
+            panic!("the byte leaf must follow the deferred chunk")
+        };
+        assert_eq!(
+            leaf.items_for_eq(),
+            vec![ListItem::Byte(3), ListItem::Byte(4)]
+        );
+        assert!(tail.is_empty());
+
+        let ListBackLeafStep::Leaf { init, leaf } =
+            list.pop_back_leaf_step(&mut duplicate_deferred)
+        else {
+            panic!("the last strict leaf must be returned whole")
+        };
+        assert_eq!(
+            leaf.items_for_eq(),
+            vec![ListItem::Byte(3), ListItem::Byte(4)]
+        );
+        let ListBackLeafStep::Deferred { prefix, deferred } =
+            init.pop_back_leaf_step(&mut duplicate_deferred)
+        else {
+            panic!("the deferred chunk must be reported unforced from the back")
+        };
+        assert_eq!(deferred, "lazy");
+        assert_eq!(prefix.items_for_eq(), value_items(1..3));
+    }
+
+    #[test]
+    fn joining_one_piece_returns_it_as_it_is() {
+        let (_, piece) = TestList::from_values((0..100).collect()).split_leaf_at(10);
+        let joined =
+            TestList::join_strict_pieces(vec![TestList::empty(), piece.clone()], &mut |value| {
+                *value
+            });
+        assert!(joined.shares_spine_with(&piece));
+    }
+
+    #[test]
+    fn joining_small_pieces_copies_them_into_chunks() {
+        // A list appended one item at a time comes back as chunks rather
+        // than as a finger tree of single items.
+        let singles = |range: std::ops::Range<u32>| {
+            range
+                .map(|value| TestList::from_values(vec![value]))
+                .collect::<Vec<_>>()
+        };
+        let joined = TestList::join_strict_pieces(singles(0..100), &mut |value| *value);
+        assert_eq!(rope_chunk_lens(&joined), vec![32, 32, 32, 4]);
+        assert_eq!(joined.items_for_eq(), value_items(0..100));
+
+        let joined = TestList::join_strict_pieces(singles(0..10), &mut |value| *value);
+        assert_eq!(
+            joined.value_slice(),
+            Some(&(0..10).collect::<Vec<_>>()[..]),
+            "a rope of one chunk is a flat slice"
+        );
+    }
+
+    #[test]
+    fn joining_large_pieces_shares_their_storage_in_a_rope() {
+        let leaf = TestList::from_values((0..100).collect());
+        let (front, back) = leaf.split_leaf_at(50);
+        let joined = TestList::join_strict_pieces(
+            vec![
+                back,
+                TestList::from_bytes(vec![7_u8; 40]),
+                TestList::from_values(vec![1]),
+                TestList::from_bytes(vec![8_u8]),
+                front,
+            ],
+            &mut |value| *value,
+        );
+
+        // Small runs of different kinds stay separate chunks.
+        assert_eq!(rope_chunk_lens(&joined), vec![50, 40, 1, 1, 50]);
+        let ListNode::Finger(rope) = joined.0.as_ref() else {
+            unreachable!("checked above")
+        };
+        let ListNode::Values(original) = leaf.0.as_ref() else {
+            unreachable!("a value list is one value leaf")
+        };
+        let Some((ListChunk::Values(first), _)) = rope.view_left() else {
+            panic!("the rope must start with the shared value chunk")
+        };
+        assert!(Arc::ptr_eq(&first.data, &original.data));
+    }
+
+    #[test]
+    fn leaf_lookups_and_splits_cross_rope_chunks() {
+        let rope = TestList::join_strict_pieces(
+            vec![
+                TestList::from_values((0..50).collect()),
+                TestList::from_values((50..100).collect()),
+            ],
+            &mut |value| *value,
+        );
+        assert_eq!(rope_chunk_lens(&rope), vec![50, 50]);
+        assert_eq!(
+            rope.leaf_item_at_by(75, &mut |value| *value),
+            ListItem::Value(75)
+        );
+        let (left, right) = rope.split_leaf_at(60);
+        assert_eq!(left.items_for_eq(), value_items(0..60));
+        assert_eq!(right.items_for_eq(), value_items(60..100));
     }
 
     #[test]

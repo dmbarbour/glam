@@ -81,6 +81,15 @@ values and list and dictionary representations should allocate less.
 Root registration is the clearest single source, and is part of
 `perf-allocation-path` there.
 
+**Unmanaged structure the collector traces, measured 2026-10-09.** Lists
+and dictionaries are still `Arc` structure. Each collection traces them,
+but they occupy no managed runs, so they do not raise the next collection's
+threshold. A program that holds a growing list collects at a rate set by
+its managed allocation, and each collection traces the whole list. This is
+one cause of `append_walk`'s collection growth, `perf-collection-growth` in
+the [structural overheads plan](StructuralOverheads_2026-10-08.md). Managed
+list nodes would count toward the threshold.
+
 The eventual representation should separate:
 
 ```text
@@ -158,6 +167,17 @@ Candidate immediates include:
 - unit, empty list, and empty dictionary constants;
 - compact atom or intern-table identities; and
 - reserved encodings for later use.
+
+The maintainer's direction (2026-10-09) also spends pointer bits on a few
+common shapes, so that they need no node of their own or a smaller one:
+- any value tagged as a singleton list of itself;
+- a few pair types labelled in the pointer, such as list concatenations,
+  singleton dicts and rationals; and
+- tagged data.
+
+Nodes are therefore expected to shrink well below today's 40-byte list node.
+Bootstrap work must not fit caches, such as a cached list length, into that
+node's spare bytes (structural overheads plan, `perf-list-leaf-walk`).
 
 Values outside an immediate range become managed objects. In particular:
 
@@ -341,7 +361,8 @@ are the source.
   would cost O(log n) rather than O(1), but both ends and index operations
   would stay logarithmic without the observers' reshaping
   (`list-pop-reshapes-remainder`, and the structural overheads plan's
-  `perf-list-index-descent`).
+  `perf-list-leaf-walk`). Until then a program that indexes one list
+  repeatedly asks for it with the `array` or `deque` annotation.
 - Migrate functions, partial calls, failures, metadata, and deferred values in
   independently testable checkpoints.
 

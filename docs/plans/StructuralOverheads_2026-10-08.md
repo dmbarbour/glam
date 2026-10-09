@@ -3,9 +3,9 @@
 Status: active, as the `perf-structural-overheads` step of the
 [performance roadmap](PerformanceRoadmap_2026-10-05.md). Done:
 `perf-admission-wakeups`, `perf-idle-wakeups`, `perf-fast-id-hashing`,
-`perf-net-builder-wired-ports`, `perf-scaling-workloads` and
-`perf-list-front-walk`. Next: `perf-list-index-descent`, once its design is
-agreed.
+`perf-net-builder-wired-ports`, `perf-scaling-workloads`,
+`perf-list-front-walk` and `perf-list-leaf-walk`. Next:
+`perf-collection-growth`.
 
 ## Purpose
 
@@ -66,6 +66,30 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 
 ## Open Steps, in Order
 
+### Collection growth (`perf-collection-growth`)
+
+Found 2026-10-09 by `append_walk` at four-times sizes (800 to 3,200
+items), whose instructions grow with exponent 1.70 while every counter
+grows linearly. Outside collection the workload is linear: its CPU time
+less collection time grows 1.95 times per doubling. Collection takes 174,
+789 and 3,829 ms at the three sizes, 45% of CPU time at 3,200. Both the
+number of collections (4, 8 and 14) and the cost of each (43, 99 and
+273 ms) grow:
+- **Count.** Collection is triggered by managed run assignment. The
+  program's list is `Arc` structure, which every collection traces but
+  which occupies no runs, so it does not raise the next threshold (value
+  representation plan, "Current Pressure").
+- **Cost of each.** It grows faster than the live list. A candidate, from
+  reading the code and not yet confirmed: resolving a slot
+  (`resolve_slot_topology_in`, the top symbol at 9.8% self time) checks
+  run membership with `AllocationClassEntry::contains_run`, a linear scan
+  over the class's runs, for every marked edge and every root
+  validation.
+
+The step starts by profiling collections alone to confirm the per-collection
+cause. Any program that holds a large live structure pays this, which is
+why it leads the open steps.
+
 ### Access-region cost (`perf-access-region-cost`)
 
 Every outer access region enters and leaves the collector's mutator
@@ -90,50 +114,6 @@ Candidate remedies, each measurable alone:
   probes), which could share a region.
 
 This is the largest broad cost: every workload pays it.
-
-### Index descent in list observers (`perf-list-index-descent`)
-
-Proposed 2026-10-08; the design needs discussion before it starts. It
-finishes the `list_sum` cubic that `perf-list-front-walk` cut to
-superlinear.
-
-The list observation machine's `len`, `at`, `split`, `slice` and
-`split_end` advance one item per builtin step, restarting the front (or
-back) projection at each item. Pops are now O(1), but `len` still takes n
-steps, so a loop that tests `len` each iteration is quadratic: at 1,600
-items `list_sum` costs 11 G instructions, and its reductions grow with
-exponent 1.70. `split` and `slice` also copy the taken items into a new
-value leaf, even from one large leaf whose slice would be O(1).
-
-Proposal, in the maintainer's direction that observers shape lists rather
-than relying on construction:
-- **Cached lengths.** A `Concat` node records its length when both
-  children's lengths are known, that is, when no lazy chunk lies beneath
-  it. `known_len` becomes O(1) and stops recursing.
-- **Descent by length.** A non-forcing step descends to an index, skipping
-  every subtree of known length whole, and stops at the index or at the
-  first lazy chunk before it, which the caller forces and resumes after.
-  Each observer then takes one step per lazy chunk it crosses, plus one,
-  rather than one per item.
-- **Balanced taken part.** What `split` or `slice` takes is strict, since
-  every chunk before the cut was forced. It comes back as a finger tree of
-  the leaves it spans, sharing them rather than copying items, so later
-  index operations on it are logarithmic. What is left keeps its sharing
-  and lazy chunks, shaped toward the cut as a pop shapes it.
-
-Notes for the discussion:
-- Building the taken part's finger tree costs one push per leaf it spans,
-  at most its length, where the current copy costs one per item.
-- The cache costs no memory: a `ListNode` is 40 bytes, sized by
-  its byte and value leaves (32 bytes each), and a `Concat` uses 16, so a
-  cached length fits. Each concatenation adds two lengths.
-- `at` returns no list, so repeated `at` on one unbalanced list pays the
-  descent each time. Balancing that persists would mean memoizing a
-  balanced form in the node, or lists that are finger trees throughout,
-  with lazy chunks as finger-tree elements. The second belongs to the
-  value representation plan's V3 list checkpoint, and would also fix pops
-  that alternate between the two ends (see `perf-list-front-walk` under
-  Done).
 
 ### Free bindings in lowering (`perf-lowering-free-bindings`)
 
@@ -254,6 +234,48 @@ of reflection effects would.
 
 ## Done
 
+- **Leaf walks in list observers** (`perf-list-leaf-walk`), 2026-10-09.
+  - **Cause.** `len`, `at`, `split`, `slice` and `split_end` advanced one
+    item per builtin step, each step a full lazy-machine poll, so a loop
+    that tested `len` stayed quadratic after `perf-list-front-walk`.
+    `split` and `slice` copied what they took into a new value leaf.
+  - **Leaf walks.** These observers now take one strict leaf (a byte
+    slice, value slice or finger tree) per projection step, and every
+    strict leaf in one builtin step, stopping only to force a deferred
+    chunk. `head` and `tail` still take one item. The item pops are now
+    built on leaf pops (`List::pop_front_leaf_step`,
+    `List::pop_back_leaf_step`).
+  - **Ropes for what is taken.** What `split`, `split_end` and `slice`
+    take comes back as a flat slice when it lies within one leaf, sharing
+    its storage, and otherwise as a finger-tree rope sharing the leaves it
+    spans (`List::join_strict_pieces`). Runs of pieces shorter than 32
+    items are copied into one chunk. The remainder is shaped as a pop
+    leaves it.
+  - **Maintainer decisions** (2026-10-09), recorded as
+    `list-observers-walk-leaves` in `docs/Decisions.md`:
+    - no cached lengths in `Concat` nodes, since value representation will
+      compact list nodes much further (pointer-tagged singleton lists,
+      concatenation pairs and other tagged shapes);
+    - a program that indexes one list repeatedly asks for an indexable form
+      with the `array` or `deque` annotation; `at` does not rebalance.
+  - Unit tests cover leaf steps from both ends, rope joining and lookups
+    across rope chunks; an evaluator test covers every position observer
+    across value leaves, a lazy chunk and a byte leaf.
+
+  Instructions (four-times sizes):
+
+  | Workload | Before | After |
+  | --- | ---: | ---: |
+  | `list_sum_400` | 1,911 M | 1,690 M |
+  | `list_sum_1600` | 10,958 M | 7,540 M |
+  | `list_map_8000` | 35,451 M | 35,453 M |
+
+  `list_sum`'s reductions are now linear (exponent 1.70 before, 1.00
+  after; 1.86 M to 0.58 M at 1,600), and its instructions grow with
+  exponent 1.11, from 1.39. `list_map` and `append_walk` use no position
+  observer and are unchanged. `append_walk` at these sizes found
+  `perf-collection-growth`.
+
 - **Front of a list** (`perf-list-front-walk`), 2026-10-08.
   - **Cause.** Popping the front of a strict left-deep spine rebuilt the
     remaining spine in the same shape (`List::join_logical_suffix`), so
@@ -289,7 +311,7 @@ of reflection effects would.
   | `append_walk_800` | 6,382 M | 6,385 M |
 
   `list_sum`'s exponent fell from 2.95 to 1.39 (400 to 1,600 items); the
-  rest is `len` counting item by item, `perf-list-index-descent`.
+  rest is `len` counting item by item, `perf-list-leaf-walk`.
   `list_map` remains quadratic (1.92 at 2,000 to 8,000); see
   `perf-interface-demand-walk`.
 

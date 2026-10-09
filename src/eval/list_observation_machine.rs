@@ -1,10 +1,14 @@
 //! Resumable list and binary observation builtins.
 //!
 //! Indices are demanded and validated before the subject. Logical lists then
-//! advance through the regional front/back projections one item at a time,
-//! retaining the exact suffix and completed prefix beneath the containing
-//! managed builtin checkpoint.
+//! advance through the regional front/back projections, retaining the exact
+//! remainder and the part taken so far beneath the containing managed builtin
+//! checkpoint. `head` and `tail` take one item; the other observers take one
+//! strict leaf at a time, all strict leaves in one step, and stop only to
+//! force a deferred chunk. What `split`, `split_end` and `slice` take comes
+//! back as a flat slice or a finger-tree rope of the leaves it spans.
 
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -19,7 +23,7 @@ use crate::number::Number;
 
 use super::builtin_machine::RegionalBuiltinPoll;
 use super::list_machine::{
-    RegionalListBack, RegionalListBackPoll, RegionalListFront, RegionalListFrontPoll,
+    RegionalListBack, RegionalListBackPoll, RegionalListFront, RegionalListFrontPoll, item_value_in,
 };
 use super::value::{evaluation_context_frame_in, index_from_evaluated, split_result_value};
 use super::whnf::{
@@ -52,7 +56,9 @@ struct RegionalListWalk {
     operation: ListWalkOperation,
     front: Option<RegionalListFront>,
     back: Option<RegionalListBack>,
-    items: Vec<Value>,
+    /// Strict leaves taken so far, each a `Value::List`, in walk order.
+    taken: Vec<Value>,
+    /// Items passed so far, from the front, or from the back for `split_end`.
     position: usize,
     source_owner: LazyId,
 }
@@ -377,7 +383,7 @@ impl RegionalListWalk {
             operation,
             front,
             back,
-            items: Vec::new(),
+            taken: Vec::new(),
             position: 0,
             source_owner,
         }
@@ -388,33 +394,34 @@ impl RegionalListWalk {
         access: &EvaluationValueAccess<'_>,
         step_budget: &mut EvaluationStepBudget,
     ) -> RegionalBuiltinPoll {
-        if matches!(self.operation, ListWalkOperation::SplitEnd { .. }) {
-            return match self
-                .back
-                .as_mut()
-                .expect("split-end traversal owns back-list work")
-                .poll_in(access, step_budget)
-            {
-                RegionalListBackPoll::Ready(Some((init, item))) => {
-                    self.consume_back_item(access, init, item)
-                }
-                RegionalListBackPoll::Ready(None) => {
-                    failure("split_end builtin count is out of bounds")
-                }
-                RegionalListBackPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
-                RegionalListBackPoll::Yielded => RegionalBuiltinPoll::Yielded,
-                RegionalListBackPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
-            };
+        match self.operation {
+            ListWalkOperation::Head | ListWalkOperation::Tail => {
+                self.poll_front_item_in(access, step_budget)
+            }
+            ListWalkOperation::SplitEnd { .. } => self.poll_back_leaves_in(access, step_budget),
+            ListWalkOperation::Slice { .. }
+            | ListWalkOperation::Len
+            | ListWalkOperation::Split { .. }
+            | ListWalkOperation::At { .. } => self.poll_front_leaves_in(access, step_budget),
         }
+    }
+
+    fn poll_front_item_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
         match self
             .front
             .as_mut()
             .expect("front-list observation owns front-list work")
             .poll_in(access, step_budget)
         {
-            RegionalListFrontPoll::Ready(Some((item, tail))) => {
-                self.consume_item(access, item, tail)
-            }
+            RegionalListFrontPoll::Ready(Some((item, tail))) => match self.operation {
+                ListWalkOperation::Head => RegionalBuiltinPoll::Ready(item),
+                ListWalkOperation::Tail => RegionalBuiltinPoll::Ready(tail),
+                _ => unreachable!("only head and tail take one item"),
+            },
             RegionalListFrontPoll::Ready(None) => self.finish_empty(),
             RegionalListFrontPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
             RegionalListFrontPoll::Yielded => RegionalBuiltinPoll::Yielded,
@@ -422,93 +429,166 @@ impl RegionalListWalk {
         }
     }
 
-    fn consume_item(
+    /// Takes strict leaves from the front until the observation completes
+    /// or a deferred chunk must be forced.
+    fn poll_front_leaves_in(
         &mut self,
         access: &EvaluationValueAccess<'_>,
-        item: Value,
-        tail: Value,
+        step_budget: &mut EvaluationStepBudget,
     ) -> RegionalBuiltinPoll {
-        match self.operation {
-            ListWalkOperation::Head => RegionalBuiltinPoll::Ready(item),
-            ListWalkOperation::Tail => RegionalBuiltinPoll::Ready(tail),
-            ListWalkOperation::At { index } if self.position == index => {
-                RegionalBuiltinPoll::Ready(item)
-            }
-            ListWalkOperation::At { .. } | ListWalkOperation::Len => {
-                self.position += 1;
-                self.front = Some(RegionalListFront::new_in(
-                    access,
-                    tail,
-                    Some(self.source_owner),
-                ));
-                RegionalBuiltinPoll::Yielded
-            }
-            ListWalkOperation::Split { index } => {
-                self.items.push(item);
-                self.position += 1;
-                if self.position == index {
-                    RegionalBuiltinPoll::Ready(split_result_value(
-                        access.values(),
-                        Value::List(List::from_values(std::mem::take(&mut self.items))),
-                        tail,
-                    ))
-                } else {
+        loop {
+            let (leaf, tail) = match self
+                .front
+                .as_mut()
+                .expect("front-list observation owns front-list work")
+                .poll_leaf_in(access, step_budget)
+            {
+                RegionalListFrontPoll::Ready(Some(step)) => step,
+                RegionalListFrontPoll::Ready(None) => return self.finish_empty(),
+                RegionalListFrontPoll::Boundary(request) => {
+                    return RegionalBuiltinPoll::Boundary(request);
+                }
+                RegionalListFrontPoll::Yielded => return RegionalBuiltinPoll::Yielded,
+                RegionalListFrontPoll::Failed(failure) => {
+                    return RegionalBuiltinPoll::Failed(failure);
+                }
+            };
+            match self.consume_front_leaf(access, leaf, tail) {
+                ControlFlow::Break(result) => return RegionalBuiltinPoll::Ready(result),
+                ControlFlow::Continue(tail) => {
                     self.front = Some(RegionalListFront::new_in(
                         access,
                         tail,
                         Some(self.source_owner),
                     ));
-                    RegionalBuiltinPoll::Yielded
                 }
             }
-            ListWalkOperation::Slice { start, end } => {
-                if self.position >= start {
-                    self.items.push(item);
-                }
-                self.position += 1;
-                if self.position == end {
-                    RegionalBuiltinPoll::Ready(Value::List(List::from_values(std::mem::take(
-                        &mut self.items,
-                    ))))
-                } else {
-                    self.front = Some(RegionalListFront::new_in(
-                        access,
-                        tail,
-                        Some(self.source_owner),
-                    ));
-                    RegionalBuiltinPoll::Yielded
-                }
-            }
-            ListWalkOperation::SplitEnd { .. } => unreachable!("split-end walks from the back"),
         }
     }
 
-    fn consume_back_item(
+    /// Observes one leaf covering the items from `self.position`. Breaks
+    /// with the result, or continues with the tail after the leaf.
+    fn consume_front_leaf(
         &mut self,
         access: &EvaluationValueAccess<'_>,
-        init: Value,
-        item: Value,
+        leaf: List,
+        tail: Value,
+    ) -> ControlFlow<Value, Value> {
+        let start = self.position;
+        let len = leaf.known_len().expect("a strict leaf knows its length");
+        let end = start + len;
+        match self.operation {
+            ListWalkOperation::At { index } if index < end => {
+                let item = leaf.leaf_item_at_by(index - start, &mut |value| {
+                    access.values().duplicate_value(value)
+                });
+                return ControlFlow::Break(item_value_in(access, item));
+            }
+            ListWalkOperation::Split { index } if index <= end => {
+                let (taken, rest) = leaf.split_leaf_at(index - start);
+                self.taken.push(Value::List(taken));
+                let Value::List(tail) = tail else {
+                    unreachable!("a front walk retains a list tail")
+                };
+                return ControlFlow::Break(split_result_value(
+                    access.values(),
+                    Value::List(self.join_taken(access)),
+                    Value::List(List::concat(rest, tail)),
+                ));
+            }
+            ListWalkOperation::Split { .. } => self.taken.push(Value::List(leaf)),
+            ListWalkOperation::Slice {
+                start: from,
+                end: to,
+            } => {
+                // The part of this leaf inside the slice, as leaf offsets.
+                let low = from.saturating_sub(start).min(len);
+                let high = (to - start).min(len);
+                if low < high {
+                    let (init, _) = leaf.split_leaf_at(high);
+                    let (_, piece) = init.split_leaf_at(low);
+                    self.taken.push(Value::List(piece));
+                }
+                if to <= end {
+                    return ControlFlow::Break(Value::List(self.join_taken(access)));
+                }
+            }
+            ListWalkOperation::At { .. } | ListWalkOperation::Len => {}
+            ListWalkOperation::Head
+            | ListWalkOperation::Tail
+            | ListWalkOperation::SplitEnd { .. } => {
+                unreachable!("only position observers walk front leaves")
+            }
+        }
+        self.position = end;
+        ControlFlow::Continue(tail)
+    }
+
+    /// Takes strict leaves from the back for `split_end`, the mirror of
+    /// [`Self::poll_front_leaves_in`].
+    fn poll_back_leaves_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
     ) -> RegionalBuiltinPoll {
         let ListWalkOperation::SplitEnd { count } = self.operation else {
             unreachable!("only split-end walks from the back")
         };
-        self.items.push(item);
-        self.position += 1;
-        if self.position == count {
-            self.items.reverse();
-            RegionalBuiltinPoll::Ready(split_result_value(
-                access.values(),
-                init,
-                Value::List(List::from_values(std::mem::take(&mut self.items))),
-            ))
-        } else {
+        loop {
+            let (init, leaf) = match self
+                .back
+                .as_mut()
+                .expect("split-end traversal owns back-list work")
+                .poll_leaf_in(access, step_budget)
+            {
+                RegionalListBackPoll::Ready(Some(step)) => step,
+                RegionalListBackPoll::Ready(None) => {
+                    return failure("split_end builtin count is out of bounds");
+                }
+                RegionalListBackPoll::Boundary(request) => {
+                    return RegionalBuiltinPoll::Boundary(request);
+                }
+                RegionalListBackPoll::Yielded => return RegionalBuiltinPoll::Yielded,
+                RegionalListBackPoll::Failed(failure) => {
+                    return RegionalBuiltinPoll::Failed(failure);
+                }
+            };
+            let len = leaf.known_len().expect("a strict leaf knows its length");
+            let wanted = count - self.position;
+            if wanted <= len {
+                let (rest, taken) = leaf.split_leaf_at(len - wanted);
+                self.taken.push(Value::List(taken));
+                self.taken.reverse();
+                let Value::List(init) = init else {
+                    unreachable!("a back walk retains a list init")
+                };
+                return RegionalBuiltinPoll::Ready(split_result_value(
+                    access.values(),
+                    Value::List(List::concat(init, rest)),
+                    Value::List(self.join_taken(access)),
+                ));
+            }
+            self.taken.push(Value::List(leaf));
+            self.position += len;
             self.back = Some(RegionalListBack::new_in(
                 access,
                 init,
                 Some(self.source_owner),
             ));
-            RegionalBuiltinPoll::Yielded
         }
+    }
+
+    /// Joins the leaves taken so far, in list order, as a flat slice or a
+    /// finger-tree rope.
+    fn join_taken(&mut self, access: &EvaluationValueAccess<'_>) -> List {
+        let pieces = std::mem::take(&mut self.taken)
+            .into_iter()
+            .map(|piece| match piece {
+                Value::List(piece) => piece,
+                _ => unreachable!("taken pieces are lists"),
+            })
+            .collect();
+        List::join_strict_pieces(pieces, &mut |value| access.values().duplicate_value(value))
     }
 
     fn finish_empty(&self) -> RegionalBuiltinPoll {
@@ -538,8 +618,8 @@ impl RegionalListWalk {
         if let Some(back) = &self.back {
             back.trace_managed_edges(visitor);
         }
-        for value in &self.items {
-            trace_compatibility_value_managed_edges(value, visitor);
+        for piece in &self.taken {
+            trace_compatibility_value_managed_edges(piece, visitor);
         }
     }
 }
