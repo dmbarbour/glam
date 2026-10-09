@@ -48,8 +48,8 @@ control-flow overview.
 
   Never collect on ordinary mutator entry. A new kind of claimed work gets the
   same call between its poll and its release. Test fixtures that hold raw
-  values across evaluation must root them; the process-wide shared test
-  domains (`shared_test_value_factory`) are never collected.
+  values across evaluation must root them; the shared test domains
+  (`shared_test_value_factory`) are never collected.
 - Collection is not a Glam semantic mutation. It never advances observation
   epochs or changes values, transactions, diagnostics, or net topology, and
   pure Glam cannot observe policy, pressure, revisions, collection counts, or
@@ -473,9 +473,12 @@ control-flow overview.
 
 ## Verification Discipline
 
-- The process-wide `test_value_factory()` amortizes compiler-value setup but
-  is never an explicit collection target: parallel fixtures can temporarily
-  hold unrooted compatibility values in that domain. Any test that forces GC
+- `test_value_factory()`, `compiler_test_runtime()` and the other shared test
+  domains are per thread: libtest runs each test on its own thread, so a
+  test's fixtures share one runtime and tests never contend on one heap. A
+  test that spawns threads hands them its factory rather than calling these
+  again there. A shared domain is never an explicit collection target: its
+  fixtures can hold unrooted compatibility values. Any test that forces GC
   must use `private_test_value_factory()` or another private runtime. A
   test-only assertion at the collection gateway latches this rule.
 - Representative sample outputs must be identical in every collection mode.

@@ -1803,9 +1803,11 @@ mod driver_tests {
     use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
     fn test_value_factory() -> CoreValueFactory {
-        static FACTORY: std::sync::LazyLock<CoreValueFactory> =
-            std::sync::LazyLock::new(|| crate::core::shared_test_value_factory(RuntimeIds::new()));
-        FACTORY.clone()
+        thread_local! {
+            static FACTORY: CoreValueFactory =
+                crate::core::shared_test_value_factory(RuntimeIds::new());
+        }
+        FACTORY.with(Clone::clone)
     }
 
     fn test_context() -> crate::evaluation::OwnedEvalContext {
@@ -2770,13 +2772,16 @@ mod driver_tests {
         let runtime = instantiate(builder.finish(data));
         let interface = runtime.test_with(&test_value_factory(), |net| net.exposed());
 
+        // Test runtimes are per thread, so the spawned threads take this
+        // thread's.
         let values = test_value_factory();
+        let leader_values = values.clone();
+        let follower_values = values.clone();
         let leader_root = values.with_runtime_value_access(|access| runtime.root_in(&access));
         let (leader_ready_tx, leader_ready_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let leader = std::thread::spawn(move || {
-            let values = test_value_factory();
-            values.with_runtime_value_access(|values| {
+            leader_values.with_runtime_value_access(|values| {
                 let leader_runtime = CoreRuntimeNet::from_root(&leader_root, &values);
                 let access = leader_runtime.access(&values);
                 access
@@ -2797,7 +2802,7 @@ mod driver_tests {
         let (registered_tx, registered_rx) = std::sync::mpsc::channel();
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let follower = std::thread::spawn(move || {
-            let context = test_context();
+            let context = EvalContext::isolated(follower_values);
             let mut registered_tx = Some(registered_tx);
             let result =
                 crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {

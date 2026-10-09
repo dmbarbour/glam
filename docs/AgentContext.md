@@ -122,7 +122,10 @@ After Rust edits run `scripts/check.sh`, the workspace verification entry
 point. Its levels are cumulative:
 
 - `scripts/check.sh fast` — `cargo fmt --check`, workspace Clippy, and the
-  workspace test suite at default features. The quick inner-loop gate.
+  workspace test suite at default features. The quick inner-loop gate. The
+  dev profile builds the workspace at opt-level 1 and dependencies at 3, and
+  each test gets its own shared test runtime, so the tests take about 20 s
+  (`fast-test-suite`).
 - `scripts/check.sh` (default `all`) — adds the collector's own `check.sh`
   (glam-gc all-features tests, persistent-edge codegen latch, unsafe-site
   audit), the G0 semantic regressions, and the `glam-prof` profiling
@@ -158,7 +161,8 @@ it explicitly. Test fixtures that hold raw values across evaluation must root
 them. A test whose primary purpose is
 `NoAuto` behaviour does not run under the feature; if only its final
 assertion depends on `NoAuto`, gate just that tail. For scale, `full` took
-911 s on 2026-10-04 (rustc 1.99.0, 8 threads, no nightly tools).
+565 s from a cold build on 2026-10-09 (rustc 1.99.0, 8 threads, no nightly
+tools); after a one-file edit, `fast` took 53 s and `all` 77 s.
 
 Add a focused regression before a broad fix when practical, then run the full
 suite. Documentation-only changes need link/path validation and

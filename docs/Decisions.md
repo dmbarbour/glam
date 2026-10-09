@@ -157,6 +157,29 @@ maps the short names used here to file names.
 - **Recorded in:** D2h review D2HR-006; GCI11R002 holistic review GCI2HR-006;
   documentation disposition, maintainer answer 5.
 
+### Fast tests come from fixing their causes
+`fast-test-suite` · 2026-10-09 · maintainer and agent · accepted
+- **Context:** workspace tests took about 225 s in `scripts/check.sh fast`.
+  The library suite used under three of eight cores. The maintainer asked
+  for slow tests to move to a slower tier, keeping faster versions in
+  `fast`, and suggested isolated runtimes if tests contended.
+- **Decision:**
+  - Shared test runtimes are per thread, so per test, instead of
+    process-wide. Tests had contended on one heap, which also grew for
+    the whole run.
+  - The dev profile builds the workspace at opt-level 1 and dependencies at
+    opt-level 3.
+  - No slow tier yet: afterwards the slowest test takes 2.5 s. Rejected for
+    now: moving tests whose slowness came from contention or an
+    unoptimized build.
+- **Consequences:** workspace tests take about 20 s. A rebuild after an
+  edit takes 15 s instead of 12 s, and stepping in a debugger needs an
+  opt-level 0 override. A test that again takes more than a few seconds
+  gets a slow tier (`test-slow-tier`).
+- **Rule lives in:** `AgentContext.md` "Verification";
+  `agent_context/evaluation.md` "Verification Discipline".
+- **Recorded in:** fast checks plan, `test-fast-tier`.
+
 ### Retired plans and reviews are deleted, not archived
 `retired-history-is-deleted` · 2026-10-05 · maintainer · accepted
 - **Context:** retirable history docs add search noise, and several state
@@ -1282,6 +1305,7 @@ Short names used under **Recorded in**, with their files under `docs/`.
 | performance roadmap | `plans/PerformanceRoadmap_2026-10-05.md` |
 | evaluation-recursion plan | `plans/EvaluationRecursionPerformance_2026-10-04.md` |
 | structural overheads plan | `plans/StructuralOverheads_2026-10-08.md` |
+| fast checks plan | `plans/FastChecks_2026-10-09.md` |
 | C2C review | `reviews/GarbageCollectorC2C_2026-08-22.md` |
 | C6 review | `reviews/GarbageCollectorC6_2026-08-24.md` |
 | C8 review | `reviews/GarbageCollectorC8_2026-10-03.md` |

@@ -692,11 +692,13 @@ impl CoreValueFactory {
         self.domain.heap.collect_full()
     }
 
-    /// Whether this is the process-wide shared test value domain. Its fixtures
-    /// hold raw values outside any root by design, so nothing may collect it.
+    /// Whether this is a test thread's shared value domain. Its fixtures hold
+    /// raw values outside any root by design, so nothing may collect it.
     #[cfg(test)]
     pub(crate) fn is_shared_test_domain(&self) -> bool {
-        super::is_shared_test_value_runtime(self.runtime_id())
+        self.domain
+            .shared_test_domain
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Whether collector pressure has latched a collection request. Lock-free
@@ -728,7 +730,7 @@ impl CoreValueFactory {
     ) -> Result<glam_gc::CollectionReport, glam_gc::CollectionError> {
         assert!(
             !self.is_shared_test_domain(),
-            "tests must not collect the process-wide shared value domain; use a private CoreValueFactory"
+            "tests must not collect a shared test value domain; use a private CoreValueFactory"
         );
         self.collect_managed_for_maintenance()
     }

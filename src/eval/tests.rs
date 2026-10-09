@@ -1059,7 +1059,7 @@ fn evaluation_context_frames_use_an_atom_operation_and_optional_named_arguments(
 #[test]
 fn immediate_diagnostic_shell_operations_share_one_root_neutral_access_region() {
     // Root-registration counts belong to one heap. Use a private value domain
-    // so unrelated parallel tests using the shared fixture cannot perturb the
+    // so other fixtures sharing the thread's test domain cannot perturb the
     // before/after probe.
     let context = EvalContext::isolated(CoreValueFactory::new(
         crate::runtime::allocate_evaluation_runtime_id(),
@@ -6942,8 +6942,9 @@ fn evaluated_metadata(context: &EvalContext, carrier: &Value) -> Result<Value, E
 
 #[test]
 fn metadata_update_reorders_copies_and_clears_hidden_values() {
-    // The fixture carries raw managed function values between calls, so it
-    // must not share a heap with parallel tests which explicitly collect.
+    // The fixture carries raw managed function values between calls, and its
+    // demands may collect, so it uses a private heap rather than a shared
+    // test domain.
     let context = isolated_test_context();
     // Carriers hold managed metadata, and each demand below may collect at
     // its driver boundaries. Root inputs and outputs for as long as they
@@ -7911,8 +7912,8 @@ fn completed_reflection_source_retains_no_external_owner_or_value_domain_cycle()
 #[test]
 fn reflection_task_result_returns_arbitrary_lazy_value_once() {
     // This fixture retains raw managed values across launcher installation and
-    // repeated client demands, so it must not share the process-wide test heap
-    // with parallel fixtures which explicitly collect.
+    // repeated client demands that may collect, so it uses a private heap
+    // rather than a shared test domain.
     let context = isolated_test_context();
     let result_forces = Arc::new(AtomicUsize::new(0));
     let counted_result_forces = result_forces.clone();
@@ -8207,8 +8208,8 @@ fn reflection_task_result_propagates_cancellation() {
 
 #[test]
 fn reflection_gate_waits_before_continuing_target_demand() {
-    // This fixture forces collection explicitly, so it must not share the
-    // process-wide test value domain with parallel raw-value fixtures.
+    // This fixture forces collection explicitly, which a shared test value
+    // domain refuses.
     let context = isolated_test_context();
     let forced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let forced_by_target = forced.clone();
@@ -8320,8 +8321,8 @@ fn reflection_gate_memoizes_task_failure() {
 }
 
 fn assert_structured_reflection_gate_failure(stage: GateFailureStage) {
-    // This fixture forces collection explicitly, so it must not share the
-    // process-wide test value domain with unrelated parallel tests.
+    // This fixture forces collection explicitly, which a shared test value
+    // domain refuses.
     let context = isolated_test_context();
     let detail = Key::atom_from_text("detail");
     let emission = Value::Dict(

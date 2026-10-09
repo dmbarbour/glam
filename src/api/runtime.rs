@@ -1751,7 +1751,8 @@ impl EvaluationRuntime {
 
 #[cfg(test)]
 pub(crate) fn compiler_test_runtime() -> EvaluationRuntime {
-    static RUNTIME: std::sync::LazyLock<EvaluationRuntime> = std::sync::LazyLock::new(|| {
+    thread_local! {
+    static RUNTIME: EvaluationRuntime = {
         let core = crate::compiler::test_value_factory();
         let id = core.runtime_id();
         let ids = core.ids().clone();
@@ -1796,6 +1797,7 @@ pub(crate) fn compiler_test_runtime() -> EvaluationRuntime {
             }),
             default_reflection_profile: Arc::new(ReflectionTaskProfile::unsealed()),
         }
-    });
-    RUNTIME.clone()
+    };
+    }
+    RUNTIME.with(Clone::clone)
 }

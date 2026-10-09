@@ -2,9 +2,7 @@ use std::any::{Any, TypeId};
 use std::fmt;
 use std::num::NonZeroU64;
 #[cfg(test)]
-use std::sync::LazyLock;
-#[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use bytes::Bytes;
@@ -349,6 +347,10 @@ pub(crate) struct RuntimeValueDomain {
     managed_promise_allocations: AtomicUsize,
     #[cfg(test)]
     managed_promise_publications: AtomicUsize,
+    /// Set for a test thread's shared domain, which nothing may collect; see
+    /// [`shared_test_value_factory`].
+    #[cfg(test)]
+    shared_test_domain: AtomicBool,
     #[cfg(feature = "glam-prof")]
     interaction_net_profile: crate::interaction_net::profiling::InteractionNetProfile,
     #[cfg(feature = "glam-prof")]
@@ -400,6 +402,8 @@ impl CoreValueFactory {
             managed_promise_allocations: AtomicUsize::new(0),
             #[cfg(test)]
             managed_promise_publications: AtomicUsize::new(0),
+            #[cfg(test)]
+            shared_test_domain: AtomicBool::new(false),
             #[cfg(feature = "glam-prof")]
             interaction_net_profile: Default::default(),
             #[cfg(feature = "glam-prof")]
@@ -655,45 +659,37 @@ impl CoreValueFactory {
     }
 }
 
-/// Runtimes of the process-wide test value domains that many tests share.
-#[cfg(test)]
-static SHARED_TEST_VALUE_RUNTIMES: std::sync::Mutex<Vec<EvaluationRuntimeId>> =
-    std::sync::Mutex::new(Vec::new());
-
-/// Creates a process-wide value domain for a module's tests to share.
+/// Creates a value domain for one test thread's fixtures to share.
 ///
-/// Parallel tests may hold raw values in it without roots, so nothing may
-/// collect it: explicit test collection refuses it, and drivers skip it.
+/// Callers keep it in a thread-local. Libtest runs each test on its own
+/// thread, so tests neither contend on one heap nor grow it for the whole
+/// run; a test that spawns threads hands them its factory. Fixtures may hold
+/// raw values in it without roots, so nothing may collect it: explicit test
+/// collection refuses it, and drivers skip it.
 #[cfg(test)]
 pub(crate) fn shared_test_value_factory(ids: Arc<RuntimeIds>) -> CoreValueFactory {
-    let runtime = crate::runtime::allocate_evaluation_runtime_id();
-    SHARED_TEST_VALUE_RUNTIMES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .push(runtime);
-    CoreValueFactory::new(runtime, ids)
-}
-
-#[cfg(test)]
-fn is_shared_test_value_runtime(runtime: EvaluationRuntimeId) -> bool {
-    SHARED_TEST_VALUE_RUNTIMES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .contains(&runtime)
+    let values = CoreValueFactory::new(crate::runtime::allocate_evaluation_runtime_id(), ids);
+    values
+        .domain
+        .shared_test_domain
+        .store(true, Ordering::Relaxed);
+    values
 }
 
 #[cfg(test)]
 pub(crate) fn test_value_factory() -> CoreValueFactory {
-    static FACTORY: LazyLock<CoreValueFactory> =
-        LazyLock::new(|| shared_test_value_factory(RuntimeIds::compiler_test_values()));
-    FACTORY.clone()
+    thread_local! {
+        static FACTORY: CoreValueFactory =
+            shared_test_value_factory(RuntimeIds::compiler_test_values());
+    }
+    FACTORY.with(Clone::clone)
 }
 
 /// Creates a private test value domain that may be collected explicitly.
 ///
-/// Most tests use [`test_value_factory`] to amortize compiler-value setup. A
-/// test that forces collection must not use that process-wide domain because
-/// parallel tests can temporarily hold unrooted values in it.
+/// Most tests use [`test_value_factory`] to share compiler-value setup among
+/// a test's fixtures. A test that forces collection must not use that domain
+/// because its fixtures can hold unrooted values in it.
 #[cfg(test)]
 pub(crate) fn private_test_value_factory() -> CoreValueFactory {
     CoreValueFactory::new(

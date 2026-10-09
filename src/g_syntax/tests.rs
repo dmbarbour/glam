@@ -3,20 +3,20 @@ use crate::core::{Dict, Key, Value};
 use crate::number::Number;
 use crate::test_support::ResultTestExt as _;
 
-fn test_assembler() -> &'static crate::api::Assembler {
-    static ASSEMBLER: std::sync::LazyLock<crate::api::Assembler> = std::sync::LazyLock::new(|| {
-        crate::api::Assembler::builder()
+fn test_assembler() -> crate::api::Assembler {
+    thread_local! {
+        static ASSEMBLER: crate::api::Assembler = crate::api::Assembler::builder()
             .evaluation_runtime(crate::api::compiler_test_runtime())
             .build()
-            .expect("compiler test assembler should be constructible")
-    });
-    &ASSEMBLER
+            .expect("compiler test assembler should be constructible");
+    }
+    ASSEMBLER.with(Clone::clone)
 }
 
 fn test_eval_context() -> crate::evaluation::EvalContext {
-    // These tests share the compiler runtime and its cached lazy values. Use
-    // the same patient direct-client context as production Assembler demands
-    // so a producer already claimed by another test thread is awaited rather
+    // A test's fixtures share its thread's compiler runtime and cached lazy
+    // values. Use the same patient direct-client context as production
+    // Assembler demands, so a producer claimed elsewhere is awaited rather
     // than exposed as a retryable machine-level block.
     test_assembler().eval_context()
 }
