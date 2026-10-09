@@ -244,6 +244,13 @@ still match its exact subscription epoch and dependency key, so completing the
 claimed tip can expose only its immediate parent. Causal `.task.new`
 descendants are a separate helping route and never become zipper frames.
 
+Each evaluation quantum (a deferred or lazy-route task poll, a client
+demand, or a spark) holds one heap region, so the many short value accesses
+inside it are recursive entries rather than admissions. The region ends
+before the quantum boundary services collection pressure, and earlier
+wherever the poll waits on another thread or calls out to a host. Reflection
+task polls hold none, because they call into their host between steps.
+
 Ordinary worker quantums preserve their thread's inactive per-heap allocation
 cursors for reuse. Worker-thread termination is the stronger collector
 lifecycle boundary: an exit guard releases every inactive cache record after

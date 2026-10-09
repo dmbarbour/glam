@@ -468,6 +468,17 @@ the separate liveness and exactly-once obligations at each call site.
   it creates a TLS record or takes admission; entering the current heap again
   reuses its record without a registry lookup. A collection can therefore
   never wait on a thread that is itself blocked entering another heap.
+- A held region (`Heap::with_held_region`) is an outer entry without a
+  mutator. The thread's heap state owns its admission, with an `Arc` of the
+  heap (one per region, not per access), so `Heap::release_held_region`
+  deeper on the stack can end it. Entries inside it are recursive and take
+  no admission. Release succeeds only while the region is the thread's only
+  active entry; inside a mutator it does nothing, so no `Mutator` borrow
+  outlives its admission. A released region is not reacquired: later entries
+  in its scope admit one by one, so a release point never blocks on
+  admission while its caller may hold other locks. Collection waits for a
+  held region as for any outer mutator, and `thread_has_any_active_mutator`
+  counts it.
 - Entry destruction first decrements recursive depth and makes the outer cache
   quiescent, then retires the coordinator obligation with a Release
   decrement. Consequently, observing zero active mutators through the gate's

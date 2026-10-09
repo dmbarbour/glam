@@ -189,12 +189,22 @@ impl ClaimedTask {
             };
         }
         let context = EvaluationPollContext::for_claim(self.kind.demand());
+        // A reflection task calls back into its host between evaluation
+        // steps, so only evaluation work holds one region per quantum.
+        let holds_region = !matches!(self.kind, ClaimedTaskKind::Reflection(_));
         let kind = &mut self.kind;
-        let polled = catch_unwind(AssertUnwindSafe(|| match kind {
-            ClaimedTaskKind::Reflection(task) => task.poll(&context, step_budget),
-            ClaimedTaskKind::Deferred(task) => task.poll(&context, step_budget),
-            ClaimedTaskKind::LazyRoute(route) => route.poll(&context, step_budget),
-        }));
+        let mut poll = || {
+            catch_unwind(AssertUnwindSafe(|| match kind {
+                ClaimedTaskKind::Reflection(task) => task.poll(&context, step_budget),
+                ClaimedTaskKind::Deferred(task) => task.poll(&context, step_budget),
+                ClaimedTaskKind::LazyRoute(route) => route.poll(&context, step_budget),
+            }))
+        };
+        let polled = if holds_region {
+            context.with_held_region(poll)
+        } else {
+            poll()
+        };
         match polled {
             Ok(poll) => halt_blocked_on_panic(poll),
             Err(payload) => EvaluationMachinePoll::Panicked {
@@ -1068,7 +1078,9 @@ impl EvaluationWorkCoordinator {
         }
         let context = EvaluationPollContext::for_claim(&claimed.demand);
         let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
-        let polled = catch_unwind(AssertUnwindSafe(|| claimed.poll(&context, &mut budget)));
+        let polled = context.with_held_region(|| {
+            catch_unwind(AssertUnwindSafe(|| claimed.poll(&context, &mut budget)))
+        });
         drop(context);
         let poll = match polled {
             Ok(coordinator::ClientDemandPoll::Blocked(dependency)) => {
@@ -1102,11 +1114,13 @@ impl EvaluationWorkCoordinator {
             self.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
             return;
         }
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            poll_context.evaluate(&context, |evaluator| {
-                claimed.poll(&poll_context, evaluator, &context, &mut budget)
-            })
-        }));
+        let result = poll_context.with_held_region(|| {
+            catch_unwind(AssertUnwindSafe(|| {
+                poll_context.evaluate(&context, |evaluator| {
+                    claimed.poll(&poll_context, evaluator, &context, &mut budget)
+                })
+            }))
+        });
         let poll = match result {
             Ok(
                 crate::eval::strategy_machine::StrategyDemandPoll::Ready

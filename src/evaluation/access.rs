@@ -302,6 +302,14 @@ impl EvaluationPollContext {
         }
     }
 
+    /// Holds the runtime's heap admission across this poll, so its value
+    /// accesses are recursive entries. The scheduler's quantum boundaries
+    /// call this around one claimed poll; the region ends before the
+    /// boundary services collection pressure.
+    pub(in crate::evaluation) fn with_held_region<R>(&self, operation: impl FnOnce() -> R) -> R {
+        self.demand.values.with_held_region(operation)
+    }
+
     pub(crate) fn assert_context(&self, context: &EvalContext) {
         assert!(
             Arc::ptr_eq(&self.demand, &context.session),

@@ -87,6 +87,9 @@ impl EvaluationTaskMachine for PausedHostWorker {
             .expect("host worker fixture should run once")
             .send(())
             .expect("host-worker observer should remain live");
+        // Host work inside a poll first ends the poll's held region, as host
+        // calls do, so a collection need not wait for it.
+        crate::core::release_held_region();
         self.release
             .recv()
             .expect("host-worker release should remain live");

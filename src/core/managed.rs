@@ -151,6 +151,13 @@ impl Drop for RuntimeValueAccessDepthGuard {
     }
 }
 
+/// Ends the calling thread's held region, if any, before it waits on another
+/// thread or calls out to a host. A waiting collection then need not wait for
+/// the rest of the quantum. Inside a value access it does nothing.
+pub(crate) fn release_held_region() {
+    let _ = glam_gc::Heap::release_held_region();
+}
+
 /// Reports whether this thread currently owns a bounded value-access region.
 ///
 /// This is a test-only structural probe. Unlike forcing a collection, it
@@ -576,6 +583,15 @@ impl CoreValueFactory {
                 scope: CoreValueAllocationScope { mutator },
             })
         })
+    }
+
+    /// Holds this runtime's heap admission across one scheduler quantum, so
+    /// each value access inside it is a recursive entry rather than an
+    /// admission. Code inside it that waits on another thread or calls out to
+    /// a host first calls [`release_held_region`]. See
+    /// `glam_gc::Heap::with_held_region`.
+    pub(crate) fn with_held_region<R>(&self, operation: impl FnOnce() -> R) -> R {
+        self.domain.heap.with_held_region(operation)
     }
 
     /// Issues one weak observer for values successfully evaluated by this

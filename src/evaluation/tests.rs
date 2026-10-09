@@ -4464,17 +4464,51 @@ fn worker_releases_mutator_before_sleep() {
 }
 
 #[test]
-fn scheduled_nested_dependency_runs_without_mutator() {
+fn an_evaluation_poll_holds_one_region_until_released() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let observed = Arc::new(Mutex::new(None));
+    let (lazy, _root) = rooted_semantic_lazy_value(context.values(), "held-region probe", {
+        let values = context.values().clone();
+        let observed = observed.clone();
+        move |evaluator| {
+            let held = matches!(
+                values.collect_managed_for_test(),
+                Err(CollectionError::ActiveMutator)
+            );
+            let outside_access = !crate::core::thread_has_runtime_value_access_for_test();
+            crate::core::release_held_region();
+            let collected = values.collect_managed_for_test().is_ok();
+            *observed.lock().unwrap() = Some((held, outside_access, collected));
+            Ok(evaluator.with_value_access(|access| access.values().unit()))
+        }
+    });
+
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &Value::Lazy(lazy))
+        .expect("the probe should complete");
+    assert_eq!(
+        *observed.lock().unwrap(),
+        Some((true, true, true)),
+        "the poll should hold its region outside value access, and releasing it should let a collection run"
+    );
+}
+
+#[test]
+fn scheduled_nested_dependency_runs_outside_the_outer_value_access() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let nested_had_no_mutator = Arc::new(AtomicBool::new(false));
     let (nested, _nested_root) =
         rooted_semantic_lazy_value(context.values(), "nested scheduled dependency", {
-            let values = context.values().clone();
             let nested_had_no_mutator = nested_had_no_mutator.clone();
+            // The nested poll holds its own region, so a forced collection
+            // here reports an active mutator; the property is that no value
+            // access is open.
             move |evaluator| {
-                nested_had_no_mutator
-                    .store(values.collect_managed_for_test().is_ok(), Ordering::Release);
+                nested_had_no_mutator.store(
+                    !crate::core::thread_has_runtime_value_access_for_test(),
+                    Ordering::Release,
+                );
                 Ok(evaluator.with_value_access(|access| access.values().unit()))
             }
         });
@@ -4496,7 +4530,7 @@ fn scheduled_nested_dependency_runs_without_mutator() {
         .assert_same_representation_for_test(&actual, &unit(&context));
     assert!(
         nested_had_no_mutator.load(Ordering::Acquire),
-        "cooperative nested pumping must not inherit an outer managed-access region"
+        "cooperative nested pumping must not inherit an outer value-access region"
     );
 }
 

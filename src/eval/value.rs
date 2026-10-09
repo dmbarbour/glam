@@ -1413,6 +1413,9 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 // ordinary evaluator path below observes that cache.
                 return EvaluationMachinePoll::Yielded;
             };
+            // Host code may block or call out: a collection must not wait
+            // for it.
+            crate::core::release_held_region();
             let outcome = match producer.invoke(durable_context.values()) {
                 Ok(value) if value.runtime_id() != durable_context.values().runtime_id() => {
                     Err(Arc::new(EvaluationFailure::message(format!(

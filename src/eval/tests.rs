@@ -8874,11 +8874,13 @@ fn strategies_stop_at_nested_metadata_carriers() {
     let sentinel = LazyValue::semantic_thunk(
         context.values(),
         "nested metadata spark sentinel",
-        move |_| {
+        move |step| {
             finished_sender
                 .send(())
                 .expect("sentinel receiver should remain open");
-            Ok(unit_value())
+            // The worker evaluates this, so its result comes from the
+            // evaluating runtime, not the worker thread's test domain.
+            Ok(step.with_value_access(|access| access.values().unit()))
         },
     );
     context.spark(Value::Lazy(sentinel.duplicate_for_test(context.values())));
@@ -8923,11 +8925,13 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
     .expect_without_debug("test promise should accept its one assignment");
     let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
     let sentinel =
-        LazyValue::semantic_thunk(context.values(), "spark admission sentinel", move |_| {
+        LazyValue::semantic_thunk(context.values(), "spark admission sentinel", move |step| {
             finished_sender
                 .send(())
                 .expect("sentinel receiver should remain open");
-            Ok(unit_value())
+            // The worker evaluates this, so its result comes from the
+            // evaluating runtime, not the worker thread's test domain.
+            Ok(step.with_value_access(|access| access.values().unit()))
         });
     let _sentinel_root = sentinel.root(context.values());
 

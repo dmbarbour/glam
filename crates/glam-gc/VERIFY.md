@@ -1157,6 +1157,11 @@ beneath an abstract copy of the coordinator's phases:
   bit clears sees the collector's writes;
 - the election and handoff models, now over the gate.
 
+Held regions (`perf-quantum-region`) have native tests: inner entries are
+recursive and admit nothing, a collection on the holding thread reports an
+active mutator, an early release lets another thread's waiting collection
+finish while the region's scope continues, and a panic ends the region.
+
 Four planted faults were each caught: an exit that never takes the lock, a
 count read that does not set `COORDINATED`, a relaxed lock-free entry, and
 waiters that do not keep the bit set. The last needs the three-party model.

@@ -37,6 +37,17 @@ control-flow overview.
   (`gc-one-heap-per-thread`). Close one runtime's access before entering
   another's. The rule keeps a collection waiting on one heap from depending
   on a thread blocked entering a different heap.
+- Evaluation polls hold one heap region per quantum
+  (`perf-quantum-region`): deferred and lazy-route task polls, client
+  demands and sparks run inside `with_held_region`, so their value accesses
+  are recursive entries. Reflection task polls do not, since they call into
+  their host between steps. Inside a held poll, release the region before
+  waiting on another thread or calling out to a host; `CountedCondvar`
+  waits, host calls (`HostCallProducer::invoke`), reflection launchers,
+  synchronous drivers (`drive_client_demand`) and pressure servicing do. A
+  released region is never reacquired. A forced collection inside a held
+  poll reports an active mutator; probe for open value access with
+  `thread_has_runtime_value_access_for_test` instead.
 - Shared runtime mutation admission may be taken inside a managed-access
   region; promise publication does. This cannot deadlock because settlement
   never collects, and a pending collection blocks no mutator entry: the

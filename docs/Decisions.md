@@ -1222,6 +1222,29 @@ maps the short names used here to file names.
   Invariants"; `agent_context/evaluation.md` "Values and Forcing".
 - **Recorded in:** structural overheads plan, `gc-one-heap-per-thread`.
 
+### Each evaluation quantum holds one heap region
+`quantum-held-region` · 2026-10-09 · maintainer and agent · accepted
+- **Context:** the evaluator opened about one outer access region per
+  reduction, each an admission. A bounded collection wait also needs a
+  boundary where an entrant holds no lock, and the quantum boundary is one.
+  The maintainer chose this direction and accepted starvation until
+  `gc-bounded-collection-wait`.
+- **Decision:** deferred and lazy-route task polls, client demands and
+  sparks hold one region (`Heap::with_held_region`), whose value accesses
+  are recursive entries. Points that wait on another thread or call out to a
+  host release it early (`Heap::release_held_region`), and a released region
+  is not reacquired. Rejected: reacquiring after the wait, which could block
+  on admission while the waiter holds a glam mutex that a finalizer needs;
+  holding regions in reflection polls, which call their host between steps.
+- **Consequences:** outer regions fall about a hundredfold and instructions
+  0.7 to 2.7%. A collection waits for in-flight quanta. A missed release
+  point delays collection, or deadlocks if the wait depends on a collecting
+  thread; the documented release points cover condvar waits, host calls,
+  launchers, synchronous drivers and pressure servicing.
+- **Rule lives in:** `crates/glam-gc/SAFETY.md` "Regional Mutator Admission
+  Invariants"; `agent_context/evaluation.md` "Values and Forcing".
+- **Recorded in:** structural overheads plan, `perf-quantum-region`.
+
 ### Clear mark bitmaps before marking
 `clear-before-mark-bitmaps` · 2026-08-22 · agent · accepted
 - **Context:** the collector's correctness surface should stay small.

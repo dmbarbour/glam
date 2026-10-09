@@ -228,6 +228,9 @@ impl RuntimeMutationAdmission {
         if self.is_poisoned() || !self.gc_pressure_requested(values) {
             return;
         }
+        // A nested driver inside a held region collects only once the region
+        // ends.
+        crate::core::release_held_region();
         let lease = self.begin_gc_activity();
         let _ = collect_under_lease(lease, values, || {});
     }

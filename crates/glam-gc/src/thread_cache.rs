@@ -9,7 +9,7 @@ use std::sync::{Arc, Weak};
 use crate::{
     Trace,
     arena::{RunAddress, RunLocation},
-    heap::{HeapInner, MutatorAdmission},
+    heap::{HeapInner, HeldAdmission, MutatorAdmission},
     run::{AllocationClassId, RunGeometry},
 };
 
@@ -172,6 +172,9 @@ fn cursor_slot(class_id: AllocationClassId) -> usize {
 struct ThreadHeapState {
     heap: Weak<HeapInner>,
     recursive_depth: usize,
+    /// The outer admission of a held region (`Heap::with_held_region`),
+    /// while one is active and not yet released.
+    held: Option<HeldAdmission>,
     captured_epoch: AllocationLeaseEpoch,
     cursors: ClassCursorCache,
     region_metrics: ThreadRegionMetrics,
@@ -245,6 +248,7 @@ impl ThreadHeapState {
         Self {
             heap: Arc::downgrade(heap),
             recursive_depth: 0,
+            held: None,
             captured_epoch,
             cursors: ClassCursorCache::default(),
             region_metrics: ThreadRegionMetrics::default(),
@@ -445,6 +449,41 @@ impl PreparedThreadHeapEntry {
             active: true,
         }
     }
+}
+
+impl PreparedThreadHeapEntry {
+    /// Activates an outer entry as a held region. The thread state keeps its
+    /// admission; [`take_held_region`] ends it.
+    pub(crate) fn activate_held(self, epoch: AllocationLeaseEpoch, admission: HeldAdmission) {
+        assert!(self.outer, "a held region must be its thread's outer entry");
+        let mut state = self.state.borrow_mut();
+        state.begin_outer_entry(epoch);
+        state.region_metrics = ThreadRegionMetrics {
+            outer_entries: 1,
+            ..ThreadRegionMetrics::default()
+        };
+        state.recursive_depth = 1;
+        state.held = Some(admission);
+    }
+}
+
+/// Ends the calling thread's held region when it is the thread's only active
+/// entry, returning its admission for the caller to release.
+///
+/// Returns `None` when the thread holds no region, or when a mutator is
+/// active inside it.
+pub(crate) fn take_held_region() -> Option<HeldAdmission> {
+    CURRENT_HEAP.with_borrow(|current| {
+        let (_, state) = current.as_ref()?;
+        let mut state = state.borrow_mut();
+        if state.held.is_none() || state.recursive_depth != 1 {
+            return None;
+        }
+        state.recursive_depth = 0;
+        let metrics = std::mem::take(&mut state.region_metrics);
+        state.counters.publish(metrics);
+        state.held.take()
+    })
 }
 
 /// Balances one activated same-thread heap entry, including recursive entries.

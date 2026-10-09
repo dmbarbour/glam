@@ -1029,6 +1029,10 @@ impl EvalContext {
         &self,
         mut handle: ClientDemandHandle,
     ) -> Result<ClientDemandResult, crate::core::EvaluationHalt> {
+        // A synchronous driver nested in a poll waits and collects like any
+        // other, so it gives up the poll's held region; its own polls hold
+        // their own.
+        crate::core::release_held_region();
         let coordinator = self
             .coordinator_for_admission()
             .map_err(|error| crate::core::EvaluationHalt::new(error.as_ref()))?;
@@ -1801,8 +1805,10 @@ impl EvalContext {
         });
         let result = match launcher {
             Ok(launcher) => {
-                // A launcher may be client code. Its panic interrupts this
-                // task's activation, not the intact work activating it.
+                // A launcher may be client code, so a collection must not
+                // wait for it. Its panic interrupts this task's activation,
+                // not the intact work activating it.
+                crate::core::release_held_region();
                 let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     launcher.build(
                         Self::for_task(self.session.clone(), handle.id(), task_profile.clone()),

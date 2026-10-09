@@ -5,8 +5,9 @@ Status: active, as the `perf-structural-overheads` step of the
 `perf-admission-wakeups`, `perf-idle-wakeups`, `perf-fast-id-hashing`,
 `perf-net-builder-wired-ports`, `perf-scaling-workloads`,
 `perf-list-front-walk`, `perf-list-leaf-walk`, `perf-access-region-cost`,
-`perf-worker-scaling`, `perf-collection-growth` and
-`gc-one-heap-per-thread`. Next: `gc-bounded-collection-wait`.
+`perf-worker-scaling`, `perf-collection-growth`,
+`gc-one-heap-per-thread` and `perf-quantum-region`. Next:
+`gc-bounded-collection-wait`.
 
 ## Purpose
 
@@ -69,27 +70,35 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 
 ### Bounded collection wait (`gc-bounded-collection-wait`)
 
-Collection waits for an idle heap, so overlapping mutators can starve it;
-glam's `collect_full` at a driver boundary waits for other threads' regions
-to end. With one open heap per thread, a waiting collection can turn new
-outer entrants away while active regions drain, without the cross-heap
-deadlock that sank the queued writer. The gate's word can carry the drain
-request. Before building it, audit lock order: an entrant held at the gate
-must hold no lock that a thread inside a region may wait for, or the drain
-deadlocks. Recursive entry stays admitted. Discuss the design before
-starting.
+Collection waits for an idle heap, and since `perf-quantum-region` each
+evaluation quantum holds the heap, so overlapping quanta can starve it
+(accepted for that step's commit, maintainer). Design (maintainer,
+2026-10-09): while a collection waits, hold back new held regions at the
+quantum boundary, the three polls that call `with_held_region`, and admit
+every other entry as now. The boundary holds no glam lock, which matters:
+settlement holds the runtime mutation gate for writing while it constructs
+values, and promise publication takes that gate for reading inside a
+region, so holding settlement's entry back would deadlock. A collection
+then waits at most for the quanta in flight, and drivers converge on it at
+their next boundary. The gate's word can carry the request.
 
-### One region per quantum (`perf-quantum-region`)
+### Two-level mutator access (`gc-two-level-mutator-access`)
 
-Hold one outer access region for a driver's whole quantum, making every
-inner region a cheap recursive entry. Collection then waits for quantum
-boundaries, which `gc-bounded-collection-wait` bounds, and every blocking
-point and host call inside a quantum must leave the region first. Region
-counts by caller (one instrumented run): `forceable_inline` opens one per
-inline offer (about 9% of the remaining regions), and
-`drive_net_semantic_action` one only to turn the action's net root back
-into a handle (about 6%). Merging those into the regions that produced
-their inputs remains a small fallback if this step stalls.
+Arbitrary recursive same-heap entry was introduced for possible Glam uses
+that never appeared: before held regions, Glam made about 104 recursive
+entries per run (maintainer, 2026-10-09). Held regions now need exactly one
+level beneath them. Restrict entry to a held region with plain accesses
+inside it, and reject nesting a mutator inside a mutator, which may
+simplify the collector's reasoning and tests.
+
+### Heap context from thread-local storage (`gc-thread-local-heap-context`)
+
+With one heap per thread, the current heap is known from thread-local
+storage, so carriers need not thread heap identity through every frame
+(maintainer, 2026-10-09). Investigate the trade: a thread-local lookup
+against passing heap references down the stack, and which same-heap
+validations it makes redundant. Pairs with
+`gc-two-level-mutator-access`.
 
 ### `list_map` growth (`perf-list-map-growth`)
 
@@ -240,6 +249,32 @@ and help only programs with parallel work, so this comes last.
   Allocating less is the better lever.
 
 ## Done
+
+- **One region per quantum** (`perf-quantum-region`), 2026-10-09. Done
+  before `gc-bounded-collection-wait`, accepting starvation in between
+  (maintainer).
+  - **Held regions.** `glam-gc` gains `Heap::with_held_region`, an outer
+    entry without a mutator whose admission the thread's heap state owns,
+    and `Heap::release_held_region`, which ends it early when it is the
+    thread's only active entry. Entries inside are recursive.
+  - **Where.** Deferred and lazy-route task polls, client demands and
+    sparks each hold one region. Reflection task polls hold none, since
+    they call into their host between steps.
+  - **Release points.** `CountedCondvar` waits, host calls
+    (`HostCallProducer::invoke`), reflection launchers, synchronous drivers
+    (`drive_client_demand`) and pressure servicing release the region; a
+    released region is not reacquired. The tests found each of these: a
+    hang where a host-work fixture blocked inside a poll, and probes that a
+    collection can run in a launcher, an interpreter callback, and nested
+    pumping.
+  - **Cross-runtime test values.** Two spark sentinels, run on a worker,
+    built their result with the worker thread's own test runtime since
+    `test-fast-tier`; they now build it in the evaluating runtime.
+  - Outer regions fall about a hundredfold (`countdown_800` 606,273 to
+    5,915), and instructions 2.7% (`countdown_800`, `sum_800`), 2.5%
+    (`append_walk_800`), 1.8% (`hello_elf`), 1.5% (`chain_800`) and 0.7%
+    (`list_map_2000`). `chain_w4_800` is unchanged within noise. The region
+    merges once kept as a fallback are no longer needed.
 
 - **One open heap per thread** (`gc-one-heap-per-thread`), 2026-10-09.
   - **Why.** A thread could hold mutators for several heaps at once, which

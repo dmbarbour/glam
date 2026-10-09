@@ -526,6 +526,42 @@ impl Heap {
         self.with_mutator_after_admission(|| {}, operation)
     }
 
+    /// Holds this heap's mutator admission while `operation` runs, without
+    /// creating a mutator.
+    ///
+    /// Every [`Heap::with_mutator`] inside the region is a recursive entry,
+    /// which takes no admission. Collection waits for the region to end, so
+    /// code inside it should call [`Heap::release_held_region`] before it
+    /// waits on another thread or calls out to a host. Inside another entry
+    /// for this heap the region adds nothing.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this thread holds another heap's mutator, or if this heap is
+    /// permanently poisoned.
+    pub fn with_held_region<R>(&self, operation: impl FnOnce() -> R) -> R {
+        struct EndHeldRegion;
+
+        impl Drop for EndHeldRegion {
+            fn drop(&mut self) {
+                drop(crate::thread_cache::take_held_region());
+            }
+        }
+
+        if !self.inner.begin_held_region() {
+            return operation();
+        }
+        let _end = EndHeldRegion;
+        operation()
+    }
+
+    /// Ends the calling thread's held region early, if it holds one and no
+    /// mutator is active inside it. Later entries in the region's scope enter
+    /// the heap one by one again. Returns whether a region ended.
+    pub fn release_held_region() -> bool {
+        crate::thread_cache::take_held_region().is_some()
+    }
+
     fn with_mutator_after_admission<R>(
         &self,
         after_admission: impl FnOnce(),
@@ -972,6 +1008,35 @@ struct SyntheticExclusiveAdmission<'heap> {
 }
 
 impl Drop for MutatorAdmission<'_> {
+    fn drop(&mut self) {
+        self.heap.release_outer_mutator();
+    }
+}
+
+impl MutatorAdmission<'_> {
+    /// Moves this obligation into a held region's owned admission.
+    fn into_held(self, heap: &Arc<HeapInner>) -> HeldAdmission {
+        assert!(
+            std::ptr::eq(self.heap, Arc::as_ptr(heap)),
+            "held admission must keep its own heap"
+        );
+        std::mem::forget(self);
+        HeldAdmission {
+            heap: Arc::clone(heap),
+        }
+    }
+}
+
+/// A held region's coordinator obligation.
+///
+/// The calling thread's heap state owns it, rather than a stack frame, so a
+/// release point deeper on the stack can end the region. It keeps a heap
+/// owner, one per held region rather than one per access.
+pub(crate) struct HeldAdmission {
+    heap: Arc<HeapInner>,
+}
+
+impl Drop for HeldAdmission {
     fn drop(&mut self) {
         self.heap.release_outer_mutator();
     }
@@ -2558,6 +2623,27 @@ impl MarkAttempt {
 }
 
 impl HeapInner {
+    /// Begins a held region unless this thread already has an entry for this
+    /// heap.
+    fn begin_held_region(self: &Arc<Self>) -> bool {
+        let prepared = ThreadHeapEntry::prepare(self, self.current_allocation_lease_epoch());
+        if !prepared.is_outer() {
+            return false;
+        }
+        let (admission, collected) = self.admit_outer_mutator();
+        let prepared = if collected {
+            drop(prepared);
+            ThreadHeapEntry::prepare(self, self.current_allocation_lease_epoch())
+        } else {
+            prepared
+        };
+        prepared.activate_held(
+            self.current_allocation_lease_epoch(),
+            admission.into_held(self),
+        );
+        true
+    }
+
     fn admit_outer_mutator(self: &Arc<Self>) -> (MutatorAdmission<'_>, bool) {
         let collection_requested = || {
             self.collection_policy == CollectionPolicy::Automatic
@@ -11467,6 +11553,93 @@ mod tests {
         // `FirstType` pointer and no collection can intervene before this
         // immediate observation.
         assert_eq!(unsafe { pointer.as_ref() }._value, 73);
+    }
+
+    #[test]
+    fn a_held_region_admits_once_and_makes_inner_entries_recursive() {
+        let heap = Heap::new();
+        heap.with_held_region(|| {
+            assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 1);
+            assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 1);
+            heap.with_mutator(|mutator| {
+                let _ = mutator.allocator::<u64>().unwrap().alloc(1);
+                assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 2);
+                assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 1);
+            });
+            assert!(matches!(
+                heap.collect_full(),
+                Err(CollectionError::ActiveMutator)
+            ));
+            // Inside another entry, a nested held region adds nothing.
+            heap.with_held_region(|| {
+                assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 1);
+            });
+        });
+        assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 0);
+        assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 0);
+        let metrics = heap.metrics();
+        assert_eq!(metrics.outer_mutator_entries(), 1);
+        assert_eq!(metrics.recursive_mutator_entries(), 1);
+    }
+
+    #[test]
+    fn releasing_a_held_region_lets_a_waiting_collection_finish() {
+        let heap = Heap::new();
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (released_tx, released_rx) = mpsc::channel();
+        let (finish_tx, finish_rx) = mpsc::channel();
+        let holder = std::thread::spawn({
+            let heap = heap.clone();
+            move || {
+                heap.with_held_region(|| {
+                    held_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    // A mutator inside the region keeps it.
+                    heap.with_mutator(|_| assert!(!Heap::release_held_region()));
+                    assert!(Heap::release_held_region());
+                    assert!(!Heap::release_held_region());
+                    released_tx.send(()).unwrap();
+                    finish_rx.recv().unwrap();
+                    // Later entries in the region's scope enter one by one.
+                    heap.with_mutator(|_| {
+                        assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 1);
+                    });
+                });
+            }
+        });
+        held_rx.recv().unwrap();
+        let collector = std::thread::spawn({
+            let heap = heap.clone();
+            move || heap.collect_full().unwrap()
+        });
+        heap.inner.wait_for_collection_waiters(1);
+        assert_eq!(
+            heap.inner.coordinator_snapshot().completed_collection_epoch,
+            0
+        );
+
+        release_tx.send(()).unwrap();
+        released_rx.recv().unwrap();
+        assert_eq!(collector.join().unwrap().epoch(), 1);
+        finish_tx.send(()).unwrap();
+        holder.join().unwrap();
+        assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 0);
+    }
+
+    #[test]
+    fn a_panic_inside_a_held_region_ends_it() {
+        let heap = Heap::new();
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            heap.with_held_region(|| {
+                heap.with_mutator(|_| panic!("injected held-region unwind"));
+            });
+        }));
+        assert!(panic.is_err());
+        assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 0);
+        assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 0);
+        assert!(!thread_has_any_active_mutator());
+        assert_eq!(heap.collect_full().unwrap().epoch(), 1);
     }
 
     #[test]
