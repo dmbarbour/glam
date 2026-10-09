@@ -121,13 +121,34 @@ Two growths multiply, and this step owns only the second:
   the eventual mitigation; neither belongs to this step.
 - **Cost of each collection** (43, 99 and 273 ms). This grows 2.3 and 2.8
   times per doubling, faster than the live list it traces, so something
-  beyond tracing grows with the heap. A candidate, from reading the code
-  and not yet confirmed: resolving a slot (`resolve_slot_topology_in`, the
-  top symbol at 9.8% self time) checks run membership with
-  `AllocationClassEntry::contains_run`, a linear scan over the class's
-  runs, for every marked edge and every root validation.
+  beyond tracing grows with the heap.
 
-The step starts by profiling collections alone to confirm the cause.
+Profile 2026-10-09, at `9e651b11`, before any collector change, so later
+changes can be attributed. Collection is 47% of `append_walk_3200`'s
+samples. A collection's cost is its slot resolutions times the cost of
+each; both grow:
+- **Resolutions repeat.** The last six collections resolve 1.5 to 5.2 M
+  edges into 23,000 to 43,000 distinct slots: each slot 120 to 150 times
+  on average, and up to 3,201 times, one per list item. List values are
+  `Arc` structure with no mark bits, so marking traces shared list
+  structure once per path that reaches it. Visiting list edges
+  (`visit_list_edges`, `trace_direct_compatibility_managed_edges`) is 31%
+  of collection self time, and resolution (`resolve_slot_topology_in`,
+  with `checked_slot_owner`) 27%.
+- **Each resolution scans the class's runs.**
+  `AllocationClassEntry::contains_run` compares run records one by one:
+  9.5 per resolution in the first collection, 33 to 38 in the last, when
+  the largest class holds 148 runs. The loop is 60% of
+  `resolve_slot_topology_in`'s self time, about 11% of collection time;
+  counted comparisons put it near 20% of the last collection.
+
+Candidate changes, each attributable against these counts: deduplicate
+shared `Arc` structure within one collection; make run membership O(1),
+for example with each run's index in its class pool; managed list nodes
+(value representation) would also give the list mark bits. In debug
+builds the same resolution runs on every managed access
+(`debug_assert_access`), which locks the heap; with per-thread test
+runtimes it is about 3% of the test suite, not a reason to change it.
 
 ### `list_map` growth (`perf-list-map-growth`)
 
