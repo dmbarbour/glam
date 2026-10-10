@@ -3283,9 +3283,9 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
 
         let mut port = neighbor;
-        let mut visited = TrustedHashSet::default();
+        let mut cycle = crate::walk_cycle::WalkCycle::new();
         let pair = loop {
-            if port.is_principal() || !visited.insert(port.node()) {
+            if port.is_principal() || !cycle.advance(port.node()) {
                 break None;
             }
             let Some(principal_neighbor) = self.neighbor(Port::principal(port.node())) else {

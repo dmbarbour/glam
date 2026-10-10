@@ -27,6 +27,7 @@ mod source;
 mod test_support;
 mod text_pattern;
 mod trusted_hash;
+mod walk_cycle;
 
 pub use api::{
     Assembler, AssemblerBuilder, BackgroundPumpReport, BackgroundPumpState, BuiltModule,

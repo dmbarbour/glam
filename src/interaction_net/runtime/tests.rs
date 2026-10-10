@@ -1299,6 +1299,36 @@ fn interface_demand_poll_classifies_stable_roots_and_exact_work() {
     );
 }
 
+/// A walk from an interface that runs into a cycle of nodes, each
+/// principal port wired to the next node's auxiliary port, finds no active
+/// pair and reports normal form instead of walking forever.
+#[test]
+fn interface_demand_poll_ends_at_a_cycle_without_a_pair() {
+    for (lead, cycle) in [(0, 1), (0, 2), (1, 3), (5, 3), (7, 16)] {
+        let mut net = RuntimeNet::<()>::empty();
+        let nodes = (0..lead + cycle)
+            .map(|_| net.add_node(RuntimeNode::Bind))
+            .collect::<Vec<_>>();
+        for (index, node) in nodes.iter().enumerate() {
+            // The edge closing the cycle enters its first node by the second
+            // auxiliary port when the lead-in already holds the first.
+            let next = if index + 1 == nodes.len() {
+                Port::auxiliary(nodes[lead], if lead == 0 { 1 } else { 2 })
+            } else {
+                Port::auxiliary(nodes[index + 1], 1)
+            };
+            net.connect(Port::principal(*node), next);
+        }
+        let interface = net.add_interface(Port::auxiliary(nodes[0], 2));
+        let net = SharedRuntimeNet::new(net);
+        assert_eq!(
+            net.poll_interface_demand(interface),
+            InterfaceDemand::NormalForm,
+            "lead {lead}, cycle {cycle}"
+        );
+    }
+}
+
 #[test]
 fn interface_demand_poll_installs_and_recognizes_stable_cursor_owners() {
     let mut data_source = NetBuilder::<()>::new();
