@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::trusted_hash::{TrustedHashMap, TrustedHashSet};
+use crate::trusted_hash::TrustedHashMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;

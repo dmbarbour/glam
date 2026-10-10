@@ -2927,9 +2927,9 @@ impl EvaluationWorkCoordinator {
     }
 
     pub(super) fn dependency_observes_runtime(&self, target: &EvaluationWaitToken) -> bool {
-        let mut seen = std::collections::HashSet::new();
+        let mut cycle = crate::walk_cycle::WalkCycle::new();
         let mut wait = target.clone();
-        while seen.insert(wait.get()) {
+        while cycle.advance(wait.get()) {
             let Some(work) = self.work_for_wait(&wait) else {
                 return false;
             };
@@ -3874,13 +3874,13 @@ fn causal_child_probe_locked(
         }
     }
 
-    let mut seen_exact = TrustedHashSet::default();
+    let mut cycle = crate::walk_cycle::WalkCycle::new();
     let mut wait = target.cloned();
     while let Some(work) = wait
         .as_ref()
         .and_then(|wait| work_for_wait_locked(state, wait))
     {
-        if !seen_exact.insert(work) {
+        if !cycle.advance(work) {
             break;
         }
         let Some(record) = state.work.get(&work) else {
@@ -4059,7 +4059,7 @@ fn dependency_has_causal_progress_locked(
     current_epoch: RuntimeObservationEpoch,
 ) -> bool {
     let mut dependency = Some(dependency.clone());
-    let mut seen = TrustedHashSet::default();
+    let mut cycle = crate::walk_cycle::WalkCycle::new();
     while let Some(current) = dependency {
         if current.is_terminal() {
             return true;
@@ -4070,7 +4070,7 @@ fn dependency_has_causal_progress_locked(
         let Some(work) = work_for_wait_locked(state, &wait) else {
             return false;
         };
-        if !seen.insert(work) {
+        if !cycle.advance(work) {
             return false;
         }
         let Some(record) = state.work.get(&work) else {

@@ -1,6 +1,5 @@
 //! Evaluation demand sessions and machine-visible evaluation contexts.
 
-use std::collections::HashSet;
 use std::fmt;
 use std::ops::Deref;
 use std::sync::Mutex;
@@ -1434,7 +1433,7 @@ impl EvalContext {
     ) -> Option<String> {
         let coordinator = self.coordinator()?;
         let mut dependency = dependency.clone();
-        let mut seen = HashSet::new();
+        let mut cycle = crate::walk_cycle::WalkCycle::new();
         loop {
             match dependency {
                 WorkDependency::Promise(promise) => {
@@ -1450,7 +1449,7 @@ impl EvalContext {
                 }
                 WorkDependency::Wait(wait) => {
                     let work = coordinator.work_for_wait(&wait)?;
-                    if !seen.insert(work) {
+                    if !cycle.advance(work) {
                         return None;
                     }
                     dependency = coordinator.work_dependency_by_id(work)?;

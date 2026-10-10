@@ -466,8 +466,10 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         let mut principal_anchors = Vec::new();
         let mut terminal_pair = None;
         let mut node = port.node();
-        let mut visited = TrustedHashSet::default();
-        while visited.insert(node) {
+        // A cycle may repeat some anchors at the end before it is noticed;
+        // the anchors are searched in order, so repeats change nothing.
+        let mut cycle = crate::walk_cycle::WalkCycle::new();
+        while cycle.advance(node) {
             let Some(neighbor) = self.neighbor(Port::principal(node)) else {
                 break;
             };
