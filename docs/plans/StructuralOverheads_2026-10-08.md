@@ -216,6 +216,14 @@ and help only programs with parallel work, so this comes last.
     10,107 of 15,964): a copy that switched to whole once its source
     finished would cover them, the next case of chunking. The rest read
     sources still evaluating. No source reached the size limit.
+  - **Cost now.** By callgrind on `countdown_200`, capturing sources is
+    3.4% of instructions and installing copies 2.7%.
+  - **Directions** (maintainer, for later). Rewrite normalized nets, or
+    chunks, into a compact form for materialization, so each copy does
+    not redo the capture's construction work; since nets change after
+    construction only by evaluation, a reduced net's form can be built
+    once. And a fast materialization path once evaluation is known to be
+    done, such as the switch above.
 
 - **Interface route ownership** (`perf-interface-route-ownership`),
   2026-10-10. Decision `interface-routes-belong-to-evaluation`.

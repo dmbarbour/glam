@@ -645,8 +645,9 @@ maps the short names used here to file names.
     under the target's in one transition: the same nodes and wiring, with
     payloads duplicated and fan sites translated to fresh ones for the
     copy, as a cursor copy would end.
-  - Nothing in such a net can reduce, and only its interface leads out,
-    so the capture is the copy a cursor would make.
+  - Nets are modified after construction only by evaluation (maintainer,
+    2026-10-10), and nothing in such a net can reduce, so the capture is
+    the copy a cursor would make.
   - Any other source still copies through a cursor.
   - The size limit bounds the work done under the source's lock and the
     copying of parts a caller may never demand.
