@@ -1360,8 +1360,9 @@ fn only_small_nets_with_no_evaluation_left_copy_whole() {
 
 /// Rewrites at the far end of a long chain move the active pair toward the
 /// interface one node at a time. Each interface walk resumes the route the
-/// demanding evaluation kept from the last one, past its unrecorded prefix;
-/// debug builds check every resumed walk against a full walk.
+/// demanding evaluation recorded from the last one, which keeps the newest
+/// nodes and a mark every stride below them, up to the node before the
+/// pair; debug builds check every resumed walk against a full walk.
 #[test]
 fn interface_demand_poll_resumes_its_route_as_the_far_end_is_rewritten() {
     let length = 40;
@@ -1393,15 +1394,29 @@ fn interface_demand_poll_resumes_its_route_as_the_far_end_is_rewritten() {
         // The chain's nodes have the lowest IDs, so the pair is keyed by its
         // bind.
         assert_eq!(pair.node(), binds[remaining - 1]);
-        assert_eq!(
-            route.0.len(),
-            remaining.saturating_sub(UNRECORDED_ROUTE_PREFIX)
-        );
+        // Each recorded node is the chain's bind at its depth, before the
+        // pair's near node, and the newest, where the next walk resumes, is
+        // within a stride of the pair.
+        let record = route.0.as_ref().expect("a deep walk records its route");
+        let entries = record.entries();
+        assert!(record.recent_len <= ROUTE_RECENT);
+        assert!(entries.iter().all(|(node, depth)| {
+            (ROUTE_UNRECORDED..remaining - 1).contains(depth) && binds[*depth] == *node
+        }));
+        if remaining >= ROUTE_MARK_STRIDE + 2 {
+            let (_, newest) = entries.last().expect("a mark lies below the pair");
+            assert!(remaining - 2 - newest < ROUTE_MARK_STRIDE);
+        }
         net.reduce_pair(pair)
             .expect("the demanded pair should reduce");
     }
     assert_eq!(demand(&mut net, &mut route), InterfaceDemand::NormalForm);
-    assert!(route.0.is_empty());
+    assert!(
+        route
+            .0
+            .as_ref()
+            .is_some_and(|record| record.entries().is_empty())
+    );
 }
 
 #[test]

@@ -625,8 +625,59 @@ maps the short names used here to file names.
   - A driver that starts fresh, or polls a net another driver walked deep,
     walks the route once. Consumed route nodes are a suffix of the route
     whoever rewrites the net, so any holder's route stays valid.
+- **Amended by:** `interface-route-ring-record` (2026-10-10): the record
+  keeps the newest route nodes exactly and a mark every 8 below them,
+  from depth 4.
 - **Rule lives in:** `InterfaceRoute` and `RuntimeNet::walk_interface_route`.
 - **Recorded in:** structural overheads plan, `perf-interface-route-ownership`.
+
+### Interface routes keep a ring of recent nodes and strided marks
+`interface-route-ring-record` · 2026-10-10 · maintainer · accepted
+- **Context:** an evaluation's interface route was a full stack, recorded
+  only after a fresh walk's first 16 nodes. The maintainer expected that
+  skip to cost nets of moderate depth and proposed a boxed record: an
+  exact ring of the newest nodes plus a strided spill of the rest. A first
+  measurement put the ring about 1% behind everywhere, which turned out to
+  be the compiler's inlining along the driver path
+  (`driver-step-boundaries`); with that pinned, the variants separate.
+- **Decision:**
+  - An `InterfaceRoute` boxes a record of the route: its 8 newest nodes
+    exactly, in a ring, and every 8th node below them as a mark. It records
+    the nodes a walk passes from depth 4, not the pair's near node, which
+    the following rewrite consumes.
+  - A walk resumes at the newest surviving recent node, else the newest
+    surviving mark, else the interface. A result returning down the route
+    walks each 8-node stretch once more, leaving it among the recent
+    nodes, so unwinding stays amortized O(1) per level, in memory for 8
+    nodes plus one byte per node of depth.
+  - Instructions against the full stack with its 16-node skip:
+    `literal_loop` (routes 3 to 16 deep) -1.8%, `list_computed` -0.2 to
+    -0.4%, every other family 0 to -0.2%. Recording from the first node
+    cost the shallow families up to 0.3% more (a full stack from the first
+    node, 0.3 to 0.6%).
+- **Consequences:** an evaluation whose routes stay within 4 nodes never
+  allocates a record; a deep route costs one byte per node, not eight.
+- **Rule lives in:** `RouteRecord` and `RuntimeNet::walk_interface_route`.
+- **Recorded in:** structural overheads plan, `perf-driver-path-inlining`.
+
+### The net driver's step boundaries are pinned
+`driver-step-boundaries` · 2026-10-10 · agent · accepted
+- **Context:** changes inside net operations, such as the interface walk
+  or the copy path, moved the compiler's inlining along the evaluator's
+  net driver loop and shifted instruction counts on every workload by
+  about 1%, unrelated to the work changed.
+- **Decision:** the core access's cursor and pair steps
+  (`step_cursor_if_current`, `step_active_pair_if_current`) and the net's
+  `poll_interface_demand` stay out of line; the cell's step functions are
+  always inlined into their one evaluator caller. Instructions fell 0.4
+  to 1.0% on every family against the build before.
+- **Consequences:** a perturbation inside a net operation now moves counts
+  by 0.1 to 0.2%, the noise floor for comparisons on this path. Changes to
+  the driver loop itself can still move its own inlining; a new hot entry
+  point from the driver into a net should get the same treatment.
+- **Rule lives in:** comments at those attributes (`core_net.rs`,
+  `interaction_net/runtime.rs`).
+- **Recorded in:** structural overheads plan, `perf-driver-path-inlining`.
 
 ### A source with no evaluation left is copied whole
 `reduced-sources-copy-whole` · 2026-10-10 · maintainer · accepted

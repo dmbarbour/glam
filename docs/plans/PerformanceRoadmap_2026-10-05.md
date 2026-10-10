@@ -187,10 +187,10 @@ gains this consequence when it lands.
      `perf-root-frames`, `perf-transient-root-avoidance`,
      `perf-list-map-growth`, `perf-list-literal-composition`,
      `perf-lowering-free-bindings`, `perf-interface-demand-walk`,
-     `perf-interface-route-ownership` and `perf-reduced-source-copy`. The
-     scheduler round trips were `perf-evaluation-recursion`.
-   - *Open, in order:* `perf-driver-path-inlining`,
-     `perf-module-definition-cost`,
+     `perf-interface-route-ownership`, `perf-reduced-source-copy` and
+     `perf-driver-path-inlining`. The scheduler round trips were
+     `perf-evaluation-recursion`.
+   - *Open, in order:* `perf-module-definition-cost`,
      `perf-runtime-net-attach`,
      `perf-reflection-step-cost` and `perf-worker-route-walks`.
    - *Experiments:* `perf-coalesced-wakeups` (open),

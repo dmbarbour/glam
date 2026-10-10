@@ -11,8 +11,8 @@ Status: active, as the `perf-structural-overheads` step of the
 `perf-root-frames`, `perf-transient-root-avoidance`,
 `perf-list-map-growth`, `perf-list-literal-composition`,
 `perf-lowering-free-bindings`, `perf-interface-demand-walk`,
-`perf-interface-route-ownership` and `perf-reduced-source-copy`. Next:
-`perf-driver-path-inlining`.
+`perf-interface-route-ownership`, `perf-reduced-source-copy` and
+`perf-driver-path-inlining`. Next: `perf-module-definition-cost`.
 `gc-two-level-mutator-access` and `gc-thread-local-heap-context` moved to
 [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md).
 
@@ -74,18 +74,6 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 | Coordinator claims, releases and admissions | under 2% |
 
 ## Open Steps, in Order
-
-### Driver hot-path inlining (`perf-driver-path-inlining`)
-
-Experiment `perf-route-ring-record` found that changes to the interface
-walk move instruction counts on every workload by about 1%, through the
-compiler's inlining along the net driver's hot path rather than the work
-done: `NetWhnfMachine::poll_in` and `step_active_pair_if_current` were
-split differently, and small `RuntimeNetCell` wrappers became calls. The
-step pins that path's inlining so that sub-percent comparisons hold, adds
-a profile family whose interface routes are 3 to 16 nodes deep (the
-families today are 1 to 5 deep, apart from `list_computed`), and runs
-the ring record against the committed route again.
 
 ### Module definition demand (`perf-module-definition-cost`)
 
@@ -192,6 +180,27 @@ and help only programs with parallel work, so this comes last.
 
 ## Done
 
+- **Driver hot-path inlining** (`perf-driver-path-inlining`), 2026-10-10.
+  Decisions `driver-step-boundaries` and `interface-route-ring-record`.
+  - **Pin** (`0657f0ef`). The core cursor and pair steps and the net's
+    interface poll stay out of line, with the cell's steps inlined into
+    them. Instructions fall 0.4 to 1.0% on every family. A patch to the
+    walk, and a never-taken branch in the pair rewrite, now move counts
+    0.06 to 0.18%, where such a patch moved them about 1% before.
+  - **Family.** `literal_loop` evaluates a 32-item literal with computed
+    items per iteration, so most of its interface routes are 3 to 16
+    nodes deep (mean 5.3, longest 17); nested calls do not make deep
+    routes, since each call evaluates in its own small net.
+  - **Routes, rerun.** Against the full stack with its 16-node skip: a
+    full stack from the first node costs the shallow families 0.3 to
+    0.6% and saves 1.7% on `literal_loop`; the ring record from the first
+    node costs up to 0.3% and saves 1.75%; the ring from depth 4 costs
+    nothing anywhere and saves 1.8% on `literal_loop` and 0.2 to 0.4% on
+    `list_computed`. Adopted (`interface-route-ring-record`).
+  - **Also.** `a_quantum_boundary_joins_a_waiting_collection` failed about
+    one run in sixteen under `aggressive-gc-verification`, which may
+    collect again at a quantum boundary; fixed in `42704fe3`.
+
 - **Reduced sources copied whole** (`perf-reduced-source-copy`),
   2026-10-10. Decision `reduced-sources-copy-whole`.
   - **Cause.** A call to a net callable copied the callable's net through
@@ -264,7 +273,8 @@ and help only programs with parallel work, so this comes last.
     whether a net is fully reduced and then materializing a copy of it
     whole, since no evaluation is left to share
     (`perf-reduced-source-copy`).
-  - **Experiment `perf-route-ring-record`** (maintainer, inconclusive).
+  - **Experiment `perf-route-ring-record`** (maintainer; inconclusive
+    here, adopted under `perf-driver-path-inlining`).
     Record routes from the first node in a box holding the newest 8
     nodes exactly and a mark every 8 nodes below them, so a returning
     result walks each stretch between marks once more; memory is 8 nodes
@@ -278,9 +288,10 @@ and help only programs with parallel work, so this comes last.
     committed walk kept out of line 0.04%. So most of the difference is
     code generation on that path, not recording, and sub-percent
     comparisons of changes there are unreliable until its inlining is
-    pinned (`perf-driver-path-inlining`). Walks average 1.3 nodes in most families; a record cannot save
-    on walks of one or two nodes, since checking a recorded node costs the
-    lookup the step it saves would.
+    pinned (`perf-driver-path-inlining`). Walks average 1.3 nodes in
+    most families; a record cannot save on walks of one or two nodes,
+    since checking a recorded node costs the lookup the step it saves
+    would.
 
 - **Interface demand walk** (`perf-interface-demand-walk`), 2026-10-10.
   Decision `interface-walks-resume`.

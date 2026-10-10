@@ -2089,22 +2089,111 @@ impl<S: NetSpecialization> RuntimeEntry<S> {
     }
 }
 
-/// How many nodes a fresh interface walk takes before it records its route:
-/// a walk this short costs less to repeat than to record.
-const UNRECORDED_ROUTE_PREFIX: usize = 16;
+/// How many nodes nearest the interface an [`InterfaceRoute`] leaves out:
+/// a walk that short costs less to repeat than to record, and an evaluation
+/// whose routes stay that shallow never allocates a record.
+const ROUTE_UNRECORDED: usize = 4;
 
-/// An evaluation's demand stack into one net, from the net's interface: the
-/// end of the route its last demand walk took, each node waiting through its
-/// principal port on the next, up to the near node of the active pair the
-/// walk found. A rewrite at the tip pushes the nodes it leaves waiting; a
-/// result reaching the tip pops it. The evaluation demanding the interface
-/// owns it, and its next walk resumes it (see
+/// How many of a route's newest nodes an [`InterfaceRoute`] keeps exactly.
+const ROUTE_RECENT: usize = 8;
+
+/// How far apart the marks an [`InterfaceRoute`] keeps below its recent
+/// nodes are. At most [`ROUTE_RECENT`], so once a walk from a mark passes
+/// the nodes up to the next one, they are all among the recent nodes again.
+const ROUTE_MARK_STRIDE: usize = 8;
+
+const _: () = assert!(ROUTE_MARK_STRIDE <= ROUTE_RECENT);
+
+/// An evaluation's demand stack into one net, from the net's interface. The
+/// route its last demand walk took is a stack of nodes, each waiting through
+/// its principal port on the next, up to the near node of the active pair
+/// the walk found: a rewrite at the tip pushes the nodes it leaves waiting,
+/// and a result reaching the tip pops it. The evaluation demanding the
+/// interface owns this record of that stack, from depth
+/// [`ROUTE_UNRECORDED`] to the node before the pair's near node, which the
+/// rewrite that follows consumes. Its next walk resumes it (see
 /// [`RuntimeNet::walk_interface_route`]); an empty one walks from the
-/// interface. It records nothing for a fresh walk's first
-/// [`UNRECORDED_ROUTE_PREFIX`] nodes, so a walk that stays short never
-/// allocates.
+/// interface.
 #[derive(Debug, Default)]
-pub struct InterfaceRoute(Vec<NodeId>);
+pub struct InterfaceRoute(Option<Box<RouteRecord>>);
+
+impl InterfaceRoute {
+    fn clear(&mut self) {
+        if let Some(record) = &mut self.0 {
+            record.clear();
+        }
+    }
+}
+
+/// A route's newest nodes exactly, and every [`ROUTE_MARK_STRIDE`]th node
+/// below them: memory for [`ROUTE_RECENT`] nodes, plus one mark per stride
+/// of depth. The interface's neighbor is at depth 0.
+#[derive(Debug, Default)]
+struct RouteRecord {
+    /// A ring of the `recent_len` newest nodes, oldest first from
+    /// `recent_start`.
+    recent: [Option<NodeId>; ROUTE_RECENT],
+    recent_start: usize,
+    recent_len: usize,
+    /// The depth of the newest recent node.
+    tip_depth: usize,
+    /// The node at depth `(index + 1) * ROUTE_MARK_STRIDE`, for each such
+    /// depth below the oldest recent node.
+    marks: Vec<NodeId>,
+}
+
+impl RouteRecord {
+    fn clear(&mut self) {
+        self.recent_len = 0;
+        self.marks.clear();
+    }
+
+    fn tip(&self) -> Option<NodeId> {
+        let last = self.recent_len.checked_sub(1)?;
+        self.recent[(self.recent_start + last) % ROUTE_RECENT]
+    }
+
+    /// Records `node` at `depth`, one past the tip unless the ring is
+    /// empty. A full ring gives up its oldest node, keeping it as a mark if
+    /// its depth is the next mark's.
+    fn push(&mut self, node: NodeId, depth: usize) {
+        debug_assert!(self.recent_len == 0 || depth == self.tip_depth + 1);
+        if self.recent_len == ROUTE_RECENT {
+            let oldest = self.recent[self.recent_start].expect("a recent node");
+            if depth - ROUTE_RECENT == (self.marks.len() + 1) * ROUTE_MARK_STRIDE {
+                self.marks.push(oldest);
+            }
+            self.recent_start = (self.recent_start + 1) % ROUTE_RECENT;
+            self.recent_len -= 1;
+        }
+        self.recent[(self.recent_start + self.recent_len) % ROUTE_RECENT] = Some(node);
+        self.recent_len += 1;
+        self.tip_depth = depth;
+    }
+
+    /// Removes the tip, returning it with its depth.
+    fn pop(&mut self) -> Option<(NodeId, usize)> {
+        let node = self.tip()?;
+        let depth = self.tip_depth;
+        self.recent_len -= 1;
+        self.tip_depth = depth.saturating_sub(1);
+        Some((node, depth))
+    }
+
+    /// The recorded nodes with their depths, marks first.
+    #[cfg(test)]
+    fn entries(&self) -> Vec<(NodeId, usize)> {
+        let marks = self.marks.iter().enumerate();
+        let oldest = (self.tip_depth + 1).saturating_sub(self.recent_len);
+        marks
+            .map(|(index, node)| (*node, (index + 1) * ROUTE_MARK_STRIDE))
+            .chain((0..self.recent_len).map(|offset| {
+                let node = self.recent[(self.recent_start + offset) % ROUTE_RECENT];
+                (node.expect("a recent node"), oldest + offset)
+            }))
+            .collect()
+    }
+}
 
 pub struct RuntimeNet<S: NetSpecialization> {
     next_node_id: u64,
@@ -3296,12 +3385,12 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     ) -> RuntimeNetMutation<InterfaceDemand> {
         self.assert_interface(interface);
         let Some(neighbor) = self.neighbor(interface) else {
-            route.0.clear();
+            route.clear();
             return RuntimeNetMutation::Unchanged(InterfaceDemand::NormalForm);
         };
 
         if neighbor.is_principal() {
-            route.0.clear();
+            route.clear();
             let node = neighbor.node();
             let demand = match self.node(node) {
                 Some(RuntimeNode::Data(_)) => InterfaceDemand::Data,
@@ -3332,11 +3421,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             return RuntimeNetMutation::Unchanged(demand);
         }
 
-        let pair = self.walk_interface_route(neighbor, &mut route.0);
+        let pair = self.walk_interface_route(neighbor, route);
         #[cfg(debug_assertions)]
         assert_eq!(
             pair,
-            self.walk_interface_route(neighbor, &mut Vec::new()),
+            self.walk_interface_route(neighbor, &mut InterfaceRoute::default()),
             "a resumed interface walk must find the pair a full walk finds"
         );
         let Some(pair) = pair else {
@@ -3355,43 +3444,63 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     /// Walks from an interface's auxiliary `neighbor`, along each node's
     /// principal port to the next node's auxiliary port, to the first
     /// principal-principal wire: the active pair the interface demands.
-    /// Returns it, leaving the end of the route walked in `route`, or `None`
-    /// at a dead end or a cycle, leaving `route` empty.
+    /// Returns it, leaving a record of the route walked in `route`, or
+    /// `None` at a dead end or a cycle, leaving `route` empty.
     ///
-    /// `route` holds the end of the route the last walk took, which this
-    /// one resumes. Since then, rewrites may have consumed nodes and wired in
+    /// `route` records the route the last walk took, which this one
+    /// resumes. Since then, rewrites may have consumed nodes and wired in
     /// new ones, but the consumed route nodes are a suffix of the route: a
     /// route node's principal port faces the next route node's auxiliary
     /// port, so it joins an active pair only once that next node is
     /// consumed, and a wire between two surviving nodes never changes. So
-    /// while a recorded node survives, so does every node before it. Node
-    /// IDs are never reused, so the walk drops missing nodes from the tip
-    /// and goes on from the last surviving one; with none left it starts
-    /// again at the interface. A poll after each rewrite at the far end of
-    /// a long chain then costs a few steps, not the chain's length.
+    /// while a route node survives, so does every node before it, at the
+    /// same depth. Node IDs are never reused, so the walk drops missing
+    /// nodes from the tip and goes on from the newest surviving one, from
+    /// the newest surviving mark once no recent node survives, or from the
+    /// interface. A poll after each rewrite at the far end of a long chain
+    /// then costs a few steps, not the chain's length: a result returning
+    /// down the route walks each stretch between marks once more, leaving
+    /// it among the recent nodes. The walk records the nodes it passes from
+    /// depth [`ROUTE_UNRECORDED`], not the pair's near node.
     fn walk_interface_route(
         &self,
         neighbor: Port,
-        route: &mut Vec<NodeId>,
+        route: &mut InterfaceRoute,
     ) -> Option<ActivePairKey> {
-        while route.last().is_some_and(|node| self.node(*node).is_none()) {
-            route.pop();
-        }
-        let (mut node, mut unrecorded) = match route.pop() {
-            Some(tip) => (tip, 0),
+        let start = match route.0.as_deref_mut() {
+            Some(record) => {
+                while record.tip().is_some_and(|node| self.node(node).is_none()) {
+                    record.pop();
+                }
+                match record.pop() {
+                    Some(tip) => Some(tip),
+                    None => {
+                        while record
+                            .marks
+                            .last()
+                            .is_some_and(|node| self.node(*node).is_none())
+                        {
+                            record.marks.pop();
+                        }
+                        record
+                            .marks
+                            .pop()
+                            .map(|mark| (mark, (record.marks.len() + 1) * ROUTE_MARK_STRIDE))
+                    }
+                }
+            }
+            None => None,
+        };
+        let (mut node, mut depth) = match start {
+            Some(start) => start,
             None if neighbor.is_principal() => return None,
-            None => (neighbor.node(), UNRECORDED_ROUTE_PREFIX),
+            None => (neighbor.node(), 0),
         };
         let mut cycle = crate::walk_cycle::WalkCycle::new();
         loop {
             if !cycle.advance(node) {
                 route.clear();
                 break None;
-            }
-            if unrecorded == 0 {
-                route.push(node);
-            } else {
-                unrecorded -= 1;
             }
             let Some(principal_neighbor) = self.neighbor(Port::principal(node)) else {
                 route.clear();
@@ -3400,7 +3509,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             if principal_neighbor.is_principal() {
                 break Some(ActivePairKey::new(node, principal_neighbor.node()));
             }
+            if depth >= ROUTE_UNRECORDED {
+                route.0.get_or_insert_default().push(node, depth);
+            }
             node = principal_neighbor.node();
+            depth += 1;
         }
     }
 
