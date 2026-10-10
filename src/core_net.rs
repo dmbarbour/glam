@@ -659,6 +659,10 @@ impl CoreRuntimeNetAccess<'_, '_> {
         )
     }
 
+    // The cursor and pair steps stay out of line, with the cell's steps
+    // inlined into them, so that changes inside net operations do not move
+    // the inlining of the evaluator's driver loop around them.
+    #[inline(never)]
     fn step_cursor_if_current(
         &self,
         cursor: NodeId,
@@ -683,6 +687,8 @@ impl CoreRuntimeNetAccess<'_, '_> {
         CoreCursorStep::from_generic(step, self.values)
     }
 
+    // Out of line, as `step_cursor_if_current` is.
+    #[inline(never)]
     fn step_active_pair_if_current(
         &self,
         pair: ActivePairKey,

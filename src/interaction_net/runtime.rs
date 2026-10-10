@@ -1432,6 +1432,8 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
     /// is ready to claim, told what kind of claim it is; returning `false`
     /// leaves the pair unclaimed and reports `NotAdmitted`. Every other
     /// outcome only observes.
+    // Inlined into its one evaluator caller, which stays out of line.
+    #[inline(always)]
     pub(crate) fn step_active_pair_with_gateway<Gateway>(
         &self,
         pair: ActivePairKey,
@@ -1573,6 +1575,8 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
     /// cursor is ready to claim, always as a `Reduction`; returning `false`
     /// leaves it unclaimed and reports `NotAdmitted`. Every other outcome only
     /// observes.
+    // Inlined into its one evaluator caller, which stays out of line.
+    #[inline(always)]
     pub(crate) fn step_cursor_with_gateway<Gateway>(
         &self,
         cursor: NodeId,
@@ -3282,6 +3286,9 @@ impl<S: NetSpecialization> RuntimeNet<S> {
 
     /// Classifies the work `interface` demands, resuming `route`, the
     /// demanding evaluation's stack from its last poll of this interface.
+    /// Out of line, so that changes to the walk do not move the inlining of
+    /// the evaluator's driver loop that calls it.
+    #[inline(never)]
     pub(crate) fn poll_interface_demand(
         &mut self,
         interface: Port,

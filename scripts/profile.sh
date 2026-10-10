@@ -161,8 +161,16 @@ dict_lookup() {
   entries=${entries%,}
   printf 'language g0\nd = {%s}\nasm.result = if d.k%s == %s then "ok" else "bad"' "$entries" "$n" "$n"
 }
+literal_loop() {
+  # Each iteration evaluates a 32-item literal with computed items in one
+  # net, so most interface routes are 3 to 16 nodes deep, where routes
+  # elsewhere are 1 to 5 (`perf-driver-path-inlining`).
+  printf 'language g0\nimport '"'"'std as std\ngo n acc = if n == 0 then acc else go (n - 1) (acc + std.list.len [%s])\nasm.result = if go %s 0 == %s then "ok" else "bad"' \
+    "$(seq 1 32 | sed 's/$/ + n/' | paste -sd, - | sed 's/,/, /g')" "$1" "$(($1 * 32))"
+}
 family list_map 500
 family list_computed 500
+family literal_loop 100
 family dict_computed 500
 family list_sum 100
 family append_walk 200
