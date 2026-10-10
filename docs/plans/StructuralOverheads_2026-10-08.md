@@ -83,6 +83,41 @@ parent forcing the lazy inline usually consumes at once. Roots carried
 between accesses of one poll stay until explicit holds can prove no
 safepoint between them (`gc-hold-transient-roots`).
 
+Findings 2026-10-10, from sampled registration sites on `countdown_800`
+(debug build, every 64th registration):
+
+| Site | Share | Root carries |
+| --- | ---: | --- |
+| WHNF shell deferred lazy request (`whnf.rs` `reduce_semantic_shell`) | 28% | a lazy to `offer_inline` |
+| net semantic action (`eval/net.rs`, `NetSemanticAction`) | 19% | a net into `drive_net_semantic_action` |
+| `follow_forwards` uncached end | 16% | a lazy to `offer_inline` |
+| `EvaluatorStepContext::root_value` | 14% | a poll result |
+| `regional_status_poll` ready value | 7% | a poll result |
+| `prepare_copy_source` | 7% | a net into a copy |
+
+None is used within one access only: each carries a value into later
+accesses of the poll, through inline forcing, a semantic action or the poll
+boundary. The root guards against two hazards: a collection at a release
+point between those accesses, and another poller replacing the checkpoint
+that also references the object. So no further local fix like
+`follow_forwards` applies.
+
+A lever does: no collection can start while a thread holds its region, and
+the collector never moves objects, so an unrooted edge carried between two
+accesses of one held poll stays valid however the object's other
+references change. Only a release point ends that guarantee, and those are
+enumerated (condvar waits, host calls, launchers, nested drivers,
+pressure servicing). Proposal: hold-scoped edges. A transient root becomes
+an entry in a thread-local list for the current hold, with no
+registration, lock or `Arc`; a release point roots every outstanding entry
+before releasing; a poll's result is made durable at the boundary; and
+debug builds check that no entry outlives its poll, as the frame
+experiment did. Transient roots cost about 9% of `countdown_800`
+(registering 6.3%, dropping 1.7%, the collector's scan 1.2%), most of
+which this would recover. It is `gc-hold-transient-roots` brought forward
+onto today's implicit held regions, and needs a design discussion: its
+soundness rests on rooting at every release point.
+
 ### `list_map` growth (`perf-list-map-growth`)
 
 Split from `perf-interface-demand-walk` on 2026-10-09, since nothing yet
