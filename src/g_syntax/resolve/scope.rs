@@ -377,6 +377,61 @@ mod resolver_context_tests {
         );
     }
 
+    /// Lowering finds a body's captures from the uses it records. They must
+    /// be the body's free bindings, through nested lambdas, lazy arguments,
+    /// list items and inline-applied lambdas, and with unused parameters.
+    #[test]
+    fn lowered_captures_are_the_bodys_free_bindings() {
+        let mut resolver = ResolverContext::default();
+        let [a, b, c, d, e, unused] = std::array::from_fn(|_| resolver.fresh_binding());
+        let local = ResolvedExpr::Local;
+        let add = |left, right| {
+            ResolvedExpr::apply(
+                ResolvedExpr::Embedded(Value::Builtin(Builtin::Add)),
+                [left, right],
+            )
+        };
+        let bodies = [
+            // A lazy argument and a nested lambda that captures from outside.
+            add(
+                local(a),
+                ResolvedExpr::lambda(vec![b], add(local(b), local(c))),
+            ),
+            // An inline-applied lambda binds its parameter; its argument is
+            // lazy code capturing `d`.
+            ResolvedExpr::apply(
+                ResolvedExpr::lambda(vec![e], add(local(e), local(a))),
+                [add(local(d), local(d))],
+            ),
+            // List items, closed and computed, in a literal long enough to
+            // compose.
+            ResolvedExpr::List(
+                (0..20)
+                    .map(|index| match index % 4 {
+                        0 => add(local(c), local(e)),
+                        1 => local(b),
+                        _ => ResolvedExpr::Embedded(Value::Number(index.into())),
+                    })
+                    .collect(),
+            ),
+        ];
+        for body in bodies {
+            let parameters = vec![e, unused];
+            let mut expected = body.free_bindings();
+            for parameter in &parameters {
+                expected.remove(parameter);
+            }
+            let (code, captures) = ResolvedNetLowerer::lower_code(
+                &crate::compiler::test_value_factory(),
+                parameters,
+                body,
+            );
+            assert_eq!(captures, expected.into_iter().collect::<Vec<_>>());
+            assert_eq!(code.capture_count(), captures.len());
+            assert_eq!(code.arity(), 2);
+        }
+    }
+
     #[test]
     fn direct_net_emitter_lifts_only_free_bindings_as_captures() {
         let mut resolver = ResolverContext::default();

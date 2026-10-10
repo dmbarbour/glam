@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
 
@@ -113,12 +114,17 @@ impl<V> ResolvedExpr<V> {
         }
     }
 
+    /// The locals this expression uses but does not bind. Lowering finds a
+    /// body's captures from the uses it records instead; tests use this to
+    /// check resolved shapes.
+    #[cfg(test)]
     pub(super) fn free_bindings(&self) -> BTreeSet<BindingId> {
         let mut free = BTreeSet::new();
         self.collect_free_bindings(&mut free, &mut BTreeSet::new());
         free
     }
 
+    #[cfg(test)]
     fn collect_free_bindings(
         &self,
         free: &mut BTreeSet<BindingId>,

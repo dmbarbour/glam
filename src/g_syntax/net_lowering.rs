@@ -57,19 +57,26 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
         })
     }
 
+    /// Lowers `body` as code over `parameters`, returning the code and its
+    /// captures: the locals `body` uses but does not bind, in binding order.
+    /// They are the code's first inputs, before its parameters.
     pub(super) fn lower_code_in(
         values: &'access RuntimeValueAccess<'scope>,
         parameters: Vec<BindingId>,
         body: ResolvedExpr<Value>,
     ) -> (FunctionCode, Vec<BindingId>) {
-        let mut captures = body.free_bindings();
-        for parameter in &parameters {
-            captures.remove(parameter);
-        }
-        let captures = captures.into_iter().collect::<Vec<_>>();
+        let (lowerer, body) = Self::lower_body_in(values, body);
+        // Every local use the body left unbound is recorded, a nested
+        // closure's captures among them, so these are exactly its captures.
+        let captures = lowerer
+            .local_uses
+            .keys()
+            .filter(|binding| !parameters.contains(binding))
+            .copied()
+            .collect::<Vec<_>>();
         let mut inputs = captures.clone();
         inputs.extend(parameters.iter().copied());
-        let template = Self::lower_template_in(values, inputs, body);
+        let template = lowerer.finish_template(inputs, body);
         let runtime = values
             .construct_managed_core_net(template.instantiate_with(values))
             .expect("managed core-net representation must fit one collector run");
@@ -90,11 +97,22 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
         })
     }
 
-    pub(super) fn lower_template_in(
+    #[cfg(test)]
+    fn lower_template_in(
         values: &'access RuntimeValueAccess<'scope>,
         inputs: Vec<BindingId>,
         body: ResolvedExpr<Value>,
     ) -> crate::core_net::CoreInteractionNet {
+        let (lowerer, body) = Self::lower_body_in(values, body);
+        lowerer.finish_template(inputs, body)
+    }
+
+    /// Lowers `body` into a new net, recording its local uses. Returns the
+    /// port that yields the body's value.
+    fn lower_body_in(
+        values: &'access RuntimeValueAccess<'scope>,
+        body: ResolvedExpr<Value>,
+    ) -> (Self, Port) {
         let mut lowerer = Self {
             values,
             net: NetBuilder::new(),
@@ -102,26 +120,34 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
         };
         let body_boundary = lowerer.net.copy(1);
         lowerer.compile_into(body, body_boundary.outputs[0]);
+        (lowerer, body_boundary.input)
+    }
 
+    /// Binds a lowered body's local uses to `inputs` and closes its net.
+    fn finish_template(
+        mut self,
+        inputs: Vec<BindingId>,
+        body: Port,
+    ) -> crate::core_net::CoreInteractionNet {
         if inputs.is_empty() {
             assert!(
-                lowerer.local_uses.is_empty(),
+                self.local_uses.is_empty(),
                 "closed net body contains an unbound local"
             );
-            return lowerer.net.finish(body_boundary.input);
+            return self.net.finish(body);
         }
 
-        let binds = lowerer.net.function_spine(inputs.len());
-        lowerer.net.wire(binds.result, body_boundary.input);
+        let binds = self.net.function_spine(inputs.len());
+        self.net.wire(binds.result, body);
         for (binding, source) in inputs.into_iter().zip(binds.arguments) {
-            let targets = lowerer.local_uses.remove(&binding).unwrap_or_default();
-            lowerer.distribute(source, &targets);
+            let targets = self.local_uses.remove(&binding).unwrap_or_default();
+            self.distribute(source, &targets);
         }
         assert!(
-            lowerer.local_uses.is_empty(),
+            self.local_uses.is_empty(),
             "lowered function body contains an unbound local"
         );
-        lowerer.net.finish(binds.input)
+        self.net.finish(binds.input)
     }
 
     fn compile_into(&mut self, expr: ResolvedExpr<Value>, target: Port) {
