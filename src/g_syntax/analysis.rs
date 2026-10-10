@@ -420,6 +420,56 @@ pub(in crate::g_syntax) fn binding_group_dependencies(
         .collect()
 }
 
+/// The canonical name a source binder binds, as `local_name_metadata`
+/// gives it, without allocating.
+fn binder_canonical(raw: &str) -> Option<&str> {
+    match raw {
+        "_" => None,
+        suppressed if suppressed.starts_with('_') => Some(&suppressed[1..]),
+        name => Some(name),
+    }
+}
+
+/// The outer locals one marking walk tracks, as a nested scope sees them.
+/// Only the outer locals' uses are read, so a nested binder matters only
+/// where it rebinds an outer local's name, hiding that local in its scope.
+/// Nothing is copied until a nested binder shadows an outer local, so a
+/// walk costs time linear in the expression it visits, however deeply its
+/// binders nest.
+struct NestedLocals<'outer> {
+    outer: &'outer [LocalName],
+    /// `outer` with each shadowed local's name removed, once one is.
+    hidden: Option<Vec<LocalName>>,
+}
+
+impl<'outer> NestedLocals<'outer> {
+    fn new(outer: &'outer [LocalName]) -> Self {
+        Self {
+            outer,
+            hidden: None,
+        }
+    }
+
+    fn bind(&mut self, raw: &str) {
+        let Some(canonical) = binder_canonical(raw) else {
+            return;
+        };
+        let shadows = |local: &LocalName| local.canonical.as_deref() == Some(canonical);
+        if !self.get().iter().any(shadows) {
+            return;
+        }
+        let outer = self.outer;
+        let hidden = self.hidden.get_or_insert_with(|| outer.to_vec());
+        for local in hidden.iter_mut().filter(|local| shadows(local)) {
+            local.canonical = None;
+        }
+    }
+
+    fn get(&self) -> &[LocalName] {
+        self.hidden.as_deref().unwrap_or(self.outer)
+    }
+}
+
 fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) {
     match expr {
         SyntaxExpr::Unit
@@ -483,17 +533,11 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
             }
         }
         SyntaxExpr::Lambda(params, body) => {
-            let nested = params
-                .iter()
-                .map(|param| local_name_metadata(param))
-                .collect::<Vec<_>>();
-            let mut combined = Vec::with_capacity(locals.len() + nested.len());
-            combined.extend_from_slice(locals);
-            combined.extend(nested);
-            let mut nested_used = vec![false; combined.len()];
-            nested_used[..locals.len()].copy_from_slice(used);
-            mark_used_locals(body, &combined, &mut nested_used);
-            used.copy_from_slice(&nested_used[..locals.len()]);
+            let mut nested = NestedLocals::new(locals);
+            for param in params {
+                nested.bind(param);
+            }
+            mark_used_locals(body, nested.get(), used);
         }
         SyntaxExpr::Do(do_expr) => {
             mark_used_do_locals(do_expr, locals, used);
@@ -520,22 +564,16 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
             }
         }
         SyntaxExpr::Let { bindings, body } => {
-            let nested = bindings
-                .iter()
-                .map(|(name, _)| local_name_metadata(name))
-                .collect::<Vec<_>>();
-            let mut combined = Vec::with_capacity(locals.len() + nested.len());
-            combined.extend_from_slice(locals);
-            combined.extend(nested);
-            let mut nested_used = vec![false; combined.len()];
-            nested_used[..locals.len()].copy_from_slice(used);
             // The group's names are in scope in every value as well as the
             // body.
-            for (_, value) in bindings {
-                mark_used_locals(value, &combined, &mut nested_used);
+            let mut nested = NestedLocals::new(locals);
+            for (name, _) in bindings {
+                nested.bind(name);
             }
-            mark_used_locals(body, &combined, &mut nested_used);
-            used.copy_from_slice(&nested_used[..locals.len()]);
+            for (_, value) in bindings {
+                mark_used_locals(value, nested.get(), used);
+            }
+            mark_used_locals(body, nested.get(), used);
         }
         SyntaxExpr::OperatorSection { left, right, .. } => {
             if let Some(left) = left {
@@ -744,33 +782,29 @@ fn mark_used_branch(
     locals: &[LocalName],
     used: &mut [bool],
 ) {
-    let outer_len = locals.len();
-    let mut combined = locals.to_vec();
-    let mut combined_used = used.to_vec();
+    let mut nested = NestedLocals::new(locals);
+    mark_used_branch_prefix(pattern, guards, &mut nested, used);
+    mark_used_locals(result, nested.get(), used);
+}
+
+/// Marks a branch's pattern and guard expressions, binding their captures in
+/// `nested` as they appear.
+fn mark_used_branch_prefix(
+    pattern: Option<&SyntaxPattern>,
+    guards: &[SyntaxGuardClause],
+    nested: &mut NestedLocals<'_>,
+    used: &mut [bool],
+) {
+    let mut visit = |event| match event {
+        SyntaxPatternScopeEvent::Expression(expr) => mark_used_locals(expr, nested.get(), used),
+        SyntaxPatternScopeEvent::Capture(name) => nested.bind(name),
+    };
     if let Some(pattern) = pattern {
-        pattern.visit_scope_events(&mut |event| match event {
-            SyntaxPatternScopeEvent::Expression(expr) => {
-                mark_used_locals(expr, &combined, &mut combined_used);
-            }
-            SyntaxPatternScopeEvent::Capture(name) => {
-                combined.push(local_name_metadata(name));
-                combined_used.push(false);
-            }
-        });
+        pattern.visit_scope_events(&mut visit);
     }
     for guard in guards {
-        guard.visit_scope_events(&mut |event| match event {
-            SyntaxPatternScopeEvent::Expression(expr) => {
-                mark_used_locals(expr, &combined, &mut combined_used);
-            }
-            SyntaxPatternScopeEvent::Capture(name) => {
-                combined.push(local_name_metadata(name));
-                combined_used.push(false);
-            }
-        });
+        guard.visit_scope_events(&mut visit);
     }
-    mark_used_locals(result, &combined, &mut combined_used);
-    used.copy_from_slice(&combined_used[..outer_len]);
 }
 
 fn mark_used_when_branch(arm: &WhenArm, locals: &[LocalName], used: &mut [bool]) {
@@ -784,42 +818,18 @@ fn mark_used_outcome_branch(
     locals: &[LocalName],
     used: &mut [bool],
 ) {
-    let outer_len = locals.len();
-    let mut combined = locals.to_vec();
-    let mut combined_used = used.to_vec();
-    if let Some(pattern) = pattern {
-        pattern.visit_scope_events(&mut |event| match event {
-            SyntaxPatternScopeEvent::Expression(expr) => {
-                mark_used_locals(expr, &combined, &mut combined_used);
-            }
-            SyntaxPatternScopeEvent::Capture(name) => {
-                combined.push(local_name_metadata(name));
-                combined_used.push(false);
-            }
-        });
-    }
-    for guard in guards {
-        guard.visit_scope_events(&mut |event| match event {
-            SyntaxPatternScopeEvent::Expression(expr) => {
-                mark_used_locals(expr, &combined, &mut combined_used);
-            }
-            SyntaxPatternScopeEvent::Capture(name) => {
-                combined.push(local_name_metadata(name));
-                combined_used.push(false);
-            }
-        });
-    }
+    let mut nested = NestedLocals::new(locals);
+    mark_used_branch_prefix(pattern, guards, &mut nested, used);
     match outcome {
         MatchOutcome::Result { expression, .. } => {
-            mark_used_locals(expression, &combined, &mut combined_used);
+            mark_used_locals(expression, nested.get(), used);
         }
         MatchOutcome::Nested(arms) => {
             for arm in arms {
-                mark_used_when_branch(arm, &combined, &mut combined_used);
+                mark_used_when_branch(arm, nested.get(), used);
             }
         }
     }
-    used.copy_from_slice(&combined_used[..outer_len]);
 }
 
 fn mark_used_prior_alias_in_outcome(outcome: &MatchOutcome, alias: Option<&str>, used: &mut bool) {
@@ -942,37 +952,30 @@ fn preview_recursive_do_plan(
 }
 
 fn mark_used_do_locals(do_expr: &DoExpr, locals: &[LocalName], used: &mut [bool]) {
-    let outer_len = locals.len();
-    let mut combined = Vec::with_capacity(outer_len + do_expr.steps.len());
-    combined.extend_from_slice(locals);
-    let mut combined_used = Vec::with_capacity(outer_len + do_expr.steps.len());
-    combined_used.extend_from_slice(used);
+    let mut nested = NestedLocals::new(locals);
     let mut unresolved_abstracts = Vec::new();
 
     for step in &do_expr.steps {
         if let Some(expr) = do_step_expr(step) {
-            mark_used_locals(expr, &combined, &mut combined_used);
+            mark_used_locals(expr, nested.get(), used);
         }
         match &step.kind {
             DoStepKind::Abstract(names) => {
                 for name in names {
-                    let local = local_name_metadata(name);
-                    if let Some(canonical) = &local.canonical {
-                        unresolved_abstracts.push(canonical.clone());
+                    if let Some(canonical) = binder_canonical(name) {
+                        unresolved_abstracts.push(canonical.to_owned());
                     }
-                    combined.push(local);
-                    combined_used.push(false);
+                    nested.bind(name);
                 }
             }
             DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
                 pattern.visit_scope_events(&mut |event| match event {
                     SyntaxPatternScopeEvent::Expression(expr) => {
-                        mark_used_locals(expr, &combined, &mut combined_used);
+                        mark_used_locals(expr, nested.get(), used);
                     }
                     SyntaxPatternScopeEvent::Capture(name) => {
                         if !fulfills_abstract(name, &mut unresolved_abstracts) {
-                            combined.push(local_name_metadata(name));
-                            combined_used.push(false);
+                            nested.bind(name);
                         }
                     }
                 });
@@ -980,8 +983,7 @@ fn mark_used_do_locals(do_expr: &DoExpr, locals: &[LocalName], used: &mut [bool]
             DoStepKind::Then(_) => {}
         }
     }
-    mark_used_locals(&do_expr.result, &combined, &mut combined_used);
-    used.copy_from_slice(&combined_used[..outer_len]);
+    mark_used_locals(&do_expr.result, nested.get(), used);
 }
 
 fn do_step_expr(step: &DoStep) -> Option<&SyntaxExpr> {

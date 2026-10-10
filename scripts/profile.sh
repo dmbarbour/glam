@@ -138,7 +138,7 @@ family sum 200
 family chain 200
 family defs_unused 200
 family chain_refl 200
-family chain_where 50
+family chain_where 200
 # Workers follow the same producer chain as the foreground, so a scheduling
 # defect shows as superlinear growth here (`perf-worker-scaling`).
 family chain 200 4

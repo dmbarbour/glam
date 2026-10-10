@@ -125,9 +125,18 @@ value carries three wrappers; building without each in turn, at 400 and
   chain, lowering is about 16% of samples.
 
 **Found along the way.**
-- `chain_where` builds in cubic time (exponent 2.78; 1,410 M instructions
-  at 200 bindings, 79 G at 800), all in the build phase; evaluating it
-  costs 0.07 ms per binding, against 0.3 ms per module definition.
+- `chain_where` built in cubic time (exponent 2.78; 1,410 M instructions
+  at 200 bindings, about 79 G at 800), and so did the same chain as nested
+  one-line `let`s; one group of the same bindings built linearly. The cost
+  was the unused-local analysis, which runs while parsing: at each binder
+  it re-walked the body, and every nested binder in that walk copied the
+  names of all enclosing locals. Nested binders now only hide an outer
+  local they shadow, copying nothing otherwise (`perf-module-definition-cost`):
+  `chain_where` at 800 falls to 713 M, against 617 M with the analysis
+  off, and `let_nested` at 400 from 10,253 M to 317 M. Each binder still
+  re-walks its body once, a quadratic remainder of about 95 M at 800
+  levels; a single-pass analysis would remove it. The parser itself is
+  linear here; `parse_ifs` stays exponential (`parser-keyword-frames`).
 - A `let` or `where` group resolved its values in the enclosing scope, so
   siblings could not see each other, though groups are documented as
   mutually recursive. Fixed first, at the maintainer's priority (decision
