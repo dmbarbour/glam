@@ -10,8 +10,9 @@ Status: active, as the `perf-structural-overheads` step of the
 `gc-bounded-collection-wait`, `perf-allocation-path`,
 `perf-root-frames`, `perf-transient-root-avoidance`,
 `perf-list-map-growth`, `perf-list-literal-composition`,
-`perf-lowering-free-bindings`, `perf-interface-demand-walk` and
-`perf-interface-route-ownership`. Next: `perf-reduced-source-copy`.
+`perf-lowering-free-bindings`, `perf-interface-demand-walk`,
+`perf-interface-route-ownership` and `perf-reduced-source-copy`. Next:
+`perf-driver-path-inlining`.
 `gc-two-level-mutator-access` and `gc-thread-local-heap-context` moved to
 [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md).
 
@@ -73,19 +74,6 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 | Coordinator claims, releases and admissions | under 2% |
 
 ## Open Steps, in Order
-
-### Copy reduced sources whole (`perf-reduced-source-copy`)
-
-A call to a net callable copies the callable's net into the caller through
-a remote cursor, one node per cursor step, so the copy shares whatever
-evaluation the source has left. In 97 to 99% of cursor inspections, on
-every profile family, the source has no active pairs, copies or cursor
-obligations left, and such sources average about 5 nodes (20 at most);
-`countdown_800` makes about 81,000 inspections and 64,000 cursor steps.
-A source with no evaluation left has nothing to share, so the maintainer
-suggests materializing its copy whole (2026-10-10). The step establishes
-when a net is fully reduced and stays so, copies such a source in one
-operation, and measures the change.
 
 ### Driver hot-path inlining (`perf-driver-path-inlining`)
 
@@ -203,6 +191,31 @@ and help only programs with parallel work, so this comes last.
   Allocating less is the better lever.
 
 ## Done
+
+- **Reduced sources copied whole** (`perf-reduced-source-copy`),
+  2026-10-10. Decision `reduced-sources-copy-whole`.
+  - **Cause.** A call to a net callable copied the callable's net through
+    a remote cursor, one node per cursor step, so the copy would share
+    whatever evaluation the source had left. In 97 to 99% of cursor
+    inspections the source had none (no active pair, copy or cursor
+    obligation), and such sources averaged about 5 nodes, 20 at most.
+  - **Fix** (`5e77e49a`). Preparing a copy captures such a source whole
+    under its own lock, up to 64 nodes reachable from its interface; the
+    target installs it in one transition with fresh fan sites. The
+    maintainer sees this as the first, known-safe case of materializing
+    chunks together based on partial normalization.
+  - **Results**, instructions against `fc6974e8`: `countdown`, `sum`,
+    `list_sum` and `append_walk` fall 19 to 22%, `list_map` 15 to 18%,
+    `hello_elf` 16.2% (2,833 M to 2,375 M), `chain` about 7%, `do_chain`
+    about 1%; the dict and `list_computed` families move under 0.5%.
+    Cursor inspections on `countdown_800` fall from 81,041 to 1,696.
+  - **Left on cursors**, measured at each family's largest size. `chain`
+    keeps 15,964 inspections (of 97,595) and `do_chain` 30,356 (of
+    39,292); the others about 1,700. Most of them read a source that is
+    fully reduced by then but was not when its copy began (in `chain`,
+    10,107 of 15,964): a copy that switched to whole once its source
+    finished would cover them, the next case of chunking. The rest read
+    sources still evaluating. No source reached the size limit.
 
 - **Interface route ownership** (`perf-interface-route-ownership`),
   2026-10-10. Decision `interface-routes-belong-to-evaluation`.
