@@ -183,16 +183,17 @@ gains this consequence when it lands.
      `perf-list-leaf-walk`, `perf-access-region-cost`,
      `perf-worker-scaling`, `perf-collection-growth`,
      `gc-one-heap-per-thread`, `perf-quantum-region`,
-     `gc-bounded-collection-wait` and `perf-allocation-path`. The
-     scheduler round trips were
+     `gc-bounded-collection-wait`, `perf-allocation-path` and
+     `perf-root-frames`. The scheduler round trips were
      `perf-evaluation-recursion`.
-   - *Open, in order:* `perf-root-frames`, `perf-list-map-growth`,
+   - *Open, in order:* `perf-transient-root-avoidance`,
+     `perf-list-map-growth`,
      `perf-lowering-free-bindings`,
      `perf-interface-demand-walk`, `perf-module-definition-cost`,
      `perf-runtime-net-attach`,
      `perf-reflection-step-cost` and `perf-worker-route-walks`.
-   - *Experiments:* `perf-coalesced-wakeups` (open) and
-     `perf-mimalloc-allocator` (not adopted).
+   - *Experiments:* `perf-coalesced-wakeups` (open),
+     `perf-mimalloc-allocator` and `perf-poll-root-frames` (not adopted).
    - *Planned separately:* [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md)
      separates holding a heap from accessing it, after lower-hanging work.
 

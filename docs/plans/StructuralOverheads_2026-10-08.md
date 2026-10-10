@@ -7,8 +7,8 @@ Status: active, as the `perf-structural-overheads` step of the
 `perf-list-front-walk`, `perf-list-leaf-walk`, `perf-access-region-cost`,
 `perf-worker-scaling`, `perf-collection-growth`,
 `gc-one-heap-per-thread`, `perf-quantum-region`,
-`gc-bounded-collection-wait` and `perf-allocation-path`. Next:
-`perf-root-frames`.
+`gc-bounded-collection-wait`, `perf-allocation-path` and
+`perf-root-frames`. Next: `perf-transient-root-avoidance`.
 `gc-two-level-mutator-access` and `gc-thread-local-heap-context` moved to
 [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md).
 
@@ -71,44 +71,17 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 
 ## Open Steps, in Order
 
-### Root frames (`perf-root-frames`)
+### Transient root avoidance (`perf-transient-root-avoidance`)
 
-Investigate a root frame as a performance change, separately from
-concurrent collection (maintainer, 2026-10-10). The
-[concurrent collection plan](ConcurrentGarbageCollection_2026-08-28.md)
-sketches `RootFrame<T>`: root-adjacent state, such as a machine's, that is
-itself the canonical state and is traced as one unit, registered once,
-instead of a bundle of `RootCell`s each with its own `Arc` and registry
-entry. Today `countdown_800` registers 211,594 roots for 182,557
-allocations. Some root a value only between two accesses of one poll,
-which explicit holds would remove (`gc-hold-transient-roots`); the rest
-live across polls in machine state, such as the checkpoint polls'
-`root_managed_value` (about 28% of registrations), which a frame per
-machine could hold. Measure registrations, root scanning at collection,
-and the granularity trade: one frame traced whole against roots
-registered and dropped one by one. Pooling `RootCell`s, the remaining
-remedy from `perf-allocation-path`, belongs here too.
-
-Lifetimes measured 2026-10-10 (one instrumented release run each; a root's
-quantum is the held region that registered it):
-
-| Workload | Dropped within its quantum | After its quantum ended | Registered outside a quantum | In a later quantum |
-| --- | ---: | ---: | ---: | ---: |
-| `countdown_800` | 207,861 | 2,649 | 1,085 | 0 |
-| `sum_800` | 239,015 | 5,045 | 1,085 | 0 |
-| `append_walk_800` | 541,746 | 11,174 | 1,223 | 0 |
-| `hello_elf` | 210,103 | 6,910 | 10,671 | 0 |
-| `chain_800` | 289,055 | 15,817 | 110,548 | 0 |
-
-So 97 to 98% of roots live within one quantum; machine state that survives
-across polls holds under 2%, and `chain_800`'s unheld registrations
-probably come from reflection polls, which hold no region. A frame per
-machine would recover little. A frame per poll would recover most: the
-poll's transient roots become pushes onto one registered frame, cleared
-when the poll ends, instead of an `Arc<RootCell>` and a registry entry
-under the heap's data mutex each. The hot sites return a root only to
-carry a value out of one access closure into the next (`forward_target`
-returns a `ManagedLazyRoot` for `follow_forwards`, and so on).
+`perf-root-frames` found that avoiding a transient root saves about 1,400
+instructions, while rooting it in a frame saves almost nothing. Check the
+remaining hot root sites for roots that never need to leave the access that
+creates them, as `follow_forwards` did: `NetWhnfMachine::poll_in`, the WHNF
+shell's deferred requests (`reduce_semantic_shell`),
+`prepare_copy_source`, and the checkpoint polls' completed values, which a
+parent forcing the lazy inline usually consumes at once. Roots carried
+between accesses of one poll stay until explicit holds can prove no
+safepoint between them (`gc-hold-transient-roots`).
 
 ### `list_map` growth (`perf-list-map-growth`)
 
@@ -228,6 +201,21 @@ and help only programs with parallel work, so this comes last.
 
 ## Experiments
 
+- **Poll root frames** (`perf-poll-root-frames`), not adopted
+  (2026-10-10; kept as `1f35ad1e`, reverted in `15bbb0bb`). `glam-gc`
+  gained `RootFrame`, state outside the heap that the collector traces as
+  one root, registered once. Glam rooted the hot transient value roots
+  (WHNF ready results, checkpoint completions, list machine items) in one
+  frame per evaluation poll, made poll results durable at the boundary,
+  and asserted in debug builds that no framed root outlived its poll. That
+  check found three escapes the call sites did not show: reflection
+  handoff roots, task lifecycle construction, and a strategy machine that
+  keeps a root across polls. Root registrations and managed allocations
+  fell 10% each, but instructions moved -0.6% to +0.5%: a framed root's
+  thread-local scope, frame mutex, handle `Arc` and per-read copy cost
+  about what its registration saved. Framing every value root a poll
+  creates, rather than chosen sites, framed durable roots too, in code
+  unaware of frames.
 - **Coalesced wake-ups** (`perf-coalesced-wakeups`), open. The maintainer's
   suggestion: coordinator mutations set a notify flag that is flushed once
   per quantum, trading up to a quantum of latency for fewer wakes of parked
@@ -249,6 +237,26 @@ and help only programs with parallel work, so this comes last.
   Allocating less is the better lever.
 
 ## Done
+
+- **Root frames** (`perf-root-frames`), 2026-10-10. Investigated as a
+  performance change separately from concurrent collection (maintainer).
+  - **Lifetimes.** Tagging each root with the quantum that registered it:
+    97 to 98% die within that quantum in every profiling workload, none in
+    a later quantum, so a frame per machine would recover under 2%.
+  - **Forwards without roots, adopted.** `follow_forwards` rooted every
+    forward target it inspected inside one access; its common path now
+    reads edges and roots only the lazy it returns. Root registrations
+    fell 6 to 8% and instructions about 1%: about 1,400 instructions per
+    root avoided.
+  - **A frame per poll, not adopted** (experiment `perf-poll-root-frames`).
+    Framing the hot transient value roots cut registrations and managed
+    allocations by 10% each but left instructions unchanged; see
+    Experiments.
+  - **Conclusion.** For transient roots, avoiding the root pays and
+    framing it does not; the remaining sites are
+    `perf-transient-root-avoidance`. Roots bundled in coordinator state,
+    such as demand records, were the maintainer's first thought and are
+    worth a later look once the larger costs are gone.
 
 - **Allocation and rooting path** (`perf-allocation-path`), 2026-10-10.
   - **Found** (holistic V1 and later profiles): every allocator

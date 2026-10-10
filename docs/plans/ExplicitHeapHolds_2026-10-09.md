@@ -98,7 +98,9 @@ against 182,557), about 9% of its samples with collection's root scan;
 most root a value only to carry it between two accesses of one poll. A
 hold proves that no safepoint lies between those accesses unless one is
 suspended, so such values could stay unrooted edges, rooted only across a
-`Hold::suspend`.
+`Hold::suspend`. Rooting them in a frame per poll instead saved nothing
+(`perf-poll-root-frames`); avoiding the root saves about 1,400
+instructions each.
 
 ### Heap context in Glam (`gc-hold-thread-context`)
 
