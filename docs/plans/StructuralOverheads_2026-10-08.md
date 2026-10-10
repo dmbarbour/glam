@@ -95,7 +95,36 @@ Progress:
   (`chain_800`), 4.0% (`append_walk_800`), 3.2% (`hello_elf`) and 0.7%
   (`list_map_2000`). The cache may later move into a hold
   (`gc-hold-class-cache`).
-- **Root registration**, open.
+- **Root registration**, partly done. `countdown_800` registers 211,594
+  roots for 182,557 allocations; registering is about 7% of its samples
+  and scanning roots at collection 1.6%. Within registration, about a
+  third is validation (resolving the slot under the heap's data mutex),
+  and much of the rest the `Arc<RootCell>` and registry growth. A root's
+  metadata now comes from the class cache rather than the process-wide
+  registry (instructions 0.3 to 0.4% lower, and one global mutex off a
+  hot path). Most roots are transient: the evaluator roots a value only to
+  carry it from one access to the next within a poll (`forward_target`,
+  `NetWhnfMachine::poll_in`, WHNF shell reduction, checkpoint polls,
+  `prepare_copy_source`). A hold that proves no safepoint intervenes would
+  make them unnecessary, so that lever belongs to
+  [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md).
+
+### Root frames (`perf-root-frames`)
+
+Investigate a root frame as a performance change, separately from
+concurrent collection (maintainer, 2026-10-10). The
+[concurrent collection plan](ConcurrentGarbageCollection_2026-08-28.md)
+sketches `RootFrame<T>`: root-adjacent state, such as a machine's, that is
+itself the canonical state and is traced as one unit, registered once,
+instead of a bundle of `RootCell`s each with its own `Arc` and registry
+entry. Today `countdown_800` registers 211,594 roots for 182,557
+allocations. Some root a value only between two accesses of one poll,
+which explicit holds would remove (`gc-hold-transient-roots`); the rest
+live across polls in machine state, such as the checkpoint polls'
+`root_managed_value` (about 28% of registrations), which a frame per
+machine could hold. Measure registrations, root scanning at collection,
+and the granularity trade: one frame traced whole against roots
+registered and dropped one by one.
 
 ### `list_map` growth (`perf-list-map-growth`)
 

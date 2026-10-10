@@ -185,7 +185,8 @@ gains this consequence when it lands.
      `gc-one-heap-per-thread`, `perf-quantum-region` and
      `gc-bounded-collection-wait`. The scheduler round trips were
      `perf-evaluation-recursion`.
-   - *Open, in order:* `perf-allocation-path`, `perf-list-map-growth`,
+   - *Open, in order:* `perf-allocation-path`, `perf-root-frames`,
+     `perf-list-map-growth`,
      `perf-lowering-free-bindings`,
      `perf-interface-demand-walk`, `perf-module-definition-cost`,
      `perf-runtime-net-attach`,

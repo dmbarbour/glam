@@ -2,8 +2,8 @@
 
 Status: planned, not started (maintainer, 2026-10-09: a widespread task, to
 follow lower-hanging work). Steps, in order: `gc-hold-api`,
-`gc-hold-boundaries`, `gc-hold-tests`, `gc-hold-class-cache`, then
-`gc-hold-thread-context`.
+`gc-hold-boundaries`, `gc-hold-tests`, `gc-hold-class-cache`,
+`gc-hold-transient-roots`, then `gc-hold-thread-context`.
 
 ## Purpose
 
@@ -90,6 +90,15 @@ Cache allocation classes in the hold, so an access finds its class without
 the registry, the geometry derivation or the heap's data mutex. A smaller
 per-thread cache may land earlier under `perf-allocation-path`; this step
 moves it into the hold.
+
+### Transient roots (`gc-hold-transient-roots`)
+
+`countdown_800` registers more roots than it allocates objects (211,594
+against 182,557), about 9% of its samples with collection's root scan;
+most root a value only to carry it between two accesses of one poll. A
+hold proves that no safepoint lies between those accesses unless one is
+suspended, so such values could stay unrooted edges, rooted only across a
+`Hold::suspend`.
 
 ### Heap context in Glam (`gc-hold-thread-context`)
 

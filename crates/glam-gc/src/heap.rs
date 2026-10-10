@@ -3927,8 +3927,14 @@ impl HeapInner {
             .completed_collection_epoch()
     }
 
-    pub(crate) fn register_root<T: Trace>(self: &Arc<Self>, value: crate::Gc<T>) -> Root<T> {
-        let expected = metadata_for::<T>();
+    /// Registers a root for `value`, whose canonical metadata the caller
+    /// supplies: from the thread's class cache when it has one.
+    pub(crate) fn register_root<T: Trace>(
+        self: &Arc<Self>,
+        value: crate::Gc<T>,
+        expected: &'static ObjectMetadata,
+    ) -> Root<T> {
+        debug_assert!(std::ptr::eq(expected, metadata_for::<T>()));
         let value = value.erase();
         let (root, registration) = Root::<T>::candidate(self, value);
         let mut state = self.data.lock().expect("heap state should not be poisoned");

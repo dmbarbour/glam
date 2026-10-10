@@ -88,7 +88,11 @@ impl<'heap> Mutator<'heap> {
     /// representation for `T`. Publication into the heap's weak root registry
     /// completes before this method returns.
     pub fn root<T: Trace>(&self, value: Gc<T>) -> Root<T> {
-        self.heap.register_root(value)
+        let expected = self
+            .cache
+            .cached_metadata::<T>()
+            .unwrap_or_else(metadata_for::<T>);
+        self.heap.register_root(value, expected)
     }
 
     pub(crate) fn debug_assert_access<T: Trace>(&self, pointer: NonNull<T>) {

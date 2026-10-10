@@ -404,6 +404,17 @@ impl ThreadCacheHandle {
         ))
     }
 
+    /// The canonical metadata for `T`, if this thread resolved its class.
+    pub(crate) fn cached_metadata<T: Trace>(&self) -> Option<&'static ObjectMetadata> {
+        Some(
+            self.state
+                .borrow()
+                .classes
+                .get(&TypeId::of::<T>())?
+                .metadata,
+        )
+    }
+
     pub(crate) fn remember_class<T: Trace>(&self, class: &AllocationClass<T>) {
         self.state.borrow_mut().classes.insert(
             TypeId::of::<T>(),
