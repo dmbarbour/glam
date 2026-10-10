@@ -798,7 +798,8 @@ fn a_lazy_left_forwarding_in_a_tail_chain_caches_its_value_when_observed() {
 /// Inline claims are per session, so a lazy shared between sessions may be
 /// forwarded by one session's driver while another session's machine still
 /// holds work for one of its checkpoint families. That machine follows the
-/// forward, whichever family its work names.
+/// forward, whichever family its work names. As an inline child, it reports
+/// completion without a root, leaving the value in its lazy's cache.
 #[test]
 fn a_machine_whose_lazy_was_forwarded_meanwhile_follows_the_forward() {
     let stale_works = [
@@ -826,7 +827,17 @@ fn a_machine_whose_lazy_was_forwarded_meanwhile_follows_the_forward() {
                 "a {family} machine must reach the forward's value"
             );
             match machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(8)) {
-                EvaluationMachinePoll::Complete(value) => break value,
+                EvaluationMachinePoll::Yielded if machine.inline_completed => {
+                    break context.values().with_runtime_value_access(|access| {
+                        let cached = machine
+                            .lazy
+                            .access(&access)
+                            .and_then(|lazy| lazy.cached())
+                            .expect("a completed inline lazy is cached")
+                            .expect_without_debug("the forward's value is not a failure");
+                        access.root_runtime_value(cached.into_value_in(&access))
+                    });
+                }
                 EvaluationMachinePoll::Yielded => {}
                 _ => panic!("a {family} machine must follow the forward to a cached end"),
             }

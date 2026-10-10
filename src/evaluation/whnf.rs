@@ -7,7 +7,7 @@ use super::{EvalContext, EvaluationPollContext, WorkDependency};
 #[cfg(test)]
 use crate::core::thread_has_runtime_value_access_for_test;
 use crate::core::{EvaluationFailure, ManagedLazyRoot};
-use crate::eval::whnf::{WhnfComputation, WhnfDeferredRequest, WhnfPoll};
+use crate::eval::whnf::{LazyCheckpointStep, WhnfComputation, WhnfDeferredRequest, WhnfPoll};
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 pub(crate) enum WhnfOwnerPoll {
@@ -38,6 +38,10 @@ pub(crate) fn poll_computation(
 
 /// How a lazy route's own WHNF checkpoint wants to proceed.
 pub(crate) enum LazyCheckpointPoll {
+    /// The checkpoint completed and the lazy cached its value in the same
+    /// access. This is the lazy's cache, which another driver may have
+    /// published first.
+    Cached(crate::core::LazyResult),
     Owner(WhnfOwnerPoll),
     /// An uncached lazy the checkpoint needs. The route forces it inline when
     /// it may, or admits its route and waits on it. In `tail` position no
@@ -53,8 +57,9 @@ pub(crate) enum LazyCheckpointPoll {
 /// The lazy root is the liveness authority. Its checkpoint edge is duplicated
 /// and consumed only inside this matching access region, then orchestration is
 /// interpreted after the region closes just like an ordinary computation. A
-/// lazy boundary is returned to the route, which decides between forcing it
-/// inline and admitting its route.
+/// completed checkpoint's value is cached in the same region. A lazy boundary
+/// is returned to the route, which decides between forcing it inline and
+/// admitting its route.
 pub(crate) fn poll_lazy_checkpoint(
     lazy: &ManagedLazyRoot,
     poll_context: &EvaluationPollContext,
@@ -63,18 +68,26 @@ pub(crate) fn poll_lazy_checkpoint(
 ) -> Option<LazyCheckpointPoll> {
     let poll = poll_context.with_value_access(context, |access| {
         let checkpoint = access.lazy_root(lazy).checkpoint_snapshot()?;
-        checkpoint.poll_semantic_in(&access, step_budget)
+        Some(match checkpoint.poll_semantic_in(&access, step_budget)? {
+            LazyCheckpointStep::Ready(value) => {
+                let value = crate::core::EvaluatedValue::from_whnf_in(access.values(), value)
+                    .expect("WHNF owner completion must eliminate the outer deferred variant");
+                Ok(lazy.cache(access.values(), Ok(value)))
+            }
+            LazyCheckpointStep::Poll { poll, tail } => Err((poll, tail)),
+        })
     });
     #[cfg(test)]
     assert!(
         !thread_has_runtime_value_access_for_test(),
         "lazy-checkpoint orchestration must begin only after managed access closes"
     );
-    poll.map(|(poll, tail)| match poll {
-        WhnfPoll::Deferred(WhnfDeferredRequest::Lazy(lazy)) => {
+    poll.map(|poll| match poll {
+        Ok(result) => LazyCheckpointPoll::Cached(result),
+        Err((WhnfPoll::Deferred(WhnfDeferredRequest::Lazy(lazy)), tail)) => {
             LazyCheckpointPoll::Inline { lazy, tail }
         }
-        poll => LazyCheckpointPoll::Owner(interpret_poll(poll, context)),
+        Err((poll, _)) => LazyCheckpointPoll::Owner(interpret_poll(poll, context)),
     })
 }
 

@@ -173,6 +173,9 @@ struct LazyTaskMachine {
     /// A lazy this machine claimed for inline forcing at its last poll,
     /// which returned `Yielded`.
     inline_request: Option<ManagedLazyRoot>,
+    /// Whether this inline child's lazy completed at its last poll, which
+    /// returned `Yielded`: its parent finds the value in the lazy's cache.
+    inline_completed: bool,
 }
 
 impl LazyTaskMachine {
@@ -192,6 +195,7 @@ impl LazyTaskMachine {
             work: LazyTaskWork::Produce,
             inline_depth,
             inline_request: None,
+            inline_completed: false,
         }
     }
 
@@ -250,10 +254,13 @@ enum ForwardEnd {
 }
 
 /// Follows `lazy`'s forwards to the first lazy that does not forward, and
-/// shortens `lazy`'s own forward to point there.
+/// shortens `lazy`'s own forward to point there. A caller that already holds
+/// a root of `lazy`'s forward target passes it as `rooted_target`, and an
+/// uncached end there returns it rather than rooting the lazy again.
 fn follow_forwards(
     access: &crate::evaluation::EvaluationValueAccess<'_>,
     lazy: &ManagedLazyRoot,
+    rooted_target: Option<ManagedLazyRoot>,
 ) -> ForwardEnd {
     let Some(first) = access.lazy_root(lazy).forward_target_edge() else {
         return ForwardEnd::NotForward;
@@ -265,7 +272,10 @@ fn follow_forwards(
     if target.id() != lazy.id() && target.forward_target_edge().is_none() {
         return match target.cached() {
             Some(result) => ForwardEnd::Cached(result),
-            None => ForwardEnd::Uncached(target.root()),
+            None => ForwardEnd::Uncached(match rooted_target {
+                Some(rooted) if rooted.id() == target.id() => rooted,
+                _ => target.root(),
+            }),
         };
     }
     let first = target.root();
@@ -352,7 +362,7 @@ fn forceable_inline(context: &EvaluatorStepContext<'_>, lazy: &ManagedLazyRoot) 
         let lazy = access.lazy_root(lazy);
         match lazy.checkpoint_snapshot() {
             Some(checkpoint) => checkpoint.kind() != ManagedLazyCheckpointKindTag::HostCall,
-            None if lazy.forward_target().is_some() => true,
+            None if lazy.forward_target_edge().is_some() => true,
             None => matches!(
                 lazy.source_snapshot(),
                 Some(source)
@@ -493,6 +503,13 @@ pub(crate) fn poll_lazy_route(
         } else {
             top.poll_route_step(poll_context, budget)
         };
+        if std::mem::take(&mut top.inline_completed) {
+            debug_assert!(matches!(poll, EvaluationMachinePoll::Yielded));
+            let finished = stack.pop().expect("an inline lazy sits above the base");
+            claims.release(&finished.lazy);
+            idle_yields = 0;
+            continue;
+        }
         if let Some(child) = top.inline_request.take() {
             debug_assert!(matches!(poll, EvaluationMachinePoll::Yielded));
             claims.lazies.push(child.clone());
@@ -604,6 +621,48 @@ impl LazyTaskMachine {
         }
     }
 
+    /// Whether this machine forces a lazy inline above its route's base.
+    fn is_inline_child(&self) -> bool {
+        self.inline_depth.is_some_and(|depth| depth > 0)
+    }
+
+    /// Roots `value`, already cached in this lazy, for the route's base to
+    /// hand its waiters. An inline child needs no root: its parent finds the
+    /// value in the lazy's cache.
+    fn completion_root_in(
+        &self,
+        values: &RuntimeValueAccess<'_>,
+        value: crate::core::EvaluatedValue,
+    ) -> Option<crate::runtime::RuntimeValueRoot> {
+        (!self.is_inline_child()).then(|| values.root_runtime_value(value.into_value_in(values)))
+    }
+
+    /// Reports completion with the root [`Self::completion_root_in`] made,
+    /// or, for an inline child, by `inline_completed`.
+    fn report_completion(
+        &mut self,
+        root: Option<crate::runtime::RuntimeValueRoot>,
+    ) -> EvaluationMachinePoll {
+        match root {
+            Some(root) => EvaluationMachinePoll::Complete(root),
+            None => {
+                self.inline_completed = true;
+                EvaluationMachinePoll::Yielded
+            }
+        }
+    }
+
+    /// Completes with `value`, already cached in this lazy.
+    fn report_complete(
+        &mut self,
+        context: &EvaluatorStepContext<'_>,
+        value: crate::core::EvaluatedValue,
+    ) -> EvaluationMachinePoll {
+        let root = (!self.is_inline_child())
+            .then(|| context.root_value(|access| value.into_value_in(access.values())));
+        self.report_completion(root)
+    }
+
     /// The work for this lazy's current producer: a checkpoint family or a
     /// forward. `None` means the lazy has a result or a recorded panic.
     fn checkpoint_work(&self, context: &EvaluatorStepContext<'_>) -> Option<LazyTaskWork> {
@@ -611,28 +670,26 @@ impl LazyTaskMachine {
             let lazy = access.lazy_root(&self.lazy);
             match lazy.checkpoint_snapshot() {
                 Some(checkpoint) => Some(Self::work_for_checkpoint_kind(checkpoint.kind())),
-                None => lazy.forward_target().map(|_| LazyTaskWork::Forward),
+                None => lazy.forward_target_edge().map(|_| LazyTaskWork::Forward),
             }
         })
     }
 
     fn complete(
-        &self,
+        &mut self,
         context: &EvaluatorStepContext<'_>,
         value: EvaluatedValue,
     ) -> EvaluationMachinePoll {
         let result =
             context.with_value_access(|access| self.lazy.cache(access.values(), Ok(value)));
         match result {
-            Ok(value) => EvaluationMachinePoll::Complete(
-                context.root_value(|access| value.into_value_in(access.values())),
-            ),
+            Ok(value) => self.report_complete(context, value),
             Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }
     }
 
     fn complete_root(
-        &self,
+        &mut self,
         context: &EvaluatorStepContext<'_>,
         value: &crate::runtime::RuntimeValueRoot,
     ) -> EvaluationMachinePoll {
@@ -662,7 +719,7 @@ impl LazyTaskMachine {
         }
     }
 
-    fn cached_poll(&self, context: &EvaluatorStepContext<'_>) -> EvaluationMachinePoll {
+    fn cached_poll(&mut self, context: &EvaluatorStepContext<'_>) -> EvaluationMachinePoll {
         let result = context.with_value_access(|access| access.lazy_root(&self.lazy).cached());
         let Some(result) = result else {
             // A lazy whose own evaluation panicked released its source
@@ -674,9 +731,7 @@ impl LazyTaskMachine {
             report.resume();
         };
         match result {
-            Ok(value) => EvaluationMachinePoll::Complete(
-                context.root_value(|access| value.into_value_in(access.values())),
-            ),
+            Ok(value) => self.report_complete(context, value),
             Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }
     }
@@ -705,8 +760,16 @@ impl LazyTaskMachine {
     /// An uncached end is forced like any lazy boundary: inline when it may
     /// be, otherwise by waiting on its route. Forwards that close a cycle
     /// fail every member, and this lazy, with a dependency cycle.
-    fn poll_forward(&mut self, context: &EvaluatorStepContext<'_>) -> EvaluationMachinePoll {
-        let followed = context.with_value_access(|access| follow_forwards(&access, &self.lazy));
+    ///
+    /// `rooted_target`, when given, roots the lazy this one forwards to (see
+    /// [`follow_forwards`]).
+    fn poll_forward(
+        &mut self,
+        context: &EvaluatorStepContext<'_>,
+        rooted_target: Option<ManagedLazyRoot>,
+    ) -> EvaluationMachinePoll {
+        let followed =
+            context.with_value_access(|access| follow_forwards(&access, &self.lazy, rooted_target));
         match followed {
             ForwardEnd::NotForward => {
                 // The lazy was cached, or its forward was replaced, meanwhile.
@@ -717,9 +780,7 @@ impl LazyTaskMachine {
                 let result =
                     context.with_value_access(|access| self.lazy.cache(access.values(), result));
                 match result {
-                    Ok(value) => EvaluationMachinePoll::Complete(
-                        context.root_value(|access| value.into_value_in(access.values())),
-                    ),
+                    Ok(value) => self.report_complete(context, value),
                     Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
                 }
             }
@@ -749,9 +810,7 @@ impl LazyTaskMachine {
                 let result = context
                     .with_value_access(|access| self.lazy.cache(access.values(), Err(failure)));
                 match result {
-                    Ok(value) => EvaluationMachinePoll::Complete(
-                        context.root_value(|access| value.into_value_in(access.values())),
-                    ),
+                    Ok(value) => self.report_complete(context, value),
                     Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
                 }
             }
@@ -771,10 +830,14 @@ impl LazyTaskMachine {
             return self.resume_moved(context);
         };
         let poll = match poll {
+            LazyCheckpointPoll::Cached(Ok(value)) => return self.report_complete(context, value),
+            LazyCheckpointPoll::Cached(Err(error)) => {
+                return EvaluationMachinePoll::Failed(context.root_failure(error));
+            }
             LazyCheckpointPoll::Owner(poll) => poll,
             LazyCheckpointPoll::Inline { lazy, tail } => {
                 if tail && self.forward_to(context, &lazy) {
-                    return self.poll_forward(context);
+                    return self.poll_forward(context, Some(lazy));
                 }
                 let request = super::whnf::WhnfDeferredRequest::Lazy(lazy);
                 match self.offer_inline(context, request) {
@@ -867,7 +930,7 @@ impl LazyTaskMachine {
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         enum Transition {
-            Complete(crate::runtime::RuntimeValueRoot),
+            Complete(Option<crate::runtime::RuntimeValueRoot>),
             Failed(crate::runtime::RuntimeFailureRoot),
             Whnf,
             Moved,
@@ -904,11 +967,9 @@ impl LazyTaskMachine {
                     let evaluated = EvaluatedValue::from_whnf_in(access.values(), value)
                         .expect("computed access must demand its final selected value to WHNF");
                     match self.lazy.cache(access.values(), Ok(evaluated)) {
-                        Ok(value) => Transition::Complete(
-                            access
-                                .values()
-                                .root_runtime_value(value.into_value_in(access.values())),
-                        ),
+                        Ok(value) => {
+                            Transition::Complete(self.completion_root_in(access.values(), value))
+                        }
                         Err(failure) => {
                             Transition::Failed(access.values().root_runtime_failure(failure))
                         }
@@ -926,11 +987,9 @@ impl LazyTaskMachine {
                 AccessRegionalPoll::Yielded => Transition::Yielded,
                 AccessRegionalPoll::Failed(failure) => {
                     match self.lazy.cache(access.values(), Err(failure)) {
-                        Ok(value) => Transition::Complete(
-                            access
-                                .values()
-                                .root_runtime_value(value.into_value_in(access.values())),
-                        ),
+                        Ok(value) => {
+                            Transition::Complete(self.completion_root_in(access.values(), value))
+                        }
                         Err(failure) => {
                             Transition::Failed(access.values().root_runtime_failure(failure))
                         }
@@ -940,7 +999,7 @@ impl LazyTaskMachine {
         });
 
         match transition {
-            Transition::Complete(value) => EvaluationMachinePoll::Complete(value),
+            Transition::Complete(root) => self.report_completion(root),
             Transition::Failed(failure) => EvaluationMachinePoll::Failed(failure),
             Transition::Yielded => EvaluationMachinePoll::Yielded,
             Transition::Whnf => {
@@ -983,7 +1042,7 @@ impl LazyTaskMachine {
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         enum Transition {
-            Complete(crate::runtime::RuntimeValueRoot),
+            Complete(Option<crate::runtime::RuntimeValueRoot>),
             Failed(crate::runtime::RuntimeFailureRoot),
             Boundary(super::whnf::RegionalBoundaryRequest),
             Yielded,
@@ -1004,11 +1063,9 @@ impl LazyTaskMachine {
                     let evaluated = EvaluatedValue::from_whnf_in(access.values(), value)
                         .expect("object construction must produce a WHNF object value");
                     match self.lazy.cache(access.values(), Ok(evaluated)) {
-                        Ok(value) => Transition::Complete(
-                            access
-                                .values()
-                                .root_runtime_value(value.into_value_in(access.values())),
-                        ),
+                        Ok(value) => {
+                            Transition::Complete(self.completion_root_in(access.values(), value))
+                        }
                         Err(failure) => {
                             Transition::Failed(access.values().root_runtime_failure(failure))
                         }
@@ -1018,11 +1075,9 @@ impl LazyTaskMachine {
                 RegionalObjectFixpointPoll::Yielded => Transition::Yielded,
                 RegionalObjectFixpointPoll::Failed(failure) => {
                     match self.lazy.cache(access.values(), Err(failure)) {
-                        Ok(value) => Transition::Complete(
-                            access
-                                .values()
-                                .root_runtime_value(value.into_value_in(access.values())),
-                        ),
+                        Ok(value) => {
+                            Transition::Complete(self.completion_root_in(access.values(), value))
+                        }
                         Err(failure) => {
                             Transition::Failed(access.values().root_runtime_failure(failure))
                         }
@@ -1032,7 +1087,7 @@ impl LazyTaskMachine {
         });
 
         match transition {
-            Transition::Complete(value) => EvaluationMachinePoll::Complete(value),
+            Transition::Complete(root) => self.report_completion(root),
             Transition::Failed(failure) => EvaluationMachinePoll::Failed(failure),
             Transition::Yielded => EvaluationMachinePoll::Yielded,
             Transition::Moved => self.resume_moved(context),
@@ -1072,7 +1127,7 @@ impl LazyTaskMachine {
     ) -> EvaluationMachinePoll {
         enum Transition {
             Complete(
-                crate::runtime::RuntimeValueRoot,
+                Option<crate::runtime::RuntimeValueRoot>,
                 Option<crate::core::ManagedPromisePublication>,
             ),
             Failed(crate::runtime::RuntimeFailureRoot),
@@ -1112,9 +1167,7 @@ impl LazyTaskMachine {
                 RegionalListEffectPoll::Failed(failure) => {
                     return match self.lazy.cache(access.values(), Err(failure)) {
                         Ok(value) => Transition::Complete(
-                            access
-                                .values()
-                                .root_runtime_value(value.into_value_in(access.values())),
+                            self.completion_root_in(access.values(), value),
                             None,
                         ),
                         Err(failure) => {
@@ -1127,9 +1180,7 @@ impl LazyTaskMachine {
                 .expect("list-effect construction must produce a WHNF list value");
             match self.lazy.cache(access.values(), Ok(evaluated)) {
                 Ok(value) => Transition::Complete(
-                    access
-                        .values()
-                        .root_runtime_value(value.into_value_in(access.values())),
+                    self.completion_root_in(access.values(), value),
                     publication,
                 ),
                 Err(failure) => Transition::Failed(access.values().root_runtime_failure(failure)),
@@ -1137,11 +1188,11 @@ impl LazyTaskMachine {
         });
 
         match transition {
-            Transition::Complete(value, publication) => {
+            Transition::Complete(root, publication) => {
                 if let Some(publication) = publication {
                     publication.notify();
                 }
-                EvaluationMachinePoll::Complete(value)
+                self.report_completion(root)
             }
             Transition::Failed(failure) => EvaluationMachinePoll::Failed(failure),
             Transition::Yielded => EvaluationMachinePoll::Yielded,
@@ -1465,7 +1516,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                             Some(checkpoint) => ProduceStart::Work(Self::work_for_checkpoint_kind(
                                 checkpoint.kind(),
                             )),
-                            None if lazy.forward_target().is_some() => {
+                            None if lazy.forward_target_edge().is_some() => {
                                 ProduceStart::Work(LazyTaskWork::Forward)
                             }
                             None => ProduceStart::Released,
@@ -1474,9 +1525,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                 });
                 let source = match start {
                     ProduceStart::Cached(Ok(value)) => {
-                        return EvaluationMachinePoll::Complete(
-                            context.root_value(|access| value.into_value_in(access.values())),
-                        );
+                        return self.report_complete(context, value);
                     }
                     ProduceStart::Cached(Err(error)) => {
                         return EvaluationMachinePoll::Failed(context.root_failure(error));
@@ -1925,7 +1974,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             }
 
             if matches!(self.work, LazyTaskWork::Forward) {
-                return self.poll_forward(context);
+                return self.poll_forward(context, None);
             }
 
             let LazyTaskWork::WhnfCheckpoint = self.work else {
@@ -1938,7 +1987,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
 
 impl LazyTaskMachine {
     fn fail(
-        &self,
+        &mut self,
         context: &EvaluatorStepContext<'_>,
         error: EvaluationHalt,
     ) -> EvaluationMachinePoll {
@@ -1968,9 +2017,7 @@ impl LazyTaskMachine {
         let result =
             context.with_value_access(|access| self.lazy.cache(access.values(), Err(failure)));
         match result {
-            Ok(value) => EvaluationMachinePoll::Complete(
-                context.root_value(|access| value.into_value_in(access.values())),
-            ),
+            Ok(value) => self.report_complete(context, value),
             Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
         }
     }
@@ -2206,12 +2253,14 @@ mod ownership_tests {
             work,
             inline_depth,
             inline_request,
+            inline_completed,
         } = lazy;
         let _: &EvalContext = context;
         let _: &ManagedLazyRoot = lazy_root;
         let _: &LazyTaskWork = work;
         let _: &Option<usize> = inline_depth;
         let _: &Option<ManagedLazyRoot> = inline_request;
+        let _: &bool = inline_completed;
 
         let PromiseFollower {
             context,
@@ -2304,6 +2353,7 @@ mod ownership_tests {
             work: LazyTaskWork::Produce,
             inline_depth: None,
             inline_request: None,
+            inline_completed: false,
         };
         let mut stale = LazyTaskMachine {
             context: (*context).clone(),
@@ -2311,6 +2361,7 @@ mod ownership_tests {
             work: LazyTaskWork::Produce,
             inline_depth: None,
             inline_request: None,
+            inline_completed: false,
         };
         let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
         let step = |machine: &mut LazyTaskMachine| {
@@ -2383,6 +2434,7 @@ mod ownership_tests {
             work: LazyTaskWork::NetWhnfCheckpoint,
             inline_depth: None,
             inline_request: None,
+            inline_completed: false,
         };
         let result = crate::core::cache_test_lazy(
             context.values(),

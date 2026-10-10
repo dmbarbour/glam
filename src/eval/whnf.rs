@@ -747,16 +747,25 @@ impl WhnfComputation {
     }
 }
 
+/// One poll of the WHNF checkpoint installed beneath a managed lazy.
+pub(crate) enum LazyCheckpointStep {
+    /// The lazy's WHNF value, unrooted, for the lazy to cache in the same
+    /// access.
+    Ready(Value),
+    /// Any other outcome. `tail` reports a tail boundary: a lazy boundary
+    /// with no continuation frame left, so the lazy's value is exactly the
+    /// boundary lazy's.
+    Poll { poll: WhnfPoll, tail: bool },
+}
+
 impl ManagedLazyCheckpointEdge {
     /// Polls the exact state installed beneath a managed lazy without creating
     /// another registered root or rebuilding its continuation containers.
-    /// The flag reports a tail boundary: a lazy boundary with no continuation
-    /// frame left, so the lazy's value is exactly the boundary lazy's.
     pub(crate) fn poll_semantic_in(
         &self,
         access: &EvaluationValueAccess<'_>,
         budget: &mut WhnfStepBudget,
-    ) -> Option<(WhnfPoll, bool)> {
+    ) -> Option<LazyCheckpointStep> {
         let _ = self.duplicate_whnf_in(access.values())?;
         let managed = self.access(access);
         let mut reduce = reduce_semantic_shell;
@@ -765,6 +774,9 @@ impl ManagedLazyCheckpointEdge {
                 Ok(result) => result,
                 Err(error) => managed_state_error(error),
             };
+        if let RegionalWhnfStatus::Ready(value) = status {
+            return Some(LazyCheckpointStep::Ready(value));
+        }
         let tail = observation.frames_empty
             && matches!(
                 status,
@@ -772,7 +784,10 @@ impl ManagedLazyCheckpointEdge {
                     WhnfDeferredRequest::Lazy(_)
                 ))
             );
-        Some((regional_status_poll(access, status), tail))
+        Some(LazyCheckpointStep::Poll {
+            poll: regional_status_poll(access, status),
+            tail,
+        })
     }
 }
 
