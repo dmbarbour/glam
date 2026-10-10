@@ -89,6 +89,27 @@ and the granularity trade: one frame traced whole against roots
 registered and dropped one by one. Pooling `RootCell`s, the remaining
 remedy from `perf-allocation-path`, belongs here too.
 
+Lifetimes measured 2026-10-10 (one instrumented release run each; a root's
+quantum is the held region that registered it):
+
+| Workload | Dropped within its quantum | After its quantum ended | Registered outside a quantum | In a later quantum |
+| --- | ---: | ---: | ---: | ---: |
+| `countdown_800` | 207,861 | 2,649 | 1,085 | 0 |
+| `sum_800` | 239,015 | 5,045 | 1,085 | 0 |
+| `append_walk_800` | 541,746 | 11,174 | 1,223 | 0 |
+| `hello_elf` | 210,103 | 6,910 | 10,671 | 0 |
+| `chain_800` | 289,055 | 15,817 | 110,548 | 0 |
+
+So 97 to 98% of roots live within one quantum; machine state that survives
+across polls holds under 2%, and `chain_800`'s unheld registrations
+probably come from reflection polls, which hold no region. A frame per
+machine would recover little. A frame per poll would recover most: the
+poll's transient roots become pushes onto one registered frame, cleared
+when the poll ends, instead of an `Arc<RootCell>` and a registry entry
+under the heap's data mutex each. The hot sites return a root only to
+carry a value out of one access closure into the next (`forward_target`
+returns a `ManagedLazyRoot` for `follow_forwards`, and so on).
+
 ### `list_map` growth (`perf-list-map-growth`)
 
 Split from `perf-interface-demand-walk` on 2026-10-09, since nothing yet
