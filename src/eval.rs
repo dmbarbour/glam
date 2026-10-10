@@ -15,10 +15,12 @@ use crate::core_net::{CoreDataKey, CoreOperator, CoreSpecialization};
 use crate::evaluation::OwnedEvalContext;
 use crate::evaluation::{EvalContext, EvaluatorStepContext};
 #[cfg(test)]
+use crate::interaction_net::NetBuilder;
+#[cfg(test)]
 use crate::interaction_net::Reduction;
 use crate::interaction_net::{
-    ActivePairKey, Call, NetBuilder, NetSpecialization, OperatorCall, OperatorYield, Port,
-    ReductionKind, StuckReason,
+    ActivePairKey, Call, NetSpecialization, OperatorCall, OperatorYield, Port, ReductionKind,
+    StuckReason,
 };
 #[cfg(test)]
 use crate::number::Number;

@@ -237,7 +237,9 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
                 fan_bind: 0,
                 fan_operator: 0,
                 erase: 0,
-                call: 3,
+                // Application nets start with their function copied in, so
+                // no call is claimed.
+                call: 0,
                 operator_call: 6,
                 // One copy's source had no evaluation left, so it copied
                 // whole; the cursor counts are the other copy's.
@@ -250,10 +252,10 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
             profile.driver,
             NetDriverCounts {
                 machine_polls: 4,
-                work_items: 63,
+                work_items: 60,
                 interface_polls: 23,
                 cursor_steps: 9,
-                active_pair_steps: 25,
+                active_pair_steps: 22,
                 cursor_dependencies: 6,
                 blocked_retries: 0,
                 contentions: 0,

@@ -12,8 +12,8 @@ Status: active, as the `perf-structural-overheads` step of the
 `perf-list-map-growth`, `perf-list-literal-composition`,
 `perf-lowering-free-bindings`, `perf-interface-demand-walk`,
 `perf-interface-route-ownership`, `perf-reduced-source-copy`,
-`perf-driver-path-inlining` and `perf-module-definition-cost`. Next:
-`perf-runtime-net-attach`.
+`perf-driver-path-inlining`, `perf-module-definition-cost` and
+`perf-runtime-net-attach`. Next: `perf-definition-assertions`.
 `gc-two-level-mutator-access` and `gc-thread-local-heap-context` moved to
 [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md).
 
@@ -75,16 +75,6 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 | Coordinator claims, releases and admissions | under 2% |
 
 ## Open Steps, in Order
-
-### Operator nets (`perf-runtime-net-attach`)
-
-`attach_net_many_in` builds a fresh net for each core operator call and runs
-the full template checks: validation, polarity and normalization. Net
-building is 2.6% of the countdown, inclusive, and its polarity check mostly
-comes from this caller; in `hello_elf`, net building and checking take about
-2.7% of self time. The evaluator fixes the net's shape, not user input.
-Candidate remedies: skip the polarity check for evaluator-built shapes
-covered by tests, or reuse a template per arity.
 
 ### Introduce and override checks (`perf-definition-assertions`)
 
@@ -150,6 +140,26 @@ brainstorming). Starting points: what evaluating one costs, and whether a
 context known at compile time, as an origin and line are, can travel
 with the definition without an evaluation step.
 
+### Applications as values (`perf-application-values`)
+
+A function value is a stage net, and applying it builds a net, so that a
+copy or clone shares whatever partial evaluation applying its arguments
+started (maintainer, 2026-10-10): a closure whose body uses a capture
+strictly, such as `n - 1`, starts that work when its captures arrive, and
+every call shares it. Representing partial applications as argument lists
+would lose that for user-defined nets and lambdas that lean on partial
+application, which the profile families barely exercise. Two narrower
+shapes keep sharing:
+- functions that are thin wrappers around a core operator could apply as
+  that operator directly;
+- a lightweight structural analysis of a code net could find how many
+  arguments it takes before any is observed; below that arity, partial
+  application starts no work, so it could collect arguments as a value
+  and instantiate the code once, saturated.
+
+The step first adds workloads and tests that lean on partial application,
+so that sharing is measured before anything trades it.
+
 ### Route walks with workers (`perf-worker-route-walks`)
 
 After `perf-worker-scaling`, `chain_w4_800` still runs 8% more
@@ -207,6 +217,33 @@ and help only programs with parallel work, so this comes last.
   Allocating less is the better lever.
 
 ## Done
+
+- **Function application nets** (`perf-runtime-net-attach`), 2026-10-10.
+  Decision `applications-copy-function-in`.
+  - **Cause.** `attach_net_many_in` is how function application is
+    represented, not operator evaluation: when a capture operator's last
+    capture arrives, a closure's or lazy computation's code is applied to
+    its captures; partial applications and saturated calls apply a stage
+    to arguments. Each built an application spine with `Data(Net(f))`
+    through the template builder, with validation and polarity inference,
+    and then had to claim the `Bind >< Data` call to copy `f` in. In
+    `countdown`, attaching was at least 8.2% of samples (capture operators
+    5.8%, saturated calls 2.4%), claiming calls 4.6%.
+  - **Fix.** The application net is built directly in its fixed shape, and
+    the function's copy, prepared in the same access, is installed at the
+    spine's head at once (`RuntimeNet::applied`). For a net callable the
+    claim only classified the value and copied it, so this is the same
+    copy made earlier; a cursor copy still shares its source's evaluation,
+    and a whole copy is made only of a source with none left.
+  - **Results**, instructions against the build before: `countdown_800`
+    -15.1%, `minimal` -8.1%, `hello_do` -7.1%, `list_computed_2000`
+    -2.0%, `chain_800` -0.6%. Two profiling tests counted calls as their
+    evidence of single application; applications now commit as bind
+    joins, so they count those.
+  - **Next shapes** are `perf-application-values`: the maintainer pointed
+    out that function values are nets so that partial application shares
+    work, which rules out turning every partial application into an
+    argument list.
 
 - **Module definition demand** (`perf-module-definition-cost`),
   2026-10-10. Decisions `reflection-boundary-shared`,

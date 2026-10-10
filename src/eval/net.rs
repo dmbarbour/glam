@@ -32,16 +32,7 @@ pub(super) fn attached_net_runtime(
     arguments: Vec<Value>,
 ) -> RuntimeNet<CoreSpecialization> {
     assert!(!arguments.is_empty(), "net attachment requires an argument");
-    let mut net = NetBuilder::new();
-    let spine = net.application_spine(arguments.len());
-    let function = net.data(Value::Net(function));
-    net.wire(spine.input, function);
-    for (argument_port, argument) in spine.arguments.into_iter().zip(arguments) {
-        let argument = net.data(argument);
-        net.wire(argument_port, argument);
-    }
-    let template = net.finish(spine.result);
-    template.instantiate_with(access)
+    crate::core_net::applied_core_net(access, function.runtime(), arguments)
 }
 
 pub(super) struct NetWhnfMachine {

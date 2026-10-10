@@ -164,6 +164,7 @@ impl<S: NetSpecialization> NetBuilder<S> {
 
     /// Builds the application spine `f a1 .. an`: `input` meets the
     /// function, and each bind supplies one argument.
+    #[cfg(test)]
     pub fn application_spine(&mut self, arity: usize) -> BindSpine {
         self.spine(arity, Self::bind)
     }

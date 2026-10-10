@@ -1159,6 +1159,17 @@ impl<'scope> CoreRuntimeNetAccess<'_, 'scope> {
     }
 }
 
+/// The runtime net applying `function` to `arguments`, headed by a copy of
+/// the function prepared in this access (see `RuntimeNet::applied`).
+pub(crate) fn applied_core_net(
+    values: &RuntimeValueAccess<'_>,
+    function: &CoreRuntimeNet,
+    arguments: Vec<Value>,
+) -> RuntimeNet<CoreSpecialization> {
+    let source = function.access(values).prepare_copy_source();
+    RuntimeNet::applied(source.into_inner(), arguments)
+}
+
 /// A copy source prepared inside one access for a copy installed in that
 /// same access. Its net edge, or a whole copy's payloads, do not root what
 /// they reach: no collection runs inside an access, and the copy layer that

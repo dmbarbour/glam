@@ -596,6 +596,26 @@ maps the short names used here to file names.
 
 ## Interaction nets
 
+### Application nets start with their function copied in
+`applications-copy-function-in` · 2026-10-10 · agent · accepted
+- **Context:** applying a function value, whether a closure's code to its
+  captures, a stage to more arguments, or a saturated call, built an
+  application spine around `Data(Net(f))` through the template builder,
+  then claimed the `Bind >< Data` call to copy `f` in. Function values stay
+  nets so that partial application shares work (maintainer).
+- **Decision:** `RuntimeNet::applied` builds the spine directly in its
+  fixed shape and installs a copy of `f`, prepared in the same access, at
+  its head. For a net callable the claim only classified the value and
+  copied it, so the copy is the same, made at construction; a cursor copy
+  still shares its source's evaluation, and a whole copy is made only of a
+  source with none left.
+- **Consequences:** no application claims a call; each commits as its
+  spine joining the function's. A closure's code is copied when its last
+  capture arrives, even if it is never called. `countdown_800` falls
+  15.1%, `minimal` 8.1%.
+- **Rule lives in:** `RuntimeNet::applied` (`interaction_net/runtime/cursor.rs`).
+- **Recorded in:** structural overheads plan, `perf-runtime-net-attach`.
+
 ### Interface demand walks resume from the surviving part of their route
 `interface-walks-resume` · 2026-10-10 · maintainer · accepted
 - **Context:** a demand poll walked from the interface to the active pair

@@ -234,6 +234,52 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         self.install_copy(source, bind)
     }
 
+    /// The net applying a function to `arguments`: an application spine, one
+    /// bind per argument, whose head is a prepared copy of the function's
+    /// net, built directly in its fixed shape. Evaluating it joins this spine
+    /// with the function's own; nothing has to claim a call and copy the
+    /// function in first. A copy through a cursor still shares whatever
+    /// evaluation its source has left.
+    pub(crate) fn applied(
+        function: PreparedCopySource<S>,
+        arguments: impl IntoIterator<Item = S::Data>,
+    ) -> Self {
+        let mut net = Self::empty();
+        let mut function = Some(function);
+        let mut created = Vec::new();
+        // Each bind consumes at its principal and first auxiliary and
+        // provides at its second, where the next bind or the result goes.
+        let mut result = None;
+        for argument in arguments {
+            let bind = net.add_node(RuntimeNode::Bind);
+            let data = net.add_node(RuntimeNode::Data(argument));
+            net.wire(
+                SignedPort::new(Port::principal(data), Sign::Provides),
+                SignedPort::new(Port::auxiliary(bind, 1), Sign::Consumes),
+            );
+            match result {
+                Some(previous) => net.wire(
+                    SignedPort::new(previous, Sign::Provides),
+                    SignedPort::new(Port::principal(bind), Sign::Consumes),
+                ),
+                None => {
+                    net.install_copy(
+                        function.take().expect("the function heads the first bind"),
+                        SignedPort::new(Port::principal(bind), Sign::Consumes),
+                    );
+                }
+            }
+            created.extend([bind, data]);
+            result = Some(Port::auxiliary(bind, 2));
+        }
+        let Some(result) = result else {
+            panic!("an application needs an argument");
+        };
+        net.exposed = Some(net.add_interface(result));
+        net.debug_check_created_polarity(&created);
+        net
+    }
+
     /// Installs a prepared copy with its root bound to `reference`, and
     /// returns the node at its root: the copy's remote cursor, or the root
     /// node of a whole copy.

@@ -2556,7 +2556,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         RuntimeNetEdgeTransition::new(leaving, RuntimeNetEdgeSet::default())
     }
 
-    #[cfg(test)]
     fn empty() -> Self {
         Self {
             next_node_id: 0,
