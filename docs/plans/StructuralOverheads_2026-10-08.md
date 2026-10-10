@@ -11,7 +11,7 @@ Status: active, as the `perf-structural-overheads` step of the
 `perf-root-frames`, `perf-transient-root-avoidance`,
 `perf-list-map-growth`, `perf-list-literal-composition`,
 `perf-lowering-free-bindings`, `perf-interface-demand-walk` and
-`perf-interface-route-ownership`. Next: `perf-module-definition-cost`.
+`perf-interface-route-ownership`. Next: `perf-reduced-source-copy`.
 `gc-two-level-mutator-access` and `gc-thread-local-heap-context` moved to
 [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md).
 
@@ -73,6 +73,31 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 | Coordinator claims, releases and admissions | under 2% |
 
 ## Open Steps, in Order
+
+### Copy reduced sources whole (`perf-reduced-source-copy`)
+
+A call to a net callable copies the callable's net into the caller through
+a remote cursor, one node per cursor step, so the copy shares whatever
+evaluation the source has left. In 97 to 99% of cursor inspections, on
+every profile family, the source has no active pairs, copies or cursor
+obligations left, and such sources average about 5 nodes (20 at most);
+`countdown_800` makes about 81,000 inspections and 64,000 cursor steps.
+A source with no evaluation left has nothing to share, so the maintainer
+suggests materializing its copy whole (2026-10-10). The step establishes
+when a net is fully reduced and stays so, copies such a source in one
+operation, and measures the change.
+
+### Driver hot-path inlining (`perf-driver-path-inlining`)
+
+Experiment `perf-route-ring-record` found that changes to the interface
+walk move instruction counts on every workload by about 1%, through the
+compiler's inlining along the net driver's hot path rather than the work
+done: `NetWhnfMachine::poll_in` and `step_active_pair_if_current` were
+split differently, and small `RuntimeNetCell` wrappers became calls. The
+step pins that path's inlining so that sub-percent comparisons hold, adds
+a profile family whose interface routes are 3 to 16 nodes deep (the
+families today are 1 to 5 deep, apart from `list_computed`), and runs
+the ring record against the committed route again.
 
 ### Module definition demand (`perf-module-definition-cost`)
 
@@ -217,7 +242,7 @@ and help only programs with parallel work, so this comes last.
     average about 5 nodes (20 at most). The maintainer suggests tracking
     whether a net is fully reduced and then materializing a copy of it
     whole, since no evaluation is left to share
-    (`perf-reduced-source-copy`, proposed).
+    (`perf-reduced-source-copy`).
   - **Experiment `perf-route-ring-record`** (maintainer, inconclusive).
     Record routes from the first node in a box holding the newest 8
     nodes exactly and a mark every 8 nodes below them, so a returning
@@ -232,7 +257,7 @@ and help only programs with parallel work, so this comes last.
     committed walk kept out of line 0.04%. So most of the difference is
     code generation on that path, not recording, and sub-percent
     comparisons of changes there are unreliable until its inlining is
-    pinned. Walks average 1.3 nodes in most families; a record cannot save
+    pinned (`perf-driver-path-inlining`). Walks average 1.3 nodes in most families; a record cannot save
     on walks of one or two nodes, since checking a recorded node costs the
     lookup the step it saves would.
 

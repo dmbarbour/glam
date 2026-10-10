@@ -189,7 +189,8 @@ gains this consequence when it lands.
      `perf-lowering-free-bindings`, `perf-interface-demand-walk` and
      `perf-interface-route-ownership`. The scheduler round trips were
      `perf-evaluation-recursion`.
-   - *Open, in order:* `perf-module-definition-cost`,
+   - *Open, in order:* `perf-reduced-source-copy`,
+     `perf-driver-path-inlining`, `perf-module-definition-cost`,
      `perf-runtime-net-attach`,
      `perf-reflection-step-cost` and `perf-worker-route-walks`.
    - *Experiments:* `perf-coalesced-wakeups` (open),
