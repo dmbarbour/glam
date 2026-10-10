@@ -952,7 +952,6 @@ struct ManagedData {
     free_runs: Vec<RunLocation>,
     allocation_pressure: AllocationPressure,
     roots: Vec<Weak<RootCell>>,
-    root_frames: Vec<Weak<dyn crate::root::RegisteredRootFrame>>,
     virgin_run_activations: u64,
     recycled_run_activations: u64,
     cold_class_discoveries: u64,
@@ -2560,11 +2559,10 @@ impl MarkAttempt {
             arena,
             classes,
             roots,
-            root_frames,
             ..
         } = data;
         let mut lookup_error = None;
-        let mut seed = |value| {
+        retain_registered_roots(roots, |value| {
             self.root_count = self
                 .root_count
                 .checked_add(1)
@@ -2579,16 +2577,6 @@ impl MarkAttempt {
                     value,
                 });
             }
-        };
-        retain_registered_roots(roots, &mut seed);
-        // A frame's owner edits it only under a mutator, and none is active
-        // now, so its contents are stable while they are traced.
-        root_frames.retain(|registration| {
-            let Some(frame) = registration.upgrade() else {
-                return false;
-            };
-            frame.trace_contents(&mut Visitor::new(&mut seed));
-            true
         });
         match lookup_error {
             Some(error) => Err(error),
@@ -3937,20 +3925,6 @@ impl HeapInner {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .completed_collection_epoch()
-    }
-
-    pub(crate) fn register_root_frame<C: crate::RootFrameContents>(
-        self: &Arc<Self>,
-        contents: C,
-    ) -> crate::RootFrame<C> {
-        let (frame, registration) = crate::RootFrame::candidate(self, contents);
-        let mut state = self.data.lock().expect("heap state should not be poisoned");
-        state
-            .root_frames
-            .try_reserve(1)
-            .expect("root frame registry capacity exhausted");
-        state.root_frames.push(registration);
-        frame
     }
 
     /// Registers a root for `value`, whose canonical metadata the caller
@@ -6992,67 +6966,6 @@ mod tests {
             1,
             "only this thread's current cache keeps live counters"
         );
-    }
-
-    struct TestRootFrame {
-        edges: Vec<crate::Gc<u64>>,
-    }
-
-    // SAFETY: `edges` is the frame's only state, and every edge in it was
-    // allocated by the frame's heap.
-    unsafe impl crate::RootFrameContents for TestRootFrame {
-        fn trace(&self, visitor: &mut Visitor<'_>) {
-            for edge in &self.edges {
-                visitor.visit(edge);
-            }
-        }
-    }
-
-    #[test]
-    fn a_root_frame_roots_its_contents_until_its_last_handle_drops() {
-        let heap = Heap::new();
-        let frame = heap.with_mutator(|mutator| {
-            let frame = mutator.root_frame(TestRootFrame { edges: Vec::new() });
-            let allocator = mutator.allocator::<u64>().unwrap();
-            frame.with(mutator, |contents| {
-                contents
-                    .edges
-                    .extend((0..3).map(|value| allocator.alloc(value)));
-            });
-            frame
-        });
-
-        assert_eq!(heap.collect_full().unwrap().reclaimed_slots(), 0);
-        heap.with_mutator(|mutator| {
-            let values = frame.with(mutator, |contents| {
-                contents
-                    .edges
-                    .iter()
-                    // SAFETY: the frame roots each edge in this live heap.
-                    .map(|edge| unsafe { *edge.get_unchecked(mutator) })
-                    .collect::<Vec<_>>()
-            });
-            assert_eq!(values, [0, 1, 2]);
-        });
-
-        let alias = frame.clone();
-        assert_eq!(frame.handle_count(), 2);
-        drop(frame);
-        assert_eq!(heap.collect_full().unwrap().reclaimed_slots(), 0);
-        drop(alias);
-        assert_eq!(heap.collect_full().unwrap().reclaimed_slots(), 3);
-    }
-
-    #[test]
-    fn a_root_frame_is_edited_only_through_its_own_heap() {
-        let owner = Heap::new();
-        let other = Heap::new();
-        let frame =
-            owner.with_mutator(|mutator| mutator.root_frame(TestRootFrame { edges: Vec::new() }));
-        let panic = catch_unwind(AssertUnwindSafe(|| {
-            other.with_mutator(|mutator| frame.with(mutator, |_| {}));
-        }));
-        assert!(panic.is_err());
     }
 
     #[test]

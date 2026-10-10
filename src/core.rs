@@ -37,7 +37,7 @@ pub(crate) use managed::{
     ManagedLazyRoot, ManagedPromiseAccess, ManagedPromisePublication, ManagedPromiseRoot,
     OpaquePayloadFamily, OpaquePayloadRecord, PreparedRuntimeValueRoot, RuntimeValueAccess,
     RuntimeValueObserver, managed_slot_extent, release_held_region,
-    trace_compatibility_value_managed_edges, with_poll_root_frame,
+    trace_compatibility_value_managed_edges,
 };
 use runtime_cache::{RuntimeCacheEntry, RuntimeCacheMap, SharedRuntimeCacheMap};
 pub(crate) use runtime_cache::{RuntimeCacheFamily, RuntimeCacheFamilyRecord};

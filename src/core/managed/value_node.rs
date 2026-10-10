@@ -5,10 +5,9 @@
 //! edges; immutable structural payload shells compose through the central
 //! compatibility walk until Value Representation Refinement replaces them.
 
-use std::cell::RefCell;
 use std::fmt;
 
-use glam_gc::{Root, RootFrame, RootFrameContents, Trace, UnsupportedLayout, Visitor};
+use glam_gc::{Root, Trace, UnsupportedLayout, Visitor};
 
 use super::{
     ManagedDropRecord, ManagedFamily, RuntimeValueAccess, RuntimeValueObserver, managed_slot_extent,
@@ -46,76 +45,6 @@ pub(crate) struct PreparedRuntimeValueRoot {
 enum PreparedValueRepresentation {
     InlineInteger(i64),
     Managed(Root<ManagedValueNode>),
-    /// A value rooted by the current poll's frame; see [`with_poll_root_frame`].
-    Framed {
-        frame: RootFrame<PollRoots>,
-        index: usize,
-    },
-}
-
-/// Values rooted during one poll, held by one root frame rather than a
-/// registered root each. Nearly every value root a poll creates is dropped
-/// before the poll ends, having only carried a value from one access to the
-/// next.
-pub(crate) struct PollRoots {
-    values: Vec<Value>,
-}
-
-// SAFETY: the central compatibility walk reports every managed edge a `Value`
-// holds, and a poll frame holds only values of its own runtime's domain.
-unsafe impl RootFrameContents for PollRoots {
-    fn trace(&self, visitor: &mut Visitor<'_>) {
-        for value in &self.values {
-            visit_compatibility_managed_edges(value, visitor);
-        }
-    }
-}
-
-struct PollFrameScope {
-    runtime: crate::runtime::EvaluationRuntimeId,
-    /// Registered on the first value the poll roots.
-    frame: Option<RootFrame<PollRoots>>,
-}
-
-thread_local! {
-    static POLL_FRAMES: RefCell<Vec<PollFrameScope>> = const { RefCell::new(Vec::new()) };
-}
-
-/// Runs one poll of `runtime` with a root frame for the value roots it
-/// creates. A root that must outlive the poll, such as its result, becomes a
-/// registered root through `RuntimeValueRoot::into_durable` before the
-/// poll returns; debug builds check that none was missed.
-pub(crate) fn with_poll_root_frame<R>(
-    runtime: crate::runtime::EvaluationRuntimeId,
-    operation: impl FnOnce() -> R,
-) -> R {
-    struct EndScope;
-
-    impl Drop for EndScope {
-        fn drop(&mut self) {
-            let scope = POLL_FRAMES
-                .with_borrow_mut(Vec::pop)
-                .expect("a poll root frame scope must be open");
-            if !std::thread::panicking() {
-                debug_assert!(
-                    scope
-                        .frame
-                        .as_ref()
-                        .is_none_or(|frame| frame.handle_count() == 1),
-                    "a framed value root outlived its poll"
-                );
-            }
-        }
-    }
-
-    POLL_FRAMES.with_borrow_mut(|frames| {
-        frames.push(PollFrameScope {
-            runtime,
-            frame: None,
-        });
-    });
-    let _end = EndScope;
-    operation()
 }
 
 impl fmt::Debug for PreparedRuntimeValueRoot {
@@ -143,82 +72,6 @@ impl PreparedRuntimeValueRoot {
         }
 
         Self::managed(observer, access, value)
-    }
-
-    /// Like [`Self::prepare_with_access`], but rooted in the current poll's
-    /// frame when a poll of this runtime is running on this thread. For a
-    /// value carried from one access to the next within the poll; a root
-    /// that leaves the poll must go through [`Self::into_durable`].
-    pub(crate) fn prepare_transient_with_access(
-        observer: RuntimeValueObserver,
-        access: &RuntimeValueAccess<'_>,
-        value: Value,
-    ) -> Self {
-        if let Value::Number(number) = &value
-            && let Some(value) = number.to_i64_if_integer()
-        {
-            return Self {
-                observer,
-                value: PreparedValueRepresentation::InlineInteger(value),
-            };
-        }
-        match Self::framed(observer, access, value) {
-            Ok(framed) => framed,
-            Err((observer, value)) => Self::managed(observer, access, value),
-        }
-    }
-
-    /// Roots `value` in the current poll's frame, if a poll of this runtime
-    /// is running on this thread.
-    #[allow(
-        clippy::result_large_err,
-        reason = "the error returns the moved inputs"
-    )]
-    fn framed(
-        observer: RuntimeValueObserver,
-        access: &RuntimeValueAccess<'_>,
-        value: Value,
-    ) -> Result<Self, (RuntimeValueObserver, Value)> {
-        POLL_FRAMES.with_borrow_mut(|frames| {
-            let Some(scope) = frames.last_mut() else {
-                return Err((observer, value));
-            };
-            if scope.runtime != observer.runtime_id() {
-                return Err((observer, value));
-            }
-            let mutator = access.scope.mutator;
-            let frame = scope
-                .frame
-                .get_or_insert_with(|| mutator.root_frame(PollRoots { values: Vec::new() }));
-            let index = frame.with(mutator, |roots| {
-                roots.values.push(value);
-                roots.values.len() - 1
-            });
-            Ok(Self {
-                observer,
-                value: PreparedValueRepresentation::Framed {
-                    frame: frame.clone(),
-                    index,
-                },
-            })
-        })
-    }
-
-    /// Whether the current poll's frame holds this root.
-    pub(crate) fn is_framed(&self) -> bool {
-        matches!(self.value, PreparedValueRepresentation::Framed { .. })
-    }
-
-    /// A root that outlives the current poll: a framed root becomes a
-    /// registered one, and any other root is returned unchanged.
-    pub(crate) fn into_durable(self, access: &RuntimeValueAccess<'_>) -> Self {
-        if !self.is_framed() {
-            return self;
-        }
-        let value = self
-            .with_value(access, |value| access.duplicate_value(value))
-            .expect("a framed root and its access must share one value domain");
-        Self::managed(self.observer, access, value)
     }
 
     fn managed(
@@ -258,16 +111,6 @@ impl PreparedRuntimeValueRoot {
                 PreparedValueRepresentation::Managed(left),
                 PreparedValueRepresentation::Managed(right),
             ) => left.ptr_eq(right),
-            (
-                PreparedValueRepresentation::Framed {
-                    frame: left,
-                    index: left_index,
-                },
-                PreparedValueRepresentation::Framed {
-                    frame: right,
-                    index: right_index,
-                },
-            ) => left.ptr_eq(right) && left_index == right_index,
             _ => false,
         }
     }
@@ -291,14 +134,6 @@ impl PreparedRuntimeValueRoot {
             PreparedValueRepresentation::Managed(root) => access
                 .admits_root(root)
                 .then(|| operation(&access.get(root).value)),
-            PreparedValueRepresentation::Framed { frame, index } => {
-                // Copy the value out rather than run `operation` under the
-                // frame's lock, which rooting another value would take again.
-                let value = frame.with(access.scope.mutator, |roots| {
-                    access.duplicate_value(&roots.values[*index])
-                });
-                Some(operation(&value))
-            }
         }
     }
 }

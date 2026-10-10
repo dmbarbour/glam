@@ -437,8 +437,8 @@ impl ManagedListFrontRoot {
         match result {
             RegionalListFrontPoll::Ready(Some((item, tail))) => {
                 DurableListFrontPoll::Ready(Some((
-                    access.values().root_transient_runtime_value(item),
-                    access.values().root_transient_runtime_value(tail),
+                    access.values().root_runtime_value(item),
+                    access.values().root_runtime_value(tail),
                 )))
             }
             RegionalListFrontPoll::Ready(None) => DurableListFrontPoll::Ready(None),

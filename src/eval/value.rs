@@ -907,7 +907,7 @@ impl LazyTaskMachine {
                         Ok(value) => Transition::Complete(
                             access
                                 .values()
-                                .root_transient_runtime_value(value.into_value_in(access.values())),
+                                .root_runtime_value(value.into_value_in(access.values())),
                         ),
                         Err(failure) => {
                             Transition::Failed(access.values().root_runtime_failure(failure))
@@ -929,7 +929,7 @@ impl LazyTaskMachine {
                         Ok(value) => Transition::Complete(
                             access
                                 .values()
-                                .root_transient_runtime_value(value.into_value_in(access.values())),
+                                .root_runtime_value(value.into_value_in(access.values())),
                         ),
                         Err(failure) => {
                             Transition::Failed(access.values().root_runtime_failure(failure))
@@ -1007,7 +1007,7 @@ impl LazyTaskMachine {
                         Ok(value) => Transition::Complete(
                             access
                                 .values()
-                                .root_transient_runtime_value(value.into_value_in(access.values())),
+                                .root_runtime_value(value.into_value_in(access.values())),
                         ),
                         Err(failure) => {
                             Transition::Failed(access.values().root_runtime_failure(failure))
@@ -1021,7 +1021,7 @@ impl LazyTaskMachine {
                         Ok(value) => Transition::Complete(
                             access
                                 .values()
-                                .root_transient_runtime_value(value.into_value_in(access.values())),
+                                .root_runtime_value(value.into_value_in(access.values())),
                         ),
                         Err(failure) => {
                             Transition::Failed(access.values().root_runtime_failure(failure))
@@ -1114,7 +1114,7 @@ impl LazyTaskMachine {
                         Ok(value) => Transition::Complete(
                             access
                                 .values()
-                                .root_transient_runtime_value(value.into_value_in(access.values())),
+                                .root_runtime_value(value.into_value_in(access.values())),
                             None,
                         ),
                         Err(failure) => {
@@ -1129,7 +1129,7 @@ impl LazyTaskMachine {
                 Ok(value) => Transition::Complete(
                     access
                         .values()
-                        .root_transient_runtime_value(value.into_value_in(access.values())),
+                        .root_runtime_value(value.into_value_in(access.values())),
                     publication,
                 ),
                 Err(failure) => Transition::Failed(access.values().root_runtime_failure(failure)),

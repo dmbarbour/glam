@@ -153,17 +153,6 @@ pub(crate) enum EvaluationMachinePoll {
     },
 }
 
-impl EvaluationMachinePoll {
-    /// Makes the result's value roots outlive the poll that created them.
-    pub(crate) fn into_durable(self, values: &crate::core::CoreValueFactory) -> Self {
-        match self {
-            Self::Complete(root) => Self::Complete(root.into_durable(values)),
-            Self::ScheduleSpark(root) => Self::ScheduleSpark(root.into_durable(values)),
-            poll => poll,
-        }
-    }
-}
-
 pub(crate) trait EvaluationTaskMachine: Send {
     fn poll(
         &mut self,

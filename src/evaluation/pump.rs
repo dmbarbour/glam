@@ -196,12 +196,8 @@ impl ClaimedTask {
         let mut poll = || {
             catch_unwind(AssertUnwindSafe(|| match kind {
                 ClaimedTaskKind::Reflection(task) => task.poll(&context, step_budget),
-                ClaimedTaskKind::Deferred(task) => context.with_root_frame(|values| {
-                    task.poll(&context, step_budget).into_durable(values)
-                }),
-                ClaimedTaskKind::LazyRoute(route) => context.with_root_frame(|values| {
-                    route.poll(&context, step_budget).into_durable(values)
-                }),
+                ClaimedTaskKind::Deferred(task) => task.poll(&context, step_budget),
+                ClaimedTaskKind::LazyRoute(route) => route.poll(&context, step_budget),
             }))
         };
         let polled = if holds_region {
@@ -1083,11 +1079,7 @@ impl EvaluationWorkCoordinator {
         let context = EvaluationPollContext::for_claim(&claimed.demand);
         let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
         let polled = context.with_held_region(|| {
-            catch_unwind(AssertUnwindSafe(|| {
-                context.with_root_frame(|values| {
-                    claimed.poll(&context, &mut budget).into_durable(values)
-                })
-            }))
+            catch_unwind(AssertUnwindSafe(|| claimed.poll(&context, &mut budget)))
         });
         drop(context);
         let poll = match polled {
@@ -1124,10 +1116,8 @@ impl EvaluationWorkCoordinator {
         }
         let result = poll_context.with_held_region(|| {
             catch_unwind(AssertUnwindSafe(|| {
-                poll_context.with_root_frame(|_| {
-                    poll_context.evaluate(&context, |evaluator| {
-                        claimed.poll(&poll_context, evaluator, &context, &mut budget)
-                    })
+                poll_context.evaluate(&context, |evaluator| {
+                    claimed.poll(&poll_context, evaluator, &context, &mut budget)
                 })
             }))
         });
