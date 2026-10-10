@@ -351,7 +351,11 @@ pub(in crate::g_syntax) fn constant_object_defs(
     root_value(access, lower_resolved_expr_in(access, expression))
 }
 
-pub(in crate::g_syntax) fn reflection_annotator_resolved(
+/// The demand boundary for final `refl.*` that one module, or one declared
+/// object, shares: unit annotated with the effect that launches the `refl.*`
+/// scanner unless `guard` records one already. Each wrapped definition
+/// forces it before exposing its own value, so the effect runs once.
+pub(in crate::g_syntax) fn reflection_boundary_resolved(
     access: &RuntimeValueAccess<'_>,
     guard: ResolvedExpr<Value>,
     final_defs: ResolvedExpr<Value>,
@@ -360,16 +364,16 @@ pub(in crate::g_syntax) fn reflection_annotator_resolved(
         ResolvedExpr::Embedded(with_values(access.values(), |compiler| {
             project_value(access, &compiler.reflection_annotator)
         })),
-        [guard, final_defs],
+        [guard, final_defs, ResolvedExpr::Embedded(access.unit())],
     )
 }
 
-pub(in crate::g_syntax) fn reflection_annotator_root(
+pub(in crate::g_syntax) fn reflection_boundary_root(
     access: &RuntimeValueAccess<'_>,
     guard: Value,
     final_defs: Value,
 ) -> RuntimeValueRoot {
-    let expression = reflection_annotator_resolved(
+    let expression = reflection_boundary_resolved(
         access,
         ResolvedExpr::Provided(guard),
         ResolvedExpr::Provided(final_defs),
@@ -378,13 +382,13 @@ pub(in crate::g_syntax) fn reflection_annotator_root(
 }
 
 #[cfg(test)]
-pub(in crate::g_syntax) fn reflection_annotator_value(
+pub(in crate::g_syntax) fn reflection_boundary_value(
     values: &CoreValueFactory,
     guard: Value,
     final_defs: Value,
 ) -> Value {
     values.with_runtime_value_access(|access| {
-        let root = reflection_annotator_root(&access, guard, final_defs);
+        let root = reflection_boundary_root(&access, guard, final_defs);
         project_value(&access, &root)
     })
 }

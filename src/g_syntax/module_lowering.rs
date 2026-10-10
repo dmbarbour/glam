@@ -66,7 +66,7 @@ impl<'context> ModuleLowerer<'context> {
     pub(in crate::g_syntax) fn new(context: &'context CompileContext) -> Self {
         compiler_values::prepare(context.values());
         let module_reflection = context.values().with_runtime_value_access(|access| {
-            compiler_values::reflection_annotator_root(
+            compiler_values::reflection_boundary_root(
                 &access,
                 context.abstract_global_path(&access, "refl"),
                 context.final_defs(&access),
@@ -112,7 +112,7 @@ impl<'context> ModuleLowerer<'context> {
                         self.context,
                         access.duplicate_value(&definitions),
                         ReflectionBoundary {
-                            annotator: self.module_reflection.clone_core_with(&access),
+                            demand: self.module_reflection.clone_core_with(&access),
                         },
                     );
                     let resolved = match kind {

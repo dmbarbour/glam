@@ -465,9 +465,11 @@ pub(in crate::g_syntax) struct NameScope<V = Value> {
     pub(in crate::g_syntax) parent: Option<Box<NameScope<V>>>,
 }
 
+/// A module's or declared object's shared demand boundary for final
+/// `refl.*` (see `compiler_values::reflection_boundary_resolved`).
 #[derive(Debug, Clone)]
 pub(in crate::g_syntax) struct ReflectionBoundary<V> {
-    pub(in crate::g_syntax) annotator: V,
+    pub(in crate::g_syntax) demand: V,
 }
 
 /// A name root is deliberately atomic. Reusing it creates another local
@@ -525,7 +527,7 @@ impl NameScope<ResolvedRoot> {
                 .as_ref()
                 .map(|root| root.duplicate_in(access)),
             reflection: self.reflection.as_ref().map(|boundary| ReflectionBoundary {
-                annotator: boundary.annotator.duplicate_in(access),
+                demand: boundary.demand.duplicate_in(access),
             }),
             parent: self
                 .parent
@@ -574,7 +576,7 @@ impl NameScope<Value> {
         compiler_values::prepare(context.values());
         context.values().with_runtime_value_access(|access| {
             let reflection = ReflectionBoundary {
-                annotator: compiler_values::reflection_annotator_value(
+                demand: compiler_values::reflection_boundary_value(
                     context.values(),
                     context.abstract_global_path(&access, "refl"),
                     context.final_defs(&access),
@@ -626,7 +628,7 @@ impl NameScope<Value> {
                 .as_ref()
                 .map(|value| ResolvedRoot::Provided(access.duplicate_value(value))),
             reflection: self.reflection.as_ref().map(|boundary| ReflectionBoundary {
-                annotator: ResolvedRoot::Provided(access.duplicate_value(&boundary.annotator)),
+                demand: ResolvedRoot::Provided(access.duplicate_value(&boundary.demand)),
             }),
             parent: self
                 .parent

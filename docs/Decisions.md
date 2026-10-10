@@ -818,6 +818,29 @@ maps the short names used here to file names.
 - **Rule lives in:** `architecture/evaluation.md` "Lazy Producers".
 - **Recorded in:** resumable-WHNF plan W6G.1c.
 
+### One reflection boundary per module or declared object
+`reflection-boundary-shared` · 2026-10-10 · agent · accepted
+- **Context:** the g front end wrapped each module definition, and each
+  member of a declared object, as `anno refl:ensure_tasks value`. The
+  effect records the `refl.*` scanner in the module's heap state if no
+  scanner is there yet, and otherwise does nothing; but every demanded
+  definition ran it again as its own reflection task, about 98 reflection
+  steps. That was 70% of the instructions in a chain of module
+  definitions.
+- **Decision:** a module, or a declared object instance, binds one
+  boundary value, `anno refl:ensure_tasks ()`, and each wrapped value
+  becomes `seq boundary value`. The boundary still runs to completion
+  before any wrapped value is exposed, and its effect, idempotent once the
+  scanner is recorded, runs once per module or object instance.
+- **Consequences:** `chain` falls 66 to 67%, with 499 reflection steps at
+  800 definitions where it took about 78,000. A failure in the boundary is
+  cached by the shared value, so every definition behind it sees the same
+  failure. The first boundary of a module still launches the scanner,
+  about 22 M instructions in `minimal`.
+- **Rule lives in:** `agent_context/reflection.md` "Front-End and Logger
+  Integration".
+- **Recorded in:** structural overheads plan, `perf-module-definition-cost`.
+
 ### Autonomous reflection tasks publish through a managed completion promise
 `reflection-tasks-publish-via-completion-promise` · 2026-09-19 · agent · accepted
 - **Context:** reflection had been misclassified as a lazy checkpoint, with an

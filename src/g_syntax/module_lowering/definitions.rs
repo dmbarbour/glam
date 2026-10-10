@@ -250,7 +250,7 @@ fn apply_reflection_boundary(
     value: ResolvedExpr<Value>,
     boundary: &ReflectionBoundary<ResolvedRoot>,
 ) -> ResolvedExpr<Value> {
-    ResolvedExpr::apply(boundary.annotator.expr(access), [value])
+    apply_builtin_resolved(access, Builtin::Seq, [boundary.demand.expr(access), value])
 }
 
 pub(in crate::g_syntax) fn definition_target_scope_resolved(

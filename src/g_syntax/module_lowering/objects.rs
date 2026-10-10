@@ -196,12 +196,12 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
             object_reflection_guard_resolved(access, object_final_defs.expr(access)),
         )
     });
-    let reflection_annotator = reflection_guard.map(|guard| {
+    let reflection_boundary = reflection_guard.map(|guard| {
         bindings.bind(
             access,
             locals,
-            "<object-reflection-annotator>",
-            compiler_values::reflection_annotator_resolved(
+            "<object-reflection-boundary>",
+            compiler_values::reflection_boundary_resolved(
                 access,
                 guard.expr(access),
                 object_final_defs.expr(access),
@@ -222,7 +222,7 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
             object_final_defs.duplicate_in(access),
             definitions.duplicate_in(access),
             parent_scope.duplicate_in(access),
-            reflection_annotator
+            reflection_boundary
                 .as_ref()
                 .map(|root| root.duplicate_in(access)),
         );
@@ -387,7 +387,7 @@ pub(in crate::g_syntax) fn object_body_scope_resolved(
     object_final_defs: ResolvedRoot,
     object_prior_defs: ResolvedRoot,
     parent: NameScope<ResolvedRoot>,
-    reflection_annotator: Option<ResolvedRoot>,
+    reflection_boundary: Option<ResolvedRoot>,
 ) -> NameScope<ResolvedRoot> {
     let object_alias = alias
         .map(local_name_metadata)
@@ -412,7 +412,7 @@ pub(in crate::g_syntax) fn object_body_scope_resolved(
         object_alias,
         object_final_defs: Some(object_final_defs.duplicate_in(access)),
         object_prior_defs: Some(object_prior_defs),
-        reflection: reflection_annotator.map(|annotator| ReflectionBoundary { annotator }),
+        reflection: reflection_boundary.map(|demand| ReflectionBoundary { demand }),
         parent: Some(Box::new(parent)),
     }
 }

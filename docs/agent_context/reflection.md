@@ -205,9 +205,11 @@ and control flow.
 - `anno refl:Effect Target` launches lazily and exposes `Target` only after the
   effect returns unit.
 - The g front end wraps ordinary module definitions and members of named
-  declared objects with one shared demand boundary for final `refl.*`. The
-  `refl`, `meta`, and `spec` subtrees, computed roots, and expression-local
-  objects stay inert.
+  declared objects with one shared demand boundary for final `refl.*`: one
+  annotated unit per module or declared object instance, which each wrapped
+  value forces (`seq`) before exposing itself, so the boundary effect runs
+  once. The `refl`, `meta`, and `spec` subtrees, computed roots, and
+  expression-local objects stay inert.
 - Object scanner identity derives from final `spec.name`; inherited definitions
   therefore use the derived object's overridable reflection namespace.
 - A boundary transaction first records one scanner handle in the shared heap.
