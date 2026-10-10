@@ -304,6 +304,13 @@ suspended, so such values could stay unrooted edges, rooted only across a
 (`perf-poll-root-frames`); avoiding the root saves about 1,400
 instructions each.
 
+`perf-transient-root-avoidance` (2026-10-10) then removed the transient
+roots that never left one access or were never read: `countdown_800` now
+registers 100,385 roots against 134,699 allocations, and runs 8.6% fewer
+instructions. What remains carries values between accesses: the inline
+stack's lazies, the net semantic action, and results leaving the poll.
+The site shares in "Design review" were measured before that step.
+
 ### Heap context in Glam (`gc-hold-thread-context`)
 
 With one heap per thread, Glam's call chains could find their runtime from

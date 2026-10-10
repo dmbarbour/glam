@@ -7,8 +7,9 @@ Status: active, as the `perf-structural-overheads` step of the
 `perf-list-front-walk`, `perf-list-leaf-walk`, `perf-access-region-cost`,
 `perf-worker-scaling`, `perf-collection-growth`,
 `gc-one-heap-per-thread`, `perf-quantum-region`,
-`gc-bounded-collection-wait`, `perf-allocation-path` and
-`perf-root-frames`. Next: `perf-transient-root-avoidance`.
+`gc-bounded-collection-wait`, `perf-allocation-path`,
+`perf-root-frames` and `perf-transient-root-avoidance`. Next:
+`perf-list-map-growth`.
 `gc-two-level-mutator-access` and `gc-thread-local-heap-context` moved to
 [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md).
 
@@ -70,58 +71,6 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 | Coordinator claims, releases and admissions | under 2% |
 
 ## Open Steps, in Order
-
-### Transient root avoidance (`perf-transient-root-avoidance`)
-
-`perf-root-frames` found that avoiding a transient root saves about 1,400
-instructions, while rooting it in a frame saves almost nothing. Check the
-remaining hot root sites for roots that never need to leave the access that
-creates them, as `follow_forwards` did: `NetWhnfMachine::poll_in`, the WHNF
-shell's deferred requests (`reduce_semantic_shell`),
-`prepare_copy_source`, and the checkpoint polls' completed values, which a
-parent forcing the lazy inline usually consumes at once. Roots carried
-between accesses of one poll stay until explicit holds can prove no
-safepoint between them (`gc-hold-transient-roots`).
-
-Findings 2026-10-10, from sampled registration sites on `countdown_800`
-(debug build, every 64th registration):
-
-| Site | Share | Root carries |
-| --- | ---: | --- |
-| WHNF shell deferred lazy request (`whnf.rs` `reduce_semantic_shell`) | 28% | a lazy to `offer_inline` |
-| net semantic action (`eval/net.rs`, `NetSemanticAction`) | 19% | a net into `drive_net_semantic_action` |
-| `follow_forwards` uncached end | 16% | a lazy to `offer_inline` |
-| `EvaluatorStepContext::root_value` | 14% | a poll result |
-| `regional_status_poll` ready value | 7% | a poll result |
-| `prepare_copy_source` | 7% | a net into a copy |
-
-Correction (2026-10-10 review): the claim recorded here that every site
-carries its value across accesses, so no local fix applies, was wrong. A
-review of each site's flow found roots that never leave one access or are
-never read (each to be confirmed as it is fixed):
-- `prepare_copy_source` (7%): created and consumed within one access in
-  both production paths (`finish_core_call_progress` into
-  `CoreCallClaim::finish`, and the callable checkpoint's `finish`).
-- Inline children's completion values: `EvaluatorStepContext::root_value`
-  roots a completed inline lazy's value, which the route loop drops
-  unread on popping the child. Base routes return it as a durable wait
-  terminal, so it stays there.
-- The lazy route's ready path: four accesses in one poll (create, project,
-  cache, re-root) could be one.
-- Tail calls root the same lazy twice: the WHNF request's root, then
-  `follow_forwards`' own.
-- `forward_target().is_some()` probes root a target only to test it;
-  `forward_target_edge()` suffices.
-
-Estimated at 20–28% of transient roots, about 2% of `countdown_800`.
-These are this step's work.
-
-The rest carries values between accesses of one poll: the inline stack's
-lazies and the net semantic action. Avoiding those roots needs a
-compile-time or runtime proof that no safepoint lies between the accesses,
-which moved to [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md)
-("Design review"). The hold-scoped edge proposal recorded here earlier is
-superseded there.
 
 ### `list_map` growth (`perf-list-map-growth`)
 
@@ -277,6 +226,57 @@ and help only programs with parallel work, so this comes last.
   Allocating less is the better lever.
 
 ## Done
+
+- **Transient root avoidance** (`perf-transient-root-avoidance`),
+  2026-10-10.
+  - **Sites.** Sampling registrations on `countdown_800` (debug build,
+    every 64th) found the hot transient roots:
+
+    | Site | Share | Root carries |
+    | --- | ---: | --- |
+    | WHNF shell deferred lazy request (`reduce_semantic_shell`) | 28% | a lazy to `offer_inline` |
+    | net semantic action (`NetSemanticAction`) | 19% | a net into `drive_net_semantic_action` |
+    | `follow_forwards` uncached end | 16% | a lazy to `offer_inline` |
+    | `EvaluatorStepContext::root_value` | 14% | a poll result |
+    | `regional_status_poll` ready value | 7% | a poll result |
+    | `prepare_copy_source` | 7% | a net into a copy |
+
+  - **A wrong first conclusion.** It was first recorded that every site
+    carries its value across accesses, so no local fix applies. A review
+    of each site's flow found roots that never leave one access or are
+    never read; all were confirmed and removed:
+    - `prepare_copy_source`: created and consumed within one access, so
+      a prepared copy source now holds a net edge bound to the access
+      scope (`bef15b7c`).
+    - Inline children's completions: the route loop popped the child
+      without reading its root; a child now marks itself completed and
+      its parent reads the lazy's cache. The route's base still roots
+      its result for its waiters.
+    - The lazy checkpoint's ready path: its value was rooted, projected,
+      cached and rooted again over three accesses; it is now cached in
+      the access that computed it.
+    - Tail forwards reuse the root of the lazy they forward to, and
+      forward probes read edges (`afe08862`).
+  - **Results** (3 runs each, against `8d2045e6`). A value root of
+    anything but an integer also allocates a managed node holding the
+    value, so allocations fell with roots:
+
+    | Workload | M instr | Change | Roots | Allocations |
+    | --- | ---: | ---: | ---: | ---: |
+    | `countdown_800` | 2,011 to 1,838 | −8.6% | 194,280 to 100,385 | 180,860 to 134,699 |
+    | `sum_800` | 2,249 to 2,069 | −8.0% | 224,635 to 119,561 | 192,059 to 145,900 |
+    | `chain_800` | 4,904 to 4,644 | −5.3% | 389,162 to 257,741 | 394,697 to 338,280 |
+    | `hello_elf` | 3,122 to 2,971 | −4.8% | 213,543 to 123,459 | 187,103 to 146,719 |
+    | `list_map_2000` | 2,689 to 2,669 | −0.7% | 37,470 to 26,253 | 33,560 to 32,976 |
+
+    CPU time fell similarly where measurable (`countdown_800` 431 to
+    390 ms, `sum_800` 508 to 472 ms).
+  - **Left.** The inline stack's lazies, the net semantic action, the
+    base route's result and poll results carry values between accesses
+    or out of the poll. Avoiding those roots needs a proof that no
+    safepoint lies between the accesses: the design review in
+    [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md), which
+    supersedes the hold-scoped edges first proposed here.
 
 - **Root frames** (`perf-root-frames`), 2026-10-10. Investigated as a
   performance change separately from concurrent collection (maintainer).
