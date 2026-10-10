@@ -1188,12 +1188,22 @@ mod tests {
         }
 
         boundary_tx.send(()).unwrap();
-        assert_eq!(
-            driver.join().unwrap(),
-            1,
-            "the next quantum must begin after the waiting collection"
-        );
+        let observed = driver.join().unwrap();
         assert_eq!(collector.join().unwrap().epoch(), 1);
+        // Aggressive verification counts any earlier allocation as pressure,
+        // so a driver that finds the waiting collection already done may
+        // start another.
+        if cfg!(feature = "aggressive-gc-verification") {
+            assert!(
+                observed >= 1,
+                "the next quantum must begin after the waiting collection"
+            );
+        } else {
+            assert_eq!(
+                observed, 1,
+                "the next quantum must begin after the waiting collection"
+            );
+        }
     }
 
     #[test]
