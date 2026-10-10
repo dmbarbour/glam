@@ -182,11 +182,11 @@ gains this consequence when it lands.
      `perf-scaling-workloads`, `perf-list-front-walk`,
      `perf-list-leaf-walk`, `perf-access-region-cost`,
      `perf-worker-scaling`, `perf-collection-growth`,
-     `gc-one-heap-per-thread`, `perf-quantum-region` and
-     `gc-bounded-collection-wait`. The scheduler round trips were
+     `gc-one-heap-per-thread`, `perf-quantum-region`,
+     `gc-bounded-collection-wait` and `perf-allocation-path`. The
+     scheduler round trips were
      `perf-evaluation-recursion`.
-   - *Open, in order:* `perf-allocation-path`, `perf-root-frames`,
-     `perf-list-map-growth`,
+   - *Open, in order:* `perf-root-frames`, `perf-list-map-growth`,
      `perf-lowering-free-bindings`,
      `perf-interface-demand-walk`, `perf-module-definition-cost`,
      `perf-runtime-net-attach`,

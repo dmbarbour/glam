@@ -6,8 +6,9 @@ Status: active, as the `perf-structural-overheads` step of the
 `perf-net-builder-wired-ports`, `perf-scaling-workloads`,
 `perf-list-front-walk`, `perf-list-leaf-walk`, `perf-access-region-cost`,
 `perf-worker-scaling`, `perf-collection-growth`,
-`gc-one-heap-per-thread`, `perf-quantum-region` and
-`gc-bounded-collection-wait`. Next: `perf-allocation-path`.
+`gc-one-heap-per-thread`, `perf-quantum-region`,
+`gc-bounded-collection-wait` and `perf-allocation-path`. Next:
+`perf-root-frames`.
 `gc-two-level-mutator-access` and `gc-thread-local-heap-context` moved to
 [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md).
 
@@ -70,45 +71,6 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 
 ## Open Steps, in Order
 
-### Allocation and rooting path (`perf-allocation-path`)
-
-Holistic V1, listed in the value-representation plan's V-1 prework, plus
-the root registrations measured since:
-- **Class lookup per allocation.** Every allocator acquisition locks the
-  process-wide metadata registry (`metadata_for`), derives the run
-  geometry again, and locks the heap's data mutex (`discover_class`).
-  These three are about 4.4% of `chain_400`'s samples.
-- **Root registration.** Each registered root allocates an
-  `Arc<RootCell>`, and `countdown_400` registers about 100,000.
-
-Remedies: a per-family static or per-thread class cache keyed by metadata
-address, shared by allocators and roots; register fewer transient roots
-(code inside one access region can use edges); and pool `RootCell`s.
-On 2026-10-09 class discovery was still about 4% of `countdown_800`
-(`discover_class_with`, `RunGeometry::derive`, `metadata_for_with`).
-
-Progress:
-- **Class cache, done.** Each thread's heap cache remembers resolved
-  classes by type, so a remembered type's allocator takes neither the
-  metadata registry, the geometry derivation, nor the heap's data mutex.
-  Instructions fell 4.7% (`countdown_800`), 4.4% (`sum_800`), 4.2%
-  (`chain_800`), 4.0% (`append_walk_800`), 3.2% (`hello_elf`) and 0.7%
-  (`list_map_2000`). The cache may later move into a hold
-  (`gc-hold-class-cache`).
-- **Root registration**, partly done. `countdown_800` registers 211,594
-  roots for 182,557 allocations; registering is about 7% of its samples
-  and scanning roots at collection 1.6%. Within registration, about a
-  third is validation (resolving the slot under the heap's data mutex),
-  and much of the rest the `Arc<RootCell>` and registry growth. A root's
-  metadata now comes from the class cache rather than the process-wide
-  registry (instructions 0.3 to 0.4% lower, and one global mutex off a
-  hot path). Most roots are transient: the evaluator roots a value only to
-  carry it from one access to the next within a poll (`forward_target`,
-  `NetWhnfMachine::poll_in`, WHNF shell reduction, checkpoint polls,
-  `prepare_copy_source`). A hold that proves no safepoint intervenes would
-  make them unnecessary, so that lever belongs to
-  [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md).
-
 ### Root frames (`perf-root-frames`)
 
 Investigate a root frame as a performance change, separately from
@@ -124,7 +86,8 @@ live across polls in machine state, such as the checkpoint polls'
 `root_managed_value` (about 28% of registrations), which a frame per
 machine could hold. Measure registrations, root scanning at collection,
 and the granularity trade: one frame traced whole against roots
-registered and dropped one by one.
+registered and dropped one by one. Pooling `RootCell`s, the remaining
+remedy from `perf-allocation-path`, belongs here too.
 
 ### `list_map` growth (`perf-list-map-growth`)
 
@@ -265,6 +228,29 @@ and help only programs with parallel work, so this comes last.
   Allocating less is the better lever.
 
 ## Done
+
+- **Allocation and rooting path** (`perf-allocation-path`), 2026-10-10.
+  - **Found** (holistic V1 and later profiles): every allocator
+    acquisition locked the process-wide metadata registry, derived the run
+    geometry again and locked the heap's data mutex to find its class,
+    about 4% of `countdown_800`; and roots cost more than allocations.
+  - **Class cache.** Each thread's heap cache remembers resolved classes by
+    type, so a remembered type's allocator takes neither the registry, the
+    geometry derivation nor the data mutex. Instructions fell 4.7%
+    (`countdown_800`), 4.4% (`sum_800`), 4.2% (`chain_800`), 4.0%
+    (`append_walk_800`), 3.2% (`hello_elf`) and 0.7% (`list_map_2000`).
+  - **Root metadata** comes from the same cache, which removes one global
+    mutex from root registration (instructions 0.3 to 0.4% lower).
+  - **Roots, measured.** `countdown_800` registers 211,594 roots for
+    182,557 allocations; registering is about 7% of its samples and the
+    collector's root scan 1.6%. Within registration, about a third is
+    validation under the data mutex, and much of the rest the
+    `Arc<RootCell>` and registry growth. Most roots carry a value between
+    two accesses of one poll (`forward_target`, `NetWhnfMachine::poll_in`,
+    WHNF shell reduction, checkpoint polls, `prepare_copy_source`). Those
+    move to [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md)
+    (`gc-hold-transient-roots`); roots held in machine state across
+    polls, and `RootCell` pooling, move to `perf-root-frames`.
 
 - **Bounded collection wait** (`gc-bounded-collection-wait`), 2026-10-09.
   - **Design** (maintainer): hold back new entrants at the quantum
