@@ -14,8 +14,10 @@ use super::model::*;
 mod cursor;
 mod graph;
 mod rewrite;
+mod whole_copy;
 
 pub(crate) use cursor::PreparedCopySource;
+pub(crate) use whole_copy::WholeCopy;
 
 #[cfg(test)]
 mod tests;
@@ -639,12 +641,14 @@ pub(crate) trait RuntimeNetMutationGateway<S: NetSpecialization>:
 /// The set deliberately describes representation locations rather than
 /// cloning payloads. A collector policy which needs a side resolves these
 /// addresses while the runtime-net mutex still holds the corresponding
-/// pre- or post-write state. Two node slots cover every current rewrite: an
+/// pre- or post-write state. Two node slots cover every rewrite: an
 /// operator completion removes two payload nodes, while duplication installs
-/// at most two payload nodes.
+/// at most two payload nodes. A whole copy installs a run of fresh nodes,
+/// the first and how many.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct RuntimeNetEdgeSet {
     nodes: [Option<NodeId>; 2],
+    fresh: Option<(NodeId, usize)>,
     copy: Option<CopyId>,
     active: Option<ActivePairKey>,
     obligation: Option<NodeId>,
@@ -668,6 +672,13 @@ impl RuntimeNetEdgeSet {
     fn copy(copy: CopyId) -> Self {
         Self {
             copy: Some(copy),
+            ..Self::default()
+        }
+    }
+
+    fn fresh(first: NodeId, count: usize) -> Self {
+        Self {
+            fresh: Some((first, count)),
             ..Self::default()
         }
     }
@@ -699,7 +710,10 @@ impl RuntimeNetEdgeSet {
         runtime: &RuntimeNet<S>,
         visit: &mut impl FnMut(RuntimeNetPayload<'_, S>),
     ) {
-        for node in self.nodes.into_iter().flatten() {
+        let fresh = self.fresh.into_iter().flat_map(|(first, count)| {
+            (0..count as u64).map(move |offset| NodeId::from_zero_based(first.get() + offset))
+        });
+        for node in self.nodes.into_iter().flatten().chain(fresh) {
             match runtime.node(node) {
                 Some(RuntimeNode::Data(data)) => visit(RuntimeNetPayload::Data(data)),
                 Some(RuntimeNode::Operator(operator)) => {
@@ -2300,14 +2314,21 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         }
     }
 
+    /// `whole` is how many nodes a whole copy installs, or `None` for a copy
+    /// through a remote cursor (see [`PreparedCopySource::whole_len`]).
     pub(crate) fn resume_call_with_copy_edge_transition(
         &self,
         call: Call,
+        whole: Option<usize>,
     ) -> RuntimeNetEdgeTransition {
-        RuntimeNetEdgeTransition::new(
-            RuntimeNetEdgeSet::node(call.data),
-            RuntimeNetEdgeSet::copy(CopyId(self.next_copy_id)),
-        )
+        RuntimeNetEdgeTransition::new(RuntimeNetEdgeSet::node(call.data), self.copy_edges(whole))
+    }
+
+    fn copy_edges(&self, whole: Option<usize>) -> RuntimeNetEdgeSet {
+        match whole {
+            Some(count) => RuntimeNetEdgeSet::fresh(self.next_node(0), count),
+            None => RuntimeNetEdgeSet::copy(CopyId(self.next_copy_id)),
+        }
     }
 
     pub(crate) fn resume_call_with_operator_edge_transition(
@@ -2370,11 +2391,9 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     pub(crate) fn resume_checkpoint_with_copy_edge_transition(
         &self,
         _call: CallableCheckpointCall,
+        whole: Option<usize>,
     ) -> RuntimeNetEdgeTransition {
-        RuntimeNetEdgeTransition::new(
-            RuntimeNetEdgeSet::default(),
-            RuntimeNetEdgeSet::copy(CopyId(self.next_copy_id)),
-        )
+        RuntimeNetEdgeTransition::new(RuntimeNetEdgeSet::default(), self.copy_edges(whole))
     }
 
     pub(crate) fn resume_checkpoint_with_operator_edge_transition(

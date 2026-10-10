@@ -75,14 +75,29 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
     }
 }
 
-pub(crate) struct PreparedCopySource<S: NetSpecialization> {
-    source: S::RuntimeSource,
-    remote: Port,
+/// A copy prepared from its source, to install under the target's lock.
+pub(crate) enum PreparedCopySource<S: NetSpecialization> {
+    /// A copy through a remote cursor standing for the source port
+    /// `remote`, node by node, sharing the evaluation the source has left.
+    Cursor {
+        source: S::RuntimeSource,
+        remote: Port,
+    },
+    /// A source with no evaluation left, installed whole.
+    Whole(Box<WholeCopy<S>>),
 }
 
 impl<S: NetSpecialization> PreparedCopySource<S> {
     pub(crate) fn new(source: S::RuntimeSource, remote: Port) -> Self {
-        Self { source, remote }
+        Self::Cursor { source, remote }
+    }
+
+    /// How many nodes a whole copy installs, or `None` for a cursor copy.
+    pub(crate) fn whole_len(&self) -> Option<usize> {
+        match self {
+            Self::Cursor { .. } => None,
+            Self::Whole(copy) => Some(copy.len()),
+        }
     }
 }
 
@@ -155,12 +170,21 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         RuntimeNetEdgeTransition::new(leaving, adding)
     }
 
+    /// Starts one logical copy through a remote cursor and returns that
+    /// initially unwired cursor.
+    #[cfg(test)]
+    pub fn begin_copy(&mut self, prepared: PreparedCopySource<S>) -> NodeId {
+        let PreparedCopySource::Cursor { source, remote } = prepared else {
+            panic!("a whole copy has no remote cursor");
+        };
+        self.begin_cursor_copy(source, remote)
+    }
+
     /// Starts one logical copy and returns its initially unwired remote cursor.
     ///
     /// Source inspection has already happened in `prepare_copy_source`, so
     /// this operation may safely run while the target net lock is held.
-    pub fn begin_copy(&mut self, prepared: PreparedCopySource<S>) -> NodeId {
-        let PreparedCopySource { source, remote } = prepared;
+    fn begin_cursor_copy(&mut self, source: S::RuntimeSource, remote: Port) -> NodeId {
         let copy = CopyId(self.next_copy_id);
         self.next_copy_id = self
             .next_copy_id
@@ -207,9 +231,21 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             .signed(Port::principal(call.bind))
             .expect("a claimed checkpoint call keeps its bind wired");
         assert!(self.take_empty_claimed_checkpoint(call));
-        let cursor = self.begin_copy(source);
-        self.bind_reference(Port::principal(cursor), bind);
-        cursor
+        self.install_copy(source, bind)
+    }
+
+    /// Installs a prepared copy with its root bound to `reference`, and
+    /// returns the node at its root: the copy's remote cursor, or the root
+    /// node of a whole copy.
+    fn install_copy(&mut self, prepared: PreparedCopySource<S>, reference: SignedPort) -> NodeId {
+        match prepared {
+            PreparedCopySource::Cursor { source, remote } => {
+                let cursor = self.begin_cursor_copy(source, remote);
+                self.bind_reference(Port::principal(cursor), reference);
+                cursor
+            }
+            PreparedCopySource::Whole(copy) => self.install_whole_copy(*copy, reference),
+        }
     }
 
     pub(in crate::interaction_net::runtime) fn attach_call_to_copy(
@@ -232,9 +268,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             Some(Port::principal(call.data))
         );
         assert!(matches!(self.remove_node(call.data), RuntimeNode::Data(_)));
-        let cursor = self.begin_copy(source);
-        self.bind_reference(Port::principal(cursor), bind);
-        cursor
+        self.install_copy(source, bind)
     }
 
     /// Completes applicable lowering by fusing the inevitable unary-function
@@ -679,7 +713,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         let node = match node {
             RuntimeNode::Bind => RuntimeNode::Bind,
             RuntimeNode::Fan { identity } => RuntimeNode::Fan {
-                identity: self.translate_fan_identity(&mut state, &identity),
+                identity: self.translate_fan_identity(&mut state.fan_sites, &identity),
             },
             RuntimeNode::Erase => RuntimeNode::Erase,
             RuntimeNode::Data(data) => RuntimeNode::Data(data),
@@ -790,12 +824,14 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         CursorProgress::Joined
     }
 
+    /// Gives one copy's fan identity fresh sites, recording each source
+    /// site's in `fan_sites` so the copy maps it the same way throughout.
     pub(in crate::interaction_net::runtime) fn translate_fan_identity(
         &mut self,
-        state: &mut CopyState<S>,
+        fan_sites: &mut TrustedHashMap<FanSite, FanSite>,
         identity: &FanIdentity,
     ) -> FanIdentity {
-        let site = *state.fan_sites.entry(identity.site).or_insert_with(|| {
+        let site = *fan_sites.entry(identity.site).or_insert_with(|| {
             let site = FanSite(self.next_fan_site);
             self.next_fan_site = self
                 .next_fan_site
@@ -807,7 +843,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             .context
             .iter()
             .map(|step| DuplicationStep {
-                through: self.translate_fan_identity(state, &step.through),
+                through: self.translate_fan_identity(fan_sites, &step.through),
                 branch: step.branch,
             })
             .collect::<Vec<_>>();

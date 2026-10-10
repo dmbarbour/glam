@@ -718,9 +718,10 @@ impl CoreRuntimeNetAccess<'_, '_> {
         source: CorePreparedCopySource<'_>,
     ) {
         let source = source.into_inner();
+        let whole = source.whole_len();
         self.runtime.cell().with_edge_mut_via(
             &self.runtime,
-            |runtime| runtime.resume_call_with_copy_edge_transition(call),
+            |runtime| runtime.resume_call_with_copy_edge_transition(call, whole),
             |runtime| runtime.resume_claimed_call_with_copy(call, source),
         );
         #[cfg(feature = "glam-prof")]
@@ -856,9 +857,10 @@ impl CoreRuntimeNetAccess<'_, '_> {
         source: CorePreparedCopySource<'_>,
     ) {
         let source = source.into_inner();
+        let whole = source.whole_len();
         self.runtime.cell().with_edge_mut_via(
             &self.runtime,
-            |runtime| runtime.resume_checkpoint_with_copy_edge_transition(call),
+            |runtime| runtime.resume_checkpoint_with_copy_edge_transition(call, whole),
             |runtime| runtime.resume_claimed_checkpoint_with_copy(call, source),
         );
         #[cfg(feature = "glam-prof")]
@@ -1134,28 +1136,35 @@ impl CoreRuntimeNetAccess<'_, '_> {
 
 impl<'scope> CoreRuntimeNetAccess<'_, 'scope> {
     /// Prepares this net as the source of a copy installed in the same
-    /// access.
+    /// access: whole if no evaluation is left in it, since a copy then has
+    /// nothing to share, and otherwise through a remote cursor.
     pub(crate) fn prepare_copy_source(&self) -> CorePreparedCopySource<'scope> {
+        let copy = match self.runtime.with(|runtime| runtime.whole_copy(self)) {
+            Some(copy) => PreparedCopySource::Whole(Box::new(copy)),
+            None => PreparedCopySource::new(
+                self.owner.duplicate_in(self.values),
+                self.runtime.with(RuntimeNet::exposed),
+            ),
+        };
         CorePreparedCopySource {
-            source: self.owner.duplicate_in(self.values),
-            remote: self.runtime.with(RuntimeNet::exposed),
+            copy,
             _access: std::marker::PhantomData,
         }
     }
 }
 
 /// A copy source prepared inside one access for a copy installed in that
-/// same access. Its net edge does not root the source: no collection runs
-/// inside an access, and the copy layer that consumes it traces the edge.
+/// same access. Its net edge, or a whole copy's payloads, do not root what
+/// they reach: no collection runs inside an access, and the copy layer that
+/// consumes them traces them.
 pub(crate) struct CorePreparedCopySource<'scope> {
-    source: CoreRuntimeNet,
-    remote: Port,
+    copy: PreparedCopySource<CoreSpecialization>,
     _access: std::marker::PhantomData<&'scope ()>,
 }
 
 impl CorePreparedCopySource<'_> {
     fn into_inner(self) -> PreparedCopySource<CoreSpecialization> {
-        PreparedCopySource::new(self.source, self.remote)
+        self.copy
     }
 }
 
@@ -1174,8 +1183,10 @@ impl TestPreparedCopySource {
         target: &RuntimeValueAccess<'scope>,
     ) -> CorePreparedCopySource<'scope> {
         CorePreparedCopySource {
-            source: CoreRuntimeNet::from_root(&self.root, target),
-            remote: self.remote,
+            copy: PreparedCopySource::new(
+                CoreRuntimeNet::from_root(&self.root, target),
+                self.remote,
+            ),
             _access: std::marker::PhantomData,
         }
     }
@@ -1428,7 +1439,7 @@ impl CoreActivePairStep {
 // These pin the current observer-free representation sizes, not ABI
 // promises. A frontier observation is one traceable net edge plus
 // only its scalar operation snapshot; a prepared copy source is one net
-// edge plus its exposed port.
+// edge plus its exposed port, or one boxed whole copy.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 const _: () = {
     assert!(std::mem::size_of::<CorePreparedCopySource<'static>>() == 16);
@@ -1500,13 +1511,16 @@ mod tests {
         let CoreRuntimeNet { edge } = runtime;
         let _: &ManagedCoreNetEdge = edge;
 
-        let CorePreparedCopySource {
-            source,
-            remote,
-            _access,
-        } = prepared;
-        let _: &CoreRuntimeNet = source;
-        let _: &Port = remote;
+        let CorePreparedCopySource { copy, _access } = prepared;
+        match copy {
+            PreparedCopySource::Cursor { source, remote } => {
+                let _: &CoreRuntimeNet = source;
+                let _: &Port = remote;
+            }
+            PreparedCopySource::Whole(copy) => {
+                let _: &crate::interaction_net::WholeCopy<CoreSpecialization> = copy;
+            }
+        }
 
         let CoreNetContention { inner } = contention;
         let _: &NetContention = inner;
@@ -1790,6 +1804,41 @@ mod tests {
         assert_eq!(records[1].leaving_edges(), 1);
         assert_eq!(records[1].adding_edges(), 1);
         drop((old_root, new_root, source, copy_call, operator_call));
+    }
+
+    /// A source with no evaluation left is copied whole, so the copy reports
+    /// each payload it installs rather than an edge to the source.
+    #[test]
+    fn whole_copies_report_each_copied_payload() {
+        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
+        let (callable_root, callable) = values.rooted_error_lazy_for_test("callable");
+        let (data_root, data) = values.rooted_error_lazy_for_test("copied data");
+        let (operator_root, operator) = values.rooted_error_lazy_for_test("copied operator");
+
+        // A bind holding data and an operator whose result is erased: no
+        // active pair is left.
+        let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
+        let [root, argument, result] = builder.bind();
+        let data = builder.data(Value::Lazy(data));
+        let [input, output] = builder.operator(CoreOperator::Applicable(Value::Lazy(operator)));
+        let erase = builder.push(crate::interaction_net::Node::Erase);
+        builder.wire(argument, data);
+        builder.wire(result, input);
+        builder.wire(output, Port::principal(erase));
+        let source = values.instantiate_core_net(&builder.finish(root));
+
+        let (caller, call) = claimed_call(&values, Value::Lazy(callable));
+        let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
+        caller.with_test_access(&values, |runtime| {
+            let prepared = source.access(runtime.values).prepare_copy_source();
+            assert_eq!(prepared.copy.whole_len(), Some(4));
+            runtime.resume_claimed_call_with_copy(call, prepared);
+        });
+        let records = probe.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].leaving_edges(), 1);
+        assert_eq!(records[0].adding_edges(), 2);
+        drop((callable_root, data_root, operator_root, source, caller));
     }
 
     #[cfg(feature = "glam-prof")]

@@ -244,20 +244,37 @@ fn reduce_randomly(
 /// port: nodes in breadth-first order from the interface, each with its kind
 /// and the canonical peer of every port, plus a count of every node kind.
 fn readback(runtime: &RuntimeNet<i32>) -> (Vec<String>, BTreeMap<String, usize>) {
-    let kind = |node: &RuntimeNode<i32>| match node {
+    let (lines, _) = reached(runtime, true);
+    let mut counts = BTreeMap::new();
+    for entry in runtime.nodes.values() {
+        *counts.entry(node_kind(&entry.node, true)).or_default() += 1;
+    }
+    (lines, counts)
+}
+
+fn node_kind(node: &RuntimeNode<i32>, fan_identity: bool) -> String {
+    match node {
         RuntimeNode::Bind => "Bind".to_owned(),
-        RuntimeNode::Fan { identity } => format!("Fan{identity:?}"),
+        RuntimeNode::Fan { identity } if fan_identity => format!("Fan{identity:?}"),
+        RuntimeNode::Fan { .. } => "Fan".to_owned(),
         RuntimeNode::Erase => "Erase".to_owned(),
         RuntimeNode::Data(value) => format!("Data({value})"),
         RuntimeNode::Operator(_) => "Operator".to_owned(),
         RuntimeNode::Interface => "Interface".to_owned(),
         other => format!("{other:?}"),
-    };
+    }
+}
+
+/// The readback lines of the component reachable from the exposed port,
+/// fan identities included if `fan_identity`, and its nodes in that order.
+fn reached(runtime: &RuntimeNet<i32>, fan_identity: bool) -> (Vec<String>, Vec<NodeId>) {
     let start = runtime.exposed().node();
     let mut order = HashMap::from([(start, 0)]);
     let mut queue = VecDeque::from([start]);
     let mut lines = Vec::new();
+    let mut nodes = Vec::new();
     while let Some(node) = queue.pop_front() {
+        nodes.push(node);
         let entry = runtime.node(node).expect("a reached node exists");
         let mut peers = Vec::new();
         for index in 0..entry.port_count() {
@@ -271,13 +288,9 @@ fn readback(runtime: &RuntimeNet<i32>) -> (Vec<String>, BTreeMap<String, usize>)
                 (id, peer.index())
             }));
         }
-        lines.push(format!("{} {peers:?}", kind(entry)));
+        lines.push(format!("{} {peers:?}", node_kind(entry, fan_identity)));
     }
-    let mut counts = BTreeMap::new();
-    for entry in runtime.nodes.values() {
-        *counts.entry(kind(&entry.node)).or_default() += 1;
-    }
-    (lines, counts)
+    (lines, nodes)
 }
 
 #[test]
@@ -305,6 +318,73 @@ fn random_polarized_nets_reduce_to_one_normal_form_in_any_order() {
     assert!(
         normalized > 100,
         "too few generated nets normalized: {normalized}"
+    );
+}
+
+/// A net with no evaluation left copies whole: the copy reads back as its
+/// source does, apart from fan sites, which map one to one onto fresh ones.
+/// A net with an active pair left, here an inert call, copies through a
+/// cursor instead.
+#[test]
+fn normalized_random_nets_copy_whole_as_they_read_back() {
+    let mut generator = Seeded(0x0C09_1E5E);
+    let (mut whole, mut active) = (0, 0);
+    for _ in 0..200 {
+        let size = 2 + generator.below(24);
+        let template = random_plan(&mut generator, size)
+            .finish()
+            .expect("a generated net is polarized and connected");
+        let mut source = template.instantiate();
+        let mut random = Seeded(generator.next());
+        if reduce_randomly(&mut source, &mut random, 400).is_none() {
+            continue;
+        }
+        let copy = source.whole_copy(&DIRECT_RUNTIME_NET_MUTATION_GATEWAY);
+        if !source.active.is_empty() {
+            assert!(
+                copy.is_none(),
+                "a net with an active pair copies through a cursor"
+            );
+            active += 1;
+            continue;
+        }
+        let (source_lines, source_nodes) = reached(&source, false);
+        // The interface is not copied.
+        let Some(copy) = copy else {
+            assert!(
+                source_nodes.len() - 1 > 64,
+                "a small inert net copies whole"
+            );
+            continue;
+        };
+        assert_eq!(copy.len(), source_nodes.len() - 1);
+
+        let mut target = RuntimeNet::<i32>::empty();
+        let interface = target.add_node(RuntimeNode::Interface);
+        let anchor = Port::auxiliary(interface, 1);
+        target.install_whole_copy(copy, SignedPort::new(anchor, Sign::Consumes));
+        target.exposed = Some(anchor);
+        target.check_invariants();
+        let (copy_lines, copy_nodes) = reached(&target, false);
+        assert_eq!(copy_lines, source_lines);
+
+        let mut sites = BTreeMap::new();
+        for (source_node, copy_node) in source_nodes.iter().zip(&copy_nodes) {
+            if let (
+                Some(RuntimeNode::Fan { identity: from }),
+                Some(RuntimeNode::Fan { identity: to }),
+            ) = (source.node(*source_node), target.node(*copy_node))
+            {
+                assert_eq!(*sites.entry(from.site).or_insert(to.site), to.site);
+            }
+        }
+        let fresh = sites.values().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(fresh.len(), sites.len(), "fan sites map one to one");
+        whole += 1;
+    }
+    assert!(
+        whole > 120 && active > 20,
+        "copied {whole} whole, {active} active"
     );
 }
 

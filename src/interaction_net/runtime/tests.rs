@@ -396,16 +396,18 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
 
     let RuntimeNetEdgeSet {
         nodes,
+        fresh,
         copy,
         active,
         obligation,
     } = edge_set;
     let _: (
         &[Option<NodeId>; 2],
+        &Option<(NodeId, usize)>,
         &Option<CopyId>,
         &Option<ActivePairKey>,
         &Option<NodeId>,
-    ) = (nodes, copy, active, obligation);
+    ) = (nodes, fresh, copy, active, obligation);
     let RuntimeNetEdgeTransition { leaving, adding } = transition;
     let _: (&RuntimeNetEdgeSet, &RuntimeNetEdgeSet) = (leaving, adding);
     let _edge_transition_cycle = RuntimeCycleEvidence::EdgeFree;
@@ -1327,6 +1329,33 @@ fn interface_demand_poll_ends_at_a_cycle_without_a_pair() {
             "lead {lead}, cycle {cycle}"
         );
     }
+}
+
+/// A fan tree whose leaves are erased has no evaluation left, so it copies
+/// whole up to the size limit; past it, or while the net is itself copying
+/// another, it copies through a cursor.
+#[test]
+fn only_small_nets_with_no_evaluation_left_copy_whole() {
+    let fan_tree = |leaves: usize| {
+        let mut builder = NetBuilder::<()>::new();
+        let tree = builder.copy(leaves);
+        for leaf in tree.outputs {
+            let erase = builder.push(Node::Erase);
+            builder.wire(leaf, Port::principal(erase));
+        }
+        builder.finish(tree.input).instantiate()
+    };
+    let whole = |net: &RuntimeNet<()>| {
+        net.whole_copy(&DIRECT_RUNTIME_NET_MUTATION_GATEWAY)
+            .map(|copy| copy.len())
+    };
+    // A tree of `n` leaves has `n - 1` fans.
+    assert_eq!(whole(&fan_tree(32)), Some(63));
+    assert_eq!(whole(&fan_tree(33)), None);
+
+    let source = SharedRuntimeNet::new(fan_tree(2));
+    let (copying, _) = RuntimeNet::test_copy_layer_from(source.prepare_copy_source());
+    assert_eq!(whole(&copying), None);
 }
 
 /// Rewrites at the far end of a long chain move the active pair toward the

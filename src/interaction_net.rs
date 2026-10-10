@@ -34,7 +34,7 @@ pub(crate) use runtime::{
     StuckReason,
 };
 #[cfg(test)]
-pub(crate) use runtime::{RuntimeNetRevisions, SharedRuntimeNet};
+pub(crate) use runtime::{RuntimeNetRevisions, SharedRuntimeNet, WholeCopy};
 
 #[cfg(test)]
 pub(crate) use model::{Node, RuntimeNode};

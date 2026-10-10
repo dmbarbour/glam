@@ -628,6 +628,39 @@ maps the short names used here to file names.
 - **Rule lives in:** `InterfaceRoute` and `RuntimeNet::walk_interface_route`.
 - **Recorded in:** structural overheads plan, `perf-interface-route-ownership`.
 
+### A source with no evaluation left is copied whole
+`reduced-sources-copy-whole` · 2026-10-10 · maintainer · accepted
+- **Context:** a call to a net callable copied the callable's net through
+  a remote cursor, node by node, so the copy shared whatever evaluation
+  the source had left. Nearly every source had none: in 97 to 99% of
+  cursor inspections the source had no active pair, copy or cursor
+  obligation, and such sources averaged about five nodes. The maintainer
+  sees this as the first case of a direction for interaction nets:
+  tracking chunks to materialize together, based on partial
+  normalization. It starts from an obviously safe subset.
+- **Decision:**
+  - A source with no active pair, copy, cursor obligation or callable
+    checkpoint, and at most 64 nodes reachable from its interface, is
+    captured under its own lock when the copy is prepared, and installed
+    under the target's in one transition: the same nodes and wiring, with
+    payloads duplicated and fan sites translated to fresh ones for the
+    copy, as a cursor copy would end.
+  - Nothing in such a net can reduce, and only its interface leads out,
+    so the capture is the copy a cursor would make.
+  - Any other source still copies through a cursor.
+  - The size limit bounds the work done under the source's lock and the
+    copying of parts a caller may never demand.
+- **Consequences:**
+  - A whole copy reports its installed payloads to the collector as a run
+    of fresh nodes (`RuntimeNetEdgeSet`), and the target keeps no edge to
+    the source.
+  - Remote cursors now serve sources with evaluation left, and copies
+    begun before their source finished reducing. What remains on them
+    measures what a general chunking scheme must cover.
+- **Rule lives in:** `RuntimeNet::whole_copy`
+  (`interaction_net/runtime/whole_copy.rs`).
+- **Recorded in:** structural overheads plan, `perf-reduced-source-copy`.
+
 ### Interaction nets are polarized; `Bind >< Bind` joins crossed
 `polarized-interaction-nets` · 2026-10-05 · maintainer · accepted
 - **Context:** N8's random-net generator and net fuzzing need a well-defined

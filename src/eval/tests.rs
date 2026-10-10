@@ -239,8 +239,10 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
                 erase: 0,
                 call: 3,
                 operator_call: 6,
-                cursor_materialized: 6,
-                cursor_joined: 2,
+                // One copy's source had no evaluation left, so it copied
+                // whole; the cursor counts are the other copy's.
+                cursor_materialized: 3,
+                cursor_joined: 1,
             },
             "over-application through a returned function must not replay semantic work"
         );
@@ -248,10 +250,10 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
             profile.driver,
             NetDriverCounts {
                 machine_polls: 4,
-                work_items: 71,
-                interface_polls: 27,
-                cursor_steps: 11,
-                active_pair_steps: 27,
+                work_items: 63,
+                interface_polls: 23,
+                cursor_steps: 9,
+                active_pair_steps: 25,
                 cursor_dependencies: 6,
                 blocked_retries: 0,
                 contentions: 0,
