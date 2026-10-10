@@ -255,17 +255,20 @@ fn follow_forwards(
     access: &crate::evaluation::EvaluationValueAccess<'_>,
     lazy: &ManagedLazyRoot,
 ) -> ForwardEnd {
-    let Some(first) = access.lazy_root(lazy).forward_target() else {
+    let Some(first) = access.lazy_root(lazy).forward_target_edge() else {
         return ForwardEnd::NotForward;
     };
     // Shortening keeps nearly every chain to one forward, to a lazy that
-    // does not forward: nothing to shorten and no cycle to look for.
-    if first.id() != lazy.id() && access.lazy_root(&first).forward_target().is_none() {
-        return match access.lazy_root(&first).cached() {
+    // does not forward: nothing to shorten and no cycle to look for. That
+    // path stays inside this access, so it roots only what it returns.
+    let target = first.access(access.values());
+    if target.id() != lazy.id() && target.forward_target_edge().is_none() {
+        return match target.cached() {
             Some(result) => ForwardEnd::Cached(result),
-            None => ForwardEnd::Uncached(first),
+            None => ForwardEnd::Uncached(target.root()),
         };
     }
+    let first = target.root();
     let mut path = vec![lazy.clone()];
     let mut seen = crate::trusted_hash::TrustedHashSet::default();
     seen.insert(crate::core::DeferredValueId::from(lazy.id()));

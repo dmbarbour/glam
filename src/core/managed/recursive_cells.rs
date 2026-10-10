@@ -948,26 +948,35 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
 
     /// The lazy this one forwards to, if its producer is a forward.
     pub(crate) fn forward_target(&self) -> Option<ManagedLazyRoot> {
+        let target = self.forward_target_edge()?;
+        Some(self.authority.root_managed_lazy(&target))
+    }
+
+    /// Roots this lazy, for a caller that keeps it past the access.
+    pub(crate) fn root(&self) -> ManagedLazyRoot {
+        self.authority.root_managed_lazy(&self.owner)
+    }
+
+    /// The lazy this one forwards to, as an edge valid only within this
+    /// access. A caller that keeps it past the access roots it.
+    pub(crate) fn forward_target_edge(&self) -> Option<ManagedLazyEdge> {
         if self.cell.result.get().is_some() {
             return None;
         }
-        let target = {
-            let producer = self
-                .cell
-                .producer
-                .lock()
-                .expect("managed lazy producer cell was poisoned");
-            if self.cell.result.get().is_some() {
-                return None;
-            }
-            match producer.as_ref()? {
-                ManagedLazyProducerState::Forward(target) => target.duplicate_in(self.authority),
-                ManagedLazyProducerState::Source(_)
-                | ManagedLazyProducerState::Checkpoint(_)
-                | ManagedLazyProducerState::Panicked(_) => return None,
-            }
-        };
-        Some(self.authority.root_managed_lazy(&target))
+        let producer = self
+            .cell
+            .producer
+            .lock()
+            .expect("managed lazy producer cell was poisoned");
+        if self.cell.result.get().is_some() {
+            return None;
+        }
+        match producer.as_ref()? {
+            ManagedLazyProducerState::Forward(target) => Some(target.duplicate_in(self.authority)),
+            ManagedLazyProducerState::Source(_)
+            | ManagedLazyProducerState::Checkpoint(_)
+            | ManagedLazyProducerState::Panicked(_) => None,
+        }
     }
 
     /// Replaces the exact `expected` checkpoint with a forward to `target`.
