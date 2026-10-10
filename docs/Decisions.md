@@ -210,6 +210,28 @@ maps the short names used here to file names.
 
 ## Language and front end
 
+### Binding groups lower by dependency components
+`binding-groups-lower-by-components` · 2026-10-10 · agent · accepted
+- **Context:** a `let` or `where` group is documented as mutually recursive,
+  but lowered as `(\x1 x2 -> body) e1 e2`, so a binding could not name a
+  sibling: `let { y = x; x = 42 } in y` failed to compile, and the name
+  analysis agreed with the implementation. The maintainer prioritized the
+  fix.
+- **Decision:**
+  - A group's names are in scope in every value and the body, in the
+    resolver, the name analysis and the unused-local warnings.
+  - The group lowers by its strongly connected components, dependencies
+    first: an acyclic component as a plain application, a cycle through
+    `fixpoint` (the lazy `x = f x`), one binding directly and several
+    through one dictionary of the members, each bound to its own entry.
+  - A cycle with no value, such as `let { x = y; y = x } in x`, fails as a
+    lazy dependency cycle.
+- **Consequences:** groups without cycles lower as before, in dependency
+  order; the dependency analysis costs 0.1 to 0.3% on the profile
+  workloads.
+- **Rule lives in:** `agent_context/g_syntax.md` "Names and Scope".
+- **Recorded in:** structural overheads plan, `perf-module-definition-cost`.
+
 ### Script extensions select a compiler; unknown ones are rejected
 `script-extension-selects-compiler` · 2026-10-05 · maintainer · accepted
 - **Context:** `--script.json` silently parsed as `.g`, contradicting

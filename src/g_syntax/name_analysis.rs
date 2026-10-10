@@ -372,12 +372,14 @@ impl FileNameAnalysis {
                 self.visit_when_arms(&match_when.arms, scope, locals);
             }
             SyntaxExpr::Let { bindings, body } => {
-                for (_, value) in bindings {
-                    self.visit_expr(value, line, scope, locals);
-                }
+                // One binding group is mutually recursive: its names are in
+                // scope in every value as well as the body.
                 let base_len = locals.len();
                 for (name, _) in bindings {
                     self.push_source_local(name, line, scope, locals);
+                }
+                for (_, value) in bindings {
+                    self.visit_expr(value, line, scope, locals);
                 }
                 self.visit_expr(body, line, scope, locals);
                 locals.truncate(base_len);

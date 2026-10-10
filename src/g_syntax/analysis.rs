@@ -112,6 +112,20 @@ fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Dia
                 .collect::<Vec<_>>();
             let mut used = vec![false; params.len()];
             mark_used_locals(body, &params, &mut used);
+            // The group is mutually recursive: a binding the body reaches
+            // uses the siblings its value names.
+            let dependencies = binding_group_dependencies(bindings);
+            let mut reached = (0..params.len())
+                .filter(|&index| used[index])
+                .collect::<Vec<_>>();
+            while let Some(index) = reached.pop() {
+                for &dependency in &dependencies[index] {
+                    if !used[dependency] {
+                        used[dependency] = true;
+                        reached.push(dependency);
+                    }
+                }
+            }
             for (param, used) in params.iter().zip(used) {
                 if !used && param.canonical.is_some() && !param.suppress_unused_warning {
                     diagnostics.push(Diagnostic::warn(
@@ -386,6 +400,26 @@ fn mark_used_prior_alias_in_key(key: &SyntaxKeyExpr, alias: Option<&str>, used: 
     }
 }
 
+/// For each binding of one `let` or `where` group, the positions of the
+/// group's bindings its value names. The group is mutually recursive, so
+/// these are its dependency edges.
+pub(in crate::g_syntax) fn binding_group_dependencies(
+    bindings: &[(String, SyntaxExpr)],
+) -> Vec<Vec<usize>> {
+    let names = bindings
+        .iter()
+        .map(|(name, _)| local_name_metadata(name))
+        .collect::<Vec<_>>();
+    bindings
+        .iter()
+        .map(|(_, value)| {
+            let mut used = vec![false; names.len()];
+            mark_used_locals(value, &names, &mut used);
+            (0..names.len()).filter(|&index| used[index]).collect()
+        })
+        .collect()
+}
+
 fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) {
     match expr {
         SyntaxExpr::Unit
@@ -486,9 +520,6 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
             }
         }
         SyntaxExpr::Let { bindings, body } => {
-            for (_, value) in bindings {
-                mark_used_locals(value, locals, used);
-            }
             let nested = bindings
                 .iter()
                 .map(|(name, _)| local_name_metadata(name))
@@ -498,6 +529,11 @@ fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) 
             combined.extend(nested);
             let mut nested_used = vec![false; combined.len()];
             nested_used[..locals.len()].copy_from_slice(used);
+            // The group's names are in scope in every value as well as the
+            // body.
+            for (_, value) in bindings {
+                mark_used_locals(value, &combined, &mut nested_used);
+            }
             mark_used_locals(body, &combined, &mut nested_used);
             used.copy_from_slice(&nested_used[..locals.len()]);
         }

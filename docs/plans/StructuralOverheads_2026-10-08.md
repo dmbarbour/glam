@@ -128,10 +128,28 @@ value carries three wrappers; building without each in turn, at 400 and
 - `chain_where` builds in cubic time (exponent 2.78; 1,410 M instructions
   at 200 bindings, 79 G at 800), all in the build phase; evaluating it
   costs 0.07 ms per binding, against 0.3 ms per module definition.
-- A `let` or `where` group resolves its values in the enclosing scope
-  (`(\x1 x2 -> body) e1 e2`), so siblings do not see each other, while
-  the syntax cheat sheet calls a group mutually recursive. The name
-  analysis matches the implementation. A question for the maintainer.
+- A `let` or `where` group resolved its values in the enclosing scope, so
+  siblings could not see each other, though groups are documented as
+  mutually recursive. Fixed first, at the maintainer's priority (decision
+  `binding-groups-lower-by-components`).
+
+**Maintainer direction, 2026-10-10.**
+- **Introduce assertion.** Compilers should check introductions and
+  overrides among a file's own definitions and report them at compile
+  time. A top-level `import` can still introduce a name already defined,
+  which no compile-time check sees, so a run-time check stays. Its form is
+  not formal semantics: compilers could record what they introduce or
+  override under `meta.*`, and the reflection boundary could look for
+  conflicts there without evaluating definitions.
+- **`refl.*` scanner.** Stays: imports act as mixins, so a module without
+  local `refl` tasks can still have some. Its speed and quality, and those
+  of other compiler-generated reflection tasks and annotations, can
+  improve.
+- **Context annotations** are for debugging; cheaper debugging annotations
+  are worth investigating and brainstorming.
+- **Lowering:** parts could become lazier, though definitions must still
+  lower to some value representation, if not a net.
+- **`where` chains:** investigate their build cost separately.
 
 ### Operator nets (`perf-runtime-net-attach`)
 

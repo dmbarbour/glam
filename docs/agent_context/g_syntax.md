@@ -117,6 +117,13 @@ disagree.
 - Object scopes resolve through explicit prior/final self values. `module`,
   `self`, aliases, and `^` escapes have defined owners; do not implement object
   lookup as an implicit fallback chain.
+- One `let` or `where` group is mutually recursive: its names are in scope
+  in every value and the body, for resolution, name analysis and unused
+  warnings alike (a binding is used if the body reaches it, directly or
+  through siblings). It lowers by strongly connected components in
+  dependency order: an acyclic one as an application, a cycle through
+  `fixpoint`, one binding directly and several through a dictionary of
+  the members. Separate `where` suffixes remain separate groups.
 - `using Dict in Expr` evaluates and shares `Dict` in the surrounding scope,
   then installs it as temporary final namespace and `self`; prior namespace is
   `{}` and `^` still escapes outward. It is front-end sugar, not a runtime
@@ -177,8 +184,10 @@ disagree.
   dictionaries, functions, and nets. See
   [`objects.md`](objects.md) for representation and linearization.
 - Named module definitions and members of named declared objects receive one
-  shared lazy reflection boundary for final `refl.*`. `refl`, `meta`, `spec`,
-  computed roots, and expression-local objects remain inert.
+  shared lazy reflection boundary for final `refl.*`: one annotated unit per
+  module or object instance, which each wrapped value forces with `seq`.
+  `refl`, `meta`, `spec`, computed roots, and expression-local objects
+  remain inert.
 - Object scanner identity derives from final `spec.name`, so inherited members
   use the derived object's overridable reflection namespace.
 

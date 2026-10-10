@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::g_syntax::analysis::binding_group_dependencies;
 
 #[cfg(test)]
 pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_scope(
@@ -1071,24 +1072,168 @@ pub(in crate::g_syntax) fn lower_let_expr_resolved(
         );
     }
 
-    let values = bindings
-        .iter()
-        .map(|(_, expr)| {
-            syntax_expr_to_resolved_in_semantic_scope(access, expr, line, context, scope, locals)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
+    // Check the group's names together: no duplicate, no shadowing.
     let base_len = locals.len();
-    let parameters =
-        locals.extend_source_bindings(bindings.iter().map(|(name, _)| name.as_str()), line)?;
-    let lowered =
-        syntax_expr_to_resolved_in_semantic_scope(access, body, line, context, scope, locals)?;
+    locals.extend_source_bindings(bindings.iter().map(|(name, _)| name.as_str()), line)?;
     locals.truncate(base_len);
 
-    Ok(ResolvedExpr::apply(
-        ResolvedExpr::lambda(parameters, lowered),
-        values,
-    ))
+    // The group is mutually recursive. Its strongly connected components
+    // bind in dependency order, each enclosing the next: one without a cycle
+    // as a plain application, one with a cycle through a fixpoint.
+    let dependencies = binding_group_dependencies(bindings);
+    let mut binders = Vec::new();
+    for component in dependency_components(&dependencies) {
+        let names = component.iter().map(|&index| bindings[index].0.as_str());
+        let resolve = |locals: &mut ResolverContext, index: usize| {
+            syntax_expr_to_resolved_in_semantic_scope(
+                access,
+                &bindings[index].1,
+                line,
+                context,
+                scope,
+                locals,
+            )
+        };
+        match component.as_slice() {
+            [index] if !dependencies[*index].contains(index) => {
+                let value = resolve(locals, *index)?;
+                binders.push((locals.extend_source_bindings(names, line)?, vec![value]));
+            }
+            [index] => {
+                // `fixpoint f` is the lazy value `x` with `x = f x`.
+                let inner_len = locals.len();
+                let inner = locals.extend_source_bindings(names.clone(), line)?;
+                let value = resolve(locals, *index)?;
+                locals.truncate(inner_len);
+                let fixpoint = ResolvedExpr::apply(
+                    ResolvedExpr::Embedded(Value::Builtin(Builtin::Fixpoint)),
+                    [ResolvedExpr::lambda(inner, value)],
+                );
+                binders.push((locals.extend_source_bindings(names, line)?, vec![fixpoint]));
+            }
+            members => {
+                // A fixpoint over one dictionary of the members' values, each
+                // member bound to its own entry.
+                let key = |position: usize| format!("binding{position}");
+                let entries = |group: BindingId| {
+                    (0..members.len())
+                        .map(|position| ResolvedExpr::Access {
+                            base: Box::new(ResolvedExpr::Local(group)),
+                            path: vec![ResolvedPathPart::Key(name_as_key(&key(position)))],
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let inner_len = locals.len();
+                let inner_group = locals.push_internal_binding("<let-group>");
+                let inner = locals.extend_source_bindings(names.clone(), line)?;
+                let values = members
+                    .iter()
+                    .map(|&index| resolve(locals, index))
+                    .collect::<Result<Vec<_>, _>>()?;
+                locals.truncate(inner_len);
+                let record = values
+                    .into_iter()
+                    .enumerate()
+                    .map(|(position, value)| {
+                        ResolvedExpr::apply(
+                            ResolvedExpr::Embedded(Value::Builtin(Builtin::DictSingleton)),
+                            [
+                                ResolvedExpr::Embedded(Value::Atom(atom_from_str(&key(position)))),
+                                value,
+                            ],
+                        )
+                    })
+                    .reduce(|left, right| {
+                        ResolvedExpr::apply(
+                            ResolvedExpr::Embedded(Value::Builtin(Builtin::DictUnion)),
+                            [left, right],
+                        )
+                    })
+                    .expect("a cycle has members");
+                let fixpoint = ResolvedExpr::apply(
+                    ResolvedExpr::Embedded(Value::Builtin(Builtin::Fixpoint)),
+                    [ResolvedExpr::lambda(
+                        vec![inner_group],
+                        ResolvedExpr::apply(
+                            ResolvedExpr::lambda(inner, record),
+                            entries(inner_group),
+                        ),
+                    )],
+                );
+                let group = locals.push_internal_binding("<let-group>");
+                binders.push((vec![group], vec![fixpoint]));
+                binders.push((locals.extend_source_bindings(names, line)?, entries(group)));
+            }
+        }
+    }
+    let mut lowered =
+        syntax_expr_to_resolved_in_semantic_scope(access, body, line, context, scope, locals)?;
+    locals.truncate(base_len);
+    for (parameters, values) in binders.into_iter().rev() {
+        lowered = ResolvedExpr::apply(ResolvedExpr::lambda(parameters, lowered), values);
+    }
+    Ok(lowered)
+}
+
+/// The strongly connected components of a binding group's dependency
+/// graph, each listed in source order, dependencies before the components
+/// that use them (Tarjan's algorithm, iteratively).
+fn dependency_components(dependencies: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    const UNVISITED: usize = usize::MAX;
+    let count = dependencies.len();
+    let mut order = vec![UNVISITED; count];
+    let mut low = vec![0; count];
+    let mut on_stack = vec![false; count];
+    let mut stack = Vec::new();
+    let mut components = Vec::new();
+    let mut next = 0;
+    for root in 0..count {
+        if order[root] != UNVISITED {
+            continue;
+        }
+        order[root] = next;
+        low[root] = next;
+        next += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        // Each frame is a node and the next of its dependencies to visit.
+        let mut frames = vec![(root, 0)];
+        while let Some(frame) = frames.last_mut() {
+            let (node, edge) = *frame;
+            if let Some(&dependency) = dependencies[node].get(edge) {
+                frame.1 += 1;
+                if order[dependency] == UNVISITED {
+                    order[dependency] = next;
+                    low[dependency] = next;
+                    next += 1;
+                    stack.push(dependency);
+                    on_stack[dependency] = true;
+                    frames.push((dependency, 0));
+                } else if on_stack[dependency] {
+                    low[node] = low[node].min(order[dependency]);
+                }
+                continue;
+            }
+            frames.pop();
+            if let Some(&(parent, _)) = frames.last() {
+                low[parent] = low[parent].min(low[node]);
+            }
+            if low[node] == order[node] {
+                let mut component = Vec::new();
+                loop {
+                    let member = stack.pop().expect("a component's root is on the stack");
+                    on_stack[member] = false;
+                    component.push(member);
+                    if member == node {
+                        break;
+                    }
+                }
+                component.sort_unstable();
+                components.push(component);
+            }
+        }
+    }
+    components
 }
 
 pub(in crate::g_syntax) fn lower_name_expr_resolved(
@@ -1260,6 +1405,17 @@ fn resolved_list(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Components come out dependencies first, each in source order.
+    #[test]
+    fn binding_group_components_order_dependencies_first() {
+        // 0 names 1, which forms a cycle with 2; 3 stands alone.
+        let dependencies = vec![vec![1], vec![2], vec![1], vec![]];
+        assert_eq!(
+            dependency_components(&dependencies),
+            vec![vec![1, 2], vec![0], vec![3]]
+        );
+    }
 
     fn resolve(expr: &SyntaxExpr) -> ResolvedExpr<Value> {
         let context = CompileContext::default();

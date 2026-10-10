@@ -5305,6 +5305,67 @@ fn lowers_multiline_let_expressions_to_lambda_application() {
     );
 }
 
+/// One `let` or `where` group is mutually recursive: a binding may name a
+/// sibling defined after it, itself, or a sibling that names it back.
+#[test]
+fn binding_groups_are_mutually_recursive() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "forward = let { y = x; x = 42 } in y\n",
+        "behind = y where { y = x + 1; x = 1 }\n",
+        "count = go 5 where go = \\n -> if n == 0 then 0 else 1 + go (n - 1)\n",
+        "parity = let { even = \\n -> if n == 0 then \"even\" else odd (n - 1); ",
+        "odd = \\n -> if n == 0 then \"odd\" else even (n - 1) } in even 7\n",
+        "mixed = let { a = [1, b]; b = 2; c = a } in c\n",
+        "asm.result = if [forward, behind, count, mixed] == [42, 2, 5, [1, 2]] ",
+        "then parity else \"wrong\"\n",
+    ));
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "result"]
+        ))),
+        b"odd"
+    );
+}
+
+/// A group whose values only name each other has no value: evaluating it
+/// fails as a lazy dependency cycle.
+#[test]
+fn binding_group_cycles_fail_as_lazy_cycles() {
+    let parsed =
+        parse("language g0\nlone = let { x = x } in x\npair = let { x = y; y = x } in x\n");
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    for name in ["lone", "pair"] {
+        let binding = value_at_atom_path(&value, &[name]).expect("binding should exist");
+        let error = fully_evaluated_error(binding).to_string();
+        assert!(error.contains("lazy dependency cycle"), "{name}: {error}");
+    }
+}
+
+/// A binding counts as used when the body reaches it, directly or through
+/// the siblings that name it.
+#[test]
+fn binding_group_siblings_count_as_uses() {
+    let parsed = parse("language g0\nasm.result = let { a = 1; b = a; c = d; d = 2 } in b\n");
+
+    let warnings = parsed
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(warnings, ["unused local `c`", "unused local `d`"]);
+}
+
 #[test]
 fn effect_shorthand_builds_applicable_effect_values() {
     let parsed = parse(
