@@ -13,7 +13,7 @@ Status: active, as the `perf-structural-overheads` step of the
 `perf-lowering-free-bindings`, `perf-interface-demand-walk`,
 `perf-interface-route-ownership`, `perf-reduced-source-copy`,
 `perf-driver-path-inlining`, `perf-module-definition-cost` and
-`perf-runtime-net-attach`. Next: `perf-definition-assertions`.
+`perf-runtime-net-attach`. Next: `perf-application-values`.
 `gc-two-level-mutator-access` and `gc-thread-local-heap-context` moved to
 [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md).
 
@@ -75,6 +75,54 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 | Coordinator claims, releases and admissions | under 2% |
 
 ## Open Steps, in Order
+
+### Applications as values (`perf-application-values`)
+
+A function value is a stage net, and applying it builds a net, so that a
+copy or clone shares whatever partial evaluation applying its arguments
+started (maintainer, 2026-10-10): a closure whose body uses a capture
+strictly, such as `n - 1`, starts that work when its captures arrive, and
+every call shares it. Representing every partial application as an
+argument list would lose that for user-defined nets and lambdas that lean
+on partial application, which the profile families barely exercise. Two
+narrower shapes keep sharing, as separate tasks.
+
+**Thin wrappers** (`perf-thin-wrapper-applications`). Counting every
+application (closure and thunk captures, partial applications, saturated
+calls) by the shape of the net applied, 2026-10-10:
+
+| Workload | Applications | Identity | One operator | Operator chain | Other |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `countdown_800` | 13,877 | 17.6% | 23.6% | 46.3% | 12.5% |
+| `list_map_2000` | 4,263 | 47.9% | 1.5% | 47.5% | 3.0% |
+| `list_sum_400` | 9,484 | 21.6% | 17.6% | 38.3% | 22.6% |
+| `append_walk_800` | 33,899 | 21.4% | 19.1% | 35.5% | 24.0% |
+| `do_chain_800` | 5,060 | 16.6% | 32.9% | 0.6% | 49.9% |
+| `hello_elf` | 14,494 | 21.4% | 17.4% | 27.2% | 33.9% |
+
+- **Identity** (`\c -> c`): a thunk whose code returns its one capture,
+  built as an applied net, copied and joined, to yield a value already in
+  hand.
+- **One operator** on the parameters: almost all `\x -> Access(path) x`,
+  compiled accessors, mostly as saturated calls.
+- **Operator chains**: only operators, binds and constants, with no
+  active pair, mostly `\c -> ApplyArity_k (ComputationCaptures(code) c)`,
+  sometimes applied to a constant or lazy argument: making an inner thunk
+  from the capture and applying it.
+- No application applies a builtin as data; builtins appear as operator
+  nodes.
+
+A code net's shape is fixed when it is lowered, so it can be classified
+once: identity yields the capture, one operator applies it directly, and
+a chain could run its operators without a net. Applying such code starts
+no work worth sharing beyond what the operators themselves do.
+
+**Unobserved arity** (`perf-unobserved-arity`). A lightweight structural
+analysis of a code net could find how many arguments it takes before any
+is observed; below that arity, partial application starts no work, so it
+could collect arguments as a value and instantiate the code once,
+saturated. It first needs workloads and tests that lean on partial
+application, so that sharing is measured before anything trades it.
 
 ### Introduce and override checks (`perf-definition-assertions`)
 
@@ -139,26 +187,6 @@ far cheaper (maintainer, 2026-10-10, open to investigation and
 brainstorming). Starting points: what evaluating one costs, and whether a
 context known at compile time, as an origin and line are, can travel
 with the definition without an evaluation step.
-
-### Applications as values (`perf-application-values`)
-
-A function value is a stage net, and applying it builds a net, so that a
-copy or clone shares whatever partial evaluation applying its arguments
-started (maintainer, 2026-10-10): a closure whose body uses a capture
-strictly, such as `n - 1`, starts that work when its captures arrive, and
-every call shares it. Representing partial applications as argument lists
-would lose that for user-defined nets and lambdas that lean on partial
-application, which the profile families barely exercise. Two narrower
-shapes keep sharing:
-- functions that are thin wrappers around a core operator could apply as
-  that operator directly;
-- a lightweight structural analysis of a code net could find how many
-  arguments it takes before any is observed; below that arity, partial
-  application starts no work, so it could collect arguments as a value
-  and instantiate the code once, saturated.
-
-The step first adds workloads and tests that lean on partial application,
-so that sharing is measured before anything trades it.
 
 ### Route walks with workers (`perf-worker-route-walks`)
 

@@ -611,8 +611,9 @@ maps the short names used here to file names.
   source with none left.
 - **Consequences:** no application claims a call; each commits as its
   spine joining the function's. A closure's code is copied when its last
-  capture arrives, even if it is never called. `countdown_800` falls
-  15.1%, `minimal` 8.1%.
+  capture arrives; closures are built lazily, so in practice that follows
+  demand for the closure, except under `par` or `seq` (maintainer).
+  `countdown_800` falls 15.1%, `minimal` 8.1%.
 - **Rule lives in:** `RuntimeNet::applied` (`interaction_net/runtime/cursor.rs`).
 - **Recorded in:** structural overheads plan, `perf-runtime-net-attach`.
 

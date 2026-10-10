@@ -191,9 +191,9 @@ gains this consequence when it lands.
      `perf-driver-path-inlining`, `perf-module-definition-cost` and
      `perf-runtime-net-attach`. The scheduler round trips were
      `perf-evaluation-recursion`.
-   - *Open, in order:* `perf-definition-assertions`,
-     `perf-reflection-scanner`, `perf-reflection-step-cost`,
-     `perf-debug-annotations`, `perf-application-values` and
+   - *Open, in order:* `perf-application-values`,
+     `perf-definition-assertions`, `perf-reflection-scanner`,
+     `perf-reflection-step-cost`, `perf-debug-annotations` and
      `perf-worker-route-walks`.
    - *Experiments:* `perf-coalesced-wakeups` (open),
      `perf-mimalloc-allocator` and `perf-poll-root-frames` (not adopted).
