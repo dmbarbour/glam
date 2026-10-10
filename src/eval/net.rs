@@ -1119,8 +1119,8 @@ pub(super) enum CoreCallable {
     Operator(CoreOperator),
 }
 
-enum CallDisposition {
-    Copy(CorePreparedCopySource),
+enum CallDisposition<'scope> {
+    Copy(CorePreparedCopySource<'scope>),
     Operator(CoreOperator),
     Failed(EvaluationHalt),
     #[cfg(test)]
@@ -1179,7 +1179,7 @@ impl<'claim, 'scope> CoreCallClaim<'claim, 'scope> {
         }
     }
 
-    fn finish(mut self, disposition: CallDisposition) -> Result<bool, EvaluationHalt> {
+    fn finish(mut self, disposition: CallDisposition<'_>) -> Result<bool, EvaluationHalt> {
         let result = match disposition {
             CallDisposition::Copy(source) => {
                 self.access

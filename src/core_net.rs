@@ -353,8 +353,11 @@ impl CoreRuntimeNet {
     pub(crate) fn test_prepare_copy_source(
         &self,
         values: &CoreValueFactory,
-    ) -> CorePreparedCopySource {
-        self.with_test_access(values, |access| access.prepare_copy_source())
+    ) -> TestPreparedCopySource {
+        self.with_test_access(values, |access| TestPreparedCopySource {
+            root: access.owner.root_in(access.values),
+            remote: access.runtime.with(RuntimeNet::exposed),
+        })
     }
 
     #[cfg(test)]
@@ -637,13 +640,6 @@ impl CoreRuntimeNetAccess<'_, '_> {
         self.step_active_pair_if_current(pair, None, admit)
     }
 
-    pub(crate) fn prepare_copy_source(&self) -> CorePreparedCopySource {
-        CorePreparedCopySource {
-            root: self.owner.root_in(self.values),
-            remote: self.runtime.with(RuntimeNet::exposed),
-        }
-    }
-
     fn inspect_source_frontier(
         &self,
         source: &CoreRuntimeNet,
@@ -713,9 +709,9 @@ impl CoreRuntimeNetAccess<'_, '_> {
     pub(crate) fn resume_claimed_call_with_copy(
         &self,
         call: crate::interaction_net::Call,
-        source: CorePreparedCopySource,
+        source: CorePreparedCopySource<'_>,
     ) {
-        let (source, _source_root) = source.into_inner_for(self.values);
+        let source = source.into_inner();
         self.runtime.cell().with_edge_mut_via(
             &self.runtime,
             |runtime| runtime.resume_call_with_copy_edge_transition(call),
@@ -851,9 +847,9 @@ impl CoreRuntimeNetAccess<'_, '_> {
     pub(crate) fn resume_claimed_checkpoint_with_copy(
         &self,
         call: crate::interaction_net::CallableCheckpointCall,
-        source: CorePreparedCopySource,
+        source: CorePreparedCopySource<'_>,
     ) {
-        let (source, _source_root) = source.into_inner_for(self.values);
+        let source = source.into_inner();
         self.runtime.cell().with_edge_mut_via(
             &self.runtime,
             |runtime| runtime.resume_checkpoint_with_copy_edge_transition(call),
@@ -1130,26 +1126,61 @@ impl CoreRuntimeNetAccess<'_, '_> {
     }
 }
 
-pub(crate) struct CorePreparedCopySource {
+impl<'scope> CoreRuntimeNetAccess<'_, 'scope> {
+    /// Prepares this net as the source of a copy installed in the same
+    /// access.
+    pub(crate) fn prepare_copy_source(&self) -> CorePreparedCopySource<'scope> {
+        CorePreparedCopySource {
+            source: self.owner.duplicate_in(self.values),
+            remote: self.runtime.with(RuntimeNet::exposed),
+            _access: std::marker::PhantomData,
+        }
+    }
+}
+
+/// A copy source prepared inside one access for a copy installed in that
+/// same access. Its net edge does not root the source: no collection runs
+/// inside an access, and the copy layer that consumes it traces the edge.
+pub(crate) struct CorePreparedCopySource<'scope> {
+    source: CoreRuntimeNet,
+    remote: Port,
+    _access: std::marker::PhantomData<&'scope ()>,
+}
+
+impl CorePreparedCopySource<'_> {
+    fn into_inner(self) -> PreparedCopySource<CoreSpecialization> {
+        PreparedCopySource::new(self.source, self.remote)
+    }
+}
+
+/// A rooted copy source, for tests that prepare a copy in one access and
+/// install it in another.
+#[cfg(test)]
+pub(crate) struct TestPreparedCopySource {
     root: ManagedCoreNetRoot,
     remote: Port,
 }
 
-impl CorePreparedCopySource {
-    fn into_inner_for(
-        self,
-        target: &RuntimeValueAccess<'_>,
-    ) -> (PreparedCopySource<CoreSpecialization>, ManagedCoreNetRoot) {
-        let source = CoreRuntimeNet::from_root(&self.root, target);
-        (PreparedCopySource::new(source, self.remote), self.root)
+#[cfg(test)]
+impl TestPreparedCopySource {
+    fn in_access<'scope>(
+        &self,
+        target: &RuntimeValueAccess<'scope>,
+    ) -> CorePreparedCopySource<'scope> {
+        CorePreparedCopySource {
+            source: CoreRuntimeNet::from_root(&self.root, target),
+            remote: self.remote,
+            _access: std::marker::PhantomData,
+        }
     }
 
-    #[cfg(test)]
     fn into_inner_for_factory(
         self,
         target: &CoreValueFactory,
     ) -> (PreparedCopySource<CoreSpecialization>, ManagedCoreNetRoot) {
-        target.with_runtime_value_access(|access| self.into_inner_for(&access))
+        let prepared =
+            target.with_runtime_value_access(|access| self.in_access(&access).into_inner());
+        (prepared, self.root)
     }
 }
 
@@ -1390,11 +1421,11 @@ impl CoreActivePairStep {
 
 // These pin the current observer-free representation sizes, not ABI
 // promises. A frontier observation is one traceable net edge plus
-// only its scalar operation snapshot; external temporary copy preparation
-// continues to use a registered root.
+// only its scalar operation snapshot; a prepared copy source is one net
+// edge plus its exposed port.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 const _: () = {
-    assert!(std::mem::size_of::<CorePreparedCopySource>() == 16);
+    assert!(std::mem::size_of::<CorePreparedCopySource<'static>>() == 16);
     assert!(std::mem::size_of::<CoreFrontierObservation>() == 32);
 };
 
@@ -1448,7 +1479,7 @@ mod tests {
 
     fn assert_core_net_durable_owner_inventory(
         runtime: &CoreRuntimeNet,
-        prepared: &CorePreparedCopySource,
+        prepared: &CorePreparedCopySource<'_>,
         contention: &CoreNetContention,
         observation: &CoreFrontierObservation,
         operator: &CoreOperator,
@@ -1463,8 +1494,12 @@ mod tests {
         let CoreRuntimeNet { edge } = runtime;
         let _: &ManagedCoreNetEdge = edge;
 
-        let CorePreparedCopySource { root, remote } = prepared;
-        let _: &ManagedCoreNetRoot = root;
+        let CorePreparedCopySource {
+            source,
+            remote,
+            _access,
+        } = prepared;
+        let _: &CoreRuntimeNet = source;
         let _: &Port = remote;
 
         let CoreNetContention { inner } = contention;
@@ -1731,7 +1766,7 @@ mod tests {
         let copy_probe =
             values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
         copy_call.with_test_access(&values, |runtime| {
-            runtime.resume_claimed_call_with_copy(call, prepared);
+            runtime.resume_claimed_call_with_copy(call, prepared.in_access(runtime.values));
         });
         let records = copy_probe.records();
         assert_eq!(records.len(), 1);
@@ -1902,7 +1937,7 @@ mod tests {
         copy_runtime.with_test_access(&values, |runtime| {
             runtime.resume_claimed_call_with_copy(
                 crate::interaction_net::Call { pair, bind, data },
-                prepared,
+                prepared.in_access(runtime.values),
             );
         });
         assert_eq!(values.interaction_net_profile_snapshot().reductions.call, 1);
@@ -2140,7 +2175,7 @@ mod tests {
                 _ => panic!("target should claim its callable data"),
             };
         target.with_test_access(&values, |runtime| {
-            runtime.resume_claimed_call_with_copy(call, prepared);
+            runtime.resume_claimed_call_with_copy(call, prepared.in_access(runtime.values));
         });
 
         let first_cursor = target
@@ -2199,7 +2234,7 @@ mod tests {
     fn core_net_durable_owner_inventory_is_compile_exhaustive() {
         let _: fn(
             &CoreRuntimeNet,
-            &CorePreparedCopySource,
+            &CorePreparedCopySource<'_>,
             &CoreNetContention,
             &CoreFrontierObservation,
             &CoreOperator,
@@ -2250,29 +2285,6 @@ mod tests {
             retained.upgrade().is_none(),
             "retiring the managed net owner must retire its operator payload"
         );
-    }
-
-    #[test]
-    fn prepared_copy_source_is_an_exact_temporary_net_owner() {
-        let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
-        let baseline = values
-            .collect_managed_for_test()
-            .expect("the prepared-copy fixture should start collectible");
-        let source = values.instantiate_core_net(&closed_unit_template(&values));
-        let prepared = source.test_prepare_copy_source(&values);
-
-        let retained = values
-            .collect_managed_for_test()
-            .expect("the prepared copy source should retain its semantic net");
-        assert_eq!(retained.root_entries(), baseline.root_entries() + 1);
-        assert_eq!(retained.marked_slots(), baseline.marked_slots() + 1);
-
-        drop(prepared);
-        let retired = values
-            .collect_managed_for_test()
-            .expect("dropping the prepared source should retire its semantic net");
-        assert_eq!(retired.root_entries(), baseline.root_entries());
-        assert_eq!(retired.finalized_slots(), 1);
     }
 
     #[test]
