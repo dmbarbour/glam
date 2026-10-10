@@ -187,12 +187,13 @@ gains this consequence when it lands.
      `perf-root-frames`, `perf-transient-root-avoidance`,
      `perf-list-map-growth`, `perf-list-literal-composition`,
      `perf-lowering-free-bindings`, `perf-interface-demand-walk`,
-     `perf-interface-route-ownership`, `perf-reduced-source-copy` and
-     `perf-driver-path-inlining`. The scheduler round trips were
-     `perf-evaluation-recursion`.
-   - *Open, in order:* `perf-module-definition-cost`,
-     `perf-runtime-net-attach`,
-     `perf-reflection-step-cost` and `perf-worker-route-walks`.
+     `perf-interface-route-ownership`, `perf-reduced-source-copy`,
+     `perf-driver-path-inlining` and `perf-module-definition-cost`. The
+     scheduler round trips were `perf-evaluation-recursion`.
+   - *Open, in order:* `perf-runtime-net-attach`,
+     `perf-definition-assertions`, `perf-reflection-scanner`,
+     `perf-reflection-step-cost`, `perf-debug-annotations` and
+     `perf-worker-route-walks`.
    - *Experiments:* `perf-coalesced-wakeups` (open),
      `perf-mimalloc-allocator` and `perf-poll-root-frames` (not adopted).
    - *Planned separately:* [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md)

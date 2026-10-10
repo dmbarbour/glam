@@ -11,8 +11,9 @@ Status: active, as the `perf-structural-overheads` step of the
 `perf-root-frames`, `perf-transient-root-avoidance`,
 `perf-list-map-growth`, `perf-list-literal-composition`,
 `perf-lowering-free-bindings`, `perf-interface-demand-walk`,
-`perf-interface-route-ownership`, `perf-reduced-source-copy` and
-`perf-driver-path-inlining`. Next: `perf-module-definition-cost`.
+`perf-interface-route-ownership`, `perf-reduced-source-copy`,
+`perf-driver-path-inlining` and `perf-module-definition-cost`. Next:
+`perf-runtime-net-attach`.
 `gc-two-level-mutator-access` and `gc-thread-local-heap-context` moved to
 [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md).
 
@@ -75,91 +76,6 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 
 ## Open Steps, in Order
 
-### Module definition demand (`perf-module-definition-cost`)
-
-Found by the `chain` workload, a chain of module definitions
-`x2 = x1 + 1`, … At its start, each demanded module definition cost about
-1,500 reductions, 97 of them reflection steps, and 6.5 M instructions at
-400 definitions, more than twice a countdown level.
-
-**Investigation, 2026-10-10.** New families: `defs_unused` (definitions
-never demanded), `chain_refl` (the chain with one `refl.*` task) and
-`chain_where` (the chain as local `where` groups). Each module definition's
-value carries three wrappers; building without each in turn, at 400 and
-800 definitions:
-
-| Wrapper removed | `chain_400` | `chain_800` | `minimal` |
-| --- | ---: | ---: | ---: |
-| reflection boundary | -70.3% | -70.7% | -43.8% |
-| introduce assertion | -17.6% | -26.0% | -4.0% |
-| context annotation | -4.2% | -4.1% | -1.4% |
-
-- **Reflection boundary, fixed** (`7aa7cb6d`, decision
-  `reflection-boundary-shared`). Every demanded definition ran the
-  boundary's effect as its own reflection task, though it does nothing
-  once the module's scanner is recorded. A module or declared object now
-  shares one boundary value, which each definition forces with `seq`.
-  `chain_800` falls from 4,273 M to 1,403 M instructions (-67%); its
-  reflection steps from about 78,000 to 499.
-- **Introduce assertion, open.** With the boundary shared, removing the
-  assertion saves 50% at 400 definitions and 58% at 1,600; it is the
-  chain's superlinear part (exponent 1.25). Each assertion looks its name
-  up in the definitions as they stood just before it, which builds every
-  intermediate dictionary and keeps it alive while the chain is in
-  progress, and each collection traces every version in full: collection
-  is 17.6% of `chain_1600` with the assertion, 4% without. The assertion
-  is also the only duplicate check: `x = 1` then `x = 2` passes unless `x`
-  is demanded. Options for discussion: check duplicate atom targets of one
-  module statically, keeping the run-time check for what imports and
-  computed roots can add; check against one shared dictionary version per
-  run of definitions; or mark shared dictionary structure once in
-  collection (`perf-collection-growth`).
-- **Context annotation, open:** 8 to 10% of the chain.
-- **First boundary per module, open.** It still launches the `refl.*`
-  scanner, about 22 M instructions: 44% of `minimal`. Skipping it needs a
-  proof that a module has no `refl.*` tasks, which imports, objects,
-  extends and computed roots can add, or a cheaper scanner launch
-  (`perf-reflection-step-cost`).
-- **Lowering, open.** A definition never demanded still costs about 0.6 M
-  instructions to lower to a net and check (`defs_unused`, linear); in the
-  chain, lowering is about 16% of samples.
-
-**Found along the way.**
-- `chain_where` built in cubic time (exponent 2.78; 1,410 M instructions
-  at 200 bindings, about 79 G at 800), and so did the same chain as nested
-  one-line `let`s; one group of the same bindings built linearly. The cost
-  was the unused-local analysis, which runs while parsing: at each binder
-  it re-walked the body, and every nested binder in that walk copied the
-  names of all enclosing locals. Nested binders now only hide an outer
-  local they shadow, copying nothing otherwise (`perf-module-definition-cost`):
-  `chain_where` at 800 falls to 713 M, against 617 M with the analysis
-  off, and `let_nested` at 400 from 10,253 M to 317 M. Each binder still
-  re-walks its body once, a quadratic remainder of about 95 M at 800
-  levels; a single-pass analysis would remove it. The parser itself is
-  linear here; `parse_ifs` stays exponential (`parser-keyword-frames`).
-- A `let` or `where` group resolved its values in the enclosing scope, so
-  siblings could not see each other, though groups are documented as
-  mutually recursive. Fixed first, at the maintainer's priority (decision
-  `binding-groups-lower-by-components`).
-
-**Maintainer direction, 2026-10-10.**
-- **Introduce assertion.** Compilers should check introductions and
-  overrides among a file's own definitions and report them at compile
-  time. A top-level `import` can still introduce a name already defined,
-  which no compile-time check sees, so a run-time check stays. Its form is
-  not formal semantics: compilers could record what they introduce or
-  override under `meta.*`, and the reflection boundary could look for
-  conflicts there without evaluating definitions.
-- **`refl.*` scanner.** Stays: imports act as mixins, so a module without
-  local `refl` tasks can still have some. Its speed and quality, and those
-  of other compiler-generated reflection tasks and annotations, can
-  improve.
-- **Context annotations** are for debugging; cheaper debugging annotations
-  are worth investigating and brainstorming.
-- **Lowering:** parts could become lazier, though definitions must still
-  lower to some value representation, if not a net.
-- **`where` chains:** investigate their build cost separately.
-
 ### Operator nets (`perf-runtime-net-attach`)
 
 `attach_net_many_in` builds a fresh net for each core operator call and runs
@@ -169,6 +85,45 @@ comes from this caller; in `hello_elf`, net building and checking take about
 2.7% of self time. The evaluator fixes the net's shape, not user input.
 Candidate remedies: skip the polarity check for evaluator-built shapes
 covered by tests, or reuse a template per arity.
+
+### Introduce and override checks (`perf-definition-assertions`)
+
+Each introduced module definition carries an assertion that the
+definitions before it do not define its name (an override, that they do).
+With the reflection boundary shared, removing the assertion saves 50% of
+`chain_400` and 58% of `chain_1600`; it is the chain's superlinear part
+(exponent 1.25). Each assertion looks its name up in the definitions as
+they stood just before it, which builds every intermediate dictionary and
+keeps it alive while the chain is in progress, and each collection traces
+every version in full: collection is 17.6% of `chain_1600` with the
+assertion, 4% without. It is also the only duplicate check: `x = 1` then
+`x = 2` passes unless `x` is demanded.
+
+Maintainer direction (2026-10-10): compilers should check introductions
+and overrides among a file's own definitions and report them at compile
+time. A top-level `import` can still introduce a name already defined,
+which no compile-time check sees, so a run-time check stays. Its form is
+not formal semantics: compilers could record what they introduce or
+override under `meta.*`, and the reflection boundary could look for
+conflicts there without evaluating definitions. The step designs that
+record and the boundary's check, adds the compile-time check, and
+measures with `chain` and `defs_unused`.
+
+### Reflection scanner (`perf-reflection-scanner`)
+
+A module's first reflection boundary launches the `refl.*` scanner, which
+waits for the final `refl.*` and launches its tasks. It cannot be skipped
+when a module defines no `refl` tasks, since imports act as mixins
+(maintainer, 2026-10-10). It costs about 22 M instructions per module:
+44% of `minimal`, and 11.5% of `list_computed_2000` (building without any
+boundary, before `reflection-boundary-shared`). By callgrind on
+`minimal`, the boundary's effect program runs through net evaluation
+(net checkpoints 20 M instructions with it, 9 M without), creating and
+activating the reflection task costs about 2 M, and tearing down the
+reflection store and launchers about 2.4 M. The maintainer expects the
+speed and quality of the scanner, and of other compiler-generated
+reflection tasks and annotations, to improve. Related:
+`perf-reflection-step-cost`.
 
 ### Reflection step cost (`perf-reflection-step-cost`)
 
@@ -184,6 +139,16 @@ Reflection task polls hold no heap region (`perf-quantum-region`), since
 they call into their host between steps. Their pure steps, such as local
 state, could hold one, provided no client callback runs inside it
 (maintainer, 2026-10-09).
+
+### Debug annotations (`perf-debug-annotations`)
+
+Each module definition carries a context annotation for diagnostics,
+`anno {context: {g: {origin, line, definition}}} value`; building without
+it saves 8 to 10% of the `chain` family. Debugging annotations should be
+far cheaper (maintainer, 2026-10-10, open to investigation and
+brainstorming). Starting points: what evaluating one costs, and whether a
+context known at compile time, as an origin and line are, can travel
+with the definition without an evaluation step.
 
 ### Route walks with workers (`perf-worker-route-walks`)
 
@@ -242,6 +207,56 @@ and help only programs with parallel work, so this comes last.
   Allocating less is the better lever.
 
 ## Done
+
+- **Module definition demand** (`perf-module-definition-cost`),
+  2026-10-10. Decisions `reflection-boundary-shared`,
+  `binding-groups-lower-by-components` and
+  `local-bindings-take-parameters`.
+  - **Cause.** Each demanded module definition cost about 1,500
+    reductions, 97 of them reflection steps, and 6.5 M instructions at
+    400 definitions. Its value carries three wrappers; building without
+    each in turn:
+
+    | Wrapper removed | `chain_400` | `chain_800` | `minimal` |
+    | --- | ---: | ---: | ---: |
+    | reflection boundary | -70.3% | -70.7% | -43.8% |
+    | introduce assertion | -17.6% | -26.0% | -4.0% |
+    | context annotation | -4.2% | -4.1% | -1.4% |
+
+  - **Reflection boundary** (`7aa7cb6d`). Every demanded definition ran
+    the boundary's effect as its own reflection task, though it does
+    nothing once the module's scanner is recorded. A module or declared
+    object now shares one boundary value, which each definition forces
+    with `seq`. `chain_800` falls from 4,273 M to 1,403 M instructions
+    (-67%); its reflection steps from about 78,000 to 499.
+  - **Families.** `defs_unused` (definitions never demanded, 0.6 M
+    instructions each, linear), `chain_refl` (the chain with one `refl.*`
+    task) and `chain_where` (the chain as nested `where` groups).
+  - **Binding groups** (`cf669884`, `097c6e64`). Building the local
+    comparison found that `let` and `where` groups resolved their values
+    in the enclosing scope, though documented as mutually recursive; they
+    now lower by dependency components, with `fixpoint` for cycles, and
+    local bindings take parameters as module definitions do.
+  - **Nested binders** (`25c66455`). Nested `where` suffixes and nested
+    one-line `let`s built in cubic time (10,253 M instructions at 400
+    levels, about 79 G at 800), while one group of the same bindings
+    built linearly. The unused-local analysis, which runs while parsing,
+    copied every enclosing local's name at each nested binder; it now
+    copies only when one is shadowed. Nested lets at 400 fall to 317 M,
+    `where` chains at 800 to 713 M against 617 M with the analysis off.
+    The parser itself is linear here; `parse_ifs` stays exponential
+    (`parser-keyword-frames`).
+  - **Moved to their own steps:** the introduce and override checks
+    (`perf-definition-assertions`), the scanner each module's first
+    boundary launches (`perf-reflection-scanner`), and the context
+    annotation (`perf-debug-annotations`).
+  - **Left.** Lowering a definition costs about 0.6 M instructions even
+    when it is never demanded, about 16% of the chain; parts could become
+    lazier, though definitions must still lower to some value
+    representation (maintainer). The unused-local analysis still re-walks
+    each binder's body once, a quadratic remainder of about 95 M
+    instructions at 800 nested levels; a single-pass analysis would
+    remove it.
 
 - **Driver hot-path inlining** (`perf-driver-path-inlining`), 2026-10-10.
   Decisions `driver-step-boundaries` and `interface-route-ring-record`.
