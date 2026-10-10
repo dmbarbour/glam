@@ -82,6 +82,11 @@ impl<'heap> Mutator<'heap> {
         })
     }
 
+    /// Registers `contents` as one root frame of this heap; see [`RootFrame`].
+    pub fn root_frame<C: crate::RootFrameContents>(&self, contents: C) -> crate::RootFrame<C> {
+        self.heap.register_root_frame(contents)
+    }
+
     /// Constructs and publishes an external root for one managed allocation.
     ///
     /// The value must belong to this mutator's heap and have the canonical

@@ -402,7 +402,7 @@ pub(crate) unsafe trait OpaquePayloadFamily: Any + Send + Sync {
 mod external_owners;
 pub(crate) use external_owners::{ExternalOwnerHandle, ExternalOwnerKey, ExternalOwnerRegistry};
 mod value_node;
-pub(crate) use value_node::PreparedRuntimeValueRoot;
+pub(crate) use value_node::{PreparedRuntimeValueRoot, with_poll_root_frame};
 mod recursive_cells;
 pub(crate) use recursive_cells::{
     ManagedCoreNetAccess, ManagedCoreNetEdge, ManagedCoreNetRoot, ManagedLazyAccess,

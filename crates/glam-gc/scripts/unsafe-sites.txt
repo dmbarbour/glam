@@ -64,6 +64,7 @@ crates/glam-gc/src/class.rs:type ErasedDrop = unsafe fn(NonNull<()>);
 crates/glam-gc/src/class.rs:type ErasedTrace = for<'visit> unsafe fn(NonNull<()>, &mut Visitor<'visit>);
 crates/glam-gc/src/class.rs:unsafe fn drop_erased<T: Trace>(pointer: NonNull<()>) {
 crates/glam-gc/src/class.rs:unsafe fn trace_erased<T: Trace>(pointer: NonNull<()>, visitor: &mut Visitor<'_>) {
+crates/glam-gc/src/heap.rs:                    .map(|edge| unsafe { *edge.get_unchecked(mutator) })
 crates/glam-gc/src/heap.rs:                    catch_unwind(AssertUnwindSafe(|| unsafe {
 crates/glam-gc/src/heap.rs:                    unsafe { *value.get_unchecked(mutator) }
 crates/glam-gc/src/heap.rs:                    unsafe { *value.get_unchecked(mutator) }
@@ -96,6 +97,7 @@ crates/glam-gc/src/heap.rs:    unsafe impl Trace for SelectivePanickingDrop {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for TerminalPanickingDrop {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for WideDropCounter {
 crates/glam-gc/src/heap.rs:    unsafe impl Trace for WideSlot {
+crates/glam-gc/src/heap.rs:    unsafe impl crate::RootFrameContents for TestRootFrame {
 crates/glam-gc/src/lib.rs:                let _ = unsafe { value.get_unchecked(mutator) };
 crates/glam-gc/src/lib.rs:                unsafe { *value.get_unchecked(mutator) }
 crates/glam-gc/src/lib.rs:            assert_eq!(unsafe { *first.get_unchecked(first_mutator) }, 11);
@@ -129,6 +131,7 @@ crates/glam-gc/src/root.rs:        let reinterpreted = unsafe { Gc::<u32>::from_
 crates/glam-gc/src/root.rs:        unsafe { Gc::from_raw(self.cell.value.as_ptr().cast::<T>()) }
 crates/glam-gc/src/root.rs:        unsafe { value.get_unchecked(mutator) }
 crates/glam-gc/src/root.rs:    unsafe impl Trace for DropProbe {
+crates/glam-gc/src/root.rs:pub unsafe trait RootFrameContents: Send + 'static {
 crates/glam-gc/src/thread_cache.rs:        let current = unsafe { allocation_word.as_ref() }.load(Ordering::Relaxed);
 crates/glam-gc/src/thread_cache.rs:        let pointer = unsafe { self.run.pointer().add(offset).cast::<T>() };
 crates/glam-gc/src/thread_cache.rs:        unsafe {

@@ -811,6 +811,17 @@ impl RuntimeValueRoot {
         }
     }
 
+    /// A root that outlives the poll creating it, such as the poll's result:
+    /// a root in the poll's frame becomes a registered root.
+    pub(crate) fn into_durable(self, values: &CoreValueFactory) -> Self {
+        if !self.value.is_framed() {
+            return self;
+        }
+        values.with_runtime_value_access(|access| Self {
+            value: self.value.into_durable(&access),
+        })
+    }
+
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
         self.value.runtime_id()
     }
@@ -886,6 +897,18 @@ impl crate::core::RuntimeValueAccess<'_> {
     /// liveness to the collector before the region ends.
     pub(crate) fn root_runtime_value(&self, value: Value) -> RuntimeValueRoot {
         RuntimeValueRoot::new_from_access(self.values().runtime_value_observer(), self, value)
+    }
+
+    /// Roots `value` for the rest of the current poll only, in the poll's
+    /// frame when one is open; see `PreparedRuntimeValueRoot::prepare_transient_with_access`.
+    pub(crate) fn root_transient_runtime_value(&self, value: Value) -> RuntimeValueRoot {
+        RuntimeValueRoot {
+            value: PreparedRuntimeValueRoot::prepare_transient_with_access(
+                self.values().runtime_value_observer(),
+                self,
+                value,
+            ),
+        }
     }
 
     /// Publishes one structured evaluation failure while this admitted region

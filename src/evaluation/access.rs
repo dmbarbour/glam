@@ -310,6 +310,17 @@ impl EvaluationPollContext {
         self.demand.values.with_held_region(operation)
     }
 
+    /// Roots the values this poll creates in one frame for the poll; see
+    /// `crate::core::with_poll_root_frame`. `operation` must make durable
+    /// any root its result carries out of the poll.
+    pub(in crate::evaluation) fn with_root_frame<R>(
+        &self,
+        operation: impl FnOnce(&crate::core::CoreValueFactory) -> R,
+    ) -> R {
+        let values = &self.demand.values;
+        crate::core::with_poll_root_frame(values.runtime_id(), || operation(values))
+    }
+
     pub(crate) fn assert_context(&self, context: &EvalContext) {
         assert!(
             Arc::ptr_eq(&self.demand, &context.session),

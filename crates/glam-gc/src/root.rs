@@ -1,8 +1,8 @@
 use std::fmt;
 use std::marker::PhantomData;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use crate::{Gc, Mutator, Trace, heap::HeapInner, trace::ErasedGc};
+use crate::{Gc, Mutator, Trace, Visitor, heap::HeapInner, trace::ErasedGc};
 
 /// A shareable liveness claim for one managed allocation in a live heap.
 ///
@@ -112,6 +112,109 @@ impl<T: Trace> fmt::Debug for Root<T> {
             .debug_tuple("Root")
             .field(&self.cell.value)
             .finish()
+    }
+}
+
+/// The contents of a [`RootFrame`]: state outside the heap whose managed
+/// edges stay rooted while the frame lives.
+///
+/// # Safety
+///
+/// `trace` must visit every managed edge the contents hold, as
+/// [`Trace::trace`] does for an allocation, and the contents may hold only
+/// edges into the frame's heap.
+pub unsafe trait RootFrameContents: Send + 'static {
+    fn trace(&self, visitor: &mut Visitor<'_>);
+}
+
+/// Root-adjacent state traced as one root.
+///
+/// A frame registers with its heap once, and every edge its contents hold
+/// stays rooted while any handle to the frame lives. Keeping many
+/// short-lived edges in one frame costs one registration, where a [`Root`]
+/// each would cost a registration, validation and allocation each. Like a
+/// root, a frame refers only weakly to its heap.
+pub struct RootFrame<C: RootFrameContents> {
+    cell: Arc<RootFrameCell<C>>,
+}
+
+struct RootFrameCell<C> {
+    heap: Weak<HeapInner>,
+    /// Edited by the owner under a mutator, read by the collector when no
+    /// mutator is active, and dropped whenever the last handle goes.
+    contents: Mutex<C>,
+}
+
+/// A registered frame as the collector sees it.
+pub(crate) trait RegisteredRootFrame: Send + Sync {
+    fn trace_contents(&self, visitor: &mut Visitor<'_>);
+}
+
+impl<C: RootFrameContents> RegisteredRootFrame for RootFrameCell<C> {
+    fn trace_contents(&self, visitor: &mut Visitor<'_>) {
+        self.contents
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .trace(visitor);
+    }
+}
+
+impl<C: RootFrameContents> RootFrame<C> {
+    pub(crate) fn candidate(
+        heap: &Arc<HeapInner>,
+        contents: C,
+    ) -> (Self, Weak<dyn RegisteredRootFrame>) {
+        let cell = Arc::new(RootFrameCell {
+            heap: Arc::downgrade(heap),
+            contents: Mutex::new(contents),
+        });
+        let registration: Weak<RootFrameCell<C>> = Arc::downgrade(&cell);
+        (Self { cell }, registration)
+    }
+
+    /// Reads or edits the contents while `mutator` holds this frame's heap,
+    /// so no collection can trace them meanwhile.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `mutator` belongs to another heap.
+    pub fn with<R>(&self, mutator: &Mutator<'_>, operation: impl FnOnce(&mut C) -> R) -> R {
+        assert!(
+            std::ptr::eq(self.cell.heap.as_ptr(), Arc::as_ptr(mutator.heap())),
+            "root frame belongs to another heap"
+        );
+        let mut contents = self
+            .cell
+            .contents
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        operation(&mut contents)
+    }
+
+    /// The number of handles to this frame, including this one.
+    #[must_use]
+    pub fn handle_count(&self) -> usize {
+        Arc::strong_count(&self.cell)
+    }
+
+    /// Whether both handles refer to the same frame.
+    #[must_use]
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.cell, &other.cell)
+    }
+}
+
+impl<C: RootFrameContents> Clone for RootFrame<C> {
+    fn clone(&self) -> Self {
+        Self {
+            cell: Arc::clone(&self.cell),
+        }
+    }
+}
+
+impl<C: RootFrameContents> fmt::Debug for RootFrame<C> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RootFrame")
     }
 }
 

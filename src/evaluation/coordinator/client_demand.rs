@@ -316,6 +316,16 @@ pub(crate) enum ClientDemandPoll {
     Panicked(EvaluationPanic),
 }
 
+impl ClientDemandPoll {
+    /// Makes the result's value root outlive the poll that created it.
+    pub(crate) fn into_durable(self, values: &crate::core::CoreValueFactory) -> Self {
+        match self {
+            Self::Complete(root) => Self::Complete(root.into_durable(values)),
+            poll => poll,
+        }
+    }
+}
+
 pub(crate) enum ClientDemandSnapshot {
     Queued,
     Running,

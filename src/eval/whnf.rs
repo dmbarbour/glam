@@ -807,7 +807,7 @@ fn regional_status_poll(
 ) -> WhnfPoll {
     match status {
         RegionalWhnfStatus::Ready(value) => {
-            WhnfPoll::Ready(access.values().root_runtime_value(value))
+            WhnfPoll::Ready(access.values().root_transient_runtime_value(value))
         }
         RegionalWhnfStatus::Boundary(RegionalBoundaryRequest::Deferred(deferred)) => {
             WhnfPoll::Deferred(deferred)

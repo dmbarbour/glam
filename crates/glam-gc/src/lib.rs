@@ -68,7 +68,7 @@ pub use heap::{
 };
 pub use mutator::{Allocator, Mutator};
 pub use pointer::Gc;
-pub use root::Root;
+pub use root::{Root, RootFrame, RootFrameContents};
 pub use trace::{Trace, Visitor};
 
 #[cfg(test)]
