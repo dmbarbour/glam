@@ -2069,6 +2069,10 @@ impl<S: NetSpecialization> RuntimeEntry<S> {
     }
 }
 
+/// How many nodes a fresh interface walk takes before it records its route:
+/// a walk this short costs less to repeat than to record.
+const UNRECORDED_ROUTE_PREFIX: usize = 16;
+
 pub struct RuntimeNet<S: NetSpecialization> {
     next_node_id: u64,
     next_fan_site: u64,
@@ -2080,6 +2084,12 @@ pub struct RuntimeNet<S: NetSpecialization> {
     // an active pair, at which point `connect` transfers the state into the
     // pair's authoritative record.
     cursor_obligations: TrustedHashMap<NodeId, PairlessCursorObligation<S>>,
+    /// The end of the route each interface's last demand walk took to an
+    /// active pair, up to the pair's near node, so the next walk resumes
+    /// there (see [`Self::walk_interface_route`]). A fresh walk records its
+    /// route only after [`UNRECORDED_ROUTE_PREFIX`] nodes, so a net whose
+    /// walks are short never allocates the map.
+    interface_routes: Option<Box<TrustedHashMap<NodeId, Vec<NodeId>>>>,
 
     // Every live principal-principal wire has exactly one authoritative state.
     // External work changes Ready to Claimed while the runtime lock is held,
@@ -2136,6 +2146,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             next_copy_id: 0,
             copies: TrustedHashMap::default(),
             cursor_obligations: TrustedHashMap::default(),
+            interface_routes: None,
             active: BTreeMap::new(),
             #[cfg(test)]
             polarity_checked: net.polarized,
@@ -2435,6 +2446,7 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             next_copy_id: 0,
             copies: TrustedHashMap::default(),
             cursor_obligations: TrustedHashMap::default(),
+            interface_routes: None,
             active: BTreeMap::new(),
             #[cfg(test)]
             polarity_checked: true,
@@ -3247,6 +3259,12 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         interface: Port,
     ) -> RuntimeNetMutation<InterfaceDemand> {
         self.assert_interface(interface);
+        // Taken out, the route goes back only when the walk ends at a pair.
+        let route = self
+            .interface_routes
+            .as_mut()
+            .and_then(|routes| routes.remove(&interface.node()))
+            .unwrap_or_default();
         let Some(neighbor) = self.neighbor(interface) else {
             return RuntimeNetMutation::Unchanged(InterfaceDemand::NormalForm);
         };
@@ -3282,23 +3300,23 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             return RuntimeNetMutation::Unchanged(demand);
         }
 
-        let mut port = neighbor;
-        let mut cycle = crate::walk_cycle::WalkCycle::new();
-        let pair = loop {
-            if port.is_principal() || !cycle.advance(port.node()) {
-                break None;
-            }
-            let Some(principal_neighbor) = self.neighbor(Port::principal(port.node())) else {
-                break None;
-            };
-            if principal_neighbor.is_principal() {
-                break Some(ActivePairKey::new(port.node(), principal_neighbor.node()));
-            }
-            port = principal_neighbor;
-        };
+        let (pair, route) = self.walk_interface_route(neighbor, route);
+        #[cfg(debug_assertions)]
+        {
+            let (full, _) = self.walk_interface_route(neighbor, Vec::new());
+            assert_eq!(
+                pair, full,
+                "a resumed interface walk must find the pair a full walk finds"
+            );
+        }
         let Some(pair) = pair else {
             return RuntimeNetMutation::Unchanged(InterfaceDemand::NormalForm);
         };
+        if !route.is_empty() {
+            self.interface_routes
+                .get_or_insert_default()
+                .insert(interface.node(), route);
+        }
         let demand = match self.active.get(&pair) {
             Some(ActivePairState::BlockedCursor {
                 cursor,
@@ -3307,6 +3325,56 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             _ => InterfaceDemand::ActivePair(pair),
         };
         RuntimeNetMutation::Unchanged(demand)
+    }
+
+    /// Walks from an interface's auxiliary `neighbor`, along each node's
+    /// principal port to the next node's auxiliary port, to the first
+    /// principal-principal wire: the active pair the interface demands.
+    /// Returns it, or `None` at a dead end or a cycle, with the route walked.
+    ///
+    /// `route` is the end of the route the last walk took, which this one
+    /// resumes. Since then, rewrites may have consumed nodes and wired in
+    /// new ones, but the consumed route nodes are a suffix of the route: a
+    /// route node's principal port faces the next route node's auxiliary
+    /// port, so it joins an active pair only once that next node is
+    /// consumed, and a wire between two surviving nodes never changes. So
+    /// while a recorded node survives, so does every node before it. Node
+    /// IDs are never reused, so the walk drops missing nodes from the tip
+    /// and goes on from the last surviving one; with none left it starts
+    /// again at the interface. A poll after each rewrite at the far end of
+    /// a long chain then costs a few steps, not the chain's length.
+    fn walk_interface_route(
+        &self,
+        neighbor: Port,
+        mut route: Vec<NodeId>,
+    ) -> (Option<ActivePairKey>, Vec<NodeId>) {
+        while route.last().is_some_and(|node| self.node(*node).is_none()) {
+            route.pop();
+        }
+        let (mut node, mut unrecorded) = match route.pop() {
+            Some(tip) => (tip, 0),
+            None if neighbor.is_principal() => return (None, route),
+            None => (neighbor.node(), UNRECORDED_ROUTE_PREFIX),
+        };
+        let mut cycle = crate::walk_cycle::WalkCycle::new();
+        let pair = loop {
+            if !cycle.advance(node) {
+                break None;
+            }
+            if unrecorded == 0 {
+                route.push(node);
+            } else {
+                unrecorded -= 1;
+            }
+            let Some(principal_neighbor) = self.neighbor(Port::principal(node)) else {
+                break None;
+            };
+            if principal_neighbor.is_principal() {
+                break Some(ActivePairKey::new(node, principal_neighbor.node()));
+            }
+            node = principal_neighbor.node();
+        };
+        (pair, route)
     }
 
     /// Returns the port wired to `port`, for evaluator diagnostics and demand
