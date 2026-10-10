@@ -9,8 +9,9 @@ Status: active, as the `perf-structural-overheads` step of the
 `gc-one-heap-per-thread`, `perf-quantum-region`,
 `gc-bounded-collection-wait`, `perf-allocation-path`,
 `perf-root-frames`, `perf-transient-root-avoidance`,
-`perf-list-map-growth`, `perf-list-literal-composition` and
-`perf-lowering-free-bindings`. Next: `perf-interface-demand-walk`.
+`perf-list-map-growth`, `perf-list-literal-composition`,
+`perf-lowering-free-bindings` and `perf-interface-demand-walk`. Next:
+`perf-module-definition-cost`.
 `gc-two-level-mutator-access` and `gc-thread-local-heap-context` moved to
 [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md).
 
@@ -72,36 +73,6 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 | Coordinator claims, releases and admissions | under 2% |
 
 ## Open Steps, in Order
-
-### Interface demand walk (`perf-interface-demand-walk`)
-
-`RuntimeNet::poll_interface_demand` walks from an interface along auxiliary
-to principal ports until it finds an active pair. Each poll starts again at
-the interface and records every visited node in a freshly allocated hash
-set, so repeated polls of a long chain are quadratic.
-
-The long chain in practice was the list operator applied to one item at a
-time; list literals now compose bounded parts
-(`perf-list-literal-composition`), and the other operator chains (an
-application's arguments, a closure's captures, an access path) are as
-long as their source. Even short walks still pay for the set: in
-`list_computed_4000` after composition, its allocation, inserts and
-rehashing are about 22% of samples. (The rehash appears under an
-`EvaluationTaskId` symbol only because identical generic code was folded.)
-
-Candidate remedies:
-- Detect cycles without allocating (Brent's algorithm): one comparison
-  per step on the acyclic chains that are the normal case. If it works
-  here, use it for the other single-path walks that detect cycles with a
-  set (maintainer): the cursor frontier walk (`runtime/cursor.rs`), the
-  coordinator's dependency-chain walks (`dependency_observes_runtime`,
-  `dependency_has_causal_progress_locked`, the causal-child probe's exact
-  chain), `recursive_promise_dependency`, `reported_dependency`, and
-  `follow_forwards`' slow path. Brent's finds a cycle a few steps after
-  its first repeat, harmless for walks that only read; walks that record
-  each step must trim what they recorded past it.
-- Remember the frontier found for an interface, so that a poll resumes
-  where the last one stopped. Less needed now that chains are short.
 
 ### Module definition demand (`perf-module-definition-cost`)
 
@@ -207,6 +178,37 @@ and help only programs with parallel work, so this comes last.
   Allocating less is the better lever.
 
 ## Done
+
+- **Interface demand walk** (`perf-interface-demand-walk`), 2026-10-10.
+  Decision `interface-walks-resume`.
+  - **Two costs.** `RuntimeNet::poll_interface_demand` walked from an
+    interface along principal-to-auxiliary wires to the active pair,
+    recording every node in a freshly allocated hash set to notice a
+    cycle; and every poll started again at the interface. Composition
+    made literal walks short (`perf-list-literal-composition`), but the
+    set still cost about 22% of `list_computed_4000`, and any net with a
+    long chain rewritten at its far end polled quadratically (the
+    maintainer: there are many ways to build such nets).
+  - **Brent's algorithm** (`2b13fb75`). A shared `WalkCycle` notices a
+    cycle with one saved item instead of a set. `list_computed_4000`:
+    469 M to 415 M instructions.
+  - **Resumed routes** (`5c34b13b`). Each interface keeps the end of the
+    route its last walk took; the next walk drops consumed nodes from the
+    tip and goes on from the last survivor. Sound because consumed route
+    nodes are always a suffix of the route (see the decision); debug
+    builds check every resumed walk against a full walk. A fresh walk
+    records nothing for its first 16 nodes, so short walks allocate
+    nothing. Common workloads move within 0.15% (the net cell grew 8
+    bytes); `list_computed_2000` fell 4.3%. A test erodes a 40-node chain
+    from its far end, checking the remembered route at each step.
+  - **Other walks** (`2b32aa46`). Five read-only single-path walks moved
+    from sets to `WalkCycle`: the cursor frontier walk and four
+    dependency-chain walks. Kept as sets: `reported_dependency` (names
+    where its walk first repeats), `follow_forwards`' slow path (needs
+    the cycle's members) and the causal probe's child-work set (spans
+    many walks).
+  - **Left.** The cursor frontier walk restarts too; the same suffix
+    argument would let it resume if it shows in profiles.
 
 - **Free bindings in lowering** (`perf-lowering-free-bindings`),
   2026-10-10. Decision `dict-literals-compose`.

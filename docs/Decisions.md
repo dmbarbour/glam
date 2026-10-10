@@ -562,6 +562,36 @@ maps the short names used here to file names.
 
 ## Interaction nets
 
+### Interface demand walks resume from the surviving part of their route
+`interface-walks-resume` · 2026-10-10 · maintainer · accepted
+- **Context:** a demand poll walked from the interface to the active pair
+  every time, so a chain rewritten at its far end, polled after each
+  rewrite, cost time quadratic in its length. The maintainer asked for
+  the approach used for lazy routes: know what to review after an
+  interruption, detect disruption, and rebuild or backtrack, noting that
+  node names are never reused.
+- **Decision:**
+  - Each interface keeps the end of the route its last walk took. The
+    next walk drops missing nodes from the tip and resumes at the last
+    surviving one, or at the interface when none survives.
+  - The invariant it rests on: a rewrite or runtime operation consumes
+    nodes, adds fresh ones, and rewires only ports that faced consumed
+    nodes, so a wire between two surviving nodes never changes. A route
+    node faces the next one's auxiliary port with its principal, so it
+    joins an active pair only once that next node is consumed; consumed
+    route nodes are therefore a suffix of the route, and a surviving node
+    implies that every node before it survives.
+  - Debug builds check every resumed walk against a full walk, so an
+    operation that broke the invariant would fail the test suite.
+  - A fresh walk records its route only after 16 nodes; cycles are
+    noticed with Brent's algorithm (`WalkCycle`).
+- **Consequences:**
+  - A runtime operation that rewired two surviving nodes would need to
+    clear the remembered routes.
+  - Each managed net cell carries one more optional pointer.
+- **Rule lives in:** `RuntimeNet::walk_interface_route`.
+- **Recorded in:** structural overheads plan, `perf-interface-demand-walk`.
+
 ### Interaction nets are polarized; `Bind >< Bind` joins crossed
 `polarized-interaction-nets` · 2026-10-05 · maintainer · accepted
 - **Context:** N8's random-net generator and net fuzzing need a well-defined
