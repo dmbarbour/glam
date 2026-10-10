@@ -1835,6 +1835,37 @@ fn parses_number_literals() {
     );
 }
 
+/// A long literal with computed items composes lists of a few items and
+/// long closed runs with `++`; it must evaluate to the same list as the
+/// literal written out in full.
+#[test]
+fn composed_list_literals_keep_their_items_in_order() {
+    let items = (1..=40)
+        .map(|item| match item {
+            // A lone computed item, then a long closed run, then a short one.
+            5 | 30 | 31 | 33 => format!("{item} + 0"),
+            _ => item.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let closed = (1..=40)
+        .map(|item| item.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(
+        parse(&format!(
+            "language g0\nresult = if [{items}] == [{closed}] then \"same\" else \"different\"\n"
+        )),
+        &context,
+    );
+    assert_eq!(lowered.diagnostics, []);
+
+    let definitions = evaluated_module_value(&context, &lowered);
+    let result = resolved_value_at_path(&definitions, &["result"]);
+    assert_eq!(output_bytes(&result), b"same");
+}
+
 #[test]
 fn parses_list_and_append_expressions() {
     let parsed = parse("language g0\nbytes = [1, 2] ++ [3, 4]\n");

@@ -132,18 +132,7 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
             ResolvedExpr::Local(binding) => {
                 self.local_uses.entry(binding).or_default().push(target)
             }
-            ResolvedExpr::List(items) => {
-                if items.is_empty() {
-                    self.data_into(Value::List(crate::core::List::empty()), target);
-                } else {
-                    let arity = items.len();
-                    self.lazy_operator_application_into(
-                        crate::eval::list_operator(self.values, arity, Arc::from([])),
-                        items,
-                        target,
-                    );
-                }
-            }
+            ResolvedExpr::List(items) => self.list_into(items, target),
             ResolvedExpr::Access { base, path } => {
                 let mut arguments = vec![*base];
                 let path = path
@@ -186,6 +175,54 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
                     arguments,
                     target,
                 );
+            }
+        }
+    }
+
+    /// Lowers a list literal by composition: a run of closed items of at
+    /// least [`LIST_OPERATOR_MAX_ARITY`] becomes one list value, the other
+    /// items lists of at most that many, and the parts join with `++` in the
+    /// shape of a finger tree (see [`ListTree::finger`]). Each step then
+    /// finds its pair within the tree's depth plus one part, and copies at
+    /// most one part's items.
+    ///
+    /// [`LIST_OPERATOR_MAX_ARITY`]: crate::eval::LIST_OPERATOR_MAX_ARITY
+    fn list_into(&mut self, items: Vec<ResolvedExpr<Value>>, target: Port) {
+        let parts = ListParts::split(self.values, items)
+            .into_iter()
+            .map(ListTree::Part)
+            .collect();
+        match ListTree::finger(parts) {
+            Some(tree) => self.list_tree_into(tree, target),
+            None => self.data_into(Value::List(crate::core::List::empty()), target),
+        }
+    }
+
+    fn list_tree_into(&mut self, tree: ListTree, target: Port) {
+        match tree {
+            ListTree::Part(ListPart::Closed(values)) => {
+                self.data_into(Value::List(crate::core::List::from_values(values)), target)
+            }
+            ListTree::Part(ListPart::Items(items)) => self.lazy_operator_application_into(
+                crate::eval::list_operator(self.values, items.len(), Arc::from([])),
+                items,
+                target,
+            ),
+            ListTree::Append(left, right) => {
+                let mut output = self.net.unary_operator(crate::eval::builtin_operator(
+                    self.values,
+                    crate::core::BuiltinCall {
+                        builtin: crate::core::Builtin::Append,
+                        arguments: Arc::from([]),
+                    },
+                ));
+                for operand in [*left, *right] {
+                    let [application, argument, result] = self.net.bind();
+                    self.net.wire(output, application);
+                    self.list_tree_into(operand, argument);
+                    output = result;
+                }
+                self.net.wire(output, target);
             }
         }
     }
@@ -323,6 +360,173 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
         self.net.wire(source, copy.input);
         for (output, target) in copy.outputs.into_iter().zip(targets) {
             self.net.wire(output, *target);
+        }
+    }
+}
+
+/// How a composed list literal joins its parts.
+enum ListTree {
+    Part(ListPart),
+    Append(Box<ListTree>, Box<ListTree>),
+}
+
+impl ListTree {
+    fn append(left: Self, right: Self) -> Self {
+        Self::Append(Box::new(left), Box::new(right))
+    }
+
+    /// Joins `elements` in order in the shape of a finger tree: the first
+    /// and last stand at the ends, `first ++ (middle ++ last)`, and the
+    /// middle is built the same way from pairs of the elements between
+    /// them. Element size doubles at each level, so both ends stay shallow
+    /// and every part lies within a depth logarithmic in their number.
+    fn finger(mut elements: Vec<Self>) -> Option<Self> {
+        if elements.len() <= 3 {
+            let last = elements.pop()?;
+            return Some(
+                elements
+                    .into_iter()
+                    .rev()
+                    .fold(last, |joined, element| Self::append(element, joined)),
+            );
+        }
+        let last = elements.pop().expect("more than three elements");
+        let mut elements = elements.into_iter();
+        let first = elements.next().expect("more than three elements");
+        let mut pairs = Vec::new();
+        while let Some(left) = elements.next() {
+            pairs.push(match elements.next() {
+                Some(right) => Self::append(left, right),
+                None => left,
+            });
+        }
+        let middle = Self::finger(pairs).expect("at least two middle elements");
+        Some(Self::append(first, Self::append(middle, last)))
+    }
+}
+
+/// One part of a composed list literal.
+enum ListPart {
+    /// A run of closed items, built as one list value during lowering.
+    Closed(Vec<Value>),
+    /// At most [`crate::eval::LIST_OPERATOR_MAX_ARITY`] items, collected by
+    /// one list operator.
+    Items(Vec<ResolvedExpr<Value>>),
+}
+
+/// Splits a list literal's items into parts, in order: runs of at least
+/// [`crate::eval::LIST_OPERATOR_MAX_ARITY`] closed items, and the remaining
+/// items in groups of at most that many.
+struct ListParts<'access, 'scope> {
+    _values: &'access RuntimeValueAccess<'scope>,
+    parts: Vec<ListPart>,
+    /// Items not yet in a part.
+    group: Vec<ResolvedExpr<Value>>,
+    /// The closed items ending the literal so far.
+    run: Vec<Value>,
+}
+
+impl<'access, 'scope> ListParts<'access, 'scope> {
+    const LIMIT: usize = crate::eval::LIST_OPERATOR_MAX_ARITY;
+
+    fn split(
+        values: &'access RuntimeValueAccess<'scope>,
+        items: Vec<ResolvedExpr<Value>>,
+    ) -> Vec<ListPart> {
+        let mut split = Self {
+            _values: values,
+            parts: Vec::new(),
+            group: Vec::new(),
+            run: Vec::new(),
+        };
+        for item in items {
+            match item {
+                ResolvedExpr::Embedded(value) | ResolvedExpr::Provided(value) => {
+                    split.run.push(value)
+                }
+                item => {
+                    split.end_closed_run();
+                    split.group.push(item);
+                }
+            }
+        }
+        split.end_closed_run();
+        split.flush_group();
+        split.parts
+    }
+
+    /// Ends a run of closed items: a long one becomes its own part, after
+    /// the items before it; a short one joins them.
+    fn end_closed_run(&mut self) {
+        if self.run.len() >= Self::LIMIT {
+            self.flush_group();
+            self.parts
+                .push(ListPart::Closed(std::mem::take(&mut self.run)));
+        } else {
+            self.group
+                .extend(self.run.drain(..).map(ResolvedExpr::Embedded));
+        }
+    }
+
+    /// Moves the pending items into parts of at most [`Self::LIMIT`] items.
+    fn flush_group(&mut self) {
+        let mut items = std::mem::take(&mut self.group).into_iter().peekable();
+        while items.peek().is_some() {
+            self.parts
+                .push(ListPart::Items(items.by_ref().take(Self::LIMIT).collect()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn numbered(count: usize) -> Vec<ListTree> {
+        (0..count)
+            .map(|index| {
+                ListTree::Part(ListPart::Closed(vec![Value::Number((index as i64).into())]))
+            })
+            .collect()
+    }
+
+    fn leaves(tree: &ListTree, depth: usize, found: &mut Vec<(i64, usize)>) {
+        match tree {
+            ListTree::Part(ListPart::Closed(values)) => {
+                let Value::Number(number) = &values[0] else {
+                    panic!("test parts hold numbers");
+                };
+                found.push((number.to_i64_if_integer().expect("an integer"), depth));
+            }
+            ListTree::Part(ListPart::Items(_)) => panic!("test parts are closed"),
+            ListTree::Append(left, right) => {
+                leaves(left, depth + 1, found);
+                leaves(right, depth + 1, found);
+            }
+        }
+    }
+
+    /// A finger-shaped join keeps its parts in order, every part within a
+    /// depth logarithmic in their number, and both ends near the root.
+    #[test]
+    fn finger_joins_keep_order_and_logarithmic_depth() {
+        assert!(ListTree::finger(Vec::new()).is_none());
+        for count in [1, 2, 3, 4, 5, 6, 7, 10, 33, 100, 1_000, 4_096] {
+            let tree = ListTree::finger(numbered(count)).expect("a nonempty join");
+            let mut found = Vec::new();
+            leaves(&tree, 0, &mut found);
+            let order = found.iter().map(|(index, _)| *index).collect::<Vec<_>>();
+            assert_eq!(order, (0..count as i64).collect::<Vec<_>>());
+            let deepest = found.iter().map(|(_, depth)| *depth).max().unwrap();
+            let levels = usize::BITS - count.leading_zeros();
+            assert!(
+                deepest <= 3 * levels as usize,
+                "{count} parts reach depth {deepest}"
+            );
+            if count >= 4 {
+                assert_eq!(found[0].1, 1, "the first part stands beside the root");
+                assert_eq!(found[count - 1].1, 2, "the last part is two from the root");
+            }
         }
     }
 }

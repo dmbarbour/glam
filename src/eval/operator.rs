@@ -56,12 +56,21 @@ pub(super) fn applicable_operator(
     CoreOperator::Applicable(function)
 }
 
+/// The most items one list operator collects. Longer literals compose
+/// shorter lists with `++`: an operator collecting n items would take n
+/// partial applications, each copying the items so far.
+pub(crate) const LIST_OPERATOR_MAX_ARITY: usize = 8;
+
 pub(crate) fn list_operator(
     _access: &RuntimeValueAccess<'_>,
     arity: usize,
     supplied: Arc<[Value]>,
 ) -> CoreOperator {
     assert!(supplied.len() < arity);
+    assert!(
+        arity <= LIST_OPERATOR_MAX_ARITY,
+        "a list operator collects at most {LIST_OPERATOR_MAX_ARITY} items"
+    );
     CoreOperator::List { arity, supplied }
 }
 
