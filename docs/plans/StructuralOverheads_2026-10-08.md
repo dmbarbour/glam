@@ -211,9 +211,30 @@ and help only programs with parallel work, so this comes last.
     missing a new peer only changes which dependency the cursor awaits.
   - **Noticed.** About half of all cursor inspections walk a source spine
     and find it stable, with no pair: 39,647 of 81,041 on `countdown_800`,
-    about 50 per iteration, each allocating its list of anchors. Whether
-    these inspect the same stable cursors again or new ones is open; it may
-    belong to `perf-runtime-net-attach`.
+    about 50 per iteration, each allocating its list of anchors. In 97 to
+    99% of all inspections, on every family measured, the source net has
+    no active pairs, copies or cursor obligations left, and such sources
+    average about 5 nodes (20 at most). The maintainer suggests tracking
+    whether a net is fully reduced and then materializing a copy of it
+    whole, since no evaluation is left to share
+    (`perf-reduced-source-copy`, proposed).
+  - **Experiment `perf-route-ring-record`** (maintainer, inconclusive).
+    Record routes from the first node in a box holding the newest 8
+    nodes exactly and a mark every 8 nodes below them, so a returning
+    result walks each stretch between marks once more; memory is 8 nodes
+    plus one byte per node of depth. Instructions rose 1.0 to 1.6% on
+    every workload, and still 0.8 to 1.2% with the ring skipping the first
+    4 nodes, where its code barely runs. Exact counts (callgrind, `minimal`)
+    put the difference in the net driver's hot path, whose inlining
+    changed: `NetWhnfMachine::poll_in` and `step_active_pair_if_current`
+    were split differently, and small `RuntimeNetCell` wrappers became
+    calls. A placebo (an unused boxed field) moved counts 0.15%, and the
+    committed walk kept out of line 0.04%. So most of the difference is
+    code generation on that path, not recording, and sub-percent
+    comparisons of changes there are unreliable until its inlining is
+    pinned. Walks average 1.3 nodes in most families; a record cannot save
+    on walks of one or two nodes, since checking a recorded node costs the
+    lookup the step it saves would.
 
 - **Interface demand walk** (`perf-interface-demand-walk`), 2026-10-10.
   Decision `interface-walks-resume`.
