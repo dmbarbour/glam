@@ -9,7 +9,7 @@ use crate::core::{FunctionCode, FunctionValue, NetValue, RuntimeValueAccess, Val
 use crate::core_net::{CoreDataKey, CoreOperator, CoreSpecialization};
 use crate::interaction_net::{NetBuilder, Port};
 
-use super::resolved::{BindingId, ResolvedExpr, ResolvedPathPart};
+use super::resolved::{BindingId, ResolvedExpr, ResolvedPathPart, finger_join};
 
 /// Consumes one closed front-end semantic expression and lowers it directly to
 /// a shared interaction-net computation. No syntax-shaped value survives this
@@ -208,7 +208,7 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
     /// Lowers a list literal by composition: a run of closed items of at
     /// least [`LIST_OPERATOR_MAX_ARITY`] becomes one list value, the other
     /// items lists of at most that many, and the parts join with `++` in the
-    /// shape of a finger tree (see [`ListTree::finger`]). Each step then
+    /// shape of a finger tree (see [`finger_join`]). Each step then
     /// finds its pair within the tree's depth plus one part, and copies at
     /// most one part's items.
     ///
@@ -218,7 +218,7 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
             .into_iter()
             .map(ListTree::Part)
             .collect();
-        match ListTree::finger(parts) {
+        match finger_join(parts, &mut ListTree::append) {
             Some(tree) => self.list_tree_into(tree, target),
             None => self.data_into(Value::List(crate::core::List::empty()), target),
         }
@@ -400,35 +400,6 @@ impl ListTree {
     fn append(left: Self, right: Self) -> Self {
         Self::Append(Box::new(left), Box::new(right))
     }
-
-    /// Joins `elements` in order in the shape of a finger tree: the first
-    /// and last stand at the ends, `first ++ (middle ++ last)`, and the
-    /// middle is built the same way from pairs of the elements between
-    /// them. Element size doubles at each level, so both ends stay shallow
-    /// and every part lies within a depth logarithmic in their number.
-    fn finger(mut elements: Vec<Self>) -> Option<Self> {
-        if elements.len() <= 3 {
-            let last = elements.pop()?;
-            return Some(
-                elements
-                    .into_iter()
-                    .rev()
-                    .fold(last, |joined, element| Self::append(element, joined)),
-            );
-        }
-        let last = elements.pop().expect("more than three elements");
-        let mut elements = elements.into_iter();
-        let first = elements.next().expect("more than three elements");
-        let mut pairs = Vec::new();
-        while let Some(left) = elements.next() {
-            pairs.push(match elements.next() {
-                Some(right) => Self::append(left, right),
-                None => left,
-            });
-        }
-        let middle = Self::finger(pairs).expect("at least two middle elements");
-        Some(Self::append(first, Self::append(middle, last)))
-    }
 }
 
 /// One part of a composed list literal.
@@ -536,9 +507,10 @@ mod tests {
     /// depth logarithmic in their number, and both ends near the root.
     #[test]
     fn finger_joins_keep_order_and_logarithmic_depth() {
-        assert!(ListTree::finger(Vec::new()).is_none());
+        assert!(finger_join(Vec::new(), &mut ListTree::append).is_none());
         for count in [1, 2, 3, 4, 5, 6, 7, 10, 33, 100, 1_000, 4_096] {
-            let tree = ListTree::finger(numbered(count)).expect("a nonempty join");
+            let tree =
+                finger_join(numbered(count), &mut ListTree::append).expect("a nonempty join");
             let mut found = Vec::new();
             leaves(&tree, 0, &mut found);
             let order = found.iter().map(|(index, _)| *index).collect::<Vec<_>>();

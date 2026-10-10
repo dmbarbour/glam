@@ -886,25 +886,64 @@ pub(in crate::g_syntax) fn lower_dict_union_resolved(
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let mut items = items.iter();
-    let Some(first) = items.next() else {
-        return Ok(ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())));
-    };
-
-    let mut value =
-        syntax_expr_to_resolved_in_semantic_scope(access, first, line, context, scope, locals)?;
-    for item in items {
-        value = ResolvedExpr::apply(
-            ResolvedExpr::Embedded(Value::Builtin(Builtin::DictUnion)),
-            [
-                value,
-                syntax_expr_to_resolved_in_semantic_scope(
-                    access, item, line, context, scope, locals,
-                )?,
-            ],
-        );
+    let items = items
+        .iter()
+        .map(|item| {
+            syntax_expr_to_resolved_in_semantic_scope(access, item, line, context, scope, locals)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(dict) = closed_dict(access, &items) {
+        return Ok(ResolvedExpr::Embedded(Value::Dict(dict)));
     }
-    Ok(value)
+    // Union is associative, so the members join in a shallow tree rather
+    // than a chain as deep as the literal is long.
+    Ok(
+        super::super::resolved::finger_join(items, &mut |left, right| {
+            ResolvedExpr::apply(
+                ResolvedExpr::Embedded(Value::Builtin(Builtin::DictUnion)),
+                [left, right],
+            )
+        })
+        .unwrap_or_else(|| ResolvedExpr::Embedded(Value::Dict(Dict::new_sync()))),
+    )
+}
+
+/// The dictionary a literal's members build, when every member is a
+/// single-key entry of closed data with an atom, number or text key, and no
+/// two entries share a key. An entry whose value is the undefined (empty)
+/// dictionary adds nothing, as its singleton would be empty. Other
+/// literals, including those whose duplicate keys must merge, build at run
+/// time.
+fn closed_dict(access: &RuntimeValueAccess<'_>, members: &[ResolvedExpr<Value>]) -> Option<Dict> {
+    let mut dict = Dict::new_sync();
+    for member in members {
+        let ResolvedExpr::Apply {
+            function,
+            arguments,
+        } = member
+        else {
+            return None;
+        };
+        let (
+            ResolvedExpr::Embedded(Value::Builtin(Builtin::DictSingleton)),
+            [ResolvedExpr::Embedded(key), ResolvedExpr::Embedded(value)],
+        ) = (function.as_ref(), arguments.as_slice())
+        else {
+            return None;
+        };
+        if !matches!(key, Value::Atom(_) | Value::Number(_) | Value::Binary(_)) {
+            return None;
+        }
+        if matches!(value, Value::Dict(entries) if entries.is_empty()) {
+            continue;
+        }
+        let key = access.key_from_value(key)?;
+        if dict.contains_key(&key) {
+            return None;
+        }
+        dict = dict.insert(key, access.duplicate_value(value));
+    }
+    Some(dict)
 }
 
 pub(in crate::g_syntax) fn lower_lambda_expr_resolved(
@@ -1253,6 +1292,61 @@ mod tests {
         assert!(
             matches!(resolve(&computed), ResolvedExpr::List(items) if items.len() == 2),
             "a literal with a computed item should stay a list to build"
+        );
+    }
+
+    fn entry(key: &str, value: SyntaxExpr) -> SyntaxExpr {
+        SyntaxExpr::PathDict(vec![SyntaxKeyExpr::Atom(key.into())], Box::new(value))
+    }
+
+    fn depth(expr: &ResolvedExpr<Value>) -> usize {
+        match expr {
+            ResolvedExpr::Apply { arguments, .. } => {
+                1 + arguments.iter().map(depth).max().unwrap_or(0)
+            }
+            _ => 0,
+        }
+    }
+
+    /// A literal of single-key entries of closed data resolves to its
+    /// dictionary, leaving out entries whose value is undefined. Duplicate
+    /// keys, which must merge, and computed values build at run time, in a
+    /// tree of unions logarithmically deep.
+    #[test]
+    fn closed_dict_literals_resolve_to_their_values() {
+        let closed = SyntaxExpr::DictUnion(vec![
+            entry("a", number(1)),
+            entry("b", SyntaxExpr::Text("two".into())),
+            entry("gone", SyntaxExpr::DictUnion(Vec::new())),
+        ]);
+        let ResolvedExpr::Embedded(Value::Dict(dict)) = resolve(&closed) else {
+            panic!("a closed literal should resolve to its dictionary");
+        };
+        assert_eq!(dict.size(), 2);
+
+        let duplicate = SyntaxExpr::DictUnion(vec![entry("a", number(1)), entry("a", number(2))]);
+        assert!(
+            matches!(resolve(&duplicate), ResolvedExpr::Apply { .. }),
+            "duplicate keys should merge at run time"
+        );
+
+        let computed = SyntaxExpr::DictUnion(
+            (0..64)
+                .map(|index| {
+                    entry(
+                        &format!("k{index}"),
+                        SyntaxExpr::Add(Box::new(number(index)), Box::new(number(0))),
+                    )
+                })
+                .collect(),
+        );
+        // Each entry adds two applications of its own (its singleton and
+        // its sum); a chain of unions would add 63 more.
+        let resolved = resolve(&computed);
+        assert!(
+            depth(&resolved) <= 3 * 7 + 2,
+            "64 computed entries should join logarithmically deep, not {}",
+            depth(&resolved)
         );
     }
 }

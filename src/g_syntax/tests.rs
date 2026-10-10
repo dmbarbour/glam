@@ -1866,6 +1866,39 @@ fn composed_list_literals_keep_their_items_in_order() {
     assert_eq!(output_bytes(&result), b"same");
 }
 
+/// A dictionary literal with computed values joins its entries in a
+/// shallow tree of unions; it must build the same dictionary as the literal
+/// written with closed values.
+#[test]
+fn composed_dict_literals_build_the_same_dictionary() {
+    let entries = |computed: bool| {
+        (1..=40)
+            .map(|item| {
+                if computed && item % 3 == 0 {
+                    format!("k{item}: {item} + 0")
+                } else {
+                    format!("k{item}: {item}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(
+        parse(&format!(
+            "language g0\nresult = if {{{}}} == {{{}}} then \"same\" else \"different\"\n",
+            entries(true),
+            entries(false)
+        )),
+        &context,
+    );
+    assert_eq!(lowered.diagnostics, []);
+
+    let definitions = evaluated_module_value(&context, &lowered);
+    let result = resolved_value_at_path(&definitions, &["result"]);
+    assert_eq!(output_bytes(&result), b"same");
+}
+
 #[test]
 fn parses_list_and_append_expressions() {
     let parsed = parse("language g0\nbytes = [1, 2] ++ [3, 4]\n");

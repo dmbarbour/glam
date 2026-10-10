@@ -291,6 +291,38 @@ where
     }
 }
 
+/// Joins `elements` in order in the shape of a finger tree: the first and
+/// last stand at the ends, `first ⋈ (middle ⋈ last)`, and the middle is
+/// built the same way from pairs of the elements between them. Element size
+/// doubles at each level, so both ends stay shallow and every element lies
+/// within a depth logarithmic in their number. Grammar-level literals use
+/// this to compose binary joins, such as `++` or a dictionary union, without
+/// a chain as deep as the literal is long.
+pub(super) fn finger_join<T>(mut elements: Vec<T>, join: &mut impl FnMut(T, T) -> T) -> Option<T> {
+    if elements.len() <= 3 {
+        let last = elements.pop()?;
+        return Some(
+            elements
+                .into_iter()
+                .rev()
+                .fold(last, |joined, element| join(element, joined)),
+        );
+    }
+    let last = elements.pop().expect("more than three elements");
+    let mut elements = elements.into_iter();
+    let first = elements.next().expect("more than three elements");
+    let mut pairs = Vec::new();
+    while let Some(left) = elements.next() {
+        pairs.push(match elements.next() {
+            Some(right) => join(left, right),
+            None => left,
+        });
+    }
+    let middle = finger_join(pairs, join).expect("at least two middle elements");
+    let tail = join(middle, last);
+    Some(join(first, tail))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

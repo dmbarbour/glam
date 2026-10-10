@@ -147,6 +147,14 @@ append_walk() {
   printf 'language g0\nimport '"'"'std as std\nbuild n = if n == 0 then [] else build (n - 1) ++ [n]\ngo acc ys = if ys == [] then acc else go (acc + std.list.head ys) (std.list.tail ys)\nasm.result = if go 0 (build %s) == %s then "ok" else "bad"' \
     "$1" "$(($1 * ($1 + 1) / 2))"
 }
+dict_computed() {
+  # A literal whose values are computed, so it builds at run time rather
+  # than resolving to its dictionary.
+  local n=$1 entries='' i
+  for ((i = 1; i <= n; i++)); do entries+="k$i:$i + 0,"; done
+  entries=${entries%,}
+  printf 'language g0\nd = {%s}\nasm.result = if d.k%s == %s then "ok" else "bad"' "$entries" "$n" "$n"
+}
 dict_lookup() {
   local n=$1 entries='' i
   for ((i = 1; i <= n; i++)); do entries+="k$i:$i,"; done
@@ -155,6 +163,7 @@ dict_lookup() {
 }
 family list_map 500
 family list_computed 500
+family dict_computed 500
 family list_sum 100
 family append_walk 200
 family dict_lookup 500

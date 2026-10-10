@@ -543,11 +543,15 @@ fn public_promise_completion_resumes_blocked_reasoning_in_its_session() {
 #[test]
 fn public_reasoning_report_exposes_retryable_blocked_errors() {
     let assembler = Assembler::default();
+    // `msg` has a computed member, so it builds at run time: readiness, which
+    // never evaluates, has no immediate text view of it, and only the
+    // projection can read it. A `msg` of closed data would resolve to its
+    // value and be readable at once.
     let module = assembler
         .module(["blocked_error"])
         .script(
             "g",
-            "language g0\nimport 'std\nrefl.error = .cut (.heap.get ['observed] >>= (\\_ -> anno context:\"retry context\" (anno 'error {msg:{text:\"structured retryable failure\"}, detail:7})))\nvalue = \"value\"\n",
+            "language g0\nimport 'std\nrefl.error = .cut (.heap.get ['observed] >>= (\\_ -> anno context:\"retry context\" (anno 'error {msg:{text:\"structured retryable failure\", step:1 + 0}, detail:7})))\nvalue = \"value\"\n",
         )
         .build()
         .expect("reflection fixture should compile");
