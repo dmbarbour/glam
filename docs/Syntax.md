@@ -651,6 +651,27 @@ We'll support Haskell-style locals.
         Body where Name1 = Def1
                    Name2 = Def2
 
+A local binding takes parameters as a module definition does, and the
+bindings of one group may name each other in any order, themselves
+included:
+
+        # parameters are lambda sugar
+        let add a b = a + b in add 1 2
+        # equivalent to:
+        let add = \a b -> a + b in add 1 2
+
+        # a binding may name a later binding of its group
+        let { y = x; x = 42 } in y
+
+        # or itself, for a local recursive helper
+        go 5 where go n = if n == 0 then 0 else go (n - 1)
+
+        # or bindings that name it back
+        parity 7 where
+          even n = if n == 0 then "even" else odd (n - 1)
+          odd n = if n == 0 then "odd" else even (n - 1)
+          parity n = even n
+
 `where` is a low-precedence, left-associative postfix construct. Each suffix
 introduces a separate mutually recursive binding group:
 

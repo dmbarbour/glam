@@ -210,6 +210,18 @@ maps the short names used here to file names.
 
 ## Language and front end
 
+### Local bindings take parameters
+`local-bindings-take-parameters` · 2026-10-10 · maintainer · accepted
+- **Context:** `let` and `where` bindings accepted only a name, so a local
+  helper was written `go = \k -> Body`, and `go k = Body` failed as an
+  invalid name; the syntax docs had no examples either way.
+- **Decision:** a local binding takes parameters as a module definition
+  does, as lambda sugar: `let add a b = a + b in Body` binds
+  `add = \a b -> a + b`. Parameters are local names separated from the
+  binding's name.
+- **Rule lives in:** `Syntax.md` "Local Definitions".
+- **Recorded in:** structural overheads plan, `perf-module-definition-cost`.
+
 ### Binding groups lower by dependency components
 `binding-groups-lower-by-components` · 2026-10-10 · agent · accepted
 - **Context:** a `let` or `where` group is documented as mutually recursive,

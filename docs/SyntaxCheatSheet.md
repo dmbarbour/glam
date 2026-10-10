@@ -188,6 +188,9 @@ let x = 1 in x + x          # one-liner
 let { x = 1; y = 2 } in x + y # braced ';' group is mutually recursive
 let {; x = 1; y = 2; } in x + y # leading/trailing ';' accepted
 let {} in Expr              # explicit empty group; equivalent to Expr
+let add a b = a + b in add 1 2 # parameters: add = \a b -> a + b
+let { y = x; x = 42 } in y  # a group's bindings name each other in any order
+go 5 where go n = if n == 0 then 0 else go (n - 1) # local recursion
 let x = 1                   # multi-line: no 'in', Body aligns with 'let'
     y = x + 1
 x + y

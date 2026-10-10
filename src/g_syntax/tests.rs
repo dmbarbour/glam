@@ -5334,6 +5334,65 @@ fn binding_groups_are_mutually_recursive() {
     );
 }
 
+/// A local binding takes parameters as a module definition does: its value
+/// becomes a lambda over them.
+#[test]
+fn local_bindings_take_parameters_as_definitions_do() {
+    let parsed = parse("language g0\nsum = let { add a b = a + b } in add 1 2\n");
+    assert_eq!(parsed.diagnostics, []);
+    let DeclarationKind::Definition(definition) = &parsed.declarations[1].kind else {
+        panic!("a definition should parse");
+    };
+    let Some(SyntaxExpr::Let { bindings, .. }) = &definition.expr else {
+        panic!("the definition should be a let expression");
+    };
+    assert!(matches!(
+        &bindings[..],
+        [(name, SyntaxExpr::Lambda(parameters, _))]
+            if name == "add" && parameters == &["a", "b"]
+    ));
+
+    let parsed = parse(concat!(
+        "language g0\n",
+        "count = go 5 where go k = if k == 0 then 0 else 1 + go (k - 1)\n",
+        "parity = answer 7\n",
+        "  where\n",
+        "    even n = if n == 0 then \"even\" else odd (n - 1)\n",
+        "    odd n = if n == 0 then \"odd\" else even (n - 1)\n",
+        "    answer n = even n\n",
+        "asm.result = if count == 5 then parity else \"wrong\"\n",
+    ));
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+    let value = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "result"]
+        ))),
+        b"odd"
+    );
+
+    for (source, message) in [
+        (
+            "language g0\nr = let { go (k) = k } in go 1\n",
+            "local binding `go` parameters must be local names",
+        ),
+        (
+            "language g0\nr = let { 1 x = x } in 1\n",
+            "invalid local binding name `1 x`",
+        ),
+    ] {
+        let messages = parse(source)
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| diagnostic.message)
+            .collect::<Vec<_>>();
+        assert_eq!(messages, [message], "{source}");
+    }
+}
+
 /// A group whose values only name each other has no value: evaluating it
 /// fails as a lazy dependency cycle.
 #[test]

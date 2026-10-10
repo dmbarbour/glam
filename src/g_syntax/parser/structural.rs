@@ -629,27 +629,79 @@ fn parse_binding(
             ),
         ));
     };
-    let name_view = trim_layout(view_between(view, view.range().start(), equal_index));
+    let head_view = trim_layout(view_between(view, view.range().start(), equal_index));
     let value_view = trim_layout(view_between(view, equal_index + 1, view.range().end()));
-    let Some(name) = local_name(name_view) else {
-        if let Some(keyword) = single_reserved_keyword(name_view) {
-            return Err(error_at_view(name_view, reserved_keyword_message(keyword)));
-        }
-        return Err(error_at_view(
-            name_view,
-            format!(
-                "invalid local binding name `{}`",
-                name_view.source_text().unwrap_or("").trim()
-            ),
-        ));
-    };
+    let (name, parameters) = parse_local_binding_head(head_view)?;
     if is_layout_empty(value_view) {
         return Err(error_at_view(
             view,
             format!("local binding `{name}` requires a value"),
         ));
     }
-    parse_expression_in_context(value_view, context).map(|value| (name.to_owned(), value))
+    let value = parse_expression_in_context(value_view, context)?;
+    let value = if parameters.is_empty() {
+        value
+    } else {
+        SyntaxExpr::Lambda(parameters, Box::new(value))
+    };
+    Ok((name.to_owned(), value))
+}
+
+/// A local binding's head: its name, then any parameters, as a module
+/// definition takes them. `go k = Body` is sugar for `go = \k -> Body`.
+fn parse_local_binding_head<'source>(
+    view: TokenView<'_, 'source>,
+) -> ParseResult<(&'source str, Vec<String>)> {
+    // Each significant top-level token with its own one-token view.
+    let tokens = view
+        .top_level()
+        .filter(|indexed| !matches!(indexed.token().kind(), TokenKind::LineStart { .. }))
+        .map(|indexed| {
+            let index = indexed.index();
+            (
+                indexed.token().leading(),
+                view_between(view, index, index + 1),
+            )
+        })
+        .collect::<Vec<_>>();
+    let Some(((_, name_view), parameter_tokens)) = tokens.split_first() else {
+        return Err(error_at_view(view, "invalid local binding name ``"));
+    };
+    let Some(name) = local_name(*name_view) else {
+        if let Some(keyword) = single_reserved_keyword(*name_view) {
+            return Err(error_at_view(*name_view, reserved_keyword_message(keyword)));
+        }
+        return Err(error_at_view(
+            view,
+            format!(
+                "invalid local binding name `{}`",
+                view.source_text().unwrap_or("").trim()
+            ),
+        ));
+    };
+    let mut parameters = Vec::new();
+    for (leading, parameter_view) in parameter_tokens {
+        let Some(parameter) = local_name(*parameter_view) else {
+            if let Some(keyword) = single_reserved_keyword(*parameter_view) {
+                return Err(error_at_view(
+                    *parameter_view,
+                    reserved_keyword_message(keyword),
+                ));
+            }
+            return Err(error_at_view(
+                *parameter_view,
+                format!("local binding `{name}` parameters must be local names"),
+            ));
+        };
+        if *leading == LeadingTrivia::Joint {
+            return Err(error_at_view(
+                *parameter_view,
+                format!("local binding `{name}` parameters must be separated from its name"),
+            ));
+        }
+        parameters.push(parameter.to_owned());
+    }
+    Ok((name, parameters))
 }
 
 fn parse_object(

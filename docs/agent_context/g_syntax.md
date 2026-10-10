@@ -123,7 +123,9 @@ disagree.
   through siblings). It lowers by strongly connected components in
   dependency order: an acyclic one as an application, a cycle through
   `fixpoint`, one binding directly and several through a dictionary of
-  the members. Separate `where` suffixes remain separate groups.
+  the members. Separate `where` suffixes remain separate groups. A local
+  binding takes parameters as a module definition does: `go k = Body` is
+  `go = \k -> Body`.
 - `using Dict in Expr` evaluates and shares `Dict` in the surrounding scope,
   then installs it as temporary final namespace and `self`; prior namespace is
   `{}` and `^` still escapes outward. It is front-end sugar, not a runtime
