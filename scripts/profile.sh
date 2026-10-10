@@ -113,9 +113,32 @@ chain() {
   for ((i = 2; i <= n; i++)); do printf 'x%d = x%d + 1\n' "$i" "$((i - 1))"; done
   printf 'asm.result = if x%d == %d then "ok" else "bad"' "$n" "$n"
 }
+# Module definitions (`perf-module-definition-cost`): defined but never
+# demanded; the chain with one `refl.*` task, so the reflection boundary
+# launches real work; and the chain as local `where` groups instead of
+# module definitions, each later group the outer scope of the one before.
+defs_unused() {
+  local n=$1 i
+  printf 'language g0\n'
+  for ((i = 1; i <= n; i++)); do printf 'x%d = %d + 0\n' "$i" "$i"; done
+  printf 'asm.result = if x%d == %d then "ok" else "bad"' "$n" "$n"
+}
+chain_refl() {
+  printf 'language g0\nrefl.ready = .r ()\n'
+  chain "$1" | tail -n +2
+}
+chain_where() {
+  local n=$1 i
+  printf 'language g0\nlast = x%d' "$n"
+  for ((i = n; i >= 2; i--)); do printf ' where x%d = x%d + 1' "$i" "$((i - 1))"; done
+  printf ' where x1 = 1\nasm.result = if last == %d then "ok" else "bad"' "$n"
+}
 family countdown 200
 family sum 200
 family chain 200
+family defs_unused 200
+family chain_refl 200
+family chain_where 50
 # Workers follow the same producer chain as the foreground, so a scheduling
 # defect shows as superlinear growth here (`perf-worker-scaling`).
 family chain 200 4

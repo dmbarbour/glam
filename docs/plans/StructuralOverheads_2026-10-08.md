@@ -78,24 +78,60 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 ### Module definition demand (`perf-module-definition-cost`)
 
 Found by the `chain` workload, a chain of module definitions
-`x2 = x1 + 1`, … Each demanded module definition costs about 1,500
-reductions, 97 of them reflection steps, and 6.5 M instructions at 400
-definitions: more than twice a countdown level, which also adds one. A
-definition that nothing demands costs almost nothing. The reflection steps
-probably come from the module's shared reflection boundary for final
-`refl.*` (`g_syntax/module_lowering`), which every named module definition
-passes through, though no `refl` task exists here; this is from reading
-the code, not yet confirmed. `hello_elf` runs 7,834 reflection steps.
+`x2 = x1 + 1`, … At its start, each demanded module definition cost about
+1,500 reductions, 97 of them reflection steps, and 6.5 M instructions at
+400 definitions, more than twice a countdown level.
 
-The cost also grows mildly with the number of definitions (exponent 1.24;
-8.9 M instructions per definition at 1,600). At that size exact-route
-validation (`validate_exact_route_locked`, 4%) and `work_for_wait_locked`
-(2%) lead the profile, and each collection traces the whole definitions
-dictionary (`visit_dict_edges`, 2%).
+**Investigation, 2026-10-10.** New families: `defs_unused` (definitions
+never demanded), `chain_refl` (the chain with one `refl.*` task) and
+`chain_where` (the chain as local `where` groups). Each module definition's
+value carries three wrappers; building without each in turn, at 400 and
+800 definitions:
 
-The step starts by confirming where the reflection steps come from and
-what the boundary does per definition, then asks whether a module without
-`refl` tasks can skip it.
+| Wrapper removed | `chain_400` | `chain_800` | `minimal` |
+| --- | ---: | ---: | ---: |
+| reflection boundary | -70.3% | -70.7% | -43.8% |
+| introduce assertion | -17.6% | -26.0% | -4.0% |
+| context annotation | -4.2% | -4.1% | -1.4% |
+
+- **Reflection boundary, fixed** (`7aa7cb6d`, decision
+  `reflection-boundary-shared`). Every demanded definition ran the
+  boundary's effect as its own reflection task, though it does nothing
+  once the module's scanner is recorded. A module or declared object now
+  shares one boundary value, which each definition forces with `seq`.
+  `chain_800` falls from 4,273 M to 1,403 M instructions (-67%); its
+  reflection steps from about 78,000 to 499.
+- **Introduce assertion, open.** With the boundary shared, removing the
+  assertion saves 50% at 400 definitions and 58% at 1,600; it is the
+  chain's superlinear part (exponent 1.25). Each assertion looks its name
+  up in the definitions as they stood just before it, which builds every
+  intermediate dictionary and keeps it alive while the chain is in
+  progress, and each collection traces every version in full: collection
+  is 17.6% of `chain_1600` with the assertion, 4% without. The assertion
+  is also the only duplicate check: `x = 1` then `x = 2` passes unless `x`
+  is demanded. Options for discussion: check duplicate atom targets of one
+  module statically, keeping the run-time check for what imports and
+  computed roots can add; check against one shared dictionary version per
+  run of definitions; or mark shared dictionary structure once in
+  collection (`perf-collection-growth`).
+- **Context annotation, open:** 8 to 10% of the chain.
+- **First boundary per module, open.** It still launches the `refl.*`
+  scanner, about 22 M instructions: 44% of `minimal`. Skipping it needs a
+  proof that a module has no `refl.*` tasks, which imports, objects,
+  extends and computed roots can add, or a cheaper scanner launch
+  (`perf-reflection-step-cost`).
+- **Lowering, open.** A definition never demanded still costs about 0.6 M
+  instructions to lower to a net and check (`defs_unused`, linear); in the
+  chain, lowering is about 16% of samples.
+
+**Found along the way.**
+- `chain_where` builds in cubic time (exponent 2.78; 1,410 M instructions
+  at 200 bindings, 79 G at 800), all in the build phase; evaluating it
+  costs 0.07 ms per binding, against 0.3 ms per module definition.
+- A `let` or `where` group resolves its values in the enclosing scope
+  (`(\x1 x2 -> body) e1 e2`), so siblings do not see each other, while
+  the syntax cheat sheet calls a group mutually recursive. The name
+  analysis matches the implementation. A question for the maintainer.
 
 ### Operator nets (`perf-runtime-net-attach`)
 
