@@ -425,6 +425,34 @@ maps the short names used here to file names.
 - **Recorded in:** structural overheads plan, `perf-list-map-growth` and
   `perf-list-literal-composition`.
 
+### Dict literals fold when closed and otherwise join as a finger tree
+`dict-literals-compose` · 2026-10-10 · maintainer · accepted
+- **Context:** a dict literal resolved to a left-nested chain of binary
+  unions, one per member, as deep as the literal was long. Lowering
+  walked it quadratically, and at 5,000 computed entries lowering and
+  evaluation overflowed the Rust stack.
+- **Decision:** dict literals are grammar-level, like list literals
+  (`list-literals-compose`; maintainer):
+  - A literal whose members are single-key entries of closed data, with
+    atom, number or text keys and no key repeated, resolves to its
+    dictionary. An entry whose value is undefined adds nothing, as at run
+    time.
+  - Any other literal joins its members with union in the same
+    finger-tree shape (`finger_join`). Union is associative and forces
+    its operands left to right, so the shape keeps the result and the
+    order in which members are demanded.
+- **Consequences:**
+  - Nesting is logarithmic in the number of members.
+  - A balanced union re-inserts each entry about log n times where a
+    chain inserted it once: 6% slower at 2,000 computed entries.
+  - Repeated keys, list and dict keys, and computed keys still build at
+    run time, where merging and key conversion live.
+  - Readiness, which never evaluates, can now read a closed literal
+    payload's diagnostic text.
+- **Rule lives in:** `lower_dict_union_resolved` and `closed_dict` in
+  `src/g_syntax/resolve/expression.rs`.
+- **Recorded in:** structural overheads plan, `perf-lowering-free-bindings`.
+
 ### List observers walk leaves; what they take is a flat slice or a rope
 `list-observers-walk-leaves` · 2026-10-09 · maintainer · accepted
 - **Context:** `len`, `at`, `split`, `slice` and `split_end` advanced one

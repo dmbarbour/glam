@@ -9,8 +9,8 @@ Status: active, as the `perf-structural-overheads` step of the
 `gc-one-heap-per-thread`, `perf-quantum-region`,
 `gc-bounded-collection-wait`, `perf-allocation-path`,
 `perf-root-frames`, `perf-transient-root-avoidance`,
-`perf-list-map-growth` and `perf-list-literal-composition`. Next:
-`perf-lowering-free-bindings`.
+`perf-list-map-growth`, `perf-list-literal-composition` and
+`perf-lowering-free-bindings`. Next: `perf-interface-demand-walk`.
 `gc-two-level-mutator-access` and `gc-thread-local-heap-context` moved to
 [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md).
 
@@ -72,22 +72,6 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 | Coordinator claims, releases and admissions | under 2% |
 
 ## Open Steps, in Order
-
-### Free bindings in lowering (`perf-lowering-free-bindings`)
-
-`ResolvedNetLowerer::lower_code_in` calls `body.free_bindings()` for each
-nested lambda or lazy body, and each call walks that body's whole subtree.
-A large dictionary literal nests about as deeply as it has entries, so
-lowering is quadratic: `collect_free_bindings` is 40% of
-`dict_lookup_4000`. A `do` block nests each step's continuation the same
-way: `collect_free_bindings` and its `BTreeSet` updates are about 45% of
-`do_chain_1600`, a 1,600-step chain, whose cost per step grows with
-exponent 1.6. The walk also recurses on the Rust stack to the
-literal's depth, an instance of the roadmap's `perf-pre-eval-stack-depth`.
-
-Candidate remedies: derive each body's captures from the uses the lowerer
-already records, or compute every body's free set in one bottom-up pass.
-The first needs care with parameters that `ApplyLambda` binds inline.
 
 ### Interface demand walk (`perf-interface-demand-walk`)
 
@@ -223,6 +207,42 @@ and help only programs with parallel work, so this comes last.
   Allocating less is the better lever.
 
 ## Done
+
+- **Free bindings in lowering** (`perf-lowering-free-bindings`),
+  2026-10-10. Decision `dict-literals-compose`.
+  - **Cause.** Lowering each nested lambda or lazy body (a closure's code
+    net) first walked the body's whole subtree for its free bindings, its
+    captures, so a body nested d deep was walked d times. Two shapes nest
+    that deep: a dict literal resolved to a left-nested chain of unions,
+    one per member, and a `do` block nests each step's continuation.
+  - **Captures from recorded uses** (`091984bd`). The lowerer already
+    records every local use while compiling a body, a nested closure's
+    captures among them, so the uses left unbound once the body is
+    lowered are exactly its captures. `free_bindings` stays as a test
+    helper; a test checks the two agree.
+  - **Dict literals** (`c411e8ee`). A literal of single-key entries of
+    closed data, with atom, number or text keys and no key repeated,
+    resolves to its dictionary; any other joins its members with union in
+    the finger-tree shape list literals use (`finger_join`).
+  - **Results:**
+
+    | Workload | Before | Captures | Dict literals |
+    | --- | ---: | ---: | ---: |
+    | `dict_lookup_2000` | 992 M | 613 M | 81 M |
+    | `do_chain_800` | 1,759 M | 1,038 M | 1,038 M |
+
+    `dict_lookup` no longer reduces at run time; `do_chain`'s exponent
+    fell from 1.54 to 1.11 over 200 to 800 steps. A new `dict_computed`
+    family (computed values) overflowed the Rust stack at 5,000 entries
+    as a chain; composed, it runs to 20,000 (7,950 M instructions). At
+    2,000 entries composition costs 6% (749 M against 708 M), since a
+    balanced union re-inserts each entry about log n times where a chain
+    inserts it once.
+  - **Left.** A computed entry or list item costs about 370 K
+    instructions, mostly lowering its value to its own code net.
+    Readiness, which never evaluates, now reads a closed literal
+    payload's message at once; one public test was adjusted to keep
+    covering a payload only the projection can read.
 
 - **List literal composition** (`perf-list-literal-composition`),
   2026-10-10. Decision `list-literals-compose`.

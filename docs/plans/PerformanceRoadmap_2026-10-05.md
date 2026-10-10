@@ -185,11 +185,11 @@ gains this consequence when it lands.
      `gc-one-heap-per-thread`, `perf-quantum-region`,
      `gc-bounded-collection-wait`, `perf-allocation-path`,
      `perf-root-frames`, `perf-transient-root-avoidance`,
-     `perf-list-map-growth` and `perf-list-literal-composition`. The
-     scheduler round trips were
+     `perf-list-map-growth`, `perf-list-literal-composition` and
+     `perf-lowering-free-bindings`. The scheduler round trips were
      `perf-evaluation-recursion`.
-   - *Open, in order:* `perf-lowering-free-bindings`,
-     `perf-interface-demand-walk`, `perf-module-definition-cost`,
+   - *Open, in order:* `perf-interface-demand-walk`,
+     `perf-module-definition-cost`,
      `perf-runtime-net-attach`,
      `perf-reflection-step-cost` and `perf-worker-route-walks`.
    - *Experiments:* `perf-coalesced-wakeups` (open),
