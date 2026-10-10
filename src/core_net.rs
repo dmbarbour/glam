@@ -17,7 +17,7 @@ use crate::interaction_net::RuntimeNetRevisions;
 use crate::interaction_net::{
     ActivePairKey, ActivePairStep, CursorDependency, CursorDependencyDisposition,
     CursorDependencyResolution, CursorProgress, CursorStep, DemandEndpoint, FrontierObservation,
-    InteractionNet, InterfaceDemand, NetContention, NodeId, OperatorYield, Port,
+    InteractionNet, InterfaceDemand, InterfaceRoute, NetContention, NodeId, OperatorYield, Port,
     PreparedCopySource, Reduction, RuntimeNet, RuntimeNetMutation, RuntimeNetPayloadDuplicator,
     SourceFrontier,
 };
@@ -328,7 +328,9 @@ impl CoreRuntimeNet {
         values: &CoreValueFactory,
         interface: Port,
     ) -> InterfaceDemand {
-        self.with_test_access(values, |access| access.poll_interface_demand(interface))
+        self.with_test_access(values, |access| {
+            access.poll_interface_demand(interface, &mut InterfaceRoute::default())
+        })
     }
 
     #[cfg(test)]
@@ -571,11 +573,15 @@ impl CoreRuntimeNetAccess<'_, '_> {
         self.reduce_pair_for_test(pair)
     }
 
-    pub(crate) fn poll_interface_demand(&self, interface: Port) -> InterfaceDemand {
+    pub(crate) fn poll_interface_demand(
+        &self,
+        interface: Port,
+        route: &mut InterfaceRoute,
+    ) -> InterfaceDemand {
         self.runtime
             .cell()
             .with_conditional_mut_via(&self.runtime, |runtime| {
-                runtime.poll_interface_demand(interface)
+                runtime.poll_interface_demand(interface, route)
             })
     }
 

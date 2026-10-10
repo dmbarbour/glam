@@ -186,8 +186,9 @@ gains this consequence when it lands.
      `gc-bounded-collection-wait`, `perf-allocation-path`,
      `perf-root-frames`, `perf-transient-root-avoidance`,
      `perf-list-map-growth`, `perf-list-literal-composition`,
-     `perf-lowering-free-bindings` and `perf-interface-demand-walk`. The
-     scheduler round trips were `perf-evaluation-recursion`.
+     `perf-lowering-free-bindings`, `perf-interface-demand-walk` and
+     `perf-interface-route-ownership`. The scheduler round trips were
+     `perf-evaluation-recursion`.
    - *Open, in order:* `perf-module-definition-cost`,
      `perf-runtime-net-attach`,
      `perf-reflection-step-cost` and `perf-worker-route-walks`.
@@ -216,6 +217,8 @@ gains this consequence when it lands.
        cursor claims, wiring, disconnection and frontier inspection, apart
        from `perf-interface-demand-walk`. NodeIds are referenced outside
        the graph and never reused, so slots need generations (holistic N3);
+       the interface routes evaluations keep rely on this
+       (`interface-routes-belong-to-evaluation`);
      - nodes as four 32-bit words (kind and three typed links) with
        payloads in side tables;
      - the GAL adaptation, whose fixed-size levels replace growing fan

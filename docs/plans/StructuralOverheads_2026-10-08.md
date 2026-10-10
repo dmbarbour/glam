@@ -10,8 +10,8 @@ Status: active, as the `perf-structural-overheads` step of the
 `gc-bounded-collection-wait`, `perf-allocation-path`,
 `perf-root-frames`, `perf-transient-root-avoidance`,
 `perf-list-map-growth`, `perf-list-literal-composition`,
-`perf-lowering-free-bindings` and `perf-interface-demand-walk`. Next:
-`perf-module-definition-cost`.
+`perf-lowering-free-bindings`, `perf-interface-demand-walk` and
+`perf-interface-route-ownership`. Next: `perf-module-definition-cost`.
 `gc-two-level-mutator-access` and `gc-thread-local-heap-context` moved to
 [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md).
 
@@ -179,6 +179,42 @@ and help only programs with parallel work, so this comes last.
 
 ## Done
 
+- **Interface route ownership** (`perf-interface-route-ownership`),
+  2026-10-10. Decision `interface-routes-belong-to-evaluation`.
+  - **Reading.** The remembered route is the continuation stack of a
+    weak-head reduction: a rewrite at the tip pushes the nodes it leaves
+    waiting, a result reaching the tip pops it, and every resumed poll
+    measured followed exactly one rewrite. The maintainer: that state
+    belongs to the evaluation, not the net.
+  - **Change.** The net driver keeps an `InterfaceRoute` and lends it to
+    each root poll; the net cell loses its route map (200 bytes again).
+  - **Alternatives measured** (nodes visited on `list_computed`, in the
+    decision). Remembering only the node before the pair halves the walk
+    but still grows with depth, since a result returning to that node
+    loses it; logarithmic checkpoints would save little memory, as every
+    stack entry is a live node. Dropping the 16-node unrecorded prefix
+    costs common workloads 0.3 to 0.5%.
+  - **Results.** Against `db57b647`, instructions fall 0.0 to 0.7%:
+    `list_computed_1000` −0.72%, `dict_lookup_2000` −0.62%, the rest
+    within 0.16%. A poll no longer looks its route up in a map.
+  - **Cursor frontier walks** could keep routes at the evaluation layer
+    too (maintainer). Counted on every profile family at its largest size
+    and `hello_do`, none is longer than 7 nodes, so resuming them would
+    save nothing yet. If one grows: the driver's worklist already stacks a
+    `ResumeCursorDependency` frame under each dependency's work, which is
+    where such a route would ride. Two differences from interface walks:
+    the walk runs inside the cursor step under the source net's lock, so
+    the route is lent through `step_cursor_within`; and its answer also
+    depends on the copy's frontier map (a peer cursor waiting on any
+    spine anchor), which changes apart from the source's topology, so a
+    resumed walk must still check the anchors it skips or show that
+    missing a new peer only changes which dependency the cursor awaits.
+  - **Noticed.** About half of all cursor inspections walk a source spine
+    and find it stable, with no pair: 39,647 of 81,041 on `countdown_800`,
+    about 50 per iteration, each allocating its list of anchors. Whether
+    these inspect the same stable cursors again or new ones is open; it may
+    belong to `perf-runtime-net-attach`.
+
 - **Interface demand walk** (`perf-interface-demand-walk`), 2026-10-10.
   Decision `interface-walks-resume`.
   - **Two costs.** `RuntimeNet::poll_interface_demand` walked from an
@@ -208,7 +244,8 @@ and help only programs with parallel work, so this comes last.
     the cycle's members) and the causal probe's child-work set (spans
     many walks).
   - **Left.** The cursor frontier walk restarts too; the same suffix
-    argument would let it resume if it shows in profiles.
+    argument would let it resume if it shows in profiles (measured under
+    `perf-interface-route-ownership`).
 
 - **Free bindings in lowering** (`perf-lowering-free-bindings`),
   2026-10-10. Decision `dict-literals-compose`.

@@ -1334,7 +1334,9 @@ impl<S: NetSpecialization> RuntimeNetCell<S> {
         S::Operator: Clone,
         S::RuntimeSource: Clone + PartialEq,
     {
-        self.with_conditional_mut(|runtime| runtime.poll_interface_demand(interface))
+        self.with_conditional_mut(|runtime| {
+            runtime.poll_interface_demand(interface, &mut InterfaceRoute::default())
+        })
     }
 
     #[cfg(test)]
@@ -2073,6 +2075,19 @@ impl<S: NetSpecialization> RuntimeEntry<S> {
 /// a walk this short costs less to repeat than to record.
 const UNRECORDED_ROUTE_PREFIX: usize = 16;
 
+/// An evaluation's demand stack into one net, from the net's interface: the
+/// end of the route its last demand walk took, each node waiting through its
+/// principal port on the next, up to the near node of the active pair the
+/// walk found. A rewrite at the tip pushes the nodes it leaves waiting; a
+/// result reaching the tip pops it. The evaluation demanding the interface
+/// owns it, and its next walk resumes it (see
+/// [`RuntimeNet::walk_interface_route`]); an empty one walks from the
+/// interface. It records nothing for a fresh walk's first
+/// [`UNRECORDED_ROUTE_PREFIX`] nodes, so a walk that stays short never
+/// allocates.
+#[derive(Debug, Default)]
+pub struct InterfaceRoute(Vec<NodeId>);
+
 pub struct RuntimeNet<S: NetSpecialization> {
     next_node_id: u64,
     next_fan_site: u64,
@@ -2084,12 +2099,6 @@ pub struct RuntimeNet<S: NetSpecialization> {
     // an active pair, at which point `connect` transfers the state into the
     // pair's authoritative record.
     cursor_obligations: TrustedHashMap<NodeId, PairlessCursorObligation<S>>,
-    /// The end of the route each interface's last demand walk took to an
-    /// active pair, up to the pair's near node, so the next walk resumes
-    /// there (see [`Self::walk_interface_route`]). A fresh walk records its
-    /// route only after [`UNRECORDED_ROUTE_PREFIX`] nodes, so a net whose
-    /// walks are short never allocates the map.
-    interface_routes: Option<Box<TrustedHashMap<NodeId, Vec<NodeId>>>>,
 
     // Every live principal-principal wire has exactly one authoritative state.
     // External work changes Ready to Claimed while the runtime lock is held,
@@ -2146,7 +2155,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             next_copy_id: 0,
             copies: TrustedHashMap::default(),
             cursor_obligations: TrustedHashMap::default(),
-            interface_routes: None,
             active: BTreeMap::new(),
             #[cfg(test)]
             polarity_checked: net.polarized,
@@ -2446,7 +2454,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             next_copy_id: 0,
             copies: TrustedHashMap::default(),
             cursor_obligations: TrustedHashMap::default(),
-            interface_routes: None,
             active: BTreeMap::new(),
             #[cfg(test)]
             polarity_checked: true,
@@ -3254,22 +3261,21 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         self.neighbor(interface)
     }
 
+    /// Classifies the work `interface` demands, resuming `route`, the
+    /// demanding evaluation's stack from its last poll of this interface.
     pub(crate) fn poll_interface_demand(
         &mut self,
         interface: Port,
+        route: &mut InterfaceRoute,
     ) -> RuntimeNetMutation<InterfaceDemand> {
         self.assert_interface(interface);
-        // Taken out, the route goes back only when the walk ends at a pair.
-        let route = self
-            .interface_routes
-            .as_mut()
-            .and_then(|routes| routes.remove(&interface.node()))
-            .unwrap_or_default();
         let Some(neighbor) = self.neighbor(interface) else {
+            route.0.clear();
             return RuntimeNetMutation::Unchanged(InterfaceDemand::NormalForm);
         };
 
         if neighbor.is_principal() {
+            route.0.clear();
             let node = neighbor.node();
             let demand = match self.node(node) {
                 Some(RuntimeNode::Data(_)) => InterfaceDemand::Data,
@@ -3300,23 +3306,16 @@ impl<S: NetSpecialization> RuntimeNet<S> {
             return RuntimeNetMutation::Unchanged(demand);
         }
 
-        let (pair, route) = self.walk_interface_route(neighbor, route);
+        let pair = self.walk_interface_route(neighbor, &mut route.0);
         #[cfg(debug_assertions)]
-        {
-            let (full, _) = self.walk_interface_route(neighbor, Vec::new());
-            assert_eq!(
-                pair, full,
-                "a resumed interface walk must find the pair a full walk finds"
-            );
-        }
+        assert_eq!(
+            pair,
+            self.walk_interface_route(neighbor, &mut Vec::new()),
+            "a resumed interface walk must find the pair a full walk finds"
+        );
         let Some(pair) = pair else {
             return RuntimeNetMutation::Unchanged(InterfaceDemand::NormalForm);
         };
-        if !route.is_empty() {
-            self.interface_routes
-                .get_or_insert_default()
-                .insert(interface.node(), route);
-        }
         let demand = match self.active.get(&pair) {
             Some(ActivePairState::BlockedCursor {
                 cursor,
@@ -3330,10 +3329,11 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     /// Walks from an interface's auxiliary `neighbor`, along each node's
     /// principal port to the next node's auxiliary port, to the first
     /// principal-principal wire: the active pair the interface demands.
-    /// Returns it, or `None` at a dead end or a cycle, with the route walked.
+    /// Returns it, leaving the end of the route walked in `route`, or `None`
+    /// at a dead end or a cycle, leaving `route` empty.
     ///
-    /// `route` is the end of the route the last walk took, which this one
-    /// resumes. Since then, rewrites may have consumed nodes and wired in
+    /// `route` holds the end of the route the last walk took, which this
+    /// one resumes. Since then, rewrites may have consumed nodes and wired in
     /// new ones, but the consumed route nodes are a suffix of the route: a
     /// route node's principal port faces the next route node's auxiliary
     /// port, so it joins an active pair only once that next node is
@@ -3346,19 +3346,20 @@ impl<S: NetSpecialization> RuntimeNet<S> {
     fn walk_interface_route(
         &self,
         neighbor: Port,
-        mut route: Vec<NodeId>,
-    ) -> (Option<ActivePairKey>, Vec<NodeId>) {
+        route: &mut Vec<NodeId>,
+    ) -> Option<ActivePairKey> {
         while route.last().is_some_and(|node| self.node(*node).is_none()) {
             route.pop();
         }
         let (mut node, mut unrecorded) = match route.pop() {
             Some(tip) => (tip, 0),
-            None if neighbor.is_principal() => return (None, route),
+            None if neighbor.is_principal() => return None,
             None => (neighbor.node(), UNRECORDED_ROUTE_PREFIX),
         };
         let mut cycle = crate::walk_cycle::WalkCycle::new();
-        let pair = loop {
+        loop {
             if !cycle.advance(node) {
+                route.clear();
                 break None;
             }
             if unrecorded == 0 {
@@ -3367,14 +3368,14 @@ impl<S: NetSpecialization> RuntimeNet<S> {
                 unrecorded -= 1;
             }
             let Some(principal_neighbor) = self.neighbor(Port::principal(node)) else {
+                route.clear();
                 break None;
             };
             if principal_neighbor.is_principal() {
                 break Some(ActivePairKey::new(node, principal_neighbor.node()));
             }
             node = principal_neighbor.node();
-        };
-        (pair, route)
+        }
     }
 
     /// Returns the port wired to `port`, for evaluator diagnostics and demand

@@ -211,13 +211,10 @@ fn assert_runtime_payload_owner_inventory_is_compile_exhaustive<S: NetSpecializa
         next_copy_id,
         copies,
         cursor_obligations,
-        interface_routes,
         active,
         polarity_checked,
     } = runtime;
     let _: &bool = polarity_checked;
-    // Plain node IDs: a remembered route owns no payload.
-    let _: &Option<Box<TrustedHashMap<NodeId, Vec<NodeId>>>> = interface_routes;
     let _: (
         &u64,
         &u64,
@@ -1334,8 +1331,8 @@ fn interface_demand_poll_ends_at_a_cycle_without_a_pair() {
 
 /// Rewrites at the far end of a long chain move the active pair toward the
 /// interface one node at a time. Each interface walk resumes the route the
-/// last one recorded, past its unrecorded prefix; debug builds check every
-/// resumed walk against a full walk.
+/// demanding evaluation kept from the last one, past its unrecorded prefix;
+/// debug builds check every resumed walk against a full walk.
 #[test]
 fn interface_demand_poll_resumes_its_route_as_the_far_end_is_rewritten() {
     let length = 40;
@@ -1353,30 +1350,29 @@ fn interface_demand_poll_resumes_its_route_as_the_far_end_is_rewritten() {
         net.connect(Port::principal(*bind), next);
     }
     let interface = net.add_interface(Port::auxiliary(binds[0], 1));
-    let demand = |net: &mut RuntimeNet<()>| match net.poll_interface_demand(interface) {
+    let mut route = InterfaceRoute::default();
+    let demand = |net: &mut RuntimeNet<()>, route: &mut InterfaceRoute| match net
+        .poll_interface_demand(interface, route)
+    {
         RuntimeNetMutation::Unchanged(demand) | RuntimeNetMutation::Changed(demand) => demand,
     };
 
     for remaining in (1..=length).rev() {
-        let InterfaceDemand::ActivePair(pair) = demand(&mut net) else {
+        let InterfaceDemand::ActivePair(pair) = demand(&mut net, &mut route) else {
             panic!("{remaining} binds should leave an active pair to demand");
         };
         // The chain's nodes have the lowest IDs, so the pair is keyed by its
         // bind.
         assert_eq!(pair.node(), binds[remaining - 1]);
-        let remembered = net
-            .interface_routes
-            .as_ref()
-            .and_then(|routes| routes.get(&interface.node()))
-            .map(Vec::len);
         assert_eq!(
-            remembered,
-            (remaining > UNRECORDED_ROUTE_PREFIX).then(|| remaining - UNRECORDED_ROUTE_PREFIX)
+            route.0.len(),
+            remaining.saturating_sub(UNRECORDED_ROUTE_PREFIX)
         );
         net.reduce_pair(pair)
             .expect("the demanded pair should reduce");
     }
-    assert_eq!(demand(&mut net), InterfaceDemand::NormalForm);
+    assert_eq!(demand(&mut net, &mut route), InterfaceDemand::NormalForm);
+    assert!(route.0.is_empty());
 }
 
 #[test]

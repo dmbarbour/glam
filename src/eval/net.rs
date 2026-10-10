@@ -8,7 +8,7 @@ use crate::core_net::{
 };
 use crate::interaction_net::{
     CursorDependencyDisposition, CursorDependencyResolution, DemandEndpoint, InterfaceDemand,
-    RuntimeNet,
+    InterfaceRoute, RuntimeNet,
 };
 #[cfg(test)]
 use crate::test_support::ResultTestExt as _;
@@ -446,6 +446,10 @@ struct NetDriver {
     request: NormalizationRequest,
     worklist: NetDriverWorklist,
     progressed: bool,
+    /// This evaluation's demand stack into the request's root net, which
+    /// each root poll resumes. It outlives a restart from the request root:
+    /// the stack stays valid while its nodes live.
+    root_route: InterfaceRoute,
 }
 
 impl NetDriver {
@@ -457,6 +461,7 @@ impl NetDriver {
             request,
             worklist,
             progressed: false,
+            root_route: InterfaceRoute::default(),
         }
     }
 
@@ -659,7 +664,8 @@ fn drive_net_work_item(
         NetDriverWork::RequestRoot { root, interface } => {
             #[cfg(feature = "glam-prof")]
             access.record_driver(crate::interaction_net::profiling::DriverEvent::InterfacePoll);
-            match access.poll_interface_demand(interface) {
+            debug_assert_eq!(interface, driver.request.root_interface);
+            match access.poll_interface_demand(interface, &mut driver.root_route) {
                 terminal @ (InterfaceDemand::Data
                 | InterfaceDemand::Bind
                 | InterfaceDemand::NormalForm
@@ -1870,10 +1876,12 @@ mod driver_tests {
             request,
             worklist,
             progressed,
+            root_route,
         } = driver;
         let _: &NormalizationRequest = request;
         let _: &NetDriverWorklist = worklist;
         let _: &bool = progressed;
+        let _: &InterfaceRoute = root_route;
     }
 
     macro_rules! assert_does_not_implement {

@@ -212,9 +212,6 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         node: NodeId,
     ) -> RuntimeNode<S> {
         self.cursor_obligations.remove(&node);
-        if let Some(routes) = &mut self.interface_routes {
-            routes.remove(&node);
-        }
         let entry = self.nodes.remove(&node).expect("removed node must exist");
         assert!(entry.links.iter().all(Option::is_none));
         entry.node

@@ -589,8 +589,44 @@ maps the short names used here to file names.
   - A runtime operation that rewired two surviving nodes would need to
     clear the remembered routes.
   - Each managed net cell carries one more optional pointer.
+- **Amended by:** `interface-routes-belong-to-evaluation` (2026-10-10): the
+  demanding evaluation keeps the route, not the net.
 - **Rule lives in:** `RuntimeNet::walk_interface_route`.
 - **Recorded in:** structural overheads plan, `perf-interface-demand-walk`.
+
+### The evaluation demanding an interface keeps its route
+`interface-routes-belong-to-evaluation` · 2026-10-10 · maintainer · accepted
+- **Context:** `interface-walks-resume` kept each interface's route in the
+  runtime net, keyed by interface. The route is the continuation stack of
+  a weak-head reduction: each node waits through its principal port on the
+  next; a rewrite at the tip pushes the nodes it leaves waiting, and a
+  result reaching the tip pops it. Each net has one interface, and every
+  resumed poll measured came straight after one rewrite.
+- **Decision:**
+  - The evaluation demanding an interface owns its route: the net driver
+    keeps an `InterfaceRoute` and lends it to each root poll. Shared nets
+    keep only their topology (maintainer: this state belongs to the
+    evaluation).
+  - The route stays a full stack. Nodes visited on `list_computed` at
+    500, 2,000 and 8,000 items: 27,920, 142,030 and 739,510 walking from
+    the interface each time; 14,499, 67,650 and 341,357 remembering only
+    the node before the pair; 8,386, 16,438 and 46,120 with the stack.
+    One node is lost whenever a result returns to it, so its walks grow
+    with depth (5 to 16 nodes per walk); the stack's stay at 2 to 3.
+  - Logarithmic checkpoints, O(log d) memory and O(d log d) visits to
+    unwind d levels, were rejected: every node on the stack is a live node
+    in the net, so the stack is a small fraction of memory already spent.
+  - A fresh walk still records nothing for its first 16 nodes. Without
+    that, every driver allocates a stack: common workloads cost 0.3 to
+    0.5% more instructions, and `list_computed_2000` gains only 0.3%.
+- **Consequences:**
+  - Net cells no longer carry routes, and removing a node no longer
+    touches them.
+  - A driver that starts fresh, or polls a net another driver walked deep,
+    walks the route once. Consumed route nodes are a suffix of the route
+    whoever rewrites the net, so any holder's route stays valid.
+- **Rule lives in:** `InterfaceRoute` and `RuntimeNet::walk_interface_route`.
+- **Recorded in:** structural overheads plan, `perf-interface-route-ownership`.
 
 ### Interaction nets are polarized; `Bind >< Bind` joins crossed
 `polarized-interaction-nets` · 2026-10-05 · maintainer · accepted
