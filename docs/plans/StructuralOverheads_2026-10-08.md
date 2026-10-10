@@ -8,8 +8,9 @@ Status: active, as the `perf-structural-overheads` step of the
 `perf-worker-scaling`, `perf-collection-growth`,
 `gc-one-heap-per-thread`, `perf-quantum-region`,
 `gc-bounded-collection-wait`, `perf-allocation-path`,
-`perf-root-frames`, `perf-transient-root-avoidance` and
-`perf-list-map-growth`. Next: `perf-lowering-free-bindings`.
+`perf-root-frames`, `perf-transient-root-avoidance`,
+`perf-list-map-growth` and `perf-list-literal-composition`. Next:
+`perf-lowering-free-bindings`.
 `gc-two-level-mutator-access` and `gc-thread-local-heap-context` moved to
 [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md).
 
@@ -95,31 +96,28 @@ to principal ports until it finds an active pair. Each poll starts again at
 the interface and records every visited node in a freshly allocated hash
 set, so repeated polls of a long chain are quadratic.
 
-The long chain in practice is an operator applied to many operands: a
-list literal with computed items lowers to the list operator applied to
-one item at a time, and the chain shrinks from the far end, so each step
-walks the rest of it. Each partial application also copies the operands
-supplied so far. `list_computed` (added 2026-10-10) measures it: 138 M,
-356 M and 1,143 M instructions at 500, 1,000 and 2,000 items (exponent
-1.85), and 4,138 M at 4,000, where the walk is about 73% of samples
-(`RuntimeNet::reference` 35%, set inserts 19% and rehashing 16%; the
-rehash appears under an `EvaluationTaskId` symbol only because identical
-generic code was folded) and the operand copies about 19%. Closed literals
-no longer take this path (`perf-list-map-growth`).
+The long chain in practice was the list operator applied to one item at a
+time; list literals now compose bounded parts
+(`perf-list-literal-composition`), and the other operator chains (an
+application's arguments, a closure's captures, an access path) are as
+long as their source. Even short walks still pay for the set: in
+`list_computed_4000` after composition, its allocation, inserts and
+rehashing are about 22% of samples. (The rehash appears under an
+`EvaluationTaskId` symbol only because identical generic code was folded.)
 
 Candidate remedies:
-- Detect cycles without allocating (Brent's algorithm): removes the set,
-  about half the walk, but stays quadratic.
+- Detect cycles without allocating (Brent's algorithm): one comparison
+  per step on the acyclic chains that are the normal case. If it works
+  here, use it for the other single-path walks that detect cycles with a
+  set (maintainer): the cursor frontier walk (`runtime/cursor.rs`), the
+  coordinator's dependency-chain walks (`dependency_observes_runtime`,
+  `dependency_has_causal_progress_locked`, the causal-child probe's exact
+  chain), `recursive_promise_dependency`, `reported_dependency`, and
+  `follow_forwards`' slow path. Brent's finds a cycle a few steps after
+  its first repeat, harmless for walks that only read; walks that record
+  each step must trim what they recorded past it.
 - Remember the frontier found for an interface, so that a poll resumes
-  where the last one stopped. A remembered node is still on the path while
-  the links leading to it are unchanged; making that check cheap and sound
-  is the design question.
-- Accumulate operands without copying: the call consumes the operator, so
-  supplied operands could move instead of being duplicated. Representation
-  work, so it may wait for value representation refinement.
-- Lower long applications in bounded chunks joined by a balanced append,
-  bounding both the chain and the copies, at the price of large computed
-  literals becoming concatenations.
+  where the last one stopped. Less needed now that chains are short.
 
 ### Module definition demand (`perf-module-definition-cost`)
 
@@ -225,6 +223,27 @@ and help only programs with parallel work, so this comes last.
   Allocating less is the better lever.
 
 ## Done
+
+- **List literal composition** (`perf-list-literal-composition`),
+  2026-10-10. Decision `list-literals-compose`.
+  - **Cause.** Closed literals were fixed by `perf-list-map-growth`, but
+    a literal with computed items still lowered to one list operator
+    collecting every item: `list_computed` grew with exponent 1.85
+    (1,143 M instructions at 2,000 items, 4,138 M at 4,000), the walk
+    about 73% of samples and the operand copies about 19%.
+  - **Origin.** The interaction-net spike (`2b433822`, 2026-07-15) lowered
+    list and access literals to chains of its one unary host agent, which
+    became `CoreOperator` in `00ece3ed`; the original agent already copied
+    its supplied operands at every call.
+  - **Fix** (`f5373979`). The list operator collects at most eight items.
+    A longer literal lowers to parts joined with `++` in the shape of a
+    finger tree: runs of eight or more closed items become list values,
+    the other items lists of at most eight.
+  - **Results.** `list_computed` is linear (exponent 1.03 over 1,000 to
+    4,000 items); 4,000 items fall from 4,138 M to 469 M instructions.
+    What remains is lowering each computed item to its own code net
+    (about 34% of samples) and the walk's per-poll set (about 22%,
+    `perf-interface-demand-walk`).
 
 - **`list_map` growth** (`perf-list-map-growth`), 2026-10-10.
   - **Cause.** Not `map`, but the workload's two list literals. A literal

@@ -385,7 +385,45 @@ maps the short names used here to file names.
   - Popping the same unshaped list again pays the first pop's cost again,
     since the reshaped remainder is not remembered in the original.
   - Index operations still walk; see `list-observers-walk-leaves`.
+- **Amended by:** `list-literals-compose` (2026-10-10): a literal of closed
+  data, or of at most eight items, is still one value leaf; a longer
+  literal with computed items is a concatenation of such leaves.
 - **Recorded in:** structural overheads plan, `perf-list-front-walk`.
+
+### List literals compose bounded lists with `++`
+`list-literals-compose` · 2026-10-10 · maintainer · accepted
+- **Context:** the core list operator collected any number of items, one
+  partial application per item. Each application copied the items so
+  far, and each step walked the rest of the application chain from the
+  net's interface, so a literal cost time quadratic in its length: 35 G
+  instructions for `list_map_8000`'s two literals. The variable arity
+  came from the interaction-net spike, which lowered every aggregate to a
+  chain of its one unary host agent; it was never a design choice.
+- **Decision:**
+  - No variable-arity list primitive. Lists are built from singletons
+    and concatenation, and an annotation changes a list's representation
+    (maintainer). The list operator is an accelerator for lists of at
+    most eight items (`LIST_OPERATOR_MAX_ARITY`).
+  - Literals are a grammar-layer concept (maintainer). A literal whose
+    items are all closed data resolves to its list value. Any other
+    literal lowers to parts, runs of eight or more closed items as list
+    values and the other items in lists of at most eight, joined with
+    `++` in the shape of a finger tree: `first ++ (middle ++ last)`, the
+    middle built the same way from pairs (maintainer's suggestion).
+  - A strict concatenation, if wanted, is an accelerator of `++` and
+    `seq`, not a core primitive (maintainer).
+- **Consequences:**
+  - Literals build in time linear in their length; each step's walk is
+    bounded by the tree's logarithmic depth plus one part.
+  - A long computed literal evaluates to a concatenation, with one lazy
+    `++` result per join, forced as observers reach it. A program that
+    needs a flat or indexable list asks for it with an annotation.
+  - The eight-item bound is a heuristic, not a measured one.
+- **Rule lives in:** `ResolvedNetLowerer::list_into` in
+  `src/g_syntax/net_lowering.rs`; `resolved_list` in
+  `src/g_syntax/resolve/expression.rs`.
+- **Recorded in:** structural overheads plan, `perf-list-map-growth` and
+  `perf-list-literal-composition`.
 
 ### List observers walk leaves; what they take is a flat slice or a rope
 `list-observers-walk-leaves` · 2026-10-09 · maintainer · accepted
