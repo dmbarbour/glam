@@ -99,7 +99,8 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
         SyntaxExpr::Using { namespace, body } => {
             lower_using_expr_resolved(access, namespace, body, line, context, scope, locals)?
         }
-        SyntaxExpr::List(items) => ResolvedExpr::List(
+        SyntaxExpr::List(items) => resolved_list(
+            access,
             items
                 .iter()
                 .map(|expr| {
@@ -113,7 +114,8 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
             ResolvedExpr::Embedded(Value::Builtin(Builtin::DictSingleton)),
             [
                 ResolvedExpr::Embedded(access.tuple()),
-                ResolvedExpr::List(
+                resolved_list(
+                    access,
                     items
                         .iter()
                         .map(|expr| {
@@ -1190,4 +1192,67 @@ pub(in crate::g_syntax) fn name_as_key(name: &str) -> Key {
 pub(in crate::g_syntax) fn atom_from_str(name: &str) -> Atom {
     // 'name atom, i.e. ["name"]:()
     Atom::from_key(&Key::binary_from_text(name))
+}
+
+/// A list literal. One whose items are all closed data is closed data too,
+/// so it resolves to the list value itself. Built at run time instead, it
+/// would take one partial application of the list operator per item, each
+/// costing time linear in the list's length.
+fn resolved_list(
+    _access: &RuntimeValueAccess<'_>,
+    items: Vec<ResolvedExpr<Value>>,
+) -> ResolvedExpr<Value> {
+    if !items
+        .iter()
+        .all(|item| matches!(item, ResolvedExpr::Embedded(_)))
+    {
+        return ResolvedExpr::List(items);
+    }
+    let values = items
+        .into_iter()
+        .map(|item| match item {
+            ResolvedExpr::Embedded(value) => value,
+            _ => unreachable!("every item is closed data"),
+        })
+        .collect();
+    ResolvedExpr::Embedded(Value::List(crate::core::List::from_values(values)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolve(expr: &SyntaxExpr) -> ResolvedExpr<Value> {
+        let context = CompileContext::default();
+        let scope = NameScope::module(&context, Value::Dict(Dict::new_sync()));
+        syntax_expr_to_resolved_in_scope(expr, 1, &context, &scope, &mut ResolverContext::default())
+            .expect("list literal should resolve")
+    }
+
+    fn number(value: i64) -> SyntaxExpr {
+        SyntaxExpr::Number(value.into())
+    }
+
+    /// A literal of closed data, nested lists included, resolves to its
+    /// list value; one with a computed item stays a list to build.
+    #[test]
+    fn closed_list_literals_resolve_to_their_values() {
+        let closed = SyntaxExpr::List(vec![
+            number(1),
+            SyntaxExpr::List(vec![number(2), SyntaxExpr::Text("three".into())]),
+        ]);
+        let ResolvedExpr::Embedded(Value::List(list)) = resolve(&closed) else {
+            panic!("a closed literal should resolve to its list");
+        };
+        assert_eq!(list.len(), 2);
+
+        let computed = SyntaxExpr::List(vec![
+            number(1),
+            SyntaxExpr::Add(Box::new(number(1)), Box::new(number(1))),
+        ]);
+        assert!(
+            matches!(resolve(&computed), ResolvedExpr::List(items) if items.len() == 2),
+            "a literal with a computed item should stay a list to build"
+        );
+    }
 }
