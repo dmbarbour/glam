@@ -129,6 +129,12 @@ list_map() {
   expected=$(seq -s ', ' 2 "$((n + 1))")
   printf 'language g0\nimport '"'"'std as std\nxs = [%s]\nys = std.list.map (\\x -> x + 1) xs\nasm.result = if ys == [%s] then "ok" else "bad"' "$items" "$expected"
 }
+list_computed() {
+  # A literal whose items are computed, so it builds at run time rather
+  # than resolving to its value; `len` forces only the spine.
+  printf 'language g0\nimport '"'"'std as std\nxs = [%s]\nasm.result = if std.list.len xs == %s then "ok" else "bad"' \
+    "$(seq 1 "$1" | sed 's/$/ + 0/' | paste -sd, - | sed 's/,/, /g')" "$1"
+}
 list_sum() {
   # Walks the list from the front, as a fold would.
   printf 'language g0\nimport '"'"'std as std\nxs = [%s]\ngo acc ys = if std.list.len ys == 0 then acc else go (acc + std.list.head ys) (std.list.tail ys)\nasm.result = if go 0 xs == %s then "ok" else "bad"' \
@@ -148,6 +154,7 @@ dict_lookup() {
   printf 'language g0\nd = {%s}\nasm.result = if d.k%s == %s then "ok" else "bad"' "$entries" "$n" "$n"
 }
 family list_map 500
+family list_computed 500
 family list_sum 100
 family append_walk 200
 family dict_lookup 500

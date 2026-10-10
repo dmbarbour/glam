@@ -8,8 +8,8 @@ Status: active, as the `perf-structural-overheads` step of the
 `perf-worker-scaling`, `perf-collection-growth`,
 `gc-one-heap-per-thread`, `perf-quantum-region`,
 `gc-bounded-collection-wait`, `perf-allocation-path`,
-`perf-root-frames` and `perf-transient-root-avoidance`. Next:
-`perf-list-map-growth`.
+`perf-root-frames`, `perf-transient-root-avoidance` and
+`perf-list-map-growth`. Next: `perf-lowering-free-bindings`.
 `gc-two-level-mutator-access` and `gc-thread-local-heap-context` moved to
 [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md).
 
@@ -72,22 +72,6 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 
 ## Open Steps, in Order
 
-### `list_map` growth (`perf-list-map-growth`)
-
-Split from `perf-interface-demand-walk` on 2026-10-09, since nothing yet
-shows that walk is the cause. After `perf-list-front-walk`, `list_map` is
-still quadratic (exponent 1.92 from 2,000 to 8,000 items) at half its
-former cost; its reductions, accesses, roots and allocations all grow
-linearly, so the growth is in the cost per operation. At `list_map_8000`
-the largest self costs are `memset` (7%), `NetWhnfMachine::poll_in`
-(5.8%), `Topology::check` (4.5%) and `RuntimeNet::wire` (4.3%). Before
-`perf-list-front-walk`, at `list_map_4000`, the interface walk's node
-lookups and hash-set inserts were almost 40% of samples.
-
-The step starts by profiling two sizes to find which costs grow, then
-decides whether the remedy is `perf-interface-demand-walk` or a step of
-its own.
-
 ### Free bindings in lowering (`perf-lowering-free-bindings`)
 
 `ResolvedNetLowerer::lower_code_in` calls `body.free_bindings()` for each
@@ -109,18 +93,33 @@ The first needs care with parameters that `ApplyLambda` binds inline.
 `RuntimeNet::poll_interface_demand` walks from an interface along auxiliary
 to principal ports until it finds an active pair. Each poll starts again at
 the interface and records every visited node in a freshly allocated hash
-set, so repeated polls of a long chain are quadratic. At `list_map_4000`,
-the node lookups (`RuntimeNet::reference`, 20%), the set inserts (10%) and
-their rehashing (8.4%) are almost 40% of samples. (The rehash appears under
-an `EvaluationTaskId` symbol only because identical generic code was
-folded.)
+set, so repeated polls of a long chain are quadratic.
 
-Candidate remedies: detect cycles without allocating (Brent's algorithm),
-and remember the frontier found for an interface, revalidated against the
-net's topology revision, so that a poll resumes where the last one stopped.
+The long chain in practice is an operator applied to many operands: a
+list literal with computed items lowers to the list operator applied to
+one item at a time, and the chain shrinks from the far end, so each step
+walks the rest of it. Each partial application also copies the operands
+supplied so far. `list_computed` (added 2026-10-10) measures it: 138 M,
+356 M and 1,143 M instructions at 500, 1,000 and 2,000 items (exponent
+1.85), and 4,138 M at 4,000, where the walk is about 73% of samples
+(`RuntimeNet::reference` 35%, set inserts 19% and rehashing 16%; the
+rehash appears under an `EvaluationTaskId` symbol only because identical
+generic code was folded) and the operand copies about 19%. Closed literals
+no longer take this path (`perf-list-map-growth`).
 
-`list_map` is no longer attributed to this walk; see
-`perf-list-map-growth`.
+Candidate remedies:
+- Detect cycles without allocating (Brent's algorithm): removes the set,
+  about half the walk, but stays quadratic.
+- Remember the frontier found for an interface, so that a poll resumes
+  where the last one stopped. A remembered node is still on the path while
+  the links leading to it are unchanged; making that check cheap and sound
+  is the design question.
+- Accumulate operands without copying: the call consumes the operator, so
+  supplied operands could move instead of being duplicated. Representation
+  work, so it may wait for value representation refinement.
+- Lower long applications in bounded chunks joined by a balanced append,
+  bounding both the chain and the copies, at the price of large computed
+  literals becoming concatenations.
 
 ### Module definition demand (`perf-module-definition-cost`)
 
@@ -226,6 +225,28 @@ and help only programs with parallel work, so this comes last.
   Allocating less is the better lever.
 
 ## Done
+
+- **`list_map` growth** (`perf-list-map-growth`), 2026-10-10.
+  - **Cause.** Not `map`, but the workload's two list literals. A literal
+    lowered to the list operator applied to one item at a time. Each
+    partial application copied the items supplied so far, and found its
+    next step by walking the rest of the application chain from the net's
+    interface (`perf-interface-demand-walk`). Counting walks at 2,000 items
+    found two descending passes, every length from 2,000 down appearing
+    four times: 8 M walk steps. At `list_map_8000` the walk was about 73%
+    of samples and the operand copies 10 to 20%.
+  - **Fix.** A literal whose items are all closed data is closed data
+    too, so the resolver now gives its list value, nested literals
+    included (`5e89b5da`). The lowering already did so for empty lists.
+  - **Results.** `list_map` is linear (exponent 1.93 to 1.00 over 2,000 to
+    8,000 items); instructions at 8,000 items fell from 35,042 M to
+    2,007 M, and CPU time from 10.7 s to 0.43 s. Other workloads are
+    unchanged.
+  - **Left.** Literals with computed items still build at run time and
+    stay quadratic; the new `list_computed` family tracks them under
+    `perf-interface-demand-walk`. `dict_lookup`'s growth is
+    `collect_free_bindings` (`perf-lowering-free-bindings`), a different
+    cause.
 
 - **Transient root avoidance** (`perf-transient-root-avoidance`),
   2026-10-10.
