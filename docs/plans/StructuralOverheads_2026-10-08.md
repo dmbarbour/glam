@@ -95,28 +95,33 @@ Findings 2026-10-10, from sampled registration sites on `countdown_800`
 | `regional_status_poll` ready value | 7% | a poll result |
 | `prepare_copy_source` | 7% | a net into a copy |
 
-None is used within one access only: each carries a value into later
-accesses of the poll, through inline forcing, a semantic action or the poll
-boundary. The root guards against two hazards: a collection at a release
-point between those accesses, and another poller replacing the checkpoint
-that also references the object. So no further local fix like
-`follow_forwards` applies.
+Correction (2026-10-10 review): the claim recorded here that every site
+carries its value across accesses, so no local fix applies, was wrong. A
+review of each site's flow found roots that never leave one access or are
+never read (each to be confirmed as it is fixed):
+- `prepare_copy_source` (7%): created and consumed within one access in
+  both production paths (`finish_core_call_progress` into
+  `CoreCallClaim::finish`, and the callable checkpoint's `finish`).
+- Inline children's completion values: `EvaluatorStepContext::root_value`
+  roots a completed inline lazy's value, which the route loop drops
+  unread on popping the child. Base routes return it as a durable wait
+  terminal, so it stays there.
+- The lazy route's ready path: four accesses in one poll (create, project,
+  cache, re-root) could be one.
+- Tail calls root the same lazy twice: the WHNF request's root, then
+  `follow_forwards`' own.
+- `forward_target().is_some()` probes root a target only to test it;
+  `forward_target_edge()` suffices.
 
-A lever does: no collection can start while a thread holds its region, and
-the collector never moves objects, so an unrooted edge carried between two
-accesses of one held poll stays valid however the object's other
-references change. Only a release point ends that guarantee, and those are
-enumerated (condvar waits, host calls, launchers, nested drivers,
-pressure servicing). Proposal: hold-scoped edges. A transient root becomes
-an entry in a thread-local list for the current hold, with no
-registration, lock or `Arc`; a release point roots every outstanding entry
-before releasing; a poll's result is made durable at the boundary; and
-debug builds check that no entry outlives its poll, as the frame
-experiment did. Transient roots cost about 9% of `countdown_800`
-(registering 6.3%, dropping 1.7%, the collector's scan 1.2%), most of
-which this would recover. It is `gc-hold-transient-roots` brought forward
-onto today's implicit held regions, and needs a design discussion: its
-soundness rests on rooting at every release point.
+Estimated at 20–28% of transient roots, about 2% of `countdown_800`.
+These are this step's work.
+
+The rest carries values between accesses of one poll: the inline stack's
+lazies and the net semantic action. Avoiding those roots needs a
+compile-time or runtime proof that no safepoint lies between the accesses,
+which moved to [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md)
+("Design review"). The hold-scoped edge proposal recorded here earlier is
+superseded there.
 
 ### `list_map` growth (`perf-list-map-growth`)
 
