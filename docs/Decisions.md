@@ -222,6 +222,24 @@ maps the short names used here to file names.
 - **Rule lives in:** `Syntax.md` "Local Definitions".
 - **Recorded in:** structural overheads plan, `perf-module-definition-cost`.
 
+### Lazy locals pass directly
+`lazy-locals-pass-directly` · 2026-10-11 · agent · accepted
+- **Context:** lowering made a thunk for every lazy argument or list item
+  that was not a constant, a local among them, so `f x` built
+  `\c -> c` over `x`: an applied net, a copy and a bind join to reach a
+  value already in hand. These were 17 to 48% of all applications in the
+  profile families.
+- **Decision:** a lazy argument or list item that is a local takes the
+  local as it is. A local is a value, possibly a lazy one, and an operator
+  waits for its operand either way, so strictness and sharing are
+  unchanged.
+- **Consequences:** instructions fall 7 to 23% across the profile
+  families (`list_map_2000` 22.7%, `hello_elf` 7.3%).
+- **Rule lives in:** `ResolvedNetLowerer::compile_lazy_into`
+  (`g_syntax/net_lowering.rs`).
+- **Recorded in:** structural overheads plan,
+  `perf-thin-wrapper-applications`.
+
 ### Binding groups lower by dependency components
 `binding-groups-lower-by-components` · 2026-10-10 · agent · accepted
 - **Context:** a `let` or `where` group is documented as mutually recursive,

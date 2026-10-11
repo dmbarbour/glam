@@ -357,6 +357,34 @@ mod resolver_context_tests {
         );
     }
 
+    /// A local is already a value, so a lazy argument or list item that is
+    /// one takes it as it is, with no thunk to return it.
+    #[test]
+    fn direct_net_emitter_passes_lazy_locals_without_a_thunk() {
+        let mut resolver = ResolverContext::default();
+        let parameter = resolver.fresh_binding();
+        let local = || ResolvedExpr::Local(parameter);
+        let bodies = [
+            ResolvedExpr::apply(
+                ResolvedExpr::Embedded(Value::Builtin(Builtin::Add)),
+                [local(), local()],
+            ),
+            ResolvedExpr::List(vec![local(), local()]),
+        ];
+        for body in bodies {
+            let net = ResolvedNetLowerer::lower_template(
+                &crate::compiler::test_value_factory(),
+                vec![parameter],
+                body,
+            );
+
+            assert!(!net.nodes().iter().any(|node| matches!(
+                node,
+                Node::Operator(crate::core_net::CoreOperator::ComputationCaptures { .. })
+            )));
+        }
+    }
+
     #[test]
     fn direct_net_emitter_builds_one_bind_chain_for_curried_parameters() {
         let mut resolver = ResolverContext::default();

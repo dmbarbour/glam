@@ -351,11 +351,14 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
         self.net.wire(output, target);
     }
 
+    /// Lowers `expr` without evaluating it: a value or local as it is, any
+    /// other expression as a thunk over its captures. A local is already a
+    /// value, so a thunk returning it would only add a step to reach it.
     fn compile_lazy_into(&mut self, expr: ResolvedExpr<Value>, target: Port) {
         match expr {
-            ResolvedExpr::Embedded(value) | ResolvedExpr::Provided(value) => {
-                self.data_into(value, target);
-            }
+            expr @ (ResolvedExpr::Embedded(_)
+            | ResolvedExpr::Provided(_)
+            | ResolvedExpr::Local(_)) => self.compile_into(expr, target),
             expr => {
                 let (code, captures) = Self::lower_code_in(self.values, Vec::new(), expr);
                 let code = Arc::new(code);

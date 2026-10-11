@@ -117,6 +117,20 @@ once: identity yields the capture, one operator applies it directly, and
 a chain could run its operators without a net. Applying such code starts
 no work worth sharing beyond what the operators themselves do.
 
+Where they come from, 2026-10-11:
+- **Every identity** is a thunk lowering made for a lazy argument or list
+  item that is just a local. Lowering now passes the local as it is
+  (decision `lazy-locals-pass-directly`): instructions fall 6.8%
+  (`minimal`), 7.0% (`countdown_800`), 22.7% (`list_map_2000`), 9.2%
+  (`list_sum_400`, `append_walk_800`), 8.3% (`do_chain_800`) and 7.3%
+  (`hello_elf`).
+- **Every one-operator application** is a saturated call of a closed
+  `\x -> x.path`, almost all the effect handlers `{eff: \api -> api.seq}`
+  and their `cut` and `alt` siblings that every `if` and `do` step runs.
+- **Chains** are mostly thunks over a strict capture once their code net
+  has reduced as far as it can alone: `\c -> f (thunk c)`, with `f` a
+  constant the shared code net's `ApplyArity` operator already holds.
+
 **Unobserved arity** (`perf-unobserved-arity`). A lightweight structural
 analysis of a code net could find how many arguments it takes before any
 is observed; below that arity, partial application starts no work, so it
