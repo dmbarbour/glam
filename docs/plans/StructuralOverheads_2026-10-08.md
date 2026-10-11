@@ -359,18 +359,64 @@ function values rather than computations of them was mixed (`do_chain_800`
 −3.6%, `list_sum_400` +3.3%).
 
 Follow-ups:
-- **Per-force cost.** A countdown iteration still costs about 380 K
-  instructions, much of it per lazy forced: allocation (about 140 K per
-  iteration before this step), entering the mutator through thread-local
-  heap entries (about 56 K), copies.
-- **Effects elsewhere.** `do` blocks and host conditionals still build and
-  interpret effects operation by operation.
-- **Nested runs.** Running the thunks a compiled thunk completes in the
-  same run, iteratively, would recover the remaining 1.3 to 3.6 points.
-- **`WrappedOperator`** can become a compiled net set at lowering.
-- **Strictness.** A thunk certain to be forced, such as an operand of a
-  strict builtin whose result is demanded, could be forced when completed.
-  That needs its own analysis.
+- **Per-force cost**, below.
+- **Effects elsewhere.** Not pursued: a `do` block is divorced from its
+  handler, and `if` and `match` are the special case where the compiler
+  provides the handler locally (maintainer).
+
+**Integer literals** (2026-10-11). A decimal integer literal built a
+cleaned digit string, parsed it as a bigint and reduced it as a rational
+over one, a bigint gcd. Plain digits that fit a machine word now parse as
+one, and other integers skip the reduction: `list_map_2000`, with 4,000
+literals, fell 8.0%.
+
+**Lazy force anatomy** (`perf-lazy-force`, investigated 2026-10-11). After
+pure conditionals and integer literals (`96324e3d`), an iteration of
+`heavy n = if n == 0 then 0 else heavy (n - 1)` costs 349 K instructions
+and makes 29 lazies (10 calls of compiled code, 7 applications of
+builtins, 3 `list.concat`, 2 `map`, and one each of `==`, `-`, `IfResult`,
+`ListEffect`, a list-effect run, an `EffectCall` and an access): about
+12 K instructions per lazy, with 70 task polls. Per iteration, from
+callgrind at depths 100 and 200:
+
+| Cost | Per iteration | Share |
+| --- | ---: | ---: |
+| `malloc`, `free` and `memcpy` (241 allocations) | about 70 K | 20% |
+| Running compiled code (`apply_compiled`, inclusive) | 42 K | 12% |
+| Mutator entries (211, about 180 instructions each) | about 38 K | 11% |
+| Offering a lazy for inline forcing (`offer_inline`, inclusive) | 23 K | 6.5% |
+| Allocating regional checkpoints | 8.8 K | 2.5% |
+| Building the list-effect API dictionary | 8.6 K | 2.5% |
+
+A forced lazy's path: `offer_inline` snapshots its checkpoint and then its
+source, duplicating the whole source, only to read their kinds; claims it
+in the coordinator's inline set and roots it. Its task's `Produce` enters
+the mutator and snapshots the source again, to run it. Installing the
+checkpoint, each checkpoint poll, a forward's end and caching the result
+each enter the mutator once more, about seven entries per force.
+
+Allocations, by caller: argument vectors (31), roots of list fronts (30),
+lazy cells, whose `&str` label becomes a fresh `Arc<str>` (29), the WHNF
+state's `followed` B-tree set (13), dictionary nodes of the list-effect
+API, built anew each time a list effect runs (22), and builtin calls and
+applications that collect a `Vec` and then copy it into an `Arc<[Value]>`.
+
+Local steps, each measured on its own:
+- **List-effect API.** Build the dictionary once and share it.
+- **Lazy labels.** Keep a static label without allocating.
+- **Inline offers.** Read the producer's kind under the lock instead of
+  duplicating the checkpoint and source.
+- **Argument arrays.** Collect into `Arc<[Value]>` directly where the
+  vector ends as one.
+- **`followed`.** A small inline set for the usual one or two entries.
+
+Structural, already planned: the mutator entries and the transient roots
+(list fronts, inline offers, checkpoint polls) are what
+[Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md) addresses
+(`gc-hold-class-cache`, `gc-hold-transient-roots`), and roots kept in
+machine state across polls are `perf-root-frames`. Fewer access regions
+per force, such as `Produce` installing its checkpoint in the region that
+reads the source, would cut entries without that plan.
 
 **Unobserved arity** (`perf-unobserved-arity`). A lightweight structural
 analysis of a code net could find how many arguments it takes before any
