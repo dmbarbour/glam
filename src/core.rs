@@ -1420,9 +1420,35 @@ impl FunctionCode {
     }
 }
 
+/// The operator a function's code applies to its parameters, in order, and
+/// does nothing else with them. Calling the function applies the operator
+/// instead of building a net from its code
+/// (`perf-thin-wrapper-applications`). It holds no values, so the
+/// function's stage stays its only managed edge.
+#[derive(Clone)]
+pub(crate) enum WrappedOperator {
+    /// An access along `path` of the first parameter, taking one index from
+    /// each parameter after it.
+    Access(Arc<[CoreDataKey]>),
+}
+
+impl WrappedOperator {
+    pub(crate) fn arity(&self) -> usize {
+        match self {
+            Self::Access(path) => {
+                1 + path
+                    .iter()
+                    .filter(|key| !matches!(key, CoreDataKey::Key(_)))
+                    .count()
+            }
+        }
+    }
+}
+
 pub struct FunctionValue {
     stage: NetValue,
     remaining_arity: usize,
+    wrapped: Option<WrappedOperator>,
 }
 
 impl FunctionValue {
@@ -1434,11 +1460,32 @@ impl FunctionValue {
         Self {
             stage,
             remaining_arity,
+            wrapped: None,
         }
+    }
+
+    /// A function whose code, `stage`, only applies `operator` to its
+    /// parameters.
+    pub(crate) fn wrapping(stage: NetValue, operator: WrappedOperator) -> Self {
+        let arity = operator.arity();
+        Self {
+            wrapped: Some(operator),
+            ..Self::new(stage, arity)
+        }
+    }
+
+    /// The operator this function's code only applies to its remaining
+    /// parameters, if that is all it does.
+    pub(crate) fn wrapped_operator(&self) -> Option<&WrappedOperator> {
+        self.wrapped.as_ref()
     }
 
     pub(crate) fn stage(&self) -> &NetValue {
         &self.stage
+    }
+
+    pub(crate) fn into_stage(self) -> NetValue {
+        self.stage
     }
 
     /// Duplicates the current application stage inside matching value access.
@@ -1450,7 +1497,11 @@ impl FunctionValue {
     /// Duplicates this immutable function stage inside matching value access.
     #[inline(always)]
     pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
-        Self::new(self.duplicate_stage_in(access), self.remaining_arity)
+        Self {
+            stage: self.duplicate_stage_in(access),
+            remaining_arity: self.remaining_arity,
+            wrapped: self.wrapped.clone(),
+        }
     }
 
     /// Compares exact stage identity and the remaining application arity.
@@ -1519,8 +1570,10 @@ pub(crate) enum LazySource {
     Application(Arc<LazyApplication>),
     Builtin(BuiltinCall),
     NetComputation(NetValue),
+    /// A saturated call: a function's stage, applied to all its remaining
+    /// arguments.
     FunctionCall {
-        function: FunctionValue,
+        stage: NetValue,
         arguments: Arc<[Value]>,
     },
 }
@@ -1548,11 +1601,8 @@ impl LazySource {
             Self::Application(application) => Self::Application(Arc::clone(application)),
             Self::Builtin(call) => Self::Builtin(call.duplicate_in(access)),
             Self::NetComputation(net) => Self::NetComputation(net.duplicate_in(access)),
-            Self::FunctionCall {
-                function,
-                arguments,
-            } => Self::FunctionCall {
-                function: function.duplicate_in(access),
+            Self::FunctionCall { stage, arguments } => Self::FunctionCall {
+                stage: stage.duplicate_in(access),
                 arguments: Arc::clone(arguments),
             },
         }
@@ -1954,7 +2004,7 @@ impl LazyValue {
             access,
             "function call",
             LazySource::FunctionCall {
-                function,
+                stage: function.into_stage(),
                 arguments,
             },
         )
@@ -3776,7 +3826,7 @@ mod tests {
             Builtin(BuiltinCall),
             NetComputation(NetValue),
             FunctionCall {
-                function: FunctionValue,
+                stage: NetValue,
                 arguments: Arc<[Value]>,
             },
         }

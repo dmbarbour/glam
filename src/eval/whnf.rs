@@ -1222,6 +1222,8 @@ fn apply_whnf_function(
             super::net::attach_net_many_in(access.values(), stage, saturating),
             remaining - consumed,
         ))
+    } else if let Some(operator) = function.wrapped_operator() {
+        super::operator::apply_wrapped_operator(access.values(), operator, saturating)
     } else {
         Value::Lazy(LazyValue::from_function_call_in(
             access.values(),

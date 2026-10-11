@@ -127,6 +127,11 @@ Where they come from, 2026-10-11:
 - **Every one-operator application** is a saturated call of a closed
   `\x -> x.path`, almost all the effect handlers `{eff: \api -> api.seq}`
   and their `cut` and `alt` siblings that every `if` and `do` step runs.
+  Such a function is now called as its operator (decision
+  `functions-wrap-operators`): instructions fall a further 3.4%
+  (`minimal`), 8.2% (`countdown_800`), 0.3% (`list_map_2000`), 7.6%
+  (`list_sum_400`), 12.4% (`append_walk_800`), 5.8% (`do_chain_800`) and
+  3.6% (`hello_elf`).
 - **Chains** are mostly thunks over a strict capture once their code net
   has reduced as far as it can alone: `\c -> f (thunk c)`, with `f` a
   constant the shared code net's `ApplyArity` operator already holds.

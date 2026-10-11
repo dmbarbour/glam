@@ -90,10 +90,10 @@ impl NetWhnfMachine {
 
     pub(super) fn from_function_call(
         access: &crate::evaluation::EvaluationValueAccess<'_>,
-        function: &FunctionValue,
+        stage: &NetValue,
         arguments: &[Value],
     ) -> Self {
-        let stage = function.duplicate_stage_in(access.values());
+        let stage = stage.duplicate_in(access.values());
         let net = attach_net_many_in(
             access.values(),
             stage,
@@ -1435,6 +1435,10 @@ fn classify_core_callable_in(
             access.values(),
             call,
         ))),
+        // A function that only wraps an operator is called as that operator.
+        Value::Function(ref function) if let Some(operator) = function.wrapped_operator() => Ok(
+            CoreCallable::Operator(wrapped_core_operator(access.values(), operator)),
+        ),
         value @ (Value::Function(_) | Value::Dict(_)) => Ok(CoreCallable::Operator(
             applicable_operator(access.values(), value),
         )),

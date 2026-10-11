@@ -1708,15 +1708,10 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                                 }
                             }
                         }
-                        LazySource::FunctionCall {
-                            function,
-                            arguments,
-                        } => {
+                        LazySource::FunctionCall { stage, arguments } => {
                             let installed = context.with_value_access(|access| {
                                 let machine = NetWhnfMachine::from_function_call(
-                                    &access,
-                                    &function,
-                                    &arguments,
+                                    &access, &stage, &arguments,
                                 );
                                 let checkpoint =
                                     ManagedLazyCheckpointEdge::allocate_net_whnf_in(

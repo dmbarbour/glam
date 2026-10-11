@@ -1,5 +1,5 @@
 use super::*;
-use crate::core::RuntimeValueAccess;
+use crate::core::{RuntimeValueAccess, WrappedOperator};
 use crate::evaluation::EvaluationValueAccess;
 
 pub(crate) fn apply_arity_operator(
@@ -85,6 +85,42 @@ pub(crate) fn access_operator(
         .count();
     assert!(supplied.len() < arity);
     CoreOperator::Access { path, supplied }
+}
+
+/// The operator a wrapped function applies, with no operands yet.
+pub(super) fn wrapped_core_operator(
+    access: &RuntimeValueAccess<'_>,
+    operator: &WrappedOperator,
+) -> CoreOperator {
+    match operator {
+        WrappedOperator::Access(path) => access_operator(access, path.clone(), Arc::from([])),
+    }
+}
+
+/// Applies a function that only wraps `operator` to all of its arguments,
+/// giving what its net would: the operator's result.
+pub(super) fn apply_wrapped_operator(
+    access: &RuntimeValueAccess<'_>,
+    operator: &WrappedOperator,
+    arguments: Vec<Value>,
+) -> Value {
+    assert_eq!(
+        arguments.len(),
+        operator.arity(),
+        "a wrapped operator applies to all of its function's arguments"
+    );
+    match operator {
+        WrappedOperator::Access(path) => access_value(access, path.clone(), arguments),
+    }
+}
+
+/// The value an access operator yields once it has all its operands.
+fn access_value(
+    access: &RuntimeValueAccess<'_>,
+    path: Arc<[CoreDataKey]>,
+    operands: Vec<Value>,
+) -> Value {
+    Value::Lazy(LazyValue::from_access_in(access, path, Arc::from(operands)))
 }
 
 pub(crate) fn request_operator(
@@ -275,11 +311,11 @@ pub(super) fn apply_core_operator(
                     Arc::from(arguments),
                 )));
             }
-            Ok(OperatorYield::Data(Value::Lazy(LazyValue::from_access_in(
+            Ok(OperatorYield::Data(access_value(
                 access.values(),
                 path.clone(),
-                Arc::from(arguments),
-            ))))
+                arguments,
+            )))
         }
         CoreOperator::Request {
             tag,

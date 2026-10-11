@@ -3813,6 +3813,67 @@ fn interaction_net_classifies_ordinary_functions_as_applicable_operators() {
     }
 }
 
+/// A closed function whose code only accesses `name` of its parameter,
+/// marked as wrapping that access, as lowering marks it.
+fn wrapped_access_function(name: &str) -> Value {
+    let Value::Function(function) = closed_function_value(
+        1,
+        TestExpr::Access(
+            Arc::new(TestExpr::Local(0)),
+            Arc::from([TestKey::Key(Key::atom_from_text(name))]),
+        ),
+    ) else {
+        unreachable!("a closed function value is a function");
+    };
+    Value::Function(FunctionValue::wrapping(
+        function.into_stage(),
+        crate::core::WrappedOperator::Access(Arc::from([crate::core_net::CoreDataKey::Key(
+            Key::atom_from_text(name),
+        )])),
+    ))
+}
+
+/// A function that only wraps an operator gives what its net would, whether
+/// applied or called from a net, where it stands as the operator itself.
+#[test]
+fn wrapped_functions_apply_their_operator() {
+    let values = crate::core::test_value_factory();
+    let record = || Value::Dict(Dict::new_sync().insert(Key::atom_from_text("a"), n(7)));
+    let function = wrapped_access_function("a");
+
+    match classify_core_callable(&test_context(), function.duplicate_for_test(&values))
+        .expect("a wrapped function should be callable from an interaction net")
+    {
+        CoreCallable::Operator(CoreOperator::Access { path, supplied }) => {
+            assert_eq!(path.len(), 1);
+            assert!(supplied.is_empty());
+        }
+        _ => panic!("a wrapped function is called as its operator"),
+    }
+
+    let applied = eval_closed_expr(&TestExpr::Apply(
+        Arc::new(TestExpr::Value(function.duplicate_for_test(&values))),
+        Arc::new(TestExpr::Value(record())),
+    ))
+    .expect("an applied wrapped function should access its argument");
+    values.assert_same_representation_for_test(&applied, &n(7));
+
+    let call = closed_net(|builder| {
+        let [application, argument, result] = builder.bind();
+        let function = builder.data(function);
+        builder.wire(function, application);
+        let record = builder.data(record());
+        builder.wire(record, argument);
+        result
+    });
+    let called = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &test_context(),
+        &Value::Lazy(LazyValue::from_net_computation(&values, call)),
+    )
+    .expect("a wrapped function called from a net should access its argument");
+    values.assert_same_representation_for_test(&called, &n(7));
+}
+
 #[test]
 fn ordinary_observers_do_not_unseal_metadata_carriers() {
     // The assertions below repeatedly hand the same managed carrier through

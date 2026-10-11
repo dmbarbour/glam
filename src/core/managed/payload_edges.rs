@@ -200,7 +200,7 @@ impl CompatibilityValueEdges for LazySource {
             }
             Self::Builtin(call) => call.visit_compatibility_value_edges(visit),
             Self::FunctionCall {
-                function: _,
+                stage: _,
                 arguments,
             } => {
                 visit_values(arguments, visit);
@@ -352,7 +352,7 @@ mod tests {
         );
 
         let function_call = LazySource::FunctionCall {
-            function: fixture_function(&values),
+            stage: fixture_function(&values).into_stage(),
             arguments: Arc::from([
                 second.duplicate_for_test(&values),
                 third.duplicate_for_test(&values),

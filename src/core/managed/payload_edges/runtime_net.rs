@@ -43,9 +43,7 @@ pub(crate) fn trace_halt_managed_edges(halt: &EvaluationHalt, visitor: &mut Visi
 pub(crate) fn trace_lazy_source_managed_net_edges(source: &LazySource, visitor: &mut Visitor<'_>) {
     match source {
         LazySource::NetComputation(net) => net.runtime().trace_managed_edge(visitor),
-        LazySource::FunctionCall { function, .. } => {
-            function.stage().runtime().trace_managed_edge(visitor);
-        }
+        LazySource::FunctionCall { stage, .. } => stage.runtime().trace_managed_edge(visitor),
         LazySource::Error
         | LazySource::ComputedFixpoint(_)
         | LazySource::ListEffectComputation(_)

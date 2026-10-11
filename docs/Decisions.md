@@ -635,6 +635,36 @@ maps the short names used here to file names.
 - **Rule lives in:** `RuntimeNet::applied` (`interaction_net/runtime/cursor.rs`).
 - **Recorded in:** structural overheads plan, `perf-runtime-net-attach`.
 
+### A function that only wraps an operator is called as that operator
+`functions-wrap-operators` · 2026-10-11 · agent · accepted
+- **Context:** after lazy locals, the commonest application was a saturated
+  call of a closed `\x -> x.path`, mostly the effect handlers
+  `{eff: \api -> api.seq}` that every `if` and `do` step runs: an applied
+  net, a copy and a net driver to yield one access. The maintainer asked
+  for thin wrappers around operators to skip the net, since applying them
+  starts no work worth sharing.
+- **Decision:**
+  - Lowering marks a closed function whose body applies one operator to
+    its parameters, in order, and does nothing else with them, with that
+    operator (`WrappedOperator`): today an access of the first parameter,
+    indexed by any others.
+  - A saturated call of a marked function yields the operator's result
+    directly; a net calling one installs the operator where the call
+    stood. Partial application and every other use go through the stage
+    net, which stays the function's representation.
+  - The mark holds no values, so the stage remains the function's only
+    managed edge. A saturated call's lazy source keeps only the stage, as
+    that is all it uses, so lazy cells keep their size.
+- **Consequences:** instructions fall a further 3.4 to 12.4% on the
+  profile families (`append_walk_800` 12.4%, `countdown_800` 8.2%,
+  `hello_elf` 3.6%). Operators that take values or code, such as closure
+  captures, are not marked.
+- **Rule lives in:** `wrapped_operator` (`g_syntax/net_lowering.rs`);
+  `apply_whnf_function` (`eval/whnf.rs`) and `classify_core_callable_in`
+  (`eval/net.rs`).
+- **Recorded in:** structural overheads plan,
+  `perf-thin-wrapper-applications`.
+
 ### Interface demand walks resume from the surviving part of their route
 `interface-walks-resume` · 2026-10-10 · maintainer · accepted
 - **Context:** a demand poll walked from the interface to the active pair
