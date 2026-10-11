@@ -4,7 +4,8 @@ Status: agreed with the maintainer on 2026-10-05, including the harness
 questions. `perf-profiling-harness` and `perf-foreground-collection` are
 done, `perf-parser` is in production, and `perf-evaluation-recursion` is
 done (2026-10-08). `perf-structural-overheads` is active, with its own
-[plan](StructuralOverheads_2026-10-08.md). This is the umbrella for
+[plan](StructuralOverheads_2026-10-08.md). The latest measurements are in
+[Snapshot 2026-10-11](#snapshot-2026-10-11). This is the umbrella for
 performance work. Each step gets its own plan when it starts; the existing
 plans it names stay the detailed records. Steps are referred to by name,
 never by number (see the plans README, "Step names").
@@ -313,6 +314,91 @@ settings as the baseline. Reduction counts are unchanged.
 The countdown is now linear, at about 3.2 ms and 290 reductions per level,
 or about 11 µs per reduction. That per-reduction cost is the next target
 everywhere, including Hello World's 300k reductions.
+
+## Snapshot 2026-10-11
+
+At `e6e07f2d`, after `perf-parser`, `perf-evaluation-recursion` and most of
+`perf-structural-overheads`, through `perf-compiled-nets`. Same machine and
+toolchain as the baseline: Intel Core i7-6700 (8 threads), rustc 1.99.0,
+release builds with `glam-prof`, zero workers. The baseline (`7962639e`,
+the harness on `b89c2d78`) and the structural overheads baseline
+(`84bfd7d2`, 2026-10-08) were rebuilt and rerun the same day on the
+baseline's own workload sources, so the columns compare directly; the
+samples have not changed since. Instructions are user space and, with CPU
+time, the mean of three runs; counters are exact.
+
+| Workload | M instr 10-06 | 10-08 | Now | Change | CPU ms 10-06 | 10-08 | Now |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `minimal` | 63.5 | 34.4 | 23.6 | −63% | 42.9 | 21.6 | 18.8 |
+| `hello_do` | 119.8 | 60.6 | 33.8 | −72% | 68.0 | 27.1 | 20.9 |
+| `hello_elf` | 9,645 | 3,493 | 1,305 | −86% | 3,499 | 736 | 293 |
+| `parse_parens_10` | 3,565 | 35.0 | 24.1 | −99.3% | 456 | 21.5 | 19.0 |
+| `parse_lists_16` | 5,194 | 35.5 | 24.2 | −99.5% | 668 | 21.5 | 24.0 |
+| `countdown_100` | 1,685 | 323 | 114 | −93% | 553 | 86.7 | 40.6 |
+| `countdown_200` | 5,127 | 633 | 198 | −96% | 1,440 | 154 | 61.8 |
+| `countdown_400` | 17,374 | 1,190 | 392 | −97.7% | 4,475 | 265 | 102 |
+| `list_map_1000` | 3,043 | 1,283 | 94.1 | −96.9% | 815 | 260 | 33.6 |
+| `dict_lookup_1000` | 4,848 | 480 | 47.2 | −99.0% | 1,124 | 104 | 22.9 |
+
+Counters, baseline to now:
+
+| Workload | Reductions | Access regions | Root registrations | Allocations | Collections |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `minimal` | 2,242 → 1,596 | 6,515 → 479 | 2,052 → 1,132 | 2,500 → 1,662 | 0 → 0 |
+| `hello_elf` | 303,303 → 137,796 | 846,986 → 5,883 | 200,261 → 61,428 | 222,644 → 92,605 | 2 → 1 |
+| `countdown_400` | 119,743 → 58,244 | 419,436 → 1,695 | 87,802 → 27,930 | 104,861 → 50,592 | 1 → 1 |
+| `list_map_1000` | 47,589 → 15,038 | 180,187 → 825 | 23,295 → 4,415 | 29,003 → 9,039 | 0 → 0 |
+| `dict_lookup_1000` | 27,001 → 1,865 | 123,067 → 486 | 26,748 → 1,291 | 33,347 → 1,897 | 0 → 0 |
+
+Growth at the sizes of the structural overheads plan's
+[Scaling 2026-10-08](StructuralOverheads_2026-10-08.md#scaling-2026-10-08)
+(at `64ba1c00`): the exponent k of instructions, with cost ≈ a + b·n^k,
+and the marginal instructions per unit of size between the two largest
+sizes.
+
+| Family | Sizes | k then | k now | K instr per unit then | Now |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `countdown` | 400/800/1,600 | 0.98 | 1.06 | 2,925 | 960 |
+| `sum` | 400/800/1,600 | 1.04 | 0.96 | 3,412 | 1,012 |
+| `chain` (module definitions) | 400/800/1,600 | 1.24 | 0.94 | 8,913 | 1,795 |
+| `do_chain` | 400/800/1,600 | 1.62 | 1.00 | 4,556 | 994 |
+| `dict_lookup` | 1,000/2,000/4,000 | 1.48 | 1.07 | 919 | 24 |
+| `list_map` | 1,000/2,000/4,000 | 1.91 | 1.23 | 5,219 | 78 |
+| `list_sum` | 400/800/1,600 then, 200/400/800 now | 2.95 | 1.01 | 294,957 | 1,144 |
+| `parse_lists` (depth) | 400/800/1,600 then, 200/400/800 now | 1.48 | 0.91 | 77 | 6 |
+| `parse_ifs` (depth) | 4/8/16 | 7.71 | 7.78 | 173,584 | 172,670 |
+
+The default suite now has 60 workloads and costs 25.1 G instructions and
+6.2 s of CPU; `parse_ifs_16` alone is 1.4 G.
+
+**Observations**
+- **Hello World** takes 12 times less CPU than at the baseline (3.5 s to
+  0.29 s). A reduction costs about 9,500 instructions and 2.1 µs, from
+  31,800 and 11.5 µs, and there are 55% fewer of them: whole copies,
+  applications built directly, lazy locals passed as they are, and
+  compiled nets replace net rules.
+- **Boundary crossings** nearly vanished. Access regions fell 99% (one
+  heap region per evaluation quantum), root registrations 69%
+  and allocations 58% in `hello_elf`, which now collects once.
+- **Fixed cost.** An empty assembly takes 23.6 M instructions and 19 ms of
+  CPU, from 63.5 M and 43 ms.
+- **Parser.** Nesting parentheses or brackets costs 3 to 6 K
+  instructions per level beyond `minimal`. `parse_ifs`, a keyword form in parentheses inside another, is
+  still exponential (`parser-keyword-frames`).
+- **Recursion** is linear and costs about 0.96 M instructions and 140
+  reductions per level, from 61 M (and growing) and 290.
+- **Lists and dicts.** A dictionary literal resolves during lowering, so
+  lookups no longer reduce at run time. Mapping a list costs 78 K
+  instructions per item, from 5.2 M (at 10-08, sizes 2,000 to 4,000).
+  Folding one from the front is linear, 1.1 M per item between 400 and 800
+  items; at 10-08 it grew with k = 2.95, 295 M per item between 800 and
+  1,600.
+- **Still superlinear at small sizes:** `chain` and `chain_where` at 200
+  to 800 definitions read k = 1.26 and 1.44, though every counter is
+  linear and `chain` reads 0.94 at twice the sizes. `dict_computed`'s
+  access regions and root registrations grow with k = 1.78 and 1.45. With
+  four workers, `chain_w4_800` takes 42% more CPU than `chain_800` for the
+  same instructions (`perf-worker-route-walks`).
 
 ## Settled Harness Questions
 
