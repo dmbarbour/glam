@@ -3940,6 +3940,59 @@ fn compiled_function_calls_give_what_their_nets_would() {
     values.assert_same_representation_for_test(&call(41), &n(42));
 }
 
+/// `anno 'normalize` normalizes a function's net in place before any
+/// application, so it compiles before its first call, and gives the
+/// function itself.
+#[test]
+fn normalize_annotation_compiles_a_function_before_its_first_call() {
+    let context = isolated_test_context();
+    let values = context.values();
+    let function = closed_function_value_in(
+        values,
+        1,
+        builtin2_expr(Builtin::Add, TestExpr::Local(0), TestExpr::Value(n(1))),
+    );
+    let _function_owner = RuntimeValueRoot::new(values, function.duplicate_for_test(values));
+    let compiled = |function: &Value| {
+        let Value::Function(function) = function else {
+            panic!("the annotation should give the function");
+        };
+        values.with_runtime_value_access(|access| {
+            function
+                .stage()
+                .runtime()
+                .access(&access)
+                .compiled(1)
+                .is_some()
+        })
+    };
+    let normalize = Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(
+        "normalize",
+    )));
+
+    assert!(!compiled(&function), "a fresh net has evaluation left");
+    let annotated = eval_closed_expr_in(
+        &context,
+        &builtin2_expr(
+            Builtin::Anno,
+            TestExpr::Value(normalize),
+            TestExpr::Value(function.duplicate_for_test(values)),
+        ),
+    )
+    .expect("the annotation should normalize the function");
+    assert!(compiled(&annotated));
+    values.assert_same_representation_for_test(&annotated, &function);
+    let call = eval_closed_expr_in(
+        &context,
+        &TestExpr::Apply(
+            Arc::new(TestExpr::Value(annotated)),
+            Arc::new(TestExpr::Value(n(2))),
+        ),
+    )
+    .expect("the normalized function should still add one");
+    values.assert_same_representation_for_test(&call, &n(3));
+}
+
 /// Normalizing a net before its first use reduces only what builds values.
 /// A call of data waits for demand, since its callable may need evaluating:
 /// here a counted lazy, which normalization must not force, so the net

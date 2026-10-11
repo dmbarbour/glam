@@ -246,10 +246,19 @@ from fewer than 300 such lazies, so the same lazies are reached again
 rather than more made. Root registrations rise by 1,725. Not yet
 explained.
 
+`anno 'normalize` landed with it, charging its reductions to the
+evaluation budget. Wrapping the compiler's helper functions and effect
+handlers in it, as a guard, raised `list_map_2000` a further 1.7% and
+`minimal` 15%: their nets already normalize at first use, and the guard
+normalized helpers never applied. So the list-effect lazies in `list_map`
+do not come from helpers awaiting normalization.
+
 Follow-ups:
-- **`anno 'normalize`**, the explicit form, for nets a program wants
-  normalized ahead of any application.
 - **`list_map`'s comparison**, above.
+- **Cursors.** Normalization stops at a remote cursor, so a stage copying
+  a net that still had evaluation left cannot normalize or compile.
+  Logically the copy is local and only shares the source's work, so
+  normalization could follow the cursor (`perf-normalization-cursors`).
 - **Nested runs.** Running the thunks a compiled thunk completes in the
   same run, iteratively, would recover the remaining 1.3 to 3.6 points.
 - **`WrappedOperator`** can become a compiled net set at lowering.

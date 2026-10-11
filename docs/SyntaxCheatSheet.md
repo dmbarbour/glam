@@ -589,6 +589,7 @@ anno 'error Message         # halt evaluation with diagnostic Message
 anno context:Frame Expr     # add Frame to msg.context if Expr errors
 anno 'deprecated Expr       # valid but warns
 anno 'scope_unique Atom     # unique atom (ephemeron pattern)
+anno 'normalize F           # reduce F's net ahead of use; F unchanged
 anno refl:(.log Msg) Term   # reflection effect before returning Term
 
 # g0 definition initialization adds a shallow source frame:

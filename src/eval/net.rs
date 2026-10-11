@@ -1784,28 +1784,61 @@ pub(in crate::eval) fn compiled_net<'access>(
     if !runtime.begin_normalization() {
         return None;
     }
-    normalize_in(access, net);
+    // Fuel proportional to the net bounds the work, as a net can reduce
+    // without end.
+    let nodes = runtime.with(RuntimeNet::node_count);
+    if nodes <= NORMALIZATION_MAX_NODES {
+        normalize_in(access, net, NORMALIZATION_FUEL_PER_NODE * nodes);
+    }
     net.access(access.values()).compiled(inputs)
 }
 
-/// Reduces the pairs of `net` that only build, in place: rewrites, and
+/// Normalizes the net of a function or net value for `anno 'normalize`, in
+/// place, charging each reduction to `budget`. Returns whether it is done:
+/// false when the budget ran out first, to continue at the next poll. A
+/// function's net is then compiled if it can be.
+pub(in crate::eval) fn normalize_value_in(
+    access: &crate::evaluation::EvaluationValueAccess<'_>,
+    value: &Value,
+    budget: &mut crate::evaluation::EvaluationStepBudget,
+) -> bool {
+    let (net, inputs) = match value {
+        Value::Function(function) => (function.stage().runtime(), Some(function.remaining_arity())),
+        Value::Net(net) => (net.runtime(), None),
+        _ => return true,
+    };
+    let limit = budget.remaining();
+    let left = normalize_in(access, net, limit);
+    budget.consume(limit - left);
+    if left == 0 {
+        return false;
+    }
+    if let Some(inputs) = inputs {
+        let runtime = net.access(access.values());
+        runtime.begin_normalization();
+        runtime.compiled(inputs);
+    }
+    true
+}
+
+/// Reduces the pairs of `net` that only build, in place, up to `limit` of
+/// them, and returns how many of the limit are left: rewrites, and
 /// operators meeting data, which construct values and force nothing. A call
 /// of data waits for demand, as its callable may need evaluating, and so
-/// does anything another evaluation holds. Fuel proportional to the net
-/// bounds the work, as a net can reduce without end.
-fn normalize_in(access: &crate::evaluation::EvaluationValueAccess<'_>, net: &CoreRuntimeNet) {
+/// does anything another evaluation holds.
+fn normalize_in(
+    access: &crate::evaluation::EvaluationValueAccess<'_>,
+    net: &CoreRuntimeNet,
+    limit: usize,
+) -> usize {
     let runtime = net.access(access.values());
-    let nodes = runtime.with(RuntimeNet::node_count);
-    if nodes > NORMALIZATION_MAX_NODES {
-        return;
-    }
-    for _ in 0..NORMALIZATION_FUEL_PER_NODE * nodes {
+    for spent in 0..limit {
         let Some(pair) = runtime.with(RuntimeNet::next_constructive_pair) else {
-            return;
+            return limit - spent;
         };
         let ActivePairStep::Reduction(reduction) = runtime.step_active_pair_within(pair, |_| true)
         else {
-            return;
+            return limit - spent;
         };
         if let ReductionKind::OperatorCall { operator, data } = reduction.kind {
             let call = OperatorCall {
@@ -1816,10 +1849,11 @@ fn normalize_in(access: &crate::evaluation::EvaluationValueAccess<'_>, net: &Cor
             // A failed operator stays in the net as a stuck pair, for the
             // demand that reaches it, if any, to report.
             if !matches!(progress_core_operator_call_in(access, net, call), Ok(true)) {
-                return;
+                return limit - spent - 1;
             }
         }
     }
+    0
 }
 
 /// The largest net normalized before its first use, four times the most a

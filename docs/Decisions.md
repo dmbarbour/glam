@@ -738,7 +738,12 @@ maps the short names used here to file names.
     constant lists 4.7%; comparing mapped elements hits list-effect lazies
     at a WHNF boundary about once per six elements more often. The cause
     is not yet known.
-  - The explicit `anno 'normalize` remains to add.
+  - `anno 'normalize` asks for the same normalization ahead of any
+    application, without fuel: each reduction is charged to the
+    evaluation budget, which yields between polls. Wrapping every helper
+    function the compiler builds in it did not help `list_map_2000`
+    (+1.7% more) and cost `minimal` 15%, normalizing helpers that are
+    never applied, so the compiler does not.
   - The managed net cell grows to 224 bytes.
 - **Rule lives in:** `compiled_net` and `normalize_in` (`eval/net.rs`);
   `RuntimeNet::next_constructive_pair`

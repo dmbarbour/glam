@@ -86,6 +86,9 @@ enum RegionalAnnotationPhase {
         diagnostic_context: Value,
         target: RegionalWhnfWork,
     },
+    /// `'normalize`: the target's value, then its net normalized in place.
+    NormalizeTarget(RegionalWhnfWork),
+    Normalizing(Value),
     Ready(Value),
     Done,
 }
@@ -137,6 +140,7 @@ enum RecognizedAnnotation {
     Reflection(Value),
     Seq(Value),
     Spark(Value),
+    Normalize,
     Error,
     Context(Value),
     Unknown(String),
@@ -708,6 +712,23 @@ impl RegionalAnnotationMachine {
                     };
                     return RegionalBuiltinPoll::Ready(target);
                 }
+                RegionalAnnotationPhase::NormalizeTarget(mut target) => {
+                    let target = match poll_demand_in(&mut target, access, step_budget) {
+                        RegionalDemandResult::Ready(target) => target,
+                        RegionalDemandResult::Pending(poll) => {
+                            self.phase = RegionalAnnotationPhase::NormalizeTarget(target);
+                            return poll;
+                        }
+                    };
+                    self.phase = RegionalAnnotationPhase::Normalizing(target);
+                }
+                RegionalAnnotationPhase::Normalizing(target) => {
+                    if super::net::normalize_value_in(access, &target, step_budget) {
+                        return RegionalBuiltinPoll::Ready(target);
+                    }
+                    self.phase = RegionalAnnotationPhase::Normalizing(target);
+                    return RegionalBuiltinPoll::Yielded;
+                }
                 RegionalAnnotationPhase::Ready(value) => return RegionalBuiltinPoll::Ready(value),
                 RegionalAnnotationPhase::Done => {
                     unreachable!("a completed annotation machine cannot be polled again")
@@ -765,6 +786,9 @@ impl RegionalAnnotationMachine {
                 Builtin::Spark,
                 [value, access.values().duplicate_value(&self.target)],
             )),
+            RecognizedAnnotation::Normalize => RegionalAnnotationPhase::NormalizeTarget(
+                self.demand_in(access, access.values().duplicate_value(&self.target)),
+            ),
             RecognizedAnnotation::Error => RegionalAnnotationPhase::ErrorMessage(
                 self.demand_in(access, access.values().duplicate_value(&self.target)),
             ),
@@ -854,6 +878,7 @@ fn recognize_simple_annotation(atom: &crate::core::Atom) -> Option<RecognizedAnn
         "binary" => Some(RecognizedAnnotation::Collection(CollectionKind::Binary)),
         "array" => Some(RecognizedAnnotation::Collection(CollectionKind::Array)),
         "error" => Some(RecognizedAnnotation::Error),
+        "normalize" => Some(RecognizedAnnotation::Normalize),
         "meta_init" => Some(RecognizedAnnotation::MetadataInitialize),
         _ => None,
     }
@@ -1001,7 +1026,8 @@ impl RegionalAnnotationPhase {
         match self {
             Self::Recognize(demand)
             | Self::ParseAssertUnit(demand)
-            | Self::ErrorMessage(demand) => demand.trace_managed_edges(visitor),
+            | Self::ErrorMessage(demand)
+            | Self::NormalizeTarget(demand) => demand.trace_managed_edges(visitor),
             Self::ParseAssertion { payload, .. } => payload.trace_managed_edges(visitor),
             Self::AssertionName { name, value, .. } => {
                 name.trace_managed_edges(visitor);
@@ -1068,7 +1094,7 @@ impl RegionalAnnotationPhase {
                 trace_value(diagnostic_context, visitor);
                 target.trace_managed_edges(visitor);
             }
-            Self::Ready(value) => trace_value(value, visitor),
+            Self::Ready(value) | Self::Normalizing(value) => trace_value(value, visitor),
             Self::Done => {}
         }
     }
