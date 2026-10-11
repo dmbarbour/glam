@@ -3951,6 +3951,7 @@ fn normalization_leaves_calls_of_data_to_demand() {
     let forced = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&forced);
     let identity = closed_function_value_in(values, 1, TestExpr::Local(0));
+    let _identity_owner = RuntimeValueRoot::new(values, identity.duplicate_for_test(values));
     let callee_values = values.clone();
     let callee = Value::Lazy(LazyValue::semantic_thunk(
         values,
@@ -3970,6 +3971,7 @@ fn normalization_leaves_calls_of_data_to_demand() {
         builder.wire(result, spine.result);
         spine.input
     });
+    let _net_owner = values.root_core_net(net.runtime());
     let normalize = || {
         crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             evaluator.with_value_access(|access| {
