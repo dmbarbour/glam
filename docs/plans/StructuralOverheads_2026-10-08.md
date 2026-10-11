@@ -136,6 +136,24 @@ Where they come from, 2026-10-11:
   has reduced as far as it can alone: `\c -> f (thunk c)`, with `f` a
   constant the shared code net's `ApplyArity` operator already holds.
 
+After both, at `3623d88e`, the applications left, classed by the shape of
+the net applied as it stands then:
+
+| Workload | Applications | One operator | Operator chain | Other |
+| --- | ---: | ---: | ---: | ---: |
+| `countdown_800` | 8,194 (−41%) | 10.3% | 68.7% | 21.0% |
+| `list_map_2000` | 2,187 (−49%) | 1.9% | 92.6% | 5.3% |
+| `list_sum_400` | 5,800 (−39%) | 21.4% | 41.8% | 36.7% |
+| `append_walk_800` | 20,208 (−40%) | 12.1% | 47.6% | 40.3% |
+| `do_chain_800` | 2,583 (−49%) | 1.6% | 31.9% | 66.4% |
+| `hello_elf` | 9,578 (−34%) | 16.8% | 32.4% | 50.2% |
+
+The one-operator applications left are thunks `\c -> f c`, and the
+chains `\c -> f (thunk c)` and `\c -> g c 1`, all with `f` and `g`
+constants: an `ApplyArity` operator holds them only once the shared code
+net has reduced, so lowering cannot see these shapes, though it could see
+the expressions they come from.
+
 **Unobserved arity** (`perf-unobserved-arity`). A lightweight structural
 analysis of a code net could find how many arguments it takes before any
 is observed; below that arity, partial application starts no work, so it
