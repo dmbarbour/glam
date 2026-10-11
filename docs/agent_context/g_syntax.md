@@ -163,9 +163,15 @@ disagree.
   reject absent/undefined entries; `path?:Pattern` explicitly passes `{}`.
   Computed paths evaluate once at their ordered match step and may use earlier
   captures. A remainder is an ordinary, potentially refutable pattern.
-- Pure `if` and `match` own one stateless root `.cut`. Host `try` variants
-  return the equivalent cut to the ambient handler. `match*` and `try_match*`
-  deliberately omit it; do not add a hidden exhaustion branch to `match*`.
+- Pure `if` and `match` select the first result of their search, so they own
+  its cut. Their handler is the list's, so lowering builds the results
+  directly from list builtins (`ResolvedChoice::emit_results`): alternatives
+  concatenate, a step maps the rest over its effect's results, a result is a
+  one-item list. Only the effects guards evaluate run through the handler
+  ([decision](../Decisions.md#pure-conditionals-build-their-results-directly)).
+  Host `try` variants return the equivalent cut search to the ambient
+  handler. `match*` and `try_match*` deliberately omit the cut; do not add a
+  hidden exhaustion branch to `match*`.
 - `match when` is a distinct guard-only form. Hierarchical child alternatives
   share progressive parent captures and may fall through to the next parent;
   only the complete match owns the cut.

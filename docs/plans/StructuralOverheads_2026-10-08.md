@@ -327,10 +327,44 @@ Follow-ups:
 - **`'normalize`** keeps `'compile`'s reductions, charged to the budget.
   Full normal form, every reduction that needs no parameter, calls of
   data included, needs the net driver's evaluation of callables and
-  copies rather than the constructive loop.
-- **Countdown.** One iteration of `heavy n = if n == 0 then 0 else heavy
-  (n - 1)` costs about 775 K instructions: 130 task polls, 56 inline lazy
-  forces and 550 allocations, with list-front cells from the conditional.
+  copies rather than the constructive loop. Deferred until something
+  uses it (maintainer).
+
+**Pure conditionals** (`perf-pure-conditionals`, 2026-10-11, decision
+`pure-conditionals-build-results`). One iteration of `heavy n = if n == 0
+then 0 else heavy (n - 1)` cost about 775 K instructions and 51 lazies, 45
+of them interpreting the conditional's effect search: each operation an
+effect value applied to its operands one at a time, then run by applying
+the list handler through every layer. Booleans are `.r ()` and `.fail`, so
+a guard stays an effect, but the search around it is a fixed template whose
+handler is known. Lowering now builds its results from list builtins.
+Instructions against `bea26a13`:
+
+| Workload | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| `minimal` | 18.8 M | 18.0 M | −4.6% |
+| `countdown_800` | 634 M | 324 M | −49.0% |
+| `list_map_2000` | 164.7 M | 163.7 M | −0.6% |
+| `list_sum_400` | 393 M | 253 M | −35.5% |
+| `append_walk_800` | 1,604 M | 933 M | −41.8% |
+| `do_chain_800` | 565 M | 563 M | −0.3% |
+| `hello_do` | 28.2 M | 27.3 M | −3.2% |
+| `hello_elf` | 922 M | 812 M | −12.0% |
+
+Measured first and not adopted: lowering a known `.op x y` as one handler,
+`{eff: \api -> api.op x y}`. A closure per operation costs more to build
+and apply once than the effects it replaces (`hello_elf` +31%; with jit,
+`countdown_800` −11% but `do_chain_800` +14%). Embedding closed lambdas as
+function values rather than computations of them was mixed (`do_chain_800`
+−3.6%, `list_sum_400` +3.3%).
+
+Follow-ups:
+- **Per-force cost.** A countdown iteration still costs about 380 K
+  instructions, much of it per lazy forced: allocation (about 140 K per
+  iteration before this step), entering the mutator through thread-local
+  heap entries (about 56 K), copies.
+- **Effects elsewhere.** `do` blocks and host conditionals still build and
+  interpret effects operation by operation.
 - **Nested runs.** Running the thunks a compiled thunk completes in the
   same run, iteratively, would recover the remaining 1.3 to 3.6 points.
 - **`WrappedOperator`** can become a compiled net set at lowering.

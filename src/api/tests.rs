@@ -423,13 +423,14 @@ fn tail_recursion_runs_in_a_constant_heap() {
             .expect("a usable heap reports telemetry");
         heap.assigned_runs() + heap.free_runs()
     };
-    let shallow = heap_runs(250);
-    let deep = heap_runs(1000);
-    // Without forwarding the heap more than doubles; collection timing
-    // alone moves it by a few runs.
+    // Both depths run past the first collection, before which the heap
+    // only grows. Without forwarding the heap more than doubles; collection
+    // timing alone moves it by a few runs.
+    let shallow = heap_runs(1000);
+    let deep = heap_runs(4000);
     assert!(
         deep <= shallow + shallow / 2,
-        "the heap grew from {shallow} runs at depth 250 to {deep} at depth 1000"
+        "the heap grew from {shallow} runs at depth 1000 to {deep} at depth 4000"
     );
 }
 

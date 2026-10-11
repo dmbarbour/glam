@@ -57,6 +57,70 @@ where
     continuation
 }
 
+/// The results of `steps` followed by `results`, as running them with the
+/// list handler gives them (see `ResolvedChoice::emit_results`): each
+/// effect a step binds runs with the handler, and the rest follows for each
+/// of its results in turn.
+pub(super) fn emit_effect_step_results<I>(
+    access: &RuntimeValueAccess<'_>,
+    steps: I,
+    mut results: ResolvedExpr<Value>,
+) -> ResolvedExpr<Value>
+where
+    I: IntoIterator<Item = ResolvedEffectStep>,
+    I::IntoIter: DoubleEndedIterator,
+{
+    for step in steps.into_iter().rev() {
+        results = match step.kind {
+            ResolvedEffectStepKind::EffectBind { operation, binding } => {
+                for_each_effect_result_resolved(access, operation, binding, results)
+            }
+            ResolvedEffectStepKind::ValueBind { value, binding } => {
+                ResolvedExpr::apply(ResolvedExpr::lambda(vec![binding], results), [value])
+            }
+            ResolvedEffectStepKind::Then {
+                operation,
+                result,
+                diagnostic_context,
+            } => {
+                let rest = assert_unit_resolved(
+                    access,
+                    diagnostic_context,
+                    ResolvedExpr::Local(result),
+                    results,
+                );
+                for_each_effect_result_resolved(access, operation, result, rest)
+            }
+        };
+    }
+    results
+}
+
+/// The results of `rest`, which gives results of its own, for each result
+/// of running `operation` with the list handler bound to `binding`, in
+/// order: a step of a search as the list handler runs it.
+pub(in crate::g_syntax) fn for_each_effect_result_resolved(
+    _access: &RuntimeValueAccess<'_>,
+    operation: ResolvedExpr<Value>,
+    binding: BindingId,
+    rest: ResolvedExpr<Value>,
+) -> ResolvedExpr<Value> {
+    let each = ResolvedExpr::apply(
+        ResolvedExpr::Embedded(Value::Builtin(Builtin::Map)),
+        [
+            ResolvedExpr::lambda(vec![binding], rest),
+            ResolvedExpr::apply(
+                ResolvedExpr::Embedded(Value::Builtin(Builtin::ListEffect)),
+                [operation],
+            ),
+        ],
+    );
+    ResolvedExpr::apply(
+        ResolvedExpr::Embedded(Value::Builtin(Builtin::ListConcat)),
+        [each],
+    )
+}
+
 fn emit_effect_step(
     access: &RuntimeValueAccess<'_>,
     step: ResolvedEffectStep,

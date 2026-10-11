@@ -240,6 +240,48 @@ maps the short names used here to file names.
 - **Recorded in:** structural overheads plan,
   `perf-thin-wrapper-applications`.
 
+### Pure conditionals build their results directly
+`pure-conditionals-build-results` · 2026-10-11 · maintainer · accepted
+- **Context:** a pure `if` or `match` is a search of effects, `.cut` over
+  `.alt` of `.seq` steps ending in `.r`, which the list handler runs. Every
+  operation is an effect value, `{eff: \api -> api.op}`; applying one to
+  each operand builds another effect, and running it applies the handler
+  through each of those layers to reach the list builtin. In a countdown
+  iteration 45 of 51 lazies served this interpretation. Booleans are
+  `.r ()` and `.fail`, so the guards themselves stay effects. The
+  maintainer accepted skipping the interpretation layer for this common
+  template as an acceleration.
+- **Decision:**
+  - Lowering builds a pure conditional's results as the list handler
+    would give them, from list builtins (`ResolvedChoice::emit_results`):
+    alternatives join with `list.concat`, a step that binds an effect maps
+    the rest over that effect's results and concatenates them, a result is
+    a one-item list, and no alternative is the empty list. Only the effects
+    a guard evaluates run through the handler.
+  - `if` and a cut `match` select the first result, so the search's cut is
+    left out; an open match's value is the result list itself. Host forms
+    keep the effect search for their ambient handler.
+  - `map` and `list.concat` are structural and force nothing
+    (`structural-lazy-map-and-concat`), so results are still observed in
+    source order and a later alternative runs only when the earlier ones
+    are exhausted.
+  - The compiler's `defined_or` helper is built the same way.
+- **Consequences:**
+  - Instructions against `nets-compile-on-request`: `countdown` −49.0%,
+    `append_walk` −41.8%, `list_sum` −35.5%, `hello_elf` −12.0%, `minimal`
+    −4.6%, `hello_do` −3.2%, others within 0.6%.
+  - A shallow countdown now finishes before the first collection, so the
+    constant-heap test compares two depths past it.
+  - Lowering a known `.op x y` as `{eff: \api -> api.op x y}`, one handler
+    for all operands, was measured first and not adopted: closures cost
+    more to build and apply once than the effects they replace (`hello_elf`
+    +31%; with jit, `countdown` −11% but `do_chain` +14%, `minimal` +8%).
+- **Rule lives in:** `agent_context/g_syntax.md` "Do, Patterns, and
+  Conditionals"; `ResolvedChoice::emit_results`
+  (`g_syntax/resolve/conditional.rs`) and
+  `for_each_effect_result_resolved` (`g_syntax/resolve/effect_steps.rs`).
+- **Recorded in:** structural overheads plan, `perf-pure-conditionals`.
+
 ### Binding groups lower by dependency components
 `binding-groups-lower-by-components` · 2026-10-10 · agent · accepted
 - **Context:** a `let` or `where` group is documented as mutually recursive,

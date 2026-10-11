@@ -5,7 +5,9 @@
 //! lowering.
 
 use super::super::*;
-use super::effect_steps::{ResolvedEffectStep, ResolvedPatternInput, emit_effect_steps};
+use super::effect_steps::{
+    ResolvedEffectStep, ResolvedPatternInput, emit_effect_step_results, emit_effect_steps,
+};
 use super::pattern::{
     PatternLoweringContext, PatternStepSink, append_guard_steps, append_pattern_steps,
 };
@@ -74,6 +76,8 @@ impl PatternStepSink for ConditionalPatternStepSink<'_> {
     }
 }
 
+/// A guard choice's effect search, cut, as a host conditional runs it.
+#[cfg(test)]
 pub(super) fn lower_guard_choices_resolved(
     access: &RuntimeValueAccess<'_>,
     alternatives: &[GuardChoiceArm<'_>],
@@ -108,10 +112,12 @@ pub(super) fn lower_if_expr_resolved(
             result: &if_expr.else_result,
         },
     ];
-    let search = lower_guard_choices_resolved(access, &alternatives, context, scope, locals)?;
+    let choice = resolve_guard_choice(access, &alternatives, context, scope, locals)?;
     Ok(match if_expr.mode {
-        ConditionalMode::Pure => compiler_values::run_pure_conditional_resolved(access, search),
-        ConditionalMode::Host => search,
+        ConditionalMode::Pure => {
+            apply_builtin_resolved(access, Builtin::IfResult, [choice.emit_results(access)])
+        }
+        ConditionalMode::Host => choice.emit(access),
     })
 }
 
@@ -382,13 +388,10 @@ impl ResolvedChoice {
     ) -> ResolvedExpr<Value> {
         match (mode, commitment) {
             (ConditionalMode::Pure, MatchCommitment::Cut) => {
-                let search = self.emit_search(access);
-                compiler_values::run_pure_match_resolved(access, search, line)
+                let results = self.emit_results(access);
+                compiler_values::select_pure_match_resolved(access, results, line)
             }
-            (ConditionalMode::Pure, MatchCommitment::Open) => {
-                let search = self.emit_search(access);
-                compiler_values::run_pure_open_match_resolved(access, search)
-            }
+            (ConditionalMode::Pure, MatchCommitment::Open) => self.emit_results(access),
             (ConditionalMode::Host, MatchCommitment::Cut) => self.emit(access),
             (ConditionalMode::Host, MatchCommitment::Open) => self.emit_search(access),
         }
@@ -396,6 +399,29 @@ impl ResolvedChoice {
 
     fn emit(self, access: &RuntimeValueAccess<'_>) -> ResolvedExpr<Value> {
         effect_call_resolved(access, "cut", [self.emit_search(access)])
+    }
+
+    /// The results of the search, in order, as running it with the list
+    /// handler gives them: an acceleration for a pure conditional, whose
+    /// handler is known, built from list builtins in place of the effect
+    /// operations the handler would interpret. Only the effects a guard
+    /// evaluates to still run through the handler. A result selector reads
+    /// the first result, so the search's cut is left out.
+    fn emit_results(self, access: &RuntimeValueAccess<'_>) -> ResolvedExpr<Value> {
+        let mut alternatives = self
+            .alternatives
+            .into_iter()
+            .map(|alternative| alternative.emit_results(access))
+            .collect::<Vec<_>>();
+        match alternatives.len() {
+            0 => ResolvedExpr::Embedded(Value::List(crate::core::List::empty())),
+            1 => alternatives.pop().expect("one alternative"),
+            _ => apply_builtin_resolved(
+                access,
+                Builtin::ListConcat,
+                [ResolvedExpr::List(alternatives)],
+            ),
+        }
     }
 
     fn emit_search(self, access: &RuntimeValueAccess<'_>) -> ResolvedExpr<Value> {
@@ -418,6 +444,10 @@ impl ResolvedAlternative {
     fn emit(self, access: &RuntimeValueAccess<'_>) -> ResolvedExpr<Value> {
         emit_effect_steps(access, self.steps, self.outcome.emit(access))
     }
+
+    fn emit_results(self, access: &RuntimeValueAccess<'_>) -> ResolvedExpr<Value> {
+        emit_effect_step_results(access, self.steps, self.outcome.emit_results(access))
+    }
 }
 
 impl ResolvedChoiceOutcome {
@@ -426,6 +456,14 @@ impl ResolvedChoiceOutcome {
             Self::Value(result) => effect_call_resolved(access, "r", [result]),
             Self::Effect(result) => result,
             Self::Nested(choice) => choice.emit_search(access),
+        }
+    }
+
+    fn emit_results(self, access: &RuntimeValueAccess<'_>) -> ResolvedExpr<Value> {
+        match self {
+            Self::Value(result) => ResolvedExpr::List(vec![result]),
+            Self::Effect(result) => apply_builtin_resolved(access, Builtin::ListEffect, [result]),
+            Self::Nested(choice) => choice.emit_results(access),
         }
     }
 }
@@ -883,10 +921,7 @@ mod tests {
         .expect("empty open pure match should resolve");
         assert_same_resolved(
             &resolved_pure,
-            &compiler_values::run_pure_open_match_test_resolved(
-                &crate::compiler::test_value_factory(),
-                lower_effect_expr_resolved(&crate::compiler::test_value_factory(), "fail"),
-            ),
+            &ResolvedExpr::Embedded(Value::List(crate::core::List::empty())),
         );
         assert!(!contains_effect(&resolved_pure, "cut"));
     }

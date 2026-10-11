@@ -39,8 +39,6 @@ struct GCompilerValues {
     empty_object_defs: RuntimeValueRoot,
     constant_object_defs: RuntimeValueRoot,
     reflection_annotator: RuntimeValueRoot,
-    pure_if_runner: RuntimeValueRoot,
-    pure_match_runner: RuntimeValueRoot,
     defined_or: RuntimeValueRoot,
     require_defined: RuntimeValueRoot,
     macro_environment: RuntimeValueRoot,
@@ -64,8 +62,6 @@ unsafe impl RuntimeCacheFamily for GCompilerValues {
             empty_object_defs,
             constant_object_defs,
             reflection_annotator,
-            pure_if_runner,
-            pure_match_runner,
             defined_or,
             require_defined,
             macro_environment,
@@ -78,8 +74,6 @@ unsafe impl RuntimeCacheFamily for GCompilerValues {
             empty_object_defs,
             constant_object_defs,
             reflection_annotator,
-            pure_if_runner,
-            pure_match_runner,
             defined_or,
             require_defined,
             macro_environment,
@@ -215,9 +209,7 @@ impl GCompilerValues {
         let constant_object_defs = build_constant_object_defs(values);
         rooted_checkpoint();
 
-        let pure_if_runner = build_pure_conditional_runner(values, Builtin::IfResult);
-        rooted_checkpoint();
-        let defined_or = build_defined_or(values, &build_cache, &pure_if_runner);
+        let defined_or = build_defined_or(values);
         rooted_checkpoint();
         let math = build_module(values, &constant_object_defs, |_| {
             Value::Dict(
@@ -281,8 +273,6 @@ impl GCompilerValues {
         rooted_checkpoint();
         let require_defined = build_require_defined(values, &defined_or);
         rooted_checkpoint();
-        let pure_match_runner = build_pure_conditional_runner(values, Builtin::MatchResult);
-        rooted_checkpoint();
         let macro_environment = build_macro_environment(values);
         rooted_checkpoint();
         Self {
@@ -295,18 +285,8 @@ impl GCompilerValues {
             reflection_annotator,
             require_defined,
             defined_or,
-            pure_if_runner,
-            pure_match_runner,
             macro_environment,
             effects,
-        }
-    }
-
-    fn pure_conditional_runner(&self, selector: Builtin) -> &RuntimeValueRoot {
-        match selector {
-            Builtin::IfResult => &self.pure_if_runner,
-            Builtin::MatchResult => &self.pure_match_runner,
-            _ => unreachable!("pure conditional runner requires a result selector"),
         }
     }
 }
@@ -393,21 +373,10 @@ pub(in crate::g_syntax) fn reflection_boundary_value(
     })
 }
 
-pub(in crate::g_syntax) fn run_pure_conditional_resolved(
+/// The first of a pure match's `results`, or an error if there are none.
+pub(in crate::g_syntax) fn select_pure_match_resolved(
     access: &RuntimeValueAccess<'_>,
-    operation: ResolvedExpr<Value>,
-) -> ResolvedExpr<Value> {
-    ResolvedExpr::apply(
-        ResolvedExpr::Embedded(with_values(access.values(), |compiler| {
-            project_value(access, compiler.pure_conditional_runner(Builtin::IfResult))
-        })),
-        [operation],
-    )
-}
-
-pub(in crate::g_syntax) fn run_pure_match_resolved(
-    access: &RuntimeValueAccess<'_>,
-    search: ResolvedExpr<Value>,
+    results: ResolvedExpr<Value>,
     line: usize,
 ) -> ResolvedExpr<Value> {
     let cache = cache(access.values());
@@ -430,39 +399,13 @@ pub(in crate::g_syntax) fn run_pure_match_resolved(
         .entry(error_key)
         .or_insert(candidate)
         .clone();
-    let exhausted = effect_call(
+    let exhausted = ResolvedExpr::List(vec![ResolvedExpr::Embedded(project_value(access, &error))]);
+    let results = apply_builtin(
         access,
-        cache.as_ref(),
-        "r",
-        [ResolvedExpr::Embedded(project_value(access, &error))],
+        Builtin::ListConcat,
+        [ResolvedExpr::List(vec![results, exhausted])],
     );
-    let operation = effect_call(
-        access,
-        cache.as_ref(),
-        "cut",
-        [effect_call(
-            access,
-            cache.as_ref(),
-            "alt",
-            [search, exhausted],
-        )],
-    );
-    ResolvedExpr::apply(
-        ResolvedExpr::Embedded(with_values(access.values(), |compiler| {
-            project_value(
-                access,
-                compiler.pure_conditional_runner(Builtin::MatchResult),
-            )
-        })),
-        [operation],
-    )
-}
-
-pub(in crate::g_syntax) fn run_pure_open_match_resolved(
-    access: &RuntimeValueAccess<'_>,
-    operation: ResolvedExpr<Value>,
-) -> ResolvedExpr<Value> {
-    apply_builtin(access, Builtin::ListEffect, [operation])
+    apply_builtin(access, Builtin::MatchResult, [results])
 }
 
 /// Extends a file-provided macro environment through the language's ordinary
@@ -491,14 +434,6 @@ pub(in crate::g_syntax) fn effect_value(access: &RuntimeValueAccess<'_>, name: &
 #[cfg(test)]
 pub(in crate::g_syntax) fn effect_test_value(values: &CoreValueFactory, name: &str) -> Value {
     values.with_runtime_value_access(|access| effect_value(&access, name))
-}
-
-#[cfg(test)]
-pub(in crate::g_syntax) fn run_pure_open_match_test_resolved(
-    values: &CoreValueFactory,
-    operation: ResolvedExpr<Value>,
-) -> ResolvedExpr<Value> {
-    values.with_runtime_value_access(|access| run_pure_open_match_resolved(&access, operation))
 }
 
 pub(in crate::g_syntax) fn effect_path_value(
@@ -715,45 +650,33 @@ fn build_could(values: &CoreValueFactory, not: &RuntimeValueRoot) -> RuntimeValu
     })
 }
 
-fn build_defined_or(
-    values: &CoreValueFactory,
-    cache: &dyn EffectValueCache,
-    pure_if_runner: &RuntimeValueRoot,
-) -> RuntimeValueRoot {
+fn build_defined_or(values: &CoreValueFactory) -> RuntimeValueRoot {
     evaluate_closed(values, |access| {
         let mut locals = ResolverContext::default();
         let fallback = locals.push_internal_binding("<defined-fallback>");
         let candidate = locals.push_internal_binding("<defined-candidate>");
+        let condition = locals.push_internal_binding("<defined-condition>");
         let is_undefined = apply_builtin(
             access,
             Builtin::PatternDictIsEmpty,
             [ResolvedExpr::Local(candidate)],
         );
-        let use_fallback = effect_call(access, cache, "r", [ResolvedExpr::Local(fallback)]);
-        let undefined_branch = effect_then(
+        // A pure conditional's results, as lowering builds them.
+        let use_fallback = assert_unit(
             access,
-            cache,
-            is_undefined,
-            use_fallback,
             "defined-or condition",
-            &mut locals,
+            ResolvedExpr::Local(condition),
+            ResolvedExpr::List(vec![ResolvedExpr::Local(fallback)]),
         );
-        let defined_branch = effect_call(access, cache, "r", [ResolvedExpr::Local(candidate)]);
-        let choice = effect_call(
+        let undefined_branch =
+            for_each_effect_result_resolved(access, is_undefined, condition, use_fallback);
+        let defined_branch = ResolvedExpr::List(vec![ResolvedExpr::Local(candidate)]);
+        let results = apply_builtin(
             access,
-            cache,
-            "cut",
-            [effect_call(
-                access,
-                cache,
-                "alt",
-                [undefined_branch, defined_branch],
-            )],
+            Builtin::ListConcat,
+            [ResolvedExpr::List(vec![undefined_branch, defined_branch])],
         );
-        let selected = ResolvedExpr::apply(
-            ResolvedExpr::Embedded(project_value(access, pure_if_runner)),
-            [choice],
-        );
+        let selected = apply_builtin(access, Builtin::IfResult, [results]);
         ResolvedExpr::lambda(vec![fallback, candidate], selected)
     })
 }
@@ -801,21 +724,6 @@ fn build_require_defined(
             [failure, ResolvedExpr::Local(candidate)],
         );
         ResolvedExpr::lambda(vec![name, candidate], required)
-    })
-}
-
-fn build_pure_conditional_runner(values: &CoreValueFactory, selector: Builtin) -> RuntimeValueRoot {
-    assert!(matches!(selector, Builtin::IfResult | Builtin::MatchResult));
-    evaluate_closed(values, |access| {
-        let mut locals = ResolverContext::default();
-        let operation = locals.push_internal_binding("<conditional-operation>");
-        let results = apply_builtin(
-            access,
-            Builtin::ListEffect,
-            [ResolvedExpr::Local(operation)],
-        );
-        let selected = apply_builtin(access, selector, [results]);
-        ResolvedExpr::lambda(vec![operation], selected)
     })
 }
 
@@ -1156,14 +1064,6 @@ mod tests {
                 Value::Function(_)
             ));
             assert!(matches!(
-                project_test_value(&values, &compiler.pure_if_runner),
-                Value::Function(_)
-            ));
-            assert!(matches!(
-                project_test_value(&values, &compiler.pure_match_runner),
-                Value::Function(_)
-            ));
-            assert!(matches!(
                 project_test_value(&values, &compiler.macro_environment),
                 Value::Function(_)
             ));
@@ -1185,7 +1085,7 @@ mod tests {
             checkpoints += 1;
         });
 
-        assert_eq!(checkpoints, 13);
+        assert_eq!(checkpoints, 11);
         values
             .collect_managed_for_test()
             .expect("the unpublished complete candidate must retain all of its roots");
@@ -1194,7 +1094,7 @@ mod tests {
             assert_eq!(root.runtime_id(), values.runtime_id());
             roots += 1;
         });
-        assert!(roots >= 14);
+        assert!(roots >= 12);
         assert!(matches!(
             project_test_value(&values, &compiler.std.value),
             Value::Dict(_)
@@ -1232,8 +1132,6 @@ mod tests {
             &compiler.empty_object_defs,
             &compiler.constant_object_defs,
             &compiler.reflection_annotator,
-            &compiler.pure_if_runner,
-            &compiler.pure_match_runner,
             &compiler.defined_or,
             &compiler.require_defined,
             &compiler.macro_environment,
