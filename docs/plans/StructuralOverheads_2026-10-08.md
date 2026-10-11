@@ -290,6 +290,47 @@ closure normalizes nothing; its first application follows its copy. This
 stays within 0.25% of the first version on every family. A copy that has
 advanced, or whose source is too large to copy whole, keeps its cursors,
 and the net does not compile.
+
+**Compile on request** (`perf-compile-annotations`, 2026-10-11, decision
+`nets-compile-on-request`, superseding `nets-normalize-before-use`). The
+maintainer rejected normalizing every net at its first application:
+applying a function evaluates only what the application demands, and a
+net normalizes only when an annotation asks, written by hand or injected
+by a front end, as lowering may. `anno 'compile` normalizes under fuel
+when demanded, then compiles; `anno 'jit` marks a net to do the same at
+its first application. Lowering marks every function it builds, and
+closures and partial applications inherit the mark. Instructions against
+`7ed1aab7`, which has the compile walk bound:
+
+| Workload | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| `minimal` | 18.3 M | 18.8 M | +2.6% |
+| `countdown_800` | 631 M | 634 M | +0.5% |
+| `list_map_2000` | 164 M | 165 M | +0.7% |
+| `list_sum_400` | 378 M | 393 M | +3.8% |
+| `append_walk_800` | 1,574 M | 1,604 M | +1.9% |
+| `do_chain_800` | 542 M | 565 M | +4.2% |
+| `hello_elf` | 910 M | 922 M | +1.35% |
+
+Lowering first wrapped each function in a lazy `anno 'compile`
+(`hello_elf` +7.2%), then in a compiler-private builtin for it (+6.6%);
+building and forcing a wrapper per function was the cost, which marks
+avoid. A census of `hello_elf` found the rest in partial applications,
+whose nets copied their function through a cursor: 126 calls. Compiling
+a partial application with its arguments as constants would rerun, at
+every call, work its net shares across calls (`f t k = heavy t + k`, with
+`g = f 3000` applied four times, runs `heavy 3000` once), so a partial
+application inherits the mark instead, and is specialized at its first
+application.
+
+Follow-ups:
+- **`'normalize`** keeps `'compile`'s reductions, charged to the budget.
+  Full normal form, every reduction that needs no parameter, calls of
+  data included, needs the net driver's evaluation of callables and
+  copies rather than the constructive loop.
+- **Countdown.** One iteration of `heavy n = if n == 0 then 0 else heavy
+  (n - 1)` costs about 775 K instructions: 130 task polls, 56 inline lazy
+  forces and 550 allocations, with list-front cells from the conditional.
 - **Nested runs.** Running the thunks a compiled thunk completes in the
   same run, iteratively, would recover the remaining 1.3 to 3.6 points.
 - **`WrappedOperator`** can become a compiled net set at lowering.

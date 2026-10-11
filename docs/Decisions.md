@@ -709,7 +709,7 @@ maps the short names used here to file names.
 - **Recorded in:** structural overheads plan, `perf-compiled-nets`.
 
 ### Nets normalize before their first application
-`nets-normalize-before-use` · 2026-10-11 · maintainer · accepted
+`nets-normalize-before-use` · 2026-10-11 · maintainer · superseded
 - **Context:** compiled nets helped only code applied repeatedly: a net
   compiled once the first application's cursor copy had reduced it, so
   code applied once, such as `do_chain`'s per-step thunks, gained nothing.
@@ -769,6 +769,73 @@ maps the short names used here to file names.
   (`interaction_net/runtime/compiled.rs`); `RuntimeNet::make_copy_whole`
   (`interaction_net/runtime/whole_copy.rs`).
 - **Recorded in:** structural overheads plan, `perf-compiled-nets`.
+- **Superseded by:** `nets-compile-on-request`.
+
+### Nets normalize and compile when an annotation asks
+`nets-compile-on-request` · 2026-10-11 · maintainer · accepted
+- **Context:** supersedes `nets-normalize-before-use`, which normalized
+  every net at its first application, a runtime policy chosen because it
+  measured best. The maintainer rejected it: applying a function evaluates
+  only what the application demands, following auxiliary ports through
+  principal ports to the next pair to reduce, so parts that do not
+  contribute may stay unreduced. A net is normalized only when an
+  annotation asks, written by hand or injected by a front end. Lowering may
+  express only what a front end could, though not necessarily the same
+  way, and annotations are specific to an assembler version, so their
+  meaning can be tuned.
+- **Decision:**
+  - `anno 'compile F`, when demanded, normalizes F's net in place as far
+    as building goes (rewrites, operators meeting data; no call of data,
+    cursor or checkpoint), under fuel of four reductions per node on nets
+    of at most 256 nodes, so it cannot diverge, then compiles a function's
+    net. It follows the copies the net is making, as before.
+  - `anno 'jit F` marks F's net. Its first application, partial or
+    saturated, does what `'compile` does, so a function demanded but
+    never applied costs nothing more. A closure of marked code and a
+    partial application of a marked function are marked too, so each is
+    specialized to what it holds at its own first application.
+  - Lowering marks each function it builds, as a front end could write
+    `anno 'jit`: a closed lambda's net and a thunk's code directly, and a
+    lambda's code, which each closure built from it inherits. A lambda
+    that only wraps an operator is applied as that operator and is not
+    marked.
+  - A net already normal still compiles when applied, at most 64 nodes in
+    a supported shape: that only changes representation.
+  - A thunk is lowered as its code, a marked function of its captures,
+    applied to them, as a front end would write it. A saturated
+    application of an evaluated function whose compiled code builds no
+    closures builds its value at once, as a completed thunk did
+    (`compiled-nets`); inside compiled steps it becomes a call of the
+    compiled code, forced later.
+  - `anno 'normalize F` keeps `'compile`'s reductions, charged to the
+    budget without fuel, until it gets full normal-form semantics.
+- **Consequences:**
+  - Instructions against `nets-normalize-before-use`: `hello_elf` +1.35%,
+    `countdown` +0.5%, `list_map` +0.7%, `append_walk` +1.9%, `minimal`
+    +2.6%, `list_sum` +3.8%, `do_chain` +4.2%.
+  - Lowering first wrapped each function in a lazy `anno 'compile`:
+    `hello_elf` +7.2%, `minimal` +8.8%, `do_chain` +5.9%; without any
+    annotation, `hello_elf` takes 45% more. A compiler-private builtin for
+    the wrapper, as `seq` is for `anno seq:`, gained only 0.6%: building
+    and forcing the wrapper lazy, once per function, was most of the cost.
+    Marks took `hello_elf` to +1.9%, and partial applications inheriting
+    them to +1.35%.
+  - A map item's lazy holding a plain function, rather than a forced
+    wrapper, is forced inline under list-effect checkpoints about once
+    per element more: `list_map` +4.8% against the wrappers, the effect
+    `nets-normalize-before-use` recorded.
+  - A compiled partial application with its arguments as constants was
+    rejected: work in the function that depends only on those arguments,
+    shared through the partial application's net, would run at every
+    call.
+  - The managed net cell holds a jit state byte in place of the old
+    normalization flag, at 224 bytes.
+- **Rule lives in:** `compiled_for_application`, `request_jit_in`,
+  `compile_value_in` and `normalize_in` (`eval/net.rs`); `jit`
+  (`g_syntax/net_lowering.rs`); `apply_whnf_function` (`eval/whnf.rs`);
+  `eagerly_completed_application` and `apply_operator`
+  (`eval/operator.rs`).
+- **Recorded in:** structural overheads plan, `perf-compile-annotations`.
 
 ### Interface demand walks resume from the surviving part of their route
 `interface-walks-resume` · 2026-10-10 · maintainer · accepted

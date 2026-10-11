@@ -296,9 +296,13 @@ never changes again: nets change after construction only by evaluation.
 - **Storage.** `ManagedCoreNetCell` holds the outcome once, compiled or
   not, set under the net mutex through an exact-delta edge transition, and
   traces it. A net with evaluation left is asked again at its next use.
-- **Normalization.** The first application to find a net with evaluation
-  left normalizes it in place first (`compiled_net`, `eval/net.rs`), once
-  per net, then compiles it. It reduces only pairs that build
+- **Normalization.** A net normalizes only when an annotation asks
+  (decision `nets-compile-on-request`). `anno 'compile` normalizes it when
+  demanded (`compile_value_in`, `eval/net.rs`). `anno 'jit` marks it, and
+  its first application, partial or saturated, normalizes it then
+  (`compiled_for_application`), once. Lowering marks each function it
+  builds; a closure of marked code and a partial application of a marked
+  function are marked too. Normalization reduces only pairs that build
   (`RuntimeNet::next_constructive_pair`): rewrites, and operator calls
   through the ordinary claim protocol. A call of data waits for demand, as
   its callable may need evaluating, and so does a checkpoint or a pair
@@ -314,19 +318,21 @@ never changes again: nets change after construction only by evaluation.
   if the source is now left with no evaluation and is small, a whole copy
   replaces the cursor, wired where it stood, as if the copy began now. A
   value behind data, such as a closure or partial application, is not
-  part of the net: building one normalizes nothing, and its own first
-  application follows its copy.
+  part of the net: building one normalizes nothing, and its own
+  normalization, when asked, follows its copy.
 - **Use.** `apply_compiled` (`eval/operator.rs`) runs the steps through the
   operators' own semantics. A saturated call (`apply_whnf_function`) and a
   forced `LazySource::FunctionCall` run a compiled stage instead of
-  building a net. A completed thunk over compiled code builds its value at
-  once unless the code builds closures; otherwise, or when the code still
-  awaits normalization, it becomes a `FunctionCall` over the code, whose
-  force normalizes and runs it. Building forces nothing:
-  operators never force their operands, so the value is a lazy
-  application, builtin call or access, or a container of operands, as
-  unevaluated as the thunk. Thunks completed inside compiled steps always
-  wait, so compiled runs never nest (decision `compiled-nets`).
+  building a net. Lowering builds a thunk as its code, a function of its
+  captures, applied to them. A saturated application of an evaluated
+  function whose compiled code builds no closures builds its value at
+  once (`eagerly_completed_application`); otherwise, and inside compiled
+  steps, it becomes a `FunctionCall` over the code, run when forced, and
+  an application of a function not yet compiled stays a lazy application,
+  whose force applies it. Building forces nothing: operators never force
+  their operands, so the value is a lazy application, builtin call or
+  access, or a container of operands, as unevaluated as the thunk.
+  Compiled runs never nest (decision `compiled-nets`).
 
 ## Core Specialization
 
