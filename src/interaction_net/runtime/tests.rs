@@ -1436,6 +1436,17 @@ fn normal_function_nets_compile_to_operator_steps() {
         }),
         Ok("two(in0 5), two(s0 in0), s1".to_owned())
     );
+    // A chain about as long as the net: each node counts once against the
+    // bound that stops a walk around a cycle.
+    assert_eq!(
+        compile(2, |builder, arguments| {
+            erase(builder, arguments[0]);
+            (0..4).fold(arguments[1], |operand, _| {
+                apply(builder, "one", operand, None)
+            })
+        }),
+        Ok("one(in1), one(s0), one(s1), one(s2), s3".to_owned())
+    );
     // A body that is an argument takes no step.
     assert_eq!(
         compile(2, |builder, arguments| {

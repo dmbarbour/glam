@@ -211,9 +211,9 @@ where
     O: Fn(&S::Operator) -> usize,
 {
     /// The operand the providing port `port` gives, within `depth` more
-    /// nodes, which bounds a cycle.
+    /// nodes, which bounds a cycle. Each node a walk enters counts once:
+    /// here, or in [`Self::step`] for the nodes of a step.
     fn operand(&mut self, port: Port, depth: usize) -> Option<CompiledOperand<S>> {
-        let depth = depth.checked_sub(1)?;
         let node = port.node();
         match (self.net.node(node)?, port.index()) {
             (RuntimeNode::Bind, 2) => match self.spine.iter().position(|&bind| bind == node) {
@@ -223,6 +223,7 @@ where
             (RuntimeNode::Operator(_), 1) => self.step(port, depth).map(CompiledOperand::Step),
             // A fan copies the value its principal takes.
             (RuntimeNode::Fan { .. }, 1 | 2) => {
+                let depth = depth.checked_sub(1)?;
                 self.reached.insert(node);
                 let source = self.net.neighbor(Port::principal(node))?;
                 self.operand(source, depth)

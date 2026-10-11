@@ -256,6 +256,14 @@ do not come from helpers awaiting normalization.
 Follow-ups:
 - **`list_map`'s comparison**, above.
 
+**Compile walk bound** (2026-10-11). The compiler bounds its walk back
+from the body by the net's node count, to stop at a cycle, but counted
+each operator twice, entering it and again in its step, so a chain of
+operators over about half the net, such as `\x -> f (g x)` in four nodes,
+did not compile: 597 nets in `hello_elf`. Counting each node once,
+instructions fall 16.9% (`countdown_800`), 9.2% (`append_walk_800`),
+8.3% (`list_sum_400`), 4.3% (`hello_elf`) and 3.4% (`do_chain_800`).
+
 **Cursors** (2026-10-11). Normalization stopped at a remote cursor, so a
 stage copying a net that still had evaluation left could not compile. A
 census of the nets that normalized without compiling: in `hello_elf`,

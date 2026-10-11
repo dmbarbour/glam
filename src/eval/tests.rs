@@ -230,7 +230,7 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
         assert_eq!(
             profile.reductions,
             NetReductionCounts {
-                bind_join: 7,
+                bind_join: 6,
                 fan_join: 0,
                 fan_commute: 0,
                 fan_data: 0,
@@ -240,7 +240,7 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
                 // Application nets start with their function copied in, so
                 // no call is claimed.
                 call: 0,
-                operator_call: 6,
+                operator_call: 4,
                 // Each function's net is normalized before its first call,
                 // so every copy is whole.
                 cursor_materialized: 0,
@@ -257,11 +257,11 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
             NetDriverCounts {
                 // Compiled calls run no net machine, and normalization
                 // reduces outside the driver.
-                machine_polls: 2,
-                work_items: 25,
-                interface_polls: 11,
+                machine_polls: 1,
+                work_items: 16,
+                interface_polls: 7,
                 cursor_steps: 0,
-                active_pair_steps: 14,
+                active_pair_steps: 9,
                 cursor_dependencies: 0,
                 blocked_retries: 0,
                 contentions: 0,
@@ -280,7 +280,9 @@ fn wrapper_application_budget_probe_yields_without_publishing_a_cache() {
     let computation_lazy = wrapper_returning_function_computation(&context);
     let computation_runtime = net_computation_runtime(&computation_lazy, &context);
     let computation = Value::Lazy(computation_lazy.duplicate_for_test(context.values()));
-    context.values().set_net_driver_work_item_limit(16);
+    // Fewer work items than the whole demand takes (16), so the probe stops
+    // partway.
+    context.values().set_net_driver_work_item_limit(8);
 
     let demand = context
         .demand_whnf(crate::runtime::RuntimeValueRoot::new(
@@ -299,7 +301,7 @@ fn wrapper_application_budget_probe_yields_without_publishing_a_cache() {
     }
 
     let profile = context.values().interaction_net_profile_snapshot();
-    assert_eq!(profile.driver.work_items, 16);
+    assert_eq!(profile.driver.work_items, 8);
     assert!(demand.poll().is_none());
     assert_eq!(context.client_demand_count_for_test(), 1);
     assert!(computation_lazy.source_snapshot(context.values()).is_none());
@@ -321,7 +323,7 @@ fn wrapper_application_budget_probe_yields_without_publishing_a_cache() {
         .expect("bounded net work must remain in a managed checkpoint");
         assert_eq!(
             checkpoint.kind(),
-            crate::eval::lazy_checkpoint::ManagedLazyCheckpointKindTag::Whnf
+            crate::eval::lazy_checkpoint::ManagedLazyCheckpointKindTag::NetWhnf
         );
     });
     assert!(computation_lazy.cached(context.values()).is_none());
