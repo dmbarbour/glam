@@ -72,6 +72,47 @@ impl<S: NetSpecialization> CompiledNet<S> {
 }
 
 impl<S: NetSpecialization> RuntimeNet<S> {
+    /// How many nodes the net holds, its interface included.
+    pub(crate) fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// A ready active pair whose rule only builds: a rewrite, or an operator
+    /// meeting data. Reducing it evaluates nothing, so normalizing a net
+    /// before it is applied reduces these and no others: not a call of data,
+    /// which needs the callable's value, nor a cursor or checkpoint pair.
+    pub(crate) fn next_constructive_pair(&self) -> Option<ActivePairKey> {
+        self.active.iter().find_map(|(&pair, state)| {
+            if !state.is_ready() {
+                return None;
+            }
+            let (left, right) = self.pair_nodes(pair)?;
+            let constructive = match (self.node(left)?, self.node(right)?) {
+                (
+                    RuntimeNode::RemoteCursor { .. }
+                    | RuntimeNode::CallableCheckpoint(_)
+                    | RuntimeNode::Interface,
+                    _,
+                )
+                | (
+                    _,
+                    RuntimeNode::RemoteCursor { .. }
+                    | RuntimeNode::CallableCheckpoint(_)
+                    | RuntimeNode::Interface,
+                ) => false,
+                (RuntimeNode::Erase, _)
+                | (_, RuntimeNode::Erase)
+                | (RuntimeNode::Fan { .. }, _)
+                | (_, RuntimeNode::Fan { .. })
+                | (RuntimeNode::Bind, RuntimeNode::Bind)
+                | (RuntimeNode::Operator(_), RuntimeNode::Data(_))
+                | (RuntimeNode::Data(_), RuntimeNode::Operator(_)) => true,
+                _ => false,
+            };
+            constructive.then_some(pair)
+        })
+    }
+
     /// Compiles this net as a function of `inputs` arguments, if it has no
     /// evaluation left and applying it only builds values. `operands` gives
     /// how many more operands an operator takes before it yields data.

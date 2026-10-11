@@ -241,10 +241,10 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
                 // no call is claimed.
                 call: 0,
                 operator_call: 6,
-                // One copy's source had no evaluation left, so it copied
-                // whole; the cursor counts are the other copy's.
-                cursor_materialized: 3,
-                cursor_joined: 1,
+                // Each function's net is normalized before its first call,
+                // so every copy is whole.
+                cursor_materialized: 0,
+                cursor_joined: 0,
                 // `make` and the function it returns have nets with no
                 // evaluation left from the start, so their calls run
                 // compiled.
@@ -255,13 +255,14 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
         assert_eq!(
             profile.driver,
             NetDriverCounts {
-                // Compiled calls run no net machine.
+                // Compiled calls run no net machine, and normalization
+                // reduces outside the driver.
                 machine_polls: 2,
-                work_items: 54,
-                interface_polls: 19,
-                cursor_steps: 9,
-                active_pair_steps: 20,
-                cursor_dependencies: 6,
+                work_items: 25,
+                interface_polls: 11,
+                cursor_steps: 0,
+                active_pair_steps: 14,
+                cursor_dependencies: 0,
                 blocked_retries: 0,
                 contentions: 0,
                 disturbances: 0,
@@ -3937,6 +3938,73 @@ fn compiled_function_calls_give_what_their_nets_would() {
         .collect_managed_for_test()
         .expect("the compiled net's constants must survive a collection");
     values.assert_same_representation_for_test(&call(41), &n(42));
+}
+
+/// Normalizing a net before its first use reduces only what builds values.
+/// A call of data waits for demand, since its callable may need evaluating:
+/// here a counted lazy, which normalization must not force, so the net
+/// cannot compile. Normalization is tried once per net.
+#[test]
+fn normalization_leaves_calls_of_data_to_demand() {
+    let context = isolated_test_context();
+    let values = context.values();
+    let forced = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&forced);
+    let identity = closed_function_value_in(values, 1, TestExpr::Local(0));
+    let callee_values = values.clone();
+    let callee = Value::Lazy(LazyValue::semantic_thunk(
+        values,
+        "counted callee",
+        move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(identity.duplicate_for_test(&callee_values))
+        },
+    ));
+    // `\x -> callee x`, the call a bare bind facing the callee.
+    let net = closed_net_in(values, |builder| {
+        let spine = builder.function_spine(1);
+        let [application, argument, result] = builder.bind();
+        let callee = builder.data(callee);
+        builder.wire(callee, application);
+        builder.wire(spine.arguments[0], argument);
+        builder.wire(result, spine.result);
+        spine.input
+    });
+    let normalize = || {
+        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
+            evaluator.with_value_access(|access| {
+                let runtime = net.runtime().access(access.values());
+                let first = runtime.awaits_normalization();
+                let compiled = super::net::compiled_net(&access, net.runtime(), 1).is_some();
+                (first, compiled)
+            })
+        })
+    };
+
+    assert_eq!(
+        normalize(),
+        (true, false),
+        "the call keeps the net from compiling"
+    );
+    assert_eq!(
+        forced.load(Ordering::SeqCst),
+        0,
+        "normalizing forced the callee"
+    );
+    assert_eq!(normalize(), (false, false), "a net is normalized once");
+
+    // The call is still there for a demand to make.
+    let function = Value::Function(FunctionValue::new(net.duplicate_for_test(values), 1));
+    let result = eval_closed_expr_in(
+        &context,
+        &TestExpr::Apply(
+            Arc::new(TestExpr::Value(function)),
+            Arc::new(TestExpr::Value(n(5))),
+        ),
+    )
+    .expect("the function should call its callee");
+    values.assert_same_representation_for_test(&result, &n(5));
+    assert_eq!(forced.load(Ordering::SeqCst), 1);
 }
 
 #[test]

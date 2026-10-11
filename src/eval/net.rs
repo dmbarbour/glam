@@ -1769,6 +1769,66 @@ fn progress_core_operator_call_in(
     progress_core_operator_claim(access, claim)
 }
 
+/// `net` compiled as a function of `inputs` arguments. The first time an
+/// application finds it with evaluation left, normalizes it so that it might
+/// compile before its first use (`perf-compiled-nets`).
+pub(in crate::eval) fn compiled_net<'access>(
+    access: &'access crate::evaluation::EvaluationValueAccess<'_>,
+    net: &'access CoreRuntimeNet,
+    inputs: usize,
+) -> Option<&'access crate::interaction_net::CompiledNet<CoreSpecialization>> {
+    let runtime = net.access(access.values());
+    if let Some(compiled) = runtime.compiled(inputs) {
+        return Some(compiled);
+    }
+    if !runtime.begin_normalization() {
+        return None;
+    }
+    normalize_in(access, net);
+    net.access(access.values()).compiled(inputs)
+}
+
+/// Reduces the pairs of `net` that only build, in place: rewrites, and
+/// operators meeting data, which construct values and force nothing. A call
+/// of data waits for demand, as its callable may need evaluating, and so
+/// does anything another evaluation holds. Fuel proportional to the net
+/// bounds the work, as a net can reduce without end.
+fn normalize_in(access: &crate::evaluation::EvaluationValueAccess<'_>, net: &CoreRuntimeNet) {
+    let runtime = net.access(access.values());
+    let nodes = runtime.with(RuntimeNet::node_count);
+    if nodes > NORMALIZATION_MAX_NODES {
+        return;
+    }
+    for _ in 0..NORMALIZATION_FUEL_PER_NODE * nodes {
+        let Some(pair) = runtime.with(RuntimeNet::next_constructive_pair) else {
+            return;
+        };
+        let ActivePairStep::Reduction(reduction) = runtime.step_active_pair_within(pair, |_| true)
+        else {
+            return;
+        };
+        if let ReductionKind::OperatorCall { operator, data } = reduction.kind {
+            let call = OperatorCall {
+                pair,
+                operator,
+                data,
+            };
+            // A failed operator stays in the net as a stuck pair, for the
+            // demand that reaches it, if any, to report.
+            if !matches!(progress_core_operator_call_in(access, net, call), Ok(true)) {
+                return;
+            }
+        }
+    }
+}
+
+/// The largest net normalized before its first use, four times the most a
+/// compiled net may hold, since normalizing shrinks a lowered net.
+const NORMALIZATION_MAX_NODES: usize = 256;
+
+/// Reductions allowed per node when normalizing.
+const NORMALIZATION_FUEL_PER_NODE: usize = 4;
+
 #[cfg(test)]
 fn progress_exact_core_operator_call(
     context: &EvalContext,

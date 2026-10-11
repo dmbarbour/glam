@@ -217,9 +217,39 @@ thunk's value stays as unevaluated as the thunk (maintainer, 2026-10-11:
 no implicit `seq`; forcing earlier is fine only where the value would
 inevitably be forced later).
 
+Normalization before a first application landed 2026-10-11 (decision
+`nets-normalize-before-use`), for every net, implicitly. Instructions
+against `e6e07f2d`:
+
+| Workload | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| `minimal` | 23.2 M | 19.6 M | −15.5% |
+| `countdown_800` | 761 M | 758 M | −0.4% |
+| `list_map_2000` | 161 M | 165 M | +3.0% |
+| `list_sum_400` | 457 M | 413 M | −9.6% |
+| `append_walk_800` | 1,850 M | 1,729 M | −6.5% |
+| `do_chain_800` | 789 M | 560 M | −29.0% |
+| `hello_elf` | 1,305 M | 1,036 M | −20.6% |
+| `hello_do` | 33.5 M | 29.5 M | −11.7% |
+| `chain_where_200` | 120 M | 91 M | −24.1% |
+| `dict_lookup_2000` | 69.8 M | 66.2 M | −5.2% |
+
+Other families move within 1.5%. Measured alternatives: normalizing only
+lowered code nets (`hello_elf` −13.1%), and completed thunks not deferring
+to their force (`do_chain_800` −11.9%, `hello_elf` −7.1%).
+
+`list_map_2000`'s rise is not in mapping (`std.list.len` of the mapped list
+falls 7.3%) nor in comparing constant lists (−4.7%), but in comparing the
+mapped list with a literal: WHNF reaches list-effect lazies (`list
+effect`, `seq`, `cut`) uncached about once per six elements more often,
+from fewer than 300 such lazies, so the same lazies are reached again
+rather than more made. Root registrations rise by 1,725. Not yet
+explained.
+
 Follow-ups:
-- **Normalization** before a first application, as `'normalize` and
-  implicitly for generated code, for one-shot code such as `do_chain`'s.
+- **`anno 'normalize`**, the explicit form, for nets a program wants
+  normalized ahead of any application.
+- **`list_map`'s comparison**, above.
 - **Nested runs.** Running the thunks a compiled thunk completes in the
   same run, iteratively, would recover the remaining 1.3 to 3.6 points.
 - **`WrappedOperator`** can become a compiled net set at lowering.

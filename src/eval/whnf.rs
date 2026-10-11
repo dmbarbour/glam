@@ -1224,9 +1224,8 @@ fn apply_whnf_function(
         ))
     } else if let Some(operator) = function.wrapped_operator() {
         super::operator::apply_wrapped_operator(access.values(), operator, saturating)
-    } else if let Some(compiled) = (function.stage().runtime())
-        .access(access.values())
-        .compiled(remaining)
+    } else if let Some(compiled) =
+        super::net::compiled_net(access, function.stage().runtime(), remaining)
     {
         super::operator::apply_compiled(access, compiled, &saturating)
     } else {

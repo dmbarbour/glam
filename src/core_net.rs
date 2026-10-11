@@ -1170,6 +1170,16 @@ impl<'access, 'scope> CoreRuntimeNetAccess<'access, 'scope> {
     /// Prepares this net as the source of a copy installed in the same
     /// access: whole if no evaluation is left in it, since a copy then has
     /// nothing to share, and otherwise through a remote cursor.
+    /// Whether the net awaits normalization and has not compiled.
+    pub(crate) fn awaits_normalization(&self) -> bool {
+        self.runtime.awaits_normalization()
+    }
+
+    /// Claims the net's one normalization, if it awaits one.
+    pub(crate) fn begin_normalization(&self) -> bool {
+        self.runtime.begin_normalization()
+    }
+
     /// This net compiled as a function of `inputs` arguments, if it has no
     /// evaluation left and compiles (`perf-compiled-nets`).
     pub(crate) fn compiled(

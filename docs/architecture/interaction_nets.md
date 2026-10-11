@@ -296,12 +296,21 @@ never changes again: nets change after construction only by evaluation.
 - **Storage.** `ManagedCoreNetCell` holds the outcome once, compiled or
   not, set under the net mutex through an exact-delta edge transition, and
   traces it. A net with evaluation left is asked again at its next use.
+- **Normalization.** The first application to find a net with evaluation
+  left normalizes it in place first (`compiled_net`, `eval/net.rs`), once
+  per net, then compiles it. It reduces only pairs that build
+  (`RuntimeNet::next_constructive_pair`): rewrites, and operator calls
+  through the ordinary claim protocol. A call of data waits for demand, as
+  its callable may need evaluating, and so does a cursor, a checkpoint or
+  a pair another evaluation holds. Fuel of four reductions per node bounds
+  the work, and nets over 256 nodes are left alone.
 - **Use.** `apply_compiled` (`eval/operator.rs`) runs the steps through the
   operators' own semantics. A saturated call (`apply_whnf_function`) and a
   forced `LazySource::FunctionCall` run a compiled stage instead of
   building a net. A completed thunk over compiled code builds its value at
-  once unless the code builds closures; otherwise it becomes a
-  `FunctionCall` over the code, run when forced. Building forces nothing:
+  once unless the code builds closures; otherwise, or when the code still
+  awaits normalization, it becomes a `FunctionCall` over the code, whose
+  force normalizes and runs it. Building forces nothing:
   operators never force their operands, so the value is a lazy
   application, builtin call or access, or a container of operands, as
   unevaluated as the thunk. Thunks completed inside compiled steps always

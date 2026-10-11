@@ -708,6 +708,43 @@ maps the short names used here to file names.
   `eagerly_completed_thunk` (`eval/operator.rs`).
 - **Recorded in:** structural overheads plan, `perf-compiled-nets`.
 
+### Nets normalize before their first application
+`nets-normalize-before-use` · 2026-10-11 · maintainer · accepted
+- **Context:** compiled nets helped only code applied repeatedly: a net
+  compiled once the first application's cursor copy had reduced it, so
+  code applied once, such as `do_chain`'s per-step thunks, gained nothing.
+  The maintainer noted that annotations could always force normalization
+  of nets before they are applied, and asked for it, with no implicit
+  `seq`: forcing earlier only where the value would be forced anyway.
+- **Decision:**
+  - The first application to find a net with evaluation left normalizes
+    it in place, once, under fuel (four reductions per node, nets of at
+    most 256 nodes), then compiles it.
+  - Normalization reduces only what builds: rewrites, and operators
+    meeting data, which construct values and force nothing. A call of
+    data waits for demand, since classifying its callable may force a
+    lazy, as do cursors, checkpoints and pairs another evaluation holds.
+  - Every net normalizes, not only lowered code: normalizing closure and
+    partial-application stages too doubles the gain on `hello_elf` (20.6%
+    against 13.1% for code nets alone).
+  - A completed thunk whose code still awaits normalization defers to its
+    force, which normalizes, compiles and runs it; without that, the gain
+    on `do_chain_800` falls from 29.0% to 11.9%.
+- **Consequences:**
+  - Instructions fall 29.0% (`do_chain_800`), 20.6% (`hello_elf`), 15.5%
+    (`minimal`), 11.7% (`hello_do`), 9.6% (`list_sum_400`) and 6.5%
+    (`append_walk_800`), within 1.5% elsewhere.
+  - `list_map_2000` rises 3.0%. Mapping alone falls 7.3% and comparing
+    constant lists 4.7%; comparing mapped elements hits list-effect lazies
+    at a WHNF boundary about once per six elements more often. The cause
+    is not yet known.
+  - The explicit `anno 'normalize` remains to add.
+  - The managed net cell grows to 224 bytes.
+- **Rule lives in:** `compiled_net` and `normalize_in` (`eval/net.rs`);
+  `RuntimeNet::next_constructive_pair`
+  (`interaction_net/runtime/compiled.rs`).
+- **Recorded in:** structural overheads plan, `perf-compiled-nets`.
+
 ### Interface demand walks resume from the surviving part of their route
 `interface-walks-resume` · 2026-10-10 · maintainer · accepted
 - **Context:** a demand poll walked from the interface to the active pair
