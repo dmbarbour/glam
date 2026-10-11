@@ -298,7 +298,12 @@ never changes again: nets change after construction only by evaluation.
   traces it. A net with evaluation left is asked again at its next use.
 - **Normalization.** The first application to find a net with evaluation
   left normalizes it in place first (`compiled_net`, `eval/net.rs`), once
-  per net, then compiles it. It reduces only pairs that build
+  per net, then compiles it. Copying a net into an applied net, for a
+  partial application or a closure's captures, is an application too, so
+  the copied net is normalized first and copies whole when small
+  (`normalize_before_application`). A pair that completes a closure inside
+  a normalization pushes the closure's code onto the normalizer's stack
+  first; the nets in progress share the fuel. It reduces only pairs that build
   (`RuntimeNet::next_constructive_pair`): rewrites, and operator calls
   through the ordinary claim protocol. A call of data waits for demand, as
   its callable may need evaluating, and so does a cursor, a checkpoint or

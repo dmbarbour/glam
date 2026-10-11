@@ -255,10 +255,26 @@ do not come from helpers awaiting normalization.
 
 Follow-ups:
 - **`list_map`'s comparison**, above.
-- **Cursors.** Normalization stops at a remote cursor, so a stage copying
-  a net that still had evaluation left cannot normalize or compile.
-  Logically the copy is local and only shares the source's work, so
-  normalization could follow the cursor (`perf-normalization-cursors`).
+
+**Cursors** (2026-10-11). Normalization stopped at a remote cursor, so a
+stage copying a net that still had evaluation left could not compile. A
+census of the nets that normalized without compiling: in `hello_elf`,
+1,816 compiled, 459 were normal but of an unsupported shape, and 368 held
+one remote cursor and nothing else; `list_map`, `countdown` and
+`append_walk` had 13 to 15 such nets each. Every one was an untouched
+copy, its only frontier at its source's exposed port, of a code net never
+normalized: a closure's stage, copying code that was never applied.
+
+Copying a net is applying it, so normalizing the net first, as before a
+call, makes each copy whole instead (decision
+`nets-normalize-before-use`): for partial applications and for closures
+completed in a net, in a compiled run, or inside another normalization,
+whose code the normalizer pushes onto its stack. Afterwards no
+application in any of 16 profile workloads copies through a cursor; instructions fall 8.0% (`hello_elf`),
+6.1% (`minimal`), 5.4% (`hello_do`) and 0.8% (`list_map_2000`), within
+0.4% elsewhere. Following cursors in general, for a copy begun before its
+source normalized or of a source too large to copy whole, needs no work
+while nothing makes such copies.
 - **Nested runs.** Running the thunks a compiled thunk completes in the
   same run, iteratively, would recover the remaining 1.3 to 3.6 points.
 - **`WrappedOperator`** can become a compiled net set at lowering.

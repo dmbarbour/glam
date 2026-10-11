@@ -730,6 +730,15 @@ maps the short names used here to file names.
   - A completed thunk whose code still awaits normalization defers to its
     force, which normalizes, compiles and runs it; without that, the gain
     on `do_chain_800` falls from 29.0% to 11.9%.
+  - Copying a net into an applied net is an application of it, so a
+    partial application normalizes the function's net first, and a
+    closure its code, in a net, in a compiled run, or within another
+    normalization, where the code is pushed onto the normalizer's stack.
+    Each copy then starts from a net with no evaluation left and is made
+    whole (maintainer: a copy is logically local and only shares its
+    source's work, so normalization should reach through it). Before,
+    every net normalization stopped at was a closure stage's untouched
+    cursor into code never normalized: 368 such nets in `hello_elf`.
 - **Consequences:**
   - Instructions fall 29.0% (`do_chain_800`), 20.6% (`hello_elf`), 15.5%
     (`minimal`), 11.7% (`hello_do`), 9.6% (`list_sum_400`) and 6.5%
@@ -744,8 +753,12 @@ maps the short names used here to file names.
     function the compiler builds in it did not help `list_map_2000`
     (+1.7% more) and cost `minimal` 15%, normalizing helpers that are
     never applied, so the compiler does not.
+  - Normalizing before copies: no application in the profile families
+    copies through a cursor any more; `hello_elf` falls a further 8.0%, `minimal` 6.1%,
+    `hello_do` 5.4%, others within 0.8%.
   - The managed net cell grows to 224 bytes.
-- **Rule lives in:** `compiled_net` and `normalize_in` (`eval/net.rs`);
+- **Rule lives in:** `compiled_net`, `normalize_before_application` and
+  `normalize_in` (`eval/net.rs`);
   `RuntimeNet::next_constructive_pair`
   (`interaction_net/runtime/compiled.rs`).
 - **Recorded in:** structural overheads plan, `perf-compiled-nets`.

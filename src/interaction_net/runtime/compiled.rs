@@ -77,6 +77,22 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         self.nodes.len()
     }
 
+    /// How many logical copies of other nets this net is making.
+    #[cfg(test)]
+    pub(crate) fn copy_count(&self) -> usize {
+        self.copies.len()
+    }
+
+    /// The operator of `pair`, if it is an operator meeting data.
+    pub(crate) fn pair_operator(&self, pair: ActivePairKey) -> Option<&S::Operator> {
+        let (left, right) = self.pair_nodes(pair)?;
+        match (self.node(left)?, self.node(right)?) {
+            (RuntimeNode::Operator(operator), RuntimeNode::Data(_))
+            | (RuntimeNode::Data(_), RuntimeNode::Operator(operator)) => Some(operator),
+            _ => None,
+        }
+    }
+
     /// A ready active pair whose rule only builds: a rewrite, or an operator
     /// meeting data. Reducing it evaluates nothing, so normalizing a net
     /// before it is applied reduces these and no others: not a call of data,

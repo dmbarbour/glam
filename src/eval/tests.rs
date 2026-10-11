@@ -3993,6 +3993,79 @@ fn normalize_annotation_compiles_a_function_before_its_first_call() {
     values.assert_same_representation_for_test(&call, &n(3));
 }
 
+/// A closure copies its code when its last capture arrives, an application
+/// of the code, which is normalized first even if never applied before: the
+/// copy is then whole, not a cursor into the code, which would stop the
+/// closure's own net from normalizing and compiling at its first call.
+#[test]
+fn closures_copy_their_normalized_code_whole() {
+    let context = isolated_test_context();
+    let values = context.values();
+    // The code of `\x -> x + c` over its capture `c`, as lowering builds
+    // it: an apply operator's wrapper still facing the binds that pass it
+    // `+`, `x` and `c`, so the net has evaluation left.
+    let code = values.with_runtime_value_access(|access| {
+        let mut builder = NetBuilder::<CoreSpecialization>::new();
+        let spine = builder.function_spine(2);
+        let [capture, parameter] = [spine.arguments[0], spine.arguments[1]];
+        let mut output = builder.unary_operator(apply_arity_operator(&access, 2, Arc::from([])));
+        let add = builder.data(Value::Builtin(Builtin::Add));
+        for operand in [add, parameter, capture] {
+            let [application, argument, result] = builder.bind();
+            builder.wire(output, application);
+            builder.wire(operand, argument);
+            output = result;
+        }
+        builder.wire(output, spine.result);
+        let template = builder.finish(spine.input);
+        let runtime = access
+            .construct_managed_core_net(template.instantiate_with(&access))
+            .expect("the code net should fit one collector run");
+        Arc::new(FunctionCode::new(runtime, 1, 1))
+    });
+    let adder = eval_closed_expr_in(
+        &context,
+        &TestExpr::Function {
+            code,
+            captures: Arc::from([Arc::new(TestExpr::Value(n(10)))]),
+        },
+    )
+    .expect("capturing should make a closure");
+    let _adder_owner = RuntimeValueRoot::new(values, adder.duplicate_for_test(values));
+    let Value::Function(closure) = adder.duplicate_for_test(values) else {
+        panic!("capturing should make a closure");
+    };
+    let copies = values.with_runtime_value_access(|access| {
+        closure
+            .stage()
+            .runtime()
+            .access(&access)
+            .with(|net| net.copy_count())
+    });
+    assert_eq!(copies, 0, "the closure copies its code whole");
+
+    let sum = eval_closed_expr_in(
+        &context,
+        &TestExpr::Apply(
+            Arc::new(TestExpr::Value(adder)),
+            Arc::new(TestExpr::Value(n(5))),
+        ),
+    )
+    .expect("the closure should add its capture");
+    values.assert_same_representation_for_test(&sum, &n(15));
+    assert!(
+        values.with_runtime_value_access(|access| {
+            closure
+                .stage()
+                .runtime()
+                .access(&access)
+                .compiled(1)
+                .is_some()
+        }),
+        "the closure's net compiles"
+    );
+}
+
 /// Normalizing a net before its first use reduces only what builds values.
 /// A call of data waits for demand, since its callable may need evaluating:
 /// here a counted lazy, which normalization must not force, so the net

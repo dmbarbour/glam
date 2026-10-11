@@ -1781,8 +1781,21 @@ pub(in crate::eval) fn compiled_net<'access>(
     if let Some(compiled) = runtime.compiled(inputs) {
         return Some(compiled);
     }
+    normalize_before_application(access, net);
+    net.access(access.values()).compiled(inputs)
+}
+
+/// Normalizes `net` in place if it awaits normalization, before an
+/// application uses it: a call, or the copy a partial application or a
+/// closure makes of it, which then starts from a net with no evaluation
+/// left and so is made whole when small (`perf-compiled-nets`).
+pub(in crate::eval) fn normalize_before_application(
+    access: &crate::evaluation::EvaluationValueAccess<'_>,
+    net: &CoreRuntimeNet,
+) {
+    let runtime = net.access(access.values());
     if !runtime.begin_normalization() {
-        return None;
+        return;
     }
     // Fuel proportional to the net bounds the work, as a net can reduce
     // without end.
@@ -1790,7 +1803,6 @@ pub(in crate::eval) fn compiled_net<'access>(
     if nodes <= NORMALIZATION_MAX_NODES {
         normalize_in(access, net, NORMALIZATION_FUEL_PER_NODE * nodes);
     }
-    net.access(access.values()).compiled(inputs)
 }
 
 /// Normalizes the net of a function or net value for `anno 'normalize`, in
@@ -1826,19 +1838,39 @@ pub(in crate::eval) fn normalize_value_in(
 /// operators meeting data, which construct values and force nothing. A call
 /// of data waits for demand, as its callable may need evaluating, and so
 /// does anything another evaluation holds.
+///
+/// A pair that completes a closure copies the closure's code, which is
+/// normalized first, as before any application, so that the copy is whole.
+/// The nets in progress form a stack rather than nesting calls, and share
+/// the limit.
 fn normalize_in(
     access: &crate::evaluation::EvaluationValueAccess<'_>,
     net: &CoreRuntimeNet,
     limit: usize,
 ) -> usize {
-    let runtime = net.access(access.values());
-    for spent in 0..limit {
+    let mut nets = vec![net.duplicate_in(access.values())];
+    let mut left = limit;
+    while let Some(current) = nets.last() {
+        if left == 0 {
+            return 0;
+        }
+        let runtime = current.access(access.values());
         let Some(pair) = runtime.with(RuntimeNet::next_constructive_pair) else {
-            return limit - spent;
+            nets.pop();
+            continue;
         };
+        if let Some(code) = completed_closure_code(access, current, pair)
+            && code.access(access.values()).begin_normalization()
+            && code.access(access.values()).with(RuntimeNet::node_count) <= NORMALIZATION_MAX_NODES
+        {
+            nets.push(code);
+            continue;
+        }
+        left -= 1;
         let ActivePairStep::Reduction(reduction) = runtime.step_active_pair_within(pair, |_| true)
         else {
-            return limit - spent;
+            nets.pop();
+            continue;
         };
         if let ReductionKind::OperatorCall { operator, data } = reduction.kind {
             let call = OperatorCall {
@@ -1848,12 +1880,38 @@ fn normalize_in(
             };
             // A failed operator stays in the net as a stuck pair, for the
             // demand that reaches it, if any, to report.
-            if !matches!(progress_core_operator_call_in(access, net, call), Ok(true)) {
-                return limit - spent - 1;
+            let progressed = CoreOperatorClaim::fresh(access, current, call).is_some_and(|claim| {
+                let (operator, data) = claim.parts(access);
+                let disposition = match apply_operator(access, operator, data) {
+                    Ok(result) => OperatorDisposition::Yield(result),
+                    Err(error) => OperatorDisposition::Failed(error),
+                };
+                matches!(claim.finish_in(access, disposition), Ok(true))
+            });
+            if !progressed {
+                nets.pop();
             }
         }
     }
-    0
+    left
+}
+
+/// The code of the closure that `pair` completes, if it applies a closure's
+/// operator to its last capture.
+fn completed_closure_code(
+    access: &crate::evaluation::EvaluationValueAccess<'_>,
+    net: &CoreRuntimeNet,
+    pair: ActivePairKey,
+) -> Option<CoreRuntimeNet> {
+    net.access(access.values())
+        .with(|runtime| match runtime.pair_operator(pair)? {
+            CoreOperator::FunctionCaptures { code, supplied }
+                if supplied.len() + 1 == code.capture_count() =>
+            {
+                Some(code.runtime().duplicate_in(access.values()))
+            }
+            _ => None,
+        })
 }
 
 /// The largest net normalized before its first use, four times the most a
