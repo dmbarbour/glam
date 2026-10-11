@@ -331,12 +331,18 @@ impl FixtureNetLowerer<'_, '_> {
                 target,
             );
         } else {
+            // As lowering does: the code, a function of the captures,
+            // applied to them.
             let captures = (0..code.capture_count())
                 .map(TestExpr::Local)
                 .collect::<Vec<_>>();
             let captures = captures.iter().collect::<Vec<_>>();
+            let function = Value::Function(FunctionValue::new(
+                NetValue::new(code.duplicate_runtime_in(self.access)),
+                code.capture_count(),
+            ));
             self.operator_application_into(
-                computation_capture_operator(self.access, code, Arc::from([])),
+                apply_arity_operator(self.access, captures.len(), Arc::from([function])),
                 &captures,
                 target,
             );

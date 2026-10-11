@@ -22,17 +22,6 @@ pub(crate) fn function_capture_operator(
     CoreOperator::FunctionCaptures { code, supplied }
 }
 
-pub(crate) fn computation_capture_operator(
-    _access: &RuntimeValueAccess<'_>,
-    code: Arc<FunctionCode>,
-    supplied: Arc<[Value]>,
-) -> CoreOperator {
-    assert_eq!(code.arity(), 0);
-    assert!(code.capture_count() > 0);
-    assert!(supplied.len() < code.capture_count());
-    CoreOperator::ComputationCaptures { code, supplied }
-}
-
 pub(crate) fn dict_operator(
     _access: &RuntimeValueAccess<'_>,
     keys: Arc<[Key]>,
@@ -202,9 +191,6 @@ pub(super) fn apply_core_operator(
     data: &Value,
 ) -> Result<OperatorYield<CoreSpecialization>, EvaluationHalt> {
     let completed = match operator {
-        CoreOperator::ComputationCaptures { code, supplied } => {
-            eagerly_completed_thunk(access, code, supplied, data)
-        }
         CoreOperator::ApplyArity { arity, supplied } => {
             eagerly_completed_application(access, *arity, supplied, data)
         }
@@ -218,9 +204,12 @@ pub(super) fn apply_core_operator(
 
 /// An application's value, if `operand` completes it and its function,
 /// already evaluated, takes exactly its operands and has compiled code that
-/// builds no code of its own: as for a thunk, the application may as well
-/// be its result. A function still lazy is not forced; the application
-/// waits for demand, as usual.
+/// builds no code of its own. Running the code then only builds values, as
+/// building its net would, so the application may as well be its result;
+/// a thunk, lowered as its code applied to its captures, is one. Compiled
+/// code that builds code runs only when its application is forced, which
+/// also keeps running compiled code from nesting. A function still lazy is
+/// not forced; the application waits for demand, as usual.
 fn eagerly_completed_application(
     access: &EvaluationValueAccess<'_>,
     arity: usize,
@@ -286,37 +275,8 @@ fn builds_closures(compiled: &CompiledNet<CoreSpecialization>) -> bool {
         .any(|step| matches!(step.operator, CoreOperator::FunctionCaptures { .. }))
 }
 
-/// A thunk's value, if `operand` is its last capture and its code is
-/// compiled and builds no code of its own. Running the code then only
-/// builds values, as building its net would, so the thunk may as well be
-/// its result. Compiled code that builds code runs only when its thunk is
-/// forced, which also keeps running compiled code from nesting.
-fn eagerly_completed_thunk(
-    access: &EvaluationValueAccess<'_>,
-    code: &FunctionCode,
-    supplied: &[Value],
-    operand: &Value,
-) -> Option<Value> {
-    if supplied.len() + 1 != code.capture_count() {
-        return None;
-    }
-    let compiled = code
-        .runtime()
-        .access(access.values())
-        .compiled(code.capture_count())?;
-    if builds_closures(compiled) {
-        return None;
-    }
-    let captures = supplied
-        .iter()
-        .chain([operand])
-        .map(|value| access.values().duplicate_value(value))
-        .collect::<Vec<_>>();
-    Some(apply_compiled(access, compiled, &captures))
-}
-
-/// Applies `operator` to `data`. A completed thunk over compiled code runs
-/// it when forced.
+/// Applies `operator` to `data`. A saturated application of compiled code
+/// runs it when forced.
 fn apply_operator(
     access: &EvaluationValueAccess<'_>,
     operator: &CoreOperator,
@@ -389,38 +349,6 @@ fn apply_operator(
                 stage,
                 code.arity(),
             ))))
-        }
-        CoreOperator::ComputationCaptures { code, supplied } => {
-            let mut captures = supplied
-                .iter()
-                .map(|value| access.values().duplicate_value(value))
-                .collect::<Vec<_>>();
-            captures.push(operand);
-            if captures.len() < code.capture_count() {
-                return Ok(OperatorYield::Operator(computation_capture_operator(
-                    access.values(),
-                    code.clone(),
-                    Arc::from(captures),
-                )));
-            }
-            // A thunk over compiled code runs it when forced.
-            let compiled = code
-                .runtime()
-                .access(access.values())
-                .compiled(captures.len());
-            if compiled.is_some() {
-                let code = NetValue::new(code.duplicate_runtime_in(access.values()));
-                return Ok(OperatorYield::Data(Value::Lazy(LazyValue::from_thunk_in(
-                    access.values(),
-                    code,
-                    Arc::from(captures),
-                ))));
-            }
-            let stage = NetValue::new(code.duplicate_runtime_in(access.values()));
-            let stage = attach_net_many_in(access.values(), stage, captures);
-            Ok(OperatorYield::Data(Value::Lazy(
-                LazyValue::from_net_computation_in(access.values(), stage),
-            )))
         }
         CoreOperator::Dict { keys, supplied } => {
             let mut values = supplied

@@ -10,7 +10,6 @@ impl CompatibilityValueEdges for CoreOperator {
         match self {
             Self::ApplyArity { supplied, .. }
             | Self::FunctionCaptures { supplied, .. }
-            | Self::ComputationCaptures { supplied, .. }
             | Self::Dict { supplied, .. }
             | Self::List { supplied, .. }
             | Self::Access { supplied, .. }
@@ -68,8 +67,7 @@ pub(crate) fn trace_core_operator_managed_net_edges(
     visitor: &mut Visitor<'_>,
 ) {
     match operator {
-        CoreOperator::FunctionCaptures { code, .. }
-        | CoreOperator::ComputationCaptures { code, .. } => {
+        CoreOperator::FunctionCaptures { code, .. } => {
             code.runtime().trace_managed_edge(visitor);
         }
         CoreOperator::ApplyArity { .. }
@@ -141,13 +139,6 @@ mod tests {
             ),
             (
                 CoreOperator::FunctionCaptures {
-                    code: code.clone(),
-                    supplied: supplied.clone(),
-                },
-                2,
-            ),
-            (
-                CoreOperator::ComputationCaptures {
                     code: code.clone(),
                     supplied: supplied.clone(),
                 },

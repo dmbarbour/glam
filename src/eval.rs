@@ -63,8 +63,6 @@ pub(crate) use application::apply_values;
 #[cfg(test)]
 pub(crate) use builtins::assert_construction_port_family_shape;
 #[cfg(test)]
-pub(crate) use operator::computation_capture_operator;
-#[cfg(test)]
 pub(crate) use operator::constant_effect;
 pub(crate) use operator::{
     LIST_OPERATOR_MAX_ARITY, access_operator, apply_arity_operator, builtin_operator,

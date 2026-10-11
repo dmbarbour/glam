@@ -38,10 +38,6 @@ pub enum CoreOperator {
         code: Arc<FunctionCode>,
         supplied: Arc<[Value]>,
     },
-    ComputationCaptures {
-        code: Arc<FunctionCode>,
-        supplied: Arc<[Value]>,
-    },
     Dict {
         keys: Arc<[Key]>,
         supplied: Arc<[Value]>,
@@ -80,8 +76,7 @@ impl CoreOperator {
     pub(crate) fn remaining_operands(&self) -> usize {
         match self {
             Self::ApplyArity { arity, supplied } => arity + 1 - supplied.len(),
-            Self::FunctionCaptures { code, supplied }
-            | Self::ComputationCaptures { code, supplied } => code.capture_count() - supplied.len(),
+            Self::FunctionCaptures { code, supplied } => code.capture_count() - supplied.len(),
             Self::Dict { keys, supplied } => keys.len() - supplied.len(),
             Self::Builtin(call) => call.builtin.arity() - call.arguments.len(),
             Self::Applicable(_) => 1,
@@ -100,10 +95,6 @@ impl CoreOperator {
                 supplied: Arc::clone(supplied),
             },
             Self::FunctionCaptures { code, supplied } => Self::FunctionCaptures {
-                code: Arc::clone(code),
-                supplied: Arc::clone(supplied),
-            },
-            Self::ComputationCaptures { code, supplied } => Self::ComputationCaptures {
                 code: Arc::clone(code),
                 supplied: Arc::clone(supplied),
             },
@@ -1660,8 +1651,7 @@ mod tests {
                 let _: &usize = arity;
                 let _: &Arc<[Value]> = supplied;
             }
-            CoreOperator::FunctionCaptures { code, supplied }
-            | CoreOperator::ComputationCaptures { code, supplied } => {
+            CoreOperator::FunctionCaptures { code, supplied } => {
                 let _: &Arc<FunctionCode> = code;
                 let _: &Arc<[Value]> = supplied;
             }
