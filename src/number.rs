@@ -192,6 +192,13 @@ impl fmt::Display for Number {
 }
 
 fn parse_decimal_or_scientific(text: &str) -> Result<Number, String> {
+    // Plain digits that fit a machine word, as most literals are.
+    if !text.is_empty() && text.len() <= 18 && text.bytes().all(|byte| byte.is_ascii_digit()) {
+        let value = text
+            .parse::<i64>()
+            .expect("at most 18 decimal digits fit an i64");
+        return Ok(Number::integer(value));
+    }
     let (mantissa, negative_exponent, exponent) =
         if let Some((mantissa, exponent)) = split_once_either(text, 'e', 'E') {
             let (negative, magnitude) = parse_exponent(exponent)?;
@@ -216,6 +223,16 @@ fn parse_decimal_or_scientific(text: &str) -> Result<Number, String> {
         (numerator, 0)
     };
 
+    // An integer is already in lowest terms, so only a fraction or a
+    // negative exponent needs reducing.
+    if scale == 0 && (exponent == 0 || !negative_exponent) {
+        let integer = if exponent == 0 {
+            numerator
+        } else {
+            numerator * pow10(exponent)
+        };
+        return Ok(Number(BigRational::from_integer(integer)));
+    }
     let mut rational = BigRational::new(numerator, pow10(scale));
     if exponent != 0 {
         let factor = BigRational::from_integer(pow10(exponent));
@@ -351,6 +368,21 @@ mod tests {
             "617/5000000000"
         );
         assert_eq!(Number::parse("12e3").unwrap().to_string(), "12000");
+        // Integers skip reduction; equal values compare equal either way.
+        assert_eq!(Number::parse("0").unwrap(), Number::integer(0));
+        assert_eq!(Number::parse("1_2e3").unwrap(), Number::integer(12_000));
+        assert_eq!(Number::parse("1.50e2").unwrap(), Number::integer(150));
+        assert_eq!(Number::parse("120e_1").unwrap(), Number::integer(12));
+        assert_eq!(Number::parse("4.0").unwrap(), Number::integer(4));
+        assert_eq!(Number::parse("007").unwrap(), Number::integer(7));
+        assert_eq!(
+            Number::parse("_123456789012345678").unwrap(),
+            Number::integer(-123_456_789_012_345_678)
+        );
+        assert_eq!(
+            Number::parse("12345678901234567890").unwrap().to_string(),
+            "12345678901234567890"
+        );
     }
 
     #[test]
