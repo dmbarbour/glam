@@ -4234,7 +4234,9 @@ fn compile_annotations_specialize_a_partial_application() {
 
 /// `anno 'jit` only marks a function. Its first application, partial here,
 /// normalizes the function's net and compiles it, so the partial
-/// application copies the compiled net whole.
+/// application copies the compiled net whole. The partial application asks
+/// for `anno 'jit` in turn, as a closure would, to join the argument into
+/// the net and compile that at its own first application.
 #[test]
 fn jit_annotations_compile_a_function_at_its_first_application() {
     let context = isolated_test_context();
@@ -4286,6 +4288,12 @@ fn jit_annotations_compile_a_function_at_its_first_application() {
         (0, false),
         "the partial application copies the normalized net whole"
     );
+    assert!(
+        values.with_runtime_value_access(|access| {
+            partial.stage().runtime().access(&access).requests_jit()
+        }),
+        "the partial application asks for `anno 'jit` too"
+    );
 
     let sum = eval_closed_expr_in(
         &context,
@@ -4296,6 +4304,7 @@ fn jit_annotations_compile_a_function_at_its_first_application() {
     )
     .expect("the saturated application should add");
     values.assert_same_representation_for_test(&sum, &n(15));
+    assert!(stage_compiled(values, &partial));
 }
 
 /// A closure of code that asks for `anno 'jit` asks for it too, as lowering

@@ -1218,13 +1218,17 @@ fn apply_whnf_function(
         .collect::<Vec<_>>();
     let value = if consumed < remaining {
         // A partial application honors `anno 'jit` too, so that the copy
-        // it makes is of the compiled net.
-        super::net::compiled_for_application(access, function.stage().runtime(), remaining);
+        // it makes is of the compiled net, and asks for it in turn, as a
+        // closure of jit code does.
+        let base = function.stage().runtime();
+        super::net::compiled_for_application(access, base, remaining);
+        let jit = base.access(access.values()).requests_jit();
         let stage = function.duplicate_stage_in(access.values());
-        Value::Function(FunctionValue::new(
-            super::net::attach_net_many_in(access.values(), stage, saturating),
-            remaining - consumed,
-        ))
+        let stage = super::net::attach_net_many_in(access.values(), stage, saturating);
+        if jit {
+            stage.runtime().access(access.values()).request_jit();
+        }
+        Value::Function(FunctionValue::new(stage, remaining - consumed))
     } else if let Some(operator) = function.wrapped_operator() {
         super::operator::apply_wrapped_operator(access.values(), operator, saturating)
     } else if let Some(compiled) =

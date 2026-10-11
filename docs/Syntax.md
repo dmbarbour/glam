@@ -1142,8 +1142,10 @@ is a function, its net is reduced and compiled at its first application,
 partial or not, rather than when the annotation is demanded. The result is
 `Expr` itself, marked; a function value demanded but never applied costs
 nothing more. A front end may inject either annotation into the code it
-generates. g0 lowering marks each function it builds this way, and each
-closure of a lambda inherits the mark.
+generates. g0 lowering marks each function it builds this way. A closure
+of a marked lambda and a partial application of a marked function are
+marked too, so each is specialized to what it holds when it is first
+applied.
 
 `anno 'normalize Expr` asks for the same without fuel: each step is
 charged to the evaluation budget, so it may run long, or forever, as an

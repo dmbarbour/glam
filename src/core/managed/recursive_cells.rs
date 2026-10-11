@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, TryLockError};
 
 use glam_gc::{Gc, Root, Trace, UnsupportedLayout, Visitor};
@@ -95,9 +95,17 @@ pub(crate) struct ManagedCoreNetCell {
     /// evaluation left: `None` if it does not compile (`perf-compiled-nets`).
     compiled: OnceLock<Option<Box<CompiledNet<CoreSpecialization>>>>,
     /// Whether `anno 'jit` asked that the net compile at its first
-    /// application, normalizing it first; tried once.
-    jit: AtomicBool,
+    /// application, normalizing it first, and whether that was tried: one of
+    /// the `JIT_*` states.
+    jit: AtomicU8,
 }
+
+/// A net no annotation asked to compile at its first application.
+const JIT_NONE: u8 = 0;
+/// A net `anno 'jit` asked to compile at its first application.
+const JIT_REQUESTED: u8 = 1;
+/// A net whose compile at its first application has been tried.
+const JIT_TRIED: u8 = 2;
 
 pub(crate) struct ManagedLazyEdge(Gc<ManagedLazyCell>);
 
@@ -189,7 +197,7 @@ impl ManagedCoreNetCell {
         Self {
             runtime: RuntimeNetCell::new(runtime),
             compiled: OnceLock::new(),
-            jit: AtomicBool::new(false),
+            jit: AtomicU8::new(JIT_NONE),
         }
     }
 }
@@ -1337,18 +1345,34 @@ impl<'access, 'scope> ManagedCoreNetAccess<'access, 'scope> {
 
     /// Asks that the net compile at its first application.
     pub(crate) fn request_jit(&self) {
-        self.cell.jit.store(true, Ordering::Release);
+        let _ = self.cell.jit.compare_exchange(
+            JIT_NONE,
+            JIT_REQUESTED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 
-    /// Whether the net asked to compile at its first application.
+    /// Whether the net asked to compile at its first application, tried or
+    /// not.
     pub(crate) fn requests_jit(&self) -> bool {
-        self.cell.jit.load(Ordering::Acquire)
+        self.cell.jit.load(Ordering::Acquire) != JIT_NONE
     }
 
     /// Claims the net's one compile at its first application, if it asked
     /// for one and has not compiled.
     pub(crate) fn take_jit(&self) -> bool {
-        self.cell.compiled.get().is_none() && self.cell.jit.swap(false, Ordering::AcqRel)
+        self.cell.compiled.get().is_none()
+            && self
+                .cell
+                .jit
+                .compare_exchange(
+                    JIT_REQUESTED,
+                    JIT_TRIED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
     }
 
     /// This net compiled as a function of `inputs` arguments, compiling it
