@@ -1167,6 +1167,21 @@ impl CoreRuntimeNetAccess<'_, '_> {
 }
 
 impl<'access, 'scope> CoreRuntimeNetAccess<'access, 'scope> {
+    /// Asks that the net compile at its first application.
+    pub(crate) fn request_jit(&self) {
+        self.runtime.request_jit();
+    }
+
+    /// Whether the net asked to compile at its first application.
+    pub(crate) fn requests_jit(&self) -> bool {
+        self.runtime.requests_jit()
+    }
+
+    /// Claims the net's one compile at its first application.
+    pub(crate) fn take_jit(&self) -> bool {
+        self.runtime.take_jit()
+    }
+
     /// This net compiled as a function of `inputs` arguments, if it has no
     /// evaluation left and compiles (`perf-compiled-nets`).
     pub(crate) fn compiled(

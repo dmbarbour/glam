@@ -4232,6 +4232,127 @@ fn compile_annotations_specialize_a_partial_application() {
     values.assert_same_representation_for_test(&sum, &n(15));
 }
 
+/// `anno 'jit` only marks a function. Its first application, partial here,
+/// normalizes the function's net and compiles it, so the partial
+/// application copies the compiled net whole.
+#[test]
+fn jit_annotations_compile_a_function_at_its_first_application() {
+    let context = isolated_test_context();
+    let values = context.values();
+    let code = values.with_runtime_value_access(|access| addition_code(&access));
+    let _code_owner = values.root_core_net(&code);
+    let add = eval_closed_expr_in(
+        &context,
+        &TestExpr::Function {
+            code: Arc::new(FunctionCode::new(
+                values.with_runtime_value_access(|access| code.duplicate_in(&access)),
+                2,
+                0,
+            )),
+            captures: Arc::from([]),
+        },
+    )
+    .expect("a closed function should evaluate");
+    let _add_owner = RuntimeValueRoot::new(values, add.duplicate_for_test(values));
+    let Value::Function(function) = add.duplicate_for_test(values) else {
+        panic!("a closed function should evaluate to a function");
+    };
+
+    let marked = annotated_in(&context, "jit", add.duplicate_for_test(values));
+    values.assert_same_representation_for_test(&marked, &add);
+    assert!(
+        !stage_compiled(values, &function),
+        "the annotation only marks the function"
+    );
+
+    let add_ten = eval_closed_expr_in(
+        &context,
+        &TestExpr::Apply(
+            Arc::new(TestExpr::Value(add)),
+            Arc::new(TestExpr::Value(n(10))),
+        ),
+    )
+    .expect("a partial application should make a function");
+    let _add_ten_owner = RuntimeValueRoot::new(values, add_ten.duplicate_for_test(values));
+    let Value::Function(partial) = add_ten.duplicate_for_test(values) else {
+        panic!("a partial application should make a function");
+    };
+    assert!(
+        stage_compiled(values, &function),
+        "the first application compiles the function"
+    );
+    assert_eq!(
+        copies_and_code_state(values, &partial, &code),
+        (0, false),
+        "the partial application copies the normalized net whole"
+    );
+
+    let sum = eval_closed_expr_in(
+        &context,
+        &TestExpr::Apply(
+            Arc::new(TestExpr::Value(add_ten)),
+            Arc::new(TestExpr::Value(n(5))),
+        ),
+    )
+    .expect("the saturated application should add");
+    values.assert_same_representation_for_test(&sum, &n(15));
+}
+
+/// A closure of code that asks for `anno 'jit` asks for it too, as lowering
+/// relies on: building the closure normalizes nothing, and its first
+/// application normalizes the code through the copy and compiles it.
+#[test]
+fn closures_of_jit_code_are_jit() {
+    let context = isolated_test_context();
+    let values = context.values();
+    let code = values.with_runtime_value_access(|access| addition_code(&access));
+    let _code_owner = values.root_core_net(&code);
+    values.with_runtime_value_access(|access| code.access(&access).request_jit());
+    let adder = eval_closed_expr_in(
+        &context,
+        &TestExpr::Function {
+            code: Arc::new(FunctionCode::new(
+                values.with_runtime_value_access(|access| code.duplicate_in(&access)),
+                1,
+                1,
+            )),
+            captures: Arc::from([Arc::new(TestExpr::Value(n(10)))]),
+        },
+    )
+    .expect("capturing should make a closure");
+    let _adder_owner = RuntimeValueRoot::new(values, adder.duplicate_for_test(values));
+    let Value::Function(closure) = adder.duplicate_for_test(values) else {
+        panic!("capturing should make a closure");
+    };
+    assert!(values.with_runtime_value_access(|access| {
+        closure.stage().runtime().access(&access).requests_jit()
+    }));
+    assert_eq!(
+        copies_and_code_state(values, &closure, &code),
+        (1, true),
+        "building the closure normalizes nothing"
+    );
+
+    let sum = eval_closed_expr_in(
+        &context,
+        &TestExpr::Apply(
+            Arc::new(TestExpr::Value(adder)),
+            Arc::new(TestExpr::Value(n(5))),
+        ),
+    )
+    .expect("the closure should add its capture");
+    values.assert_same_representation_for_test(&sum, &n(15));
+    assert!(
+        stage_compiled(values, &closure),
+        "the first application compiles the closure"
+    );
+    assert_eq!(
+        copies_and_code_state(values, &closure, &code),
+        (0, false),
+        "its normalization follows the copy into the code"
+    );
+}
+
 /// `anno 'compile` reduces only what builds values. A call of data waits
 /// for demand, since its callable may need evaluating: here a counted
 /// lazy, which compiling must not force, so the net cannot compile.

@@ -94,6 +94,9 @@ pub(crate) struct ManagedCoreNetCell {
     /// The net compiled as a function of its arguments, set once it has no
     /// evaluation left: `None` if it does not compile (`perf-compiled-nets`).
     compiled: OnceLock<Option<Box<CompiledNet<CoreSpecialization>>>>,
+    /// Whether `anno 'jit` asked that the net compile at its first
+    /// application, normalizing it first; tried once.
+    jit: AtomicBool,
 }
 
 pub(crate) struct ManagedLazyEdge(Gc<ManagedLazyCell>);
@@ -186,6 +189,7 @@ impl ManagedCoreNetCell {
         Self {
             runtime: RuntimeNetCell::new(runtime),
             compiled: OnceLock::new(),
+            jit: AtomicBool::new(false),
         }
     }
 }
@@ -1331,6 +1335,22 @@ impl<'access, 'scope> ManagedCoreNetAccess<'access, 'scope> {
         &self.cell.runtime
     }
 
+    /// Asks that the net compile at its first application.
+    pub(crate) fn request_jit(&self) {
+        self.cell.jit.store(true, Ordering::Release);
+    }
+
+    /// Whether the net asked to compile at its first application.
+    pub(crate) fn requests_jit(&self) -> bool {
+        self.cell.jit.load(Ordering::Acquire)
+    }
+
+    /// Claims the net's one compile at its first application, if it asked
+    /// for one and has not compiled.
+    pub(crate) fn take_jit(&self) -> bool {
+        self.cell.compiled.get().is_none() && self.cell.jit.swap(false, Ordering::AcqRel)
+    }
+
     /// This net compiled as a function of `inputs` arguments, compiling it
     /// first if it has no evaluation left; `None` while it has some, or if
     /// it does not compile.
@@ -1632,7 +1652,7 @@ const _: () = {
     assert!(std::mem::align_of::<ManagedPromiseCell>() == 8);
     // Test builds add the runtime net's polarity-check flag. The runtime
     // net's three node maps use the zero-sized trusted hasher state.
-    assert!(std::mem::size_of::<ManagedCoreNetCell>() == 216 + if cfg!(test) { 8 } else { 0 });
+    assert!(std::mem::size_of::<ManagedCoreNetCell>() == 224 + if cfg!(test) { 8 } else { 0 });
     assert!(std::mem::align_of::<ManagedCoreNetCell>() == 8);
     assert!(std::mem::size_of::<ManagedLazyRoot>() == 32);
     assert!(std::mem::align_of::<ManagedLazyRoot>() == 8);
@@ -1950,9 +1970,9 @@ mod tests {
                 ManagedPromiseCell,
             >())
         );
-        // 216 bytes in production, with the compiled net's slot; test
-        // builds add the runtime net's polarity-check flag.
-        assert_eq!(std::mem::size_of::<ManagedCoreNetCell>(), 224);
+        // 224 bytes in production, with the compiled net's slot and the
+        // jit flag; test builds add the runtime net's polarity-check flag.
+        assert_eq!(std::mem::size_of::<ManagedCoreNetCell>(), 232);
         assert_eq!(std::mem::align_of::<ManagedCoreNetCell>(), 8);
         assert_eq!(
             <ManagedCoreNetCell as Trace>::REQUESTED_SLOT_SIZE,

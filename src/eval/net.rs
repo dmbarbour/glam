@@ -1831,10 +1831,42 @@ pub(in crate::eval) fn compile_value_in(
     }
 }
 
+/// For `anno 'jit`: asks that the net of a function or net value compile
+/// at the function's first application, normalizing it then as `anno
+/// 'compile` does.
+pub(in crate::eval) fn request_jit_in(
+    access: &crate::evaluation::EvaluationValueAccess<'_>,
+    value: &Value,
+) {
+    if let Some((net, _)) = normalization_target(access, value) {
+        net.access(access.values()).request_jit();
+    }
+}
+
+/// `net` compiled as a function of `inputs` arguments, at an application.
+/// The first application of a net that `anno 'jit` marked normalizes it
+/// first, once, as `anno 'compile` does: under fuel, so the work is bounded
+/// and stays within the application's step.
+pub(in crate::eval) fn compiled_for_application<'access>(
+    access: &'access crate::evaluation::EvaluationValueAccess<'_>,
+    net: &'access CoreRuntimeNet,
+    inputs: usize,
+) -> Option<&'access crate::interaction_net::CompiledNet<CoreSpecialization>> {
+    let runtime = net.access(access.values());
+    if let Some(compiled) = runtime.compiled(inputs) {
+        return Some(compiled);
+    }
+    if !runtime.take_jit() {
+        return None;
+    }
+    normalize_in(access, net, NormalizationLimit::PerNode);
+    net.access(access.values()).compiled(inputs)
+}
+
 /// What bounds a normalization, as a net can reduce without end.
 #[derive(Clone, Copy)]
 enum NormalizationLimit {
-    /// For `anno 'compile`: fuel in proportion to each net normalized,
+    /// For `anno 'compile` and `'jit`: fuel in proportion to each net normalized,
     /// [`NORMALIZATION_FUEL_PER_NODE`] reductions per node, leaving alone
     /// nets over [`NORMALIZATION_MAX_NODES`] nodes.
     PerNode,

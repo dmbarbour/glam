@@ -6,8 +6,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use crate::core::CoreValueFactory;
 use crate::core::{
-    Builtin, BuiltinCall, FunctionCode, FunctionValue, NetValue, RuntimeValueAccess, Value,
-    WrappedOperator,
+    FunctionCode, FunctionValue, NetValue, RuntimeValueAccess, Value, WrappedOperator,
 };
 use crate::core_net::{CoreDataKey, CoreOperator, CoreSpecialization};
 use crate::interaction_net::{NetBuilder, Port};
@@ -264,23 +263,15 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
             let function = match wrapped {
                 // Applied as its operator, it has no net worth compiling.
                 Some(operator) => Value::Function(FunctionValue::wrapping(stage, operator)),
-                None => compile_lazily(
-                    self.values,
-                    Value::Function(FunctionValue::new(stage, code.arity())),
-                ),
+                None => jit(self.values, FunctionValue::new(stage, code.arity())),
             };
             self.data_into(function, target);
         } else {
-            // The closure goes to `compile` once its captures arrive.
-            let annotation = self.net.unary_operator(crate::eval::builtin_operator(
-                self.values,
-                BuiltinCall::new(Builtin::Compile),
-            ));
-            let [application, closure, result] = self.net.bind();
-            self.net.wire(annotation, application);
+            // Each closure is jit, as `anno 'jit` on it would make it: the
+            // code carries the request, and building a closure passes it on.
+            code.runtime().access(self.values).request_jit();
             let operator = crate::eval::function_capture_operator(self.values, code, Arc::from([]));
-            self.binding_operator_application_into(operator, captures, closure);
-            self.net.wire(result, target);
+            self.binding_operator_application_into(operator, captures, target);
         }
     }
 
@@ -380,14 +371,13 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
                     );
                 } else {
                     // The thunk applies its code, a function of its captures,
-                    // to them, and the code goes to `anno 'compile` once for
-                    // every thunk it makes.
-                    let code = compile_lazily(
+                    // to them; the code is jit, for every thunk it makes.
+                    let code = jit(
                         self.values,
-                        Value::Function(FunctionValue::new(
+                        FunctionValue::new(
                             NetValue::new(code.duplicate_runtime_in(self.values)),
                             code.capture_count(),
-                        )),
+                        ),
                     );
                     let operator = crate::eval::apply_arity_operator(
                         self.values,
@@ -414,20 +404,14 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
     }
 }
 
-/// `compile function`, lazily: lowering wraps it around each function it
-/// builds, as a front end may with `anno 'compile`. Demanded with the
-/// function, as at its first application, it normalizes the function's net
-/// under fuel and compiles it. A closure's normalization follows its copy
-/// into the code, so the shared code is normalized once and each closure
-/// joins its captures into it.
-fn compile_lazily(values: &RuntimeValueAccess<'_>, function: Value) -> Value {
-    Value::Lazy(crate::core::LazyValue::from_builtin_in(
-        values,
-        BuiltinCall {
-            builtin: Builtin::Compile,
-            arguments: Arc::from([function]),
-        },
-    ))
+/// `anno 'jit function`, which lowering asks of each function it builds, as
+/// any front end may: at the function's first application, its net is
+/// normalized under fuel and compiled, so nothing is paid before then. A
+/// closure's normalization follows its copy into the code, so the shared
+/// code is normalized once and each closure joins its captures into it.
+fn jit(values: &RuntimeValueAccess<'_>, function: FunctionValue) -> Value {
+    function.stage().runtime().access(values).request_jit();
+    Value::Function(function)
 }
 
 /// The access keys of `path`: each key as it is, and a placeholder for each

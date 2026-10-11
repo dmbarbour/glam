@@ -1135,8 +1135,15 @@ is `Expr` itself; only its later applications get cheaper. Applying a
 function evaluates only what the application demands, so this is the way
 to ask for more. Like any expression, the annotation is lazy: wrapped
 around a function, it does its work when the function is first demanded,
-usually by its first application. A front end may inject it into the code
-it generates.
+usually by its first application.
+
+`anno 'jit Expr` evaluates `Expr` and asks the same of it, deferred: when it
+is a function, its net is reduced and compiled at its first application,
+partial or not, rather than when the annotation is demanded. The result is
+`Expr` itself, marked; a function value demanded but never applied costs
+nothing more. A front end may inject either annotation into the code it
+generates. g0 lowering marks each function it builds this way, and each
+closure of a lambda inherits the mark.
 
 `anno 'normalize Expr` asks for the same without fuel: each step is
 charged to the evaluation budget, so it may run long, or forever, as an

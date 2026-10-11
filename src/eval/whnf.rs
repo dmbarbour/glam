@@ -1217,6 +1217,9 @@ fn apply_whnf_function(
         .map(|argument| access.values().duplicate_value(argument))
         .collect::<Vec<_>>();
     let value = if consumed < remaining {
+        // A partial application honors `anno 'jit` too, so that the copy
+        // it makes is of the compiled net.
+        super::net::compiled_for_application(access, function.stage().runtime(), remaining);
         let stage = function.duplicate_stage_in(access.values());
         Value::Function(FunctionValue::new(
             super::net::attach_net_many_in(access.values(), stage, saturating),
@@ -1224,9 +1227,8 @@ fn apply_whnf_function(
         ))
     } else if let Some(operator) = function.wrapped_operator() {
         super::operator::apply_wrapped_operator(access.values(), operator, saturating)
-    } else if let Some(compiled) = (function.stage().runtime())
-        .access(access.values())
-        .compiled(remaining)
+    } else if let Some(compiled) =
+        super::net::compiled_for_application(access, function.stage().runtime(), remaining)
     {
         super::operator::apply_compiled(access, compiled, &saturating)
     } else {

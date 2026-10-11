@@ -209,7 +209,7 @@ pub(super) fn apply_builtin_in(
         | Builtin::InteractionNetBuilderRun => Ok(deferred(arguments)),
         Builtin::InspectOrigin => Ok(deferred(arguments)),
         Builtin::AssertUnit => Ok(deferred(arguments)),
-        Builtin::Anno | Builtin::Compile => Ok(deferred(arguments)),
+        Builtin::Anno => Ok(deferred(arguments)),
     }
 }
 

@@ -94,12 +94,15 @@ enum RegionalAnnotationPhase {
     Done,
 }
 
+/// When an annotation normalizes its target's net, and how.
 #[derive(Clone, Copy)]
 enum NormalizationKind {
     /// `'normalize`, charged to the budget, resumed at each poll.
     Normalize,
     /// `'compile`, under fuel, then compiled.
     Compile,
+    /// `'jit`: as `'compile`, at the function's first application.
+    Jit,
 }
 
 #[derive(Clone, Copy)]
@@ -175,26 +178,6 @@ impl RegionalAnnotationMachine {
                 RegionalWhnfWork::from_focus(access, access.values().duplicate_value(annotation))
                     .with_source_owner(source_owner),
             ),
-            source_owner,
-        }
-    }
-
-    /// The machine for `compile target`: `anno 'compile target`, already
-    /// recognized.
-    pub(in crate::eval) fn compile_in(
-        access: &EvaluationValueAccess<'_>,
-        source_owner: LazyId,
-        arguments: &[Value],
-    ) -> Self {
-        let [target] = arguments else {
-            panic!("a compile source retains one operand")
-        };
-        let target = access.values().duplicate_value(target);
-        let demand = RegionalWhnfWork::from_focus(access, access.values().duplicate_value(&target))
-            .with_source_owner(source_owner);
-        Self {
-            target,
-            phase: RegionalAnnotationPhase::NormalizeTarget(NormalizationKind::Compile, demand),
             source_owner,
         }
     }
@@ -757,6 +740,10 @@ impl RegionalAnnotationMachine {
                             super::net::compile_value_in(access, &target, step_budget);
                             return RegionalBuiltinPoll::Ready(target);
                         }
+                        NormalizationKind::Jit => {
+                            super::net::request_jit_in(access, &target);
+                            return RegionalBuiltinPoll::Ready(target);
+                        }
                     }
                 }
                 RegionalAnnotationPhase::Normalizing(target) => {
@@ -929,6 +916,7 @@ fn recognize_simple_annotation(atom: &crate::core::Atom) -> Option<RecognizedAnn
             NormalizationKind::Normalize,
         )),
         "compile" => Some(RecognizedAnnotation::Normalize(NormalizationKind::Compile)),
+        "jit" => Some(RecognizedAnnotation::Normalize(NormalizationKind::Jit)),
         "meta_init" => Some(RecognizedAnnotation::MetadataInitialize),
         _ => None,
     }

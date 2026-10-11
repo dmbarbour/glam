@@ -590,6 +590,7 @@ anno context:Frame Expr     # add Frame to msg.context if Expr errors
 anno 'deprecated Expr       # valid but warns
 anno 'scope_unique Atom     # unique atom (ephemeron pattern)
 anno 'compile F             # reduce F's net under fuel, compile it; F unchanged
+anno 'jit F                 # as 'compile, at F's first application
 anno 'normalize F           # reduce F's net without fuel; F unchanged
 anno refl:(.log Msg) Term   # reflection effect before returning Term
 

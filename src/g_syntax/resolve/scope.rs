@@ -388,6 +388,53 @@ mod resolver_context_tests {
         }
     }
 
+    /// Lowering asks `anno 'jit` of each function it builds: of a closed
+    /// lambda, and of a closure's code, which passes it on to each closure.
+    /// A lambda that only wraps an operator is applied as that operator.
+    #[test]
+    fn direct_net_emitter_asks_jit_of_its_functions() {
+        let values = crate::compiler::test_value_factory();
+        let mut resolver = ResolverContext::default();
+        let [outer, inner] = std::array::from_fn(|_| resolver.fresh_binding());
+        let local = ResolvedExpr::Local;
+        let add = |left, right| {
+            ResolvedExpr::apply(
+                ResolvedExpr::Embedded(Value::Builtin(Builtin::Add)),
+                [left, right],
+            )
+        };
+        let jit_requests = |body| {
+            let net = ResolvedNetLowerer::lower_template(&values, vec![outer], body);
+            values.with_runtime_value_access(|access| {
+                net.nodes()
+                    .iter()
+                    .filter_map(|node| match node {
+                        Node::Data(Value::Function(function)) => {
+                            Some(function.stage().runtime().access(&access).requests_jit())
+                        }
+                        Node::Operator(crate::core_net::CoreOperator::FunctionCaptures {
+                            code,
+                            ..
+                        }) => Some(code.runtime().access(&access).requests_jit()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        let one = ResolvedExpr::Embedded(Value::Number(1i64.into()));
+        let closed = ResolvedExpr::lambda(vec![inner], add(local(inner), one));
+        assert_eq!(jit_requests(closed), [true]);
+        let closure = ResolvedExpr::lambda(vec![inner], add(local(outer), local(inner)));
+        assert_eq!(jit_requests(closure), [true]);
+        let access = ResolvedExpr::Access {
+            base: Box::new(local(inner)),
+            path: vec![ResolvedPathPart::Key(crate::core::Key::atom_from_text("a"))],
+        };
+        let wrapper = ResolvedExpr::lambda(vec![inner], access);
+        assert_eq!(jit_requests(wrapper), [false]);
+    }
+
     #[test]
     fn direct_net_emitter_builds_one_bind_chain_for_curried_parameters() {
         let mut resolver = ResolverContext::default();

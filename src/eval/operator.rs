@@ -378,8 +378,13 @@ fn apply_operator(
             if captures.len() != code.capture_count() {
                 return Err(EvaluationHalt::new("function capture arity mismatch"));
             }
+            // A closure of code that asks for `anno 'jit` asks for it too.
+            let jit = code.runtime().access(access.values()).requests_jit();
             let stage = NetValue::new(code.duplicate_runtime_in(access.values()));
             let stage = attach_net_many_in(access.values(), stage, captures);
+            if jit {
+                stage.runtime().access(access.values()).request_jit();
+            }
             Ok(OperatorYield::Data(Value::Function(FunctionValue::new(
                 stage,
                 code.arity(),
