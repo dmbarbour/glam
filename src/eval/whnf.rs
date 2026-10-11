@@ -1217,7 +1217,6 @@ fn apply_whnf_function(
         .map(|argument| access.values().duplicate_value(argument))
         .collect::<Vec<_>>();
     let value = if consumed < remaining {
-        super::net::normalize_before_application(access, function.stage().runtime());
         let stage = function.duplicate_stage_in(access.values());
         Value::Function(FunctionValue::new(
             super::net::attach_net_many_in(access.values(), stage, saturating),

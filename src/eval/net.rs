@@ -1781,28 +1781,10 @@ pub(in crate::eval) fn compiled_net<'access>(
     if let Some(compiled) = runtime.compiled(inputs) {
         return Some(compiled);
     }
-    normalize_before_application(access, net);
+    if runtime.begin_normalization() {
+        normalize_in(access, net, NormalizationLimit::PerNode);
+    }
     net.access(access.values()).compiled(inputs)
-}
-
-/// Normalizes `net` in place if it awaits normalization, before an
-/// application uses it: a call, or the copy a partial application or a
-/// closure makes of it, which then starts from a net with no evaluation
-/// left and so is made whole when small (`perf-compiled-nets`).
-pub(in crate::eval) fn normalize_before_application(
-    access: &crate::evaluation::EvaluationValueAccess<'_>,
-    net: &CoreRuntimeNet,
-) {
-    let runtime = net.access(access.values());
-    if !runtime.begin_normalization() {
-        return;
-    }
-    // Fuel proportional to the net bounds the work, as a net can reduce
-    // without end.
-    let nodes = runtime.with(RuntimeNet::node_count);
-    if nodes <= NORMALIZATION_MAX_NODES {
-        normalize_in(access, net, NORMALIZATION_FUEL_PER_NODE * nodes);
-    }
 }
 
 /// Normalizes the net of a function or net value for `anno 'normalize`, in
@@ -1820,11 +1802,11 @@ pub(in crate::eval) fn normalize_value_in(
         _ => return true,
     };
     let limit = budget.remaining();
-    let left = normalize_in(access, net, limit);
-    budget.consume(limit - left);
-    if left == 0 {
+    let Some(reductions) = normalize_in(access, net, NormalizationLimit::Total(limit)) else {
+        budget.consume(limit);
         return false;
-    }
+    };
+    budget.consume(reductions);
     if let Some(inputs) = inputs {
         let runtime = net.access(access.values());
         runtime.begin_normalization();
@@ -1833,92 +1815,158 @@ pub(in crate::eval) fn normalize_value_in(
     true
 }
 
-/// Reduces the pairs of `net` that only build, in place, up to `limit` of
-/// them, and returns how many of the limit are left: rewrites, and
+/// What bounds a normalization, as a net can reduce without end.
+#[derive(Clone, Copy)]
+enum NormalizationLimit {
+    /// Before an application: fuel in proportion to each net normalized,
+    /// [`NORMALIZATION_FUEL_PER_NODE`] reductions per node, leaving alone
+    /// nets over [`NORMALIZATION_MAX_NODES`] nodes and sources another
+    /// normalization has begun.
+    PerNode,
+    /// For `anno 'normalize`: at most this many reductions in all, through
+    /// every source, which a normalization that runs out begins again.
+    Total(usize),
+}
+
+/// Reduces the pairs of `net` that only build, in place: rewrites, and
 /// operators meeting data, which construct values and force nothing. A call
 /// of data waits for demand, as its callable may need evaluating, and so
-/// does anything another evaluation holds.
+/// does anything another evaluation holds. Returns how many reductions it
+/// made, or `None` if `limit` ran out first.
 ///
-/// A pair that completes a closure copies the closure's code, which is
-/// normalized first, as before any application, so that the copy is whole.
-/// The nets in progress form a stack rather than nesting calls, and share
-/// the limit.
+/// A copy that `net` is making through a cursor is logically part of
+/// `net`, so normalization follows it: it normalizes the copy's source in
+/// place, sharing the work with every other copy of it, then makes the copy
+/// whole if it has not advanced, and goes on reducing what that joins. A
+/// value behind data, such as a closure built here, is not part of `net`
+/// and waits for its own application. The nets in progress form a stack
+/// rather than nesting calls.
 fn normalize_in(
     access: &crate::evaluation::EvaluationValueAccess<'_>,
     net: &CoreRuntimeNet,
-    limit: usize,
-) -> usize {
-    let mut nets = vec![net.duplicate_in(access.values())];
-    let mut left = limit;
-    while let Some(current) = nets.last() {
-        if left == 0 {
-            return 0;
-        }
-        let runtime = current.access(access.values());
-        let Some(pair) = runtime.with(RuntimeNet::next_constructive_pair) else {
-            nets.pop();
-            continue;
-        };
-        if let Some(code) = completed_closure_code(access, current, pair)
-            && code.access(access.values()).begin_normalization()
-            && code.access(access.values()).with(RuntimeNet::node_count) <= NORMALIZATION_MAX_NODES
-        {
-            nets.push(code);
-            continue;
-        }
-        left -= 1;
-        let ActivePairStep::Reduction(reduction) = runtime.step_active_pair_within(pair, |_| true)
-        else {
-            nets.pop();
-            continue;
-        };
-        if let ReductionKind::OperatorCall { operator, data } = reduction.kind {
-            let call = OperatorCall {
-                pair,
-                operator,
-                data,
+    limit: NormalizationLimit,
+) -> Option<usize> {
+    let mut fuel = match limit {
+        NormalizationLimit::PerNode => normalization_fuel(access, net)?,
+        NormalizationLimit::Total(limit) => limit,
+    };
+    let mut reductions = 0;
+    let mut followed = vec![net.duplicate_in(access.values())];
+    let mut nets = vec![NormalizationFrame::new(net.duplicate_in(access.values()))];
+    while let Some(frame) = nets.last_mut() {
+        let runtime = frame.net.access(access.values());
+        if let Some(pair) = runtime.with(RuntimeNet::next_constructive_pair) {
+            if fuel == 0 {
+                return None;
+            }
+            fuel -= 1;
+            reductions += 1;
+            let ActivePairStep::Reduction(reduction) =
+                runtime.step_active_pair_within(pair, |_| true)
+            else {
+                nets.pop();
+                continue;
             };
-            // A failed operator stays in the net as a stuck pair, for the
-            // demand that reaches it, if any, to report.
-            let progressed = CoreOperatorClaim::fresh(access, current, call).is_some_and(|claim| {
-                let (operator, data) = claim.parts(access);
-                let disposition = match apply_operator(access, operator, data) {
-                    Ok(result) => OperatorDisposition::Yield(result),
-                    Err(error) => OperatorDisposition::Failed(error),
+            if let ReductionKind::OperatorCall { operator, data } = reduction.kind {
+                let call = OperatorCall {
+                    pair,
+                    operator,
+                    data,
                 };
-                matches!(claim.finish_in(access, disposition), Ok(true))
-            });
-            if !progressed {
+                // A failed operator stays in the net as a stuck pair, for the
+                // demand that reaches it, if any, to report.
+                if !matches!(
+                    progress_core_operator_call_in(access, &frame.net, call),
+                    Ok(true)
+                ) {
+                    nets.pop();
+                }
+            }
+            continue;
+        }
+        match frame.stage {
+            NormalizationStage::FollowCopies => {
+                frame.stage = NormalizationStage::MakeCopiesWhole;
+                let mut sources = Vec::new();
+                for source in runtime.copy_sources() {
+                    if followed
+                        .iter()
+                        .any(|net: &CoreRuntimeNet| net.same_net_in(&source, access.values()))
+                    {
+                        continue;
+                    }
+                    followed.push(source.duplicate_in(access.values()));
+                    let begun = source.access(access.values()).begin_normalization();
+                    match limit {
+                        NormalizationLimit::PerNode if begun => {
+                            if let Some(more) = normalization_fuel(access, &source) {
+                                fuel += more;
+                                sources.push(NormalizationFrame::new(source));
+                            }
+                        }
+                        NormalizationLimit::PerNode => {}
+                        NormalizationLimit::Total(_) => {
+                            sources.push(NormalizationFrame::new(source));
+                        }
+                    }
+                }
+                nets.extend(sources);
+            }
+            NormalizationStage::MakeCopiesWhole => {
+                frame.stage = NormalizationStage::Done;
+                let installed = runtime.make_unadvanced_copies_whole();
+                if let NormalizationLimit::PerNode = limit {
+                    fuel += NORMALIZATION_FUEL_PER_NODE * installed;
+                }
+            }
+            NormalizationStage::Done => {
                 nets.pop();
             }
         }
     }
-    left
+    Some(reductions)
 }
 
-/// The code of the closure that `pair` completes, if it applies a closure's
-/// operator to its last capture.
-fn completed_closure_code(
+/// Fuel to normalize `net` before an application, in proportion to its
+/// size, or none if it is too large to normalize.
+fn normalization_fuel(
     access: &crate::evaluation::EvaluationValueAccess<'_>,
     net: &CoreRuntimeNet,
-    pair: ActivePairKey,
-) -> Option<CoreRuntimeNet> {
-    net.access(access.values())
-        .with(|runtime| match runtime.pair_operator(pair)? {
-            CoreOperator::FunctionCaptures { code, supplied }
-                if supplied.len() + 1 == code.capture_count() =>
-            {
-                Some(code.runtime().duplicate_in(access.values()))
-            }
-            _ => None,
-        })
+) -> Option<usize> {
+    let nodes = net.access(access.values()).with(RuntimeNet::node_count);
+    (nodes <= NORMALIZATION_MAX_NODES).then_some(NORMALIZATION_FUEL_PER_NODE * nodes)
+}
+
+/// A net in progress in [`normalize_in`].
+struct NormalizationFrame {
+    net: CoreRuntimeNet,
+    stage: NormalizationStage,
+}
+
+impl NormalizationFrame {
+    fn new(net: CoreRuntimeNet) -> Self {
+        Self {
+            net,
+            stage: NormalizationStage::FollowCopies,
+        }
+    }
+}
+
+/// What a net in progress does once it has no pair left that builds.
+enum NormalizationStage {
+    /// Normalize the sources of its copies.
+    FollowCopies,
+    /// Then make whole the copies that have not advanced, which may join
+    /// more pairs.
+    MakeCopiesWhole,
+    Done,
 }
 
 /// The largest net normalized before its first use, four times the most a
 /// compiled net may hold, since normalizing shrinks a lowered net.
 const NORMALIZATION_MAX_NODES: usize = 256;
 
-/// Reductions allowed per node when normalizing.
+/// Reductions allowed per node when normalizing before an application.
 const NORMALIZATION_FUEL_PER_NODE: usize = 4;
 
 #[cfg(test)]

@@ -171,3 +171,90 @@ impl<S: NetSpecialization> RuntimeNet<S> {
         ids[0]
     }
 }
+
+impl<S: NetSpecialization> RuntimeNet<S> {
+    /// The sources of the copies this net is making.
+    pub(crate) fn copy_sources(&self) -> impl Iterator<Item = &S::RuntimeSource> {
+        self.copies.values().map(|state| &state.source)
+    }
+
+    /// The copies this net might make whole: each with one frontier, held by
+    /// an unclaimed cursor, at source port `remote`. One whose `remote` is
+    /// its source's exposed port, where every copy begins, has copied
+    /// nothing yet (see [`Self::whole_copy_for`]), since a cursor that
+    /// materializes moves its frontier on, never back.
+    pub(crate) fn unadvanced_copies(
+        &self,
+    ) -> impl Iterator<Item = (CopyId, Port, &S::RuntimeSource)> {
+        self.copies.iter().filter_map(|(&copy, state)| {
+            let remote = *state.frontiers.keys().next()?;
+            self.unadvanced_cursor(copy, remote)?;
+            Some((copy, remote, &state.source))
+        })
+    }
+
+    fn unadvanced_cursor(&self, copy: CopyId, remote: Port) -> Option<NodeId> {
+        let state = self.copies.get(&copy)?;
+        if state.frontiers.len() != 1 {
+            return None;
+        }
+        let cursor = *state.frontiers.get(&remote)?;
+        (!self.cursor_claim_is_in_flight(cursor)).then_some(cursor)
+    }
+
+    /// Captures this net for a whole copy, as [`Self::whole_copy`] does, to
+    /// replace a copy that has not advanced from the source port `remote`:
+    /// none unless `remote` is this net's exposed port.
+    pub(crate) fn whole_copy_for(
+        &self,
+        remote: Port,
+        duplicator: &impl RuntimeNetPayloadDuplicator<S>,
+    ) -> Option<WholeCopy<S>> {
+        if self.exposed != Some(remote) {
+            return None;
+        }
+        self.whole_copy(duplicator)
+    }
+
+    /// The transition [`Self::make_copy_whole`] makes with a whole copy of
+    /// `nodes` nodes, or none if it would change nothing.
+    pub(crate) fn make_copy_whole_edge_transition(
+        &self,
+        copy: CopyId,
+        remote: Port,
+        nodes: usize,
+    ) -> RuntimeNetEdgeTransition {
+        let Some(cursor) = self.unadvanced_cursor(copy, remote) else {
+            return RuntimeNetEdgeTransition::default();
+        };
+        let mut leaving = RuntimeNetEdgeSet::copy(copy).with_obligation(cursor);
+        if let Some(pair) = self.active_pair_key(cursor) {
+            leaving = leaving.with_active(pair);
+        }
+        RuntimeNetEdgeTransition::new(leaving, RuntimeNetEdgeSet::fresh(self.next_node(0), nodes))
+    }
+
+    /// Replaces `copy`, which has not advanced from its source's port
+    /// `remote`, with `whole`, a whole copy of its source taken since the
+    /// source was left with no evaluation, wired where the cursor stood:
+    /// the copy as it would have been had it begun then. Returns false and
+    /// changes nothing if the copy has advanced or its cursor is claimed.
+    pub(crate) fn make_copy_whole(
+        &mut self,
+        copy: CopyId,
+        remote: Port,
+        whole: WholeCopy<S>,
+    ) -> bool {
+        let Some(cursor) = self.unadvanced_cursor(copy, remote) else {
+            return false;
+        };
+        self.unschedule_node(cursor);
+        let reference = self
+            .take_reference(Port::principal(cursor))
+            .expect("a remote cursor faces the local net");
+        self.remove_node(cursor);
+        self.copies.remove(&copy);
+        self.install_whole_copy(whole, reference);
+        true
+    }
+}

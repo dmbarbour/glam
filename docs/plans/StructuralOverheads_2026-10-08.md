@@ -265,16 +265,23 @@ one remote cursor and nothing else; `list_map`, `countdown` and
 copy, its only frontier at its source's exposed port, of a code net never
 normalized: a closure's stage, copying code that was never applied.
 
-Copying a net is applying it, so normalizing the net first, as before a
-call, makes each copy whole instead (decision
-`nets-normalize-before-use`): for partial applications and for closures
-completed in a net, in a compiled run, or inside another normalization,
-whose code the normalizer pushes onto its stack. Afterwards no
-application in any of 16 profile workloads copies through a cursor; instructions fall 8.0% (`hello_elf`),
-6.1% (`minimal`), 5.4% (`hello_do`) and 0.8% (`list_map_2000`), within
-0.4% elsewhere. Following cursors in general, for a copy begun before its
-source normalized or of a source too large to copy whole, needs no work
-while nothing makes such copies.
+A first version treated a copy as an application of its source, so
+building a closure or a partial application normalized the code it copied,
+and the copy was whole. No application in any of 16 profile workloads then
+copied through a cursor; instructions fell 8.0% (`hello_elf`), 6.1%
+(`minimal`), 5.4% (`hello_do`) and 0.8% (`list_map_2000`), within 0.4%
+elsewhere. The maintainer rejected it: a closure behind data is not part
+of the net that holds it, and a net normalizes only when asked, by an
+application or the annotation, not because it is built.
+
+Instead normalization follows a net's copies, which are logically part of
+it (decision `nets-normalize-before-use`): it normalizes each copy's source
+in place, then makes whole each copy that has not advanced, as if it began
+once its source was reduced (`make_unadvanced_copies_whole`). Building a
+closure normalizes nothing; its first application follows its copy. This
+stays within 0.25% of the first version on every family. A copy that has
+advanced, or whose source is too large to copy whole, keeps its cursors,
+and the net does not compile.
 - **Nested runs.** Running the thunks a compiled thunk completes in the
   same run, iteratively, would recover the remaining 1.3 to 3.6 points.
 - **`WrappedOperator`** can become a compiled net set at lowering.

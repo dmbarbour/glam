@@ -129,13 +129,6 @@ pub(super) fn apply_compiled(
         .values()
         .interaction_net_profile()
         .record_reduction(crate::interaction_net::profiling::ReductionEvent::CompiledApplication);
-    // A step that makes a closure copies its code, which is normalized
-    // first, as `apply_core_operator` does for one in a net.
-    for step in compiled.steps() {
-        if let CoreOperator::FunctionCaptures { code, .. } = &step.operator {
-            super::net::normalize_before_application(access, code.runtime());
-        }
-    }
     let mut results = Vec::with_capacity(compiled.steps().len());
     for step in compiled.steps() {
         let mut operator = None;
@@ -208,20 +201,10 @@ pub(super) fn apply_core_operator(
     operator: &CoreOperator,
     data: &Value,
 ) -> Result<OperatorYield<CoreSpecialization>, EvaluationHalt> {
-    match operator {
-        CoreOperator::ComputationCaptures { code, supplied } => {
-            if let Some(value) = eagerly_completed_thunk(access, code, supplied, data) {
-                return Ok(OperatorYield::Data(value));
-            }
-        }
-        // A closure's net copies its code, which an application normalizes
-        // first, so that the copy is whole and the closure can compile.
-        CoreOperator::FunctionCaptures { code, supplied }
-            if supplied.len() + 1 == code.capture_count() =>
-        {
-            super::net::normalize_before_application(access, code.runtime());
-        }
-        _ => {}
+    if let CoreOperator::ComputationCaptures { code, supplied } = operator
+        && let Some(value) = eagerly_completed_thunk(access, code, supplied, data)
+    {
+        return Ok(OperatorYield::Data(value));
     }
     apply_operator(access, operator, data)
 }
@@ -260,10 +243,8 @@ fn eagerly_completed_thunk(
 }
 
 /// Applies `operator` to `data`. A completed thunk over compiled code runs
-/// it when forced. Unlike `apply_core_operator`, it normalizes nothing and
-/// completes no thunk at once, so normalization and compiled runs, which
-/// apply operators through it, never nest.
-pub(super) fn apply_operator(
+/// it when forced.
+fn apply_operator(
     access: &EvaluationValueAccess<'_>,
     operator: &CoreOperator,
     data: &Value,

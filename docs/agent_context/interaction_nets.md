@@ -376,6 +376,14 @@ This preserves one-way dataflow and work sharing: shared source-local active
 pairs normalize only in the shared source, while each target receives stable
 frontier nodes on demand.
 
+Normalization may replace a copy that has not advanced with a whole copy once
+its source is left with no evaluation (`RuntimeNet::make_copy_whole`). Such a
+copy has one frontier, at the source's exposed port, held by an unclaimed
+cursor; a materializing cursor moves its frontier on and never back to that
+port. The replacement consumes the cursor, adds fresh nodes, and rewires only
+the port that faced the cursor, as a rewrite does. An advanced copy is never
+replaced, since part of its source is already local.
+
 The hierarchy here is a work-ownership property, not a claim that every
 recursive program terminates. A promise or fixpoint may make a closed net
 contain itself as data. Sharing may then revisit the same source runtime where

@@ -3993,40 +3993,77 @@ fn normalize_annotation_compiles_a_function_before_its_first_call() {
     values.assert_same_representation_for_test(&call, &n(3));
 }
 
-/// A closure copies its code when its last capture arrives, an application
-/// of the code, which is normalized first even if never applied before: the
-/// copy is then whole, not a cursor into the code, which would stop the
-/// closure's own net from normalizing and compiling at its first call.
+/// The net of `\a b -> a + b`, as lowering builds it: an apply operator's
+/// wrapper still facing the binds that pass it `+`, `a` and `b`, so the net
+/// has evaluation left.
+fn addition_code(access: &crate::core::RuntimeValueAccess<'_>) -> CoreRuntimeNet {
+    let mut builder = NetBuilder::<CoreSpecialization>::new();
+    let spine = builder.function_spine(2);
+    let mut output = builder.unary_operator(apply_arity_operator(access, 2, Arc::from([])));
+    let add = builder.data(Value::Builtin(Builtin::Add));
+    for operand in [add, spine.arguments[0], spine.arguments[1]] {
+        let [application, argument, result] = builder.bind();
+        builder.wire(output, application);
+        builder.wire(operand, argument);
+        output = result;
+    }
+    builder.wire(output, spine.result);
+    let template = builder.finish(spine.input);
+    access
+        .construct_managed_core_net(template.instantiate_with(access))
+        .expect("the code net should fit one collector run")
+}
+
+/// How many copies `function`'s net is making, and whether `code` awaits
+/// normalization.
+fn copies_and_code_state(
+    values: &CoreValueFactory,
+    function: &FunctionValue,
+    code: &CoreRuntimeNet,
+) -> (usize, bool) {
+    values.with_runtime_value_access(|access| {
+        (
+            function
+                .stage()
+                .runtime()
+                .access(&access)
+                .with(|net| net.copy_count()),
+            code.access(&access).awaits_normalization(),
+        )
+    })
+}
+
+/// Whether `function`'s net compiles for its first application, which
+/// normalizes it first.
+fn compiles_for_first_application(context: &EvalContext, function: &FunctionValue) -> bool {
+    crate::evaluation::EvalContext::evaluate_test_step(context, |evaluator| {
+        evaluator.with_value_access(|access| {
+            let net = function.stage().runtime();
+            super::net::compiled_net(&access, net, function.remaining_arity()).is_some()
+        })
+    })
+}
+
+/// A closure's net copies its code through a cursor while the code has
+/// evaluation left, and building the closure normalizes nothing: the
+/// closure is data until applied. Its first application normalizes its
+/// net, which follows the copy: it normalizes the code in place, then makes
+/// the copy whole, so the closure's net compiles.
 #[test]
-fn closures_copy_their_normalized_code_whole() {
+fn closures_normalize_their_code_at_their_first_application() {
     let context = isolated_test_context();
     let values = context.values();
-    // The code of `\x -> x + c` over its capture `c`, as lowering builds
-    // it: an apply operator's wrapper still facing the binds that pass it
-    // `+`, `x` and `c`, so the net has evaluation left.
-    let code = values.with_runtime_value_access(|access| {
-        let mut builder = NetBuilder::<CoreSpecialization>::new();
-        let spine = builder.function_spine(2);
-        let [capture, parameter] = [spine.arguments[0], spine.arguments[1]];
-        let mut output = builder.unary_operator(apply_arity_operator(&access, 2, Arc::from([])));
-        let add = builder.data(Value::Builtin(Builtin::Add));
-        for operand in [add, parameter, capture] {
-            let [application, argument, result] = builder.bind();
-            builder.wire(output, application);
-            builder.wire(operand, argument);
-            output = result;
-        }
-        builder.wire(output, spine.result);
-        let template = builder.finish(spine.input);
-        let runtime = access
-            .construct_managed_core_net(template.instantiate_with(&access))
-            .expect("the code net should fit one collector run");
-        Arc::new(FunctionCode::new(runtime, 1, 1))
-    });
+    // `\x -> c + x` over its capture `c`.
+    let code = values.with_runtime_value_access(|access| addition_code(&access));
+    let _code_owner = values.root_core_net(&code);
     let adder = eval_closed_expr_in(
         &context,
         &TestExpr::Function {
-            code,
+            code: Arc::new(FunctionCode::new(
+                values.with_runtime_value_access(|access| code.duplicate_in(&access)),
+                1,
+                1,
+            )),
             captures: Arc::from([Arc::new(TestExpr::Value(n(10)))]),
         },
     )
@@ -4035,14 +4072,20 @@ fn closures_copy_their_normalized_code_whole() {
     let Value::Function(closure) = adder.duplicate_for_test(values) else {
         panic!("capturing should make a closure");
     };
-    let copies = values.with_runtime_value_access(|access| {
-        closure
-            .stage()
-            .runtime()
-            .access(&access)
-            .with(|net| net.copy_count())
-    });
-    assert_eq!(copies, 0, "the closure copies its code whole");
+    assert_eq!(
+        copies_and_code_state(values, &closure, &code),
+        (1, true),
+        "building the closure copies its code through a cursor and normalizes nothing"
+    );
+    assert!(
+        compiles_for_first_application(&context, &closure),
+        "the closure's net compiles"
+    );
+    assert_eq!(
+        copies_and_code_state(values, &closure, &code),
+        (0, false),
+        "its first application normalizes its code and copies it whole"
+    );
 
     let sum = eval_closed_expr_in(
         &context,
@@ -4053,17 +4096,116 @@ fn closures_copy_their_normalized_code_whole() {
     )
     .expect("the closure should add its capture");
     values.assert_same_representation_for_test(&sum, &n(15));
+}
+
+/// A copy that has advanced holds part of its source already, so only its
+/// cursors can copy the rest: normalization still normalizes the source,
+/// but leaves the copy as it is, and the net does not compile.
+#[test]
+fn advanced_copies_are_not_made_whole() {
+    let context = isolated_test_context();
+    let values = context.values();
+    let code = values.with_runtime_value_access(|access| addition_code(&access));
+    let _code_owner = values.root_core_net(&code);
+    let adder = eval_closed_expr_in(
+        &context,
+        &TestExpr::Function {
+            code: Arc::new(FunctionCode::new(
+                values.with_runtime_value_access(|access| code.duplicate_in(&access)),
+                1,
+                1,
+            )),
+            captures: Arc::from([Arc::new(TestExpr::Value(n(10)))]),
+        },
+    )
+    .expect("capturing should make a closure");
+    let _adder_owner = RuntimeValueRoot::new(values, adder.duplicate_for_test(values));
+    let Value::Function(closure) = adder.duplicate_for_test(values) else {
+        panic!("capturing should make a closure");
+    };
+    // The cursor meets the bind passing the capture, and copies the code's
+    // first node.
+    values.with_runtime_value_access(|access| {
+        let stage = closure.stage().runtime().access(&access);
+        let pair = stage
+            .with(crate::interaction_net::RuntimeNet::next_ready_pair)
+            .expect("the cursor meets the capture's bind");
+        assert!(matches!(
+            stage.step_active_pair(pair),
+            crate::core_net::CoreActivePairStep::Reduction(_)
+        ));
+    });
+
     assert!(
-        values.with_runtime_value_access(|access| {
-            closure
-                .stage()
-                .runtime()
-                .access(&access)
-                .compiled(1)
-                .is_some()
-        }),
-        "the closure's net compiles"
+        !compiles_for_first_application(&context, &closure),
+        "the closure's net still copies through cursors"
     );
+    assert_eq!(
+        copies_and_code_state(values, &closure, &code),
+        (1, false),
+        "normalization normalizes the code but leaves the advanced copy"
+    );
+    let sum = eval_closed_expr_in(
+        &context,
+        &TestExpr::Apply(
+            Arc::new(TestExpr::Value(adder)),
+            Arc::new(TestExpr::Value(n(5))),
+        ),
+    )
+    .expect("the closure should add its capture");
+    values.assert_same_representation_for_test(&sum, &n(15));
+}
+
+/// A partial application is data too: its net copies the function's
+/// through a cursor, and only the application that saturates it normalizes
+/// either.
+#[test]
+fn partial_applications_normalize_their_function_when_saturated() {
+    let context = isolated_test_context();
+    let values = context.values();
+    let code = values.with_runtime_value_access(|access| addition_code(&access));
+    let _code_owner = values.root_core_net(&code);
+    let add = TestExpr::Function {
+        code: Arc::new(FunctionCode::new(
+            values.with_runtime_value_access(|access| code.duplicate_in(&access)),
+            2,
+            0,
+        )),
+        captures: Arc::from([]),
+    };
+    let add_ten = eval_closed_expr_in(
+        &context,
+        &TestExpr::Apply(Arc::new(add), Arc::new(TestExpr::Value(n(10)))),
+    )
+    .expect("a partial application should make a function");
+    let _add_ten_owner = RuntimeValueRoot::new(values, add_ten.duplicate_for_test(values));
+    let Value::Function(partial) = add_ten.duplicate_for_test(values) else {
+        panic!("a partial application should make a function");
+    };
+    assert_eq!(
+        copies_and_code_state(values, &partial, &code),
+        (1, true),
+        "the partial application copies the function through a cursor and normalizes nothing"
+    );
+    assert!(
+        compiles_for_first_application(&context, &partial),
+        "the partial application's net compiles"
+    );
+    assert_eq!(
+        copies_and_code_state(values, &partial, &code),
+        (0, false),
+        "saturating it normalizes the function and copies it whole"
+    );
+
+    let sum = eval_closed_expr_in(
+        &context,
+        &TestExpr::Apply(
+            Arc::new(TestExpr::Value(add_ten)),
+            Arc::new(TestExpr::Value(n(5))),
+        ),
+    )
+    .expect("the saturated application should add");
+    values.assert_same_representation_for_test(&sum, &n(15));
 }
 
 /// Normalizing a net before its first use reduces only what builds values.

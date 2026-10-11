@@ -1167,9 +1167,6 @@ impl CoreRuntimeNetAccess<'_, '_> {
 }
 
 impl<'access, 'scope> CoreRuntimeNetAccess<'access, 'scope> {
-    /// Prepares this net as the source of a copy installed in the same
-    /// access: whole if no evaluation is left in it, since a copy then has
-    /// nothing to share, and otherwise through a remote cursor.
     /// Whether the net awaits normalization and has not compiled.
     pub(crate) fn awaits_normalization(&self) -> bool {
         self.runtime.awaits_normalization()
@@ -1189,6 +1186,9 @@ impl<'access, 'scope> CoreRuntimeNetAccess<'access, 'scope> {
         self.runtime.compiled(inputs)
     }
 
+    /// Prepares this net as the source of a copy installed in the same
+    /// access: whole if no evaluation is left in it, since a copy then has
+    /// nothing to share, and otherwise through a remote cursor.
     pub(crate) fn prepare_copy_source(&self) -> CorePreparedCopySource<'scope> {
         let copy = match self.runtime.with(|runtime| runtime.whole_copy(self)) {
             Some(copy) => PreparedCopySource::Whole(Box::new(copy)),
@@ -1201,6 +1201,59 @@ impl<'access, 'scope> CoreRuntimeNetAccess<'access, 'scope> {
             copy,
             _access: std::marker::PhantomData,
         }
+    }
+
+    /// The sources of the copies this net is making.
+    pub(crate) fn copy_sources(&self) -> Vec<CoreRuntimeNet> {
+        self.runtime.with(|runtime| {
+            runtime
+                .copy_sources()
+                .map(|source| source.duplicate_in(self.values))
+                .collect()
+        })
+    }
+
+    /// Makes whole each copy this net began through a cursor and has not
+    /// advanced, if its source has since been left with no evaluation and
+    /// is small enough: the copy as it would have been had it begun now
+    /// (decision `reduced-sources-copy-whole`). Returns how many nodes the
+    /// copies installed.
+    pub(crate) fn make_unadvanced_copies_whole(&self) -> usize {
+        let copies = self.runtime.with(|runtime| {
+            runtime
+                .unadvanced_copies()
+                .map(|(copy, remote, source)| (copy, remote, source.duplicate_in(self.values)))
+                .collect::<Vec<_>>()
+        });
+        let mut installed = 0;
+        for (copy, remote, source) in copies {
+            // The source's lock is released before the target's is taken.
+            let source = source.access(self.values);
+            let Some(whole) = source
+                .runtime
+                .with(|runtime| runtime.whole_copy_for(remote, &source))
+            else {
+                continue;
+            };
+            let nodes = whole.len();
+            let mut whole = Some(whole);
+            let made = self.runtime.cell().with_conditional_edge_mut_via(
+                &self.runtime,
+                |runtime| runtime.make_copy_whole_edge_transition(copy, remote, nodes),
+                |runtime| {
+                    let whole = whole.take().expect("a whole copy is installed once");
+                    if runtime.make_copy_whole(copy, remote, whole) {
+                        RuntimeNetMutation::Changed(true)
+                    } else {
+                        RuntimeNetMutation::Unchanged(false)
+                    }
+                },
+            );
+            if made {
+                installed += nodes;
+            }
+        }
+        installed
     }
 }
 
