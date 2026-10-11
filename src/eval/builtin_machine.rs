@@ -152,6 +152,7 @@ impl RegionalBuiltinMachine {
             builtin,
             Builtin::AssertUnit
                 | Builtin::Anno
+                | Builtin::Compile
                 | Builtin::IfResult
                 | Builtin::MatchResult
                 | Builtin::Greater
@@ -249,6 +250,11 @@ impl RegionalBuiltinMachine {
                 RegionalEffectMachine::new_in(access, source_owner, builtin, arguments),
             )),
             Builtin::Anno => Self::Annotation(Box::new(RegionalAnnotationMachine::new_in(
+                access,
+                source_owner,
+                arguments,
+            ))),
+            Builtin::Compile => Self::Annotation(Box::new(RegionalAnnotationMachine::compile_in(
                 access,
                 source_owner,
                 arguments,

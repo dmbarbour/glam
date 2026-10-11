@@ -179,6 +179,26 @@ impl RegionalAnnotationMachine {
         }
     }
 
+    /// The machine for `compile target`: `anno 'compile target`, already
+    /// recognized.
+    pub(in crate::eval) fn compile_in(
+        access: &EvaluationValueAccess<'_>,
+        source_owner: LazyId,
+        arguments: &[Value],
+    ) -> Self {
+        let [target] = arguments else {
+            panic!("a compile source retains one operand")
+        };
+        let target = access.values().duplicate_value(target);
+        let demand = RegionalWhnfWork::from_focus(access, access.values().duplicate_value(&target))
+            .with_source_owner(source_owner);
+        Self {
+            target,
+            phase: RegionalAnnotationPhase::NormalizeTarget(NormalizationKind::Compile, demand),
+            source_owner,
+        }
+    }
+
     pub(in crate::eval) fn poll_in(
         &mut self,
         access: &EvaluationValueAccess<'_>,

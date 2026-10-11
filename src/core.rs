@@ -2072,6 +2072,10 @@ pub enum Builtin {
     Less,
     Fixpoint,
     Anno,
+    /// Compiler-private `anno 'compile`: `compile f` is `anno 'compile f`.
+    /// Lowering applies it to the functions it builds; the built-in module
+    /// never binds it.
+    Compile,
     /// Compiler-private assertion gate. Accepts a diagnostic context, the
     /// value that must evaluate to unit, and the target returned on success.
     AssertUnit,
@@ -2192,6 +2196,7 @@ impl Builtin {
             Self::Less => 2,
             Self::Fixpoint => 1,
             Self::Anno => 2,
+            Self::Compile => 1,
             Self::AssertUnit => 3,
             Self::Seq => 2,
             Self::Spark => 2,

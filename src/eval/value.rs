@@ -353,6 +353,20 @@ const INLINE_LAZY_DEPTH: usize = 32;
 /// again.
 const IDLE_YIELD_REPOLLS: usize = 8;
 
+/// Whether `call`, `compile` or `anno 'compile`, has a function or net
+/// already evaluated as its target. Compiling one then needs no machine:
+/// its work is bounded.
+fn compiles_evaluated_target(call: &crate::core::BuiltinCall) -> bool {
+    use crate::core::Builtin;
+    match (call.builtin, call.arguments.as_ref()) {
+        (Builtin::Compile, [Value::Function(_) | Value::Net(_)]) => true,
+        (Builtin::Anno, [Value::Atom(annotation), Value::Function(_) | Value::Net(_)]) => {
+            super::annotation_machine::is_compile_annotation(annotation)
+        }
+        _ => false,
+    }
+}
+
 /// Whether a route may force `lazy` inline: it has a source or checkpoint
 /// that a later route can resume if the inline poll is abandoned. Host calls
 /// and reflection tasks run exactly once, under their own route; a cached or
@@ -596,18 +610,22 @@ pub(crate) fn poll_lazy_route(
 }
 
 impl LazyTaskMachine {
-    /// Compiles the evaluated target of `anno 'compile`, `call`, and
-    /// installs it as this lazy's value. Out of line, so that it leaves the
+    /// Compiles the evaluated target of `call`, `compile` or `anno
+    /// 'compile`, and installs it as this lazy's value. Out of line, so that it leaves the
     /// inlining of the task's poll loop alone.
     #[inline(never)]
-    fn compile_annotated_target(
+    fn compile_requested_target(
         &self,
         context: &EvaluatorStepContext<'_>,
         call: &crate::core::BuiltinCall,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> bool {
         context.with_value_access(|access| {
-            let target = access.values().duplicate_value(&call.arguments[1]);
+            let target = access.values().duplicate_value(
+                call.arguments
+                    .last()
+                    .expect("a compile request has a target"),
+            );
             super::net::compile_value_in(&access, &target, step_budget);
             let work = super::whnf::RegionalWhnfWork::from_focus(&access, target);
             self.install_regional_whnf_in(&access, work)
@@ -1882,21 +1900,11 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                                 return self.cached_poll(context);
                             }
                         }
-                        // `anno 'compile` of a function or net already
-                        // evaluated compiles it at once: its work is bounded,
-                        // and it needs no machine.
-                        LazySource::Builtin(call)
-                            if call.builtin == crate::core::Builtin::Anno
-                                && matches!(
-                                    call.arguments.as_ref(),
-                                    [Value::Atom(annotation), Value::Function(_) | Value::Net(_)]
-                                        if super::annotation_machine::is_compile_annotation(annotation)
-                                ) =>
-                        {
+                        LazySource::Builtin(call) if compiles_evaluated_target(&call) => {
                             if !step_budget.try_consume() {
                                 return EvaluationMachinePoll::Yielded;
                             }
-                            if self.compile_annotated_target(context, &call, step_budget) {
+                            if self.compile_requested_target(context, &call, step_budget) {
                                 LazyTaskWork::WhnfCheckpoint
                             } else if let Some(work) = self.checkpoint_work(context) {
                                 work

@@ -264,20 +264,17 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
             let function = match wrapped {
                 // Applied as its operator, it has no net worth compiling.
                 Some(operator) => Value::Function(FunctionValue::wrapping(stage, operator)),
-                None => compile_annotated(
+                None => compile_lazily(
                     self.values,
                     Value::Function(FunctionValue::new(stage, code.arity())),
                 ),
             };
             self.data_into(function, target);
         } else {
-            // The closure goes to `anno 'compile` once its captures arrive.
+            // The closure goes to `compile` once its captures arrive.
             let annotation = self.net.unary_operator(crate::eval::builtin_operator(
                 self.values,
-                BuiltinCall {
-                    builtin: Builtin::Anno,
-                    arguments: Arc::from([compile_annotation(self.values)]),
-                },
+                BuiltinCall::new(Builtin::Compile),
             ));
             let [application, closure, result] = self.net.bind();
             self.net.wire(annotation, application);
@@ -385,7 +382,7 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
                     // The thunk applies its code, a function of its captures,
                     // to them, and the code goes to `anno 'compile` once for
                     // every thunk it makes.
-                    let code = compile_annotated(
+                    let code = compile_lazily(
                         self.values,
                         Value::Function(FunctionValue::new(
                             NetValue::new(code.duplicate_runtime_in(self.values)),
@@ -417,25 +414,18 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
     }
 }
 
-/// The annotation lowering wraps around each function it builds, as any
-/// front end may: `anno 'compile`, which, demanded with the function, as
-/// at its first application, normalizes the function's net under fuel and
-/// compiles it. A closure's normalization follows its copy into the code,
-/// so the shared code is normalized once and each closure joins its
-/// captures into it.
-fn compile_annotation(_values: &RuntimeValueAccess<'_>) -> Value {
-    Value::Atom(crate::core::Atom::from_key(
-        &crate::core::Key::binary_from_text("compile"),
-    ))
-}
-
-/// `anno 'compile function`, a lazy value (see [`compile_annotation`]).
-fn compile_annotated(values: &RuntimeValueAccess<'_>, function: Value) -> Value {
+/// `compile function`, lazily: lowering wraps it around each function it
+/// builds, as a front end may with `anno 'compile`. Demanded with the
+/// function, as at its first application, it normalizes the function's net
+/// under fuel and compiles it. A closure's normalization follows its copy
+/// into the code, so the shared code is normalized once and each closure
+/// joins its captures into it.
+fn compile_lazily(values: &RuntimeValueAccess<'_>, function: Value) -> Value {
     Value::Lazy(crate::core::LazyValue::from_builtin_in(
         values,
         BuiltinCall {
-            builtin: Builtin::Anno,
-            arguments: Arc::from([compile_annotation(values), function]),
+            builtin: Builtin::Compile,
+            arguments: Arc::from([function]),
         },
     ))
 }
