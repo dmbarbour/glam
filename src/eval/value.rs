@@ -596,6 +596,24 @@ pub(crate) fn poll_lazy_route(
 }
 
 impl LazyTaskMachine {
+    /// Compiles the evaluated target of `anno 'compile`, `call`, and
+    /// installs it as this lazy's value. Out of line, so that it leaves the
+    /// inlining of the task's poll loop alone.
+    #[inline(never)]
+    fn compile_annotated_target(
+        &self,
+        context: &EvaluatorStepContext<'_>,
+        call: &crate::core::BuiltinCall,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> bool {
+        context.with_value_access(|access| {
+            let target = access.values().duplicate_value(&call.arguments[1]);
+            super::net::compile_value_in(&access, &target, step_budget);
+            let work = super::whnf::RegionalWhnfWork::from_focus(&access, target);
+            self.install_regional_whnf_in(&access, work)
+        })
+    }
+
     fn install_regional_whnf_in(
         &self,
         access: &crate::evaluation::EvaluationValueAccess<'_>,
@@ -1858,6 +1876,28 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                             });
                             if installed {
                                 LazyTaskWork::AccessCheckpoint
+                            } else if let Some(work) = self.checkpoint_work(context) {
+                                work
+                            } else {
+                                return self.cached_poll(context);
+                            }
+                        }
+                        // `anno 'compile` of a function or net already
+                        // evaluated compiles it at once: its work is bounded,
+                        // and it needs no machine.
+                        LazySource::Builtin(call)
+                            if call.builtin == crate::core::Builtin::Anno
+                                && matches!(
+                                    call.arguments.as_ref(),
+                                    [Value::Atom(annotation), Value::Function(_) | Value::Net(_)]
+                                        if super::annotation_machine::is_compile_annotation(annotation)
+                                ) =>
+                        {
+                            if !step_budget.try_consume() {
+                                return EvaluationMachinePoll::Yielded;
+                            }
+                            if self.compile_annotated_target(context, &call, step_budget) {
+                                LazyTaskWork::WhnfCheckpoint
                             } else if let Some(work) = self.checkpoint_work(context) {
                                 work
                             } else {

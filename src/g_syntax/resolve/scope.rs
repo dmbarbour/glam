@@ -378,9 +378,12 @@ mod resolver_context_tests {
                 body,
             );
 
+            // A thunk applies its code, supplied to an apply operator, to
+            // its captures.
             assert!(!net.nodes().iter().any(|node| matches!(
                 node,
-                Node::Operator(crate::core_net::CoreOperator::ComputationCaptures { .. })
+                Node::Operator(crate::core_net::CoreOperator::ApplyArity { supplied, .. })
+                    if !supplied.is_empty()
             )));
         }
     }

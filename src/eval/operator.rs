@@ -201,12 +201,89 @@ pub(super) fn apply_core_operator(
     operator: &CoreOperator,
     data: &Value,
 ) -> Result<OperatorYield<CoreSpecialization>, EvaluationHalt> {
-    if let CoreOperator::ComputationCaptures { code, supplied } = operator
-        && let Some(value) = eagerly_completed_thunk(access, code, supplied, data)
-    {
+    let completed = match operator {
+        CoreOperator::ComputationCaptures { code, supplied } => {
+            eagerly_completed_thunk(access, code, supplied, data)
+        }
+        CoreOperator::ApplyArity { arity, supplied } => {
+            eagerly_completed_application(access, *arity, supplied, data)
+        }
+        _ => None,
+    };
+    if let Some(value) = completed {
         return Ok(OperatorYield::Data(value));
     }
     apply_operator(access, operator, data)
+}
+
+/// An application's value, if `operand` completes it and its function,
+/// already evaluated, takes exactly its operands and has compiled code that
+/// builds no code of its own: as for a thunk, the application may as well
+/// be its result. A function still lazy is not forced; the application
+/// waits for demand, as usual.
+fn eagerly_completed_application(
+    access: &EvaluationValueAccess<'_>,
+    arity: usize,
+    supplied: &[Value],
+    operand: &Value,
+) -> Option<Value> {
+    if arity == 0 || supplied.len() != arity {
+        return None;
+    }
+    let function = compiled_function(access, &supplied[0], arity)?;
+    let compiled = function
+        .stage()
+        .runtime()
+        .access(access.values())
+        .compiled(arity)?;
+    if builds_closures(compiled) {
+        return None;
+    }
+    let arguments = supplied[1..]
+        .iter()
+        .chain([operand])
+        .map(|value| access.values().duplicate_value(value))
+        .collect::<Vec<_>>();
+    Some(apply_compiled(access, compiled, &arguments))
+}
+
+/// `function`, if it is evaluated, or a lazy already evaluated, to a
+/// function with compiled code for exactly `arity` arguments. A lazy is not
+/// forced.
+fn compiled_function(
+    access: &EvaluationValueAccess<'_>,
+    function: &Value,
+    arity: usize,
+) -> Option<FunctionValue> {
+    let function = match function {
+        Value::Lazy(lazy) => access
+            .lazy(lazy)
+            .cached()?
+            .ok()?
+            .into_value_in(access.values()),
+        function => access.values().duplicate_value(function),
+    };
+    let Value::Function(function) = function else {
+        return None;
+    };
+    let compiled = function.remaining_arity() == arity
+        && function.wrapped_operator().is_none()
+        && function
+            .stage()
+            .runtime()
+            .access(access.values())
+            .compiled(arity)
+            .is_some();
+    compiled.then_some(function)
+}
+
+/// Whether running `compiled` builds closures, whose code would then run
+/// compiled too, nesting runs.
+fn builds_closures(compiled: &CompiledNet<CoreSpecialization>) -> bool {
+    compiled
+        .steps()
+        .iter()
+        .any(|step| matches!(step.operator, CoreOperator::FunctionCaptures { .. }))
 }
 
 /// A thunk's value, if `operand` is its last capture and its code is
@@ -227,11 +304,7 @@ fn eagerly_completed_thunk(
         .runtime()
         .access(access.values())
         .compiled(code.capture_count())?;
-    let builds_closures = compiled
-        .steps()
-        .iter()
-        .any(|step| matches!(step.operator, CoreOperator::FunctionCaptures { .. }));
-    if builds_closures {
+    if builds_closures(compiled) {
         return None;
     }
     let captures = supplied
@@ -267,6 +340,16 @@ fn apply_operator(
             let function = operands.remove(0);
             if *arity == 0 {
                 return Ok(OperatorYield::Data(function));
+            }
+            // An evaluated function with compiled code for exactly these
+            // operands runs it when forced, as a thunk over compiled code
+            // does.
+            if let Some(function) = compiled_function(access, &function, *arity) {
+                return Ok(OperatorYield::Data(Value::Lazy(LazyValue::from_thunk_in(
+                    access.values(),
+                    function.into_stage(),
+                    Arc::from(operands),
+                ))));
             }
             // A saturated apply operator may still represent over-application:
             // evaluating `function` can first yield another function before the

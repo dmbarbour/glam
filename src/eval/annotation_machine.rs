@@ -846,20 +846,25 @@ fn recognize_annotation(
     access: &EvaluationValueAccess<'_>,
     annotation: Value,
 ) -> RecognizedAnnotation {
-    let rendered = format!("{:?}", access.values().diagnostic_debug(&annotation));
+    // Rendered only for an annotation not recognized, to report it.
+    let unknown = || {
+        RecognizedAnnotation::Unknown(format!(
+            "{:?}",
+            access.values().diagnostic_debug(&annotation)
+        ))
+    };
     if let Value::Atom(atom) = &annotation {
-        return recognize_simple_annotation(atom)
-            .unwrap_or_else(|| RecognizedAnnotation::Unknown(rendered));
+        return recognize_simple_annotation(atom).unwrap_or_else(unknown);
     }
 
     let Value::Dict(annotation_dict) = &annotation else {
-        return RecognizedAnnotation::Unknown(rendered);
+        return unknown();
     };
     let Some((tag, payload)) = annotation_dict.iter().next() else {
-        return RecognizedAnnotation::Unknown(rendered);
+        return unknown();
     };
     if annotation_dict.iter().nth(1).is_some() {
-        return RecognizedAnnotation::Unknown(rendered);
+        return unknown();
     }
     let payload_value = || access.values().duplicate_value(payload);
     match key_atom_name(tag) {
@@ -880,14 +885,18 @@ fn recognize_annotation(
         Some("assert_unit") => RecognizedAnnotation::AssertUnit(payload_value()),
         _ if matches!(payload, Value::Dict(dict) if dict.is_empty()) => {
             if let Key::Atom(atom) = tag {
-                recognize_simple_annotation(atom)
-                    .unwrap_or_else(|| RecognizedAnnotation::Unknown(rendered.clone()))
+                recognize_simple_annotation(atom).unwrap_or_else(unknown)
             } else {
-                RecognizedAnnotation::Unknown(rendered)
+                unknown()
             }
         }
-        _ => RecognizedAnnotation::Unknown(rendered),
+        _ => unknown(),
     }
+}
+
+/// Whether `atom` is the `'compile` annotation.
+pub(in crate::eval) fn is_compile_annotation(atom: &crate::core::Atom) -> bool {
+    atom_name(atom) == Some("compile")
 }
 
 fn recognize_simple_annotation(atom: &crate::core::Atom) -> Option<RecognizedAnnotation> {

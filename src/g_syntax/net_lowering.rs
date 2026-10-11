@@ -6,7 +6,8 @@ use std::sync::Arc;
 #[cfg(test)]
 use crate::core::CoreValueFactory;
 use crate::core::{
-    FunctionCode, FunctionValue, NetValue, RuntimeValueAccess, Value, WrappedOperator,
+    Builtin, BuiltinCall, FunctionCode, FunctionValue, NetValue, RuntimeValueAccess, Value,
+    WrappedOperator,
 };
 use crate::core_net::{CoreDataKey, CoreOperator, CoreSpecialization};
 use crate::interaction_net::{NetBuilder, Port};
@@ -261,13 +262,28 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
         if captures.is_empty() {
             let stage = NetValue::new(code.duplicate_runtime_in(self.values));
             let function = match wrapped {
-                Some(operator) => FunctionValue::wrapping(stage, operator),
-                None => FunctionValue::new(stage, code.arity()),
+                // Applied as its operator, it has no net worth compiling.
+                Some(operator) => Value::Function(FunctionValue::wrapping(stage, operator)),
+                None => compile_annotated(
+                    self.values,
+                    Value::Function(FunctionValue::new(stage, code.arity())),
+                ),
             };
-            self.data_into(Value::Function(function), target);
+            self.data_into(function, target);
         } else {
+            // The closure goes to `anno 'compile` once its captures arrive.
+            let annotation = self.net.unary_operator(crate::eval::builtin_operator(
+                self.values,
+                BuiltinCall {
+                    builtin: Builtin::Anno,
+                    arguments: Arc::from([compile_annotation(self.values)]),
+                },
+            ));
+            let [application, closure, result] = self.net.bind();
+            self.net.wire(annotation, application);
             let operator = crate::eval::function_capture_operator(self.values, code, Arc::from([]));
-            self.binding_operator_application_into(operator, captures, target);
+            self.binding_operator_application_into(operator, captures, closure);
+            self.net.wire(result, target);
         }
     }
 
@@ -366,8 +382,21 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
                         target,
                     );
                 } else {
-                    let operator =
-                        crate::eval::computation_capture_operator(self.values, code, Arc::from([]));
+                    // The thunk applies its code, a function of its captures,
+                    // to them, and the code goes to `anno 'compile` once for
+                    // every thunk it makes.
+                    let code = compile_annotated(
+                        self.values,
+                        Value::Function(FunctionValue::new(
+                            NetValue::new(code.duplicate_runtime_in(self.values)),
+                            code.capture_count(),
+                        )),
+                    );
+                    let operator = crate::eval::apply_arity_operator(
+                        self.values,
+                        captures.len(),
+                        Arc::from([code]),
+                    );
                     self.binding_operator_application_into(operator, captures, target);
                 }
             }
@@ -386,6 +415,29 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
             self.net.wire(output, *target);
         }
     }
+}
+
+/// The annotation lowering wraps around each function it builds, as any
+/// front end may: `anno 'compile`, which, demanded with the function, as
+/// at its first application, normalizes the function's net under fuel and
+/// compiles it. A closure's normalization follows its copy into the code,
+/// so the shared code is normalized once and each closure joins its
+/// captures into it.
+fn compile_annotation(_values: &RuntimeValueAccess<'_>) -> Value {
+    Value::Atom(crate::core::Atom::from_key(
+        &crate::core::Key::binary_from_text("compile"),
+    ))
+}
+
+/// `anno 'compile function`, a lazy value (see [`compile_annotation`]).
+fn compile_annotated(values: &RuntimeValueAccess<'_>, function: Value) -> Value {
+    Value::Lazy(crate::core::LazyValue::from_builtin_in(
+        values,
+        BuiltinCall {
+            builtin: Builtin::Anno,
+            arguments: Arc::from([compile_annotation(values), function]),
+        },
+    ))
 }
 
 /// The access keys of `path`: each key as it is, and a placeholder for each
