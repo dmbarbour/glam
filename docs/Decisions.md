@@ -685,10 +685,15 @@ maps the short names used here to file names.
     a compiled net instead of building an applied net. Compiling only a
     normal net keeps sharing: a closure's stage compiles with what its
     captures started as constants.
-  - A completed thunk runs compiled code at once unless the code builds
-    closures, which would build nets a thunk never forced does not need;
-    otherwise it waits for a force. Thunks completed inside compiled steps
-    always wait, so compiled runs never nest on the Rust stack.
+  - A completed thunk builds its value at once from compiled code unless
+    the code builds closures, which would build nets a thunk never forced
+    does not need; otherwise it waits for a force. Building forces
+    nothing, as operators never force their operands: the value is a lazy
+    application, builtin call or access, or a container of operands, and
+    is evaluated only when the thunk would have been. A thunk already
+    built its applied net when completed, unreduced; this replaces that
+    work. Thunks completed inside compiled steps always wait, so compiled
+    runs never nest on the Rust stack.
 - **Consequences:**
   - Instructions fall 26.3% (`countdown_800`), 38.2% (`list_map_2000`),
     36.0% (`list_sum_400`), 30.2% (`append_walk_800`), 32.8% (`sum_800`)

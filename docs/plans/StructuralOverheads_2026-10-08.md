@@ -207,11 +207,15 @@ Instructions against `8500d2ea`:
 | `do_chain_800` | 793 M | 789 M | −0.6% |
 | `hello_elf` | 1,710 M | 1,305 M | −23.7% |
 
-Other families move 0.1 to 2.1%, none up. How a completed thunk runs
-compiled code was measured three ways: always at once, the fastest
-(`countdown_800` −27.6%), but nesting compiled runs on the Rust stack;
-always when forced (−24.3%); and at once unless the code builds closures,
-with thunks it completes waiting (−26.3%), which keeps the runs flat.
+Other families move 0.1 to 2.1%, none up. When a completed thunk builds
+its value from compiled code was measured three ways: always at once, the
+fastest (`countdown_800` −27.6%), but nesting compiled runs on the Rust
+stack; always when forced (−24.3%); and at once unless the code builds
+closures, with thunks it completes waiting (−26.3%), which keeps the runs
+flat. Building forces nothing: operators never force their operands, so a
+thunk's value stays as unevaluated as the thunk (maintainer, 2026-10-11:
+no implicit `seq`; forcing earlier is fine only where the value would
+inevitably be forced later).
 
 Follow-ups:
 - **Normalization** before a first application, as `'normalize` and
@@ -219,6 +223,9 @@ Follow-ups:
 - **Nested runs.** Running the thunks a compiled thunk completes in the
   same run, iteratively, would recover the remaining 1.3 to 3.6 points.
 - **`WrappedOperator`** can become a compiled net set at lowering.
+- **Strictness.** A thunk certain to be forced, such as an operand of a
+  strict builtin whose result is demanded, could be forced when completed.
+  That needs its own analysis.
 
 **Unobserved arity** (`perf-unobserved-arity`). A lightweight structural
 analysis of a code net could find how many arguments it takes before any

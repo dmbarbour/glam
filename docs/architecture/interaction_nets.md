@@ -299,9 +299,12 @@ never changes again: nets change after construction only by evaluation.
 - **Use.** `apply_compiled` (`eval/operator.rs`) runs the steps through the
   operators' own semantics. A saturated call (`apply_whnf_function`) and a
   forced `LazySource::FunctionCall` run a compiled stage instead of
-  building a net. A completed thunk over compiled code runs it at once
-  unless it builds closures; otherwise it becomes a `FunctionCall` over the
-  code, run when forced. Thunks completed inside compiled steps always
+  building a net. A completed thunk over compiled code builds its value at
+  once unless the code builds closures; otherwise it becomes a
+  `FunctionCall` over the code, run when forced. Building forces nothing:
+  operators never force their operands, so the value is a lazy
+  application, builtin call or access, or a container of operands, as
+  unevaluated as the thunk. Thunks completed inside compiled steps always
   wait, so compiled runs never nest (decision `compiled-nets`).
 
 ## Core Specialization
