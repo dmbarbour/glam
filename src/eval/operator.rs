@@ -315,10 +315,12 @@ fn apply_operator(
                     Arc::from(captures),
                 )));
             }
-            // A thunk over compiled code runs it when forced, and so does one
-            // whose code might compile once normalized, which its force does.
-            let runtime = code.runtime().access(access.values());
-            if runtime.compiled(captures.len()).is_some() || runtime.awaits_normalization() {
+            // A thunk over compiled code runs it when forced.
+            let compiled = code
+                .runtime()
+                .access(access.values())
+                .compiled(captures.len());
+            if compiled.is_some() {
                 let code = NetValue::new(code.duplicate_runtime_in(access.values()));
                 return Ok(OperatorYield::Data(Value::Lazy(LazyValue::from_thunk_in(
                     access.values(),

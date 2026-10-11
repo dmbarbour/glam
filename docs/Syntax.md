@@ -1126,13 +1126,21 @@ Other conventional annotations include `anno 'TBD Expr` for incomplete
 definitions and `anno 'deprecated Expr` for valid transitional code that
 should produce a warning.
 
-`anno 'normalize Expr` evaluates `Expr` and, when it is a function or a
+`anno 'compile Expr` evaluates `Expr` and, when it is a function or a
 net, reduces that net in place as far as it goes without arguments or
-demand: every step that only builds a value. Nothing is forced, so a call
-inside the net still waits to be demanded. The result is `Expr` itself;
-only its later applications get cheaper, as its net then compiles. The
-evaluator already does this before a net's first application, so the
-annotation matters for nets a program wants ready ahead of any use.
+demand, then compiles it if it can: every step that only builds a value,
+under fuel in proportion to the net, so it never diverges. Nothing is
+forced, so a call inside the net still waits to be demanded. The result
+is `Expr` itself; only its later applications get cheaper. Applying a
+function evaluates only what the application demands, so this is the way
+to ask for more. Like any expression, the annotation is lazy: wrapped
+around a function, it does its work when the function is first demanded,
+usually by its first application. A front end may inject it into the code
+it generates.
+
+`anno 'normalize Expr` asks for the same without fuel: each step is
+charged to the evaluation budget, so it may run long, or forever, as an
+annotation may.
 
 ## Pipes
 

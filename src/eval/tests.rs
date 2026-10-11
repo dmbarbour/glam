@@ -230,7 +230,7 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
         assert_eq!(
             profile.reductions,
             NetReductionCounts {
-                bind_join: 6,
+                bind_join: 7,
                 fan_join: 0,
                 fan_commute: 0,
                 fan_data: 0,
@@ -240,11 +240,11 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
                 // Application nets start with their function copied in, so
                 // no call is claimed.
                 call: 0,
-                operator_call: 4,
-                // Each function's net is normalized before its first call,
-                // so every copy is whole.
-                cursor_materialized: 0,
-                cursor_joined: 0,
+                operator_call: 6,
+                // One copy's source had no evaluation left, so it copied
+                // whole; the cursor counts are the other copy's.
+                cursor_materialized: 3,
+                cursor_joined: 1,
                 // `make` and the function it returns have nets with no
                 // evaluation left from the start, so their calls run
                 // compiled.
@@ -255,14 +255,13 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
         assert_eq!(
             profile.driver,
             NetDriverCounts {
-                // Compiled calls run no net machine, and normalization
-                // reduces outside the driver.
-                machine_polls: 1,
-                work_items: 16,
-                interface_polls: 7,
-                cursor_steps: 0,
-                active_pair_steps: 9,
-                cursor_dependencies: 0,
+                // Compiled calls run no net machine.
+                machine_polls: 2,
+                work_items: 54,
+                interface_polls: 19,
+                cursor_steps: 9,
+                active_pair_steps: 20,
+                cursor_dependencies: 6,
                 blocked_retries: 0,
                 contentions: 0,
                 disturbances: 0,
@@ -4016,8 +4015,8 @@ fn addition_code(access: &crate::core::RuntimeValueAccess<'_>) -> CoreRuntimeNet
         .expect("the code net should fit one collector run")
 }
 
-/// How many copies `function`'s net is making, and whether `code` awaits
-/// normalization.
+/// How many copies `function`'s net is making, and whether `code` has pairs
+/// left that only build.
 fn copies_and_code_state(
     values: &CoreValueFactory,
     function: &FunctionValue,
@@ -4030,29 +4029,45 @@ fn copies_and_code_state(
                 .runtime()
                 .access(&access)
                 .with(|net| net.copy_count()),
-            code.access(&access).awaits_normalization(),
+            code.access(&access)
+                .with(|net| net.next_constructive_pair().is_some()),
         )
     })
 }
 
-/// Whether `function`'s net compiles for its first application, which
-/// normalizes it first.
-fn compiles_for_first_application(context: &EvalContext, function: &FunctionValue) -> bool {
-    crate::evaluation::EvalContext::evaluate_test_step(context, |evaluator| {
-        evaluator.with_value_access(|access| {
-            let net = function.stage().runtime();
-            super::net::compiled_net(&access, net, function.remaining_arity()).is_some()
-        })
+/// `anno 'name target`, evaluated.
+fn annotated_in(context: &EvalContext, name: &str, target: Value) -> Value {
+    let annotation = Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(name)));
+    eval_closed_expr_in(
+        context,
+        &builtin2_expr(
+            Builtin::Anno,
+            TestExpr::Value(annotation),
+            TestExpr::Value(target),
+        ),
+    )
+    .expect("the annotation should give its target")
+}
+
+/// Whether `function`'s net is compiled.
+fn stage_compiled(values: &CoreValueFactory, function: &FunctionValue) -> bool {
+    values.with_runtime_value_access(|access| {
+        function
+            .stage()
+            .runtime()
+            .access(&access)
+            .compiled(function.remaining_arity())
+            .is_some()
     })
 }
 
 /// A closure's net copies its code through a cursor while the code has
-/// evaluation left, and building the closure normalizes nothing: the
-/// closure is data until applied. Its first application normalizes its
-/// net, which follows the copy: it normalizes the code in place, then makes
-/// the copy whole, so the closure's net compiles.
+/// evaluation left, and building the closure normalizes nothing.
+/// `anno 'compile` on the closure follows the copy: it normalizes the code
+/// in place, then makes the copy whole and joins the capture into it, so
+/// the closure's net compiles.
 #[test]
-fn closures_normalize_their_code_at_their_first_application() {
+fn compile_annotations_follow_a_closures_copy_into_its_code() {
     let context = isolated_test_context();
     let values = context.values();
     // `\x -> c + x` over its capture `c`.
@@ -4079,14 +4094,17 @@ fn closures_normalize_their_code_at_their_first_application() {
         (1, true),
         "building the closure copies its code through a cursor and normalizes nothing"
     );
+
+    let compiled = annotated_in(&context, "compile", adder.duplicate_for_test(values));
+    values.assert_same_representation_for_test(&compiled, &adder);
     assert!(
-        compiles_for_first_application(&context, &closure),
+        stage_compiled(values, &closure),
         "the closure's net compiles"
     );
     assert_eq!(
         copies_and_code_state(values, &closure, &code),
         (0, false),
-        "its first application normalizes its code and copies it whole"
+        "the annotation normalizes the code and copies it whole"
     );
 
     let sum = eval_closed_expr_in(
@@ -4138,8 +4156,9 @@ fn advanced_copies_are_not_made_whole() {
         ));
     });
 
+    annotated_in(&context, "compile", adder.duplicate_for_test(values));
     assert!(
-        !compiles_for_first_application(&context, &closure),
+        !stage_compiled(values, &closure),
         "the closure's net still copies through cursors"
     );
     assert_eq!(
@@ -4158,11 +4177,12 @@ fn advanced_copies_are_not_made_whole() {
     values.assert_same_representation_for_test(&sum, &n(15));
 }
 
-/// A partial application is data too: its net copies the function's
-/// through a cursor, and only the application that saturates it normalizes
-/// either.
+/// A partial application copies the function's net through a cursor and
+/// normalizes nothing. `anno 'compile` on it specializes the function to
+/// the argument in place: it normalizes the function's net, makes the copy
+/// whole and joins the argument into it.
 #[test]
-fn partial_applications_normalize_their_function_when_saturated() {
+fn compile_annotations_specialize_a_partial_application() {
     let context = isolated_test_context();
     let values = context.values();
     let code = values.with_runtime_value_access(|access| addition_code(&access));
@@ -4189,14 +4209,16 @@ fn partial_applications_normalize_their_function_when_saturated() {
         (1, true),
         "the partial application copies the function through a cursor and normalizes nothing"
     );
+
+    annotated_in(&context, "compile", add_ten.duplicate_for_test(values));
     assert!(
-        compiles_for_first_application(&context, &partial),
+        stage_compiled(values, &partial),
         "the partial application's net compiles"
     );
     assert_eq!(
         copies_and_code_state(values, &partial, &code),
         (0, false),
-        "saturating it normalizes the function and copies it whole"
+        "the annotation normalizes the function and copies it whole"
     );
 
     let sum = eval_closed_expr_in(
@@ -4210,12 +4232,11 @@ fn partial_applications_normalize_their_function_when_saturated() {
     values.assert_same_representation_for_test(&sum, &n(15));
 }
 
-/// Normalizing a net before its first use reduces only what builds values.
-/// A call of data waits for demand, since its callable may need evaluating:
-/// here a counted lazy, which normalization must not force, so the net
-/// cannot compile. Normalization is tried once per net.
+/// `anno 'compile` reduces only what builds values. A call of data waits
+/// for demand, since its callable may need evaluating: here a counted
+/// lazy, which compiling must not force, so the net cannot compile.
 #[test]
-fn normalization_leaves_calls_of_data_to_demand() {
+fn compile_annotations_leave_calls_of_data_to_demand() {
     let context = isolated_test_context();
     let values = context.values();
     let forced = Arc::new(AtomicUsize::new(0));
@@ -4242,31 +4263,24 @@ fn normalization_leaves_calls_of_data_to_demand() {
         spine.input
     });
     let _net_owner = values.root_core_net(net.runtime());
-    let normalize = || {
-        crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
-            evaluator.with_value_access(|access| {
-                let runtime = net.runtime().access(access.values());
-                let first = runtime.awaits_normalization();
-                let compiled = super::net::compiled_net(&access, net.runtime(), 1).is_some();
-                (first, compiled)
-            })
-        })
-    };
+    let function = Value::Function(FunctionValue::new(net.duplicate_for_test(values), 1));
+    let _function_owner = RuntimeValueRoot::new(values, function.duplicate_for_test(values));
 
-    assert_eq!(
-        normalize(),
-        (true, false),
+    annotated_in(&context, "compile", function.duplicate_for_test(values));
+    let Value::Function(compiled) = &function else {
+        unreachable!("the target is a function");
+    };
+    assert!(
+        !stage_compiled(values, compiled),
         "the call keeps the net from compiling"
     );
     assert_eq!(
         forced.load(Ordering::SeqCst),
         0,
-        "normalizing forced the callee"
+        "compiling forced the callee"
     );
-    assert_eq!(normalize(), (false, false), "a net is normalized once");
 
     // The call is still there for a demand to make.
-    let function = Value::Function(FunctionValue::new(net.duplicate_for_test(values), 1));
     let result = eval_closed_expr_in(
         &context,
         &TestExpr::Apply(

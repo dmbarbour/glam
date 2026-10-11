@@ -1769,22 +1769,19 @@ fn progress_core_operator_call_in(
     progress_core_operator_claim(access, claim)
 }
 
-/// `net` compiled as a function of `inputs` arguments. The first time an
-/// application finds it with evaluation left, normalizes it so that it might
-/// compile before its first use (`perf-compiled-nets`).
-pub(in crate::eval) fn compiled_net<'access>(
-    access: &'access crate::evaluation::EvaluationValueAccess<'_>,
-    net: &'access CoreRuntimeNet,
-    inputs: usize,
-) -> Option<&'access crate::interaction_net::CompiledNet<CoreSpecialization>> {
-    let runtime = net.access(access.values());
-    if let Some(compiled) = runtime.compiled(inputs) {
-        return Some(compiled);
+/// The net of a function or net value, with the arguments a function's
+/// net takes.
+fn normalization_target<'value>(
+    _access: &crate::evaluation::EvaluationValueAccess<'_>,
+    value: &'value Value,
+) -> Option<(&'value CoreRuntimeNet, Option<usize>)> {
+    match value {
+        Value::Function(function) => {
+            Some((function.stage().runtime(), Some(function.remaining_arity())))
+        }
+        Value::Net(net) => Some((net.runtime(), None)),
+        _ => None,
     }
-    if runtime.begin_normalization() {
-        normalize_in(access, net, NormalizationLimit::PerNode);
-    }
-    net.access(access.values()).compiled(inputs)
 }
 
 /// Normalizes the net of a function or net value for `anno 'normalize`, in
@@ -1796,32 +1793,50 @@ pub(in crate::eval) fn normalize_value_in(
     value: &Value,
     budget: &mut crate::evaluation::EvaluationStepBudget,
 ) -> bool {
-    let (net, inputs) = match value {
-        Value::Function(function) => (function.stage().runtime(), Some(function.remaining_arity())),
-        Value::Net(net) => (net.runtime(), None),
-        _ => return true,
+    let Some((net, inputs)) = normalization_target(access, value) else {
+        return true;
     };
-    let limit = budget.remaining();
-    let Some(reductions) = normalize_in(access, net, NormalizationLimit::Total(limit)) else {
-        budget.consume(limit);
+    let normalized = normalize_in(access, net, NormalizationLimit::Total(budget.remaining()));
+    budget.consume(normalized.reductions);
+    if !normalized.finished {
         return false;
-    };
-    budget.consume(reductions);
+    }
     if let Some(inputs) = inputs {
-        let runtime = net.access(access.values());
-        runtime.begin_normalization();
-        runtime.compiled(inputs);
+        net.access(access.values()).compiled(inputs);
     }
     true
+}
+
+/// Normalizes the net of a function or net value for `anno 'compile`, in
+/// place, under fuel in proportion to the nets it normalizes, so that it
+/// cannot diverge, then compiles a function's net if it can be. Its
+/// reductions are charged to `budget`, which may overrun.
+pub(in crate::eval) fn compile_value_in(
+    access: &crate::evaluation::EvaluationValueAccess<'_>,
+    value: &Value,
+    budget: &mut crate::evaluation::EvaluationStepBudget,
+) {
+    let Some((net, inputs)) = normalization_target(access, value) else {
+        return;
+    };
+    if let Some(inputs) = inputs
+        && net.access(access.values()).compiled(inputs).is_some()
+    {
+        return;
+    }
+    let normalized = normalize_in(access, net, NormalizationLimit::PerNode);
+    budget.consume(normalized.reductions.min(budget.remaining()));
+    if let Some(inputs) = inputs {
+        net.access(access.values()).compiled(inputs);
+    }
 }
 
 /// What bounds a normalization, as a net can reduce without end.
 #[derive(Clone, Copy)]
 enum NormalizationLimit {
-    /// Before an application: fuel in proportion to each net normalized,
+    /// For `anno 'compile`: fuel in proportion to each net normalized,
     /// [`NORMALIZATION_FUEL_PER_NODE`] reductions per node, leaving alone
-    /// nets over [`NORMALIZATION_MAX_NODES`] nodes and sources another
-    /// normalization has begun.
+    /// nets over [`NORMALIZATION_MAX_NODES`] nodes.
     PerNode,
     /// For `anno 'normalize`: at most this many reductions in all, through
     /// every source, which a normalization that runs out begins again.
@@ -1831,8 +1846,7 @@ enum NormalizationLimit {
 /// Reduces the pairs of `net` that only build, in place: rewrites, and
 /// operators meeting data, which construct values and force nothing. A call
 /// of data waits for demand, as its callable may need evaluating, and so
-/// does anything another evaluation holds. Returns how many reductions it
-/// made, or `None` if `limit` ran out first.
+/// does anything another evaluation holds.
 ///
 /// A copy that `net` is making through a cursor is logically part of
 /// `net`, so normalization follows it: it normalizes the copy's source in
@@ -1845,9 +1859,9 @@ fn normalize_in(
     access: &crate::evaluation::EvaluationValueAccess<'_>,
     net: &CoreRuntimeNet,
     limit: NormalizationLimit,
-) -> Option<usize> {
+) -> Normalized {
     let mut fuel = match limit {
-        NormalizationLimit::PerNode => normalization_fuel(access, net)?,
+        NormalizationLimit::PerNode => normalization_fuel(access, net).unwrap_or_default(),
         NormalizationLimit::Total(limit) => limit,
     };
     let mut reductions = 0;
@@ -1857,7 +1871,10 @@ fn normalize_in(
         let runtime = frame.net.access(access.values());
         if let Some(pair) = runtime.with(RuntimeNet::next_constructive_pair) {
             if fuel == 0 {
-                return None;
+                return Normalized {
+                    reductions,
+                    finished: false,
+                };
             }
             fuel -= 1;
             reductions += 1;
@@ -1896,15 +1913,13 @@ fn normalize_in(
                         continue;
                     }
                     followed.push(source.duplicate_in(access.values()));
-                    let begun = source.access(access.values()).begin_normalization();
                     match limit {
-                        NormalizationLimit::PerNode if begun => {
+                        NormalizationLimit::PerNode => {
                             if let Some(more) = normalization_fuel(access, &source) {
                                 fuel += more;
                                 sources.push(NormalizationFrame::new(source));
                             }
                         }
-                        NormalizationLimit::PerNode => {}
                         NormalizationLimit::Total(_) => {
                             sources.push(NormalizationFrame::new(source));
                         }
@@ -1924,11 +1939,21 @@ fn normalize_in(
             }
         }
     }
-    Some(reductions)
+    Normalized {
+        reductions,
+        finished: true,
+    }
 }
 
-/// Fuel to normalize `net` before an application, in proportion to its
-/// size, or none if it is too large to normalize.
+/// What [`normalize_in`] did.
+struct Normalized {
+    reductions: usize,
+    /// Whether it reduced all it could, rather than running out of fuel.
+    finished: bool,
+}
+
+/// Fuel for `anno 'compile` to normalize `net`, in proportion to its size,
+/// or none if it is too large to normalize.
 fn normalization_fuel(
     access: &crate::evaluation::EvaluationValueAccess<'_>,
     net: &CoreRuntimeNet,
@@ -1962,11 +1987,11 @@ enum NormalizationStage {
     Done,
 }
 
-/// The largest net normalized before its first use, four times the most a
+/// The largest net `anno 'compile` normalizes, four times the most a
 /// compiled net may hold, since normalizing shrinks a lowered net.
 const NORMALIZATION_MAX_NODES: usize = 256;
 
-/// Reductions allowed per node when normalizing before an application.
+/// Reductions `anno 'compile` allows per node it normalizes.
 const NORMALIZATION_FUEL_PER_NODE: usize = 4;
 
 #[cfg(test)]

@@ -1167,16 +1167,6 @@ impl CoreRuntimeNetAccess<'_, '_> {
 }
 
 impl<'access, 'scope> CoreRuntimeNetAccess<'access, 'scope> {
-    /// Whether the net awaits normalization and has not compiled.
-    pub(crate) fn awaits_normalization(&self) -> bool {
-        self.runtime.awaits_normalization()
-    }
-
-    /// Claims the net's one normalization, if it awaits one.
-    pub(crate) fn begin_normalization(&self) -> bool {
-        self.runtime.begin_normalization()
-    }
-
     /// This net compiled as a function of `inputs` arguments, if it has no
     /// evaluation left and compiles (`perf-compiled-nets`).
     pub(crate) fn compiled(

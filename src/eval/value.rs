@@ -1712,11 +1712,9 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                             let installed = context.with_value_access(|access| {
                                 // A compiled stage gives the call's result
                                 // directly, to evaluate as this lazy's value.
-                                let compiled = super::net::compiled_net(
-                                    &access,
-                                    stage.runtime(),
-                                    arguments.len(),
-                                );
+                                let compiled = (stage.runtime())
+                                    .access(access.values())
+                                    .compiled(arguments.len());
                                 if let Some(compiled) = compiled {
                                     let value = super::operator::apply_compiled(&access, compiled, &arguments);
                                     let work =
