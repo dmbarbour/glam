@@ -15,7 +15,7 @@ use crate::interaction_net::ReductionKind;
 #[cfg(test)]
 use crate::interaction_net::RuntimeNetRevisions;
 use crate::interaction_net::{
-    ActivePairKey, ActivePairStep, CursorDependency, CursorDependencyDisposition,
+    ActivePairKey, ActivePairStep, CompiledNet, CursorDependency, CursorDependencyDisposition,
     CursorDependencyResolution, CursorProgress, CursorStep, DemandEndpoint, FrontierObservation,
     InteractionNet, InterfaceDemand, InterfaceRoute, NetContention, NodeId, OperatorYield, Port,
     PreparedCopySource, Reduction, RuntimeNet, RuntimeNetMutation, RuntimeNetPayloadDuplicator,
@@ -66,7 +66,33 @@ pub enum CoreOperator {
     },
 }
 
+/// How many operands an access along `path` takes: its base, then one per
+/// index.
+pub(crate) fn access_arity(path: &[CoreDataKey]) -> usize {
+    1 + path
+        .iter()
+        .filter(|key| !matches!(key, CoreDataKey::Key(_)))
+        .count()
+}
+
 impl CoreOperator {
+    /// How many more operands this operator takes before it yields data.
+    pub(crate) fn remaining_operands(&self) -> usize {
+        match self {
+            Self::ApplyArity { arity, supplied } => arity + 1 - supplied.len(),
+            Self::FunctionCaptures { code, supplied }
+            | Self::ComputationCaptures { code, supplied } => code.capture_count() - supplied.len(),
+            Self::Dict { keys, supplied } => keys.len() - supplied.len(),
+            Self::Builtin(call) => call.builtin.arity() - call.arguments.len(),
+            Self::Applicable(_) => 1,
+            Self::List { arity, supplied }
+            | Self::Request {
+                arity, supplied, ..
+            } => arity - supplied.len(),
+            Self::Access { path, supplied } => access_arity(path) - supplied.len(),
+        }
+    }
+
     pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
         match self {
             Self::ApplyArity { arity, supplied } => Self::ApplyArity {
@@ -1140,10 +1166,19 @@ impl CoreRuntimeNetAccess<'_, '_> {
     }
 }
 
-impl<'scope> CoreRuntimeNetAccess<'_, 'scope> {
+impl<'access, 'scope> CoreRuntimeNetAccess<'access, 'scope> {
     /// Prepares this net as the source of a copy installed in the same
     /// access: whole if no evaluation is left in it, since a copy then has
     /// nothing to share, and otherwise through a remote cursor.
+    /// This net compiled as a function of `inputs` arguments, if it has no
+    /// evaluation left and compiles (`perf-compiled-nets`).
+    pub(crate) fn compiled(
+        &self,
+        inputs: usize,
+    ) -> Option<&'access CompiledNet<CoreSpecialization>> {
+        self.runtime.compiled(inputs)
+    }
+
     pub(crate) fn prepare_copy_source(&self) -> CorePreparedCopySource<'scope> {
         let copy = match self.runtime.with(|runtime| runtime.whole_copy(self)) {
             Some(copy) => PreparedCopySource::Whole(Box::new(copy)),
@@ -1934,6 +1969,7 @@ mod tests {
                 operator_call: 0,
                 cursor_materialized: 1,
                 cursor_joined: 1,
+                compiled_application: 0,
             }
         );
     }

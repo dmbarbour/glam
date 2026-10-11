@@ -22,6 +22,9 @@ pub struct NetReductionCounts {
     pub operator_call: u64,
     pub cursor_materialized: u64,
     pub cursor_joined: u64,
+    /// Applications run compiled, in place of rewrites of an applied net
+    /// (`perf-compiled-nets`).
+    pub compiled_application: u64,
 }
 
 impl NetReductionCounts {
@@ -37,6 +40,7 @@ impl NetReductionCounts {
             + self.operator_call
             + self.cursor_materialized
             + self.cursor_joined
+            + self.compiled_application
     }
 }
 
@@ -204,6 +208,7 @@ atomic_counts!(AtomicNetReductionCounts => NetReductionCounts {
     operator_call,
     cursor_materialized,
     cursor_joined,
+    compiled_application,
 });
 
 atomic_counts!(AtomicNetDriverCounts => NetDriverCounts {
@@ -251,6 +256,7 @@ pub(crate) enum ReductionEvent {
     OperatorCall,
     CursorMaterialized,
     CursorJoined,
+    CompiledApplication,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -298,6 +304,7 @@ impl InteractionNetProfile {
             ReductionEvent::OperatorCall => &self.reductions.operator_call,
             ReductionEvent::CursorMaterialized => &self.reductions.cursor_materialized,
             ReductionEvent::CursorJoined => &self.reductions.cursor_joined,
+            ReductionEvent::CompiledApplication => &self.reductions.compiled_application,
         };
         counter.fetch_add(1, Ordering::Relaxed);
     }

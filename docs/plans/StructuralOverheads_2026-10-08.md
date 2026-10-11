@@ -154,6 +154,72 @@ constants: an `ApplyArity` operator holds them only once the shared code
 net has reduced, so lowering cannot see these shapes, though it could see
 the expressions they come from.
 
+**Compiled nets** (agreed with the maintainer, 2026-10-11). Chains are
+better modeled as an acceleration the runtime attaches to a net than as
+programs lowering emits:
+- A function's net stays the reference. A *compiled form* is an
+  alternative implementation attached to the net, which applying it may
+  run instead of copying the net. That is unobservable, so annotations
+  request it: `anno 'normalize F` evaluates F's net to normal form, not
+  only WHNF (for a function, every reduction that needs no parameter; it
+  may diverge, as annotations may), and `anno 'compile F` normalizes under
+  fuel and compiles, warning when nothing compiles.
+- What compiles: a normal form whose remaining interactions, once its
+  inputs arrive as data, only build values: an operator meeting data, a
+  fan copying it, an eraser dropping it, an application bind passing an
+  operator its next operand. Nothing waits on evaluation, so the compiled
+  form runs to completion: steps, each an operator (with the constants it
+  already holds) applied to inputs, constants or earlier steps. Anything
+  else, such as a call of data, a cursor, or an active pair, falls back to
+  the net.
+- It lives with the net, set once in the managed net cell beside the
+  runtime net and traced with it. A function value and its code share the
+  cell; the net's later reductions cannot invalidate it, as both denote
+  the same function.
+- Compiling a net only once it is normal keeps sharing: a closure's stage
+  compiles with whatever its captures started as constants.
+- Lowering may fold the annotation for code it generates, provided its
+  program equals compiling the normal form. `WrappedOperator` is the
+  one-step case and moves into the same store.
+- Start (`perf-compiled-nets`): compile a code net or stage at
+  application once it is normal, the test whole copies already make, and
+  run the compiled form for saturated calls and completed thunks. Then
+  normalization, as `'normalize` and implicitly for generated code, so
+  one-shot code, such as `do_chain`'s per-step thunks, compiles before its
+  first application.
+
+A thunk builds its applied net when its last capture arrives. Deferring
+that until it is forced, measured alone, changes instructions by −3.2%
+(`list_sum_400`) to +2.7% (`append_walk_800`), within 0.3% elsewhere: it
+only pays as the place a compiled form runs.
+
+Compiling at application landed 2026-10-11 (decision `compiled-nets`).
+Instructions against `8500d2ea`:
+
+| Workload | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| `minimal` | 23.9 M | 23.2 M | −2.9% |
+| `countdown_800` | 1,032 M | 761 M | −26.3% |
+| `sum_800` | 1,244 M | 836 M | −32.8% |
+| `list_map_2000` | 259 M | 160 M | −38.2% |
+| `list_sum_400` | 715 M | 458 M | −36.0% |
+| `append_walk_800` | 2,652 M | 1,850 M | −30.2% |
+| `do_chain_800` | 793 M | 789 M | −0.6% |
+| `hello_elf` | 1,710 M | 1,305 M | −23.7% |
+
+Other families move 0.1 to 2.1%, none up. How a completed thunk runs
+compiled code was measured three ways: always at once, the fastest
+(`countdown_800` −27.6%), but nesting compiled runs on the Rust stack;
+always when forced (−24.3%); and at once unless the code builds closures,
+with thunks it completes waiting (−26.3%), which keeps the runs flat.
+
+Follow-ups:
+- **Normalization** before a first application, as `'normalize` and
+  implicitly for generated code, for one-shot code such as `do_chain`'s.
+- **Nested runs.** Running the thunks a compiled thunk completes in the
+  same run, iteratively, would recover the remaining 1.3 to 3.6 points.
+- **`WrappedOperator`** can become a compiled net set at lowering.
+
 **Unobserved arity** (`perf-unobserved-arity`). A lightweight structural
 analysis of a code net could find how many arguments it takes before any
 is observed; below that arity, partial application starts no work, so it

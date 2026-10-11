@@ -230,7 +230,7 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
         assert_eq!(
             profile.reductions,
             NetReductionCounts {
-                bind_join: 9,
+                bind_join: 7,
                 fan_join: 0,
                 fan_commute: 0,
                 fan_data: 0,
@@ -245,17 +245,22 @@ fn wrapper_returning_function_then_accepts_remaining_application() {
                 // whole; the cursor counts are the other copy's.
                 cursor_materialized: 3,
                 cursor_joined: 1,
+                // `make` and the function it returns have nets with no
+                // evaluation left from the start, so their calls run
+                // compiled.
+                compiled_application: 3,
             },
             "over-application through a returned function must not replay semantic work"
         );
         assert_eq!(
             profile.driver,
             NetDriverCounts {
-                machine_polls: 4,
-                work_items: 60,
-                interface_polls: 23,
+                // Compiled calls run no net machine.
+                machine_polls: 2,
+                work_items: 54,
+                interface_polls: 19,
                 cursor_steps: 9,
-                active_pair_steps: 22,
+                active_pair_steps: 20,
                 cursor_dependencies: 6,
                 blocked_retries: 0,
                 contentions: 0,
@@ -3872,6 +3877,66 @@ fn wrapped_functions_apply_their_operator() {
     )
     .expect("a wrapped function called from a net should access its argument");
     values.assert_same_representation_for_test(&called, &n(7));
+}
+
+/// Once a function's code net has no evaluation left, a call runs it
+/// compiled, which gives what the net would and keeps the constants it
+/// holds, here a lazy one, through a collection.
+#[test]
+fn compiled_function_calls_give_what_their_nets_would() {
+    let context = isolated_test_context();
+    let values = context.values();
+    let one = Value::Lazy(LazyValue::from_net_computation(
+        values,
+        NetValue::new(
+            lower_test_function_code_in(values, 0, TestExpr::Value(n(1)))
+                .runtime()
+                .duplicate_for_test(values),
+        ),
+    ));
+    let function = RuntimeValueRoot::new(
+        values,
+        closed_function_value_in(
+            values,
+            1,
+            builtin2_expr(Builtin::Add, TestExpr::Local(0), TestExpr::Value(one)),
+        ),
+    );
+    let compiled = || {
+        let Value::Function(function) = function.clone_core_for_test() else {
+            unreachable!("the fixture is a function");
+        };
+        values.with_runtime_value_access(|access| {
+            function
+                .stage()
+                .runtime()
+                .access(&access)
+                .compiled(1)
+                .is_some()
+        })
+    };
+    let call = |argument| {
+        eval_closed_expr_in(
+            &context,
+            &TestExpr::Apply(
+                Arc::new(TestExpr::Value(function.clone_core_for_test())),
+                Arc::new(TestExpr::Value(n(argument))),
+            ),
+        )
+        .expect("a call of the fixture should add one")
+    };
+
+    assert!(!compiled(), "a fresh code net still has evaluation left");
+    values.assert_same_representation_for_test(&call(1), &n(2));
+    assert!(
+        compiled(),
+        "the first call leaves the code net fully reduced"
+    );
+    values.assert_same_representation_for_test(&call(2), &n(3));
+    values
+        .collect_managed_for_test()
+        .expect("the compiled net's constants must survive a collection");
+    values.assert_same_representation_for_test(&call(41), &n(42));
 }
 
 #[test]

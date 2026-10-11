@@ -25,8 +25,8 @@ use crate::evaluation::{
     WakeRegistration,
 };
 use crate::interaction_net::{
-    RuntimeNet, RuntimeNetCell, RuntimeNetEdgeTransition, RuntimeNetMutationGateway,
-    RuntimeNetPayload, RuntimeNetPayloadDuplicator,
+    CompiledNet, RuntimeNet, RuntimeNetCell, RuntimeNetEdgeTransition, RuntimeNetMutationGateway,
+    RuntimeNetPayload, RuntimeNetPayloadDuplicator, Uncompiled,
 };
 use crate::runtime::RuntimeMutationAuthority;
 
@@ -91,6 +91,9 @@ pub(crate) struct ManagedPromiseCell {
 /// registered roots respectively.
 pub(crate) struct ManagedCoreNetCell {
     runtime: RuntimeNetCell<CoreSpecialization>,
+    /// The net compiled as a function of its arguments, set once it has no
+    /// evaluation left: `None` if it does not compile (`perf-compiled-nets`).
+    compiled: OnceLock<Option<Box<CompiledNet<CoreSpecialization>>>>,
 }
 
 pub(crate) struct ManagedLazyEdge(Gc<ManagedLazyCell>);
@@ -182,6 +185,7 @@ impl ManagedCoreNetCell {
     fn new(runtime: RuntimeNet<CoreSpecialization>) -> Self {
         Self {
             runtime: RuntimeNetCell::new(runtime),
+            compiled: OnceLock::new(),
         }
     }
 }
@@ -1326,6 +1330,60 @@ impl<'access, 'scope> ManagedCoreNetAccess<'access, 'scope> {
     pub(crate) fn cell(&self) -> &RuntimeNetCell<CoreSpecialization> {
         &self.cell.runtime
     }
+
+    /// This net compiled as a function of `inputs` arguments, compiling it
+    /// first if it has no evaluation left; `None` while it has some, or if
+    /// it does not compile.
+    pub(crate) fn compiled(
+        &self,
+        inputs: usize,
+    ) -> Option<&'access CompiledNet<CoreSpecialization>> {
+        let cell = self.cell;
+        if cell.compiled.get().is_none() {
+            // The net mutex orders compilers, and a net with no evaluation
+            // left never changes, so the first to find it so compiles it.
+            cell.runtime.with(|runtime| {
+                if cell.compiled.get().is_some() {
+                    return;
+                }
+                let compiled =
+                    match runtime.compile(inputs, self.authority, CoreOperator::remaining_operands)
+                    {
+                        Ok(compiled) => Some(Box::new(compiled)),
+                        Err(Uncompiled::Evaluating) => return,
+                        Err(Uncompiled::Unsupported) => None,
+                    };
+                let compiled = RefCell::new(Some(compiled));
+                // SAFETY: the cell belongs to this exact access region and
+                // its slot is empty, so nothing leaves; the adding visitor
+                // reports every payload the compiled net holds.
+                unsafe {
+                    self.authority.with_managed_edge_transition(
+                        &self.owner.0,
+                        |_| {},
+                        |visitor| {
+                            if let Some(Some(compiled)) = compiled.borrow().as_ref() {
+                                compiled.visit_payloads(&mut |payload| {
+                                    trace_core_runtime_payload(payload, visitor);
+                                });
+                            }
+                        },
+                        || {
+                            let compiled = compiled.borrow_mut().take();
+                            let installed = cell
+                                .compiled
+                                .set(compiled.expect("a compiled net is installed exactly once"));
+                            assert!(installed.is_ok(), "the net mutex orders compilers");
+                        },
+                    )
+                }
+            });
+        }
+        cell.compiled
+            .get()?
+            .as_deref()
+            .filter(|compiled| compiled.inputs() == inputs)
+    }
 }
 
 impl RuntimeNetPayloadDuplicator<CoreSpecialization> for RuntimeValueAccess<'_> {
@@ -1518,6 +1576,11 @@ unsafe impl Trace for ManagedCoreNetCell {
         self.runtime.try_visit_logical_payloads(&mut |payload| {
             trace_core_runtime_payload(payload, visitor);
         });
+        if let Some(Some(compiled)) = self.compiled.get() {
+            compiled.visit_payloads(&mut |payload| {
+                trace_core_runtime_payload(payload, visitor);
+            });
+        }
     }
 }
 
@@ -1569,7 +1632,7 @@ const _: () = {
     assert!(std::mem::align_of::<ManagedPromiseCell>() == 8);
     // Test builds add the runtime net's polarity-check flag. The runtime
     // net's three node maps use the zero-sized trusted hasher state.
-    assert!(std::mem::size_of::<ManagedCoreNetCell>() == 200 + if cfg!(test) { 8 } else { 0 });
+    assert!(std::mem::size_of::<ManagedCoreNetCell>() == 216 + if cfg!(test) { 8 } else { 0 });
     assert!(std::mem::align_of::<ManagedCoreNetCell>() == 8);
     assert!(std::mem::size_of::<ManagedLazyRoot>() == 32);
     assert!(std::mem::align_of::<ManagedLazyRoot>() == 8);
@@ -1887,9 +1950,9 @@ mod tests {
                 ManagedPromiseCell,
             >())
         );
-        // 200 bytes in production; test builds add the runtime net's
-        // polarity-check flag.
-        assert_eq!(std::mem::size_of::<ManagedCoreNetCell>(), 208);
+        // 216 bytes in production, with the compiled net's slot; test
+        // builds add the runtime net's polarity-check flag.
+        assert_eq!(std::mem::size_of::<ManagedCoreNetCell>(), 224);
         assert_eq!(std::mem::align_of::<ManagedCoreNetCell>(), 8);
         assert_eq!(
             <ManagedCoreNetCell as Trace>::REQUESTED_SLOT_SIZE,

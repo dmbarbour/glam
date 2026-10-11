@@ -1,6 +1,7 @@
 use super::*;
 use crate::core::{RuntimeValueAccess, WrappedOperator};
 use crate::evaluation::EvaluationValueAccess;
+use crate::interaction_net::{CompiledNet, CompiledOperand};
 
 pub(crate) fn apply_arity_operator(
     _access: &RuntimeValueAccess<'_>,
@@ -79,11 +80,7 @@ pub(crate) fn access_operator(
     path: Arc<[CoreDataKey]>,
     supplied: Arc<[Value]>,
 ) -> CoreOperator {
-    let arity = 1 + path
-        .iter()
-        .filter(|key| !matches!(key, CoreDataKey::Key(_)))
-        .count();
-    assert!(supplied.len() < arity);
+    assert!(supplied.len() < crate::core_net::access_arity(&path));
     CoreOperator::Access { path, supplied }
 }
 
@@ -114,6 +111,65 @@ pub(super) fn apply_wrapped_operator(
     }
 }
 
+/// Applies a compiled net to its inputs, giving what the net would: each
+/// step's operator applied to its operands in order (`perf-compiled-nets`).
+pub(super) fn apply_compiled(
+    access: &EvaluationValueAccess<'_>,
+    compiled: &CompiledNet<CoreSpecialization>,
+    inputs: &[Value],
+) -> Value {
+    assert_eq!(
+        inputs.len(),
+        compiled.inputs(),
+        "a compiled net applies to all its inputs"
+    );
+    #[cfg(feature = "glam-prof")]
+    access
+        .values()
+        .values()
+        .interaction_net_profile()
+        .record_reduction(crate::interaction_net::profiling::ReductionEvent::CompiledApplication);
+    let mut results = Vec::with_capacity(compiled.steps().len());
+    for step in compiled.steps() {
+        let mut operator = None;
+        let mut result = None;
+        for operand in &step.operands {
+            debug_assert!(
+                result.is_none(),
+                "a compiled step yields at its last operand"
+            );
+            let current = operator.as_ref().unwrap_or(&step.operator);
+            let operand = compiled_operand(access, operand, inputs, &results);
+            match apply_operator(access, current, operand)
+                .expect("a compiled step's operator takes each of its operands")
+            {
+                OperatorYield::Operator(next) => operator = Some(next),
+                OperatorYield::Data(data) => result = Some(data),
+            }
+        }
+        results.push(result.expect("a compiled step's operands saturate its operator"));
+    }
+    access.values().duplicate_value(compiled_operand(
+        access,
+        compiled.result(),
+        inputs,
+        &results,
+    ))
+}
+
+fn compiled_operand<'value>(
+    _access: &EvaluationValueAccess<'_>,
+    operand: &'value CompiledOperand<CoreSpecialization>,
+    inputs: &'value [Value],
+    results: &'value [Value],
+) -> &'value Value {
+    match operand {
+        CompiledOperand::Input(input) => &inputs[*input],
+        CompiledOperand::Constant(value) => value,
+        CompiledOperand::Step(step) => &results[*step],
+    }
+}
+
 /// The value an access operator yields once it has all its operands.
 fn access_value(
     access: &RuntimeValueAccess<'_>,
@@ -141,6 +197,54 @@ pub(crate) fn request_operator(
 }
 
 pub(super) fn apply_core_operator(
+    access: &EvaluationValueAccess<'_>,
+    operator: &CoreOperator,
+    data: &Value,
+) -> Result<OperatorYield<CoreSpecialization>, EvaluationHalt> {
+    if let CoreOperator::ComputationCaptures { code, supplied } = operator
+        && let Some(value) = eagerly_completed_thunk(access, code, supplied, data)
+    {
+        return Ok(OperatorYield::Data(value));
+    }
+    apply_operator(access, operator, data)
+}
+
+/// A thunk's value, if `operand` is its last capture and its code is
+/// compiled and builds no code of its own. Running the code then only
+/// builds values, as building its net would, so the thunk may as well be
+/// its result. Compiled code that builds code runs only when its thunk is
+/// forced, which also keeps running compiled code from nesting.
+fn eagerly_completed_thunk(
+    access: &EvaluationValueAccess<'_>,
+    code: &FunctionCode,
+    supplied: &[Value],
+    operand: &Value,
+) -> Option<Value> {
+    if supplied.len() + 1 != code.capture_count() {
+        return None;
+    }
+    let compiled = code
+        .runtime()
+        .access(access.values())
+        .compiled(code.capture_count())?;
+    let builds_closures = compiled
+        .steps()
+        .iter()
+        .any(|step| matches!(step.operator, CoreOperator::FunctionCaptures { .. }));
+    if builds_closures {
+        return None;
+    }
+    let captures = supplied
+        .iter()
+        .chain([operand])
+        .map(|value| access.values().duplicate_value(value))
+        .collect::<Vec<_>>();
+    Some(apply_compiled(access, compiled, &captures))
+}
+
+/// Applies `operator` to `data`. A completed thunk over compiled code runs
+/// it when forced.
+fn apply_operator(
     access: &EvaluationValueAccess<'_>,
     operator: &CoreOperator,
     data: &Value,
@@ -210,6 +314,19 @@ pub(super) fn apply_core_operator(
                     code.clone(),
                     Arc::from(captures),
                 )));
+            }
+            // A thunk over compiled code runs it when forced.
+            let compiled = code
+                .runtime()
+                .access(access.values())
+                .compiled(captures.len());
+            if compiled.is_some() {
+                let code = NetValue::new(code.duplicate_runtime_in(access.values()));
+                return Ok(OperatorYield::Data(Value::Lazy(LazyValue::from_thunk_in(
+                    access.values(),
+                    code,
+                    Arc::from(captures),
+                ))));
             }
             let stage = NetValue::new(code.duplicate_runtime_in(access.values()));
             let stage = attach_net_many_in(access.values(), stage, captures);
@@ -295,10 +412,7 @@ pub(super) fn apply_core_operator(
             ))))
         }
         CoreOperator::Access { path, supplied } => {
-            let arity = 1 + path
-                .iter()
-                .filter(|key| !matches!(key, CoreDataKey::Key(_)))
-                .count();
+            let arity = crate::core_net::access_arity(path);
             let mut arguments = supplied
                 .iter()
                 .map(|value| access.values().duplicate_value(value))

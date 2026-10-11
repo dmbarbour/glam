@@ -122,7 +122,8 @@ while the net mutex is held.
 - **Machines.** `LazySource::NetComputation` (the zero-arity bridge) and
   `LazySource::FunctionCall` install a `NetWhnfMachine` in a managed
   net-WHNF lazy checkpoint. A function call first instantiates a small
-  application-spine net around the function's stage (`attach_net_many_in`).
+  application-spine net around the function's stage (`attach_net_many_in`),
+  unless the stage is compiled (see "Nets With No Evaluation Left").
 - **Polling.** `LazyTaskMachine::poll_net_whnf_checkpoint` (`eval/value.rs`)
   polls the machine under the checkpoint mutex, inside one access region.
   See [`evaluation.md`](evaluation.md) "Lazy Producers".
@@ -275,6 +276,33 @@ The finish depends on the source port wired to `remote`:
 
 Anchors stay valid because the frontier advances only through principals.
 See the agent note's "Logical Copies and Cursors" and "Fans".
+
+## Nets With No Evaluation Left
+
+A net with no active pair, copy, cursor obligation or callable checkpoint
+never changes again: nets change after construction only by evaluation.
+
+- **Whole copies.** `prepare_copy_source` captures such a net of at most 64
+  nodes under its lock, and the copy installs it in one transition
+  (decision `reduced-sources-copy-whole`).
+- **Compiled nets.** `RuntimeNet::compile` reads such a net as a function
+  of n arguments: n spine binds from the interface, then the body. If each
+  interaction left once arguments arrive only builds a value (an operator
+  meets data, a fan copies it, an eraser drops it, an application bind
+  passes an operator its next operand), it compiles to steps: each an
+  operator applied to arguments, constants or earlier steps, as many as
+  it takes to yield data. Anything else, a dropped step included, does not
+  compile.
+- **Storage.** `ManagedCoreNetCell` holds the outcome once, compiled or
+  not, set under the net mutex through an exact-delta edge transition, and
+  traces it. A net with evaluation left is asked again at its next use.
+- **Use.** `apply_compiled` (`eval/operator.rs`) runs the steps through the
+  operators' own semantics. A saturated call (`apply_whnf_function`) and a
+  forced `LazySource::FunctionCall` run a compiled stage instead of
+  building a net. A completed thunk over compiled code runs it at once
+  unless it builds closures; otherwise it becomes a `FunctionCall` over the
+  code, run when forced. Thunks completed inside compiled steps always
+  wait, so compiled runs never nest (decision `compiled-nets`).
 
 ## Core Specialization
 

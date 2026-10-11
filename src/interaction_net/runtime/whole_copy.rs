@@ -12,7 +12,7 @@ use super::*;
 /// works under the source's lock and copies parts its caller may never
 /// demand; the sources measured average about five nodes and reach twenty
 /// (`perf-reduced-source-copy`).
-const WHOLE_COPY_MAX_NODES: usize = 64;
+pub(super) const WHOLE_COPY_MAX_NODES: usize = 64;
 
 /// A source net with no evaluation left, captured for one copy: the nodes
 /// reachable from its interface, each with its payload duplicated and the

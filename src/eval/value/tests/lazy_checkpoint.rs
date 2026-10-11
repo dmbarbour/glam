@@ -1861,11 +1861,17 @@ fn object_checkpoint_does_not_replay_mixin_stages_after_route_loss() {
     assert_eq!(defs_demands.load(Ordering::SeqCst), 1);
     #[cfg(feature = "glam-prof")]
     {
-        // An application net starts with its function copied in, so each
-        // application commits as its spine joining the function's.
+        // An application commits as its spine joining the function's
+        // copied net, or as one compiled run once the function's net is
+        // fully reduced, as these constant functions' nets are from the
+        // start.
         let profile_after = context.values().interaction_net_profile_snapshot();
+        let commits =
+            |profile: &crate::interaction_net::profiling::InteractionNetProfileSnapshot| {
+                profile.reductions.bind_join + profile.reductions.compiled_application
+            };
         assert_eq!(
-            profile_after.reductions.bind_join - profile_before.reductions.bind_join,
+            commits(&profile_after) - commits(&profile_before),
             2,
             "the base and self mixin applications must each commit exactly once"
         );

@@ -1358,6 +1358,141 @@ fn only_small_nets_with_no_evaluation_left_copy_whole() {
     assert_eq!(whole(&copying), None);
 }
 
+/// A normal function net compiles to the steps applying it takes: each
+/// operator applied to inputs, copies of them, constants or earlier
+/// results, as many as it takes.
+#[test]
+fn normal_function_nets_compile_to_operator_steps() {
+    type Body = fn(&mut NetBuilder<i32>, &[Port]) -> Port;
+    fn operator(name: &'static str) -> TestOperator<i32> {
+        TestOperator::new(name, |_| unreachable!("compiling runs no operator"))
+    }
+    // Drops an argument the body does not use.
+    fn erase(builder: &mut NetBuilder<i32>, port: Port) {
+        let erase = builder.push(Node::Erase);
+        builder.wire(port, Port::principal(erase));
+    }
+    // Applies `name` to `first`; a second operand comes through a bind the
+    // operator's result faces until it yields.
+    fn apply(
+        builder: &mut NetBuilder<i32>,
+        name: &'static str,
+        first: Port,
+        second: Option<Port>,
+    ) -> Port {
+        let [input, mut output] = builder.operator(operator(name));
+        builder.wire(first, input);
+        if let Some(second) = second {
+            let [application, argument, result] = builder.bind();
+            builder.wire(output, application);
+            builder.wire(second, argument);
+            output = result;
+        }
+        output
+    }
+    // Compiles a function of two arguments as one of `inputs`, written as
+    // its steps and result.
+    let compile = |inputs: usize, body: Body| {
+        let mut builder = NetBuilder::<i32>::new();
+        let spine = builder.function_spine(2);
+        let result = body(&mut builder, &spine.arguments);
+        builder.wire(result, spine.result);
+        let net = builder.finish(spine.input).instantiate();
+        let operands = |operator: &TestOperator<i32>| if operator.name == "one" { 1 } else { 2 };
+        let compiled = net.compile(inputs, &DIRECT_RUNTIME_NET_MUTATION_GATEWAY, operands)?;
+        let operand = |operand: &CompiledOperand<i32>| match operand {
+            CompiledOperand::Input(input) => format!("in{input}"),
+            CompiledOperand::Constant(data) => format!("{data}"),
+            CompiledOperand::Step(step) => format!("s{step}"),
+        };
+        let steps = compiled.steps().iter().map(|step| {
+            let operands = step.operands.iter().map(operand).collect::<Vec<_>>();
+            format!("{}({}), ", step.operator.name, operands.join(" "))
+        });
+        Ok(format!(
+            "{}{}",
+            steps.collect::<String>(),
+            operand(compiled.result())
+        ))
+    };
+
+    // One operator on the second argument; the first is unused.
+    assert_eq!(
+        compile(2, |builder, arguments| {
+            erase(builder, arguments[0]);
+            apply(builder, "one", arguments[1], None)
+        }),
+        Ok("one(in1), s0".to_owned())
+    );
+    // An argument copied to two operands, a constant, and a chain.
+    assert_eq!(
+        compile(2, |builder, arguments| {
+            erase(builder, arguments[1]);
+            let copy = builder.copy(2);
+            builder.wire(arguments[0], copy.input);
+            let constant = builder.data(5);
+            let first = apply(builder, "two", copy.outputs[0], Some(constant));
+            apply(builder, "two", first, Some(copy.outputs[1]))
+        }),
+        Ok("two(in0 5), two(s0 in0), s1".to_owned())
+    );
+    // A body that is an argument takes no step.
+    assert_eq!(
+        compile(2, |builder, arguments| {
+            erase(builder, arguments[0]);
+            arguments[1]
+        }),
+        Ok("in1".to_owned())
+    );
+
+    // Evaluation left: an operator facing a constant.
+    assert_eq!(
+        compile(2, |builder, arguments| {
+            erase(builder, arguments[0]);
+            erase(builder, arguments[1]);
+            let constant = builder.data(5);
+            apply(builder, "one", constant, None)
+        }),
+        Err(Uncompiled::Evaluating)
+    );
+    // An operator left wanting an operand, an argument called as a
+    // function, a step whose result is dropped, and the wrong number of
+    // arguments.
+    let unsupported: [(usize, Body); 4] = [
+        (2, |builder, arguments| {
+            erase(builder, arguments[0]);
+            apply(builder, "two", arguments[1], None)
+        }),
+        (2, |builder, arguments| {
+            erase(builder, arguments[0]);
+            let [application, argument, result] = builder.bind();
+            builder.wire(arguments[1], application);
+            let constant = builder.data(5);
+            builder.wire(constant, argument);
+            result
+        }),
+        (2, |builder, arguments| {
+            erase(builder, arguments[0]);
+            let copy = builder.copy(2);
+            builder.wire(arguments[1], copy.input);
+            let dropped = apply(builder, "one", copy.outputs[0], None);
+            erase(builder, dropped);
+            copy.outputs[1]
+        }),
+        (1, |builder, arguments| {
+            erase(builder, arguments[0]);
+            arguments[1]
+        }),
+    ];
+    for (index, (inputs, body)) in unsupported.into_iter().enumerate() {
+        assert_eq!(
+            compile(inputs, body),
+            Err(Uncompiled::Unsupported),
+            "case {index}"
+        );
+    }
+}
+
 /// Rewrites at the far end of a long chain move the active pair toward the
 /// interface one node at a time. Each interface walk resumes the route the
 /// demanding evaluation recorded from the last one, which keeps the newest

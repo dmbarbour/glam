@@ -1710,6 +1710,19 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                         }
                         LazySource::FunctionCall { stage, arguments } => {
                             let installed = context.with_value_access(|access| {
+                                // A compiled stage gives the call's result
+                                // directly, to evaluate as this lazy's value.
+                                let compiled = (stage.runtime())
+                                    .access(access.values())
+                                    .compiled(arguments.len());
+                                if let Some(compiled) = compiled {
+                                    let value = super::operator::apply_compiled(&access, compiled, &arguments);
+                                    let work =
+                                        super::whnf::RegionalWhnfWork::from_focus(&access, value);
+                                    return self
+                                        .install_regional_whnf_in(&access, work)
+                                        .then_some(LazyTaskWork::WhnfCheckpoint);
+                                }
                                 let machine = NetWhnfMachine::from_function_call(
                                     &access, &stage, &arguments,
                                 );
@@ -1724,9 +1737,10 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                                     .lazy_root(&self.lazy)
                                     .install_checkpoint(checkpoint)
                                     .is_ok()
+                                    .then_some(LazyTaskWork::NetWhnfCheckpoint)
                             });
-                            if installed {
-                                LazyTaskWork::NetWhnfCheckpoint
+                            if let Some(work) = installed {
+                                work
                             } else if let Some(work) = self.checkpoint_work(context) {
                                 work
                             } else {

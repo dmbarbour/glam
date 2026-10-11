@@ -11,11 +11,13 @@ use crate::counted_condvar::CountedCondvar;
 
 use super::model::*;
 
+mod compiled;
 mod cursor;
 mod graph;
 mod rewrite;
 mod whole_copy;
 
+pub(crate) use compiled::{CompiledNet, CompiledOperand, Uncompiled};
 pub(crate) use cursor::PreparedCopySource;
 pub(crate) use whole_copy::WholeCopy;
 

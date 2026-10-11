@@ -1435,12 +1435,7 @@ pub(crate) enum WrappedOperator {
 impl WrappedOperator {
     pub(crate) fn arity(&self) -> usize {
         match self {
-            Self::Access(path) => {
-                1 + path
-                    .iter()
-                    .filter(|key| !matches!(key, CoreDataKey::Key(_)))
-                    .count()
-            }
+            Self::Access(path) => crate::core_net::access_arity(path),
         }
     }
 }
@@ -2006,6 +2001,23 @@ impl LazyValue {
             LazySource::FunctionCall {
                 stage: function.into_stage(),
                 arguments,
+            },
+        )
+    }
+
+    /// A thunk over `code` with its `captures`: a call of the code, made when
+    /// the thunk is forced.
+    pub(crate) fn from_thunk_in(
+        access: &RuntimeValueAccess<'_>,
+        code: NetValue,
+        captures: Arc<[Value]>,
+    ) -> Self {
+        Self::with_source_in(
+            access,
+            "net computation",
+            LazySource::FunctionCall {
+                stage: code,
+                arguments: captures,
             },
         )
     }

@@ -665,6 +665,44 @@ maps the short names used here to file names.
 - **Recorded in:** structural overheads plan,
   `perf-thin-wrapper-applications`.
 
+### Nets with no evaluation left compile to operator steps
+`compiled-nets` · 2026-10-11 · maintainer · accepted
+- **Context:** after thin-wrapper calls, most applications left were
+  chains such as `\c -> f (thunk c)` and `\c -> g c 1`, whose code net
+  holds `f` or `g` only once it has reduced. The maintainer prefers
+  modeling direct execution as an acceleration attached to a net, which
+  annotations request (`anno 'normalize`, `anno 'compile`), over programs
+  lowering emits; lowering may fold the annotation for code it generates.
+- **Decision:**
+  - A net with no evaluation left compiles, read as a function of its
+    arguments, when each interaction left once they arrive only builds a
+    value: to steps, each an operator applied to arguments, constants or
+    earlier steps until it yields data. Anything else stays a net.
+  - The managed net cell holds the outcome once, set under the net mutex
+    through an exact-delta edge transition, and traces it. A function
+    value and its code share the cell; the net cannot change after it.
+  - Saturated calls, forced function-call lazies and completed thunks run
+    a compiled net instead of building an applied net. Compiling only a
+    normal net keeps sharing: a closure's stage compiles with what its
+    captures started as constants.
+  - A completed thunk runs compiled code at once unless the code builds
+    closures, which would build nets a thunk never forced does not need;
+    otherwise it waits for a force. Thunks completed inside compiled steps
+    always wait, so compiled runs never nest on the Rust stack.
+- **Consequences:**
+  - Instructions fall 26.3% (`countdown_800`), 38.2% (`list_map_2000`),
+    36.0% (`list_sum_400`), 30.2% (`append_walk_800`), 32.8% (`sum_800`)
+    and 23.7% (`hello_elf`), and up to 2.1% elsewhere, with no
+    regressions.
+  - Code applied once, such as `do_chain`'s per-step thunks, gains
+    nothing until normalization runs before a first application.
+  - The managed net cell grows from 200 to 216 bytes.
+- **Rule lives in:** `RuntimeNet::compile`
+  (`interaction_net/runtime/compiled.rs`); `ManagedCoreNetAccess::compiled`
+  (`core/managed/recursive_cells.rs`); `apply_compiled` and
+  `eagerly_completed_thunk` (`eval/operator.rs`).
+- **Recorded in:** structural overheads plan, `perf-compiled-nets`.
+
 ### Interface demand walks resume from the surviving part of their route
 `interface-walks-resume` · 2026-10-10 · maintainer · accepted
 - **Context:** a demand poll walked from the interface to the active pair
