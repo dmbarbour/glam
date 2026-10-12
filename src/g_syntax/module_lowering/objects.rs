@@ -23,14 +23,7 @@ pub(in crate::g_syntax) fn lower_object(
         name,
         declared_target_has_reflection(&object.target),
     )?;
-    let target_context =
-        DefinitionTargetContext::new(access, &definitions_root, line, context, &scope);
-    let object_value = target_context.annotate_static(
-        BuiltinAssertion::Undefined,
-        &object.target,
-        object_value,
-        &mut locals,
-    )?;
+    // The module's journal checks the introduction.
     let object_value =
         annotate_definition_context(access, object_value, &object.target, line, context);
     Ok(update_module_resolved(
@@ -263,6 +256,7 @@ pub(in crate::g_syntax) fn lower_object_body_item_resolved(
             context,
             definitions,
             scope,
+            false,
             locals,
         ),
         ObjectBodyDefinitionKind::Object(object) => lower_nested_object_resolved(

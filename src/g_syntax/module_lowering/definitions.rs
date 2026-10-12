@@ -160,6 +160,10 @@ impl<'a> DefinitionTargetContext<'a> {
     }
 }
 
+/// Lowers a definition. A `journaled` one is a module's: its journal and
+/// the reflection boundary's replay check its introduction of a static
+/// target, in place of a run-time assertion (`perf-definition-assertions`).
+#[allow(clippy::too_many_arguments)]
 pub(in crate::g_syntax) fn lower_definition_resolved(
     access: &RuntimeValueAccess<'_>,
     definition: &DefinitionDecl,
@@ -167,6 +171,7 @@ pub(in crate::g_syntax) fn lower_definition_resolved(
     context: &CompileContext,
     definitions: &ResolvedRoot,
     scope: &NameScope<ResolvedRoot>,
+    journaled: bool,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let Some(expr) = &definition.expr else {
@@ -179,15 +184,20 @@ pub(in crate::g_syntax) fn lower_definition_resolved(
         DefinitionTargetContext::new(access, definitions, line, context, &target_scope);
     let (assertion, value) = match definition.kind {
         DefinitionKind::Introduce | DefinitionKind::Override => {
+            let static_target = definition
+                .target
+                .iter()
+                .all(|key| matches!(key, SyntaxKeyExpr::Atom(_)));
             let assertion = match definition.kind {
-                DefinitionKind::Introduce => BuiltinAssertion::Undefined,
-                DefinitionKind::Override => BuiltinAssertion::Defined,
+                DefinitionKind::Introduce if journaled && static_target => None,
+                DefinitionKind::Introduce => Some(BuiltinAssertion::Undefined),
+                DefinitionKind::Override => Some(BuiltinAssertion::Defined),
                 DefinitionKind::Update => unreachable!(),
             };
             let value = syntax_expr_to_resolved_in_semantic_scope(
                 access, expr, line, context, scope, locals,
             )?;
-            (Some(assertion), value)
+            (assertion, value)
         }
         DefinitionKind::Update => (
             None,

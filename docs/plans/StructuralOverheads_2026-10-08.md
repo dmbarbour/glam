@@ -170,7 +170,11 @@ Steps:
     override of a path no journal records is not an error: names come
     from outside journals too, such as the assembler's `asm.args` or a
     dict's members (`f = {a: 1}` then `f.a := 2`). `:=` keeps its
-    run-time `assert_defined` for now (agent; low confidence).
+    run-time `assert_defined` until this is settled. The maintainer would
+    not keep it: names from outside should reach the journal at other
+    layers, e.g. the assembler journaling what it provides or expects
+    (`asm.result`, `env`) first, and an `assume name` declaration for
+    journal analysis. Options to discuss.
   - Defining a path defines each namespace on the way, as in the
     compile-time check, so `refl := {}` after `refl.x = ...` stands.
   - A definition within a nested namespace's `refl`, `meta` or `spec`
@@ -185,7 +189,18 @@ Steps:
     and reading compiler-written ops synchronously, halved the replay
     (about 11 K instructions per entry before).
 - `defs-drop-assertions`: module definitions, object declarations,
-  `extend` and `language` lose their run-time assertions.
+  `extend` and `language` lose their run-time assertions. Done 2026-10-12
+  for introductions: a module's `=` with a static target and its object
+  declarations no longer assert. `:=` and `extend` keep `assert_defined`
+  until overrides are settled (see `defs-journal-check`), a computed
+  target keeps its assertions, and
+  `language`'s assertion is on a macro environment object's member, so it
+  waits for objects. Instructions against `b7fd0c42`: `chain` -53.7%,
+  `defs_unused` -33.6%, `chain_refl` -49.6%; `hello_elf` +0.6%,
+  `countdown` +2.2%, `list_map` +7.0%, `minimal` +41% (17.6 M to 24.8 M).
+  The small programs' cost is mostly the `asm` namespace's boundary,
+  whose scanner is a second reflection task (`list_map`'s reflection
+  steps rise from 492 to 853).
 - `defs-with-union`: dict `with` lowers `=` to union and `:=` to update.
 - Objects' members follow once the module form settles.
 

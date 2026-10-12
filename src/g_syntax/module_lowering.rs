@@ -382,6 +382,7 @@ fn resolve_module_definition(
         context,
         &ResolvedRoot::Provided(definitions),
         &scope.resolved_in(access),
+        true,
         &mut locals,
     )
 }
