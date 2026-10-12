@@ -165,7 +165,25 @@ Steps:
   journal updates (`asm` and the host).
 - `defs-journal-check`: each reflection boundary replays its namespace's
   final journal and logs conflicts as errors; nested definitions carry
-  their namespace's boundary.
+  their namespace's boundary. Done 2026-10-12.
+  - The replay reports only introductions of a path already defined. An
+    override of a path no journal records is not an error: names come
+    from outside journals too, such as the assembler's `asm.args` or a
+    dict's members (`f = {a: 1}` then `f.a := 2`). `:=` keeps its
+    run-time `assert_defined` for now (agent; low confidence).
+  - Defining a path defines each namespace on the way, as in the
+    compile-time check, so `refl := {}` after `refl.x = ...` stands.
+  - A definition within a nested namespace's `refl`, `meta` or `spec`
+    keeps the module's boundary alone, as macros read `meta` while
+    compiling.
+  - The CLI prints both definitions' `g: line N` frames but not their
+    files; `g` frames never show the origin's file yet.
+  - Instructions against `b7fd0c42`, before dropping any assertion:
+    `minimal` +45% (17.6 M to 25.4 M: the `asm` boundary 5.3 M, the
+    journals' recording and replay the rest), `chain` +2.5%,
+    `defs_unused` +3.8%. Interning keys once per flush and per replay,
+    and reading compiler-written ops synchronously, halved the replay
+    (about 11 K instructions per entry before).
 - `defs-drop-assertions`: module definitions, object declarations,
   `extend` and `language` lose their run-time assertions.
 - `defs-with-union`: dict `with` lowers `=` to union and `:=` to update.

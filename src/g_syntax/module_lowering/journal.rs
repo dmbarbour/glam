@@ -85,6 +85,17 @@ impl PendingJournal {
         context: &CompileContext,
         mut definitions: Value,
     ) -> Value {
+        if self.namespaces.is_empty() {
+            return definitions;
+        }
+        let parts = EntryParts {
+            op: name_as_key("op"),
+            at: name_as_key("at"),
+            intro: name_as_key(JournalOp::Introduce.tag()),
+            over: name_as_key(JournalOp::Override.tag()),
+            update: name_as_key(JournalOp::Update.tag()),
+            origin: context.opaque_origin(access),
+        };
         for (namespace, entries) in std::mem::take(&mut self.namespaces) {
             let target = namespace
                 .iter()
@@ -104,7 +115,7 @@ impl PendingJournal {
                 .chain(
                     entries
                         .into_iter()
-                        .map(|entry| journal_entry_in(access, context, entry)),
+                        .map(|entry| parts.entry_in(access, entry)),
                 )
                 .collect();
             definitions = lower_resolved_expr_in(
@@ -121,31 +132,41 @@ impl PendingJournal {
     }
 }
 
-fn journal_entry_in(
-    access: &RuntimeValueAccess<'_>,
-    context: &CompileContext,
-    entry: JournalEntry,
-) -> Value {
-    let path = entry
-        .path
-        .iter()
-        .map(|key| key.to_value_in(access))
-        .collect::<Vec<_>>();
-    let op = Dict::new_sync().insert(
-        name_as_key(entry.op.tag()),
-        Value::List(List::from_values(path)),
-    );
-    let mut location = Dict::new_sync().insert(
-        (*keys::LINE).clone(),
-        Value::Number(crate::number::Number::from_usize(entry.line)),
-    );
-    if let Some(origin) = context.opaque_origin(access) {
-        location = location.insert((*keys::ORIGIN).clone(), origin);
+/// What every entry written at once shares.
+struct EntryParts {
+    op: Key,
+    at: Key,
+    intro: Key,
+    over: Key,
+    update: Key,
+    origin: Option<Value>,
+}
+
+impl EntryParts {
+    fn entry_in(&self, access: &RuntimeValueAccess<'_>, entry: JournalEntry) -> Value {
+        let path = entry
+            .path
+            .iter()
+            .map(|key| key.to_value_in(access))
+            .collect::<Vec<_>>();
+        let tag = match entry.op {
+            JournalOp::Introduce => &self.intro,
+            JournalOp::Override => &self.over,
+            JournalOp::Update => &self.update,
+        };
+        let op = Dict::new_sync().insert(tag.clone(), Value::List(List::from_values(path)));
+        let mut location = Dict::new_sync().insert(
+            (*keys::LINE).clone(),
+            Value::Number(crate::number::Number::from_usize(entry.line)),
+        );
+        if let Some(origin) = &self.origin {
+            location = location.insert((*keys::ORIGIN).clone(), access.duplicate_value(origin));
+        }
+        let at = Dict::new_sync().insert((*keys::G).clone(), Value::Dict(location));
+        Value::Dict(
+            Dict::new_sync()
+                .insert(self.op.clone(), Value::Dict(op))
+                .insert(self.at.clone(), Value::Dict(at)),
+        )
     }
-    let at = Dict::new_sync().insert((*keys::G).clone(), Value::Dict(location));
-    Value::Dict(
-        Dict::new_sync()
-            .insert(name_as_key("op"), Value::Dict(op))
-            .insert(name_as_key("at"), Value::Dict(at)),
-    )
 }

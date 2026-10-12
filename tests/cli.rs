@@ -361,6 +361,70 @@ fn import_as_inherits_assembly_env() {
     assert_eq!(output.stderr, b"");
 }
 
+/// A conflict between files is logged as an error by the reflection
+/// boundary of the namespace it is in, only once a definition in that
+/// namespace is forced, and fails the run.
+#[test]
+fn cross_file_definition_conflicts_are_logged_when_their_namespace_is_used() {
+    let dir = unique_temp_dir("glam-definition-conflicts");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|err| panic!("failed to create temp dir {}: {err}", dir.display()));
+    let write = |name: &str, text: &str| {
+        let path = dir.join(name);
+        fs::write(&path, text)
+            .unwrap_or_else(|err| panic!("failed to write {}: {err}", path.display()));
+        path
+    };
+    write("part.g", "language g0\nfoo = 1\n");
+    write(
+        "lib.g",
+        "language g0\nimport \"part.g\"\nfoo = 2\nresult = \"lib\"\n",
+    );
+    write("message.g", "language g0\nmessage = \"m\"\n");
+    let run = |main: &str| {
+        let main = write("main.g", main);
+        let output = glam_command()
+            .arg("--file")
+            .arg(&main)
+            .output()
+            .expect("failed to run glam");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+
+    let (success, stdout, stderr) =
+        run("language g0\nimport \"lib.g\" as lib\nasm.result = \"unused\"\n");
+    assert!(success, "stderr: {stderr}");
+    assert_eq!((stdout.as_str(), stderr.as_str()), ("unused", ""));
+
+    let (success, stdout, stderr) =
+        run("language g0\nimport \"lib.g\" as lib\nasm.result = lib.result\n");
+    assert!(!success);
+    assert_eq!(stdout, "lib");
+    assert_eq!(
+        stderr,
+        concat!(
+            "error: cannot introduce `foo` because it is already defined\n",
+            "  context:\n    g: line 3\n    g: line 2\n",
+        )
+    );
+
+    // A nested definition is checked against its namespace's journal.
+    let nested = "language g0\nimport \"message.g\" as m\nm.message = \"again\"\nm.extra = \"x\"\n";
+    let (success, _, stderr) = run(&format!("{nested}asm.result = \"unused\"\n"));
+    assert!(success, "stderr: {stderr}");
+    let (success, stdout, stderr) = run(&format!("{nested}asm.result = m.extra\n"));
+    assert!(!success);
+    assert_eq!(stdout, "x");
+    assert!(
+        stderr.starts_with("error: cannot introduce `message` because it is already defined\n"),
+        "stderr: {stderr}"
+    );
+}
+
 #[test]
 fn configuration_files_compose_using_path_separator() {
     let dir = unique_temp_dir("glam-conf-path-list");

@@ -7212,6 +7212,37 @@ fn update_definitions_observe_prior_module_state() {
     );
 }
 
+/// A module-level definition in a declared object carries only the object's
+/// reflection boundary, not the module's, as objects are self-contained.
+#[test]
+fn object_member_definitions_skip_the_module_boundary() {
+    let source = r#"language g0
+import 'std
+refl.notice = .log 'info { msg:{ text:"module reflection" } }
+object foo with
+    a = 1
+foo.b = 2
+meta.module_unclaimed = anno { refl:(.heap.get [guard,'claim] >>= (\claim -> if claim == {} then .r () else .fail)) } "module unclaimed"
+meta.object_claimed = anno { refl:(.heap.get [[object_refl_marker, abstract_global_path foo],'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .r ()))) } "object claimed"
+"#;
+    let (_assembler, context, module, _module_root, diagnostics) =
+        reflection_test_module(source, &["object_member_test"], &[("guard", "refl")]);
+
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["foo", "b"]),
+        &Value::Number(n(2)),
+    );
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["meta", "module_unclaimed"]),
+        &Value::binary_from_text("module unclaimed"),
+    );
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["meta", "object_claimed"]),
+        &Value::binary_from_text("object claimed"),
+    );
+    assert!(take_reflection_diagnostics(&diagnostics).is_empty());
+}
+
 #[test]
 fn ordinary_module_demand_launches_final_reflection_tasks_once() {
     let source = r#"language g0

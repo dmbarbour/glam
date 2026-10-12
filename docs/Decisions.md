@@ -600,8 +600,11 @@ maps the short names used here to file names.
     them are recorded whole. A dict is a module insofar as it is used as
     one. Compilers reject `spec` at module scope.
   - A namespace's reflection boundary replays its final journal and logs
-    conflicts as errors, so the check runs only when a definition in the
-    namespace is forced, compatible with lazy loading. A nested definition
+    introductions of a path already defined as errors, so the check runs
+    only when a definition in the namespace is forced, compatible with
+    lazy loading. An override of a path no journal records is not
+    reported, since names also come from outside journals (the
+    assembler's `asm.args`, a dict's members). A nested definition
     carries its namespace's boundary as well as its file's; a definition in
     a declared object carries only the object's.
 - **Consequences:**

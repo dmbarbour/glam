@@ -911,13 +911,53 @@ fn build_reflection_annotator(
                 [mapped, ResolvedExpr::lambda(vec![records], store_records)],
             )],
         );
-        let scanner = effect_call(
+        let launch_tasks = effect_call(
             access,
             cache,
             "seq",
             [
                 effect_call(access, cache, "dict_items", [final_refl]),
                 ResolvedExpr::lambda(vec![items], map_and_store),
+            ],
+        );
+
+        // Replays the namespace's final journal first, logging each conflict
+        // as an error (`perf-definition-assertions`).
+        let final_journal = ResolvedExpr::Access {
+            base: Box::new(ResolvedExpr::Local(final_defs)),
+            path: vec![
+                ResolvedPathPart::Key(name_as_key("meta")),
+                ResolvedPathPart::Key(name_as_key("journal")),
+            ],
+        };
+        let conflict = locals.push_internal_binding("<reflection-journal-conflict>");
+        let report = ResolvedExpr::lambda(
+            vec![conflict],
+            effect_call(
+                access,
+                cache,
+                "log",
+                [
+                    ResolvedExpr::Embedded(Value::Atom(atom_from_str("error"))),
+                    ResolvedExpr::Local(conflict),
+                ],
+            ),
+        );
+        let check_journal = ResolvedExpr::apply(
+            ResolvedExpr::Embedded(Value::Builtin(Builtin::EffectMap)),
+            [
+                report,
+                apply_builtin(access, Builtin::JournalConflicts, [final_journal]),
+            ],
+        );
+        let reported = locals.push_internal_binding("<reflection-journal-reported>");
+        let scanner = effect_call(
+            access,
+            cache,
+            "seq",
+            [
+                effect_call(access, cache, "cut", [check_journal]),
+                ResolvedExpr::lambda(vec![reported], launch_tasks),
             ],
         );
 

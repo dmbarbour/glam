@@ -25,6 +25,7 @@ use super::builtins::{
 use super::comparison_machine::RegionalComparisonMachine;
 use super::dict_machine::RegionalDictBuiltinMachine;
 use super::effect_machine::RegionalEffectMachine;
+use super::journal_machine::RegionalJournalConflictsMachine;
 use super::list_machine::{RegionalListFront, RegionalListFrontPoll};
 use super::list_observation_machine::RegionalListObservationMachine;
 use super::list_transform_machine::{
@@ -75,6 +76,7 @@ pub(in crate::eval) enum RegionalBuiltinMachine {
     PatternList(RegionalPatternListMachine),
     PatternPath(Box<RegionalPatternPathMachine>),
     TextLines(RegionalTextLinesMachine),
+    JournalConflicts(RegionalJournalConflictsMachine),
     Numeric(RegionalNumericMachine),
     Net(RegionalNetMachine),
     Object(Box<RegionalObjectBuiltinMachine>),
@@ -195,6 +197,7 @@ impl RegionalBuiltinMachine {
                 | Builtin::Map
                 | Builtin::ListConcat
                 | Builtin::TextLines
+                | Builtin::JournalConflicts
                 | Builtin::PatternIsList
                 | Builtin::PatternListTryUncons
                 | Builtin::PatternListTryUnsnoc
@@ -405,6 +408,9 @@ impl RegionalBuiltinMachine {
                 source_owner,
                 arguments,
             )),
+            Builtin::JournalConflicts => Self::JournalConflicts(
+                RegionalJournalConflictsMachine::new_in(access, source_owner, arguments),
+            ),
             builtin if RegionalPatternListMachine::supports(builtin) => Self::PatternList(
                 RegionalPatternListMachine::new_in(access, source_owner, builtin, arguments),
             ),
@@ -474,6 +480,7 @@ impl RegionalBuiltinMachine {
             Self::PatternList(machine) => machine.poll_in(access, step_budget),
             Self::PatternPath(machine) => machine.poll_in(access, step_budget),
             Self::TextLines(machine) => machine.poll_in(access, step_budget),
+            Self::JournalConflicts(machine) => machine.poll_in(access, step_budget),
             Self::Numeric(machine) => machine.poll_in(access, step_budget),
             Self::Net(machine) => machine.poll_in(access, step_budget),
             Self::Object(machine) => machine.poll_in(access, step_budget),
@@ -502,6 +509,7 @@ impl RegionalBuiltinMachine {
             Self::PatternList(machine) => machine.trace_managed_edges(visitor),
             Self::PatternPath(machine) => machine.trace_managed_edges(visitor),
             Self::TextLines(machine) => machine.trace_managed_edges(visitor),
+            Self::JournalConflicts(machine) => machine.trace_managed_edges(visitor),
             Self::Numeric(machine) => machine.trace_managed_edges(visitor),
             Self::Net(machine) => machine.trace_managed_edges(visitor),
             Self::Object(machine) => machine.trace_managed_edges(visitor),

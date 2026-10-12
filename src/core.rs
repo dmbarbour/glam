@@ -2049,6 +2049,10 @@ pub enum Builtin {
     /// Splits binary-compatible text into shared line segments without their
     /// newline delimiters. Internal support for closed formatting functions.
     TextLines,
+    /// Replays a definition journal and returns a diagnostic per
+    /// introduction of a name already defined. Internal support for
+    /// reflection boundaries.
+    JournalConflicts,
     ListEffect,
     ListEffectReturn,
     ListEffectSeq,
@@ -2151,6 +2155,7 @@ impl Builtin {
             Self::PatternDictTryTakeOptional => 2,
             Self::PatternDictIsEmpty => 1,
             Self::TextLines => 1,
+            Self::JournalConflicts => 1,
             Self::ListEffect => 1,
             Self::ListEffectReturn => 1,
             Self::ListEffectSeq => 2,

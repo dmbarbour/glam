@@ -363,7 +363,7 @@ pub(in crate::g_syntax) fn remove_object_spec_resolved(
     )
 }
 
-fn object_reflection_guard_resolved(
+pub(in crate::g_syntax) fn object_reflection_guard_resolved(
     access: &RuntimeValueAccess<'_>,
     object_final_defs: ResolvedExpr<Value>,
 ) -> ResolvedExpr<Value> {

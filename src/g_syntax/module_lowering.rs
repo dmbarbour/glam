@@ -1,3 +1,5 @@
+use std::collections::{BTreeSet, HashMap};
+
 use super::*;
 use crate::runtime::RuntimeValueRoot;
 
@@ -60,6 +62,11 @@ pub(in crate::g_syntax) struct ModuleLowerer<'context> {
     context: &'context CompileContext,
     definitions: RuntimeValueRoot,
     module_reflection: RuntimeValueRoot,
+    /// Boundaries of definitions in nested namespaces, by namespace path:
+    /// the module's with the namespace's, or a declared object's alone.
+    nested_reflection: HashMap<String, RuntimeValueRoot>,
+    /// The objects this file declares or extends.
+    declared_objects: BTreeSet<String>,
     journal: PendingJournal,
     diagnostics: Vec<Diagnostic>,
     parsed_declarations: Vec<Declaration>,
@@ -79,6 +86,8 @@ impl<'context> ModuleLowerer<'context> {
             context,
             definitions: context.prior_defs_root().clone(),
             module_reflection,
+            nested_reflection: HashMap::new(),
+            declared_objects: BTreeSet::new(),
             journal: PendingJournal::default(),
             diagnostics: Vec::new(),
             parsed_declarations: Vec::new(),
@@ -110,6 +119,24 @@ impl<'context> ModuleLowerer<'context> {
             kind @ (DeclarationKind::Definition(_)
             | DeclarationKind::Object(_)
             | DeclarationKind::Extend(_)) => {
+                let nested = match kind {
+                    DeclarationKind::Definition(definition) => {
+                        self.nested_reflection(&definition.target)
+                    }
+                    DeclarationKind::Object(object) => {
+                        self.declared_objects.insert(object.target.clone());
+                        None
+                    }
+                    DeclarationKind::Extend(extend) => {
+                        self.declared_objects.insert(extend.target.clone());
+                        None
+                    }
+                    _ => None,
+                };
+                let reflection = match &nested {
+                    Some(path) => &self.nested_reflection[path],
+                    None => &self.module_reflection,
+                };
                 let result = self.context.values().with_runtime_value_access(|access| {
                     let definitions = self.definitions.clone_core_with(&access);
                     let scope = NameScope::module_with_reflection(
@@ -117,7 +144,7 @@ impl<'context> ModuleLowerer<'context> {
                         self.context,
                         access.duplicate_value(&definitions),
                         ReflectionBoundary {
-                            demand: self.module_reflection.clone_core_with(&access),
+                            demand: reflection.clone_core_with(&access),
                         },
                     );
                     let resolved = match kind {
@@ -155,6 +182,74 @@ impl<'context> ModuleLowerer<'context> {
             self.diagnostics.push(diagnostic);
         }
         self.parsed_declarations.push(declaration);
+    }
+
+    /// The namespace path whose boundary a definition of `target` carries,
+    /// if it is nested: the module's and the namespace's own, which checks
+    /// the namespace's journal, or only a declared object's, as objects are
+    /// self-contained. A target within `refl`, `meta` or `spec` carries the
+    /// module's boundary or none, as before.
+    fn nested_reflection(&mut self, target: &[SyntaxKeyExpr]) -> Option<String> {
+        let names = target
+            .iter()
+            .map(|key| match key {
+                SyntaxKeyExpr::Atom(name) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let (_, namespace) = names.split_last()?;
+        if namespace.is_empty()
+            || namespace
+                .iter()
+                .any(|name| matches!(*name, "refl" | "meta" | "spec"))
+        {
+            return None;
+        }
+        let object = (1..=namespace.len())
+            .map(|length| namespace[..length].join("."))
+            .find(|path| self.declared_objects.contains(path));
+        let path = match &object {
+            Some(object) => format!("object {object}"),
+            None => namespace.join("."),
+        };
+        if !self.nested_reflection.contains_key(&path) {
+            let boundary = self.context.values().with_runtime_value_access(|access| {
+                let final_defs = || ResolvedExpr::Provided(self.context.final_defs(&access));
+                let boundary = match &object {
+                    Some(object) => compiler_values::reflection_boundary_resolved(
+                        &access,
+                        object_reflection_guard_resolved(
+                            &access,
+                            path_resolved_in_definitions(&access, object, final_defs()),
+                        ),
+                        path_resolved_in_definitions(&access, object, final_defs()),
+                    ),
+                    None => {
+                        let namespace = namespace.join(".");
+                        let guard = self
+                            .context
+                            .abstract_global_path(&access, &format!("{namespace}.refl"));
+                        apply_builtin_resolved(
+                            &access,
+                            Builtin::Seq,
+                            [
+                                ResolvedExpr::Provided(
+                                    self.module_reflection.clone_core_with(&access),
+                                ),
+                                compiler_values::reflection_boundary_resolved(
+                                    &access,
+                                    ResolvedExpr::Provided(guard),
+                                    path_resolved_in_definitions(&access, &namespace, final_defs()),
+                                ),
+                            ],
+                        )
+                    }
+                };
+                access.root_runtime_value(lower_resolved_expr_in(&access, boundary))
+            });
+            self.nested_reflection.insert(path.clone(), boundary);
+        }
+        Some(path)
     }
 
     /// Records what `kind` defines in the journal, writing the stretch

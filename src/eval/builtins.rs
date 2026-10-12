@@ -71,7 +71,9 @@ pub(super) fn apply_builtin_in(
         | Builtin::Less
         | Builtin::Seq
         | Builtin::Spark => Ok(deferred(arguments)),
-        Builtin::Map | Builtin::ListConcat | Builtin::TextLines => Ok(deferred(arguments)),
+        Builtin::Map | Builtin::ListConcat | Builtin::TextLines | Builtin::JournalConflicts => {
+            Ok(deferred(arguments))
+        }
         Builtin::Append => {
             let [left, right] = exact(arguments, "append")?;
             append_values(access.values(), left, right)

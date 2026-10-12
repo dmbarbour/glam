@@ -9500,3 +9500,109 @@ fn strategy_annotations_share_builtin_semantics() {
         &n(42),
     );
 }
+
+/// A journal entry `{op:Tag:path, at:g:{line}}`.
+fn journal_entry(tag: &str, path: &[&str], line: i64) -> Value {
+    let path = path
+        .iter()
+        .map(|name| Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(name))))
+        .collect();
+    let op = Dict::new_sync().insert(
+        Key::atom_from_text(tag),
+        Value::List(List::from_values(path)),
+    );
+    let at = Dict::new_sync().insert(
+        Key::atom_from_text("g"),
+        Value::Dict(Dict::new_sync().insert(Key::atom_from_text("line"), n(line))),
+    );
+    Value::Dict(
+        Dict::new_sync()
+            .insert(Key::atom_from_text("op"), Value::Dict(op))
+            .insert(Key::atom_from_text("at"), Value::Dict(at)),
+    )
+}
+
+/// The conflicts builtin replays nested stretches in order, forcing a lazy
+/// prior, and reports introductions of defined paths with their entries'
+/// `at`, then the earlier definition's. Defining `refl.x` defines `refl`;
+/// overriding `bar`, which may come from outside any journal, defines it.
+#[test]
+fn journal_conflicts_replay_nested_stretches() {
+    let context = isolated_test_context();
+    let prior = Value::semantic_thunk(context.values(), |_| {
+        Ok(Value::List(List::from_values(vec![
+            Value::Dict(Dict::new_sync()),
+            journal_entry("intro", &["foo"], 1),
+            journal_entry("update", &["f"], 2),
+        ])))
+    });
+    let journal = Value::List(List::from_values(vec![
+        prior,
+        journal_entry("intro", &["foo"], 3),
+        journal_entry("over", &["bar"], 4),
+        journal_entry("intro", &["f"], 5),
+        journal_entry("intro", &["refl", "x"], 6),
+        journal_entry("over", &["foo"], 7),
+        journal_entry("over", &["refl"], 8),
+    ]));
+    let application = apply_values(
+        &context,
+        Value::Builtin(Builtin::JournalConflicts),
+        vec![journal],
+    )
+    .expect("journal conflicts should build");
+    let Value::List(conflicts) =
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &application)
+            .expect("journal conflicts should evaluate")
+    else {
+        panic!("journal conflicts should be a list");
+    };
+    let conflicts = list_to_value_items(&context, &conflicts)
+        .expect("conflicts should be readable")
+        .into_iter()
+        .map(|conflict| {
+            let Value::Dict(conflict) = conflict else {
+                panic!("a conflict should be a diagnostic dict");
+            };
+            let Some(Value::Dict(message)) = conflict.get(&keys::MSG) else {
+                panic!("a conflict should have a message");
+            };
+            let Some(Value::Binary(text)) = message.get(&keys::TEXT) else {
+                panic!("a conflict message should have text");
+            };
+            let Some(Value::List(frames)) = message.get(&keys::CONTEXT) else {
+                panic!("a conflict should have context frames");
+            };
+            let lines = list_to_value_items(&context, frames)
+                .expect("frames should be readable")
+                .into_iter()
+                .map(|frame| {
+                    let Value::Dict(frame) = frame else {
+                        panic!("a frame should be a dict")
+                    };
+                    let Some(Value::Dict(g)) = frame.get(&Key::atom_from_text("g")) else {
+                        panic!("a frame should be a `g` frame");
+                    };
+                    let Some(Value::Number(line)) = g.get(&Key::atom_from_text("line")) else {
+                        panic!("a frame should have a line");
+                    };
+                    line.to_string()
+                })
+                .collect::<Vec<_>>();
+            (String::from_utf8_lossy(text).into_owned(), lines)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        conflicts,
+        [
+            (
+                "cannot introduce `foo` because it is already defined".to_owned(),
+                vec!["3".to_owned(), "1".to_owned()]
+            ),
+            (
+                "cannot introduce `f` because it is already defined".to_owned(),
+                vec!["5".to_owned(), "2".to_owned()]
+            ),
+        ]
+    );
+}
