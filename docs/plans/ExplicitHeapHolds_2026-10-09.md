@@ -1,10 +1,33 @@
 # Explicit Heap Holds — 2026-10-09
 
-Status: planned, not started (maintainer, 2026-10-09: a widespread task, to
-follow lower-hanging work). A design review on 2026-10-10 proposes revising
-the design below; nothing from it is decided yet (see "Design review"). Steps, in order: `gc-hold-api`,
-`gc-hold-boundaries`, `gc-hold-tests`, `gc-hold-class-cache`,
-`gc-hold-transient-roots`, then `gc-hold-thread-context`.
+Status: design adopted, not started. The maintainer adopted the 2026-10-10
+design review on 2026-10-12 (see "Decisions, 2026-10-12") and suggested
+pulling this plan forward, ahead of the leftovers of
+`perf-reflection-step-cost`. Since the plan was written, a per-thread
+allocation-class cache landed (`perf-allocation-path`) and transient-root
+avoidance landed (`perf-transient-root-avoidance`, `2484ad2a`). Steps, in
+order: `gc-hold-api`, `gc-hold-boundaries`, `gc-hold-tests`,
+`gc-hold-transient-roots`, then `gc-hold-thread-context`;
+`gc-hold-class-cache` is narrowed to a measurement. The Steps use the
+review's vocabulary: an owned `Mutator`, not a `Hold`.
+
+## Decisions, 2026-10-12
+
+- **Adopt the design review** (maintainer), not the counted stopgap: an
+  owned per-thread `Mutator`, `GcRef` views borrowed from it, and a
+  re-admitting `suspend`; `LocalRoot` stays deferred until measured.
+- **`Root::as_gc` changes in this plan** (maintainer): it returns a
+  `GcRef`, as do the other detached-`Gc` sources the plan reaches.
+- **Transition aids are welcome** (maintainer): hints, shims and latches
+  as incremental steps need them, and suspend-generation metadata in
+  `GcRef`. The check runs in debug builds and tests (agent proposal):
+  safe code cannot hold a view across a suspend, since `suspend` takes
+  `&mut Mutator` and a view borrows `&Mutator`; the check catches views
+  made through `unsafe`, and legacy release points that end admission
+  without that borrow, until those points retire.
+- **Lifetimes.** `'mu` is a mutator's invariant, generative brand, which
+  ties views to one mutator; `'m` is the borrow of `&'m Mutator<'mu>` a
+  view lives within, which ends at a suspend.
 
 ## Purpose
 
@@ -19,7 +42,10 @@ become an outer entry, which is what made the lock-order audit for
 
 ## Design
 
-Agreed with the maintainer on 2026-10-09:
+Agreed with the maintainer on 2026-10-09. The design review below,
+adopted on 2026-10-12, supersedes it where they differ: an owned
+`Mutator` instead of a `Hold`, and access as a borrow rather than
+counted.
 - **A hold is the only admission.** It is explicit and taken at
   boundaries, and a thread holds at most one; a second hold panics.
 - **Access requires a hold**, and panics without one in every build. The
@@ -31,9 +57,12 @@ Agreed with the maintainer on 2026-10-09:
   where the thread holds no Glam lock, so above the wait functions rather
   than inside `CountedCondvar`, which instead asserts that no hold is
   active while it waits.
-- **Holds cache allocation classes.** Class discovery on each access is
+- **Holds cache allocation classes.** Class discovery on each access was
   about 4% of `countdown_800` (metadata lookup, `RunGeometry::derive`,
-  `discover_class_with`).
+  `discover_class_with`). Since landed per thread instead
+  (`perf-allocation-path`): `Mutator::allocator` checks the thread's
+  cached class first (`mutator.rs`, `thread_cache.rs`), which recovered
+  the 4%.
 
 Held regions (`perf-quantum-region`) are the current approximation: an
 evaluation quantum holds the heap without a token, accesses inside it are
@@ -160,8 +189,9 @@ gateways, and new allocations are marked live for the cycle.
   policy, re-admission may itself collect, so withdrawal follows
   re-admission. Runtime heaps are `NoAuto`.
 - **Finalizers.** Destructors run under the collector thread's finalizer
-  mutator. With one mutator per thread, a destructor's heap entry must be
-  a non-panicking `try_`, as `trace.rs` already requires.
+  mutator. With one mutator per thread, a destructor must not require a
+  mutator, as `trace.rs` already requires; glam-gc has no `try_` entry
+  today.
 - **Migration.** Views do not raise the entry depth, so a legacy
   `release_held_region` reached while views are live would end heap
   admission beneath them. While a new mutator is live, legacy release
@@ -174,12 +204,19 @@ gateways, and new allocations are marked live for the cycle.
 | --- | --- | --- |
 | Host call (`eval/value.rs`) | the inline stack's base only (`forceable_inline` excludes host-call sources) | easily: return an invoke request |
 | Launcher (`session.rs`) | the base only (reflection-task sources) | moderate: return the reservations |
-| Net contention wait (`CountedCondvar`) | inline children with a net checkpoint; the only condvar wait inside held polls | easily: already followed by `return Yielded` |
+| Net contention wait (`CountedCondvar`) | any machine on the inline stack with a net checkpoint (`LazyTaskMachine::poll_net_whnf_checkpoint`); the only condvar wait inside held polls | easily: already followed by `return Yielded` |
 | Nested `drive_client_demand` | not reachable from held polls | already outside; assert no mutator |
 | Pressure servicing | quantum boundaries | already outside |
 
 So evaluator polls may need no suspend point at all. Machines would still
 take `&Mutator`, to carry views between accesses.
+
+Reflection polls hold no region, but pump the lazy routes they wait on
+within the poll (`EffectTask::poll_pumping`, every blocked step since
+`b6222f5f`; `poll_blocked` before), each pumped claim taking its own
+held region. If a reflection poll's pure steps take a mutator, that
+pumping must sit outside it or inside a suspend, since a second mutator
+on the thread panics (audit, 2026-10-12).
 
 ### Migration size (estimates)
 
@@ -200,8 +237,9 @@ take `&Mutator`, to carry views between accesses.
   `for<'scope>` closures.
 - **Most code already takes access as a parameter:** about 690
   parameters (`&EvaluationValueAccess`, `&RuntimeValueAccess`), against
-  about 450 calls that open access themselves (100 `with_value_access`,
-  344 `with_runtime_value_access`).
+  about 440 calls that open access themselves in non-test code (91
+  `with_value_access`, 348 `with_runtime_value_access`; recounted
+  2026-10-12, 100 and 344 at the review).
 
 ### Ordering with other plans
 
@@ -224,6 +262,8 @@ take `&Mutator`, to carry views between accesses.
 | concurrent-GC plan | stale lines on several heaps per thread; this is a CG0 candidate for transient roots |
 | `docs/architecture/evaluation.md` | "the poll carrier exposes neither that route nor a mutator to the machine" reverses; the WHNF rule that poll results cross as `RuntimeValueRoot` stays |
 | `docs/architecture/values.md` glossary | "regional" becomes "valid until suspend" |
+| `crates/glam-gc/SAFETY.md` "Regional Mutator Admission Invariants" | admission belongs to the owned mutator; recursive entry becomes a borrow |
+| `docs/agent_context/evaluation.md` (heap access and held regions) | the same change, for agents |
 
 ### Alternative
 
@@ -233,12 +273,14 @@ count is zero, always on, with creation sites tracked in debug builds.
 About a third of the churn, checked at runtime instead of by the borrow
 checker, and removed when `GcRef` lands.
 
-### Open questions
+### Open questions (resolved 2026-10-12)
 
-- Adopt this revision, the counted stopgap, or neither for now.
+- Adopt this revision, the counted stopgap, or neither for now: the
+  revision.
 - Whether `Root::as_gc` and the detached-`Gc` sources change with this
-  plan or with the scoped-pointer plan.
-- Where the generation check runs ("some modes").
+  plan or with the scoped-pointer plan: this plan.
+- Where the generation check runs ("some modes"): debug builds and tests,
+  during migration and for `unsafe` views.
 
 ## Measurements
 
@@ -255,10 +297,11 @@ limit, so the counts are a floor):
 | Tests, mostly through `eval/test_support`, lazy-checkpoint and `whnf` fixtures | about 290 | the test, through the helpers |
 
 Nesting today: production nests an access inside an access only through
-the public value API (`Values::list` and `record` run the caller's
-iterator inside their own access; diagnostic emission) and cycle poisoning
+the public value API (`Values::list`, `record` and `dictionary` run the
+caller's iterator inside their own access; diagnostic emission, as
+`Diagnostic::with_source_location` reopens access) and cycle poisoning
 (`pump.rs`, rooting a failure through a second access). Forbidding nesting
-outright broke 186 tests.
+outright broke 186 tests (at `4072eb92`).
 
 Reflection steps (2026-10-12, `perf-reflection-step-cost`): a `.r ()`
 step in a `refl.*` chain costs 518 K instructions, with 64 root
@@ -269,60 +312,82 @@ release), heap region entry and the thread cache another 11%; most of the
 roots carry values between the accesses of lazy routes forced within one
 poll.
 
+Heap entries: each mutator entry costs about 180 instructions, 11% of a
+lazy-forcing iteration of `heavy` (`perf-lazy-force`, 2026-10-11) and
+about 58 K of a reflection step (35 outer and 118 nested entries). An
+owned mutator replaces most of them with borrows, which is a motivation
+of its own beside the roots.
+
 ## Steps
 
-### Hold and access API (`gc-hold-api`)
+### Mutator and access API (`gc-hold-api`)
 
-`glam-gc` gains `Heap::hold`, where a nested hold panics, `Hold::suspend`,
-and access that requires a hold, with nested accesses as plain scope
-proofs. A temporary shim keeps today's automatic entry for unconverted
-callers.
+`glam-gc` gains the owned mutator: one per thread, `!Send`, taken at a
+boundary through a closure that brands it with an invariant `'mu`;
+access borrows it (`&Mutator`), and `suspend(&mut self, f)` releases heap
+admission, runs `f` and re-admits, with the guarantees above.
+`GcRef<'m, T>` views borrow it; `Root::as_gc` and the other
+detached-`Gc` sources the slice reaches return views. Transition aids:
+today's closure token keeps working under a temporary name
+(`MutatorAccess`) for unconverted callers, a legacy release point reached
+while an owned mutator is live panics or does nothing, and views carry a
+suspend generation checked on use in debug builds and tests.
 
 ### Boundaries (`gc-hold-boundaries`)
 
-Convert Glam's boundaries: the public API, the compile entry, reflection
-polls (hold their pure steps, such as local state, and suspend around
-client callbacks), and directly driven polls. Turn release points into
-suspend scopes above the locks: the coordinator's change wait, the client
-demand result wait, the runtime activity wait, the net disturbance wait,
-the reflection lifecycle waits, host calls, launchers, nested drivers and
-pressure servicing. Fix the production nesting sites: collect a caller's
-iterator before taking access, and reuse an open access in diagnostics
-and cycle poisoning.
+Convert Glam's boundaries to take the mutator: the public API, the
+compile entry, reflection polls, and directly driven polls. Reflection
+polls take it for their pure steps, such as local state, and release it
+or suspend around client callbacks and around the dependency pumping in
+`poll_pumping` and `poll_blocked`, since each pumped claim takes its own
+region. The release points inside held evaluator polls move to their
+drivers instead (host calls return an invoke request, launchers return
+their reservations, the net contention wait already returns `Yielded`),
+so evaluator polls need no suspend. The remaining waits become suspend
+scopes above the locks: the coordinator's change wait, the client demand
+result wait, the runtime activity wait, the reflection lifecycle waits,
+nested drivers and pressure servicing. Fix the production nesting sites:
+collect a caller's iterator before taking access, and reuse an open
+access in diagnostics and cycle poisoning.
 
 ### Tests and enforcement (`gc-hold-tests`)
 
-Convert the test helpers, then remove the shim, so unheld access panics in
-every build.
+Convert the test helpers, then remove the shim, so access without a
+mutator panics in every build.
 
-### Class cache (`gc-hold-class-cache`)
+### Class cache (`gc-hold-class-cache`), narrowed
 
-Cache allocation classes in the hold, so an access finds its class without
-the registry, the geometry derivation or the heap's data mutex. A smaller
-per-thread cache may land earlier under `perf-allocation-path`; this step
-moves it into the hold.
+The per-thread class cache landed under `perf-allocation-path`; it lives
+in the thread's cache record, which outlives a mutator. What remains per
+allocator acquisition is a `RefCell` borrow, a `TypeId` lookup and an
+`Arc` clone. Measure that once mutators exist; move the cache only if it
+shows.
 
 ### Transient roots (`gc-hold-transient-roots`)
 
-`countdown_800` registers more roots than it allocates objects (211,594
+`countdown_800` registered more roots than it allocated objects (211,594
 against 182,557), about 9% of its samples with collection's root scan;
-most root a value only to carry it between two accesses of one poll. A
-hold proves that no safepoint lies between those accesses unless one is
-suspended, so such values could stay unrooted edges, rooted only across a
-`Hold::suspend`. Rooting them in a frame per poll instead saved nothing
-(`perf-poll-root-frames`); avoiding the root saves about 1,400
-instructions each.
+most root a value only to carry it between two accesses of one poll.
+`perf-transient-root-avoidance` (2026-10-10) removed the transient roots
+that never left one access or were never read (`countdown_800`: 100,385
+roots against 134,699 allocations, 8.6% fewer instructions); the
+2026-10-11 snapshot has `countdown_400` at 27,930 roots against 50,592
+allocations, before `perf-lazy-force` took 12.1% more off `countdown_800`.
+These shares are historical; measure again before the step. Rooting
+values in a frame per poll saved nothing (`perf-poll-root-frames`);
+avoiding a root saves about 1,400 instructions.
 
-`perf-transient-root-avoidance` (2026-10-10) then removed the transient
-roots that never left one access or were never read: `countdown_800` now
-registers 100,385 roots against 134,699 allocations, and runs 8.6% fewer
-instructions. What remains carries values between accesses: the inline
-stack's lazies, the net semantic action, and results leaving the poll.
-The site shares in "Design review" were measured before that step.
+What remains carries values between accesses: the inline stack's lazies,
+the net semantic action, results leaving the poll, and in reflection
+steps 64 roots each. A mutator proves that no safepoint lies between
+those accesses unless it suspends, so such values become views, rooted
+only across a suspend. First slice: the WHNF request and
+`follow_forwards` into the inline stack, then the reflection machine's
+demand and decode carriers.
 
 ### Heap context in Glam (`gc-hold-thread-context`)
 
 With one heap per thread, Glam's call chains could find their runtime from
-the hold instead of passing value factories down (maintainer,
+the mutator instead of passing value factories down (maintainer,
 2026-10-09). Investigate the trade: a thread-local lookup against passed
 references, and which same-runtime validations it makes redundant.

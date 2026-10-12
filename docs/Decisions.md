@@ -1950,7 +1950,7 @@ maps the short names used here to file names.
 - **Recorded in:** structural overheads plan, `gc-bounded-collection-wait`.
 
 ### Holding a heap is separate from accessing it
-`explicit-heap-holds` · 2026-10-09 · maintainer · accepted (planned)
+`explicit-heap-holds` · 2026-10-09 · maintainer · superseded
 - **Context:** any `with_mutator` deep in a call stack may become an outer
   entry, so the points where admission can block on a collection are not
   enumerable. Arbitrary recursive entry serves almost no Glam use.
@@ -1963,7 +1963,29 @@ maps the short names used here to file names.
 - **Consequences:** about 80 production and 290 test sites need explicit
   holds, so the work is its own plan, after lower-hanging steps. It
   replaces `gc-two-level-mutator-access`.
+- **Superseded by:** `owned-mutator-views`.
 - **Recorded in:** explicit heap holds plan.
+
+### An owned mutator per thread; access borrows it
+`owned-mutator-views` · 2026-10-12 · maintainer · accepted (planned)
+- **Context:** the 2026-10-10 design review of explicit heap holds, and
+  the costs it would remove: about 180 instructions per heap entry and
+  about 1,400 per transient root, a fifth to a third of a lazy-heavy step
+  (`perf-reflection-step-cost`).
+- **Decision:** adopt the review. Admission is an owned, `!Send` mutator
+  per thread, taken at boundaries and branded `'mu`; access is a borrow of
+  it, not counted; `suspend(&mut self)` re-admits. `GcRef<'m, T>` views
+  borrow the mutator, so none outlives a suspend; `Root::as_gc` returns
+  one. `LocalRoot` waits until measured. Transition aids are allowed,
+  including a suspend generation in views, checked in debug builds and
+  tests. Supersedes `explicit-heap-holds`; revises `scoped-gc-deferred`,
+  `quantum-held-region`, `publish-before-access-ends` and
+  `noauto-runtime-collection-policy` as its steps land.
+- **Consequences:** about 690 access parameters gain a mutator borrow
+  over time; evaluator polls need no suspend, as their release points
+  move to drivers; reflection polls release or suspend around dependency
+  pumping.
+- **Recorded in:** explicit heap holds plan, "Decisions, 2026-10-12".
 
 ### Clear mark bitmaps before marking
 `clear-before-mark-bitmaps` · 2026-08-22 · agent · accepted
