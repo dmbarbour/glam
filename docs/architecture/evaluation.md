@@ -378,7 +378,7 @@ are in `aggressive-gc-via-stable-pump` in [`Decisions.md`](../Decisions.md).
 Every durable whole-value owner carries one `WhnfComputation`. It begins with a
 `RuntimeValueRoot`; its first bounded access promotes that seed atomically into
 one `ManagedWhnfRoot`. The canonical managed state retains the current focus,
-continuation frames, followed lazy and promise identities, and the optional
+continuation frames, followed promise identities, and the optional
 source-owner and cycle-promise state needed by the owning machine. Resuming the
 same computation therefore continues from its last transition rather than
 restarting demand from the original value. Two lighter designs were rejected:

@@ -507,11 +507,11 @@ mod tests {
             members: vec![
                 LazyCycleMember {
                     id: LazyId(NonZeroU64::new(1).unwrap()),
-                    label: Arc::from("left"),
+                    label: "left".into(),
                 },
                 LazyCycleMember {
                     id: LazyId(NonZeroU64::new(2).unwrap()),
-                    label: Arc::from("right"),
+                    label: "right".into(),
                 },
             ]
             .into_boxed_slice(),

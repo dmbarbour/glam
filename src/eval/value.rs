@@ -3,9 +3,9 @@ use std::sync::Arc;
 #[cfg(test)]
 use crate::core::ListThunk;
 use crate::core::{
-    Dict, EvaluatedValue, EvaluationFailure, EvaluationHalt, FixpointComputation, Key, LazySource,
-    LazyValue, List, ManagedLazyRoot, ManagedPromiseRoot, PromisedValue, RuntimeValueAccess, Value,
-    keys,
+    Dict, EvaluatedValue, EvaluationFailure, EvaluationHalt, FixpointComputation, Key,
+    LazyProducerView, LazySource, LazyValue, List, ManagedLazyRoot, ManagedPromiseRoot,
+    PromisedValue, RuntimeValueAccess, Value, keys,
 };
 use crate::core_net::CoreDataKey;
 use crate::evaluation::{
@@ -359,16 +359,19 @@ const IDLE_YIELD_REPOLLS: usize = 8;
 /// panicked lazy has nothing to force.
 fn forceable_inline(context: &EvaluatorStepContext<'_>, lazy: &ManagedLazyRoot) -> bool {
     context.with_value_access(|access| {
-        let lazy = access.lazy_root(lazy);
-        match lazy.checkpoint_snapshot() {
-            Some(checkpoint) => checkpoint.kind() != ManagedLazyCheckpointKindTag::HostCall,
-            None if lazy.forward_target_edge().is_some() => true,
-            None => matches!(
-                lazy.source_snapshot(),
-                Some(source)
-                    if !matches!(source, LazySource::HostCall(_) | LazySource::ReflectionTask(_))
-            ),
-        }
+        access
+            .lazy_root(lazy)
+            .view_producer(|producer| match producer {
+                LazyProducerView::Checkpoint(checkpoint) => {
+                    checkpoint.kind() != ManagedLazyCheckpointKindTag::HostCall
+                }
+                LazyProducerView::Forward => true,
+                LazyProducerView::Source(source) => !matches!(
+                    source,
+                    LazySource::HostCall(_) | LazySource::ReflectionTask(_)
+                ),
+                LazyProducerView::Done => false,
+            })
     })
 }
 

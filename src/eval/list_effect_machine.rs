@@ -483,8 +483,10 @@ pub(in crate::eval) fn publish_fix_result_in(
     Ok((value, publication))
 }
 
+/// The list handler's API. It holds only builtins and the empty list, no
+/// managed value, so one dictionary serves every run.
 fn list_effect_api(_access: &EvaluationValueAccess<'_>) -> Value {
-    Value::Dict(
+    static API: std::sync::LazyLock<Dict> = std::sync::LazyLock::new(|| {
         Dict::new_sync()
             .insert(
                 (*keys::R).clone(),
@@ -494,6 +496,7 @@ fn list_effect_api(_access: &EvaluationValueAccess<'_>) -> Value {
             .insert((*keys::ALT).clone(), Value::Builtin(Builtin::ListEffectAlt))
             .insert((*keys::FAIL).clone(), Value::List(List::empty()))
             .insert((*keys::CUT).clone(), Value::Builtin(Builtin::ListEffectCut))
-            .insert((*keys::FIX).clone(), Value::Builtin(Builtin::ListEffectFix)),
-    )
+            .insert((*keys::FIX).clone(), Value::Builtin(Builtin::ListEffectFix))
+    });
+    Value::Dict(API.clone())
 }

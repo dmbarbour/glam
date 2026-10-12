@@ -275,6 +275,20 @@ fn builds_closures(compiled: &CompiledNet<CoreSpecialization>) -> bool {
         .any(|step| matches!(step.operator, CoreOperator::FunctionCaptures { .. }))
 }
 
+/// `supplied` and then `operand`, duplicated into the array an operator or
+/// lazy keeps. The iterator's length is exact, so this allocates once.
+fn with_operand(
+    access: &EvaluationValueAccess<'_>,
+    supplied: &[Value],
+    operand: Value,
+) -> Arc<[Value]> {
+    supplied
+        .iter()
+        .map(|value| access.values().duplicate_value(value))
+        .chain(std::iter::once(operand))
+        .collect()
+}
+
 /// Applies `operator` to `data`. A saturated application of compiled code
 /// runs it when forced.
 fn apply_operator(
@@ -285,22 +299,18 @@ fn apply_operator(
     let operand = access.values().duplicate_value(data);
     match operator {
         CoreOperator::ApplyArity { arity, supplied } => {
-            let mut operands = supplied
-                .iter()
-                .map(|value| access.values().duplicate_value(value))
-                .collect::<Vec<_>>();
-            operands.push(operand);
-            if operands.len() < *arity + 1 {
+            if supplied.len() < *arity {
                 return Ok(OperatorYield::Operator(apply_arity_operator(
                     access.values(),
                     *arity,
-                    Arc::from(operands),
+                    with_operand(access, supplied, operand),
                 )));
             }
-            let function = operands.remove(0);
-            if *arity == 0 {
-                return Ok(OperatorYield::Data(function));
-            }
+            let Some((function, supplied)) = supplied.split_first() else {
+                return Ok(OperatorYield::Data(operand));
+            };
+            let function = access.values().duplicate_value(function);
+            let operands = with_operand(access, supplied, operand);
             // An evaluated function with compiled code for exactly these
             // operands runs it when forced, as a thunk over compiled code
             // does.
@@ -308,7 +318,7 @@ fn apply_operator(
                 return Ok(OperatorYield::Data(Value::Lazy(LazyValue::from_thunk_in(
                     access.values(),
                     function.into_stage(),
-                    Arc::from(operands),
+                    operands,
                 ))));
             }
             // A saturated apply operator may still represent over-application:
@@ -319,22 +329,22 @@ fn apply_operator(
             // the nested evaluation yields, causing the restored pair to replay
             // the application from its beginning.
             Ok(OperatorYield::Data(Value::Lazy(
-                LazyValue::from_application_in(access.values(), function, Arc::from(operands)),
+                LazyValue::from_application_in(access.values(), function, operands),
             )))
         }
         CoreOperator::FunctionCaptures { code, supplied } => {
+            if supplied.len() + 1 < code.capture_count() {
+                return Ok(OperatorYield::Operator(function_capture_operator(
+                    access.values(),
+                    code.clone(),
+                    with_operand(access, supplied, operand),
+                )));
+            }
             let mut captures = supplied
                 .iter()
                 .map(|value| access.values().duplicate_value(value))
                 .collect::<Vec<_>>();
             captures.push(operand);
-            if captures.len() < code.capture_count() {
-                return Ok(OperatorYield::Operator(function_capture_operator(
-                    access.values(),
-                    code.clone(),
-                    Arc::from(captures),
-                )));
-            }
             if captures.len() != code.capture_count() {
                 return Err(EvaluationHalt::new("function capture arity mismatch"));
             }
@@ -373,18 +383,13 @@ fn apply_operator(
             Ok(OperatorYield::Data(Value::Dict(dict)))
         }
         CoreOperator::Builtin(call) => {
-            let mut arguments = call
-                .arguments
-                .iter()
-                .map(|value| access.values().duplicate_value(value))
-                .collect::<Vec<_>>();
-            arguments.push(operand);
+            let arguments = with_operand(access, &call.arguments, operand);
             if arguments.len() < call.builtin.arity() {
                 return Ok(OperatorYield::Operator(builtin_operator(
                     access.values(),
                     BuiltinCall {
                         builtin: call.builtin,
-                        arguments: Arc::from(arguments),
+                        arguments,
                     },
                 )));
             }
@@ -398,7 +403,7 @@ fn apply_operator(
                     access.values(),
                     BuiltinCall {
                         builtin: call.builtin,
-                        arguments: Arc::from(arguments),
+                        arguments,
                     },
                 ),
             )))

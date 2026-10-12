@@ -6022,7 +6022,7 @@ fn a_lazy_task_that_waits_on_itself_is_poisoned_as_a_cycle() {
     let cycle = dependency_cycle(&context, &lazy);
     assert_eq!(cycle.members.len(), 1);
     assert_eq!(cycle.members[0].id, lazy.id(context.values()));
-    assert_eq!(cycle.members[0].label.as_ref(), "self cycle");
+    assert_eq!(&*cycle.members[0].label, "self cycle");
     assert!(matches!(
         context.poll_wait(&wait),
         EvaluationWaitPoll::Failed(error)

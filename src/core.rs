@@ -32,11 +32,11 @@ pub(crate) use managed::{
     reset_runtime_value_access_depth_for_test, thread_has_runtime_value_access_for_test,
 };
 pub(crate) use managed::{
-    ExternalOwnerHandle, ExternalOwnerKey, ExternalOwnerRegistry, ManagedCoreNetAccess,
-    ManagedCoreNetEdge, ManagedCoreNetRoot, ManagedDropRecord, ManagedFamily, ManagedLazyAccess,
-    ManagedLazyRoot, ManagedPromiseAccess, ManagedPromisePublication, ManagedPromiseRoot,
-    OpaquePayloadFamily, OpaquePayloadRecord, PreparedRuntimeValueRoot, RuntimeValueAccess,
-    RuntimeValueObserver, managed_slot_extent, release_held_region,
+    ExternalOwnerHandle, ExternalOwnerKey, ExternalOwnerRegistry, LazyProducerView,
+    ManagedCoreNetAccess, ManagedCoreNetEdge, ManagedCoreNetRoot, ManagedDropRecord, ManagedFamily,
+    ManagedLazyAccess, ManagedLazyRoot, ManagedPromiseAccess, ManagedPromisePublication,
+    ManagedPromiseRoot, OpaquePayloadFamily, OpaquePayloadRecord, PreparedRuntimeValueRoot,
+    RuntimeValueAccess, RuntimeValueObserver, managed_slot_extent, release_held_region,
     trace_compatibility_value_managed_edges,
 };
 use runtime_cache::{RuntimeCacheEntry, RuntimeCacheMap, SharedRuntimeCacheMap};
@@ -278,8 +278,65 @@ pub(crate) struct LazyCycle {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LazyCycleMember {
     pub(crate) id: LazyId,
-    pub(crate) label: Arc<str>,
+    pub(crate) label: LazyLabel,
 }
+
+/// A lazy's label, which diagnostics show. Most lazies take a literal, kept
+/// as it is so that making a lazy allocates no label.
+#[derive(Clone)]
+pub(crate) enum LazyLabel {
+    Static(&'static str),
+    Shared(Arc<str>),
+}
+
+impl std::ops::Deref for LazyLabel {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        match self {
+            Self::Static(label) => label,
+            Self::Shared(label) => label,
+        }
+    }
+}
+
+impl From<&'static str> for LazyLabel {
+    fn from(label: &'static str) -> Self {
+        Self::Static(label)
+    }
+}
+
+impl From<String> for LazyLabel {
+    fn from(label: String) -> Self {
+        Self::Shared(Arc::from(label))
+    }
+}
+
+impl From<Arc<str>> for LazyLabel {
+    fn from(label: Arc<str>) -> Self {
+        Self::Shared(label)
+    }
+}
+
+impl std::fmt::Debug for LazyLabel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&**self, formatter)
+    }
+}
+
+impl std::fmt::Display for LazyLabel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&**self, formatter)
+    }
+}
+
+impl PartialEq for LazyLabel {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl Eq for LazyLabel {}
 
 pub struct LazyValue {
     edge: managed::ManagedLazyEdge,
@@ -803,7 +860,7 @@ impl LazyValue {
 
     fn with_source_in(
         access: &RuntimeValueAccess<'_>,
-        label: impl Into<Arc<str>>,
+        label: impl Into<LazyLabel>,
         source: LazySource,
     ) -> Self {
         access
@@ -813,7 +870,7 @@ impl LazyValue {
 
     pub(crate) fn computed_fixpoint_in(
         access: &RuntimeValueAccess<'_>,
-        label: impl Into<Arc<str>>,
+        label: impl Into<LazyLabel>,
         computation: FixpointComputation,
     ) -> Self {
         Self::with_source_in(
@@ -826,7 +883,7 @@ impl LazyValue {
     #[cfg(test)]
     pub(crate) fn computed_fixpoint(
         values: &CoreValueFactory,
-        label: impl Into<Arc<str>>,
+        label: impl Into<LazyLabel>,
         computation: FixpointComputation,
     ) -> Self {
         values.with_runtime_value_access(|access| {
@@ -837,7 +894,7 @@ impl LazyValue {
     #[cfg(test)]
     pub(crate) fn semantic_thunk_in(
         access: &RuntimeValueAccess<'_>,
-        label: impl Into<Arc<str>>,
+        label: impl Into<LazyLabel>,
         thunk: impl Fn(&EvaluatorStepContext<'_>) -> Result<Value, EvaluationHalt>
         + Send
         + Sync
@@ -849,7 +906,7 @@ impl LazyValue {
     #[cfg(test)]
     pub(crate) fn semantic_thunk(
         values: &CoreValueFactory,
-        label: impl Into<Arc<str>>,
+        label: impl Into<LazyLabel>,
         thunk: impl Fn(&EvaluatorStepContext<'_>) -> Result<Value, EvaluationHalt>
         + Send
         + Sync
@@ -866,7 +923,7 @@ impl LazyValue {
     #[cfg(test)]
     pub(crate) fn semantic_computation(
         values: &CoreValueFactory,
-        label: impl Into<Arc<str>>,
+        label: impl Into<LazyLabel>,
         captures: impl Into<Arc<[Value]>>,
         operation: SemanticOperation,
     ) -> Self {
@@ -878,7 +935,7 @@ impl LazyValue {
     #[cfg(test)]
     pub(crate) fn semantic_computation_in(
         access: &RuntimeValueAccess<'_>,
-        label: impl Into<Arc<str>>,
+        label: impl Into<LazyLabel>,
         captures: impl Into<Arc<[Value]>>,
         operation: SemanticOperation,
     ) -> Self {
@@ -894,7 +951,7 @@ impl LazyValue {
 
     pub(crate) fn list_effect_computation_in(
         access: &RuntimeValueAccess<'_>,
-        label: impl Into<Arc<str>>,
+        label: impl Into<LazyLabel>,
         computation: ListEffectComputation,
     ) -> Self {
         Self::with_source_in(
@@ -907,7 +964,7 @@ impl LazyValue {
     #[cfg(test)]
     pub(crate) fn external_host_call(
         values: &CoreValueFactory,
-        label: impl Into<Arc<str>>,
+        label: impl Into<LazyLabel>,
         record: HostCallRecord,
         captures: impl Into<Arc<[Value]>>,
         producer: impl Fn(HostCallRootBundle) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>>
@@ -922,7 +979,7 @@ impl LazyValue {
 
     pub(crate) fn external_host_call_in(
         access: &RuntimeValueAccess<'_>,
-        label: impl Into<Arc<str>>,
+        label: impl Into<LazyLabel>,
         record: HostCallRecord,
         captures: impl Into<Arc<[Value]>>,
         producer: impl Fn(HostCallRootBundle) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>>
@@ -957,7 +1014,7 @@ impl LazyValue {
     #[cfg(test)]
     pub(crate) fn host_call(
         values: &CoreValueFactory,
-        label: impl Into<Arc<str>>,
+        label: impl Into<LazyLabel>,
         producer: impl Fn(HostCallRootBundle) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>>
         + Send
         + Sync
@@ -979,7 +1036,7 @@ impl LazyValue {
     #[cfg(test)]
     pub(crate) fn host_call_in(
         access: &RuntimeValueAccess<'_>,
-        label: impl Into<Arc<str>>,
+        label: impl Into<LazyLabel>,
         producer: impl Fn(HostCallRootBundle) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>>
         + Send
         + Sync
@@ -1013,7 +1070,7 @@ impl LazyValue {
 
     pub(crate) fn failure_in(
         access: &RuntimeValueAccess<'_>,
-        label: impl Into<Arc<str>>,
+        label: impl Into<LazyLabel>,
         failure: Arc<EvaluationFailure>,
     ) -> Self {
         access
@@ -2341,7 +2398,7 @@ impl Value {
     #[cfg(test)]
     pub(crate) fn semantic_thunk(
         values: &CoreValueFactory,
-        label: impl Into<Arc<str>>,
+        label: impl Into<LazyLabel>,
         thunk: impl Fn(&EvaluatorStepContext<'_>) -> Result<Value, EvaluationHalt>
         + Send
         + Sync
@@ -2353,7 +2410,7 @@ impl Value {
     #[cfg(test)]
     pub(crate) fn external_host_call(
         values: &CoreValueFactory,
-        label: impl Into<Arc<str>>,
+        label: impl Into<LazyLabel>,
         record: HostCallRecord,
         captures: impl Into<Arc<[Value]>>,
         producer: impl Fn(HostCallRootBundle) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>>
@@ -4478,11 +4535,11 @@ mod tests {
             members: vec![
                 LazyCycleMember {
                     id: first.id(&values),
-                    label: Arc::from("first"),
+                    label: "first".into(),
                 },
                 LazyCycleMember {
                     id: second.id(&values),
-                    label: Arc::from("second"),
+                    label: "second".into(),
                 },
             ]
             .into_boxed_slice(),

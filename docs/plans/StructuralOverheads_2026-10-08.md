@@ -401,14 +401,24 @@ state's `followed` B-tree set (13), dictionary nodes of the list-effect
 API, built anew each time a list effect runs (22), and builtin calls and
 applications that collect a `Vec` and then copy it into an `Arc<[Value]>`.
 
-Local steps, each measured on its own:
-- **List-effect API.** Build the dictionary once and share it.
-- **Lazy labels.** Keep a static label without allocating.
-- **Inline offers.** Read the producer's kind under the lock instead of
-  duplicating the checkpoint and source.
-- **Argument arrays.** Collect into `Arc<[Value]>` directly where the
-  vector ends as one.
-- **`followed`.** A small inline set for the usual one or two entries.
+Local steps, each measured on its own (instructions, `countdown_800` /
+`list_sum_400` / `hello_elf`), done 2026-10-12:
+- **List-effect API.** One shared dictionary: −2.6% / −1.7% / −0.9%,
+  `do_chain_800` −3.1%.
+- **Lazy labels.** `LazyLabel` keeps a literal as it is and shares any
+  other: −4.0% / −3.4% / −1.7%. The lazy cell grows to 152 bytes and its
+  root to 40; the root's copy of the label could go.
+- **Inline offers.** `view_producer` reads the producer's kind under its
+  lock, duplicating nothing: −1.2% / −1.1% / −0.6%.
+- **Argument arrays.** An operator's operands, the new one moved in,
+  collect straight into the `Arc<[Value]>` it keeps: −4.0% / −4.4% /
+  −2.3%.
+- **`followed`.** It recorded every cached lazy a WHNF walk passed, but
+  only a repeated promise is ever consulted, and a cached value is never a
+  lazy, so it now records promises alone: −0.9% / −1.0% / −0.5%.
+
+Together `countdown_800` −12.1%, `list_sum_400` −11.1%, `do_chain_800`
+−6.9%, `list_map_2000` −6.1%, `hello_elf` −5.8%, `minimal` −1.6%.
 
 Structural, already planned: the mutator entries and the transient roots
 (list fronts, inline offers, checkpoint polls) are what

@@ -64,6 +64,7 @@ struct WhnfPollObservation {
 pub(crate) struct WhnfState {
     focus: Value,
     frames: Vec<WhnfContinuation>,
+    /// The promises followed, to find a cycle through one.
     followed: BTreeSet<DeferredValueId>,
     source_owner: Option<LazyId>,
     cycle_promise: Option<PromisedValue>,
@@ -840,10 +841,9 @@ pub(crate) fn reduce_semantic_shell(
 ) -> RegionalWhnfStep {
     match &work.0.focus {
         Value::Lazy(lazy) => match access.lazy(lazy).cached() {
-            Some(Ok(value)) => {
-                work.0.followed.insert(access.lazy(lazy).id().into());
-                RegionalWhnfStep::Delegate(value.into_value_in(access.values()))
-            }
+            // A cached value is in WHNF, never a lazy, so following one
+            // closes no cycle: only promises need recording.
+            Some(Ok(value)) => RegionalWhnfStep::Delegate(value.into_value_in(access.values())),
             Some(Err(failure)) => RegionalWhnfStep::Failed(failure),
             None => {
                 let id = access.lazy(lazy).id();

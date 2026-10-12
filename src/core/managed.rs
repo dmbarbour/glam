@@ -405,8 +405,8 @@ mod value_node;
 pub(crate) use value_node::PreparedRuntimeValueRoot;
 mod recursive_cells;
 pub(crate) use recursive_cells::{
-    ManagedCoreNetAccess, ManagedCoreNetEdge, ManagedCoreNetRoot, ManagedLazyAccess,
-    ManagedLazyEdge, ManagedLazyRoot, ManagedPromiseAccess, ManagedPromiseEdge,
+    LazyProducerView, ManagedCoreNetAccess, ManagedCoreNetEdge, ManagedCoreNetRoot,
+    ManagedLazyAccess, ManagedLazyEdge, ManagedLazyRoot, ManagedPromiseAccess, ManagedPromiseEdge,
     ManagedPromisePublication, ManagedPromiseRoot,
 };
 
@@ -995,7 +995,7 @@ impl RuntimeValueAccess<'_> {
 impl CoreValueFactory {
     pub(crate) fn rooted_error_lazy_for_test(
         &self,
-        label: impl Into<Arc<str>>,
+        label: impl Into<crate::core::LazyLabel>,
     ) -> (ManagedLazyRoot, LazyValue) {
         self.with_runtime_value_access(|access| {
             let root = access

@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError, TryLockError};
 use glam_gc::{Gc, Root, Trace, UnsupportedLayout, Visitor};
 
 use crate::core::{
-    EvaluationFailure, EvaluationPanic, LazyId, LazyResult, LazySource, LazyValue, PromiseId,
-    PromisedValue, RuntimeValueAccess, Value,
+    EvaluationFailure, EvaluationPanic, LazyId, LazyLabel, LazyResult, LazySource, LazyValue,
+    PromiseId, PromisedValue, RuntimeValueAccess, Value,
 };
 use crate::core_net::{CoreOperator, CoreRuntimeNet, CoreSpecialization};
 use crate::eval::lazy_checkpoint::ManagedLazyCheckpointEdge;
@@ -49,7 +49,7 @@ type ManagedPromiseAssignment = Result<Value, Arc<EvaluationFailure>>;
 /// separate fields retain the current lock-free terminal read opportunity.
 pub(crate) struct ManagedLazyCell {
     id: LazyId,
-    label: Arc<str>,
+    label: LazyLabel,
     producer: Mutex<Option<ManagedLazyProducerState>>,
     result: OnceLock<LazyResult>,
 }
@@ -107,6 +107,15 @@ const JIT_REQUESTED: u8 = 1;
 /// A net whose compile at its first application has been tried.
 const JIT_TRIED: u8 = 2;
 
+/// A lazy's producer as [`ManagedLazyAccess::view_producer`] shows it.
+pub(crate) enum LazyProducerView<'producer> {
+    Source(&'producer LazySource),
+    Checkpoint(&'producer ManagedLazyCheckpointEdge),
+    Forward,
+    /// Cached, or its evaluation panicked: nothing is left to produce.
+    Done,
+}
+
 pub(crate) struct ManagedLazyEdge(Gc<ManagedLazyCell>);
 
 pub(crate) struct ManagedPromiseEdge(Gc<ManagedPromiseCell>);
@@ -117,7 +126,7 @@ pub(crate) struct ManagedCoreNetEdge(Gc<ManagedCoreNetCell>);
 #[derive(Clone, Debug)]
 pub(crate) struct ManagedLazyRoot {
     id: LazyId,
-    label: Arc<str>,
+    label: LazyLabel,
     root: Root<ManagedLazyCell>,
 }
 
@@ -205,7 +214,7 @@ impl ManagedCoreNetCell {
 impl ManagedLazyCell {
     fn new(
         values: &crate::core::CoreValueFactory,
-        label: impl Into<Arc<str>>,
+        label: impl Into<LazyLabel>,
         source: LazySource,
     ) -> Self {
         Self {
@@ -237,7 +246,7 @@ impl ManagedPromiseCell {
 impl RuntimeValueAccess<'_> {
     fn allocate_managed_lazy(
         &self,
-        label: impl Into<Arc<str>>,
+        label: impl Into<LazyLabel>,
         source: LazySource,
     ) -> Result<ManagedLazyEdge, UnsupportedLayout> {
         let allocator = self.allocator::<ManagedLazyCell>()?;
@@ -276,7 +285,7 @@ impl RuntimeValueAccess<'_> {
     /// traced owner or use [`Self::construct_rooted_managed_lazy`].
     pub(in crate::core) fn construct_managed_lazy(
         &self,
-        label: impl Into<Arc<str>>,
+        label: impl Into<LazyLabel>,
         source: LazySource,
     ) -> Result<LazyValue, UnsupportedLayout> {
         let edge = self.allocate_managed_lazy(label, source)?;
@@ -287,7 +296,7 @@ impl RuntimeValueAccess<'_> {
     /// facade from this region.
     pub(in crate::core) fn construct_failed_managed_lazy(
         &self,
-        label: impl Into<Arc<str>>,
+        label: impl Into<LazyLabel>,
         failure: Arc<EvaluationFailure>,
     ) -> Result<LazyValue, UnsupportedLayout> {
         let lazy = self.construct_managed_lazy(label, LazySource::Error)?;
@@ -355,7 +364,7 @@ impl RuntimeValueAccess<'_> {
     #[cfg(test)]
     pub(in crate::core) fn construct_rooted_managed_lazy(
         &self,
-        label: impl Into<Arc<str>>,
+        label: impl Into<LazyLabel>,
         source: LazySource,
     ) -> Result<ManagedLazyRoot, UnsupportedLayout> {
         let lazy = self.construct_managed_lazy(label, source)?;
@@ -491,7 +500,7 @@ impl ManagedLazyRoot {
         self.id
     }
 
-    pub(crate) fn label(&self) -> &Arc<str> {
+    pub(crate) fn label(&self) -> &LazyLabel {
         &self.label
     }
 
@@ -712,7 +721,7 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
         self.cell.id
     }
 
-    pub(crate) fn label(&self) -> &Arc<str> {
+    pub(crate) fn label(&self) -> &LazyLabel {
         &self.cell.label
     }
 
@@ -975,6 +984,32 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
 
     /// The lazy this one forwards to, as an edge valid only within this
     /// access. A caller that keeps it past the access roots it.
+    /// What `view` makes of this lazy's producer, read under its lock
+    /// without duplicating it.
+    pub(crate) fn view_producer<R>(&self, view: impl FnOnce(LazyProducerView<'_>) -> R) -> R {
+        if self.cell.result.get().is_some() {
+            return view(LazyProducerView::Done);
+        }
+        let producer = self
+            .cell
+            .producer
+            .lock()
+            .expect("managed lazy producer cell was poisoned");
+        if self.cell.result.get().is_some() {
+            return view(LazyProducerView::Done);
+        }
+        match producer.as_ref() {
+            Some(ManagedLazyProducerState::Source(source)) => {
+                view(LazyProducerView::Source(source))
+            }
+            Some(ManagedLazyProducerState::Checkpoint(checkpoint)) => {
+                view(LazyProducerView::Checkpoint(checkpoint))
+            }
+            Some(ManagedLazyProducerState::Forward(_)) => view(LazyProducerView::Forward),
+            Some(ManagedLazyProducerState::Panicked(_)) | None => view(LazyProducerView::Done),
+        }
+    }
+
     pub(crate) fn forward_target_edge(&self) -> Option<ManagedLazyEdge> {
         if self.cell.result.get().is_some() {
             return None;
@@ -1670,7 +1705,7 @@ unsafe impl ManagedFamily for ManagedCoreNetCell {
 // field change must update these target-specific latches.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 const _: () = {
-    assert!(std::mem::size_of::<ManagedLazyCell>() == 144);
+    assert!(std::mem::size_of::<ManagedLazyCell>() == 152);
     assert!(std::mem::align_of::<ManagedLazyCell>() == 8);
     assert!(std::mem::size_of::<ManagedPromiseCell>() == 104);
     assert!(std::mem::align_of::<ManagedPromiseCell>() == 8);
@@ -1678,7 +1713,7 @@ const _: () = {
     // net's three node maps use the zero-sized trusted hasher state.
     assert!(std::mem::size_of::<ManagedCoreNetCell>() == 224 + if cfg!(test) { 8 } else { 0 });
     assert!(std::mem::align_of::<ManagedCoreNetCell>() == 8);
-    assert!(std::mem::size_of::<ManagedLazyRoot>() == 32);
+    assert!(std::mem::size_of::<ManagedLazyRoot>() == 40);
     assert!(std::mem::align_of::<ManagedLazyRoot>() == 8);
     assert!(std::mem::size_of::<ManagedPromiseRoot>() == 40);
     assert!(std::mem::align_of::<ManagedPromiseRoot>() == 8);
@@ -1832,7 +1867,7 @@ mod tests {
     }
 
     fn assert_lazy_promise_cycle_through_source(
-        label: &str,
+        label: &'static str,
         source_for: impl FnOnce(Value) -> LazySource,
     ) {
         let values = new_values();
@@ -1980,7 +2015,7 @@ mod tests {
 
     #[test]
     fn recursive_cell_layouts_are_recorded() {
-        assert_eq!(std::mem::size_of::<ManagedLazyCell>(), 144);
+        assert_eq!(std::mem::size_of::<ManagedLazyCell>(), 152);
         assert_eq!(std::mem::align_of::<ManagedLazyCell>(), 8);
         assert_eq!(
             <ManagedLazyCell as Trace>::REQUESTED_SLOT_SIZE,
@@ -2004,7 +2039,7 @@ mod tests {
                 ManagedCoreNetCell,
             >())
         );
-        assert_eq!(std::mem::size_of::<ManagedLazyRoot>(), 32);
+        assert_eq!(std::mem::size_of::<ManagedLazyRoot>(), 40);
         assert_eq!(std::mem::size_of::<ManagedPromiseRoot>(), 40);
         assert_eq!(std::mem::size_of::<ManagedCoreNetRoot>(), 8);
     }
@@ -2068,7 +2103,7 @@ mod tests {
                 .access(&access)
                 .expect("the matching value domain should authorize its lazy cell");
             assert_eq!(lazy.id(), root.id());
-            assert_eq!(lazy.label().as_ref(), "prepared lazy");
+            assert_eq!(&**lazy.label(), "prepared lazy");
             assert!(lazy.source_snapshot().is_some());
             let first = root.cache(&access, Ok(winner.duplicate_in(&access)));
             access.assert_same_representation_for_test(&first, &Ok(winner.duplicate_in(&access)));
@@ -2479,10 +2514,7 @@ mod tests {
         });
 
         values.with_runtime_value_access(|access| {
-            assert_eq!(
-                lazy.access(&access).unwrap().label().as_ref(),
-                "rooted lazy"
-            );
+            assert_eq!(&**lazy.access(&access).unwrap().label(), "rooted lazy");
             let data = net.access(&access).unwrap().with(|runtime| {
                 runtime
                     .interface_data(runtime.exposed())
@@ -2526,7 +2558,7 @@ mod tests {
                 .allocate_managed_core_net(prepared_runtime(&access, 61))
                 .expect("the managed core-net cell should fit a run");
 
-            assert_eq!(lazy_edge.access(&access).label().as_ref(), "split lazy");
+            assert_eq!(&**lazy_edge.access(&access).label(), "split lazy");
             let data = net_edge.access(&access).with(|runtime| {
                 runtime
                     .interface_data(runtime.exposed())
