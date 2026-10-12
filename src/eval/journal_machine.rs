@@ -1,14 +1,17 @@
 //! Replays a definition journal for conflicts (`perf-definition-assertions`).
 //!
 //! A journal is a list of entries, or `{}` if a namespace has none, and an
-//! entry is `{op:intro:path, at:Frame}` with `over` or `update` in place of
-//! `intro`. The builtin accelerates a fold a front end could
-//! write in glam: it returns one diagnostic per introduction of a path
-//! already defined, in journal order, with the entry's `at` as context
-//! (`msg.context`), then the earlier definition's. Defining a path defines
-//! each namespace on the way, as the compile-time check counts them. An
-//! override of a path the journal lacks is not reported: names can come from
-//! outside any journal, such as a host's `asm.args` or a dict's members.
+//! entry is `{op:intro:path, at:Frame}` with `over`, `update`, `declare` or
+//! `assume` in place of `intro`. The builtin accelerates a fold a front end
+//! could write in glam. It returns a diagnostic, in journal order, for each
+//! introduction of a path already defined (context: the entry's `at`, then
+//! the earlier definition's), each override of a path not defined, and then
+//! each declared path never defined. Context frames go in `msg.context`.
+//!
+//! `assume` defines a path, as its definition lies outside the journal;
+//! `declare` defines nothing but expects a definition by the end. Defining
+//! a path defines each namespace on the way, and declaring one declares
+//! them, as the compile-time check counts them.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,11 +35,19 @@ use super::whnf::{
 pub(in crate::eval) struct RegionalJournalConflictsMachine {
     /// What remains to replay, the next step last.
     frames: Vec<JournalFrame>,
-    /// Each defined path's first `at`.
-    defined: HashMap<Key, Value>,
+    /// Each path the journal declares or defines.
+    paths: HashMap<Key, JournalPath>,
+    /// Declared paths, in journal order, for the final check.
+    declared: Vec<Key>,
     conflicts: Vec<Value>,
     keys: JournalKeys,
     source_owner: LazyId,
+}
+
+/// A path the journal declares or defines, with the `at` that did.
+struct JournalPath {
+    defined: bool,
+    at: Value,
 }
 
 /// The keys an entry is read by, interned once.
@@ -46,6 +57,17 @@ struct JournalKeys {
     intro: Key,
     over: Key,
     update: Key,
+    declare: Key,
+    assume: Key,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JournalOp {
+    Introduce,
+    Override,
+    Update,
+    Declare,
+    Assume,
 }
 
 enum JournalFrame {
@@ -74,7 +96,8 @@ impl RegionalJournalConflictsMachine {
                 access.values().duplicate_value(journal),
                 source_owner,
             ))],
-            defined: HashMap::new(),
+            paths: HashMap::new(),
+            declared: Vec::new(),
             conflicts: Vec::new(),
             keys: JournalKeys {
                 op: Key::atom_from_text("op"),
@@ -82,6 +105,8 @@ impl RegionalJournalConflictsMachine {
                 intro: Key::atom_from_text("intro"),
                 over: Key::atom_from_text("over"),
                 update: Key::atom_from_text("update"),
+                declare: Key::atom_from_text("declare"),
+                assume: Key::atom_from_text("assume"),
             },
             source_owner,
         }
@@ -140,6 +165,17 @@ impl RegionalJournalConflictsMachine {
         step_budget: &mut EvaluationStepBudget,
     ) -> RegionalBuiltinPoll {
         let Some(frame) = self.frames.last_mut() else {
+            for path in std::mem::take(&mut self.declared) {
+                let entry = &self.paths[&path];
+                if !entry.defined {
+                    let context = vec![access.values().duplicate_value(&entry.at)];
+                    self.conflicts.push(conflict(
+                        access,
+                        format!("`{}` is declared but never defined", path_name(&path)),
+                        context,
+                    ));
+                }
+            }
             let conflicts = std::mem::take(&mut self.conflicts);
             return RegionalBuiltinPoll::Ready(Value::List(List::from_values(conflicts)));
         };
@@ -201,55 +237,91 @@ impl RegionalJournalConflictsMachine {
         op: Key,
         at: Option<Value>,
     ) -> Result<(), &'static str> {
-        const INVALID: &str =
-            "a definition journal op must be `intro`, `over` or `update` of a path";
+        const INVALID: &str = "a definition journal op must be `intro`, `over`, `update`, `declare` or `assume` of a path";
         let Key::Dict(op) = op else {
             return Err(INVALID);
         };
         let [(tag, path @ Key::List(parts))] = op.as_ref() else {
             return Err(INVALID);
         };
-        let name = || {
-            parts
-                .iter()
-                .map(format_name_part)
-                .collect::<Vec<_>>()
-                .join(".")
-        };
+        let op = [
+            (&self.keys.intro, JournalOp::Introduce),
+            (&self.keys.over, JournalOp::Override),
+            (&self.keys.update, JournalOp::Update),
+            (&self.keys.declare, JournalOp::Declare),
+            (&self.keys.assume, JournalOp::Assume),
+        ]
+        .into_iter()
+        .find_map(|(key, op)| (key == tag).then_some(op))
+        .ok_or(INVALID)?;
+        let at = at.unwrap_or_else(|| empty(access));
         let duplicate = |value: &Value| access.values().duplicate_value(value);
-        // Defining a path defines each namespace on the way.
+        // A path's namespaces are declared with it, and defined otherwise.
+        let defines = op != JournalOp::Declare;
         for length in 1..parts.len() {
-            let prefix = Key::List(Arc::from(&parts[..length]));
-            self.defined
-                .entry(prefix)
-                .or_insert_with(|| at.as_ref().map_or_else(|| empty(access), duplicate));
+            self.note(
+                access,
+                Key::List(Arc::from(&parts[..length])),
+                defines,
+                duplicate(&at),
+            );
         }
-        if *tag == self.keys.intro {
-            match self.defined.get(path) {
-                Some(earlier) => {
-                    let context = at.iter().chain([earlier]).map(duplicate).collect();
+        match op {
+            JournalOp::Introduce => match self.paths.get(path) {
+                Some(earlier) if earlier.defined => {
+                    let context = vec![duplicate(&at), duplicate(&earlier.at)];
                     self.conflicts.push(conflict(
                         access,
                         format!(
                             "cannot introduce `{}` because it is already defined",
-                            name()
+                            path_name(path)
                         ),
                         context,
                     ));
                 }
-                None => {
-                    self.defined
-                        .insert(path.clone(), at.unwrap_or_else(|| empty(access)));
-                }
+                _ => self.note(access, path.clone(), true, at),
+            },
+            JournalOp::Override if !self.paths.contains_key(path) => {
+                let context = vec![duplicate(&at)];
+                self.conflicts.push(conflict(
+                    access,
+                    format!(
+                        "cannot override `{}` because it is not defined",
+                        path_name(path)
+                    ),
+                    context,
+                ));
+                self.note(access, path.clone(), true, at);
             }
-        } else if *tag == self.keys.over || *tag == self.keys.update {
-            self.defined
-                .entry(path.clone())
-                .or_insert_with(|| at.unwrap_or_else(|| empty(access)));
-        } else {
-            return Err(INVALID);
+            JournalOp::Override | JournalOp::Update | JournalOp::Assume => {
+                self.note(access, path.clone(), true, at);
+            }
+            JournalOp::Declare => self.note(access, path.clone(), false, at),
         }
         Ok(())
+    }
+
+    /// Notes that `path` is declared, or defined, unless it already is.
+    fn note(&mut self, _access: &EvaluationValueAccess<'_>, path: Key, defines: bool, at: Value) {
+        match self.paths.get_mut(&path) {
+            Some(entry) => {
+                if defines && !entry.defined {
+                    *entry = JournalPath { defined: true, at };
+                }
+            }
+            None => {
+                if !defines {
+                    self.declared.push(path.clone());
+                }
+                self.paths.insert(
+                    path,
+                    JournalPath {
+                        defined: defines,
+                        at,
+                    },
+                );
+            }
+        }
     }
 
     pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
@@ -267,7 +339,12 @@ impl RegionalJournalConflictsMachine {
                 }
             }
         }
-        for value in self.defined.values().chain(&self.conflicts) {
+        for value in self
+            .paths
+            .values()
+            .map(|entry| &entry.at)
+            .chain(&self.conflicts)
+        {
             trace_compatibility_value_managed_edges(value, visitor);
         }
     }
@@ -295,6 +372,18 @@ fn drive_in(
         RegionalWhnfStatus::Boundary(request) => Err(RegionalBuiltinPoll::Boundary(request)),
         RegionalWhnfStatus::Yielded => Err(RegionalBuiltinPoll::Yielded),
         RegionalWhnfStatus::Failed(failure) => Err(RegionalBuiltinPoll::Failed(failure)),
+    }
+}
+
+/// A path's dotted name.
+fn path_name(path: &Key) -> String {
+    match path {
+        Key::List(parts) => parts
+            .iter()
+            .map(format_name_part)
+            .collect::<Vec<_>>()
+            .join("."),
+        other => format_name_part(other),
     }
 }
 

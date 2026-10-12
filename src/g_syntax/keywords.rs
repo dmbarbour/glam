@@ -55,6 +55,10 @@ pub(super) const G0_KEYWORDS: &[Keyword] = &[
         roles: &[Modifier],
     },
     Keyword {
+        spelling: "assume",
+        roles: &[Declaration],
+    },
+    Keyword {
         spelling: "at",
         roles: &[Modifier],
     },
@@ -208,6 +212,10 @@ mod tests {
         assert_eq!(
             g0_keyword("declare").map(Keyword::roles),
             Some(&[Declaration, Statement][..])
+        );
+        assert_eq!(
+            g0_keyword("assume").map(Keyword::roles),
+            Some(&[Declaration][..])
         );
         assert_eq!(
             g0_keyword("abstract_global_path").map(Keyword::roles),

@@ -40,6 +40,7 @@ pub enum DeclarationKind {
     Language(LanguageDecl),
     Import(ImportDecl),
     Declare(Vec<String>),
+    Assume(Vec<String>),
     Unique(Vec<String>),
     Object(ObjectDecl),
     Extend(ObjectExtendDecl),

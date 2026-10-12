@@ -17,6 +17,7 @@ pub(in crate::g_syntax::parser) enum SimpleDeclaration {
     Language,
     Import,
     Declare,
+    Assume,
     Unique,
 }
 
@@ -26,6 +27,7 @@ impl SimpleDeclaration {
             "language" => Some(Self::Language),
             "import" => Some(Self::Import),
             "declare" => Some(Self::Declare),
+            "assume" => Some(Self::Assume),
             "unique" => Some(Self::Unique),
             _ => None,
         }
@@ -56,6 +58,12 @@ pub(in crate::g_syntax::parser) fn parse_simple_declaration<'lex, 'source: 'lex>
             line,
             session,
             keyword_name_list("declare").map(DeclarationKind::Declare),
+        ),
+        SimpleDeclaration::Assume => parse_with(
+            view,
+            line,
+            session,
+            keyword_name_list("assume").map(DeclarationKind::Assume),
         ),
         SimpleDeclaration::Unique => parse_with(
             view,

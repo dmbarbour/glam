@@ -216,11 +216,25 @@ Steps:
   pattern builtins); targets within `refl`, `meta` or `spec` at any depth
   carry no boundary. Done 2026-10-12: `minimal` -4.5%, `chain` -1%, others
   within 0.4%.
-- `defs-declarations` (next, to settle): journal `declare` and `assume`
-  entries; the assembler seeds what it provides (`asm.args`, `env`) and
-  declares what it expects (`asm.result`); the replay reports overriding
-  an undefined path and a declared path left undefined; `:=` and `extend`
-  lose `assert_defined`.
+- `defs-declarations`: journal `declare` and `assume` entries; the
+  assembler seeds what it provides (`asm.args`, `env`) and declares what it
+  expects (`asm.result`), with `at:asm:()`; `import ... as` journals `env`;
+  the replay reports overriding an undefined path and a declared path left
+  undefined; a module's `:=` and `extend` lose `assert_defined`. Done
+  2026-10-12, after renaming `abstract Name, ...` to `declare` at module
+  scope and in `do` (`ec4fa6ab`; `abstract object` stays).
+  - `declare` concerns only the final state: one `=` and any `:=` are
+    legal. `assume` stands for a prior definition outside the journal:
+    `:=` is legal and `=` conflicts, in the compile-time check too.
+  - `assume` is a module declaration for now. It suits object bodies too
+    (maintainer), which wait for objects' journals; in `do` it would gain
+    little, as a do block has only locals.
+  - Declaring a nested path declares its namespaces; assuming one assumes
+    them.
+  - Instructions against `b7fd0c42`, all steps together: `chain` -54.0%,
+    `defs_unused` -33.5%, `chain_refl` -49.6%, `hello_elf` +0.65%,
+    `countdown` +1.6%, `list_map` +6.2%, `minimal` +36% (17.6 M to
+    23.9 M; the `asm` boundary is most of it).
 - `defs-with-union`: dict `with` lowers `=` to union and `:=` to update.
   Deferred (maintainer, 2026-10-12): union merges dicts, so `f = {a: 1}`
   and then `f = {b: 2}` would not conflict, which would confuse users.

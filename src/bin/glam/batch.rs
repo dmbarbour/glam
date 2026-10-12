@@ -468,8 +468,21 @@ fn assemble(
             .map(|argument| values.bytes(argument.as_encoded_bytes().to_vec())),
     )?;
     let initial_definitions = values.record([
-        ("asm", values.record([("args", arguments)])?),
+        (
+            "asm",
+            values.record([
+                ("args", arguments),
+                (
+                    "meta",
+                    journal_record(&values, [("intro", "args"), ("declare", "result")])?,
+                ),
+            ])?,
+        ),
         ("env", environment),
+        (
+            "meta",
+            journal_record(&values, [("intro", "asm"), ("intro", "env")])?,
+        ),
     ])?;
     let module = super::profile::time("build", || {
         assembler
@@ -493,6 +506,26 @@ fn assemble(
                 .with_context(&values, context)
                 .expect("assembly-result context belongs to the assembler runtime")
         })
+}
+
+/// `{journal: [...]}` recording what the assembler provides and expects
+/// before the first input, by the `.g` journal convention
+/// (`perf-definition-assertions`): `{op:Op:[name], at:asm:()}`.
+fn journal_record<const N: usize>(
+    values: &Values,
+    entries: [(&str, &str); N],
+) -> Result<Value, Error> {
+    let entries = entries
+        .into_iter()
+        .map(|(op, name)| {
+            let path = values.list([values.atom_from_text(name)])?;
+            values.record([
+                ("op", values.record([(op, path)])?),
+                ("at", values.record([("asm", values.unit())])?),
+            ])
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    values.record([("journal", values.list(entries)?)])
 }
 
 pub(super) fn assembly_result_context(values: &Values) -> Result<Value, Error> {

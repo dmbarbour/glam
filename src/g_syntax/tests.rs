@@ -6931,26 +6931,45 @@ fn inline_builtin_imports_follow_ordered_module_updates() {
     ));
 }
 
+/// A module's reflection boundary reports overriding a name its journal
+/// lacks and a declared name never defined; an assumed name may be
+/// overridden. The definitions themselves still evaluate.
 #[test]
-fn introduce_and_override_checks_are_deferred_until_observed() {
-    let context = CompileContext::default();
-    let parsed = parse("language g0\nfoo := 1\nok = \"ok\"\n");
-    let lowered = lower_parsed_source(parsed, &context);
-    assert_eq!(lowered.diagnostics, []);
+fn module_boundaries_report_undefined_overrides_and_declarations() {
+    let source = r#"language g0
+import 'std
+foo := 1
+declare later
+assume outside
+outside := 2
+ok = "ok"
+meta.probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .r ()))) } "probe"
+"#;
+    let (_assembler, context, module, _module_root, diagnostics) =
+        reflection_test_module(source, &["journal_report_test"], &[("guard", "refl")]);
 
-    let value = evaluated_module_value(&context, &lowered);
     assert_same_value_representation(
-        &fully_evaluated_value(resolved_value_at_path(&value, &["ok"])),
+        &resolved_value_at_path_with_context(&context, &module, &["ok"]),
         &Value::binary_from_text("ok"),
     );
-
-    let foo = value
-        .get_atom_path(&[Atom::from_key(&Key::binary_from_text("foo"))])
-        .expect("foo binding should exist lazily");
-    let err = fully_evaluated_error(foo.duplicate_for_test(&crate::compiler::test_value_factory()));
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["foo"]),
+        &Value::Number(n(1)),
+    );
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["meta", "probe"]),
+        &Value::binary_from_text("probe"),
+    );
+    let messages = take_reflection_diagnostics(&diagnostics)
+        .iter()
+        .map(|diagnostic| diagnostic.message().to_owned())
+        .collect::<Vec<_>>();
     assert_eq!(
-        err.to_string(),
-        "cannot override `foo` because it is not defined"
+        messages,
+        [
+            "cannot override `foo` because it is not defined",
+            "`later` is declared but never defined",
+        ]
     );
 }
 
@@ -6994,6 +7013,8 @@ fn duplicate_introductions_fail_the_module() {
             "u = 4\n",
             "v.w = 5\n",
             "v = 6\n",
+            "assume x\n",
+            "x = 7\n",
         )),
         &context,
     );
@@ -7011,6 +7032,10 @@ fn duplicate_introductions_fail_the_module() {
             (6, "cannot introduce `s` because line 5 already defines it"),
             (8, "cannot introduce `u` because line 7 already defines it"),
             (10, "cannot introduce `v` because line 9 already defines it"),
+            (
+                12,
+                "cannot introduce `x` because line 11 already defines it"
+            ),
         ]
     );
 }
@@ -7130,6 +7155,8 @@ fn modules_journal_their_definitions() {
             "object Point with\n    x = 1\n",
             "extend Point with\n    y = 2\n",
             "unique u\n",
+            "declare d.e\n",
+            "assume a\n",
         )),
         &context,
     );
@@ -7142,9 +7169,11 @@ fn modules_journal_their_definitions() {
         journal(&["meta", "journal"]),
         concat!(
             "[intro foo@2, intro s@3, update foo@4, over bar@5, update f@6, ",
-            "intro refl.x@7, intro meta.a.b@8, intro Point@9, over Point@11, intro u@13]"
+            "intro refl.x@7, intro meta.a.b@8, intro Point@9, over Point@11, intro u@13, ",
+            "declare d@14, assume a@15]"
         )
     );
+    assert_eq!(journal(&["d", "meta", "journal"]), "[declare e@14]");
     assert_eq!(journal(&["f", "meta", "journal"]), "[update g@6]");
     assert_eq!(journal(&["f", "g", "meta", "journal"]), "[intro h@6]");
 

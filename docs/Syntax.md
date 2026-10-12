@@ -185,7 +185,7 @@ The active `g0` table is:
 
 | Role | Keywords |
 | --- | --- |
-| declaration heads | `language`, `import`, `declare`, `unique`, `object`, `abstract object`, `extend` |
+| declaration heads | `language`, `import`, `declare`, `assume`, `unique`, `object`, `abstract object`, `extend` |
 | expression forms | `abstract_global_path`, `let`, `where`, `using`, `do`, `if`, `match`, `try`, `try_match`, `object`, `abstract object` |
 | do statements | `declare` |
 | expression operators | `and`, `or` |
@@ -265,10 +265,11 @@ The compiler enforces explicit overrides by implicit assertions analogous to: `n
 To localize errors, and to simplify analysis of name shadowing, names in use shall be defined or declared. A lightweight declaration names what a module expects to be defined, e.g. by a mixin, much as an abstract object declares methods:
 
         declare Name(, Name)*
+        assume Name(, Name)*
 
-Essentially, these declarations build a list of names that compilers won't complain about being undefined locally.
+`declare` names what must be defined by the time a module's definitions are complete, e.g. by a later mixin; `=` may define it once and `:=` may override it. `assume` names what is already defined outside the module's journal, e.g. by a host or by a dict used as a module; `:=` may override it, and `=` conflicts.
 
-To share declarations across includes, we'll represent them in our namespace. This might simply be defined in `meta.*`. The compiler may declare `env` implicitly.
+Compilers record both in the namespace's definition journal, `meta.journal`, beside each introduction (`=`), override (`:=`) and update (`::=`). A namespace's reflection boundary replays its journal when a definition in it is forced, and reports introducing a defined name, overriding an undefined one, and a declared name never defined. Hosts and compilers journal what they provide: the assembler introduces `asm.args` and `env` and declares `asm.result`, and `import ... as` introduces `env`.
 
 ### Associated Names (Convention)
 

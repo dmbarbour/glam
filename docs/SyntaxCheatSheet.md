@@ -13,7 +13,7 @@ language g0 with utf8  # BaseVer with Extensions
 ```
 # Names: [a-zA-Z][a-zA-Z0-9]* parts, joined by single underscores.
 # Active g0 keywords are reserved as bare names and local binders:
-# abstract abstract_global_path and as at binary declare do else extend
+# abstract abstract_global_path and as assume at binary declare do else extend
 # extends if import in language let match module module_origin object or self
 # then try try_match unique using when where with
 # Explicit keys may use them: module.where, where:Value, or .['where] = Value.
@@ -33,9 +33,10 @@ y = foo.(['bar] ++ path)    # .(ListExpr); .([1,'two]++[3]) ≡ .[1].two.[3]
 .[Idx] = Def                # toplevel expr-indexed def; access via module.[Idx]
 
 # Declarations:
-declare foo, bar            # names expected to be defined, e.g. by a mixin
-                            # (bootstrap: only declares the names for name
-                            # analysis; no runtime check or metadata yet)
+declare foo, bar            # names expected to be defined, e.g. by a mixin;
+                            # the journal reports one left undefined
+assume foo, bar             # names defined outside the journal (`:=` may
+                            # override them; `=` would conflict)
 unique Red, Green, Blue     # introduce unique atoms based on namespace path
  
 # Multi-line: continuation lines must be indented; closing }]) may sit at col 0.

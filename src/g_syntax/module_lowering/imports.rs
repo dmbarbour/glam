@@ -1,4 +1,5 @@
 use super::super::*;
+use super::journal::{JournalOp, seed_journal_in};
 use super::objects::*;
 
 pub(in crate::g_syntax) fn lower_import(
@@ -30,9 +31,14 @@ pub(in crate::g_syntax) fn lower_import(
             access,
             definitions,
         ),
-        ImportReference::Local(request) => {
-            lower_local_import(request, &import.placement, context, access, definitions)
-        }
+        ImportReference::Local(request) => lower_local_import(
+            request,
+            &import.placement,
+            line,
+            context,
+            access,
+            definitions,
+        ),
     }
 }
 
@@ -74,6 +80,7 @@ pub(in crate::g_syntax) fn lower_builtin_import(
 pub(in crate::g_syntax) fn lower_local_import(
     request: &str,
     placement: &ImportPlacement,
+    line: usize,
     context: &CompileContext,
     access: &RuntimeValueAccess<'_>,
     definitions: &mut Value,
@@ -92,6 +99,7 @@ pub(in crate::g_syntax) fn lower_local_import(
             let prior_defs = import_as_prior_defs_in(
                 access,
                 target,
+                line,
                 access.duplicate_value(definitions),
                 context,
             )?;
@@ -156,18 +164,23 @@ fn scoped_local_import_value_in(
     Ok(context.import_module_in(access, request, Some(target), prior_defs, final_defs))
 }
 
+/// An imported module's prior: the `env` it inherits, which its journal
+/// records as introduced by the import.
 fn import_as_prior_defs_in(
     access: &RuntimeValueAccess<'_>,
     target: &str,
+    line: usize,
     definitions: Value,
     context: &CompileContext,
 ) -> Result<Value, Diagnostic> {
     let env = inherited_import_env_object_value_in(access, target, definitions, context)?;
+    let prior = update_module_value_in(access, Value::Dict(Dict::new_sync()), "env", env);
+    let journal = seed_journal_in(access, context, &[(JournalOp::Introduce, "env", line)]);
     Ok(update_module_value_in(
         access,
-        Value::Dict(Dict::new_sync()),
-        "env",
-        env,
+        prior,
+        "meta.journal",
+        journal,
     ))
 }
 

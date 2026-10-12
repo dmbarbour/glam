@@ -161,8 +161,9 @@ impl<'a> DefinitionTargetContext<'a> {
 }
 
 /// Lowers a definition. A `journaled` one is a module's: its journal and
-/// the reflection boundary's replay check its introduction of a static
-/// target, in place of a run-time assertion (`perf-definition-assertions`).
+/// the reflection boundary's replay check its introduction or override of
+/// a static target, in place of a run-time assertion
+/// (`perf-definition-assertions`).
 #[allow(clippy::too_many_arguments)]
 pub(in crate::g_syntax) fn lower_definition_resolved(
     access: &RuntimeValueAccess<'_>,
@@ -189,7 +190,7 @@ pub(in crate::g_syntax) fn lower_definition_resolved(
                 .iter()
                 .all(|key| matches!(key, SyntaxKeyExpr::Atom(_)));
             let assertion = match definition.kind {
-                DefinitionKind::Introduce if journaled && static_target => None,
+                _ if journaled && static_target => None,
                 DefinitionKind::Introduce => Some(BuiltinAssertion::Undefined),
                 DefinitionKind::Override => Some(BuiltinAssertion::Defined),
                 DefinitionKind::Update => unreachable!(),

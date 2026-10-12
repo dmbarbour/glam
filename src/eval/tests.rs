@@ -9523,9 +9523,11 @@ fn journal_entry(tag: &str, path: &[&str], line: i64) -> Value {
 }
 
 /// The conflicts builtin replays a journal in order, forcing a lazy prior
-/// segment, and reports introductions of defined paths with their entries'
-/// `at`, then the earlier definition's. Defining `refl.x` defines `refl`;
-/// overriding `bar`, which may come from outside any journal, defines it.
+/// segment. It reports introductions of defined paths, with their entries'
+/// `at` and then the earlier definition's, overrides of undefined paths, and
+/// finally declared paths never defined. Defining `refl.x` defines `refl`,
+/// declaring `never.x` declares `never`, an assumed path counts as defined,
+/// and overriding a declared one defines it.
 #[test]
 fn journal_conflicts_replay_a_journal_in_order() {
     let context = isolated_test_context();
@@ -9546,6 +9548,11 @@ fn journal_conflicts_replay_a_journal_in_order() {
             journal_entry("intro", &["refl", "x"], 6),
             journal_entry("over", &["foo"], 7),
             journal_entry("over", &["refl"], 8),
+            journal_entry("declare", &["d"], 9),
+            journal_entry("assume", &["a"], 10),
+            journal_entry("intro", &["a"], 11),
+            journal_entry("over", &["d"], 12),
+            journal_entry("declare", &["never", "x"], 13),
         ]),
     ));
     let application = apply_values(
@@ -9603,8 +9610,24 @@ fn journal_conflicts_replay_a_journal_in_order() {
                 vec!["3".to_owned(), "1".to_owned()]
             ),
             (
+                "cannot override `bar` because it is not defined".to_owned(),
+                vec!["4".to_owned()]
+            ),
+            (
                 "cannot introduce `f` because it is already defined".to_owned(),
                 vec!["5".to_owned(), "2".to_owned()]
+            ),
+            (
+                "cannot introduce `a` because it is already defined".to_owned(),
+                vec!["11".to_owned(), "10".to_owned()]
+            ),
+            (
+                "`never` is declared but never defined".to_owned(),
+                vec!["13".to_owned()]
+            ),
+            (
+                "`never.x` is declared but never defined".to_owned(),
+                vec!["13".to_owned()]
             ),
         ]
     );

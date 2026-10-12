@@ -602,11 +602,17 @@ maps the short names used here to file names.
     them are recorded whole. A dict is a module insofar as it is used as
     one. Compilers reject `spec` at module scope.
   - A namespace's reflection boundary replays its final journal and logs
-    introductions of a path already defined as errors, so the check runs
-    only when a definition in the namespace is forced, compatible with
-    lazy loading. An override of a path no journal records is not
-    reported, since names also come from outside journals (the
-    assembler's `asm.args`, a dict's members). A nested definition
+    as errors introductions of a path already defined, overrides of one
+    not defined, and declared paths never defined. The check runs only
+    when a definition in the namespace is forced, compatible with lazy
+    loading.
+  - Names from outside a journal reach it at their source: the assembler
+    journals what it provides and expects (`intro` of `asm.args` and
+    `env`, `declare` of `asm.result`, `at:asm:()`), `import ... as`
+    journals `env`, and users write `assume Name`. `declare Name` (renamed
+    from `abstract Name`, as abstract object methods are) concerns only the
+    final state. A dict defined by value and then used as a module is its
+    author's responsibility. A nested definition
     carries its namespace's boundary as well as its file's; a definition in
     a declared object carries only the object's. A target within `refl`,
     `meta` or `spec` carries none.
@@ -615,7 +621,9 @@ maps the short names used here to file names.
     journal too.
   - A name the journal records stays defined: `x := {}` no longer frees
     `x` for reintroduction.
-  - A cross-file conflict is a diagnostic, not a failed value.
+  - A cross-file conflict is a diagnostic, not a failed value, and a
+    module's `=`, `:=` and `extend` no longer carry run-time assertions;
+    computed targets and object members still do.
   - Recording costs 1 to 2% of instructions on `chain` and `defs_unused`,
     mostly tracing the live journal at each collection; a nested boundary
     costs about 5 M instructions the first time.

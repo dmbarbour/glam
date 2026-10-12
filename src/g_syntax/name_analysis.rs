@@ -136,6 +136,15 @@ impl FileNameAnalysis {
                     self.introduce_static_path(self.scopes[scope.0].definitions, path, line);
                 }
             }
+            // An assumed name was defined outside the journal, so a later
+            // introduction conflicts.
+            DeclarationKind::Assume(paths) => {
+                for path in paths {
+                    let definitions = self.scopes[scope.0].definitions;
+                    self.introduce_static_path(definitions, path, line);
+                    self.define_static_path(definitions, path, false, line);
+                }
+            }
             DeclarationKind::Unique(paths) => {
                 for path in paths {
                     let definitions = self.scopes[scope.0].definitions;

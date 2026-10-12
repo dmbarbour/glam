@@ -431,6 +431,7 @@ pub(in crate::g_syntax) fn lower_extend(
         &scope,
         &mut locals,
         declared_target_has_reflection(&extend.target),
+        true,
     )
 }
 
@@ -452,6 +453,7 @@ pub(in crate::g_syntax) fn lower_nested_extend_resolved(
         scope,
         locals,
         scope.reflection.is_some() && declared_target_has_reflection(&extend.target),
+        false,
     )
 }
 
@@ -465,6 +467,7 @@ fn extend_object_resolved_in_scope(
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
     declared_reflection: bool,
+    journaled: bool,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let extension_defs = object_body_defs_resolved_in_scope(
         access,
@@ -509,13 +512,17 @@ fn extend_object_resolved_in_scope(
             composed_defs,
         ),
     );
-    let target_context = DefinitionTargetContext::new(access, definitions, line, context, scope);
-    let object_value = target_context.annotate_static(
-        BuiltinAssertion::Defined,
-        &extend.target,
-        object_value,
-        locals,
-    )?;
+    // A module's journal checks that the object is defined.
+    let object_value = if journaled {
+        object_value
+    } else {
+        DefinitionTargetContext::new(access, definitions, line, context, scope).annotate_static(
+            BuiltinAssertion::Defined,
+            &extend.target,
+            object_value,
+            locals,
+        )?
+    };
     let object_value =
         annotate_definition_context(access, object_value, &extend.target, line, context);
     Ok(update_module_resolved(

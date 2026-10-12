@@ -176,6 +176,7 @@ impl<'context> ModuleLowerer<'context> {
             }
             DeclarationKind::Language(_)
             | DeclarationKind::Declare(_)
+            | DeclarationKind::Assume(_)
             | DeclarationKind::Unknown => Ok(()),
         };
         if let Err(diagnostic) = result {
@@ -274,6 +275,17 @@ impl<'context> ModuleLowerer<'context> {
                 for name in names {
                     self.journal
                         .record(&[name.as_str()], JournalOp::Introduce, line);
+                }
+                return;
+            }
+            DeclarationKind::Declare(paths) | DeclarationKind::Assume(paths) => {
+                let op = match kind {
+                    DeclarationKind::Declare(_) => JournalOp::Declare,
+                    _ => JournalOp::Assume,
+                };
+                for path in paths {
+                    let path = path.split('.').collect::<Vec<_>>();
+                    self.journal.record(&path, op, line);
                 }
                 return;
             }

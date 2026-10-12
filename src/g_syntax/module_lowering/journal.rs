@@ -17,6 +17,10 @@ pub(in crate::g_syntax) enum JournalOp {
     Introduce,
     Override,
     Update,
+    /// `declare`: the name must be defined by the journal's end.
+    Declare,
+    /// `assume`: the name was defined outside the journal.
+    Assume,
 }
 
 impl JournalOp {
@@ -25,6 +29,17 @@ impl JournalOp {
             Self::Introduce => "intro",
             Self::Override => "over",
             Self::Update => "update",
+            Self::Declare => "declare",
+            Self::Assume => "assume",
+        }
+    }
+
+    /// What declaring, assuming or defining a nested name says of each
+    /// namespace on the way.
+    fn of_namespace(self) -> Self {
+        match self {
+            Self::Declare | Self::Assume => self,
+            Self::Introduce | Self::Override | Self::Update => Self::Update,
         }
     }
 }
@@ -42,8 +57,9 @@ pub(in crate::g_syntax) struct PendingJournal {
 }
 
 impl PendingJournal {
-    /// Records `op` on `target` in the namespace that holds it, and an
-    /// update of each namespace on the way in the one that holds that. A
+    /// Records `op` on `target` in the namespace that holds it, and of each
+    /// namespace on the way in the one that holds that (an update, for a
+    /// definition). A
     /// path through `refl` or `meta` stays whole, since neither keeps a
     /// journal of its own.
     pub(in crate::g_syntax) fn record(&mut self, target: &[&str], op: JournalOp, line: usize) {
@@ -53,7 +69,7 @@ impl PendingJournal {
             && !tail.is_empty()
             && !matches!(*name, "refl" | "meta")
         {
-            self.push(&namespace, JournalOp::Update, vec![name_as_key(name)], line);
+            self.push(&namespace, op.of_namespace(), vec![name_as_key(name)], line);
             namespace.push((*name).to_owned());
             rest = tail;
         }
@@ -88,14 +104,7 @@ impl PendingJournal {
         if self.namespaces.is_empty() {
             return definitions;
         }
-        let parts = EntryParts {
-            op: name_as_key("op"),
-            at: name_as_key("at"),
-            intro: name_as_key(JournalOp::Introduce.tag()),
-            over: name_as_key(JournalOp::Override.tag()),
-            update: name_as_key(JournalOp::Update.tag()),
-            origin: context.opaque_origin(access),
-        };
+        let parts = EntryParts::new_in(access, context);
         for (namespace, entries) in std::mem::take(&mut self.namespaces) {
             let target = namespace
                 .iter()
@@ -142,24 +151,34 @@ impl PendingJournal {
 struct EntryParts {
     op: Key,
     at: Key,
-    intro: Key,
-    over: Key,
-    update: Key,
+    tags: [Key; 5],
     origin: Option<Value>,
 }
 
 impl EntryParts {
+    fn new_in(access: &RuntimeValueAccess<'_>, context: &CompileContext) -> Self {
+        Self {
+            op: name_as_key("op"),
+            at: name_as_key("at"),
+            tags: [
+                JournalOp::Introduce,
+                JournalOp::Override,
+                JournalOp::Update,
+                JournalOp::Declare,
+                JournalOp::Assume,
+            ]
+            .map(|op| name_as_key(op.tag())),
+            origin: context.opaque_origin(access),
+        }
+    }
+
     fn entry_in(&self, access: &RuntimeValueAccess<'_>, entry: JournalEntry) -> Value {
         let path = entry
             .path
             .iter()
             .map(|key| key.to_value_in(access))
             .collect::<Vec<_>>();
-        let tag = match entry.op {
-            JournalOp::Introduce => &self.intro,
-            JournalOp::Override => &self.over,
-            JournalOp::Update => &self.update,
-        };
+        let tag = &self.tags[entry.op as usize];
         let op = Dict::new_sync().insert(tag.clone(), Value::List(List::from_values(path)));
         let mut location = Dict::new_sync().insert(
             (*keys::LINE).clone(),
@@ -175,4 +194,28 @@ impl EntryParts {
                 .insert(self.at.clone(), Value::Dict(at)),
         )
     }
+}
+
+/// A journal of `entries`, each `(op, path, line)`, which a compiler writes
+/// for what it provides a module, such as `env` on `import ... as`.
+pub(in crate::g_syntax) fn seed_journal_in(
+    access: &RuntimeValueAccess<'_>,
+    context: &CompileContext,
+    entries: &[(JournalOp, &str, usize)],
+) -> Value {
+    let parts = EntryParts::new_in(access, context);
+    let entries = entries
+        .iter()
+        .map(|(op, path, line)| {
+            parts.entry_in(
+                access,
+                JournalEntry {
+                    op: *op,
+                    path: path.split('.').map(name_as_key).collect(),
+                    line: *line,
+                },
+            )
+        })
+        .collect();
+    Value::List(List::from_values(entries))
 }
