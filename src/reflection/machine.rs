@@ -617,9 +617,20 @@ impl<S: TaskSpecialization> EffectTask<S> {
     pub(super) fn poll(&mut self, steps: usize) -> EffectTaskPoll {
         let context = EvaluationPollContext::for_context(&self.eval_context);
         let mut budget = crate::evaluation::EvaluationStepBudget::new(steps.max(1));
+        self.poll_pumping(&context, &mut budget)
+    }
+
+    /// Polls within `budget`, pumping a dependency it blocks on within the
+    /// same budget rather than returning to its scheduler, so a demanded
+    /// lazy is forced by this poll.
+    pub(super) fn poll_pumping(
+        &mut self,
+        context: &EvaluationPollContext,
+        budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> EffectTaskPoll {
         while budget.remaining() != 0 {
             let before = budget.remaining();
-            let poll = self.poll_with_context(&context, &mut budget);
+            let poll = self.poll_with_context(context, budget);
             budget.charge_if_unchanged(before);
             let EffectTaskPoll::Blocked(blocked) = &poll else {
                 return poll;
@@ -638,7 +649,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             };
             match self.eval_context.pump_wait_on_route_within(
                 wait,
-                &mut budget,
+                budget,
                 &mut self.exact_demand_route,
             ) {
                 EvaluationPumpOutcome::TargetReady => {}
@@ -842,7 +853,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 continue;
             }
             assert!(step_budget.try_consume());
-            let work = self.execution.work.clone();
+            let work = self.take_work_for_step();
             match self.step(context, work) {
                 Ok(MachineStep::Continue(work)) => self.execution.work = work,
                 Ok(MachineStep::Decode(decoding)) => {
@@ -899,6 +910,34 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
         }
         EffectTaskPoll::Yielded
+    }
+
+    /// The work for one step. A failed step's recovery (`retry_wake`) reads
+    /// the work it started from only through a transaction, a retry
+    /// checkpoint, or a cut that owns a transaction; without those, the
+    /// work moves into the step instead of being cloned each step.
+    fn take_work_for_step(&mut self) -> MachineWork<S> {
+        let recoverable = self
+            .execution
+            .cuts
+            .iter()
+            .any(|frame| frame.owns_transaction)
+            || self
+                .execution
+                .work
+                .branch()
+                .is_some_and(|branch| branch.transaction.is_some() || branch.retry.is_some());
+        if recoverable {
+            self.execution.work.clone()
+        } else {
+            std::mem::replace(
+                &mut self.execution.work,
+                MachineWork::Outcome {
+                    outcome: BranchOutcome::Cancelled,
+                    scope_depth: 0,
+                },
+            )
+        }
     }
 
     fn handle_step_error(&mut self, error: TaskHalt) -> EffectTaskPoll {
@@ -3555,7 +3594,7 @@ fn poll_value_effect_task<S: TaskSpecialization>(
     step_budget: &mut crate::evaluation::EvaluationStepBudget,
 ) -> EvaluationMachinePoll {
     let observed_epoch = task.eval_context.current_observation_epoch();
-    match task.poll_with_context(context, step_budget) {
+    match task.poll_pumping(context, step_budget) {
         EffectTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
         EffectTaskPoll::Blocked(blocked) => {
             if let Some(error) = blocked

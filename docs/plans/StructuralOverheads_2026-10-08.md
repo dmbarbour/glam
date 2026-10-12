@@ -359,6 +359,16 @@ or `.heap.get ['k]`), and loops of 400 iterations through a recursive
   evaluating it is a small part.
 - The recursive loop also collects: about 105 K per iteration in full
   collections and 80 K in finalization.
+- First changes (2026-10-12): a step moves its machine work rather than
+  cloning it unless a failed step's recovery could read it (a
+  transaction, a retry checkpoint or a cut owning a transaction); and a
+  reflection task run by the coordinator pumps a dependency it blocks on
+  within its own poll, as a directly run task does, rather than returning
+  to the scheduler for a round trip. Per step: `.r ()` -5%, `.heap.set`
+  -8%; `minimal` -5.7%, `hello_elf` -1.2%. The lazies' own routes remain
+  most of a step (about 296 K): net WHNF evaluation of each small lazy
+  about 28 K, plus checkpoints and route claims. The store's change log
+  also grows with every step: dropping it costs about 37 K per step (R1).
 
 Reflection task polls hold no heap region (`perf-quantum-region`), since
 they call into their host between steps. Their pure steps, such as local
