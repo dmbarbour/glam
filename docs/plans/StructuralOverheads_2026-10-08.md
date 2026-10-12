@@ -436,6 +436,7 @@ is observed; below that arity, partial application starts no work, so it
 could collect arguments as a value and instantiate the code once,
 saturated. It first needs workloads and tests that lean on partial
 application, so that sharing is measured before anything trades it.
+Dropped for now (maintainer, 2026-10-12).
 
 ### Introduce and override checks (`perf-definition-assertions`)
 
