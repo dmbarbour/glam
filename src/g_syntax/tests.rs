@@ -616,7 +616,7 @@ fn keyword_atoms_explicit_key_paths_and_tags_remain_data() {
         "effect = .where\n",
         ".['where] = atom\n",
         "nested.where = atom\n",
-        "abstract outer.where\n",
+        "declare outer.where\n",
         "unique markers.unique\n",
         "import 'list as imports.with\n",
         "object nested.object with {}\n",
@@ -640,7 +640,7 @@ fn simple_declarations_preserve_indented_line_continuations() {
         "import\n",
         "  'std\n",
         "  as standard\n",
-        "abstract first,\n",
+        "declare first,\n",
         "  nested.second\n",
         "unique\n",
         "  Marker\n",
@@ -664,7 +664,7 @@ fn simple_declarations_preserve_indented_line_continuations() {
     );
     assert_eq!(
         parsed.declarations[2].kind,
-        DeclarationKind::Abstract(vec!["first".to_owned(), "nested.second".to_owned()])
+        DeclarationKind::Declare(vec!["first".to_owned(), "nested.second".to_owned()])
     );
     assert_eq!(
         parsed.declarations[3].kind,
@@ -976,7 +976,7 @@ fn parses_mixed_top_level_declarations() {
     let parsed = parse(concat!(
         "language g0 with utf8\n",
         "import 'std as standard\n",
-        "abstract missing, nested.value\n",
+        "declare missing, nested.value\n",
         "unique Marker\n",
         "object holder with\n",
         "  value = 41\n",
@@ -994,7 +994,7 @@ fn parses_mixed_top_level_declarations() {
     ));
     assert_eq!(
         parsed.declarations[2].kind,
-        DeclarationKind::Abstract(vec!["missing".to_owned(), "nested.value".to_owned()])
+        DeclarationKind::Declare(vec!["missing".to_owned(), "nested.value".to_owned()])
     );
     assert_eq!(
         parsed.declarations[3].kind,
@@ -1015,7 +1015,7 @@ fn malformed_simple_declarations_report_their_declaration_lines() {
     for (source, line) in [
         ("language\n", 1),
         ("language g0\nimport\n", 2),
-        ("language g0\nabstract\n", 2),
+        ("language g0\ndeclare\n", 2),
         ("language g0\nunique\n", 2),
     ] {
         let parsed = parse(source);
@@ -1268,7 +1268,7 @@ fn parses_object_expressions() {
 #[test]
 fn parses_abstract_object_declarations_expressions_and_extensions() {
     let parsed = parse(
-        "language g0\nabstract object protocol with {}\nvalue = abstract object \"value\" with {}\nobject outer with {\n  abstract object nested with {};\n  extend abstract nested with {};\n}\nextend abstract protocol with {}\nabstract provided\n",
+        "language g0\nabstract object protocol with {}\nvalue = abstract object \"value\" with {}\nobject outer with {\n  abstract object nested with {};\n  extend abstract nested with {};\n}\nextend abstract protocol with {}\ndeclare provided\n",
     );
 
     assert_eq!(parsed.diagnostics, []);
@@ -1317,7 +1317,7 @@ fn parses_abstract_object_declarations_expressions_and_extensions() {
     ));
     assert!(matches!(
         &parsed.declarations[5].kind,
-        DeclarationKind::Abstract(names) if names == &["provided"]
+        DeclarationKind::Declare(names) if names == &["provided"]
     ));
 }
 
@@ -2364,7 +2364,7 @@ fn recursive_do_forward_names_follow_unused_local_rules() {
     let parsed = parse(concat!(
         "language g0\n",
         "recursive = do\n",
-        "  abstract unused, _quiet, used\n",
+        "  declare unused, _quiet, used\n",
         "  reader = \\_ -> used\n",
         "  (unused) = 1\n",
         "  quiet = 2\n",
@@ -2389,7 +2389,7 @@ fn recursive_do_reports_invalid_regions() {
             concat!(
                 "language g0\n",
                 "bad = do\n",
-                "  abstract missing\n",
+                "  declare missing\n",
                 "  .r ()\n",
             ),
             3,
@@ -2399,18 +2399,18 @@ fn recursive_do_reports_invalid_regions() {
             concat!(
                 "language g0\n",
                 "bad = do\n",
-                "  abstract value, _value\n",
+                "  declare value, _value\n",
                 "  value = 1\n",
                 "  .r value\n",
             ),
             3,
-            "duplicate recursive do abstract declaration for `value`",
+            "duplicate recursive do `declare` statement for `value`",
         ),
         (
             concat!(
                 "language g0\n",
                 "bad outer = do\n",
-                "  abstract outer\n",
+                "  declare outer\n",
                 "  outer = 1\n",
                 "  .r outer\n",
             ),
@@ -2434,30 +2434,30 @@ fn recursive_do_uses_standard_fix_and_preserves_region_locals() {
         "language g0\n",
         "import 'std\n",
         "single = do\n",
-        "  abstract answer\n",
+        "  declare answer\n",
         "  reader = \\_ -> answer\n",
         "  .r 72 -> answer\n",
         "  .r (reader ())\n",
         "mutual = do\n",
-        "  abstract left, right\n",
+        "  declare left, right\n",
         "  captured = 72\n",
         "  left = \\_ -> right\n",
         "  right = captured\n",
         "  ((left () == 72) and (captured == 72)) =>> .r 72\n",
         "sequential = do\n",
-        "  abstract first\n",
+        "  declare first\n",
         "  first = 70\n",
-        "  abstract second\n",
+        "  declare second\n",
         "  second = first + 2\n",
         "  .r second\n",
         "direct_hierarchy = do\n",
-        "  abstract outer\n",
-        "  abstract inner\n",
+        "  declare outer\n",
+        "  declare inner\n",
         "  inner = 2\n",
         "  outer = inner + 70\n",
         "  .r outer\n",
         "independent = do\n",
-        "  abstract _x, y, _z\n",
+        "  declare _x, y, _z\n",
         "  early_y = \\_ -> y\n",
         "  y = 72\n",
         "  (early_y () == 72) =>> .r ()\n",
@@ -2465,9 +2465,9 @@ fn recursive_do_uses_standard_fix_and_preserves_region_locals() {
         "  z = 74\n",
         "  .r y\n",
         "hierarchical = do\n",
-        "  abstract outer\n",
+        "  declare outer\n",
         "  inner = do\n",
-        "    abstract nested\n",
+        "    declare nested\n",
         "    nested = outer + 2\n",
         "    .r nested\n",
         "  outer = 70\n",
@@ -2510,9 +2510,9 @@ fn crossing_recursive_do_promotes_fix_scope_without_leaking_name_visibility() {
         "import 'std\n",
         "initial = 1\n",
         "crossing = do\n",
-        "  abstract outer\n",
+        "  declare outer\n",
         "  prior = initial\n",
-        "  abstract _inner\n",
+        "  declare _inner\n",
         "  outer = prior\n",
         "  inner = 2\n",
         "  .r outer\n",
@@ -2551,7 +2551,7 @@ fn recursive_do_strict_forward_observation_reports_the_fixpoint_cycle() {
         "language g0\n",
         "import 'std\n",
         "task = do\n",
-        "  abstract answer\n",
+        "  declare answer\n",
         "  (answer == 72) =>> .r ()\n",
         "  answer = 72\n",
         "  .r ()\n",
@@ -2583,7 +2583,7 @@ fn recursive_do_without_fix_handler_fails_like_an_explicit_fix_request() {
         "language g0\n",
         "api = { r:(\\x -> x), seq:(\\op k -> (k (op.eff api)).eff api) }\n",
         "recursive = do\n",
-        "  abstract answer\n",
+        "  declare answer\n",
         "  answer = 72\n",
         "  .r answer\n",
         "explicit = .fix (\\_future -> .r 72)\n",
@@ -2719,7 +2719,7 @@ fn literal_and_list_patterns_match_or_fall_through() {
         "asm.literal_fallback = list.pure (.alt (do { .r 41 -> 42; .r \"bad\" }) (.r \"F\"))\n",
         "asm.list_fallback = list.pure (.alt (do { .r [1] -> [1,2]; .r \"bad\" }) (.r \"S\"))\n",
         "asm.kind_fallback = list.pure (.alt (do { .r 1 -> []; .r \"bad\" }) (.r \"K\"))\n",
-        "asm.recursive = list.pure do { abstract left, right; .r [65,66] -> [left,right]; ((left == 65) and (right == 66)) =>> .r \"AB\" }\n",
+        "asm.recursive = list.pure do { declare left, right; .r [65,66] -> [left,right]; ((left == 65) and (right == 66)) =>> .r \"AB\" }\n",
     ));
     assert_eq!(parsed.diagnostics, []);
     let context = CompileContext::default();
@@ -2779,8 +2779,8 @@ fn dictionary_tag_and_tuple_patterns_match_or_fall_through() {
         "asm.spliced_quoted = list.pure do { .r (['foo,42],['foo,42]) -> (path,'.(path)); .r \"F\" }\n",
         "asm.computed_fallback = list.pure (.alt (do { .r {selector:'missing} -> {selector:key,[key]:_value}; .r \"bad\" }) (.r \"G\"))\n",
         "asm.quoted_fallback = list.pure (.alt (do { .r (43,['foo,42]) -> (index,'.foo.[index]); .r \"bad\" }) (.r \"P\"))\n",
-        "asm.computed_recursive = list.pure do { abstract key,value; .r {selector:'target,target:65} -> {selector:key,[key]:value}; ((value == 65) and (key == 'target)) =>> .r \"X\" }\n",
-        "asm.recursive = list.pure do { abstract left, right; .r {left:65,right:66} -> {:left,:right}; ((left == 65) and (right == 66)) =>> .r \"AB\" }\n",
+        "asm.computed_recursive = list.pure do { declare key,value; .r {selector:'target,target:65} -> {selector:key,[key]:value}; ((value == 65) and (key == 'target)) =>> .r \"X\" }\n",
+        "asm.recursive = list.pure do { declare left, right; .r {left:65,right:66} -> {:left,:right}; ((left == 65) and (right == 66)) =>> .r \"AB\" }\n",
     ));
     assert_eq!(parsed.diagnostics, []);
     let context = CompileContext::default();
@@ -2834,7 +2834,7 @@ fn computed_tag_patterns_use_prior_captures_and_match_singleton_dicts() {
         "asm.key = list.pure do { .r ('target,target:69) -> (tag,[tag]:value); (value == 69) =>> .r \"K\" }\n",
         "asm.path = list.pure do { .r (['root,'target],root.target:70) -> (path,(path):value); (value == 70) =>> .r \"P\" }\n",
         "asm.fallback = list.pure (.alt (do { .r ('missing,target:71) -> (tag,[tag]:_value); .r \"bad\" }) (.r \"F\"))\n",
-        "asm.recursive = list.pure do { abstract tag,value; .r ('target,target:72) -> (tag,[tag]:value); ((tag == 'target) and (value == 72)) =>> .r \"R\" }\n",
+        "asm.recursive = list.pure do { declare tag,value; .r ('target,target:72) -> (tag,[tag]:value); ((tag == 'target) and (value == 72)) =>> .r \"R\" }\n",
     ));
     assert_eq!(parsed.diagnostics, []);
     let context = CompileContext::default();
@@ -2862,7 +2862,7 @@ fn refutable_dictionary_remainders_match_the_residual_dictionary() {
         "asm.empty = list.pure do { .r {selected:74} -> {selected:value,{}}; (value == 74) =>> .r \"E\" }\n",
         "asm.missing = list.pure (.alt (do { .r {selected:75} -> {selected:_value,{required:other}}; .r other }) (.r \"A\"))\n",
         "asm.extra = list.pure (.alt (do { .r {selected:76,required:77,extra:78} -> {selected:_value,{required:other}}; .r other }) (.r \"X\"))\n",
-        "asm.recursive = list.pure do { abstract key,value; .r {selector:'target,target:79} -> {selector:key,{[key]:value}}; ((key == 'target) and (value == 79)) =>> .r \"R\" }\n",
+        "asm.recursive = list.pure do { declare key,value; .r {selector:'target,target:79} -> {selector:key,{[key]:value}}; ((key == 'target) and (value == 79)) =>> .r \"R\" }\n",
     ));
     assert_eq!(parsed.diagnostics, []);
     let context = CompileContext::default();
@@ -2891,7 +2891,7 @@ fn refutable_variable_list_segments_match_the_middle_slice() {
         "asm.exact = list.pure do { .r [0,1,2,9] -> [0] ++ ([1,2]) ++ [9]; .r \"E\" }\n",
         "asm.computed = list.pure do { .r [42,'foo,42,9] -> [key] ++ '.foo.[key] ++ [9]; .r \"C\" }\n",
         "asm.fallback = list.pure (.alt (do { .r [0,1,3,9] -> [0] ++ ([1,2]) ++ [9]; .r \"bad\" }) (.r \"F\"))\n",
-        "asm.recursive = list.pure do { abstract head,tail; .r [0,1,2,9] -> [0] ++ ([head] ++ tail) ++ [9]; ((head == 1) and (tail == [2])) =>> .r \"R\" }\n",
+        "asm.recursive = list.pure do { declare head,tail; .r [0,1,2,9] -> [0] ++ ([head] ++ tail) ++ [9]; ((head == 1) and (tail == [2])) =>> .r \"R\" }\n",
     ));
     assert_eq!(parsed.diagnostics, []);
     let context = CompileContext::default();
@@ -2930,7 +2930,7 @@ fn effectful_patterns_transform_filter_guard_and_preserve_the_subject() {
         "asm.view_fallback = list.pure (.alt (do { .r 1 -> (increment -> 3); .r \"bad\" }) (.r \"V\"))\n",
         "asm.predicate_fallback = list.pure (.alt (do { .r 1 -> (equals 2 _); .r \"bad\" }) (.r \"P\"))\n",
         "asm.guard_fallback = list.pure (.alt (do { .r 1 -> (_ when 1 == 2); .r \"bad\" }) (.r \"G\"))\n",
-        "asm.recursive = list.pure do { abstract viewed,next; .r 74 -> ((increment -> viewed) when .r (viewed + 1) -> next); ((viewed == 75) and (next == 76)) =>> .r \"R\" }\n",
+        "asm.recursive = list.pure do { declare viewed,next; .r 74 -> ((increment -> viewed) when .r (viewed + 1) -> next); ((viewed == 75) and (next == 76)) =>> .r \"R\" }\n",
     ));
     assert_eq!(parsed.diagnostics, []);
     let context = CompileContext::default();
@@ -4321,16 +4321,16 @@ fn abstract_objects_retain_specs_without_instantiating_members() {
     assert!(protocol.get(&Key::atom_from_text("text")).is_none());
 
     let Value::Dict(expression) = resolved_value_at_path(&value, &["expression"]) else {
-        panic!("abstract expression should evaluate to a dictionary");
+        panic!("declare expression should evaluate to a dictionary");
     };
     let Some(expression_spec) = expression
         .get(&*keys::SPEC)
         .map(|value| value.duplicate_for_test(&crate::compiler::test_value_factory()))
     else {
-        panic!("abstract expression should retain its specification");
+        panic!("declare expression should retain its specification");
     };
     let Value::Dict(expression_spec) = fully_evaluated_value(expression_spec) else {
-        panic!("abstract expression specification should evaluate to a dictionary");
+        panic!("declare expression specification should evaluate to a dictionary");
     };
     assert!(expression_spec.get(&*keys::NAME).is_none());
     assert_same_value_representation(
@@ -4357,7 +4357,7 @@ fn abstract_and_instance_extensions_choose_the_final_realization() {
 
     let value = evaluated_module_value(&context, &lowered);
     let Value::Dict(base) = resolved_value_at_path(&value, &["base"]) else {
-        panic!("abstract extension should leave a spec-only dictionary");
+        panic!("declare extension should leave a spec-only dictionary");
     };
     assert_eq!(base.iter().count(), 1);
     assert!(base.get(&*keys::SPEC).is_some());

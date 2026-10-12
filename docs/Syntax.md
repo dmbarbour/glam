@@ -185,9 +185,9 @@ The active `g0` table is:
 
 | Role | Keywords |
 | --- | --- |
-| declaration heads | `language`, `import`, `abstract`, `unique`, `object`, `extend` |
+| declaration heads | `language`, `import`, `declare`, `unique`, `object`, `abstract object`, `extend` |
 | expression forms | `abstract_global_path`, `let`, `where`, `using`, `do`, `if`, `match`, `try`, `try_match`, `object`, `abstract object` |
-| do statements | `abstract` |
+| do statements | `declare` |
 | expression operators | `and`, `or` |
 | special expression references | `module`, `module_origin`, `self` |
 | special object/`with` alias | `self` |
@@ -260,15 +260,15 @@ Users refer to prior versions of names via `_name`, i.e. `_` prefix. This applie
 
 The compiler enforces explicit overrides by implicit assertions analogous to: `name = assert (_name == {}) Expr` or `name := assert(_name <> {}) Expr` (where `{}` is the 'undefined' value). As an escape hatch, I propose a non-observing `name ::= \ prior -> Expr`. This also serves as an in-place update, i.e. `name ::= Update`. Users have more freedom with `::=`. 
 
-### Abstract Definitions (Tentative)
+### Declarations (Tentative)
 
-To localize errors, and to simplify analysis of name shadowing, names in use shall be defined or declared. I propose a lightweight declaration for names that we assume to be provided externally:
+To localize errors, and to simplify analysis of name shadowing, names in use shall be defined or declared. A lightweight declaration names what a module expects to be defined, e.g. by a mixin, much as an abstract object declares methods:
 
-        abstract Name(, Name)*
+        declare Name(, Name)*
 
-Essentially, these declarations build a list of toplevel names that that compilers won't complain about being undefined locally. We don't bother with granularity below the toplevel name.
+Essentially, these declarations build a list of names that compilers won't complain about being undefined locally.
 
-To share abstract declarations across includes, we'll represent them in our namespace. This might simply be defined in `meta.abstract_names` or similar. The compiler may introduce `abstract env` implicitly.
+To share declarations across includes, we'll represent them in our namespace. This might simply be defined in `meta.*`. The compiler may declare `env` implicitly.
 
 ### Associated Names (Convention)
 
@@ -328,7 +328,7 @@ Users may also write just `_` if they know a value won't be used, e.g. `skip _ y
 
 ### Module Metadata
 
-In some cases, compilers need to thread some state through toplevel imports, e.g. to track names declared `abstract`. To support this, the compiler will store such metadata under `meta.*` within the module. This is also visible to users, e.g. macros can support similar features or as an interaction surface with the compiler. Alternatively, we could use a name that is difficult to write. But it seems better to just be open about it.
+In some cases, compilers need to thread some state through toplevel imports, e.g. to track declared names. To support this, the compiler will store such metadata under `meta.*` within the module. This is also visible to users, e.g. macros can support similar features or as an interaction surface with the compiler. Alternatively, we could use a name that is difficult to write. But it seems better to just be open about it.
 
 ### Reflection Tasks
 
@@ -476,26 +476,26 @@ Aside from do notation, we'll support the `>>=` composition and `>=>` Kleisli co
 
 ### Recursive Do
 
-Use of fixpoint within do notation is not implicit. It's problematic for it to be implicit because it easily conflicts with shift-reset and features that build upon it. Instead, we'll forward-declare the names we need via `abstract`.
+Use of fixpoint within do notation is not implicit. It's problematic for it to be implicit because it easily conflicts with shift-reset and features that build upon it. Instead, we'll forward-declare the names we need via `declare`.
 
         do
-            abstract foo
+            declare foo
             ... wire foo up, but don't observe foo ...
             op -> foo
-            ... at this point foo is no longer abstract ...
+            ... at this point foo is defined ...
 
 The compiler will leverage `.fix` to capture the name.
 
 The current Rust bootstrap implements this explicitly declared, name-only
-form. `abstract Name, ...` is valid only as a non-final do statement and makes
+form. `declare Name, ...` is valid only as a non-final do statement and makes
 those names visible to following statements. The first later direct bind or
 pure name binding with the same canonical name fulfills each declaration.
 References before fulfillment use the `.fix` future; references afterward use
 the ordinary resolved local.
 
-Each abstract name has its own recursive interval from its declaration through
+Each declared name has its own recursive interval from its declaration through
 its fulfillment and lowers to an independently completable `.fix`. Thus
-`abstract X, Y, Z` creates three fixpoints with the same source start. The
+`declare X, Y, Z` creates three fixpoints with the same source start. The
 compiler may reorder their nesting by fulfillment point without warning: a
 name fulfilled earlier becomes observable through old captures of its future
 while later names remain pending. Each `.fix` privately returns that one
@@ -506,7 +506,7 @@ Direct declarations in one do block may be disjoint, hierarchically contained,
 or syntactically crossing. Disjoint intervals lower sequentially and contained
 intervals lower as nested `.fix` requests. For crossing intervals, the later
 ending fixpoint starts earlier so the resulting scopes are hierarchical. The
-name remains unavailable to source expressions until its written `abstract`
+name remains unavailable to source expressions until its written `declare`
 statement, but the compiler emits a warning because moving `.fix` changes its
 scope relative to shift/reset. Reordering names declared together does not move
 their shared source boundary and does not warn.
@@ -515,8 +515,7 @@ Missing fulfillment, duplicate declarations, and source-scope conflicts are
 also diagnosed. Strictly observing an unresolved forward value follows the
 standard fixpoint failure behavior. The selected effect handler must provide
 `.fix` just as it must for an explicitly written `.fix` request. `_name`
-retains warning suppression, but the inaccessible `_` cannot be declared
-abstract.
+retains warning suppression, but the inaccessible `_` cannot be declared.
 
 ### Applicatives
 

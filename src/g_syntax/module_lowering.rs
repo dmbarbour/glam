@@ -175,7 +175,7 @@ impl<'context> ModuleLowerer<'context> {
                 }
             }
             DeclarationKind::Language(_)
-            | DeclarationKind::Abstract(_)
+            | DeclarationKind::Declare(_)
             | DeclarationKind::Unknown => Ok(()),
         };
         if let Err(diagnostic) = result {

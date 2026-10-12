@@ -39,7 +39,7 @@ pub struct Declaration {
 pub enum DeclarationKind {
     Language(LanguageDecl),
     Import(ImportDecl),
-    Abstract(Vec<String>),
+    Declare(Vec<String>),
     Unique(Vec<String>),
     Object(ObjectDecl),
     Extend(ObjectExtendDecl),
@@ -534,7 +534,7 @@ fn visit_key_scope_events<'a>(
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum DoStepKind {
-    Abstract(Vec<String>),
+    Declare(Vec<String>),
     Bind {
         pattern: SyntaxPattern,
         operation: SyntaxExpr,

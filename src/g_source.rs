@@ -88,7 +88,7 @@ impl GDeclarationSummary {
 pub enum GDeclarationKind {
     Language,
     Import,
-    Abstract,
+    Declare,
     Unique,
     Object,
     Extend,
@@ -102,7 +102,7 @@ impl GDeclarationKind {
         match self {
             Self::Language => "language",
             Self::Import => "import",
-            Self::Abstract => "abstract",
+            Self::Declare => "declare",
             Self::Unique => "unique",
             Self::Object => "object",
             Self::Extend => "extend",
@@ -146,7 +146,7 @@ fn declaration_kind(kind: &InspectedDeclarationKind) -> GDeclarationKind {
         InspectedDeclarationKind::Parsed(kind) => match kind {
             DeclarationKind::Language(_) => GDeclarationKind::Language,
             DeclarationKind::Import(_) => GDeclarationKind::Import,
-            DeclarationKind::Abstract(_) => GDeclarationKind::Abstract,
+            DeclarationKind::Declare(_) => GDeclarationKind::Declare,
             DeclarationKind::Unique(_) => GDeclarationKind::Unique,
             DeclarationKind::Object(_) => GDeclarationKind::Object,
             DeclarationKind::Extend(_) => GDeclarationKind::Extend,

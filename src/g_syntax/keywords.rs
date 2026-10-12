@@ -40,7 +40,7 @@ use KeywordRole::{
 pub(super) const G0_KEYWORDS: &[Keyword] = &[
     Keyword {
         spelling: "abstract",
-        roles: &[Declaration, Expression, Statement, Modifier],
+        roles: &[Declaration, Expression, Modifier],
     },
     Keyword {
         spelling: "abstract_global_path",
@@ -61,6 +61,10 @@ pub(super) const G0_KEYWORDS: &[Keyword] = &[
     Keyword {
         spelling: "binary",
         roles: &[Modifier],
+    },
+    Keyword {
+        spelling: "declare",
+        roles: &[Declaration, Statement],
     },
     Keyword {
         spelling: "do",
@@ -199,7 +203,11 @@ mod tests {
     fn keyword_roles_record_each_active_syntax_site() {
         assert_eq!(
             g0_keyword("abstract").map(Keyword::roles),
-            Some(&[Declaration, Expression, Statement, Modifier][..])
+            Some(&[Declaration, Expression, Modifier][..])
+        );
+        assert_eq!(
+            g0_keyword("declare").map(Keyword::roles),
+            Some(&[Declaration, Statement][..])
         );
         assert_eq!(
             g0_keyword("abstract_global_path").map(Keyword::roles),

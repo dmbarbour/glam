@@ -19,7 +19,7 @@ use super::structural::{
 type ParseResult<T> = Result<T, Vec<Diagnostic>>;
 
 enum ParsedDoStatement {
-    Abstract(Vec<String>),
+    Declare(Vec<String>),
     Bind {
         pattern: SyntaxPattern,
         operation: SyntaxExpr,
@@ -194,7 +194,7 @@ fn hanging_statement_alignment_error(
 }
 
 fn line_begins_do_statement(view: TokenView<'_, '_>) -> bool {
-    starts_with_contextual_name(view, "abstract")
+    starts_with_contextual_name(view, "declare")
         || top_level_symbols(view, "<-")
             .into_iter()
             .next()
@@ -284,7 +284,7 @@ fn finish_do_statements(
     let mut steps = Vec::with_capacity(statements.len());
     for (line, statement) in statements {
         let kind = match statement {
-            ParsedDoStatement::Abstract(names) => DoStepKind::Abstract(names),
+            ParsedDoStatement::Declare(names) => DoStepKind::Declare(names),
             ParsedDoStatement::Bind { pattern, operation } => {
                 DoStepKind::Bind { pattern, operation }
             }
@@ -298,9 +298,9 @@ fn finish_do_statements(
 
     let result = match result_statement {
         ParsedDoStatement::Expr(expr) => expr,
-        ParsedDoStatement::Abstract(_) => {
+        ParsedDoStatement::Declare(_) => {
             return Err(
-                "do block cannot end with an abstract declaration; add its fulfillment and a final expression"
+                "do block cannot end with a `declare` statement; add its fulfillment and a final expression"
                     .to_owned(),
             );
         }
@@ -332,8 +332,8 @@ fn parse_statement(
 ) -> ParseResult<ParsedDoStatement> {
     let view = trim_layout(view);
     let context = parent_context.child_owner(view);
-    if starts_with_contextual_name(view, "abstract") {
-        return parse_abstract(view);
+    if starts_with_contextual_name(view, "declare") {
+        return parse_declare(view);
     }
 
     if let Some(arrow) = top_level_symbols(view, "<-").into_iter().next() {
@@ -408,10 +408,10 @@ fn parse_statement(
     parse_expression_in_context(view, context).map(ParsedDoStatement::Expr)
 }
 
-fn parse_abstract(view: TokenView<'_, '_>) -> ParseResult<ParsedDoStatement> {
-    let (abstract_index, abstract_token) = view
+fn parse_declare(view: TokenView<'_, '_>) -> ParseResult<ParsedDoStatement> {
+    let (abstract_index, declare_token) = view
         .first_significant()
-        .expect("abstract statement has a leading token");
+        .expect("declare statement has a leading token");
     let names = trim_layout(view_between(view, abstract_index + 1, view.range().end()));
     let names = split_top_level(names, ",")
         .into_iter()
@@ -424,15 +424,15 @@ fn parse_abstract(view: TokenView<'_, '_>) -> ParseResult<ParsedDoStatement> {
                     if local_name(name) == Some("_") {
                         error_at_view(
                             name,
-                            "do abstract declaration cannot use the inaccessible `_` name",
+                            "do `declare` statement cannot use the inaccessible `_` name",
                         )
                     } else if let Some(keyword) = single_reserved_keyword(name) {
                         error_at_view(name, reserved_keyword_message(keyword))
                     } else {
                         error_at_token(
                             view,
-                            abstract_token,
-                            "do abstract declaration requires one or more comma-separated local names",
+                            declare_token,
+                            "do `declare` statement requires one or more comma-separated local names",
                         )
                     }
                 })
@@ -441,11 +441,11 @@ fn parse_abstract(view: TokenView<'_, '_>) -> ParseResult<ParsedDoStatement> {
     if names.is_empty() {
         return Err(error_at_token(
             view,
-            abstract_token,
-            "do abstract declaration requires one or more comma-separated local names",
+            declare_token,
+            "do `declare` statement requires one or more comma-separated local names",
         ));
     }
-    Ok(ParsedDoStatement::Abstract(names))
+    Ok(ParsedDoStatement::Declare(names))
 }
 
 fn starts_with_contextual_name(view: TokenView<'_, '_>, expected: &str) -> bool {

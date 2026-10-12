@@ -1,7 +1,7 @@
 language g0
 
 main = do
-  abstract entry
+  declare entry
   jump = \_ -> entry
   .label "_start" -> entry
   .r (jump ())

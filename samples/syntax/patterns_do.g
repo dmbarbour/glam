@@ -27,6 +27,6 @@ guardedPattern input = list.pure do
   .r value
 
 recursivePattern input = list.pure do
-  abstract head, tail
+  declare head, tail
   .r input -> [head] ++ tail
   .r [head,tail]

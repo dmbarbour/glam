@@ -13,9 +13,9 @@ language g0 with utf8  # BaseVer with Extensions
 ```
 # Names: [a-zA-Z][a-zA-Z0-9]* parts, joined by single underscores.
 # Active g0 keywords are reserved as bare names and local binders:
-# abstract abstract_global_path and as at binary do else extend extends if
-# import in language let match module module_origin object or self then try
-# try_match unique using when where with
+# abstract abstract_global_path and as at binary declare do else extend
+# extends if import in language let match module module_origin object or self
+# then try try_match unique using when where with
 # Explicit keys may use them: module.where, where:Value, or .['where] = Value.
 foo = 42                    # introduce (ERROR if foo already defined)
 foo := 43                   # override (ERROR if foo NOT already defined)
@@ -33,7 +33,7 @@ y = foo.(['bar] ++ path)    # .(ListExpr); .([1,'two]++[3]) ≡ .[1].two.[3]
 .[Idx] = Def                # toplevel expr-indexed def; access via module.[Idx]
 
 # Declarations:
-abstract foo, bar           # names assumed provided externally
+declare foo, bar            # names expected to be defined, e.g. by a mixin
                             # (bootstrap: only declares the names for name
                             # analysis; no runtime check or metadata yet)
 unique Red, Green, Blue     # introduce unique atoms based on namespace path
@@ -390,7 +390,7 @@ op1 !> op2 !> .r f          # right-assoc; always run left-to-right
 
 # Recursive do is explicit; ordinary do never acquires an implicit fixpoint.
 do
-    abstract loop_top, loop_exit
+    declare loop_top, loop_exit
     .jmp loop_top           # may pass the future value without observing it
     .label -> loop_top      # first direct bind fulfills loop_top
     .exit_label -> loop_exit
@@ -401,7 +401,7 @@ do
 # nest directly; crossing intervals move the later-ending `.fix` outward and
 # warn because its shift/reset scope changed. Missing/duplicate declarations
 # and strict premature observations are errors. `_name` suppresses only unused
-# warnings; bare `_` cannot be abstract because it is inaccessible.
+# warnings; bare `_` cannot be declared because it is inaccessible.
 ```
 
 ## Conditionals & Patterns
@@ -605,9 +605,9 @@ anno context:{origin:module_origin} Expr
 type_of.foo = ...           # associated names: '_of' dicts
 final_of.foo = _foo         # guard against accidental override
 refl.check_invariants = ... # refl.* run automatically as reflection tasks
-meta.abstract_names         # compiler metadata lives under meta.* (target;
-                            # not yet populated)
-env                         # implicitly abstract; provided on import by host 
+meta.journal                # compiler metadata lives under meta.*, e.g. the
+                            # journal of names introduced or overridden
+env                         # implicitly declared; provided on import by host 
 module                      # alias for module toplevel namespace
 module_origin               # opaque provenance for this source compilation
 self                        # current object namespace (= module at toplevel)

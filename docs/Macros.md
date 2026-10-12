@@ -267,7 +267,7 @@ The top-level object owns its recursive knot independently of the module-level
 fixpoint while remaining a named, composable grammar.
 
 Use a local `let` or `where` group when a small helper group is intentionally
-private to one macro value. Use `.fix` or `do { abstract ... }` only when
+private to one macro value. Use `.fix` or `do { declare ... }` only when
 a fixpoint value genuinely depends on the result of some effectful observation.
 
 An explicit prior-definition reference can also avoid the final module, but

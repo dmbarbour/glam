@@ -67,7 +67,7 @@ impl ForwardNameRegistry {
         if names.is_empty() {
             return Err(Diagnostic::error(
                 line,
-                "recursive do abstract declaration requires at least one name",
+                "recursive do `declare` statement requires at least one name",
             ));
         }
 
@@ -77,13 +77,13 @@ impl ForwardNameRegistry {
             let Some(canonical) = local_name_metadata(written).canonical else {
                 return Err(Diagnostic::error(
                     line,
-                    "recursive do abstract declarations require accessible local names",
+                    "recursive do `declare` statements require accessible local names",
                 ));
             };
             if canonical_names.contains(&canonical) || self.active.contains_key(&canonical) {
                 return Err(Diagnostic::error(
                     line,
-                    format!("duplicate recursive do abstract declaration for `{canonical}`"),
+                    format!("duplicate recursive do `declare` statement for `{canonical}`"),
                 ));
             }
             canonical_names.push(canonical.clone());
@@ -168,7 +168,7 @@ impl RecursiveDoPlan {
             return Err(Diagnostic::error(
                 steps[declaration_step].line,
                 format!(
-                    "recursive do abstract declaration has no later fulfillment for {}",
+                    "recursive do `declare` statement has no later fulfillment for {}",
                     unresolved.join(", ")
                 ),
             ));
@@ -294,10 +294,10 @@ mod tests {
         }
     }
 
-    fn abstract_names(names: &[&str], line: usize) -> DoStep {
+    fn declared_names(names: &[&str], line: usize) -> DoStep {
         DoStep {
             line,
-            kind: DoStepKind::Abstract(names.iter().map(|name| (*name).to_owned()).collect()),
+            kind: DoStepKind::Declare(names.iter().map(|name| (*name).to_owned()).collect()),
         }
     }
 
@@ -306,7 +306,7 @@ mod tests {
         let mut steps = Vec::new();
         for step in &do_expr.steps {
             match &step.kind {
-                DoStepKind::Abstract(names) => {
+                DoStepKind::Declare(names) => {
                     let ids = registry.declare(names, step.line).unwrap();
                     steps.push(RecursiveDoStep {
                         line: step.line,
@@ -345,7 +345,7 @@ mod tests {
     #[test]
     fn same_declaration_names_are_nested_by_independent_fulfillment() {
         let original = plan(vec![
-            abstract_names(&["x", "y", "z"], 1),
+            declared_names(&["x", "y", "z"], 1),
             value_bind("y", 2),
             value_bind("x", 3),
             value_bind("z", 4),
@@ -357,7 +357,7 @@ mod tests {
         assert!(original.promotion_warnings().is_empty());
 
         let reordered = plan(vec![
-            abstract_names(&["z", "x", "y"], 1),
+            declared_names(&["z", "x", "y"], 1),
             value_bind("y", 2),
             value_bind("x", 3),
             value_bind("z", 4),
@@ -374,9 +374,9 @@ mod tests {
     fn crossing_and_transitive_intervals_promote_individual_starts() {
         let do_expr = DoExpr {
             steps: vec![
-                abstract_names(&["a"], 10),
-                abstract_names(&["b"], 11),
-                abstract_names(&["c"], 12),
+                declared_names(&["a"], 10),
+                declared_names(&["b"], 11),
+                declared_names(&["c"], 12),
                 value_bind("a", 13),
                 value_bind("b", 14),
                 value_bind("c", 15),
@@ -401,11 +401,11 @@ mod tests {
     #[test]
     fn contained_and_disjoint_intervals_form_a_laminar_forest() {
         let plan = plan(vec![
-            abstract_names(&["outer"], 1),
-            abstract_names(&["inner"], 2),
+            declared_names(&["outer"], 1),
+            declared_names(&["inner"], 2),
             value_bind("inner", 3),
             value_bind("outer", 4),
-            abstract_names(&["later"], 5),
+            declared_names(&["later"], 5),
             value_bind("later", 6),
         ]);
 
@@ -419,8 +419,8 @@ mod tests {
     fn promotion_warns_once_for_only_the_moved_names_in_a_declaration() {
         let do_expr = DoExpr {
             steps: vec![
-                abstract_names(&["a"], 20),
-                abstract_names(&["b", "c"], 21),
+                declared_names(&["a"], 20),
+                declared_names(&["b", "c"], 21),
                 value_bind("c", 22),
                 value_bind("a", 23),
                 value_bind("b", 24),

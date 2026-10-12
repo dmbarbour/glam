@@ -867,7 +867,7 @@ fn analyze_do_expr_locals(do_expr: &DoExpr, diagnostics: &mut Vec<Diagnostic>) {
         }
 
         match &step.kind {
-            DoStepKind::Abstract(names) => {
+            DoStepKind::Declare(names) => {
                 for name in names {
                     let local = local_name_metadata(name);
                     if let Some(canonical) = &local.canonical {
@@ -923,7 +923,7 @@ fn preview_recursive_do_plan(
     let mut steps = Vec::new();
     for step in &do_expr.steps {
         match &step.kind {
-            DoStepKind::Abstract(names) => {
+            DoStepKind::Declare(names) => {
                 let ids = registry.declare(names, step.line)?;
                 steps.push(recursive_do::RecursiveDoStep {
                     line: step.line,
@@ -960,7 +960,7 @@ fn mark_used_do_locals(do_expr: &DoExpr, locals: &[LocalName], used: &mut [bool]
             mark_used_locals(expr, nested.get(), used);
         }
         match &step.kind {
-            DoStepKind::Abstract(names) => {
+            DoStepKind::Declare(names) => {
                 for name in names {
                     if let Some(canonical) = binder_canonical(name) {
                         unresolved_abstracts.push(canonical.to_owned());
@@ -988,7 +988,7 @@ fn mark_used_do_locals(do_expr: &DoExpr, locals: &[LocalName], used: &mut [bool]
 
 fn do_step_expr(step: &DoStep) -> Option<&SyntaxExpr> {
     match &step.kind {
-        DoStepKind::Abstract(_) => None,
+        DoStepKind::Declare(_) => None,
         DoStepKind::Bind { operation, .. } => Some(operation),
         DoStepKind::ValueBind { value, .. } => Some(value),
         DoStepKind::Then(expr) => Some(expr),

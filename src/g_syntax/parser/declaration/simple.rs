@@ -16,7 +16,7 @@ use super::super::input::{
 pub(in crate::g_syntax::parser) enum SimpleDeclaration {
     Language,
     Import,
-    Abstract,
+    Declare,
     Unique,
 }
 
@@ -25,7 +25,7 @@ impl SimpleDeclaration {
         match head {
             "language" => Some(Self::Language),
             "import" => Some(Self::Import),
-            "abstract" => Some(Self::Abstract),
+            "declare" => Some(Self::Declare),
             "unique" => Some(Self::Unique),
             _ => None,
         }
@@ -51,11 +51,11 @@ pub(in crate::g_syntax::parser) fn parse_simple_declaration<'lex, 'source: 'lex>
             session,
             import_decl(view).map(DeclarationKind::Import),
         ),
-        SimpleDeclaration::Abstract => parse_with(
+        SimpleDeclaration::Declare => parse_with(
             view,
             line,
             session,
-            keyword_name_list("abstract").map(DeclarationKind::Abstract),
+            keyword_name_list("declare").map(DeclarationKind::Declare),
         ),
         SimpleDeclaration::Unique => parse_with(
             view,

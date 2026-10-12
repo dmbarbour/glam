@@ -131,7 +131,7 @@ impl FileNameAnalysis {
                     self.define_static_path(definitions, target, true, line);
                 }
             }
-            DeclarationKind::Abstract(paths) => {
+            DeclarationKind::Declare(paths) => {
                 for path in paths {
                     self.introduce_static_path(self.scopes[scope.0].definitions, path, line);
                 }
@@ -521,7 +521,7 @@ impl FileNameAnalysis {
         let mut unresolved = Vec::new();
         for step in &do_expr.steps {
             match &step.kind {
-                DoStepKind::Abstract(names) => {
+                DoStepKind::Declare(names) => {
                     for name in names {
                         if let Some(canonical) =
                             self.push_source_local(name, step.line, scope, locals)

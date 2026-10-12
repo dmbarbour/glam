@@ -17,7 +17,7 @@ fn layout_do_parses() {
         "do first <- .read\n   second <- .read\n   .r [first, second]",
         "do # the first significant member establishes next-line layout\n  first <- .read\n\n  # comments do not change the anchor\n  second <- .read\n  .r [first, second]",
         "do\n.read 'left -> left\nright <- .read 'right\ntotal = left + right\n.write total\n.r total",
-        "do\nabstract left, _right\n.r (\\_ -> left) -> use_left\nleft = 1\nright <- .r 2\n.r (use_left ())",
+        "do\ndeclare left, _right\n.r (\\_ -> left) -> use_left\nleft = 1\nright <- .r 2\n.r (use_left ())",
         "do\nvalue <- do\n  input <- source\n  .r input\nwritten <- write\n  value\n.r written",
         "interaction_net do\n.bind -> ports\n.r ports",
         "\\api -> do\n.r api",
@@ -667,17 +667,14 @@ fn token_do_reports_structural_statement_errors() {
             "dictionary shorthand is valid only inside braces",
         ),
         (
-            "do\nabstract\n.r ()",
+            "do\ndeclare\n.r ()",
             "requires one or more comma-separated local names",
         ),
         (
-            "do\nabstract _\n.r ()",
+            "do\ndeclare _\n.r ()",
             "cannot use the inaccessible `_` name",
         ),
-        (
-            "do\nabstract value",
-            "cannot end with an abstract declaration",
-        ),
+        ("do\ndeclare value", "cannot end with a `declare` statement"),
     ];
 
     for (source, expected) in cases {

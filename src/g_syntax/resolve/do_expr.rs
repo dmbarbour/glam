@@ -113,7 +113,7 @@ impl DoLowering<'_> {
 
             for step in &do_expr.steps {
                 match &step.kind {
-                    DoStepKind::Abstract(names) => {
+                    DoStepKind::Declare(names) => {
                         let ids = forward_names.declare(names, step.line)?;
                         debug_assert_eq!(ids.len(), names.len());
                         let first_slot = locals.len();
@@ -309,7 +309,7 @@ fn resolve_capture_binding(
     let forward = &mut forwards[id];
     let slot = forward
         .resolver_slot
-        .expect("planned fulfillment follows its abstract declaration");
+        .expect("planned fulfillment follows its `declare` statement");
     let mut local = local_name_metadata(name);
     local.binding = Some(binding);
     locals[slot] = local;
@@ -367,19 +367,19 @@ impl DoEmitter<'_> {
         let resolved = &self.forwards[id];
         let forward_binding = resolved
             .forward_binding
-            .expect("planned abstract name has a forward binding");
+            .expect("planned declared name has a forward binding");
         let resolved_binding = resolved
             .resolved_binding
-            .expect("planned abstract name has a resolved binding");
+            .expect("planned declared name has a resolved binding");
         let future_binding = resolved
             .future_binding
-            .expect("planned abstract name has a future binding");
+            .expect("planned declared name has a future binding");
         let fixed_result_binding = resolved
             .fixed_result_binding
-            .expect("planned abstract name has a fixed-result binding");
+            .expect("planned declared name has a fixed-result binding");
         let continuation_parameter = resolved
             .continuation_parameter
-            .expect("planned abstract name has a continuation parameter");
+            .expect("planned declared name has a continuation parameter");
 
         let payload = effect_call_resolved(
             self.access,
@@ -722,7 +722,7 @@ mod tests {
             steps: vec![
                 DoStep {
                     line: 2,
-                    kind: DoStepKind::Abstract(vec!["left".to_owned(), "right".to_owned()]),
+                    kind: DoStepKind::Declare(vec!["left".to_owned(), "right".to_owned()]),
                 },
                 DoStep {
                     line: 3,
@@ -761,11 +761,7 @@ mod tests {
             steps: vec![
                 DoStep {
                     line: 2,
-                    kind: DoStepKind::Abstract(vec![
-                        "x".to_owned(),
-                        "y".to_owned(),
-                        "z".to_owned(),
-                    ]),
+                    kind: DoStepKind::Declare(vec!["x".to_owned(), "y".to_owned(), "z".to_owned()]),
                 },
                 DoStep {
                     line: 3,

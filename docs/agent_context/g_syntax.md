@@ -180,7 +180,7 @@ disagree.
   resolved IR rather than inferring it from an expression.
 - Postfix `A if Guards else B` resolves guards before `A`. Guard captures are
   visible in `A`, never in `B` or the surrounding expression.
-- Recursive do is explicit. Each `abstract` name has an independently
+- Recursive do is explicit. Each declared name has an independently
   completable `.fix` interval. The planner consumes the completed primitive-do
   stream, not surface patterns. Crossing intervals promote the later-ending
   fixpoint with a warning; missing, duplicate, or prematurely observed
