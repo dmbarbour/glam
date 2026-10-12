@@ -38,6 +38,7 @@ struct GCompilerValues {
     std: RootedBuiltinModule,
     empty_object_defs: RuntimeValueRoot,
     constant_object_defs: RuntimeValueRoot,
+    reflection_scanner: RuntimeValueRoot,
     reflection_annotator: RuntimeValueRoot,
     defined_or: RuntimeValueRoot,
     require_defined: RuntimeValueRoot,
@@ -61,6 +62,7 @@ unsafe impl RuntimeCacheFamily for GCompilerValues {
             std,
             empty_object_defs,
             constant_object_defs,
+            reflection_scanner,
             reflection_annotator,
             defined_or,
             require_defined,
@@ -73,6 +75,7 @@ unsafe impl RuntimeCacheFamily for GCompilerValues {
         for root in [
             empty_object_defs,
             constant_object_defs,
+            reflection_scanner,
             reflection_annotator,
             defined_or,
             require_defined,
@@ -270,6 +273,8 @@ impl GCompilerValues {
         rooted_checkpoint();
         let empty_object_defs = build_empty_object_defs(values);
         rooted_checkpoint();
+        let reflection_scanner = build_reflection_scanner(values, &build_cache);
+        rooted_checkpoint();
         let reflection_annotator = build_reflection_annotator(values, &build_cache);
         rooted_checkpoint();
         let require_defined = build_require_defined(values, &defined_or);
@@ -283,6 +288,7 @@ impl GCompilerValues {
             std,
             empty_object_defs,
             constant_object_defs,
+            reflection_scanner,
             reflection_annotator,
             require_defined,
             defined_or,
@@ -332,33 +338,78 @@ pub(in crate::g_syntax) fn constant_object_defs(
     root_value(access, lower_resolved_expr_in(access, expression))
 }
 
-/// The demand boundary for final `refl.*` that one module, or one declared
-/// object, shares: unit annotated with the effect that launches the `refl.*`
-/// scanner unless `guard` records one already. Each wrapped definition
-/// forces it before exposing its own value, so the effect runs once.
+/// The demand boundary one module file, nested namespace or declared object
+/// shares: unit annotated with the effect that launches `operation`, the
+/// namespace's reflection operation, in a task unless `guard` records one
+/// started. Each wrapped definition forces it before exposing its own
+/// value, so the effect runs once per file, and the task once per
+/// namespace.
 pub(in crate::g_syntax) fn reflection_boundary_resolved(
+    access: &RuntimeValueAccess<'_>,
+    guard: ResolvedExpr<Value>,
+    operation: ResolvedExpr<Value>,
+) -> ResolvedExpr<Value> {
+    ResolvedExpr::apply(
+        ResolvedExpr::Embedded(with_values(access.values(), |compiler| {
+            project_value(access, &compiler.reflection_annotator)
+        })),
+        [guard, operation, ResolvedExpr::Embedded(access.unit())],
+    )
+}
+
+/// The `refl.*` scanner for the namespace at `final_defs`, claiming under
+/// `guard`: a declared object's reflection operation, and a module's or
+/// nested namespace's default.
+pub(in crate::g_syntax) fn reflection_scanner_resolved(
     access: &RuntimeValueAccess<'_>,
     guard: ResolvedExpr<Value>,
     final_defs: ResolvedExpr<Value>,
 ) -> ResolvedExpr<Value> {
     ResolvedExpr::apply(
         ResolvedExpr::Embedded(with_values(access.values(), |compiler| {
-            project_value(access, &compiler.reflection_annotator)
+            project_value(access, &compiler.reflection_scanner)
         })),
-        [guard, final_defs, ResolvedExpr::Embedded(access.unit())],
+        [guard, final_defs],
     )
 }
 
+/// A module's or nested namespace's reflection operation: its final
+/// `meta.refl`, or the scanner. Objects run their scanner directly, since
+/// an object inherits its parents' `meta.refl` with their guards.
+pub(in crate::g_syntax) fn namespace_reflection_operation_resolved(
+    access: &RuntimeValueAccess<'_>,
+    guard: impl Fn() -> ResolvedExpr<Value>,
+    final_defs: impl Fn() -> ResolvedExpr<Value>,
+) -> ResolvedExpr<Value> {
+    apply_builtin(
+        access,
+        Builtin::Default,
+        [
+            reflection_scanner_resolved(access, guard(), final_defs()),
+            ResolvedExpr::Access {
+                base: Box::new(final_defs()),
+                path: vec![
+                    ResolvedPathPart::Key(name_as_key("meta")),
+                    ResolvedPathPart::Key(name_as_key("refl")),
+                ],
+            },
+        ],
+    )
+}
+
+/// A module's demand boundary, claiming under `guard` and running its
+/// `meta.refl`.
 pub(in crate::g_syntax) fn reflection_boundary_root(
     access: &RuntimeValueAccess<'_>,
     guard: Value,
     final_defs: Value,
 ) -> RuntimeValueRoot {
-    let expression = reflection_boundary_resolved(
+    let operation = namespace_reflection_operation_resolved(
         access,
-        ResolvedExpr::Provided(guard),
-        ResolvedExpr::Provided(final_defs),
+        || ResolvedExpr::Provided(access.duplicate_value(&guard)),
+        || ResolvedExpr::Provided(access.duplicate_value(&final_defs)),
     );
+    let expression = reflection_boundary_resolved(access, ResolvedExpr::Provided(guard), operation);
     root_value(access, lower_resolved_expr_in(access, expression))
 }
 
@@ -796,7 +847,10 @@ fn build_constant_object_defs(values: &CoreValueFactory) -> RuntimeValueRoot {
     })
 }
 
-fn build_reflection_annotator(
+/// `\guard final_defs -> scanner`: the reflection operation a namespace
+/// runs by default. It replays the final journal, logging conflicts, then
+/// launches each final `refl.*` task and records them under `guard`.
+fn build_reflection_scanner(
     values: &CoreValueFactory,
     cache: &dyn EffectValueCache,
 ) -> RuntimeValueRoot {
@@ -804,7 +858,6 @@ fn build_reflection_annotator(
         let mut locals = ResolverContext::default();
         let guard = locals.push_internal_binding("<reflection-guard>");
         let final_defs = locals.push_internal_binding("<reflection-final-definitions>");
-        let target = locals.push_internal_binding("<reflection-target>");
 
         let state_path = |field: &str| {
             ResolvedExpr::List(vec![
@@ -937,13 +990,42 @@ fn build_reflection_annotator(
             ],
         );
 
+        ResolvedExpr::lambda(vec![guard, final_defs], scanner)
+    })
+}
+
+/// `\guard operation target -> target` annotated to launch `operation`, a
+/// namespace's reflection operation, in a task unless `guard` records one
+/// started. The new task forces `operation`, so forcing a definition never
+/// forces a final namespace that `operation` reads, such as `meta.refl`.
+fn build_reflection_annotator(
+    values: &CoreValueFactory,
+    cache: &dyn EffectValueCache,
+) -> RuntimeValueRoot {
+    evaluate_closed(values, |access| {
+        let mut locals = ResolverContext::default();
+        let guard = locals.push_internal_binding("<reflection-guard>");
+        let operation = locals.push_internal_binding("<reflection-operation>");
+        let target = locals.push_internal_binding("<reflection-target>");
+        let state_path = |field: &str| {
+            ResolvedExpr::List(vec![
+                ResolvedExpr::Local(guard),
+                ResolvedExpr::Embedded(Value::Atom(atom_from_str(field))),
+            ])
+        };
+
         let scanner_handle = locals.push_internal_binding("<reflection-scanner-handle>");
         let launch_and_remember = effect_call(
             access,
             cache,
             "seq",
             [
-                effect_path_call(access, cache, &["task", "new"], [scanner]),
+                effect_path_call(
+                    access,
+                    cache,
+                    &["task", "new"],
+                    [ResolvedExpr::Local(operation)],
+                ),
                 ResolvedExpr::lambda(
                     vec![scanner_handle],
                     effect_path_call(
@@ -1001,7 +1083,7 @@ fn build_reflection_annotator(
             Builtin::Anno,
             [annotation, ResolvedExpr::Local(target)],
         );
-        ResolvedExpr::lambda(vec![guard, final_defs, target], annotated)
+        ResolvedExpr::lambda(vec![guard, operation, target], annotated)
     })
 }
 
@@ -1101,7 +1183,7 @@ mod tests {
             checkpoints += 1;
         });
 
-        assert_eq!(checkpoints, 11);
+        assert_eq!(checkpoints, 12);
         values
             .collect_managed_for_test()
             .expect("the unpublished complete candidate must retain all of its roots");
@@ -1147,6 +1229,7 @@ mod tests {
             &compiler.std.definitions,
             &compiler.empty_object_defs,
             &compiler.constant_object_defs,
+            &compiler.reflection_scanner,
             &compiler.reflection_annotator,
             &compiler.defined_or,
             &compiler.require_defined,

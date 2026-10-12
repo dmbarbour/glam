@@ -139,10 +139,10 @@ Design (maintainer, 2026-10-12):
   objects: dicts and object expressions have no compiler-provided
   boundary. A target within `refl`, `meta` or `spec`, at any depth,
   carries no boundary (maintainer, 2026-10-12).
-- **Boundary in `meta.refl` (maintainer idea, 2026-10-12).** Keeping each
-  namespace's reflection-boundary task thunk in `meta.refl` would avoid
-  redundant work per file and let the task be shared, extended,
-  overridden or canceled. For `perf-reflection-scanner`.
+- **Reflection operation in `meta.refl` (maintainer, 2026-10-12).** A
+  namespace's reflection task runs the operation in its final `meta.refl`,
+  so users can replace, extend or disable it (`meta.refl := .r ()`). See
+  `defs-meta-refl`.
 - **Dict `with`** could become cheap, local, best-effort enforcement: `=`
   a dict union, `:=` a dict update. Deferred: union merges dict values
   instead of conflicting.
@@ -235,6 +235,34 @@ Steps:
     `defs_unused` -33.5%, `chain_refl` -49.6%, `hello_elf` +0.65%,
     `countdown` +1.6%, `list_map` +6.2%, `minimal` +36% (17.6 M to
     23.9 M; the `asm` boundary is most of it).
+- `defs-meta-refl`: the language declaration installs the module's
+  reflection operation, the `refl.*` scanner, as `meta.refl` unless the
+  module has one (`meta.refl = default scanner prior.meta.refl`; journaled
+  as an update), leaving room for a language's version or extensions to
+  choose otherwise. Done 2026-10-12.
+  - `seq final.meta.refl Definition` was tried first and rejected: reading
+    `final.meta.refl` forces the final namespace's structure, so `idx =
+    42` then `.[idx] = ...` cycled (`.[_idx]` should stay valid).
+  - Instead each file keeps its compiler boundary, forced once per file,
+    which claims the namespace's key and spawns a task running `default
+    scanner final.meta.refl`. `task.new` defers its argument to the task,
+    so the forcing thread never reads `final`.
+  - Modules and nested namespaces run `meta.refl`; declared objects run
+    their scanner directly, since an object inherits its parents'
+    `meta.refl` along with their claim keys.
+  - One claim key per namespace, `[object reflection guard, abstract
+    name]`, for modules, nested namespaces and objects. Module keys were
+    `module.refl` before, so `extend lib` and `object hello extends lib`
+    on an imported `lib` launched a second scanner for it (latent: its
+    `refl.*` tasks would have run twice).
+  - A once-only check in the scanner itself (a `scanned` mark under its
+    key; a second run logs an error), robust against user-defined syntax
+    that spawns it again (maintainer), found that double launch, but costs
+    about 8.8 M instructions per program (+37% on `minimal`), as each
+    effect step runs through net evaluation. Deferred until effect steps
+    are cheaper (`perf-reflection-scanner`).
+  - Instructions against `8aacd29f`: `minimal` +4.9% (1.2 M), others
+    within 1.1%.
 - `defs-with-union`: dict `with` lowers `=` to union and `:=` to update.
   Deferred (maintainer, 2026-10-12): union merges dicts, so `f = {a: 1}`
   and then `f = {b: 2}` would not conflict, which would confuse users.

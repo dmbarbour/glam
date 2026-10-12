@@ -637,6 +637,30 @@ maps the short names used here to file names.
 - **Rule lives in:** `src/g_syntax/module_lowering/journal.rs` module docs.
 - **Recorded in:** structural overheads plan, `perf-definition-assertions`.
 
+### A namespace's reflection task runs its `meta.refl`
+`reflection-operation-in-meta-refl` · 2026-10-12 · maintainer · accepted
+- **Context:** a module's reflection boundary launched a fixed `refl.*`
+  scanner, so users could not replace, extend or disable it.
+- **Decision:**
+  - The language declaration installs the module's reflection operation,
+    the scanner, as `meta.refl` unless the module has one; a language's
+    version or extensions may later choose otherwise.
+  - Each file's compiler boundary, forced once per file by its first used
+    definition, claims the namespace's key and spawns a task running
+    `default scanner final.meta.refl`. The task, not the forcing thread,
+    reads `final`: `seq final.meta.refl Definition` would force the final
+    namespace's structure and cycle on computed keys.
+  - Modules and nested namespaces run `meta.refl`; declared objects run
+    their scanner, as they inherit parents' `meta.refl`.
+  - One claim key per namespace, `[object reflection guard, abstract
+    name]`, shared by a module, a nested namespace and an object of one
+    name.
+- **Consequences:**
+  - `meta.refl := .r ()` disables a module's `refl.*` tasks.
+  - A once-only check inside the scanner is deferred for cost.
+  - `minimal` costs 1.2 M more instructions.
+- **Recorded in:** structural overheads plan, `defs-meta-refl`.
+
 ## Diagnostics
 
 ### A failure's cause is a nested `msg` frame; the headline states only its own finding

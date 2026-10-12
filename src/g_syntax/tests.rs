@@ -41,12 +41,6 @@ fn context_final_defs(context: &CompileContext) -> Value {
         .with_runtime_value_access(|access| context.final_defs(&access))
 }
 
-fn context_abstract_global_path(context: &CompileContext, path: &str) -> Value {
-    context
-        .values()
-        .with_runtime_value_access(|access| context.abstract_global_path(&access, path))
-}
-
 fn core_global_access(context: &CompileContext, path: Vec<Key>) -> Value {
     lower_resolved_expr(
         context.values(),
@@ -315,12 +309,16 @@ fn reflection_test_module(
         assembler.core_values(),
         module_path.iter().copied(),
     );
-    let prior = guards.iter().fold(Dict::new_sync(), |dict, (name, path)| {
-        dict.insert(
-            Key::atom_from_text(name),
-            context_abstract_global_path(&context, path),
-        )
-    });
+    let prior = guards
+        .iter()
+        .fold(Dict::new_sync(), |dict, (name, namespace)| {
+            dict.insert(
+                Key::atom_from_text(name),
+                context.values().with_runtime_value_access(|access| {
+                    context.reflection_guard(&access, namespace)
+                }),
+            )
+        });
     let prior = prior.insert(
         Key::atom_from_text("object_refl_marker"),
         assembler
@@ -6946,7 +6944,7 @@ ok = "ok"
 meta.probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .r ()))) } "probe"
 "#;
     let (_assembler, context, module, _module_root, diagnostics) =
-        reflection_test_module(source, &["journal_report_test"], &[("guard", "refl")]);
+        reflection_test_module(source, &["journal_report_test"], &[("guard", "")]);
 
     assert_same_value_representation(
         &resolved_value_at_path_with_context(&context, &module, &["ok"]),
@@ -7168,7 +7166,7 @@ fn modules_journal_their_definitions() {
     assert_eq!(
         journal(&["meta", "journal"]),
         concat!(
-            "[intro foo@2, intro s@3, update foo@4, over bar@5, update f@6, ",
+            "[update meta.refl@1, intro foo@2, intro s@3, update foo@4, over bar@5, update f@6, ",
             "intro refl.x@7, intro meta.a.b@8, intro Point@9, over Point@11, intro u@13, ",
             "declare d@14, assume a@15]"
         )
@@ -7183,7 +7181,10 @@ fn modules_journal_their_definitions() {
     assert_eq!(lowered.diagnostics, []);
     let module = evaluated_module_value(&context, &lowered);
     let journal = journal_text(value_at_atom_path(&module, &["meta", "journal"]).unwrap());
-    assert!(journal.starts_with("[update "), "{journal}");
+    assert!(
+        journal.starts_with("[update meta.refl@1, update "),
+        "{journal}"
+    );
     assert!(journal.contains(", update list@2, "), "{journal}");
     assert!(journal.ends_with(", intro foo@3]"), "{journal}");
 }
@@ -7248,7 +7249,7 @@ object foo extends base with
 meta.probe = anno { refl:(.heap.get [[object_refl_marker, abstract_global_path foo],'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .r ()))) } "probe"
 "#;
     let (_assembler, context, module, _module_root, diagnostics) =
-        reflection_test_module(source, &["object_journal_test"], &[("guard", "refl")]);
+        reflection_test_module(source, &["object_journal_test"], &[("guard", "")]);
 
     assert_same_value_representation(
         &resolved_value_at_path_with_context(&context, &module, &["foo", "x"]),
@@ -7338,7 +7339,7 @@ meta.module_unclaimed = anno { refl:(.heap.get [guard,'claim] >>= (\claim -> if 
 meta.object_claimed = anno { refl:(.heap.get [[object_refl_marker, abstract_global_path foo],'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .r ()))) } "object claimed"
 "#;
     let (_assembler, context, module, _module_root, diagnostics) =
-        reflection_test_module(source, &["object_member_test"], &[("guard", "refl")]);
+        reflection_test_module(source, &["object_member_test"], &[("guard", "")]);
 
     assert_same_value_representation(
         &resolved_value_at_path_with_context(&context, &module, &["foo", "b"]),
@@ -7367,7 +7368,7 @@ ordinary_two = "ordinary two"
 probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [guard,'tasks] >>= (\tasks -> .task.join (list.head tasks).task >>= (\_ -> .r ()))))) } "probe"
 "#;
     let (_assembler, context, module, _module_root, diagnostics) =
-        reflection_test_module(source, &["module_refl_test"], &[("guard", "refl")]);
+        reflection_test_module(source, &["module_refl_test"], &[("guard", "")]);
 
     assert_same_value_representation(
         &resolved_value_at_path_with_context(&context, &module, &["meta", "hidden"]),
@@ -7533,7 +7534,33 @@ meta.probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join s
 ordinary = "ordinary"
 "#;
     let (_assembler, context, module, _module_root, diagnostics) =
-        reflection_test_module(source, &["disabled_refl_test"], &[("guard", "refl")]);
+        reflection_test_module(source, &["disabled_refl_test"], &[("guard", "")]);
+
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["ordinary"]),
+        &Value::binary_from_text("ordinary"),
+    );
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["meta", "probe"]),
+        &Value::binary_from_text("probe"),
+    );
+    assert!(take_reflection_diagnostics(&diagnostics).is_empty());
+}
+
+/// The language declaration installs the module's reflection operation as
+/// `meta.refl`, and the boundary's task runs whatever the final `meta.refl`
+/// is: overriding it replaces the `refl.*` scanner, here with nothing.
+#[test]
+fn overriding_meta_refl_replaces_the_reflection_operation() {
+    let source = r#"language g0
+import 'std
+refl.notice = .log 'info { msg:{ text:"scanned reflection task" } }
+meta.refl := .r ()
+meta.probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [guard,'tasks] >>= (\tasks -> if tasks == {} then .r () else .fail)))) } "probe"
+ordinary = "ordinary"
+"#;
+    let (_assembler, context, module, _module_root, diagnostics) =
+        reflection_test_module(source, &["meta_refl_test"], &[("guard", "")]);
 
     assert_same_value_representation(
         &resolved_value_at_path_with_context(&context, &module, &["ordinary"]),
@@ -7555,7 +7582,7 @@ meta.probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join s
 ordinary = "ordinary"
 "#;
     let (_assembler, context, module, _module_root, diagnostics) =
-        reflection_test_module(source, &["unit_refl_test"], &[("guard", "refl")]);
+        reflection_test_module(source, &["unit_refl_test"], &[("guard", "")]);
 
     assert_same_value_representation(
         &resolved_value_at_path_with_context(&context, &module, &["ordinary"]),

@@ -656,7 +656,7 @@ impl NameScope<Value> {
             let reflection = ReflectionBoundary {
                 demand: compiler_values::reflection_boundary_value(
                     context.values(),
-                    context.abstract_global_path(&access, "refl"),
+                    context.reflection_guard(&access, ""),
                     context.final_defs(&access),
                 ),
             };

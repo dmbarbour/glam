@@ -78,7 +78,7 @@ impl<'context> ModuleLowerer<'context> {
         let module_reflection = context.values().with_runtime_value_access(|access| {
             compiler_values::reflection_boundary_root(
                 &access,
-                context.abstract_global_path(&access, "refl"),
+                context.reflection_guard(&access, ""),
                 context.final_defs(&access),
             )
         });
@@ -174,15 +174,53 @@ impl<'context> ModuleLowerer<'context> {
                     Err(diagnostic) => Err(diagnostic),
                 }
             }
-            DeclarationKind::Language(_)
-            | DeclarationKind::Declare(_)
-            | DeclarationKind::Assume(_)
-            | DeclarationKind::Unknown => Ok(()),
+            DeclarationKind::Language(_) => {
+                self.install_reflection();
+                Ok(())
+            }
+            DeclarationKind::Declare(_) | DeclarationKind::Assume(_) | DeclarationKind::Unknown => {
+                Ok(())
+            }
         };
         if let Err(diagnostic) = result {
             self.diagnostics.push(diagnostic);
         }
         self.parsed_declarations.push(declaration);
+    }
+
+    /// Installs the module's reflection operation as `meta.refl`, the
+    /// scanner, unless the module has one, just after the language
+    /// declaration, where a language's version or extensions may later
+    /// choose otherwise. The reflection boundary's task runs it.
+    fn install_reflection(&mut self) {
+        let definitions = self.context.values().with_runtime_value_access(|access| {
+            let definitions = self.definitions.clone_core_with(&access);
+            let scanner = compiler_values::reflection_scanner_resolved(
+                &access,
+                ResolvedExpr::Provided(self.context.reflection_guard(&access, "")),
+                ResolvedExpr::Provided(self.context.final_defs(&access)),
+            );
+            let installed = apply_builtin_resolved(
+                &access,
+                Builtin::Default,
+                [
+                    scanner,
+                    path_resolved_in_definitions(
+                        &access,
+                        "meta.refl",
+                        ResolvedExpr::Provided(access.duplicate_value(&definitions)),
+                    ),
+                ],
+            );
+            let definitions = update_module_resolved(
+                &access,
+                ResolvedExpr::Provided(definitions),
+                "meta.refl",
+                installed,
+            );
+            access.root_runtime_value(lower_resolved_expr_in(&access, definitions))
+        });
+        self.definitions = definitions;
     }
 
     /// The namespace path whose boundary a definition of `target` carries,
@@ -217,19 +255,32 @@ impl<'context> ModuleLowerer<'context> {
             let boundary = self.context.values().with_runtime_value_access(|access| {
                 let final_defs = || ResolvedExpr::Provided(self.context.final_defs(&access));
                 let boundary = match &object {
-                    Some(object) => compiler_values::reflection_boundary_resolved(
-                        &access,
-                        object_reflection_guard_resolved(
+                    Some(object) => {
+                        let object_final =
+                            || path_resolved_in_definitions(&access, object, final_defs());
+                        let guard = || object_reflection_guard_resolved(&access, object_final());
+                        compiler_values::reflection_boundary_resolved(
                             &access,
-                            path_resolved_in_definitions(&access, object, final_defs()),
-                        ),
-                        path_resolved_in_definitions(&access, object, final_defs()),
-                    ),
+                            guard(),
+                            compiler_values::reflection_scanner_resolved(
+                                &access,
+                                guard(),
+                                object_final(),
+                            ),
+                        )
+                    }
                     None => {
                         let namespace = namespace.join(".");
-                        let guard = self
-                            .context
-                            .abstract_global_path(&access, &format!("{namespace}.refl"));
+                        let guard = || {
+                            ResolvedExpr::Provided(
+                                self.context.reflection_guard(&access, &namespace),
+                            )
+                        };
+                        let operation = compiler_values::namespace_reflection_operation_resolved(
+                            &access,
+                            guard,
+                            || path_resolved_in_definitions(&access, &namespace, final_defs()),
+                        );
                         apply_builtin_resolved(
                             &access,
                             Builtin::Seq,
@@ -239,8 +290,8 @@ impl<'context> ModuleLowerer<'context> {
                                 ),
                                 compiler_values::reflection_boundary_resolved(
                                     &access,
-                                    ResolvedExpr::Provided(guard),
-                                    path_resolved_in_definitions(&access, &namespace, final_defs()),
+                                    guard(),
+                                    operation,
                                 ),
                             ],
                         )
@@ -309,6 +360,7 @@ impl<'context> ModuleLowerer<'context> {
                 };
                 (op, target)
             }
+            DeclarationKind::Language(_) => (JournalOp::Update, static_path("meta.refl")),
             DeclarationKind::Object(object) => (JournalOp::Introduce, static_path(&object.target)),
             DeclarationKind::Extend(extend) => (JournalOp::Override, static_path(&extend.target)),
             _ => return,

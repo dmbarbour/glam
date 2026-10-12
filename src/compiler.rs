@@ -252,6 +252,30 @@ impl CompileContext {
         ))))
     }
 
+    /// The key a namespace's reflection boundary claims its task under:
+    /// `[object reflection guard, abstract name]`, where `namespace` is
+    /// relative to the module and empty for the module itself. A module, a
+    /// nested namespace and an object of one name thus share one task, as a
+    /// declared object's boundary claims under its spec's name.
+    pub(crate) fn reflection_guard(
+        &self,
+        access: &crate::core::RuntimeValueAccess<'_>,
+        namespace: &str,
+    ) -> Value {
+        debug_assert!(access.belongs_to(&self.values));
+        let mut parts = self.module_path.iter().cloned().collect::<Vec<_>>();
+        if !namespace.is_empty() {
+            parts.extend(namespace.split('.').map(ToOwned::to_owned));
+        }
+        let name = Value::Atom(Atom::from_key(&Key::AbstractGlobalPath(Arc::from(
+            parts.into_boxed_slice(),
+        ))));
+        Value::List(crate::core::List::from_values(vec![
+            access.object_reflection_guard(),
+            name,
+        ]))
+    }
+
     pub(crate) fn emit_diagnostic(&self, severity: Severity, message: RuntimeValueRoot) {
         debug_assert_eq!(message.runtime_id(), self.values.runtime_id());
         if let Some(emitter) = &self.diagnostic_emitter {

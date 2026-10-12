@@ -608,6 +608,9 @@ anno context:{origin:module_origin} Expr
 type_of.foo = ...           # associated names: '_of' dicts
 final_of.foo = _foo         # guard against accidental override
 refl.check_invariants = ... # refl.* run automatically as reflection tasks
+meta.refl := .r ()          # the namespace's reflection operation, run once
+                            # in a task when a definition is first used;
+                            # defaults to launching refl.* (here: disabled)
 meta.journal                # compiler metadata lives under meta.*, e.g. the
                             # journal of names introduced or overridden
 env                         # implicitly declared; provided on import by host 

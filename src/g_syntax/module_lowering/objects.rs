@@ -198,7 +198,11 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
             compiler_values::reflection_boundary_resolved(
                 access,
                 guard.expr(access),
-                object_final_defs.expr(access),
+                compiler_values::reflection_scanner_resolved(
+                    access,
+                    guard.expr(access),
+                    object_final_defs.expr(access),
+                ),
             ),
         )
     });
