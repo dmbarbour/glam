@@ -100,6 +100,46 @@ conflicts there without evaluating definitions. The step designs that
 record and the boundary's check, adds the compile-time check, and
 measures with `chain` and `defs_unused`.
 
+Design (maintainer, 2026-10-12):
+- **Journal.** Modules record what they introduce and override in
+  `meta.journal`, a list of `{op:intro:'foo, file:File, line:Line}` and
+  `{op:over:'foo, file:File, line:Line}`, in order. `File` is the opaque
+  origin token compilers already hold for context annotations; they
+  cannot observe the file itself. `::=` records `{op:update:'foo, ...}`,
+  as the journal may serve more than conflict detection; an updated name
+  counts as defined. `meta.*` is the compiler's and top-level macros'
+  workspace, so the record is a de facto convention, not formal
+  semantics.
+- **Hierarchy.** A definition of `f.foo` records `intro:'foo` in
+  `f.meta.journal`, not the local journal. A dict is a module insofar as
+  it is used as one (`f = {env: ...}; import "file.g" at f` is legitimate),
+  so dicts get journals the same way; objects are told apart by `spec`.
+- **File-local conflicts** fail the module at compile time.
+- **Cross-file conflicts**, which top-level `import "file.g"` mixins can
+  bring (they are include-like and never lazy in practice; `import ... as
+  f` is lazy in `f`), are reported by one check at the reflection
+  boundary, which replays the final journal. Some redundancy with the
+  compile-time check is expected. An error diagnostic fails a batch run.
+- **Dict `with`** becomes cheap, local, best-effort enforcement: `=` is a
+  dict union, which fails on a conflict, and `:=` a dict update.
+- A name the journal records stays defined: `x := {}` no longer frees `x`
+  to be introduced again. Tests relying on that are deprecated.
+- The maintainer doubts it improves performance, but expects better
+  analysis and reports either way.
+
+Steps:
+- `defs-local-conflicts`: name analysis reports introducing a name the
+  file already defined, by `=`, `:=`, `::=`, an object, `extend`, `import
+  ... as` or `unique`. Done 2026-10-12.
+- `defs-journal`: lowering records the journal, one list per stretch of
+  definitions between inline imports.
+- `defs-journal-check`: the reflection boundary replays the final journal
+  and logs conflicts as errors.
+- `defs-drop-assertions`: module definitions, object declarations,
+  `extend` and `language` lose their run-time assertions.
+- `defs-with-union`: dict `with` lowers `=` to union and `:=` to update.
+- Objects' members follow once the module form settles.
+
 ### Reflection scanner (`perf-reflection-scanner`)
 
 A module's first reflection boundary launches the `refl.*` scanner, which

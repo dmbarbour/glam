@@ -2,7 +2,9 @@
 //!
 //! Ordinary local-to-local shadowing remains a resolver invariant. This pass
 //! indexes only source-written namespace introductions and global-root uses so
-//! that local/global conflicts do not depend on declaration order.
+//! that local/global conflicts do not depend on declaration order. It also
+//! reports a file introducing a name it already defined, which fails the
+//! module (`defs-local-conflicts`).
 
 use std::collections::BTreeMap;
 
@@ -18,6 +20,9 @@ struct ResolutionScopeId(usize);
 struct Namespace {
     children: BTreeMap<String, NamespaceId>,
     introduced: BTreeMap<String, usize>,
+    /// Names this file defines here, by introduction, override or update,
+    /// with the line of the first.
+    defined: BTreeMap<String, usize>,
     used: BTreeMap<String, usize>,
 }
 
@@ -41,6 +46,7 @@ struct FileNameAnalysis {
     namespaces: Vec<Namespace>,
     scopes: Vec<ResolutionScope>,
     binders: Vec<SourceBinder>,
+    conflicts: Vec<Diagnostic>,
 }
 
 impl FileNameAnalysis {
@@ -55,6 +61,7 @@ impl FileNameAnalysis {
                 parent: None,
             }],
             binders: Vec::new(),
+            conflicts: Vec::new(),
         }
     }
 
@@ -68,7 +75,7 @@ impl FileNameAnalysis {
     }
 
     fn finish(self) -> Vec<Diagnostic> {
-        let mut diagnostics = Vec::new();
+        let mut diagnostics = self.conflicts;
         for binder in self.binders {
             let introduction = binder.visible_namespaces.iter().find_map(|namespace| {
                 self.namespaces[namespace.0]
@@ -116,12 +123,21 @@ impl FileNameAnalysis {
         match &declaration.kind {
             DeclarationKind::Import(import) => {
                 if let ImportPlacement::As(target) = &import.placement {
-                    self.introduce_static_path(self.scopes[scope.0].definitions, target, line);
+                    let definitions = self.scopes[scope.0].definitions;
+                    self.introduce_static_path(definitions, target, line);
+                    self.define_static_path(definitions, target, true, line);
                 }
             }
-            DeclarationKind::Abstract(paths) | DeclarationKind::Unique(paths) => {
+            DeclarationKind::Abstract(paths) => {
                 for path in paths {
                     self.introduce_static_path(self.scopes[scope.0].definitions, path, line);
+                }
+            }
+            DeclarationKind::Unique(paths) => {
+                for path in paths {
+                    let definitions = self.scopes[scope.0].definitions;
+                    self.introduce_static_path(definitions, path, line);
+                    self.define_static_path(definitions, path, true, line);
                 }
             }
             DeclarationKind::Object(object) => {
@@ -144,7 +160,22 @@ impl FileNameAnalysis {
         scope: ResolutionScopeId,
         locals: &mut Vec<String>,
     ) {
-        self.introduce_definition_path(self.scopes[scope.0].definitions, &definition.target, line);
+        let definitions = self.scopes[scope.0].definitions;
+        self.introduce_definition_path(definitions, &definition.target, line);
+        if definition.expr.is_some() {
+            let introduction = matches!(definition.kind, DefinitionKind::Introduce);
+            let names = definition
+                .target
+                .iter()
+                .map(|key| match key {
+                    SyntaxKeyExpr::Atom(name) => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>();
+            if let Some(names) = names {
+                self.define_names(definitions, &names, introduction, line);
+            }
+        }
         for key in &definition.target {
             self.visit_key_expr(key, line, scope, locals);
         }
@@ -163,11 +194,9 @@ impl FileNameAnalysis {
         for dependency in &object.deps {
             self.visit_expr(dependency, line, parent_scope, locals);
         }
-        let object_namespace = self.introduce_static_path(
-            self.scopes[parent_scope.0].definitions,
-            &object.target,
-            line,
-        );
+        let definitions = self.scopes[parent_scope.0].definitions;
+        let object_namespace = self.introduce_static_path(definitions, &object.target, line);
+        self.define_static_path(definitions, &object.target, true, line);
         self.visit_object_body(
             &object.body,
             BodyScopeSpec {
@@ -188,8 +217,9 @@ impl FileNameAnalysis {
         parent_scope: ResolutionScopeId,
         locals: &mut Vec<String>,
     ) {
-        let object_namespace =
-            self.ensure_static_path(self.scopes[parent_scope.0].definitions, &extend.target);
+        let definitions = self.scopes[parent_scope.0].definitions;
+        let object_namespace = self.ensure_static_path(definitions, &extend.target);
+        self.define_static_path(definitions, &extend.target, false, line);
         self.visit_object_body(
             &extend.body,
             BodyScopeSpec {
@@ -657,6 +687,48 @@ impl FileNameAnalysis {
             .entry(name.to_owned())
             .or_insert(line);
         self.child_namespace(namespace, name)
+    }
+
+    fn define_static_path(
+        &mut self,
+        start: NamespaceId,
+        path: &str,
+        introduction: bool,
+        line: usize,
+    ) {
+        let names = path.split('.').collect::<Vec<_>>();
+        self.define_names(start, &names, introduction, line);
+    }
+
+    /// Records that the file defines `names` below `start`, and reports
+    /// introducing a name it already defined.
+    fn define_names(
+        &mut self,
+        start: NamespaceId,
+        names: &[&str],
+        introduction: bool,
+        line: usize,
+    ) {
+        let Some((leaf, parents)) = names.split_last() else {
+            return;
+        };
+        let namespace = parents.iter().fold(start, |namespace, name| {
+            self.child_namespace(namespace, name)
+        });
+        let defined = &mut self.namespaces[namespace.0].defined;
+        match defined.get(*leaf) {
+            Some(first) if introduction => self.conflicts.push(Diagnostic::error(
+                line,
+                format!(
+                    "cannot introduce `{}` because line {first} already defines it",
+                    names.join(".")
+                ),
+            )),
+            Some(_) => {}
+            None => {
+                defined.insert((*leaf).to_owned(), line);
+            }
+        }
     }
 
     fn ensure_static_path(&mut self, start: NamespaceId, path: &str) -> NamespaceId {

@@ -6954,26 +6954,61 @@ fn introduce_and_override_checks_are_deferred_until_observed() {
     );
 }
 
+/// Introducing a name the file already defined fails the module at compile
+/// time, whether or not anything observes it.
 #[test]
-fn duplicate_introductions_fail_lazily_against_prior_module_updates() {
+fn duplicate_introductions_fail_the_module() {
     let context = CompileContext::default();
-    let parsed = parse("language g0\nfoo = 1\nfoo = 2\nok = \"ok\"\n");
-    let lowered = lower_parsed_source(parsed, &context);
-    assert_eq!(lowered.diagnostics, []);
-
-    let value = evaluated_module_value(&context, &lowered);
-    assert_same_value_representation(
-        &fully_evaluated_value(resolved_value_at_path(&value, &["ok"])),
-        &Value::binary_from_text("ok"),
+    let lowered = lower_parsed_source(
+        parse("language g0\nfoo = 1\nfoo = 2\nbar := 3\nbar = 4\nok = \"ok\"\n"),
+        &context,
+    );
+    assert_eq!(
+        lowered
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.line, diagnostic.message.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                3,
+                "cannot introduce `foo` because line 2 already defines it"
+            ),
+            (
+                5,
+                "cannot introduce `bar` because line 4 already defines it"
+            ),
+        ]
     );
 
-    let foo = value
-        .get_atom_path(&[Atom::from_key(&Key::binary_from_text("foo"))])
-        .expect("duplicate foo binding should exist lazily");
-    let err = fully_evaluated_error(foo.duplicate_for_test(&crate::compiler::test_value_factory()));
+    // An object, an import's name, a nested target and an update define
+    // names too.
+    let lowered = lower_parsed_source(
+        parse(concat!(
+            "language g0\n",
+            "object Point with\n    x = 1\n",
+            "Point.x = 2\n",
+            "import 'std as s\n",
+            "s = 3\n",
+            "u ::= \\_ -> 1\n",
+            "u = 4\n",
+        )),
+        &context,
+    );
     assert_eq!(
-        err.to_string(),
-        "cannot introduce `foo` because it is already defined"
+        lowered
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.line, diagnostic.message.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                4,
+                "cannot introduce `Point.x` because line 3 already defines it"
+            ),
+            (6, "cannot introduce `s` because line 5 already defines it"),
+            (8, "cannot introduce `u` because line 7 already defines it"),
+        ]
     );
 }
 
