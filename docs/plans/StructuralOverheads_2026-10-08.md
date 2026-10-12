@@ -12,8 +12,9 @@ Status: active, as the `perf-structural-overheads` step of the
 `perf-list-map-growth`, `perf-list-literal-composition`,
 `perf-lowering-free-bindings`, `perf-interface-demand-walk`,
 `perf-interface-route-ownership`, `perf-reduced-source-copy`,
-`perf-driver-path-inlining`, `perf-module-definition-cost` and
-`perf-runtime-net-attach`. Next: `perf-application-values`.
+`perf-driver-path-inlining`, `perf-module-definition-cost`,
+`perf-runtime-net-attach` and `perf-application-values`. Next:
+`perf-definition-assertions`.
 `gc-two-level-mutator-access` and `gc-thread-local-heap-context` moved to
 [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md).
 
@@ -76,7 +77,139 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 
 ## Open Steps, in Order
 
+### Introduce and override checks (`perf-definition-assertions`)
+
+Each introduced module definition carries an assertion that the
+definitions before it do not define its name (an override, that they do).
+With the reflection boundary shared, removing the assertion saves 50% of
+`chain_400` and 58% of `chain_1600`; it is the chain's superlinear part
+(exponent 1.25). Each assertion looks its name up in the definitions as
+they stood just before it, which builds every intermediate dictionary and
+keeps it alive while the chain is in progress, and each collection traces
+every version in full: collection is 17.6% of `chain_1600` with the
+assertion, 4% without. It is also the only duplicate check: `x = 1` then
+`x = 2` passes unless `x` is demanded.
+
+Maintainer direction (2026-10-10): compilers should check introductions
+and overrides among a file's own definitions and report them at compile
+time. A top-level `import` can still introduce a name already defined,
+which no compile-time check sees, so a run-time check stays. Its form is
+not formal semantics: compilers could record what they introduce or
+override under `meta.*`, and the reflection boundary could look for
+conflicts there without evaluating definitions. The step designs that
+record and the boundary's check, adds the compile-time check, and
+measures with `chain` and `defs_unused`.
+
+### Reflection scanner (`perf-reflection-scanner`)
+
+A module's first reflection boundary launches the `refl.*` scanner, which
+waits for the final `refl.*` and launches its tasks. It cannot be skipped
+when a module defines no `refl` tasks, since imports act as mixins
+(maintainer, 2026-10-10). It costs about 22 M instructions per module:
+44% of `minimal`, and 11.5% of `list_computed_2000` (building without any
+boundary, before `reflection-boundary-shared`). By callgrind on
+`minimal`, the boundary's effect program runs through net evaluation
+(net checkpoints 20 M instructions with it, 9 M without), creating and
+activating the reflection task costs about 2 M, and tearing down the
+reflection store and launchers about 2.4 M. The maintainer expects the
+speed and quality of the scanner, and of other compiler-generated
+reflection tasks and annotations, to improve. Related:
+`perf-reflection-step-cost`.
+
+### Reflection step cost (`perf-reflection-step-cost`)
+
+Holistic R1, R2 and R6, still open: the reflection store's change log grows
+without bound and each validation scans it; the reflection machine
+deep-clones its active branch every step, so a `do` chain costs O(n²); and
+captured continuations are never released. No profile has measured them
+yet. The `do_chain` workload does not: its pure effects reduce in nets, and
+its reflection-step count stays constant. A workload that runs a long chain
+of reflection effects would.
+
+Reflection task polls hold no heap region (`perf-quantum-region`), since
+they call into their host between steps. Their pure steps, such as local
+state, could hold one, provided no client callback runs inside it
+(maintainer, 2026-10-09).
+
+### Debug annotations (`perf-debug-annotations`)
+
+Each module definition carries a context annotation for diagnostics,
+`anno {context: {g: {origin, line, definition}}} value`; building without
+it saves 8 to 10% of the `chain` family. Debugging annotations should be
+far cheaper (maintainer, 2026-10-10, open to investigation and
+brainstorming). Starting points: what evaluating one costs, and whether a
+context known at compile time, as an origin and line are, can travel
+with the definition without an evaluation step.
+
+### Route walks with workers (`perf-worker-route-walks`)
+
+After `perf-worker-scaling`, `chain_w4_800` still runs 8% more
+instructions than `chain_800` and 2.3 times its CPU time, growing as
+n^1.27 against n^1.23. Two walks remain quadratic:
+- **Workers walk from the root.** A worker finds work by walking each
+  reflection root's exact producer chain from the top on every claim
+  (`exact_producer_probe_locked`). The profiling counters do not see these
+  walks. A worker could keep a route as the foreground does.
+- **Mid-route mismatches rebuild.** When a worker changes a record in the
+  middle of the foreground's route, validation falls back to a complete
+  search (781 `changed_dependency_fallbacks` and 290
+  `guarded_release_mutation_fallbacks` at `chain_w4_800`). The frames above
+  the mismatch are proven, so the route could shrink to them, as it now
+  does for a retired tip, and reach the same tip a rebuild would.
+
+Walks are about 8% of samples and lock contention 4%. Workers are opt-in
+and help only programs with parallel work, so this comes last.
+
+## Experiments
+
+- **Poll root frames** (`perf-poll-root-frames`), not adopted
+  (2026-10-10; kept as `1f35ad1e`, reverted in `15bbb0bb`). `glam-gc`
+  gained `RootFrame`, state outside the heap that the collector traces as
+  one root, registered once. Glam rooted the hot transient value roots
+  (WHNF ready results, checkpoint completions, list machine items) in one
+  frame per evaluation poll, made poll results durable at the boundary,
+  and asserted in debug builds that no framed root outlived its poll. That
+  check found three escapes the call sites did not show: reflection
+  handoff roots, task lifecycle construction, and a strategy machine that
+  keeps a root across polls. Root registrations and managed allocations
+  fell 10% each, but instructions moved -0.6% to +0.5%: a framed root's
+  thread-local scope, frame mutex, handle `Arc` and per-read copy cost
+  about what its registration saved. Framing every value root a poll
+  creates, rather than chosen sites, framed durable roots too, in code
+  unaware of frames.
+- **Coalesced wake-ups** (`perf-coalesced-wakeups`), open. The maintainer's
+  suggestion: coordinator mutations set a notify flag that is flushed once
+  per quantum, trading up to a quantum of latency for fewer wakes of parked
+  threads. The notifying thread must flush before it parks or blocks
+  itself. It matters only with threads parked, so it starts with a profile
+  that has workers enabled.
+- **mimalloc** (`perf-mimalloc-allocator`), not adopted. A temporary build
+  with the mimalloc global allocator ran 9–16% fewer user-space
+  instructions but used more CPU, apparently in the kernel (memory
+  reservation and page faults in this container):
+
+  | Workload | glibc M instr | mimalloc | glibc CPU ms | mimalloc |
+  | --- | ---: | ---: | ---: | ---: |
+  | `countdown_400` | 1,190 | 1,078 | 278 | 376 |
+  | `hello_elf` | 3,493 | 3,171 | 786 | 959 |
+  | `list_map_1000` | 1,283 | 1,074 | 272 | 275 |
+  | `minimal` | 34 | 30 | 22 | 67 |
+
+  Allocating less is the better lever.
+
+## Done
+
 ### Applications as values (`perf-application-values`)
+
+Done 2026-10-12. Identity thunks, operator wrappers, compiled nets, compile
+on request with `'jit`, pure conditionals, integer literals and the local
+lazy-force steps landed; the evidence follows. Left: `list_map`'s
+comparison, deferred to a later performance review; full normal form for
+`'normalize`, deferred until something uses it; the remaining per-force
+cost (mutator entries, transient roots), which is
+[Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md);
+`perf-unobserved-arity`, dropped.
+
 
 A function value is a stage net, and applying it builds a net, so that a
 copy or clone shares whatever partial evaluation applying its arguments
@@ -446,128 +579,6 @@ could collect arguments as a value and instantiate the code once,
 saturated. It first needs workloads and tests that lean on partial
 application, so that sharing is measured before anything trades it.
 Dropped for now (maintainer, 2026-10-12).
-
-### Introduce and override checks (`perf-definition-assertions`)
-
-Each introduced module definition carries an assertion that the
-definitions before it do not define its name (an override, that they do).
-With the reflection boundary shared, removing the assertion saves 50% of
-`chain_400` and 58% of `chain_1600`; it is the chain's superlinear part
-(exponent 1.25). Each assertion looks its name up in the definitions as
-they stood just before it, which builds every intermediate dictionary and
-keeps it alive while the chain is in progress, and each collection traces
-every version in full: collection is 17.6% of `chain_1600` with the
-assertion, 4% without. It is also the only duplicate check: `x = 1` then
-`x = 2` passes unless `x` is demanded.
-
-Maintainer direction (2026-10-10): compilers should check introductions
-and overrides among a file's own definitions and report them at compile
-time. A top-level `import` can still introduce a name already defined,
-which no compile-time check sees, so a run-time check stays. Its form is
-not formal semantics: compilers could record what they introduce or
-override under `meta.*`, and the reflection boundary could look for
-conflicts there without evaluating definitions. The step designs that
-record and the boundary's check, adds the compile-time check, and
-measures with `chain` and `defs_unused`.
-
-### Reflection scanner (`perf-reflection-scanner`)
-
-A module's first reflection boundary launches the `refl.*` scanner, which
-waits for the final `refl.*` and launches its tasks. It cannot be skipped
-when a module defines no `refl` tasks, since imports act as mixins
-(maintainer, 2026-10-10). It costs about 22 M instructions per module:
-44% of `minimal`, and 11.5% of `list_computed_2000` (building without any
-boundary, before `reflection-boundary-shared`). By callgrind on
-`minimal`, the boundary's effect program runs through net evaluation
-(net checkpoints 20 M instructions with it, 9 M without), creating and
-activating the reflection task costs about 2 M, and tearing down the
-reflection store and launchers about 2.4 M. The maintainer expects the
-speed and quality of the scanner, and of other compiler-generated
-reflection tasks and annotations, to improve. Related:
-`perf-reflection-step-cost`.
-
-### Reflection step cost (`perf-reflection-step-cost`)
-
-Holistic R1, R2 and R6, still open: the reflection store's change log grows
-without bound and each validation scans it; the reflection machine
-deep-clones its active branch every step, so a `do` chain costs O(n²); and
-captured continuations are never released. No profile has measured them
-yet. The `do_chain` workload does not: its pure effects reduce in nets, and
-its reflection-step count stays constant. A workload that runs a long chain
-of reflection effects would.
-
-Reflection task polls hold no heap region (`perf-quantum-region`), since
-they call into their host between steps. Their pure steps, such as local
-state, could hold one, provided no client callback runs inside it
-(maintainer, 2026-10-09).
-
-### Debug annotations (`perf-debug-annotations`)
-
-Each module definition carries a context annotation for diagnostics,
-`anno {context: {g: {origin, line, definition}}} value`; building without
-it saves 8 to 10% of the `chain` family. Debugging annotations should be
-far cheaper (maintainer, 2026-10-10, open to investigation and
-brainstorming). Starting points: what evaluating one costs, and whether a
-context known at compile time, as an origin and line are, can travel
-with the definition without an evaluation step.
-
-### Route walks with workers (`perf-worker-route-walks`)
-
-After `perf-worker-scaling`, `chain_w4_800` still runs 8% more
-instructions than `chain_800` and 2.3 times its CPU time, growing as
-n^1.27 against n^1.23. Two walks remain quadratic:
-- **Workers walk from the root.** A worker finds work by walking each
-  reflection root's exact producer chain from the top on every claim
-  (`exact_producer_probe_locked`). The profiling counters do not see these
-  walks. A worker could keep a route as the foreground does.
-- **Mid-route mismatches rebuild.** When a worker changes a record in the
-  middle of the foreground's route, validation falls back to a complete
-  search (781 `changed_dependency_fallbacks` and 290
-  `guarded_release_mutation_fallbacks` at `chain_w4_800`). The frames above
-  the mismatch are proven, so the route could shrink to them, as it now
-  does for a retired tip, and reach the same tip a rebuild would.
-
-Walks are about 8% of samples and lock contention 4%. Workers are opt-in
-and help only programs with parallel work, so this comes last.
-
-## Experiments
-
-- **Poll root frames** (`perf-poll-root-frames`), not adopted
-  (2026-10-10; kept as `1f35ad1e`, reverted in `15bbb0bb`). `glam-gc`
-  gained `RootFrame`, state outside the heap that the collector traces as
-  one root, registered once. Glam rooted the hot transient value roots
-  (WHNF ready results, checkpoint completions, list machine items) in one
-  frame per evaluation poll, made poll results durable at the boundary,
-  and asserted in debug builds that no framed root outlived its poll. That
-  check found three escapes the call sites did not show: reflection
-  handoff roots, task lifecycle construction, and a strategy machine that
-  keeps a root across polls. Root registrations and managed allocations
-  fell 10% each, but instructions moved -0.6% to +0.5%: a framed root's
-  thread-local scope, frame mutex, handle `Arc` and per-read copy cost
-  about what its registration saved. Framing every value root a poll
-  creates, rather than chosen sites, framed durable roots too, in code
-  unaware of frames.
-- **Coalesced wake-ups** (`perf-coalesced-wakeups`), open. The maintainer's
-  suggestion: coordinator mutations set a notify flag that is flushed once
-  per quantum, trading up to a quantum of latency for fewer wakes of parked
-  threads. The notifying thread must flush before it parks or blocks
-  itself. It matters only with threads parked, so it starts with a profile
-  that has workers enabled.
-- **mimalloc** (`perf-mimalloc-allocator`), not adopted. A temporary build
-  with the mimalloc global allocator ran 9–16% fewer user-space
-  instructions but used more CPU, apparently in the kernel (memory
-  reservation and page faults in this container):
-
-  | Workload | glibc M instr | mimalloc | glibc CPU ms | mimalloc |
-  | --- | ---: | ---: | ---: | ---: |
-  | `countdown_400` | 1,190 | 1,078 | 278 | 376 |
-  | `hello_elf` | 3,493 | 3,171 | 786 | 959 |
-  | `list_map_1000` | 1,283 | 1,074 | 272 | 275 |
-  | `minimal` | 34 | 30 | 22 | 67 |
-
-  Allocating less is the better lever.
-
-## Done
 
 - **Function application nets** (`perf-runtime-net-attach`), 2026-10-10.
   Decision `applications-copy-function-in`.

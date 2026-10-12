@@ -189,11 +189,10 @@ gains this consequence when it lands.
      `perf-list-map-growth`, `perf-list-literal-composition`,
      `perf-lowering-free-bindings`, `perf-interface-demand-walk`,
      `perf-interface-route-ownership`, `perf-reduced-source-copy`,
-     `perf-driver-path-inlining`, `perf-module-definition-cost` and
-     `perf-runtime-net-attach`. The scheduler round trips were
-     `perf-evaluation-recursion`.
-   - *Open, in order:* `perf-application-values`,
-     `perf-definition-assertions`, `perf-reflection-scanner`,
+     `perf-driver-path-inlining`, `perf-module-definition-cost`,
+     `perf-runtime-net-attach` and `perf-application-values`. The
+     scheduler round trips were `perf-evaluation-recursion`.
+   - *Open, in order:* `perf-definition-assertions`, `perf-reflection-scanner`,
      `perf-reflection-step-cost`, `perf-debug-annotations` and
      `perf-worker-route-walks`.
    - *Experiments:* `perf-coalesced-wakeups` (open),
