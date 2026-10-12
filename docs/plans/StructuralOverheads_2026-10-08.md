@@ -422,6 +422,16 @@ n^1.27 against n^1.23. Two walks remain quadratic:
 Walks are about 8% of samples and lock contention 4%. Workers are opt-in
 and help only programs with parallel work, so this comes last.
 
+### Root checks by kind (`perf-root-check-kinds`), a later lever
+
+Registering a root validates it in release builds (about 935 instructions
+of the roughly 1,400 a transient root costs), because `Root` is a safe API
+and a stale `Gc` must not become rootable. Users' API roots need that;
+inner roots that never cross runtimes, made by the runtime from values it
+holds, may not. Robustly distinguishing the two kinds could skip most
+checks (maintainer, 2026-10-12). After explicit heap holds, which remove
+many inner roots outright, measure what remains.
+
 ## Experiments
 
 - **Poll root frames** (`perf-poll-root-frames`), not adopted
