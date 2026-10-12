@@ -252,12 +252,12 @@ impl CompileContext {
         ))))
     }
 
-    /// The key a namespace's reflection boundary claims its task under:
-    /// `[object reflection guard, abstract name]`, where `namespace` is
-    /// relative to the module and empty for the module itself. A module, a
-    /// nested namespace and an object of one name thus share one task, as a
-    /// declared object's boundary claims under its spec's name.
-    pub(crate) fn reflection_guard(
+    /// A namespace's abstract name, where `namespace` is relative to the
+    /// module and empty for the module itself. Its reflection state lives
+    /// under `[name, 'meta, 'refl]:()`, as a declared object's lives under
+    /// its spec's name, so a module, a nested namespace and an object of
+    /// one name share one reflection task.
+    pub(crate) fn namespace_name(
         &self,
         access: &crate::core::RuntimeValueAccess<'_>,
         namespace: &str,
@@ -267,13 +267,9 @@ impl CompileContext {
         if !namespace.is_empty() {
             parts.extend(namespace.split('.').map(ToOwned::to_owned));
         }
-        let name = Value::Atom(Atom::from_key(&Key::AbstractGlobalPath(Arc::from(
+        Value::Atom(Atom::from_key(&Key::AbstractGlobalPath(Arc::from(
             parts.into_boxed_slice(),
-        ))));
-        Value::List(crate::core::List::from_values(vec![
-            access.object_reflection_guard(),
-            name,
-        ]))
+        ))))
     }
 
     pub(crate) fn emit_diagnostic(&self, severity: Severity, message: RuntimeValueRoot) {

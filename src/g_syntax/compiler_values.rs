@@ -374,20 +374,26 @@ pub(in crate::g_syntax) fn reflection_scanner_resolved(
 }
 
 /// A module's or nested namespace's reflection operation: its final
-/// `meta.refl`, or the scanner. Objects run their scanner directly, since
-/// an object inherits its parents' `meta.refl` with their guards.
+/// `meta.refl`, or `.r ()` without one, so only what a namespace declares
+/// decides, never the first file to use it. Objects run their scanner
+/// directly, since an object inherits its parents' `meta.refl`.
 pub(in crate::g_syntax) fn namespace_reflection_operation_resolved(
     access: &RuntimeValueAccess<'_>,
-    guard: impl Fn() -> ResolvedExpr<Value>,
-    final_defs: impl Fn() -> ResolvedExpr<Value>,
+    final_defs: ResolvedExpr<Value>,
 ) -> ResolvedExpr<Value> {
+    let cache = cache(access.values());
     apply_builtin(
         access,
         Builtin::Default,
         [
-            reflection_scanner_resolved(access, guard(), final_defs()),
+            effect_call(
+                access,
+                cache.as_ref(),
+                "r",
+                [ResolvedExpr::Embedded(access.unit())],
+            ),
             ResolvedExpr::Access {
-                base: Box::new(final_defs()),
+                base: Box::new(final_defs),
                 path: vec![
                     ResolvedPathPart::Key(name_as_key("meta")),
                     ResolvedPathPart::Key(name_as_key("refl")),
@@ -397,30 +403,50 @@ pub(in crate::g_syntax) fn namespace_reflection_operation_resolved(
     )
 }
 
-/// A module's demand boundary, claiming under `guard` and running its
-/// `meta.refl`.
+/// `[name, 'meta, 'refl]:()`, the heap key of the reflection state of the
+/// namespace or object called `name`: the state dict holding its task's
+/// `claim`, its `refl.*` `tasks` and the scanner's `scanned` mark.
+pub(in crate::g_syntax) fn reflection_state_key_resolved(
+    access: &RuntimeValueAccess<'_>,
+    name: ResolvedExpr<Value>,
+) -> ResolvedExpr<Value> {
+    apply_builtin(
+        access,
+        Builtin::DictUpdate,
+        [
+            ResolvedExpr::List(vec![
+                name,
+                ResolvedExpr::Embedded(Value::Atom(atom_from_str("meta"))),
+                ResolvedExpr::Embedded(Value::Atom(atom_from_str("refl"))),
+            ]),
+            ResolvedExpr::Embedded(access.unit()),
+            ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())),
+        ],
+    )
+}
+
+/// The demand boundary of the module or nested namespace called `name`,
+/// running its `meta.refl`.
 pub(in crate::g_syntax) fn reflection_boundary_root(
     access: &RuntimeValueAccess<'_>,
-    guard: Value,
+    name: Value,
     final_defs: Value,
 ) -> RuntimeValueRoot {
-    let operation = namespace_reflection_operation_resolved(
-        access,
-        || ResolvedExpr::Provided(access.duplicate_value(&guard)),
-        || ResolvedExpr::Provided(access.duplicate_value(&final_defs)),
-    );
-    let expression = reflection_boundary_resolved(access, ResolvedExpr::Provided(guard), operation);
+    let operation =
+        namespace_reflection_operation_resolved(access, ResolvedExpr::Provided(final_defs));
+    let guard = reflection_state_key_resolved(access, ResolvedExpr::Provided(name));
+    let expression = reflection_boundary_resolved(access, guard, operation);
     root_value(access, lower_resolved_expr_in(access, expression))
 }
 
 #[cfg(test)]
 pub(in crate::g_syntax) fn reflection_boundary_value(
     values: &CoreValueFactory,
-    guard: Value,
+    name: Value,
     final_defs: Value,
 ) -> Value {
     values.with_runtime_value_access(|access| {
-        let root = reflection_boundary_root(&access, guard, final_defs);
+        let root = reflection_boundary_root(&access, name, final_defs);
         project_value(&access, &root)
     })
 }
@@ -849,7 +875,8 @@ fn build_constant_object_defs(values: &CoreValueFactory) -> RuntimeValueRoot {
 
 /// `\guard final_defs -> scanner`: the reflection operation a namespace
 /// runs by default. It replays the final journal, logging conflicts, then
-/// launches each final `refl.*` task and records them under `guard`.
+/// launches each final `refl.*` task and records them under `guard`. It
+/// first takes ownership of `guard`'s state, so it runs once per namespace.
 fn build_reflection_scanner(
     values: &CoreValueFactory,
     cache: &dyn EffectValueCache,
@@ -990,7 +1017,73 @@ fn build_reflection_scanner(
             ],
         );
 
-        ResolvedExpr::lambda(vec![guard, final_defs], scanner)
+        // The scanner takes ownership of its namespace's reflection state:
+        // a second run, as user-defined syntax might spawn, logs an error
+        // and halts.
+        let scanned = locals.push_internal_binding("<reflection-scanned>");
+        let first_run = apply_builtin(
+            access,
+            Builtin::Equal,
+            [
+                ResolvedExpr::Local(scanned),
+                ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())),
+            ],
+        );
+        let mark_and_scan = effect_then(
+            access,
+            cache,
+            effect_path_call(
+                access,
+                cache,
+                &["heap", "set"],
+                [state_path("scanned"), ResolvedExpr::Embedded(access.unit())],
+            ),
+            scanner,
+            "reflection scanner mark",
+            &mut locals,
+        );
+        let scan_once = effect_then(
+            access,
+            cache,
+            first_run,
+            mark_and_scan,
+            "reflection scanner first-run test",
+            &mut locals,
+        );
+        let message = Value::Dict(Dict::new_sync().insert(
+            name_as_key("msg"),
+            Value::Dict(Dict::new_sync().insert(
+                name_as_key("text"),
+                Value::binary_from_text("the reflection scanner ran again for its namespace"),
+            )),
+        ));
+        let report_again = effect_call(
+            access,
+            cache,
+            "log",
+            [
+                ResolvedExpr::Embedded(Value::Atom(atom_from_str("error"))),
+                ResolvedExpr::Embedded(message),
+            ],
+        );
+        let once = effect_call(
+            access,
+            cache,
+            "cut",
+            [effect_call(
+                access,
+                cache,
+                "seq",
+                [
+                    effect_path_call(access, cache, &["heap", "get"], [state_path("scanned")]),
+                    ResolvedExpr::lambda(
+                        vec![scanned],
+                        effect_call(access, cache, "alt", [scan_once, report_again]),
+                    ),
+                ],
+            )],
+        );
+        ResolvedExpr::lambda(vec![guard, final_defs], once)
     })
 }
 

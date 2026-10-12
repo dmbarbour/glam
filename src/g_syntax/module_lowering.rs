@@ -78,7 +78,7 @@ impl<'context> ModuleLowerer<'context> {
         let module_reflection = context.values().with_runtime_value_access(|access| {
             compiler_values::reflection_boundary_root(
                 &access,
-                context.reflection_guard(&access, ""),
+                context.namespace_name(&access, ""),
                 context.final_defs(&access),
             )
         });
@@ -197,7 +197,10 @@ impl<'context> ModuleLowerer<'context> {
             let definitions = self.definitions.clone_core_with(&access);
             let scanner = compiler_values::reflection_scanner_resolved(
                 &access,
-                ResolvedExpr::Provided(self.context.reflection_guard(&access, "")),
+                compiler_values::reflection_state_key_resolved(
+                    &access,
+                    ResolvedExpr::Provided(self.context.namespace_name(&access, "")),
+                ),
                 ResolvedExpr::Provided(self.context.final_defs(&access)),
             );
             let installed = apply_builtin_resolved(
@@ -272,14 +275,16 @@ impl<'context> ModuleLowerer<'context> {
                     None => {
                         let namespace = namespace.join(".");
                         let guard = || {
-                            ResolvedExpr::Provided(
-                                self.context.reflection_guard(&access, &namespace),
+                            compiler_values::reflection_state_key_resolved(
+                                &access,
+                                ResolvedExpr::Provided(
+                                    self.context.namespace_name(&access, &namespace),
+                                ),
                             )
                         };
                         let operation = compiler_values::namespace_reflection_operation_resolved(
                             &access,
-                            guard,
-                            || path_resolved_in_definitions(&access, &namespace, final_defs()),
+                            path_resolved_in_definitions(&access, &namespace, final_defs()),
                         );
                         apply_builtin_resolved(
                             &access,

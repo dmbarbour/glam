@@ -793,10 +793,6 @@ impl RuntimeValueAccess<'_> {
         self.atom_for_key(&super::keys::UNIT)
     }
 
-    pub(crate) fn object_reflection_guard(&self) -> super::Value {
-        self.atom_for_key(&super::keys::OBJECT_REFLECTION_GUARD)
-    }
-
     pub(crate) fn tuple(&self) -> super::Value {
         self.atom_for_key(&super::keys::TUPLE)
     }

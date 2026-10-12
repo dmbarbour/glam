@@ -3366,10 +3366,6 @@ mod tests {
                 &access.key_value(&keys::UNIT),
             );
             access.assert_same_representation_for_test(
-                &access.object_reflection_guard(),
-                &access.key_value(&keys::OBJECT_REFLECTION_GUARD),
-            );
-            access.assert_same_representation_for_test(
                 &access.tuple(),
                 &access.key_value(&keys::TUPLE),
             );

@@ -263,6 +263,29 @@ Steps:
     are cheaper (`perf-reflection-scanner`).
   - Instructions against `8aacd29f`: `minimal` +4.9% (1.2 M), others
     within 1.1%.
+- `defs-refl-state` (maintainer, 2026-10-12): Done 2026-10-12.
+  - A namespace without `meta.refl` runs `.r ()`, never the compiler's
+    scanner, so only what a namespace declares decides, not whichever
+    file's boundary spawns first. A nested dict such as `asm` thus runs no
+    scanner.
+  - Reflection state lives under `[name, 'meta, 'refl]:()`, an atom-like
+    key: `name` is a module's or nested namespace's abstract path, or a
+    declared object's final `spec.name` (so an inheriting object keys its
+    own). Its `claim`, `tasks` and `scanned` are fields of that state
+    dict (`.heap.get` takes paths).
+  - The scanner takes ownership first: an unset `scanned` is set and the
+    scan runs; otherwise it logs an error and halts.
+  - Cost of that check, on `minimal`: a heap read alone about 1.0 M
+    instructions, a write alone 1.1 M, the whole check 5.1 M (the `Equal`,
+    `alt` and `cut` around them about 3 M); `hello_elf` +3.1%, one check
+    per object scanner. Each reflection effect step costs on the order of
+    a million instructions, which needs attention next.
+  - Imported modules are objects (`f241ff4d`, 2026-07-11): `import ... as`
+    builds an instance named by the target's abstract path, with the
+    module's definitions as constant defs, so inheriting from one is
+    mixin-like; an object extending one inherits its installed
+    `meta.refl` with the module's key, which is why objects run their own
+    scanner.
 - `defs-with-union`: dict `with` lowers `=` to union and `:=` to update.
   Deferred (maintainer, 2026-10-12): union merges dicts, so `f = {a: 1}`
   and then `f = {b: 2}` would not conflict, which would confuse users.

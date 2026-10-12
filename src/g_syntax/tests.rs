@@ -309,22 +309,22 @@ fn reflection_test_module(
         assembler.core_values(),
         module_path.iter().copied(),
     );
+    // Each guard is a namespace's reflection state key, as the compiler
+    // builds it.
     let prior = guards
         .iter()
         .fold(Dict::new_sync(), |dict, (name, namespace)| {
             dict.insert(
                 Key::atom_from_text(name),
                 context.values().with_runtime_value_access(|access| {
-                    context.reflection_guard(&access, namespace)
+                    let name = ResolvedExpr::Provided(context.namespace_name(&access, namespace));
+                    lower_resolved_expr_in(
+                        &access,
+                        compiler_values::reflection_state_key_resolved(&access, name),
+                    )
                 }),
             )
         });
-    let prior = prior.insert(
-        Key::atom_from_text("object_refl_marker"),
-        assembler
-            .core_values()
-            .with_runtime_value_access(|access| access.object_reflection_guard()),
-    );
     let context = context.with_prior_defs(Value::Dict(prior));
     let lowered = lower_parsed_source(parse(source), &context);
     assert_eq!(lowered.diagnostics, []);
@@ -7246,7 +7246,7 @@ object foo extends base with
     assume w
     w := 4
     y = 5
-meta.probe = anno { refl:(.heap.get [[object_refl_marker, abstract_global_path foo],'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .r ()))) } "probe"
+meta.probe = anno { refl:(.heap.get [[abstract_global_path foo, 'meta, 'refl]:(),'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .r ()))) } "probe"
 "#;
     let (_assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["object_journal_test"], &[("guard", "")]);
@@ -7336,7 +7336,7 @@ object foo with
     a = 1
 foo.b = 2
 meta.module_unclaimed = anno { refl:(.heap.get [guard,'claim] >>= (\claim -> if claim == {} then .r () else .fail)) } "module unclaimed"
-meta.object_claimed = anno { refl:(.heap.get [[object_refl_marker, abstract_global_path foo],'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .r ()))) } "object claimed"
+meta.object_claimed = anno { refl:(.heap.get [[abstract_global_path foo, 'meta, 'refl]:(),'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .r ()))) } "object claimed"
 "#;
     let (_assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["object_member_test"], &[("guard", "")]);
@@ -7399,7 +7399,7 @@ fn named_top_level_object_uses_object_refl_without_triggering_module_refl() {
     let source = r#"language g0
 import 'std
 refl.module_notice = .log 'info { msg:{ text:"module reflection task" } }
-meta.probe = anno { refl:(.heap.get [[object_refl_marker,foo.spec.name],'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [[object_refl_marker,foo.spec.name],'tasks] >>= (\tasks -> .task.join (list.head tasks).task >>= (\_ -> .r ()))))) } "probe"
+meta.probe = anno { refl:(.heap.get [[foo.spec.name, 'meta, 'refl]:(),'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [[foo.spec.name, 'meta, 'refl]:(),'tasks] >>= (\tasks -> .task.join (list.head tasks).task >>= (\_ -> .r ()))))) } "probe"
 object foo with
   refl.notice = .log 'info { msg:{ text:"object reflection task" } }
   meta.hidden = "metadata"
@@ -7432,7 +7432,7 @@ object foo with
 fn nested_declared_object_uses_final_extended_refl() {
     let source = r#"language g0
 import 'std
-meta.probe = anno { refl:(.heap.get [[object_refl_marker,parent.child.spec.name],'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [[object_refl_marker,parent.child.spec.name],'tasks] >>= (\tasks -> .task.join (list.head tasks).task >>= (\_ -> .r ()))))) } "probe"
+meta.probe = anno { refl:(.heap.get [[parent.child.spec.name, 'meta, 'refl]:(),'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [[parent.child.spec.name, 'meta, 'refl]:(),'tasks] >>= (\tasks -> .task.join (list.head tasks).task >>= (\_ -> .r ()))))) } "probe"
 object parent with
   refl.parent_notice = .log 'info { msg:{ text:"parent reflection task" } }
   object child with
@@ -7462,8 +7462,8 @@ extend parent.child with
 fn inherited_member_uses_derived_object_refl_and_guard() {
     let source = r#"language g0
 import 'std
-meta.derived_probe = anno { refl:(.heap.get [[object_refl_marker,derived.spec.name],'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [[object_refl_marker,derived.spec.name],'tasks] >>= (\tasks -> .task.join (list.head tasks).task >>= (\_ -> .r ()))))) } "derived probe"
-meta.base_probe = anno { refl:(.heap.get [[object_refl_marker,base.spec.name],'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [[object_refl_marker,base.spec.name],'tasks] >>= (\tasks -> .task.join (list.head tasks).task >>= (\_ -> .r ()))))) } "base probe"
+meta.derived_probe = anno { refl:(.heap.get [[derived.spec.name, 'meta, 'refl]:(),'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [[derived.spec.name, 'meta, 'refl]:(),'tasks] >>= (\tasks -> .task.join (list.head tasks).task >>= (\_ -> .r ()))))) } "derived probe"
+meta.base_probe = anno { refl:(.heap.get [[base.spec.name, 'meta, 'refl]:(),'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [[base.spec.name, 'meta, 'refl]:(),'tasks] >>= (\tasks -> .task.join (list.head tasks).task >>= (\_ -> .r ()))))) } "base probe"
 object base with
   refl.notice = .log 'info { msg:{ text:"base reflection task" } }
   inherited = "inherited value"
@@ -7571,6 +7571,38 @@ ordinary = "ordinary"
         &Value::binary_from_text("probe"),
     );
     assert!(take_reflection_diagnostics(&diagnostics).is_empty());
+}
+
+/// The default reflection operation takes ownership of its namespace's
+/// state, so it runs once: run again, as user-defined syntax might, it logs
+/// an error and halts.
+#[test]
+fn the_reflection_scanner_runs_once_per_namespace() {
+    let source = r#"language g0
+import 'std
+refl.again = meta.refl
+meta.probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [guard,'tasks] >>= (\tasks -> .task.join (list.head tasks).task >>= (\_ -> .r ()))))) } "probe"
+ordinary = "ordinary"
+"#;
+    let (_assembler, context, module, _module_root, diagnostics) =
+        reflection_test_module(source, &["scanner_once_test"], &[("guard", "")]);
+
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["ordinary"]),
+        &Value::binary_from_text("ordinary"),
+    );
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["meta", "probe"]),
+        &Value::binary_from_text("probe"),
+    );
+    let messages = take_reflection_diagnostics(&diagnostics)
+        .iter()
+        .map(|diagnostic| diagnostic.message().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        messages,
+        ["the reflection scanner ran again for its namespace"]
+    );
 }
 
 #[test]

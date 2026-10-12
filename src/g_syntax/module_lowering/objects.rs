@@ -448,18 +448,18 @@ pub(in crate::g_syntax) fn remove_object_spec_resolved(
     )
 }
 
+/// The key a declared object's reflection state lives under, by its final
+/// spec's name, an abstract path for a declared object, so an object that
+/// inherits keys its own: `[spec.name, 'meta, 'refl]:()`.
 pub(in crate::g_syntax) fn object_reflection_guard_resolved(
     access: &RuntimeValueAccess<'_>,
     object_final_defs: ResolvedExpr<Value>,
 ) -> ResolvedExpr<Value> {
-    let object_name = ResolvedExpr::Access {
+    let name = ResolvedExpr::Access {
         base: Box::new(object_spec_resolved(access, object_final_defs)),
         path: vec![ResolvedPathPart::Key(name_as_key("name"))],
     };
-    ResolvedExpr::List(vec![
-        ResolvedExpr::Embedded(access.object_reflection_guard()),
-        object_name,
-    ])
+    compiler_values::reflection_state_key_resolved(access, name)
 }
 
 fn declared_target_has_reflection(target: &str) -> bool {

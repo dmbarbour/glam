@@ -652,13 +652,17 @@ maps the short names used here to file names.
     namespace's structure and cycle on computed keys.
   - Modules and nested namespaces run `meta.refl`; declared objects run
     their scanner, as they inherit parents' `meta.refl`.
-  - One claim key per namespace, `[object reflection guard, abstract
-    name]`, shared by a module, a nested namespace and an object of one
-    name.
+  - A namespace without `meta.refl` runs `.r ()`, so only what it
+    declares decides, never the first file to spawn its task.
+  - Reflection state lives under `[name, 'meta, 'refl]:()`: a module's or
+    nested namespace's abstract path, or a declared object's final
+    `spec.name`, shared by a module and an object of one name. The
+    scanner takes ownership of it before scanning, so it runs once even
+    when spawned twice.
 - **Consequences:**
   - `meta.refl := .r ()` disables a module's `refl.*` tasks.
-  - A once-only check inside the scanner is deferred for cost.
-  - `minimal` costs 1.2 M more instructions.
+  - The ownership check costs about 5 M instructions per scanner, since
+    each reflection effect step costs about a million.
 - **Recorded in:** structural overheads plan, `defs-meta-refl`.
 
 ## Diagnostics
