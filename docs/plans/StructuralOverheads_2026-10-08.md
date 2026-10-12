@@ -280,6 +280,14 @@ Steps:
     `alt` and `cut` around them about 3 M); `hello_elf` +3.1%, one check
     per object scanner. Each reflection effect step costs on the order of
     a million instructions, which needs attention next.
+  - The check's longer scanner exposed a race in a session drain
+    (`run_until_quiescent`): it read the work generation after a failed
+    claim and re-looked only if a ready task was visible, so a worker
+    requeueing or claiming a task between its checks made it report a
+    deadlock with that task Queued or Running (about 1 run in 30 of
+    `ordinary_result_is_identical_across_worker_counts` with 4 workers).
+    The drain now reads the generation before claiming and looks again on
+    any change; 0 of 400 runs fail.
   - Imported modules are objects (`f241ff4d`, 2026-07-11): `import ... as`
     builds an instance named by the target's abstract path, with the
     module's definitions as constant defs, so inheriting from one is

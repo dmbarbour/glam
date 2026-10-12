@@ -388,10 +388,12 @@ impl EvaluationDemandState {
                 if self.is_closed() {
                     return self.closed_run_report();
                 }
+                // Read before claiming, so a task a worker requeues after a
+                // failed claim changes the generation compared below.
+                let generation = coordinator.work_generation();
                 if let Some(claimed) = self.claim_ready_task(&coordinator) {
                     break claimed;
                 }
-                let generation = coordinator.work_generation();
                 if self.task_is_running(&coordinator) {
                     if coordinator.wait_for_change_for(
                         generation,
@@ -411,9 +413,10 @@ impl EvaluationDemandState {
                     }
                     continue;
                 }
-                if coordinator.work_generation() != generation
-                    && coordinator.session_has_ready_task(self.id)
-                {
+                // Any change since the claim attempt, such as a worker
+                // requeueing or claiming a task between the checks above,
+                // means the session may not be quiescent: look again.
+                if coordinator.work_generation() != generation {
                     continue;
                 }
                 return self.session_run_report(&coordinator);
