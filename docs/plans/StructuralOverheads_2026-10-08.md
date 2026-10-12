@@ -336,6 +336,30 @@ yet. The `do_chain` workload does not: its pure effects reduce in nets, and
 its reflection-step count stays constant. A workload that runs a long chain
 of reflection effects would.
 
+Measured 2026-10-12 (maintainer: "a million CPU steps per reflection step
+is rather absurd"). Workloads: a `refl.*` task running a straight chain of
+200 effects (`.r () =>> ... =>> .r ()`, the same with `.heap.set ['k] 1`
+or `.heap.get ['k]`), and loops of 400 iterations through a recursive
+`loop n`. Instructions per step, compile cost excluded:
+- `.r ()` about 540 K, `.heap.get` about 530 K, `.heap.set` about 780 K;
+  the loops add about 360 K per iteration of evaluating
+  `if n == 0 then ... else loop (n - 1)`, as pure `countdown` does.
+- Per `.r ()` step (callgrind): lazy route tasks run by the pump about
+  294 K, the reflection machine about 185 K, of which cloning the whole
+  machine work, its branch and continuation stack each step (R2) about
+  32 K. Within the lazy routes: claim nets about 57 K, `ClaimedTask`
+  release 48 K, checkpoint production and installation about 61 K,
+  following forwards 22 K.
+- Per step (counters): 5.3 fresh work admissions, 10.9 work releases,
+  26.8 coordinator `notify_all`s, 85 heap slots, 55 net work items. One
+  `a =>> b` (`seq a (\x -> assert_unit x b)`) step forces about five
+  lazies: the chain node's effect value, the decoded request, the `.r ()`
+  value, the continuation applied to its result and the next effect;
+  each admits its own route at about 100 K instructions, of which
+  evaluating it is a small part.
+- The recursive loop also collects: about 105 K per iteration in full
+  collections and 80 K in finalization.
+
 Reflection task polls hold no heap region (`perf-quantum-region`), since
 they call into their host between steps. Their pure steps, such as local
 state, could hold one, provided no client callback runs inside it
