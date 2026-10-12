@@ -152,12 +152,28 @@ enum LazyTaskWork {
     HostCallCheckpoint,
 }
 
-/// What a `Produce` poll finds when it starts.
+/// Whether `call` is `anno 'compile` of a function or net already
+/// evaluated, which compiles at once: its work is bounded, and it needs no
+/// machine.
+fn compiles_at_once(call: &crate::core::BuiltinCall) -> bool {
+    call.builtin == crate::core::Builtin::Anno
+        && matches!(
+            call.arguments.as_ref(),
+            [Value::Atom(annotation), Value::Function(_) | Value::Net(_)]
+                if super::annotation_machine::is_compile_annotation(annotation)
+        )
+}
+
+/// What a `Produce` poll finds when it starts, in the access region that
+/// also installs the checkpoint starting most sources.
 enum ProduceStart {
     Cached(crate::core::LazyResult),
+    /// A source whose start needs work outside an access region.
     Source(LazySource),
-    /// A checkpoint or forward is installed already.
+    /// A checkpoint or forward is installed, by this poll or already.
     Work(LazyTaskWork),
+    /// Another poller installed a checkpoint or cached a result first.
+    Rejected,
     /// No source, checkpoint, forward or result: the lazy's evaluation
     /// panicked.
     Released,
@@ -622,6 +638,160 @@ impl LazyTaskMachine {
             .lazy_root(&self.lazy)
             .install_checkpoint(checkpoint)
             .is_ok()
+    }
+
+    /// Builds the checkpoint that starts `source` and installs it, in the
+    /// access region that read the source: `Ok(Some(work))` once installed,
+    /// `Ok(None)` if another poller installed a checkpoint or cached a
+    /// result first, and `Err(source)` for a source whose start needs work
+    /// outside an access region.
+    fn install_source_in(
+        &self,
+        access: &crate::evaluation::EvaluationValueAccess<'_>,
+        source: LazySource,
+    ) -> Result<Option<LazyTaskWork>, LazySource> {
+        let install = |checkpoint: ManagedLazyCheckpointEdge| {
+            access
+                .lazy_root(&self.lazy)
+                .install_checkpoint(checkpoint)
+                .is_ok()
+        };
+        let (installed, work) = match source {
+            LazySource::HostCall(producer) => {
+                let checkpoint =
+                    ManagedLazyCheckpointEdge::allocate_host_call_in(access.values(), producer)
+                        .expect("managed host-call state must fit its reviewed slot");
+                (install(checkpoint), LazyTaskWork::HostCallInvoke)
+            }
+            LazySource::Application(application) => {
+                let work = super::whnf::RegionalWhnfWork::from_application_checkpoint_in(
+                    access,
+                    access
+                        .values()
+                        .duplicate_value(application.function_in(access.values())),
+                    application.arguments_in(access.values()),
+                    None,
+                );
+                (
+                    self.install_regional_whnf_in(access, work),
+                    LazyTaskWork::WhnfCheckpoint,
+                )
+            }
+            LazySource::ComputedFixpoint(fixpoint) => {
+                let marker = Value::Lazy(LazyValue::from_root(&self.lazy, access.values()));
+                match fixpoint.as_ref() {
+                    FixpointComputation::Function(function) => {
+                        let work = super::whnf::RegionalWhnfWork::from_application_checkpoint_in(
+                            access,
+                            access.values().duplicate_value(function),
+                            std::slice::from_ref(&marker),
+                            None,
+                        );
+                        (
+                            self.install_regional_whnf_in(access, work),
+                            LazyTaskWork::WhnfCheckpoint,
+                        )
+                    }
+                    FixpointComputation::ObjectInstance(spec) => {
+                        let spec = access.values().duplicate_value(spec);
+                        let state =
+                            RegionalObjectFixpoint::new_in(access, self.lazy.id(), spec, marker);
+                        let checkpoint =
+                            ManagedLazyCheckpointEdge::allocate_object_fixpoint_in(access, state)
+                                .expect("managed object-fixpoint state must fit its reviewed slot");
+                        (install(checkpoint), LazyTaskWork::ObjectFixpointCheckpoint)
+                    }
+                }
+            }
+            LazySource::FunctionCall { stage, arguments } => {
+                // A compiled stage gives the call's result directly, to
+                // evaluate as this lazy's value.
+                let compiled = (stage.runtime())
+                    .access(access.values())
+                    .compiled(arguments.len());
+                if let Some(compiled) = compiled {
+                    let value = super::operator::apply_compiled(access, compiled, &arguments);
+                    let work = super::whnf::RegionalWhnfWork::from_focus(access, value);
+                    (
+                        self.install_regional_whnf_in(access, work),
+                        LazyTaskWork::WhnfCheckpoint,
+                    )
+                } else {
+                    let machine = NetWhnfMachine::from_function_call(access, &stage, &arguments);
+                    let checkpoint =
+                        ManagedLazyCheckpointEdge::allocate_net_whnf_in(access, machine)
+                            .expect("managed function-call net state must fit its reviewed slot");
+                    (install(checkpoint), LazyTaskWork::NetWhnfCheckpoint)
+                }
+            }
+            LazySource::NetComputation(net) => {
+                let runtime = net.runtime().duplicate_in(access.values());
+                let exposed = access.net(&runtime).with(|runtime| runtime.exposed());
+                let machine = NetWhnfMachine::new_in(
+                    access,
+                    runtime,
+                    exposed,
+                    Arc::from("lazy net computation"),
+                )
+                .with_failure_context("net_computation");
+                let checkpoint = ManagedLazyCheckpointEdge::allocate_net_whnf_in(access, machine)
+                    .expect("managed lazy-net state must fit its reviewed slot");
+                (install(checkpoint), LazyTaskWork::NetWhnfCheckpoint)
+            }
+            LazySource::ListEffectComputation(recipe) => {
+                let state = RegionalListEffect::new_in(access, self.lazy.id(), &recipe);
+                let checkpoint = ManagedLazyCheckpointEdge::allocate_list_effect_in(access, state)
+                    .expect("managed list-effect state must fit its reviewed slot");
+                (install(checkpoint), LazyTaskWork::ListEffectCheckpoint)
+            }
+            LazySource::Access { path, arguments }
+                if path.iter().all(|part| matches!(part, CoreDataKey::Key(_))) =>
+            {
+                let keys = path
+                    .iter()
+                    .map(|part| match part {
+                        CoreDataKey::Key(key) => key.clone(),
+                        CoreDataKey::Index | CoreDataKey::PathIndex => unreachable!(),
+                    })
+                    .collect::<Vec<_>>();
+                let base = access.values().duplicate_value(
+                    arguments
+                        .first()
+                        .expect("value access must retain its base value"),
+                );
+                let work = super::whnf::RegionalWhnfWork::from_static_access_checkpoint_in(
+                    access,
+                    base,
+                    Arc::from(keys),
+                    Some(self.lazy.id()),
+                );
+                (
+                    self.install_regional_whnf_in(access, work),
+                    LazyTaskWork::WhnfCheckpoint,
+                )
+            }
+            LazySource::Access { path, arguments } => {
+                let machine = AccessMachine::new_in(access, self.lazy.id(), path, &arguments);
+                let checkpoint = ManagedLazyCheckpointEdge::allocate_access_in(access, machine)
+                    .expect("managed computed-access state must fit its reviewed slot");
+                (install(checkpoint), LazyTaskWork::AccessCheckpoint)
+            }
+            LazySource::Builtin(call)
+                if !compiles_at_once(&call) && RegionalBuiltinMachine::supports(call.builtin) =>
+            {
+                let machine = RegionalBuiltinMachine::new_in(
+                    access,
+                    self.lazy.id(),
+                    call.builtin,
+                    &call.arguments,
+                );
+                let checkpoint = ManagedLazyCheckpointEdge::allocate_builtin_in(access, machine)
+                    .expect("managed builtin state must fit its reviewed slot");
+                (install(checkpoint), LazyTaskWork::BuiltinCheckpoint)
+            }
+            source => return Err(source),
+        };
+        Ok(installed.then_some(work))
     }
 
     fn work_for_checkpoint_kind(kind: ManagedLazyCheckpointKindTag) -> LazyTaskWork {
@@ -1526,7 +1696,11 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                         return ProduceStart::Cached(result);
                     }
                     match lazy.source_snapshot() {
-                        Some(source) => ProduceStart::Source(source),
+                        Some(source) => match self.install_source_in(&access, source) {
+                            Ok(Some(work)) => ProduceStart::Work(work),
+                            Ok(None) => ProduceStart::Rejected,
+                            Err(source) => ProduceStart::Source(source),
+                        },
                         None => match lazy.checkpoint_snapshot() {
                             Some(checkpoint) => ProduceStart::Work(Self::work_for_checkpoint_kind(
                                 checkpoint.kind(),
@@ -1550,30 +1724,17 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                         self.work = work;
                         None
                     }
+                    ProduceStart::Rejected => {
+                        let Some(work) = self.checkpoint_work(context) else {
+                            return self.cached_poll(context);
+                        };
+                        self.work = work;
+                        None
+                    }
                     ProduceStart::Source(source) => Some(source),
                 };
                 if let Some(source) = source {
                     self.work = match source {
-                        LazySource::HostCall(producer) => {
-                            let installed = context.with_value_access(|access| {
-                                let checkpoint = ManagedLazyCheckpointEdge::allocate_host_call_in(
-                                    access.values(),
-                                    producer,
-                                )
-                                .expect("managed host-call state must fit its reviewed slot");
-                                access
-                                    .lazy_root(&self.lazy)
-                                    .install_checkpoint(checkpoint)
-                                    .is_ok()
-                            });
-                            if installed {
-                                LazyTaskWork::HostCallInvoke
-                            } else if let Some(work) = self.checkpoint_work(context) {
-                                work
-                            } else {
-                                return self.cached_poll(context);
-                            }
-                        }
                         LazySource::ReflectionTask(computation) => {
                             let (effect, target, completion) = context
                                 .with_value_access(|access| {
@@ -1644,284 +1805,12 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                             }
                             LazyTaskWork::WhnfCheckpoint
                         }
-                        LazySource::Application(application) => {
-                            let installed = context.with_value_access(|access| {
-                                let work = super::whnf::RegionalWhnfWork::from_application_checkpoint_in(
-                                    &access,
-                                    access
-                                        .values()
-                                        .duplicate_value(application.function_in(access.values())),
-                                    application.arguments_in(access.values()),
-                                    None,
-                                );
-                                self.install_regional_whnf_in(&access, work)
-                            });
-                            if installed {
-                                LazyTaskWork::WhnfCheckpoint
-                            } else if let Some(work) = self.checkpoint_work(context) {
-                                work
-                            } else {
-                                return self.cached_poll(context);
-                            }
-                        }
-                        LazySource::ComputedFixpoint(fixpoint) => {
-                            match fixpoint.as_ref() {
-                                FixpointComputation::Function(function) => {
-                                    let installed = context.with_value_access(|access| {
-                                        let marker = Value::Lazy(LazyValue::from_root(
-                                            &self.lazy,
-                                            access.values(),
-                                        ));
-                                        let work = super::whnf::RegionalWhnfWork::from_application_checkpoint_in(
-                                            &access,
-                                            access.values().duplicate_value(function),
-                                            std::slice::from_ref(&marker),
-                                            None,
-                                        );
-                                        self.install_regional_whnf_in(&access, work)
-                                    });
-                                    if installed {
-                                        LazyTaskWork::WhnfCheckpoint
-                                    } else if let Some(work) = self.checkpoint_work(context) {
-                                        work
-                                    } else {
-                                        return self.cached_poll(context);
-                                    }
-                                }
-                                FixpointComputation::ObjectInstance(spec) => {
-                                    let installed = context.with_value_access(|access| {
-                                        let spec = access.values().duplicate_value(spec);
-                                        let marker = Value::Lazy(LazyValue::from_root(
-                                            &self.lazy,
-                                            access.values(),
-                                        ));
-                                        let state = RegionalObjectFixpoint::new_in(
-                                            &access,
-                                            self.lazy.id(),
-                                            spec,
-                                            marker,
-                                        );
-                                        let checkpoint = ManagedLazyCheckpointEdge::allocate_object_fixpoint_in(
-                                            &access,
-                                            state,
-                                        )
-                                        .expect(
-                                            "managed object-fixpoint state must fit its reviewed slot",
-                                        );
-                                        access
-                                            .lazy_root(&self.lazy)
-                                            .install_checkpoint(checkpoint)
-                                            .is_ok()
-                                    });
-                                    if installed {
-                                        LazyTaskWork::ObjectFixpointCheckpoint
-                                    } else if let Some(work) = self.checkpoint_work(context) {
-                                        work
-                                    } else {
-                                        return self.cached_poll(context);
-                                    }
-                                }
-                            }
-                        }
-                        LazySource::FunctionCall { stage, arguments } => {
-                            let installed = context.with_value_access(|access| {
-                                // A compiled stage gives the call's result
-                                // directly, to evaluate as this lazy's value.
-                                let compiled = (stage.runtime())
-                                    .access(access.values())
-                                    .compiled(arguments.len());
-                                if let Some(compiled) = compiled {
-                                    let value = super::operator::apply_compiled(&access, compiled, &arguments);
-                                    let work =
-                                        super::whnf::RegionalWhnfWork::from_focus(&access, value);
-                                    return self
-                                        .install_regional_whnf_in(&access, work)
-                                        .then_some(LazyTaskWork::WhnfCheckpoint);
-                                }
-                                let machine = NetWhnfMachine::from_function_call(
-                                    &access, &stage, &arguments,
-                                );
-                                let checkpoint =
-                                    ManagedLazyCheckpointEdge::allocate_net_whnf_in(
-                                        &access, machine,
-                                    )
-                                    .expect(
-                                        "managed function-call net state must fit its reviewed slot",
-                                    );
-                                access
-                                    .lazy_root(&self.lazy)
-                                    .install_checkpoint(checkpoint)
-                                    .is_ok()
-                                    .then_some(LazyTaskWork::NetWhnfCheckpoint)
-                            });
-                            if let Some(work) = installed {
-                                work
-                            } else if let Some(work) = self.checkpoint_work(context) {
-                                work
-                            } else {
-                                return self.cached_poll(context);
-                            }
-                        }
-                        LazySource::NetComputation(net) => {
-                            let installed = context.with_value_access(|access| {
-                                let runtime = net.runtime().duplicate_in(access.values());
-                                let exposed = access.net(&runtime).with(|runtime| runtime.exposed());
-                                let machine = NetWhnfMachine::new_in(
-                                    &access,
-                                    runtime,
-                                    exposed,
-                                    Arc::from("lazy net computation"),
-                                )
-                                .with_failure_context("net_computation");
-                                let checkpoint =
-                                    ManagedLazyCheckpointEdge::allocate_net_whnf_in(
-                                        &access, machine,
-                                    )
-                                    .expect(
-                                        "managed lazy-net state must fit its reviewed slot",
-                                    );
-                                access
-                                    .lazy_root(&self.lazy)
-                                    .install_checkpoint(checkpoint)
-                                    .is_ok()
-                            });
-                            if installed {
-                                LazyTaskWork::NetWhnfCheckpoint
-                            } else if let Some(work) = self.checkpoint_work(context) {
-                                work
-                            } else {
-                                return self.cached_poll(context);
-                            }
-                        }
-                        LazySource::ListEffectComputation(recipe) => {
-                            let installed = context.with_value_access(|access| {
-                                let state = RegionalListEffect::new_in(
-                                    &access,
-                                    self.lazy.id(),
-                                    &recipe,
-                                );
-                                let checkpoint =
-                                    ManagedLazyCheckpointEdge::allocate_list_effect_in(
-                                        &access, state,
-                                    )
-                                    .expect(
-                                        "managed list-effect state must fit its reviewed slot",
-                                    );
-                                access
-                                    .lazy_root(&self.lazy)
-                                    .install_checkpoint(checkpoint)
-                                    .is_ok()
-                            });
-                            if installed {
-                                LazyTaskWork::ListEffectCheckpoint
-                            } else if let Some(work) = self.checkpoint_work(context) {
-                                work
-                            } else {
-                                return self.cached_poll(context);
-                            }
-                        }
-                        LazySource::Access { path, arguments }
-                            if path.iter().all(|part| matches!(part, CoreDataKey::Key(_))) =>
-                        {
-                            let keys = path
-                                .iter()
-                                .map(|part| match part {
-                                    CoreDataKey::Key(key) => key.clone(),
-                                    CoreDataKey::Index | CoreDataKey::PathIndex => unreachable!(),
-                                })
-                                .collect::<Vec<_>>();
-                            let installed = context.with_value_access(|access| {
-                                let base = access.values().duplicate_value(
-                                    arguments
-                                        .first()
-                                        .expect("value access must retain its base value"),
-                                );
-                                let work = super::whnf::RegionalWhnfWork::from_static_access_checkpoint_in(
-                                    &access,
-                                    base,
-                                    Arc::from(keys),
-                                    Some(self.lazy.id()),
-                                );
-                                self.install_regional_whnf_in(&access, work)
-                            });
-                            if installed {
-                                LazyTaskWork::WhnfCheckpoint
-                            } else if let Some(work) = self.checkpoint_work(context) {
-                                work
-                            } else {
-                                return self.cached_poll(context);
-                            }
-                        }
-                        LazySource::Access { path, arguments } => {
-                            let installed = context.with_value_access(|access| {
-                                let machine = AccessMachine::new_in(
-                                    &access,
-                                    self.lazy.id(),
-                                    path,
-                                    &arguments,
-                                );
-                                let checkpoint = ManagedLazyCheckpointEdge::allocate_access_in(
-                                    &access, machine,
-                                )
-                                .expect(
-                                    "managed computed-access state must fit its reviewed slot",
-                                );
-                                access
-                                    .lazy_root(&self.lazy)
-                                    .install_checkpoint(checkpoint)
-                                    .is_ok()
-                            });
-                            if installed {
-                                LazyTaskWork::AccessCheckpoint
-                            } else if let Some(work) = self.checkpoint_work(context) {
-                                work
-                            } else {
-                                return self.cached_poll(context);
-                            }
-                        }
-                        // `anno 'compile` of a function or net already
-                        // evaluated compiles it at once: its work is bounded,
-                        // and it needs no machine.
-                        LazySource::Builtin(call)
-                            if call.builtin == crate::core::Builtin::Anno
-                                && matches!(
-                                    call.arguments.as_ref(),
-                                    [Value::Atom(annotation), Value::Function(_) | Value::Net(_)]
-                                        if super::annotation_machine::is_compile_annotation(annotation)
-                                ) =>
-                        {
+                        LazySource::Builtin(call) if compiles_at_once(&call) => {
                             if !step_budget.try_consume() {
                                 return EvaluationMachinePoll::Yielded;
                             }
                             if self.compile_annotated_target(context, &call, step_budget) {
                                 LazyTaskWork::WhnfCheckpoint
-                            } else if let Some(work) = self.checkpoint_work(context) {
-                                work
-                            } else {
-                                return self.cached_poll(context);
-                            }
-                        }
-                        LazySource::Builtin(call)
-                            if RegionalBuiltinMachine::supports(call.builtin) =>
-                        {
-                            let installed = context.with_value_access(|access| {
-                                let machine = RegionalBuiltinMachine::new_in(
-                                    &access,
-                                    self.lazy.id(),
-                                    call.builtin,
-                                    &call.arguments,
-                                );
-                                let checkpoint = ManagedLazyCheckpointEdge::allocate_builtin_in(
-                                    &access, machine,
-                                )
-                                .expect("managed builtin state must fit its reviewed slot");
-                                access
-                                    .lazy_root(&self.lazy)
-                                    .install_checkpoint(checkpoint)
-                                    .is_ok()
-                            });
-                            if installed {
-                                LazyTaskWork::BuiltinCheckpoint
                             } else if let Some(work) = self.checkpoint_work(context) {
                                 work
                             } else {
@@ -1988,6 +1877,15 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                             }
                         }
                         LazySource::Error => return self.cached_poll(context),
+                        LazySource::HostCall(_)
+                        | LazySource::Application(_)
+                        | LazySource::ComputedFixpoint(_)
+                        | LazySource::FunctionCall { .. }
+                        | LazySource::NetComputation(_)
+                        | LazySource::ListEffectComputation(_)
+                        | LazySource::Access { .. } => {
+                            unreachable!("the access region that read this source started it")
+                        }
                     };
                 }
                 if matches!(self.work, LazyTaskWork::HostCallInvoke) {

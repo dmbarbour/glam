@@ -429,9 +429,13 @@ Structural, already planned: the mutator entries and the transient roots
 (list fronts, inline offers, checkpoint polls) are what
 [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md) addresses
 (`gc-hold-class-cache`, `gc-hold-transient-roots`), and roots kept in
-machine state across polls are `perf-root-frames`. Fewer access regions
-per force, such as `Produce` installing its checkpoint in the region that
-reads the source, would cut entries without that plan.
+machine state across polls are `perf-root-frames`. `Produce` now builds
+and installs the checkpoint that starts a source in the access region that
+reads it, one entry fewer per force, except for sources whose start needs
+work outside a region (reflection tasks, `'compile`, immediate builtins):
+−2.1% / −1.3% / −0.8% (2026-10-12), `append_walk_800` −1.7%. Under
+Explicit Heap Holds an access is a borrow of the held mutator, so this
+needs no unwinding.
 
 **Unobserved arity** (`perf-unobserved-arity`). A lightweight structural
 analysis of a code net could find how many arguments it takes before any
