@@ -41,7 +41,7 @@ fn return_first_capture(
 fn assigned_promise_chain_value(context: &EvalContext, depth: usize) -> Value {
     let mut current = Value::Number(Number::from_usize(depth));
     for _ in 0..depth {
-        let promise = PromisedValue::new(context.values(), "assigned promise alias");
+        let promise = PromisedValue::new(context.values());
         crate::core::set_test_promise(context.values(), &promise, current)
             .expect_without_debug("a fresh promise alias should accept its assignment");
         current = Value::Promised(promise);
@@ -61,7 +61,6 @@ fn checkpointed_promise_chain_root(context: &EvalContext, depth: usize) -> Runti
     context.values().construct_runtime_value_root(|access| {
         Value::Lazy(LazyValue::semantic_computation_in(
             access,
-            "checkpointed promise chain",
             Arc::from([access.duplicate_value(&current)]),
             return_first_capture,
         ))

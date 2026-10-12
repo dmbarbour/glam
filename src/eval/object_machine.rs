@@ -864,16 +864,15 @@ mod tests {
     #[test]
     fn object_fixpoint_resumes_through_spec_name_and_dependency_chunk() {
         let context = context();
-        let spec = PromisedValue::new(context.values(), "object spec");
+        let spec = PromisedValue::new(context.values());
         // Nothing managed references these until the spec is assigned after
         // the first demand, whose driver boundaries may collect.
-        let name = PromisedValue::new(context.values(), "object name");
+        let name = PromisedValue::new(context.values());
         let _name_root = name.root(context.values());
-        let deps = PromisedValue::new(context.values(), "object dependency chunk");
+        let deps = PromisedValue::new(context.values());
         let _deps_root = deps.root(context.values());
         let object = Value::Lazy(LazyValue::computed_fixpoint(
             context.values(),
-            "object self",
             FixpointComputation::ObjectInstance(Value::Promised(
                 spec.duplicate_for_test(context.values()),
             )),
@@ -919,7 +918,7 @@ mod tests {
     #[test]
     fn object_fixpoint_resumes_through_a_nested_dependency_spec() {
         let context = context();
-        let dependency = PromisedValue::new(context.values(), "nested object dependency");
+        let dependency = PromisedValue::new(context.values());
         let root_spec = Value::Dict(
             Dict::new_sync()
                 .insert((*keys::NAME).clone(), Value::binary_from_text("root"))
@@ -932,7 +931,6 @@ mod tests {
         );
         let object = Value::Lazy(LazyValue::computed_fixpoint(
             context.values(),
-            "object self",
             FixpointComputation::ObjectInstance(root_spec),
         ));
 
@@ -961,10 +959,10 @@ mod tests {
     #[test]
     fn object_fixpoint_resumes_each_mixin_application_once() {
         let context = context();
-        let first_result = PromisedValue::new(context.values(), "first mixin application");
+        let first_result = PromisedValue::new(context.values());
         // Nothing managed references this until the second stage is built
         // after the first demand, whose driver boundaries may collect.
-        let second_result = PromisedValue::new(context.values(), "second mixin application");
+        let second_result = PromisedValue::new(context.values());
         let _second_result_root = second_result.root(context.values());
         let defs = closed_function_value_in(
             context.values(),
@@ -981,7 +979,6 @@ mod tests {
         );
         let object = Value::Lazy(LazyValue::computed_fixpoint(
             context.values(),
-            "object self",
             FixpointComputation::ObjectInstance(spec),
         ));
 
@@ -1044,7 +1041,6 @@ mod tests {
         );
         let object = Value::Lazy(LazyValue::computed_fixpoint(
             context.values(),
-            "object self",
             FixpointComputation::ObjectInstance(spec),
         ));
 

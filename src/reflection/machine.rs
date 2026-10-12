@@ -1541,10 +1541,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             );
                         }
                     };
-                    let handle = match PromisedValue::fixpoint(
-                        &self.eval_context,
-                        "reflection effect fixpoint",
-                    ) {
+                    let handle = match PromisedValue::fixpoint(&self.eval_context) {
                         Ok(handle) => handle,
                         Err(error) => {
                             return ControlStep::Failed(

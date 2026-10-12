@@ -616,7 +616,6 @@ fn finish_object_extension_in(
     );
     Ok(Value::Lazy(LazyValue::computed_fixpoint_in(
         access.values(),
-        "object self",
         FixpointComputation::ObjectInstance(spec),
     )))
 }

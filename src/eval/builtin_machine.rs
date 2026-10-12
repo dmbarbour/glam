@@ -1034,11 +1034,11 @@ mod tests {
         let context = context();
         let first_demands = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&first_demands);
-        let first = Value::semantic_thunk(context.values(), "first numeric operand", move |_| {
+        let first = Value::semantic_thunk(context.values(), move |_| {
             observed.fetch_add(1, Ordering::Relaxed);
             Ok(Value::Number(1.into()))
         });
-        let second = PromisedValue::new(context.values(), "second numeric operand");
+        let second = PromisedValue::new(context.values());
         let sum = Value::builtin_call(
             context.values(),
             Builtin::Add,
@@ -1116,12 +1116,11 @@ mod tests {
         let context = context();
         let value_demands = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&value_demands);
-        let value = Value::semantic_thunk(context.values(), "asserted value", move |_| {
+        let value = Value::semantic_thunk(context.values(), move |_| {
             observed.fetch_add(1, Ordering::Relaxed);
             Ok(Value::Number(7.into()))
         });
-        let diagnostic_context =
-            PromisedValue::new(context.values(), "unit assertion diagnostic context");
+        let diagnostic_context = PromisedValue::new(context.values());
         let assertion = Value::builtin_call(
             context.values(),
             Builtin::AssertUnit,
@@ -1222,7 +1221,7 @@ mod tests {
         let context = context();
         let result_demands = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&result_demands);
-        let front = PromisedValue::new(context.values(), "conditional deferred front");
+        let front = PromisedValue::new(context.values());
         // The thunk captures `deferred_front` outside the managed graph, so a
         // driver-boundary collection before the thunk runs would free it.
         // Root it until the selection checkpoint owns it; the collection
@@ -1230,7 +1229,7 @@ mod tests {
         let front_root = front.root(context.values());
         let deferred_front = front.duplicate_for_test(context.values());
         let deferred_values = context.values().clone();
-        let results = Value::semantic_thunk(context.values(), "conditional results", move |_| {
+        let results = Value::semantic_thunk(context.values(), move |_| {
             observed.fetch_add(1, Ordering::Relaxed);
             Ok(Value::List(crate::core::List::from_thunk(
                 ListThunk::Promised(deferred_front.duplicate_for_test(&deferred_values)),
@@ -1282,12 +1281,11 @@ mod tests {
         let context = context();
         let first_demands = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&first_demands);
-        let first =
-            Value::semantic_thunk(context.values(), "first dictionary operand", move |_| {
-                observed.fetch_add(1, Ordering::Relaxed);
-                Ok(Value::Dict(crate::core::Dict::new_sync()))
-            });
-        let second = PromisedValue::new(context.values(), "second dictionary operand");
+        let first = Value::semantic_thunk(context.values(), move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+            Ok(Value::Dict(crate::core::Dict::new_sync()))
+        });
+        let second = PromisedValue::new(context.values());
         let union = Value::builtin_call(
             context.values(),
             Builtin::DictUnion,
@@ -1335,7 +1333,7 @@ mod tests {
     #[test]
     fn provenance_machine_suspends_then_preserves_its_demand_context() {
         let context = context();
-        let origin = PromisedValue::new(context.values(), "origin operand");
+        let origin = PromisedValue::new(context.values());
         let inspection = Value::builtin_call(
             context.values(),
             Builtin::InspectOrigin,
@@ -1357,7 +1355,7 @@ mod tests {
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &inspection)
             .expect_err_without_debug("a later route must resume the exact origin dependency");
 
-        let failed = Value::semantic_thunk(context.values(), "failed origin", |_| {
+        let failed = Value::semantic_thunk(context.values(), |_| {
             Err(EvaluationHalt::new("origin production failed"))
         });
         crate::core::set_test_promise(context.values(), &origin, failed)
@@ -1385,12 +1383,11 @@ mod tests {
         let context = context();
         let first_demands = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&first_demands);
-        let first =
-            Value::semantic_thunk(context.values(), "first comparison operand", move |_| {
-                observed.fetch_add(1, Ordering::Relaxed);
-                Ok(Value::Number(7.into()))
-            });
-        let second = PromisedValue::new(context.values(), "second comparison operand");
+        let first = Value::semantic_thunk(context.values(), move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+            Ok(Value::Number(7.into()))
+        });
+        let second = PromisedValue::new(context.values());
         let comparison = Value::builtin_call(
             context.values(),
             Builtin::Equal,
@@ -1431,11 +1428,11 @@ mod tests {
         let context = context();
         let prefix_demands = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&prefix_demands);
-        let prefix = Value::semantic_thunk(context.values(), "comparison list prefix", move |_| {
+        let prefix = Value::semantic_thunk(context.values(), move |_| {
             observed.fetch_add(1, Ordering::Relaxed);
             Ok(Value::Number(1.into()))
         });
-        let tail = PromisedValue::new(context.values(), "comparison list tail");
+        let tail = PromisedValue::new(context.values());
         let left = Value::List(crate::core::List::concat(
             crate::core::List::from_values(vec![prefix]),
             crate::core::List::from_thunk(ListThunk::Promised(
@@ -1485,17 +1482,13 @@ mod tests {
         let context = context();
         let prefix_demands = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&prefix_demands);
-        let prefix = LazyValue::semantic_thunk(
-            context.values(),
-            "list observation front prefix",
-            move |_| {
-                observed.fetch_add(1, Ordering::Relaxed);
-                Ok(Value::List(crate::core::List::from_values(vec![
-                    Value::Number(41.into()),
-                ])))
-            },
-        );
-        let tail = PromisedValue::new(context.values(), "list observation front tail");
+        let prefix = LazyValue::semantic_thunk(context.values(), move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+            Ok(Value::List(crate::core::List::from_values(vec![
+                Value::Number(41.into()),
+            ])))
+        });
+        let tail = PromisedValue::new(context.values());
         let list = Value::List(crate::core::List::concat(
             crate::core::List::from_thunk(prefix.into()),
             crate::core::List::from_thunk(ListThunk::Promised(
@@ -1547,19 +1540,15 @@ mod tests {
     #[test]
     fn list_observation_retains_a_completed_back_chunk_across_collection() {
         let context = context();
-        let prefix = PromisedValue::new(context.values(), "list observation back prefix");
+        let prefix = PromisedValue::new(context.values());
         let suffix_demands = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&suffix_demands);
-        let suffix = LazyValue::semantic_thunk(
-            context.values(),
-            "list observation back suffix",
-            move |_| {
-                observed.fetch_add(1, Ordering::Relaxed);
-                Ok(Value::List(crate::core::List::from_values(vec![
-                    Value::Number(42.into()),
-                ])))
-            },
-        );
+        let suffix = LazyValue::semantic_thunk(context.values(), move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+            Ok(Value::List(crate::core::List::from_values(vec![
+                Value::Number(42.into()),
+            ])))
+        });
         let list = Value::List(crate::core::List::concat(
             crate::core::List::from_thunk(ListThunk::Promised(
                 prefix.duplicate_for_test(context.values()),
@@ -1608,17 +1597,13 @@ mod tests {
     #[test]
     fn pattern_unsnoc_retains_a_completed_suffix_across_collection() {
         let context = context();
-        let prefix = PromisedValue::new(context.values(), "pattern unsnoc collected prefix");
+        let prefix = PromisedValue::new(context.values());
         let suffix_demands = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&suffix_demands);
-        let suffix = LazyValue::semantic_thunk(
-            context.values(),
-            "pattern unsnoc collected suffix",
-            move |_| {
-                observed.fetch_add(1, Ordering::Relaxed);
-                Ok(Value::List(crate::core::List::empty()))
-            },
-        );
+        let suffix = LazyValue::semantic_thunk(context.values(), move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+            Ok(Value::List(crate::core::List::empty()))
+        });
         let list = Value::List(crate::core::List::concat(
             crate::core::List::from_thunk(ListThunk::Promised(
                 prefix.duplicate_for_test(context.values()),
@@ -1666,12 +1651,11 @@ mod tests {
         let context = context();
         let prefix_demands = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&prefix_demands);
-        let prefix =
-            LazyValue::semantic_thunk(context.values(), "text-lines collected prefix", move |_| {
-                observed.fetch_add(1, Ordering::Relaxed);
-                Ok(Value::Number(Number::from_u8(b'a')))
-            });
-        let item = PromisedValue::new(context.values(), "text-lines collected item");
+        let prefix = LazyValue::semantic_thunk(context.values(), move |_| {
+            observed.fetch_add(1, Ordering::Relaxed);
+            Ok(Value::Number(Number::from_u8(b'a')))
+        });
+        let item = PromisedValue::new(context.values());
         let source = Value::List(crate::core::List::from_values(vec![
             Value::Lazy(prefix),
             Value::Promised(item.duplicate_for_test(context.values())),

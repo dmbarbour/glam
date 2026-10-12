@@ -213,7 +213,7 @@ mod tests {
             .expect("the trace fixture should begin collectible");
         let forced = Arc::new(AtomicBool::new(false));
         let forced_by_thunk = forced.clone();
-        let deferred = Value::semantic_thunk(&values, "managed net trace sentinel", move |_| {
+        let deferred = Value::semantic_thunk(&values, move |_| {
             forced_by_thunk.store(true, Ordering::Release);
             panic!("net payload tracing must not force semantic data")
         });

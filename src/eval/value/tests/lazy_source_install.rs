@@ -16,22 +16,18 @@ fn lazy_source_result_is_installed_once_before_following_a_promise() {
         crate::runtime::allocate_evaluation_runtime_id(),
         crate::runtime::RuntimeIds::new(),
     ));
-    let promise = PromisedValue::new(context.values(), "source-result promise");
+    let promise = PromisedValue::new(context.values());
     let _promise_root = promise.root(context.values());
     let evaluations = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&evaluations);
     let returned = promise.duplicate_for_test(context.values());
     let returned_values = context.values().clone();
-    let lazy = LazyValue::semantic_thunk(
-        context.values(),
-        "source result retained by WHNF",
-        move |_| {
-            observed.fetch_add(1, Ordering::SeqCst);
-            Ok(Value::Promised(
-                returned.duplicate_for_test(&returned_values),
-            ))
-        },
-    );
+    let lazy = LazyValue::semantic_thunk(context.values(), move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::Promised(
+            returned.duplicate_for_test(&returned_values),
+        ))
+    });
     let (lazy, mut machine) = lazy_machine(&context, lazy);
     let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
     context
@@ -86,14 +82,10 @@ fn lazy_source_failure_is_cached_without_replaying_the_source() {
     let context = EvalContext::standalone();
     let evaluations = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&evaluations);
-    let lazy = LazyValue::semantic_thunk(
-        context.values(),
-        "source failure retained by lazy",
-        move |_| {
-            observed.fetch_add(1, Ordering::SeqCst);
-            Err(EvaluationHalt::new("source failed permanently"))
-        },
-    );
+    let lazy = LazyValue::semantic_thunk(context.values(), move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Err(EvaluationHalt::new("source failed permanently"))
+    });
     let (_root, mut machine) = lazy_machine(&context, lazy);
     let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
 

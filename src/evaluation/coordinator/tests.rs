@@ -242,9 +242,9 @@ fn promise_dependency_projects_only_a_task_owned_producer_wait() {
         super::super::test_execution_resources(0).expect("test execution resources should build");
     let session = TestDemand::new(&coordinator);
     let context = session.context().for_effect_task();
-    let resolver_owned = PromisedValue::new(context.values(), "resolver-owned promise");
-    let task_owned = PromisedValue::fixpoint(&context, "task-owned promise")
-        .expect("the local task should own its promise");
+    let resolver_owned = PromisedValue::new(context.values());
+    let task_owned =
+        PromisedValue::fixpoint(&context).expect("the local task should own its promise");
 
     assert!(
         WorkDependency::Promise(resolver_owned.root(context.values()))
@@ -671,13 +671,12 @@ fn settle_test_deferred(coordinator: &Arc<EvaluationWorkCoordinator>, work: Eval
 fn reserve_test_deferred(
     coordinator: &EvaluationWorkCoordinator,
     session: &TestDemand,
-    name: &'static str,
 ) -> (EvaluationTaskId, EvaluationWaitToken, EvaluationWorkId) {
     let task = super::super::allocate_task_id(&session.demand.values)
         .expect("deferred task identity should allocate");
     let wait = super::super::allocate_wait_token(&session.demand, task)
         .expect("deferred wait identity should allocate");
-    let lazy = LazyValue::semantic_thunk(&session.demand.values, name, |_| {
+    let lazy = LazyValue::semantic_thunk(&session.demand.values, |_| {
         panic!("coordinator policy test never polls its synthetic lazy")
     });
     let DeferredWorkReservation::New = coordinator
@@ -764,7 +763,7 @@ fn foreground_exact_selection_runs_a_queued_ancestor_before_its_prior_block() {
         super::super::test_execution_resources(0).expect("test resources should build");
     let session = TestDemand::new(&coordinator);
     let observed = coordinator.observations.current();
-    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session, "stale descendant");
+    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session);
     let (parent_wait, parent) =
         block_test_reflection_on(&coordinator, &session, child_wait, Some(observed));
 
@@ -801,7 +800,7 @@ fn foreground_search_follows_a_blocked_chain_to_queued_and_running_tails() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test resources should build");
     let session = TestDemand::new(&coordinator);
-    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session, "exact tail");
+    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session);
     let (parent_wait, _) = block_test_reflection_on(&coordinator, &session, child_wait, None);
 
     let ExactTargetSelection::Claimed(claimed) = coordinator.claim_exact_target(&parent_wait)
@@ -832,8 +831,8 @@ fn foreground_search_detects_an_exact_dependency_cycle() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test resources should build");
     let session = TestDemand::new(&coordinator);
-    let (_, first_wait, first) = reserve_test_deferred(&coordinator, &session, "cycle first");
-    let (_, second_wait, second) = reserve_test_deferred(&coordinator, &session, "cycle second");
+    let (_, first_wait, first) = reserve_test_deferred(&coordinator, &session);
+    let (_, second_wait, second) = reserve_test_deferred(&coordinator, &session);
     {
         let mut state = coordinator
             .state
@@ -874,8 +873,7 @@ fn foreground_search_may_cross_demand_sessions_within_one_runtime() {
         super::super::test_execution_resources(0).expect("test resources should build");
     let parent_session = TestDemand::new(&coordinator);
     let child_session = TestDemand::new(&coordinator);
-    let (_, child_wait, child) =
-        reserve_test_deferred(&coordinator, &child_session, "cross-session tail");
+    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &child_session);
     let (parent_wait, parent) =
         block_test_reflection_on(&coordinator, &parent_session, child_wait, None);
 
@@ -903,7 +901,7 @@ fn foreground_route_descends_from_a_published_block_without_rediscovery() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test resources should build");
     let session = TestDemand::new(&coordinator);
-    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session, "route child");
+    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session);
     let (_, parent) = reserve_ready_test_reflection(&coordinator, &session);
     let parent_wait = wait_for_test_work(&coordinator, parent);
     let mut route = ExactDemandRoute::default();
@@ -980,8 +978,7 @@ fn exact_claimed_work_families_publish_release_observations() {
         )
     );
 
-    let (_, deferred_wait, _) =
-        reserve_test_deferred(&coordinator, &session, "route release deferred");
+    let (_, deferred_wait, _) = reserve_test_deferred(&coordinator, &session);
     let mut deferred_route = ExactDemandRoute::default();
     let ExactTargetSelection::Claimed(ClaimedTaskWork::Deferred(deferred)) =
         coordinator.claim_exact_target_on_route(&deferred_wait, &mut deferred_route)
@@ -1004,7 +1001,7 @@ fn exact_claimed_work_families_publish_release_observations() {
         .expect("lazy route task identity should allocate");
     let lazy_wait = super::super::allocate_wait_token(&session.demand, lazy_task)
         .expect("lazy route wait identity should allocate");
-    let lazy = LazyValue::semantic_thunk(&session.demand.values, "route release lazy", |_| {
+    let lazy = LazyValue::semantic_thunk(&session.demand.values, |_| {
         panic!("coordinator route test never evaluates its synthetic lazy")
     });
     let lazy_wait = coordinator
@@ -1044,7 +1041,7 @@ fn a_route_admitted_during_an_inline_claim_is_busy_until_the_claim_ends() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test resources should build");
     let session = TestDemand::new(&coordinator);
-    let lazy = LazyValue::semantic_thunk(&session.demand.values, "inline-forced lazy", |_| {
+    let lazy = LazyValue::semantic_thunk(&session.demand.values, |_| {
         panic!("coordinator route test never evaluates its synthetic lazy")
     });
     let root = lazy.root(&session.demand.values);
@@ -1096,7 +1093,7 @@ fn foreground_route_retains_a_busy_candidate_across_its_release() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test resources should build");
     let session = TestDemand::new(&coordinator);
-    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session, "busy route child");
+    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session);
     let (parent_wait, _) = block_test_reflection_on(&coordinator, &session, child_wait, None);
     let running = coordinator
         .claim_work(child)
@@ -1132,7 +1129,7 @@ fn foreground_route_returns_to_its_parent_after_child_completion() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test resources should build");
     let session = TestDemand::new(&coordinator);
-    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session, "terminal child");
+    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session);
     let (parent_wait, parent) = block_test_reflection_on(&coordinator, &session, child_wait, None);
     let mut route = ExactDemandRoute::default();
 
@@ -1183,7 +1180,7 @@ fn foreground_route_keeps_an_anticipated_child_claimed_by_another_poller() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test resources should build");
     let session = TestDemand::new(&coordinator);
-    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session, "raced child");
+    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session);
     let (parent_wait, _) = block_test_reflection_on(&coordinator, &session, child_wait, None);
     let mut route = ExactDemandRoute::default();
 
@@ -1223,7 +1220,7 @@ fn foreground_route_recovers_its_root_when_the_child_completes_first() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test resources should build");
     let session = TestDemand::new(&coordinator);
-    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session, "early child");
+    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session);
     let (parent_wait, parent) = block_test_reflection_on(&coordinator, &session, child_wait, None);
     let mut route = ExactDemandRoute::default();
 
@@ -1357,7 +1354,7 @@ fn foreground_route_falls_back_when_an_observation_wakes_its_parent() {
         super::super::test_execution_resources(0).expect("test resources should build");
     let session = TestDemand::new(&coordinator);
     let observed = coordinator.observations.current();
-    let (_, child_wait, _) = reserve_test_deferred(&coordinator, &session, "observed child");
+    let (_, child_wait, _) = reserve_test_deferred(&coordinator, &session);
     let (parent_wait, parent) =
         block_test_reflection_on(&coordinator, &session, child_wait, Some(observed));
     let mut route = ExactDemandRoute::default();
@@ -1394,8 +1391,8 @@ fn foreground_route_falls_back_after_its_parent_reblocks_at_a_new_epoch() {
         super::super::test_execution_resources(0).expect("test resources should build");
     let session = TestDemand::new(&coordinator);
     let observed = coordinator.observations.current();
-    let (_, first_wait, _) = reserve_test_deferred(&coordinator, &session, "first child");
-    let (_, second_wait, second) = reserve_test_deferred(&coordinator, &session, "second child");
+    let (_, first_wait, _) = reserve_test_deferred(&coordinator, &session);
+    let (_, second_wait, second) = reserve_test_deferred(&coordinator, &session);
     let (parent_wait, parent) =
         block_test_reflection_on(&coordinator, &session, first_wait, Some(observed));
     let mut route = ExactDemandRoute::default();
@@ -1447,7 +1444,7 @@ fn foreground_route_does_not_retain_a_closed_demand_session() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test resources should build");
     let session = TestDemand::new(&coordinator);
-    let (_, child_wait, _) = reserve_test_deferred(&coordinator, &session, "closing child");
+    let (_, child_wait, _) = reserve_test_deferred(&coordinator, &session);
     let (parent_wait, _) = block_test_reflection_on(&coordinator, &session, child_wait, None);
     let mut route = ExactDemandRoute::default();
 
@@ -1482,7 +1479,7 @@ fn foreground_route_falls_back_after_an_interleaved_release_mutation() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test resources should build");
     let session = TestDemand::new(&coordinator);
-    let (_, unrelated_wait, _) = reserve_test_deferred(&coordinator, &session, "interleaved work");
+    let (_, unrelated_wait, _) = reserve_test_deferred(&coordinator, &session);
     let (_, parent) = reserve_ready_test_reflection(&coordinator, &session);
     let parent_wait = wait_for_test_work(&coordinator, parent);
     let mut route = ExactDemandRoute::default();
@@ -1561,7 +1558,7 @@ fn foreground_route_follows_only_task_owned_promise_producers() {
         .schedule_task({
             let published = published.clone();
             move |task_context| {
-                let promise = PromisedValue::fixpoint(&task_context, "task-owned route promise")?;
+                let promise = PromisedValue::fixpoint(&task_context)?;
                 *published
                     .lock()
                     .expect("published promise fixture was poisoned") = Some(promise);
@@ -1590,7 +1587,7 @@ fn foreground_route_follows_only_task_owned_promise_producers() {
     assert_eq!(claimed.id(), task_work);
     coordinator.requeue_unpolled_task(claimed);
 
-    let resolver_owned = PromisedValue::new(context.values(), "resolver-owned route promise");
+    let resolver_owned = PromisedValue::new(context.values());
     let (resolver_parent_wait, _) = block_test_reflection_on_dependency(
         &coordinator,
         &session,
@@ -1609,7 +1606,7 @@ fn foreground_exact_selection_holds_mutation_and_state_through_claim() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test resources should build");
     let session = TestDemand::new(&coordinator);
-    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session, "retired tail");
+    let (_, child_wait, child) = reserve_test_deferred(&coordinator, &session);
     let (parent_wait, _) = block_test_reflection_on(&coordinator, &session, child_wait, None);
 
     let probed = Arc::new(AtomicBool::new(false));
@@ -1808,7 +1805,7 @@ fn static_producer_obligations_are_taken_once() {
     assert_eq!(publisher.wait, wait);
     assert!(reflection.take_producer().is_none());
 
-    let lazy = LazyValue::semantic_thunk(&session.demand.values, "static obligation", |_| {
+    let lazy = LazyValue::semantic_thunk(&session.demand.values, |_| {
         panic!("static obligation test never evaluates its synthetic lazy")
     });
     let producer = DeferredProducer::Lazy(lazy.root(&session.demand.values));
@@ -2172,7 +2169,7 @@ fn foreign_promise_dependency_retires_work_without_subscribing() {
         crate::runtime::allocate_evaluation_runtime_id(),
         RuntimeIds::new(),
     );
-    let promise = PromisedValue::new(&foreign_values, "foreign spark promise");
+    let promise = PromisedValue::new(&foreign_values);
 
     coordinator.release_spark(
         claimed,
@@ -3282,11 +3279,9 @@ fn deferred_insertion_is_immediately_dormant_and_promotable() {
         .expect("deferred task identity should allocate");
     let wait = super::super::allocate_wait_token(&session.demand, task)
         .expect("deferred wait identity should allocate");
-    let lazy = LazyValue::semantic_thunk(
-        &session.demand.values,
-        "coordinator deferred lifecycle",
-        |_| panic!("coordinator lifecycle test never evaluates its synthetic lazy"),
-    );
+    let lazy = LazyValue::semantic_thunk(&session.demand.values, |_| {
+        panic!("coordinator lifecycle test never evaluates its synthetic lazy")
+    });
     let DeferredWorkReservation::New = coordinator
         .reserve_deferred(
             &session.demand,
@@ -3378,11 +3373,9 @@ fn background_selectors_ignore_an_unrooted_promoted_deferred_producer() {
         .expect("deferred task identity should allocate");
     let wait = super::super::allocate_wait_token(&session.demand, task)
         .expect("deferred wait identity should allocate");
-    let lazy = LazyValue::semantic_thunk(
-        &session.demand.values,
-        "foreground-only promoted producer",
-        |_| panic!("causal selection test never polls its synthetic machine"),
-    );
+    let lazy = LazyValue::semantic_thunk(&session.demand.values, |_| {
+        panic!("causal selection test never polls its synthetic machine")
+    });
     let DeferredWorkReservation::New = coordinator
         .reserve_deferred(
             &session.demand,
@@ -3436,9 +3429,9 @@ fn reflection_root_claims_only_its_exact_descendant_under_contested_orders() {
             let unrelated = TestDemand::new(&coordinator);
             let observer = TestDemand::new(&coordinator);
             let (producer_task, producer_wait, producer_work) =
-                reserve_test_deferred(&coordinator, &producer, "reflection descendant");
+                reserve_test_deferred(&coordinator, &producer);
             let (unrelated_task, unrelated_wait, unrelated_work) =
-                reserve_test_deferred(&coordinator, &unrelated, "foreground-only unrelated");
+                reserve_test_deferred(&coordinator, &unrelated);
             assert!(coordinator.promote_deferred_wait(&unrelated_wait));
 
             let (_, reflection_work) = reserve_ready_test_reflection(&coordinator, &observer);
@@ -3540,7 +3533,7 @@ fn spark_root_claims_exact_deferred_dependency_after_block() {
         .expect("deferred task identity should allocate");
     let wait = super::super::allocate_wait_token(&producer.demand, task)
         .expect("deferred wait identity should allocate");
-    let lazy = LazyValue::semantic_thunk(&producer.demand.values, "spark-rooted producer", |_| {
+    let lazy = LazyValue::semantic_thunk(&producer.demand.values, |_| {
         panic!("causal selection test never polls its synthetic machine")
     });
     let DeferredWorkReservation::New = coordinator
@@ -3596,11 +3589,9 @@ fn exact_deferred_demand_remains_local_across_a_cooperative_yield() {
         .expect("deferred task identity should allocate");
     let wait = super::super::allocate_wait_token(&session.demand, task)
         .expect("deferred wait identity should allocate");
-    let lazy = LazyValue::semantic_thunk(
-        &session.demand.values,
-        "exact demand cooperative yield",
-        |_| panic!("coordinator lifecycle test never evaluates its synthetic lazy"),
-    );
+    let lazy = LazyValue::semantic_thunk(&session.demand.values, |_| {
+        panic!("coordinator lifecycle test never evaluates its synthetic lazy")
+    });
     let DeferredWorkReservation::New = coordinator
         .reserve_deferred(
             &session.demand,
@@ -3651,11 +3642,9 @@ fn dependency_published_while_deferred_runs_survives_its_yield() {
         .expect("deferred task identity should allocate");
     let wait = super::super::allocate_wait_token(&session.demand, task)
         .expect("deferred wait identity should allocate");
-    let lazy = LazyValue::semantic_thunk(
-        &session.demand.values,
-        "running dependency publication",
-        |_| panic!("coordinator lifecycle test never evaluates its synthetic lazy"),
-    );
+    let lazy = LazyValue::semantic_thunk(&session.demand.values, |_| {
+        panic!("coordinator lifecycle test never evaluates its synthetic lazy")
+    });
     let DeferredWorkReservation::New = coordinator
         .reserve_deferred(
             &session.demand,
@@ -3701,12 +3690,12 @@ fn ready_selection_allows_independent_same_session_machine_claims() {
         super::super::test_execution_resources(0).expect("test execution resources should build");
     let session = TestDemand::new(&coordinator);
     let mut tasks = Vec::new();
-    for label in ["first session machine", "second session machine"] {
+    for _ in 0..2 {
         let task = super::super::allocate_task_id(&session.demand.values)
             .expect("deferred task identity should allocate");
         let wait = super::super::allocate_wait_token(&session.demand, task)
             .expect("deferred wait identity should allocate");
-        let lazy = LazyValue::semantic_thunk(&session.demand.values, label, |_| {
+        let lazy = LazyValue::semantic_thunk(&session.demand.values, |_| {
             panic!("coordinator lifecycle test never evaluates its synthetic lazy")
         });
         let DeferredWorkReservation::New = coordinator
@@ -3818,11 +3807,9 @@ fn closing_owner_immediately_after_deferred_insertion_abandons_the_dormant_recor
         .expect("deferred task identity should allocate");
     let wait = super::super::allocate_wait_token(&session.demand, task)
         .expect("deferred wait identity should allocate");
-    let lazy = LazyValue::semantic_thunk(
-        &session.demand.values,
-        "close after deferred insertion",
-        |_| panic!("session-close test must not poll its deferred machine"),
-    );
+    let lazy = LazyValue::semantic_thunk(&session.demand.values, |_| {
+        panic!("session-close test must not poll its deferred machine")
+    });
     assert!(matches!(
         coordinator
             .reserve_deferred(
@@ -3851,10 +3838,9 @@ fn racing_deferred_candidates_install_one_dormant_machine_and_drop_the_loser_unl
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test execution resources should build");
     let session = TestDemand::new(&coordinator);
-    let lazy =
-        LazyValue::semantic_thunk(&session.demand.values, "racing deferred candidates", |_| {
-            panic!("candidate race test drives its machine explicitly")
-        });
+    let lazy = LazyValue::semantic_thunk(&session.demand.values, |_| {
+        panic!("candidate race test drives its machine explicitly")
+    });
     let barrier = Arc::new(Barrier::new(3));
     let drops = Arc::new(AtomicUsize::new(0));
     let all_drops_unlocked = Arc::new(AtomicBool::new(true));
@@ -3931,11 +3917,9 @@ fn deferred_claim_excludes_competitors_and_releases_its_machine_outside_runtime_
         .expect("deferred task identity should allocate");
     let wait = super::super::allocate_wait_token(&session.demand, task)
         .expect("deferred wait identity should allocate");
-    let lazy = LazyValue::semantic_thunk(
-        &session.demand.values,
-        "coordinator machine ownership",
-        |_| panic!("coordinator ownership test never evaluates its synthetic lazy"),
-    );
+    let lazy = LazyValue::semantic_thunk(&session.demand.values, |_| {
+        panic!("coordinator ownership test never evaluates its synthetic lazy")
+    });
     let dropped_without_runtime_locks = Arc::new(AtomicBool::new(false));
     let DeferredWorkReservation::New = coordinator
         .reserve_deferred(
@@ -3994,11 +3978,9 @@ fn running_deferred_machine_does_not_serialize_same_session_client_admission() {
         .expect("deferred task identity should allocate");
     let wait = super::super::allocate_wait_token(&session.demand, task)
         .expect("deferred wait identity should allocate");
-    let lazy = LazyValue::semantic_thunk(
-        &session.demand.values,
-        "terminal publication admission ordering",
-        |_| panic!("the forced-order test drives its deferred machine explicitly"),
-    );
+    let lazy = LazyValue::semantic_thunk(&session.demand.values, |_| {
+        panic!("the forced-order test drives its deferred machine explicitly")
+    });
     let DeferredWorkReservation::New = coordinator
         .reserve_deferred(
             &session.demand,
@@ -4062,11 +4044,9 @@ fn retired_deferred_machine_does_not_delay_same_session_client_admission() {
         .expect("deferred task identity should allocate");
     let wait = super::super::allocate_wait_token(&session.demand, task)
         .expect("deferred wait identity should allocate");
-    let lazy = LazyValue::semantic_thunk(
-        &session.demand.values,
-        "retirement before admission ordering",
-        |_| panic!("the forced-order test drives its deferred machine explicitly"),
-    );
+    let lazy = LazyValue::semantic_thunk(&session.demand.values, |_| {
+        panic!("the forced-order test drives its deferred machine explicitly")
+    });
     let DeferredWorkReservation::New = coordinator
         .reserve_deferred(
             &session.demand,
@@ -4167,11 +4147,9 @@ fn outer_block_promotes_one_canonical_deferred_producer() {
         .expect("producer task identity should allocate");
     let producer_wait = super::super::allocate_wait_token(&producer_session.demand, producer_task)
         .expect("producer wait identity should allocate");
-    let lazy = LazyValue::semantic_thunk(
-        &producer_session.demand.values,
-        "cross-session canonical producer",
-        |_| panic!("coordinator promotion test does not evaluate its lazy"),
-    );
+    let lazy = LazyValue::semantic_thunk(&producer_session.demand.values, |_| {
+        panic!("coordinator promotion test does not evaluate its lazy")
+    });
     let DeferredWorkReservation::New = coordinator
         .reserve_deferred(
             &producer_session.demand,

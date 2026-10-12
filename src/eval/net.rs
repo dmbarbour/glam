@@ -2405,7 +2405,7 @@ mod driver_tests {
         let after_net = values.interaction_net_profile_snapshot();
         assert_eq!(after_net.reductions.call - after_builtin.reductions.call, 1);
 
-        let promise = PromisedValue::new(&values, "profiled unresolved callable");
+        let promise = PromisedValue::new(&values);
         let (runtime, call) = claimed_core_call_in(&values, Value::Promised(promise));
         assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
 
@@ -2465,13 +2465,13 @@ mod driver_tests {
     fn callable_profile_records_checkpoint_install_resume_replace_and_terminalize() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
         let context = EvalContext::isolated(values.clone());
-        let terminal = PromisedValue::new(context.values(), "profiled terminal callable");
+        let terminal = PromisedValue::new(context.values());
         crate::core::set_test_promise(context.values(), &terminal, Value::Builtin(Builtin::Add))
             .expect_without_debug("terminal promise accepts its callable result");
         let mut focus = terminal;
-        for label in ["third", "second", "first"] {
+        for _ in 0..3 {
             let prior = Value::Promised(focus);
-            let next = PromisedValue::new(context.values(), format!("{label} profiled callable"));
+            let next = PromisedValue::new(context.values());
             crate::core::set_test_promise(context.values(), &next, prior)
                 .expect_without_debug("promise accepts its delegated focus");
             focus = next;
@@ -2510,7 +2510,7 @@ mod driver_tests {
     fn callable_profile_records_exact_dependency_retry_and_stale_admission() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
         let context = EvalContext::isolated(values.clone());
-        let promise = PromisedValue::new(context.values(), "profiled dependency");
+        let promise = PromisedValue::new(context.values());
         let (runtime, call) = claimed_core_call_in(&values, Value::Promised(promise));
         assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
         let blocked = runtime
@@ -3169,7 +3169,7 @@ mod driver_tests {
     #[test]
     fn semantic_wait_is_published_to_the_net_before_driver_parking() {
         let context = test_context();
-        let promise = PromisedValue::new(context.values(), "forced semantic net wait");
+        let promise = PromisedValue::new(context.values());
         let mut builder = NetBuilder::<CoreSpecialization>::new();
         let [application, argument, result] = builder.bind();
         let function = builder.data(Value::Promised(promise));
@@ -3211,7 +3211,7 @@ mod driver_tests {
     #[test]
     fn persistent_driver_requeues_the_exact_active_pair_before_semantic_parking() {
         let context = test_context();
-        let promise = PromisedValue::new(context.values(), "persistent semantic net wait");
+        let promise = PromisedValue::new(context.values());
         let mut builder = NetBuilder::<CoreSpecialization>::new();
         let [application, argument, result] = builder.bind();
         let function = builder.data(Value::Promised(
@@ -3304,7 +3304,7 @@ mod driver_tests {
     #[test]
     fn net_whnf_machine_retains_one_edge_across_semantic_dependency() {
         let context = test_context();
-        let promise = PromisedValue::new(context.values(), "net WHNF semantic wait");
+        let promise = PromisedValue::new(context.values());
         let mut builder = NetBuilder::<CoreSpecialization>::new();
         let [application, argument, result] = builder.bind();
         let function = builder.data(Value::Promised(
@@ -3517,7 +3517,7 @@ mod driver_tests {
     #[test]
     fn rechecking_a_blocked_callable_checkpoint_spends_no_budget() {
         let context = test_context();
-        let promise = PromisedValue::new(context.values(), "pending callable");
+        let promise = PromisedValue::new(context.values());
         let mut net = NetBuilder::<CoreSpecialization>::new();
         let [application, argument, result] = net.bind();
         let function = net.data(Value::Promised(promise));
@@ -3809,7 +3809,7 @@ mod driver_tests {
     #[test]
     fn retried_checkpoint_claim_release_restores_the_exact_generation() {
         let context = test_context();
-        let promise = PromisedValue::new(context.values(), "call-claim wait");
+        let promise = PromisedValue::new(context.values());
         let (runtime, call) = claimed_core_call(Value::Promised(promise));
         assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
         let blocked = runtime
@@ -3848,7 +3848,7 @@ mod driver_tests {
     #[test]
     fn retried_checkpoint_claim_unwind_restores_the_exact_generation() {
         let context = test_context();
-        let promise = PromisedValue::new(context.values(), "unwound call-claim wait");
+        let promise = PromisedValue::new(context.values());
         let (runtime, call) = claimed_core_call(Value::Promised(promise));
         assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
         let blocked = runtime
@@ -3886,7 +3886,7 @@ mod driver_tests {
     #[test]
     fn mismatched_blocked_checkpoint_retry_fails_without_disturbance() {
         let context = test_context();
-        let promise = PromisedValue::new(context.values(), "current call wait");
+        let promise = PromisedValue::new(context.values());
         let (runtime, call) = claimed_core_call(Value::Promised(promise));
         assert!(progress_exact_core_call(&context, &runtime, call).unwrap());
         let blocked = runtime
@@ -3894,7 +3894,7 @@ mod driver_tests {
                 net.blocked_callable_checkpoint(call.pair)
             })
             .expect("unassigned callable promise must block the checkpoint");
-        let other = PromisedValue::new(context.values(), "unrelated call wait");
+        let other = PromisedValue::new(context.values());
         let wrong_wait = crate::core_net::CoreWaitToken(
             promise_wait(&context, &other).expect("unrelated wait must allocate"),
         );
@@ -4005,7 +4005,7 @@ mod driver_tests {
                 "cached lazy resolving to {name}"
             );
 
-            let promise = PromisedValue::new(context.values(), format!("assigned {name} callable"));
+            let promise = PromisedValue::new(context.values());
             crate::core::set_test_promise(context.values(), &promise, promise_result)
                 .expect_without_debug("fresh callable promise must accept its assignment");
             let (runtime, call) = claimed_core_call(Value::Promised(promise));
@@ -4017,7 +4017,7 @@ mod driver_tests {
             );
         }
 
-        let promise = PromisedValue::new(context.values(), "blocked disposition");
+        let promise = PromisedValue::new(context.values());
         let (blocked_runtime, blocked_call) = claimed_core_call(Value::Promised(promise));
         assert!(progress_exact_core_call(&context, &blocked_runtime, blocked_call).unwrap());
         assert_eq!(
@@ -4025,7 +4025,7 @@ mod driver_tests {
             CurrentCallablePath::BlockedDependency
         );
 
-        let lazy_dependency = PromisedValue::new(context.values(), "blocked lazy dependency");
+        let lazy_dependency = PromisedValue::new(context.values());
         let lazy = LazyValue::from_access(
             context.values(),
             Arc::from([]),
@@ -4072,15 +4072,15 @@ mod driver_tests {
     #[test]
     fn callable_checkpoint_resumes_published_focus_without_replay() {
         let context = test_context();
-        let terminal = PromisedValue::new(context.values(), "terminal callable focus");
+        let terminal = PromisedValue::new(context.values());
         crate::core::set_test_promise(context.values(), &terminal, Value::Builtin(Builtin::Add))
             .expect_without_debug("terminal promise accepts its callable result");
         let mut focus = terminal;
-        for label in ["third", "second", "first"] {
+        for _ in 0..3 {
             let prior = context
                 .values()
                 .with_runtime_value_access(|access| Value::Promised(focus.duplicate_in(&access)));
-            let next = PromisedValue::new(context.values(), format!("{label} callable focus"));
+            let next = PromisedValue::new(context.values());
             crate::core::set_test_promise(context.values(), &next, prior)
                 .expect_without_debug("promise accepts its delegated focus");
             focus = next;
@@ -4140,7 +4140,7 @@ mod driver_tests {
     #[test]
     fn callable_dependency_completion_before_exact_block_is_not_lost() {
         let context = test_context();
-        let promise = PromisedValue::new(context.values(), "checkpoint block race");
+        let promise = PromisedValue::new(context.values());
         let call_promise = context
             .values()
             .with_runtime_value_access(|access| promise.duplicate_in(&access));
@@ -4201,7 +4201,7 @@ mod driver_tests {
         // A task that observes its own promise cannot wait on it, so forming
         // the checkpoint's wait fails.
         let (promise, _task, owner) = context
-            .task_owned_promise("self-observed checkpoint dependency")
+            .task_owned_promise()
             .expect("test task should own its promise");
         let unit = context
             .values()
@@ -4250,11 +4250,11 @@ mod driver_tests {
     #[test]
     fn frame_bearing_callable_checkpoint_survives_every_ownership_handoff() {
         let context = test_context();
-        let inner = PromisedValue::new(context.values(), "framed checkpoint dependency");
+        let inner = PromisedValue::new(context.values());
         let inner_value = context
             .values()
             .with_runtime_value_access(|access| Value::Promised(inner.duplicate_in(&access)));
-        let outer = PromisedValue::new(context.values(), "framed checkpoint delegate");
+        let outer = PromisedValue::new(context.values());
         crate::core::set_test_promise(context.values(), &outer, inner_value)
             .expect_without_debug("outer promise delegates to the unresolved inner promise");
         let unit = context
@@ -4493,7 +4493,7 @@ mod driver_tests {
             net.operator_call(operator_call.pair).is_none()
         }));
 
-        let promise = PromisedValue::new(context.values(), "blocked operator disposition");
+        let promise = PromisedValue::new(context.values());
         let blocked_operator = context.values().with_runtime_value_access(|access| {
             applicable_operator(&access, Value::Promised(promise))
         });

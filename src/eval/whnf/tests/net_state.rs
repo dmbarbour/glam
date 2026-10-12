@@ -11,8 +11,8 @@ fn isolated_values() -> CoreValueFactory {
     CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new())
 }
 
-fn sentinel(values: &CoreValueFactory, label: String) -> Value {
-    Value::Lazy(LazyValue::semantic_thunk(values, label, |_| {
+fn sentinel(values: &CoreValueFactory) -> Value {
+    Value::Lazy(LazyValue::semantic_thunk(values, |_| {
         Ok(Value::Number(0.into()))
     }))
 }
@@ -216,7 +216,7 @@ fn net_state_trace_retains_every_value_position_through_collection() {
         poll.with_value_access(&context, |access| {
             let mut next = 0;
             let mut make = || {
-                let value = sentinel(&values, format!("edge {next}"));
+                let value = sentinel(&values);
                 next += 1;
                 value
             };
@@ -244,7 +244,7 @@ fn net_state_trace_retains_every_value_position_through_collection() {
             assert_eq!(expected_lazy_ids.len(), next);
 
             let source_owner = expected_lazy_ids[1];
-            let promise = PromisedValue::new(&values, "promise breadcrumb");
+            let promise = PromisedValue::new(&values);
             let promise_id = access.promise(&promise).id();
             let followed = [
                 DeferredValueId::Lazy(expected_lazy_ids[0]),
@@ -445,7 +445,7 @@ fn net_state_and_durable_work_share_exact_budget_split_semantics() {
 #[test]
 fn net_driver_retains_frame_state_on_yield_boundary_and_failure() {
     let values = isolated_values();
-    let (deferred, _) = values.rooted_error_lazy_for_test("net-state boundary");
+    let (deferred, _) = values.rooted_error_lazy_for_test();
     let context = EvalContext::isolated(values);
     let poll = EvaluationPollContext::for_context(&context);
 

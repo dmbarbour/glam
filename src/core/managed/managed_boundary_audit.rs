@@ -621,7 +621,6 @@ pub(super) fn closed_compatibility_variants(
         Value::Net(NetValue::new(runtime)),
         Value::external_host_call(
             values,
-            "passive closure host probe",
             HostCallRecord::external_without_semantic_values(
                 "passive closure host probe",
                 "src/core/managed/managed_boundary_audit.rs",
@@ -633,7 +632,7 @@ pub(super) fn closed_compatibility_variants(
                 unreachable!("passive-closure collection must not invoke a host callback")
             },
         ),
-        Value::Promised(PromisedValue::new(values, "passive closure promise")),
+        Value::Promised(PromisedValue::new(values)),
         values.with_runtime_value_access(|access| access.initial_metadata()),
         Value::Opaque(OpaqueValue::new(values, opaque_probe)),
     ]
@@ -723,7 +722,6 @@ fn arbitrary_host_callback_root_backedge_is_conservative_external_ownership() {
     let callback_capture = Arc::clone(&captured_root);
     let value = Value::external_host_call(
         &values,
-        "external-root backedge",
         HostCallRecord::external_without_semantic_values(
             "external-root backedge",
             "src/core/managed/managed_boundary_audit.rs",
@@ -786,7 +784,7 @@ fn production_reflection_result_edges_do_not_need_an_external_root() {
         .collect_managed_for_test()
         .expect("the reflection-edge fixture should start collectible");
     {
-        let promise = PromisedValue::new(&values, "reflection effect backedge");
+        let promise = PromisedValue::new(&values);
         let reflected = values.with_runtime_value_access(|access| {
             Value::reflection_task_result_in(
                 &access,
@@ -822,7 +820,7 @@ fn production_reflection_gate_target_backedge_reclaims_without_an_external_root(
         .collect_managed_for_test()
         .expect("the reflection-target fixture should start collectible");
     {
-        let promise = PromisedValue::new(&values, "reflection target backedge");
+        let promise = PromisedValue::new(&values);
         let reflected = values.with_runtime_value_access(|access| {
             Value::Lazy(LazyValue::from_reflection_gate_in(
                 &access,
@@ -859,7 +857,6 @@ fn host_call_constructor_rejects_captures_that_contradict_its_record() {
     let mismatch = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         LazyValue::external_host_call(
             &values,
-            "misclassified host-call capture",
             HostCallRecord::external_without_semantic_values(
                 "misclassified host-call capture",
                 "src/core/managed/managed_boundary_audit.rs",
@@ -890,7 +887,6 @@ fn semantic_computation_captures_are_explicit() {
     let values = crate::core::test_value_factory();
     let lazy = LazyValue::semantic_computation(
         &values,
-        "explicit capture fixture",
         [Value::Number(1.into()), Value::Number(2.into())],
         return_second_capture,
     );
@@ -910,7 +906,6 @@ fn external_host_call_requires_a_source_backed_record() {
     let values = crate::core::test_value_factory();
     let lazy = LazyValue::external_host_call(
         &values,
-        "external call fixture",
         HostCallRecord::external_without_semantic_values(
             "external call fixture",
             "src/core/managed/managed_boundary_audit.rs",
@@ -940,7 +935,6 @@ fn external_closure_bundle_retains_only_declared_roots() {
     let callback_observed = Arc::clone(&observed);
     let lazy = LazyValue::external_host_call(
         &values,
-        "explicit host root bundle",
         HostCallRecord::external_with_semantic_values(
             "explicit host root bundle",
             "src/core/managed/managed_boundary_audit.rs",
@@ -992,10 +986,9 @@ fn managed_deferred_state_cycle_reclaims() {
         .collect_managed_for_test()
         .expect("the deferred-state fixture should start collectible");
     {
-        let promise = PromisedValue::new(&values, "host-call capture backedge");
+        let promise = PromisedValue::new(&values);
         let lazy = LazyValue::external_host_call(
             &values,
-            "traceable host-call capture",
             HostCallRecord::external_with_semantic_values(
                 "traceable host-call capture",
                 "src/core/managed/managed_boundary_audit.rs",
@@ -1041,7 +1034,6 @@ fn host_call_capture_retires_only_during_external_registry_drain() {
     {
         let _lazy = LazyValue::external_host_call(
             &values,
-            "external owner fixture",
             HostCallRecord::external_without_semantic_values(
                 "external owner fixture",
                 "src/core/managed/managed_boundary_audit.rs",

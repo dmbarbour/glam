@@ -51,7 +51,7 @@ fn managed_seed_promotion(frame_count: usize) {
     let empty = values
         .collect_managed_for_test()
         .expect("baseline heap should collect before construction");
-    let (deferred, _) = values.rooted_error_lazy_for_test("seed-promotion boundary");
+    let (deferred, _) = values.rooted_error_lazy_for_test();
     let mut computation = WhnfComputation::from_root(root(&context, text("initial")));
     let registrations_before = values.managed_root_registrations_for_test();
     let mut access_entries = 0;
@@ -183,7 +183,7 @@ fn structured_constructors_publish_canonical_state_under_existing_access() {
     let empty = values
         .collect_managed_for_test()
         .expect("baseline heap should collect before construction");
-    let (retained_lazy, _) = values.rooted_error_lazy_for_test("structured edge");
+    let (retained_lazy, _) = values.rooted_error_lazy_for_test();
     let retained_lazy_id = retained_lazy.id();
     let registrations_before = values.managed_root_registrations_for_test();
 

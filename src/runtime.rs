@@ -1365,14 +1365,10 @@ mod tests {
         let values = test_value_factory();
         let forced = Arc::new(AtomicBool::new(false));
         let forced_by_thunk = forced.clone();
-        let lazy = Value::Lazy(LazyValue::semantic_thunk(
-            &values,
-            "runtime failure root sentinel",
-            move |_| {
-                forced_by_thunk.store(true, Ordering::Release);
-                panic!("failure-root construction must not evaluate a direct value")
-            },
-        ));
+        let lazy = Value::Lazy(LazyValue::semantic_thunk(&values, move |_| {
+            forced_by_thunk.store(true, Ordering::Release);
+            panic!("failure-root construction must not evaluate a direct value")
+        }));
         let failure = Arc::new(values.with_runtime_value_access(|access| {
             EvaluationFailure::emission_in(&access, access.duplicate_value(&lazy))
         }));
@@ -1395,7 +1391,7 @@ mod tests {
             .expect("the failure-root fixture should start collectible");
         let (promise_root, failure) = values.with_runtime_value_access(|access| {
             let promise_root = access
-                .construct_rooted_managed_promise("failure root lifecycle")
+                .construct_rooted_managed_promise()
                 .expect("the managed promise cell should fit a run");
             let promise = PromisedValue::from_root(&promise_root, &access);
             (

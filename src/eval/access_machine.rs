@@ -1273,7 +1273,7 @@ mod tests {
     #[test]
     fn shared_key_list_converter_survives_deferred_collection_with_one_root() {
         let context = context();
-        let chunk = PromisedValue::new(context.values(), "regional key-list chunk");
+        let chunk = PromisedValue::new(context.values());
         let input = context.values().construct_runtime_value_root(|_| {
             Value::List(List::concat(
                 List::from_values(vec![Value::Number(1.into())]),
@@ -1357,7 +1357,7 @@ mod tests {
     #[test]
     fn scalar_computed_key_resumes_from_its_exact_promise() {
         let context = context();
-        let promise = PromisedValue::new(context.values(), "computed access key");
+        let promise = PromisedValue::new(context.values());
         let base = Value::Dict(
             Dict::new_sync().insert(Key::Number(42.into()), Value::binary_from_text("found")),
         );
@@ -1397,7 +1397,7 @@ mod tests {
     fn recursive_dictionary_key_conversion_resumes_at_its_member() {
         let context = context();
         let member = Key::atom_from_text("member");
-        let promise = PromisedValue::new(context.values(), "dictionary key member");
+        let promise = PromisedValue::new(context.values());
         let expected_key = Key::Dict(Arc::from([(member.clone(), Key::Number(7.into()))]));
         let base = Value::Dict(
             Dict::new_sync().insert(expected_key, Value::binary_from_text("recursive")),
@@ -1422,7 +1422,7 @@ mod tests {
     #[test]
     fn computed_path_resumes_after_a_deferred_middle_chunk() {
         let context = context();
-        let promise = PromisedValue::new(context.values(), "computed path chunk");
+        let promise = PromisedValue::new(context.values());
         let base = Value::Dict(Dict::new_sync().insert(
             Key::Number(1.into()),
             Value::Dict(
@@ -1456,12 +1456,12 @@ mod tests {
     fn computed_path_preserves_completed_prefix_base_and_result_across_route_loss() {
         let context = context();
         let prefix_forces = Arc::new(AtomicUsize::new(0));
-        let middle = PromisedValue::new(context.values(), "computed path middle chunk");
-        let base = PromisedValue::new(context.values(), "computed access base");
-        let result = PromisedValue::new(context.values(), "computed access result");
+        let middle = PromisedValue::new(context.values());
+        let base = PromisedValue::new(context.values());
+        let result = PromisedValue::new(context.values());
         let result_root = result.root(context.values());
         let observed_prefix_forces = Arc::clone(&prefix_forces);
-        let prefix = Value::semantic_thunk(context.values(), "computed path prefix", move |_| {
+        let prefix = Value::semantic_thunk(context.values(), move |_| {
             observed_prefix_forces.fetch_add(1, Ordering::SeqCst);
             Ok(Value::Number(1.into()))
         });
@@ -1565,9 +1565,7 @@ mod tests {
         let key = Key::Number(Number::from_u8(b'x'));
         let base = Value::Dict(Dict::new_sync().insert(key, Value::binary_from_text("byte")));
         let chunk =
-            LazyValue::semantic_thunk(context.values(), "deferred binary path chunk", |_| {
-                Ok(Value::binary_from_text("x"))
-            });
+            LazyValue::semantic_thunk(context.values(), |_| Ok(Value::binary_from_text("x")));
         let path = Value::List(List::from_thunk(ListThunk::Lazy(chunk)));
         let access = access_value(&context, [CoreDataKey::PathIndex], vec![base, path]);
         context.values().assert_same_representation_for_test(

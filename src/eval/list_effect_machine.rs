@@ -279,7 +279,7 @@ impl RegionalListEffect {
                 };
                 let handle = access
                     .values()
-                    .construct_managed_promise("list effect fixpoint")
+                    .construct_managed_promise()
                     .expect("managed promise representation must fit one collector run");
                 let operation = LazyValue::from_application_in(
                     access.values(),
@@ -322,7 +322,6 @@ impl RegionalListEffect {
                     let tail = List::from_thunk(
                         LazyValue::list_effect_computation_in(
                             access.values(),
-                            "list effect fix alternative",
                             ListEffectComputation::FixFunction {
                                 function: access.values().duplicate_value(function),
                                 alternative: next_alternative,
@@ -387,7 +386,6 @@ impl ListEffectState {
 fn deferred_run_list_in(access: &EvaluationValueAccess<'_>, operation: &Value) -> Value {
     let lazy = LazyValue::list_effect_computation_in(
         access.values(),
-        "list effect",
         ListEffectComputation::Run {
             effect: access.values().duplicate_value(operation),
         },
@@ -408,7 +406,6 @@ fn sequence_result_in(
     );
     let left = LazyValue::list_effect_computation_in(
         access.values(),
-        "list effect",
         ListEffectComputation::Run {
             effect: Value::Lazy(application),
         },
@@ -418,7 +415,6 @@ fn sequence_result_in(
     };
     let right = LazyValue::list_effect_computation_in(
         access.values(),
-        "list effect seq",
         ListEffectComputation::Sequence {
             results: tail.clone(),
             continuation: access.values().duplicate_value(continuation),
@@ -446,7 +442,6 @@ fn flat_map_result_in(
     };
     let right = LazyValue::list_effect_computation_in(
         access.values(),
-        "direct list flat-map",
         ListEffectComputation::FlatMapResults {
             results: tail.clone(),
             continuation: access.values().duplicate_value(continuation),

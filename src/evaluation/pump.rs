@@ -20,7 +20,7 @@ use super::session::{
     EvaluationUnfinishedTask,
 };
 use super::{EvaluationDemandState, EvaluationPollContext, evaluation_failure};
-use crate::core::{EvaluationFailure, LazyCycle, LazyCycleMember};
+use crate::core::{EvaluationFailure, LazyCycle};
 use crate::runtime::RuntimeFailureRoot;
 
 impl ClientDemandOperation {
@@ -934,13 +934,7 @@ fn poison_lazy_cycle(
     cycle_error: Option<String>,
 ) {
     let cycle = Arc::new(LazyCycle {
-        members: members
-            .iter()
-            .map(|member| LazyCycleMember {
-                id: member.lazy.id(),
-                label: member.lazy.label().clone(),
-            })
-            .collect(),
+        members: members.iter().map(|member| member.lazy.id()).collect(),
     });
     let failure = cycle_error
         .map(evaluation_failure)

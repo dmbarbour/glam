@@ -81,7 +81,7 @@ impl CompileContext {
         let prior_defs = values.construct_runtime_value_root(|_| Value::Dict(Dict::new_sync()));
         let final_defs = values.construct_runtime_value_root(|access| {
             let promise = access
-                .construct_managed_promise("final definitions")
+                .construct_managed_promise()
                 .expect("managed promise representation must fit one collector run");
             Value::Promised(promise)
         });
@@ -302,13 +302,11 @@ impl CompileContext {
         let (module_path, extends) = self.qualify_module_path(relative_namespace);
         let importer_source = self.importer_source.clone();
         let importer_trace = self.compilation_trace.clone();
-        let label: Arc<str> = Arc::from(format!("import {}", request.as_str()));
         let loader = self.local_module_loader.clone();
         let expected_runtime = self.values.runtime_id();
 
         Value::Lazy(LazyValue::external_host_call_in(
             access,
-            label,
             HostCallRecord::external_with_semantic_values(
                 "deferred module import",
                 "src/compiler.rs",
@@ -382,13 +380,11 @@ impl CompileContext {
             importer_source: self.importer_source.clone(),
             importer_trace: self.compilation_trace.clone(),
         };
-        let label: Arc<str> = Arc::from(format!("import binary {}", args.request.as_str()));
         let loader = self.local_binary_loader.clone();
         let expected_runtime = self.values.runtime_id();
 
         Value::Lazy(LazyValue::external_host_call_in(
             access,
-            label,
             HostCallRecord::external_without_semantic_values(
                 "deferred binary import",
                 "src/compiler.rs",
@@ -479,11 +475,7 @@ fn invalid_import_request_in(
     importer_source: Option<&SourceArtifact>,
 ) -> Value {
     let failure = import_failure_in(access, message, request, trace, importer_source);
-    Value::Lazy(LazyValue::failure_in(
-        access,
-        Arc::from(format!("invalid import request {request}")),
-        failure,
-    ))
+    Value::Lazy(LazyValue::failure_in(access, failure))
 }
 
 #[cfg(test)]

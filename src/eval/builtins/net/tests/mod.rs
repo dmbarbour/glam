@@ -406,7 +406,7 @@ fn public_construction_data_backedge_is_lazy_and_reclaimed_after_roots_drop() {
     let values = context.values();
     let (construction_root, promise_root) = with_access(&context, |access| {
         let promise_root = access
-            .construct_rooted_managed_promise("construction data backedge")
+            .construct_rooted_managed_promise()
             .expect("the backedge promise should fit a collector run");
         let promise = PromisedValue::from_root(&promise_root, access);
         let data = partial_builder(
@@ -593,16 +593,12 @@ fn public_construction_selects_only_the_first_two_results() {
     let tail_demands = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_tail = Arc::clone(&tail_demands);
     let effect = with_access(&context, |access| {
-        let tail = LazyValue::semantic_thunk(
-            access.values(),
-            "unobserved construction result tail",
-            move |_| {
-                observed_tail.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Err(crate::core::EvaluationHalt::new(
-                    "third result was demanded",
-                ))
-            },
-        );
+        let tail = LazyValue::semantic_thunk(access.values(), move |_| {
+            observed_tail.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(crate::core::EvaluationHalt::new(
+                "third result was demanded",
+            ))
+        });
         effect_returning_results(
             access,
             List::concat(
@@ -630,14 +626,10 @@ fn public_construction_does_not_demand_its_effect_until_observed() {
     let effect = with_access(&context, |access| {
         let empty = effect_returning_results(access, List::empty());
         let empty = crate::runtime::RuntimeValueRoot::new(access.values(), empty);
-        Value::Lazy(LazyValue::semantic_thunk(
-            access.values(),
-            "counted construction effect",
-            move |_| {
-                observed_effect.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(empty.clone_core_for_test())
-            },
-        ))
+        Value::Lazy(LazyValue::semantic_thunk(access.values(), move |_| {
+            observed_effect.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(empty.clone_core_for_test())
+        }))
     });
     let construction = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);
     assert_eq!(effect_demands.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -1397,19 +1389,15 @@ fn hidden_builder_get_resumes_lazy_paths_and_intermediates_and_rejects_invalid_o
         path(access, [outer.clone(), inner.clone()])
     });
     let path_values = context.values().clone();
-    let lazy_path = Value::Lazy(LazyValue::semantic_thunk(
-        context.values(),
-        "lazy builder state path",
-        move |_| Ok(source_path.duplicate_for_test(&path_values)),
-    ));
+    let lazy_path = Value::Lazy(LazyValue::semantic_thunk(context.values(), move |_| {
+        Ok(source_path.duplicate_for_test(&path_values))
+    }));
     let inner_dict =
         Value::Dict(Dict::new_sync().insert(inner.clone(), Value::binary_from_text("ready")));
     let inner_values = context.values().clone();
-    let lazy_inner = Value::Lazy(LazyValue::semantic_thunk(
-        context.values(),
-        "lazy builder state intermediate",
-        move |_| Ok(inner_dict.duplicate_for_test(&inner_values)),
-    ));
+    let lazy_inner = Value::Lazy(LazyValue::semantic_thunk(context.values(), move |_| {
+        Ok(inner_dict.duplicate_for_test(&inner_values))
+    }));
     let (state, get, get_missing) = with_access(&context, |access| {
         let Value::Dict(user_state) = super::builder::initial_user_state(access) else {
             unreachable!()
@@ -1563,20 +1551,16 @@ fn hidden_builder_reset_shift_resumes_lazy_keys_and_captured_cut() {
     let reset_key = {
         let prompt = duplicate_value(&context, &prompt);
         let values = context.values().clone();
-        Value::Lazy(LazyValue::semantic_thunk(
-            context.values(),
-            "lazy reset key",
-            move |_| Ok(prompt.duplicate_for_test(&values)),
-        ))
+        Value::Lazy(LazyValue::semantic_thunk(context.values(), move |_| {
+            Ok(prompt.duplicate_for_test(&values))
+        }))
     };
     let shift_key = {
         let prompt = duplicate_value(&context, &prompt);
         let values = context.values().clone();
-        Value::Lazy(LazyValue::semantic_thunk(
-            context.values(),
-            "lazy shift key",
-            move |_| Ok(prompt.duplicate_for_test(&values)),
-        ))
+        Value::Lazy(LazyValue::semantic_thunk(context.values(), move |_| {
+            Ok(prompt.duplicate_for_test(&values))
+        }))
     };
     let (state, capture) = with_access(&context, |access| {
         let state = encode_builder_state(

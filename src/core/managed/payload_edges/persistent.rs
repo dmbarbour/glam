@@ -223,7 +223,6 @@ mod tests {
         let forced_by_thunk = forced.clone();
         let lazy = LazyValue::semantic_thunk(
             &crate::core::test_value_factory(),
-            "persistent adapter thunk sentinel",
             move |_| -> Result<Value, EvaluationHalt> {
                 forced_by_thunk.store(true, Ordering::Release);
                 panic!("persistent collection tracing must not force a thunk")
@@ -239,10 +238,7 @@ mod tests {
         assert_eq!(thunk_stats.semantic_edges, 1);
         assert!(!forced.load(Ordering::Acquire));
 
-        let promise = PromisedValue::new(
-            &crate::core::test_value_factory(),
-            "persistent adapter promise",
-        );
+        let promise = PromisedValue::new(&crate::core::test_value_factory());
         let promise_thunk = List::from_thunk(ListThunk::Promised(promise));
         assert!(edges(&values, &promise_thunk).is_empty());
 

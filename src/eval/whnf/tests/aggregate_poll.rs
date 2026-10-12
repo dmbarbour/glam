@@ -17,8 +17,8 @@ fn context() -> crate::evaluation::OwnedEvalContext {
 fn one_poll_aggregates_every_focus_and_frame_edit_into_one_edge_transition() {
     let context = context();
     let values = context.values();
-    let (old_root, old) = values.rooted_error_lazy_for_test("aggregate-poll old edge");
-    let (new_root, new) = values.rooted_error_lazy_for_test("aggregate-poll new edge");
+    let (old_root, old) = values.rooted_error_lazy_for_test();
+    let (new_root, new) = values.rooted_error_lazy_for_test();
     let focus = values.construct_runtime_value_root(|access| Value::Lazy(old.duplicate_in(access)));
     let mut computation = WhnfComputation::from_root(focus);
     let expected = new_root.clone();

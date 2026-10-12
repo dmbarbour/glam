@@ -409,7 +409,10 @@ Local steps, each measured on its own (instructions, `countdown_800` /
   `do_chain_800` −3.1%.
 - **Lazy labels.** `LazyLabel` keeps a literal as it is and shares any
   other: −4.0% / −3.4% / −1.7%. The lazy cell grows to 152 bytes and its
-  root to 40; the root's copy of the label could go.
+  root to 40. Then labels were removed altogether (decision
+  `lazies-carry-no-labels`, 2026-10-12): only cycle messages read them,
+  naming runtime machinery. The cell is 128 bytes and the root 16:
+  −1.5% / −1.8% / −1.0%.
 - **Inline offers.** `view_producer` reads the producer's kind under its
   lock, duplicating nothing: −1.2% / −1.1% / −0.6%.
 - **Argument arrays.** An operator's operands, the new one moved in,

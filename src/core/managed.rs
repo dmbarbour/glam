@@ -993,13 +993,10 @@ impl RuntimeValueAccess<'_> {
 
 #[cfg(test)]
 impl CoreValueFactory {
-    pub(crate) fn rooted_error_lazy_for_test(
-        &self,
-        label: impl Into<crate::core::LazyLabel>,
-    ) -> (ManagedLazyRoot, LazyValue) {
+    pub(crate) fn rooted_error_lazy_for_test(&self) -> (ManagedLazyRoot, LazyValue) {
         self.with_runtime_value_access(|access| {
             let root = access
-                .construct_rooted_managed_lazy(label, LazySource::Error)
+                .construct_rooted_managed_lazy(LazySource::Error)
                 .expect("test lazy should fit one managed slot");
             let lazy = LazyValue::from_root(&root, &access);
             (root, lazy)

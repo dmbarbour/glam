@@ -289,7 +289,6 @@ impl RegionalEffectMachine {
                 }
                 let lazy = LazyValue::computed_fixpoint_in(
                     access.values(),
-                    "fixpoint",
                     FixpointComputation::Function(function),
                 );
                 RegionalBuiltinPoll::Ready(Value::Lazy(lazy))

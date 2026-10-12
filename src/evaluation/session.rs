@@ -1586,17 +1586,15 @@ impl EvalContext {
     #[cfg(test)]
     pub(crate) fn task_owned_promises(
         &self,
-        labels: impl IntoIterator<Item = Arc<str>>,
+        count: usize,
     ) -> Result<(Vec<PromisedValue>, EvaluationTaskHandle, EvalContext), Arc<str>> {
-        let labels = labels.into_iter().collect::<Vec<_>>();
         let promises = Arc::new(Mutex::new(None));
         let output = promises.clone();
         let owner_context = Arc::new(Mutex::new(None));
         let owner_output = owner_context.clone();
         let task = self.schedule_task(move |context| {
-            let owned = labels
-                .into_iter()
-                .map(|label| PromisedValue::fixpoint(&context, label))
+            let owned = (0..count)
+                .map(|_| PromisedValue::fixpoint(&context))
                 .collect::<Result<Vec<_>, _>>()?;
             *output.lock().expect("test promise output was poisoned") = Some(owned);
             *owner_output
@@ -1620,9 +1618,8 @@ impl EvalContext {
     #[cfg(test)]
     pub(crate) fn task_owned_promise(
         &self,
-        label: impl Into<Arc<str>>,
     ) -> Result<(PromisedValue, EvaluationTaskHandle, EvalContext), Arc<str>> {
-        let (mut promises, task, owner) = self.task_owned_promises([label.into()])?;
+        let (mut promises, task, owner) = self.task_owned_promises(1)?;
         Ok((
             promises.pop().expect("one promise was requested"),
             task,

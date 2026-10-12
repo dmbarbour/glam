@@ -182,7 +182,6 @@ fn store_root_boundary_inventory_is_complete() {
 
 fn unforced_store_value(
     values: &CoreValueFactory,
-    label: &'static str,
 ) -> (PublicValue, Weak<()>, Arc<std::sync::atomic::AtomicBool>) {
     let retained = Arc::new(());
     let weak = Arc::downgrade(&retained);
@@ -190,7 +189,7 @@ fn unforced_store_value(
     let forced_by_thunk = forced.clone();
     (
         PublicValue::from_runtime_root(values.construct_runtime_value_root(|access| {
-            Value::Lazy(LazyValue::semantic_thunk_in(access, label, move |_| {
+            Value::Lazy(LazyValue::semantic_thunk_in(access, move |_| {
                 let _ = &retained;
                 forced_by_thunk.store(true, Ordering::Release);
                 panic!("reflection-store root retention must not force its value")
@@ -205,14 +204,11 @@ fn unforced_store_value(
 fn snapshot_journal_edits_and_protected_volumes_retain_roots_without_forcing() {
     let mut store = store_with(crate::core::private_test_value_factory());
     let collector = store.values.clone();
-    let (heap_root, heap_retained, heap_forced) =
-        unforced_store_value(&store.values, "snapshot heap root");
+    let (heap_root, heap_retained, heap_forced) = unforced_store_value(&store.values);
     let (replacement_root, replacement_retained, replacement_forced) =
-        unforced_store_value(&store.values, "store replacement root");
-    let (volume_root, volume_retained, volume_forced) =
-        unforced_store_value(&store.values, "snapshot protected volume");
-    let (edit_root, edit_retained, edit_forced) =
-        unforced_store_value(&store.values, "journal edit root");
+        unforced_store_value(&store.values);
+    let (volume_root, volume_retained, volume_forced) = unforced_store_value(&store.values);
+    let (edit_root, edit_retained, edit_forced) = unforced_store_value(&store.values);
     store.replace_root(heap_root);
     let volume = store
         .create_volume(volume_root)
@@ -267,7 +263,7 @@ fn snapshot_journal_edits_and_protected_volumes_retain_roots_without_forcing() {
 fn query_result_remains_rooted_after_store_and_handle_retirement() {
     let assembler = Assembler::default();
     let mut store = store_with(assembler.core_values());
-    let (result, retained, forced) = unforced_store_value(&store.values, "retained query result");
+    let (result, retained, forced) = unforced_store_value(&store.values);
     let mut reservation = StoreJournal::new(store.snapshot());
     let handle = reservation
         .reserve_query_with(result)

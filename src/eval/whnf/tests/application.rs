@@ -108,7 +108,7 @@ fn partial_builtin_resumes_without_replaying_supplied_arguments() {
 #[test]
 fn promised_callable_resumes_at_function_demand_before_applying_arguments() {
     let context = context();
-    let promise = PromisedValue::new(context.values(), "promised callable");
+    let promise = PromisedValue::new(context.values());
     let mut computation = application(
         &context,
         Value::Promised(promise.duplicate_for_test(context.values())),
@@ -176,7 +176,7 @@ fn function_application_batches_arguments_without_intermediate_roots() {
 #[test]
 fn effect_payload_undefined_check_resumes_from_the_exact_promise() {
     let context = context();
-    let promise = PromisedValue::new(context.values(), "effect payload");
+    let promise = PromisedValue::new(context.values());
     let effect = Value::Dict(Dict::new_sync().insert(
         Key::atom_from_text("eff"),
         Value::Promised(promise.duplicate_for_test(context.values())),
@@ -212,7 +212,7 @@ fn effect_payload_undefined_check_resumes_from_the_exact_promise() {
 #[test]
 fn nested_undefined_extra_resumes_without_restarting_tag_recognition() {
     let context = context();
-    let promise = PromisedValue::new(context.values(), "nested undefined extra");
+    let promise = PromisedValue::new(context.values());
     let nested = Value::Dict(Dict::new_sync().insert(
         Key::atom_from_text("nested"),
         Value::Promised(promise.duplicate_for_test(context.values())),
@@ -241,7 +241,7 @@ fn nested_undefined_extra_resumes_without_restarting_tag_recognition() {
 #[test]
 fn promised_apply_member_resumes_before_the_original_argument_is_consumed() {
     let context = context();
-    let promise = PromisedValue::new(context.values(), "promised apply member");
+    let promise = PromisedValue::new(context.values());
     let applicable = Value::Dict(Dict::new_sync().insert(
         Key::atom_from_text("apply"),
         Value::Promised(promise.duplicate_for_test(context.values())),

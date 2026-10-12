@@ -190,11 +190,11 @@ impl EvaluatorStepContext<'_> {
     }
 
     #[cfg(test)]
-    pub(crate) fn construct_promise(&self, label: impl Into<Arc<str>>) -> PromisedValue {
+    pub(crate) fn construct_promise(&self) -> PromisedValue {
         let (value, root) = self.with_value_access(|access| {
             let root = access
                 .values()
-                .construct_rooted_managed_promise(label)
+                .construct_rooted_managed_promise()
                 .expect("managed promise representation must fit one collector run");
             let value = PromisedValue::from_root(&root, access.values());
             (value, root)
@@ -522,7 +522,7 @@ mod tests {
         let root = poll.evaluate(&context, |evaluator| {
             let lazy = evaluator
                 .construct_lazy(|access| LazyValue::error_in(access, "guarded evaluator lazy"));
-            let promise = evaluator.construct_promise("guarded evaluator promise");
+            let promise = evaluator.construct_promise();
             let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
             let exposed = builder.data(Value::Number(31.into()));
             let template = builder.finish(exposed);

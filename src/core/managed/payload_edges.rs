@@ -244,8 +244,8 @@ mod tests {
 
     use super::*;
     use crate::core::{
-        Builtin, CoreValueFactory, FunctionValue, HostCallRecord, LazyCycle, LazyCycleMember,
-        LazyId, LazyValue, NetValue, PromisedValue,
+        Builtin, CoreValueFactory, FunctionValue, HostCallRecord, LazyCycle, LazyId, LazyValue,
+        NetValue, PromisedValue,
     };
     use crate::core_net::{CoreDataKey, CoreSpecialization};
     use crate::interaction_net::NetBuilder;
@@ -424,7 +424,7 @@ mod tests {
             ],
         );
 
-        let promise = PromisedValue::new(&values, "compatibility visitor promise");
+        let promise = PromisedValue::new(&values);
         assert!(
             crate::core::set_test_promise(&values, &promise, first.duplicate_for_test(&values))
                 .is_ok(),
@@ -435,7 +435,7 @@ mod tests {
             &Some(Ok(first.duplicate_for_test(&values))),
         );
 
-        let failed_promise = PromisedValue::new(&values, "compatibility visitor failure");
+        let failed_promise = PromisedValue::new(&values);
         assert!(
             crate::core::fail_test_promise(
                 &values,
@@ -454,7 +454,6 @@ mod tests {
 
         let pending = LazyValue::semantic_computation(
             &values,
-            "compatibility visitor semantic source",
             [
                 first.duplicate_for_test(&values),
                 second.duplicate_for_test(&values),
@@ -473,12 +472,7 @@ mod tests {
             ],
         );
 
-        let complete = LazyValue::semantic_computation(
-            &values,
-            "compatibility visitor result",
-            [second],
-            return_first_capture,
-        );
+        let complete = LazyValue::semantic_computation(&values, [second], return_first_capture);
         let evaluated = values.with_runtime_value_access(|access| {
             EvaluatedValue::from_whnf_in(&access, access.duplicate_value(&first))
                 .expect("a number is already in weak-head normal form")
@@ -505,14 +499,8 @@ mod tests {
         let shared = Value::List(crate::core::List::from_values(vec![number(7)]));
         let cycle = Arc::new(LazyCycle {
             members: vec![
-                LazyCycleMember {
-                    id: LazyId(NonZeroU64::new(1).unwrap()),
-                    label: "left".into(),
-                },
-                LazyCycleMember {
-                    id: LazyId(NonZeroU64::new(2).unwrap()),
-                    label: "right".into(),
-                },
+                LazyId(NonZeroU64::new(1).unwrap()),
+                LazyId(NonZeroU64::new(2).unwrap()),
             ]
             .into_boxed_slice(),
         });
@@ -545,7 +533,6 @@ mod tests {
         let root = values.construct_runtime_value_root(|access| {
             let sentinel = LazyValue::external_host_call_in(
                 access,
-                "failure visitor sentinel",
                 HostCallRecord::external_without_semantic_values(
                     "failure visitor sentinel",
                     "src/core/managed/payload_edges.rs",
@@ -564,7 +551,7 @@ mod tests {
             );
             Value::Lazy(
                 access
-                    .construct_failed_managed_lazy("failure trace owner", failure)
+                    .construct_failed_managed_lazy(failure)
                     .expect("the failed lazy should fit one collector run"),
             )
         });
@@ -587,11 +574,10 @@ mod tests {
             .expect("the host-call fixture should start collectible");
         let root = values.construct_runtime_value_root(|access| {
             let promise = access
-                .construct_managed_promise("host-call capture")
+                .construct_managed_promise()
                 .expect("the capture promise should fit one collector run");
             Value::Lazy(LazyValue::external_host_call_in(
                 access,
-                "compatibility visitor host call",
                 HostCallRecord::external_with_semantic_values(
                     "compatibility visitor host call",
                     "src/core/managed/payload_edges.rs",

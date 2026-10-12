@@ -146,11 +146,9 @@ mod tests {
             crate::runtime::RuntimeIds::new(),
         ));
         let focus = context.values().construct_runtime_value_root(|access| {
-            Value::Lazy(LazyValue::semantic_thunk_in(
-                access,
-                "post-region lazy admission",
-                |_| Ok(Value::Number(61.into())),
-            ))
+            Value::Lazy(LazyValue::semantic_thunk_in(access, |_| {
+                Ok(Value::Number(61.into()))
+            }))
         });
         let mut computation = WhnfComputation::from_root(focus);
         let poll_context = EvaluationPollContext::for_context(&context);
@@ -179,7 +177,7 @@ mod tests {
             crate::runtime::allocate_evaluation_runtime_id(),
             crate::runtime::RuntimeIds::new(),
         ));
-        let promise = PromisedValue::new(context.values(), "direct promise dependency");
+        let promise = PromisedValue::new(context.values());
         let expected = promise.id(context.values());
         let focus = context.values().construct_runtime_value_root(|access| {
             access.duplicate_value(&Value::Promised(promise))
@@ -207,7 +205,7 @@ mod tests {
             crate::runtime::RuntimeIds::new(),
         ));
         let (promise, task, owner) = context
-            .task_owned_promise("self-observed promise")
+            .task_owned_promise()
             .expect("test task should own its promise");
         let promise_id = promise.id(owner.values());
         let focus = owner.values().construct_runtime_value_root(|access| {

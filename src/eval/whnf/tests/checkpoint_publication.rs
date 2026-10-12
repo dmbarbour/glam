@@ -28,7 +28,7 @@ fn boundary_publishes_the_complete_checkpoint_before_access_closes() {
     let context = EvalContext::isolated(values.clone());
     let poll = EvaluationPollContext::for_context(&context);
     let mut computation = WhnfComputation::from_root(root(&values, text("initial")));
-    let (deferred, _) = values.rooted_error_lazy_for_test("published-checkpoint boundary");
+    let (deferred, _) = values.rooted_error_lazy_for_test();
     let registrations_before = values.managed_root_registrations_for_test();
 
     let mut budget = WhnfStepBudget::new(1);

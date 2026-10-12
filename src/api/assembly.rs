@@ -688,7 +688,7 @@ impl ReflectionEnvironmentBuilder<'_> {
             let label = label.into();
             let promise = scoped
                 .runtime_access()
-                .construct_rooted_managed_promise(label.clone())
+                .construct_rooted_managed_promise()
                 .expect("managed promise representation must fit one collector run");
             let value = scoped.wrap(CoreValue::Promised(PromisedValue::from_root(
                 &promise,
@@ -988,7 +988,7 @@ impl Assembler {
             let label = label.into();
             let promise = scoped
                 .runtime_access()
-                .construct_rooted_managed_promise(label.clone())
+                .construct_rooted_managed_promise()
                 .expect("managed promise representation must fit one collector run");
             let value = scoped.wrap(CoreValue::Promised(PromisedValue::from_root(
                 &promise,

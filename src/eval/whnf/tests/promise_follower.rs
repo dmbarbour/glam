@@ -11,11 +11,8 @@ fn isolated_values() -> CoreValueFactory {
     CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new())
 }
 
-fn promise_computation(
-    values: &CoreValueFactory,
-    label: &'static str,
-) -> (PromisedValue, WhnfComputation) {
-    let promise = PromisedValue::new(values, label);
+fn promise_computation(values: &CoreValueFactory) -> (PromisedValue, WhnfComputation) {
+    let promise = PromisedValue::new(values);
     let root =
         values.construct_runtime_value_root(|access| Value::Promised(promise.duplicate_in(access)));
     (promise, WhnfComputation::from_root(root))
@@ -26,7 +23,7 @@ fn assigned_promise_success_delegates_without_a_follower() {
     let values = isolated_values();
     let context = EvalContext::isolated(values.clone());
     let poll = EvaluationPollContext::for_context(&context);
-    let (promise, mut computation) = promise_computation(&values, "assigned success");
+    let (promise, mut computation) = promise_computation(&values);
     crate::core::set_test_promise(&values, &promise, Value::Number(47.into()))
         .expect_without_debug("promise should accept one assignment");
 
@@ -48,7 +45,7 @@ fn assigned_promise_failure_remains_the_original_structured_failure() {
     let values = isolated_values();
     let context = EvalContext::isolated(values.clone());
     let poll = EvaluationPollContext::for_context(&context);
-    let (promise, mut computation) = promise_computation(&values, "assigned failure");
+    let (promise, mut computation) = promise_computation(&values);
     let failure = Arc::new(EvaluationFailure::message("promise failed"));
     crate::core::fail_test_promise(&values, &promise, failure.clone())
         .expect_without_debug("promise should accept one failure");
@@ -68,7 +65,7 @@ fn repeated_assigned_promise_requests_the_canonical_follower() {
     let values = isolated_values();
     let context = EvalContext::isolated(values.clone());
     let poll = EvaluationPollContext::for_context(&context);
-    let (promise, mut computation) = promise_computation(&values, "assigned recursion");
+    let (promise, mut computation) = promise_computation(&values);
     crate::core::set_test_promise(
         &values,
         &promise,
@@ -92,7 +89,7 @@ fn unassigned_promise_leaves_as_its_exact_root_then_resumes_after_assignment() {
     let values = isolated_values();
     let context = EvalContext::isolated(values.clone());
     let poll = EvaluationPollContext::for_context(&context);
-    let (promise, mut computation) = promise_computation(&values, "unassigned");
+    let (promise, mut computation) = promise_computation(&values);
     let expected_id = poll.with_value_access(&context, |access| access.promise(&promise).id());
 
     let request = poll.with_value_access(&context, |access| {

@@ -139,8 +139,10 @@ which vary by process or heap.
 Lazies, promises and core nets are the only mutable shared identities, so only
 they close cycles; functions do so through their net. Each semantic facade
 (`LazyValue`, `PromisedValue`, `CoreRuntimeNet`) is one `Gc` edge. Durable
-owners hold `Managed{Lazy,Promise,CoreNet}Root`, which copy only the IDs,
-labels and edge-free promise sidecars read without access.
+owners hold `Managed{Lazy,Promise,CoreNet}Root`, which copy only the IDs
+and edge-free promise sidecars read without access. Lazies and promises carry
+no labels: a failure's location comes from the context annotations it passes
+through.
 
 - A lazy cell holds a producer slot (source, checkpoint or panic report) under
   a mutex and a one-write result, published before the producer is released.

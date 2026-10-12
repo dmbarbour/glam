@@ -259,10 +259,10 @@ impl fmt::Display for EvaluationFailure {
             EvaluationFailureKind::DependencyCycle(cycle) => {
                 formatter.write_str("lazy dependency cycle")?;
                 for member in cycle.members.iter() {
-                    write!(formatter, " -> {} ({})", member.id.get(), member.label)?;
+                    write!(formatter, " -> {}", member.get())?;
                 }
                 if let Some(first) = cycle.members.first() {
-                    write!(formatter, " -> {}", first.id.get())?;
+                    write!(formatter, " -> {}", first.get())?;
                 }
                 Ok(())
             }
@@ -272,71 +272,8 @@ impl fmt::Display for EvaluationFailure {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LazyCycle {
-    pub(crate) members: Box<[LazyCycleMember]>,
+    pub(crate) members: Box<[LazyId]>,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LazyCycleMember {
-    pub(crate) id: LazyId,
-    pub(crate) label: LazyLabel,
-}
-
-/// A lazy's label, which diagnostics show. Most lazies take a literal, kept
-/// as it is so that making a lazy allocates no label.
-#[derive(Clone)]
-pub(crate) enum LazyLabel {
-    Static(&'static str),
-    Shared(Arc<str>),
-}
-
-impl std::ops::Deref for LazyLabel {
-    type Target = str;
-
-    fn deref(&self) -> &str {
-        match self {
-            Self::Static(label) => label,
-            Self::Shared(label) => label,
-        }
-    }
-}
-
-impl From<&'static str> for LazyLabel {
-    fn from(label: &'static str) -> Self {
-        Self::Static(label)
-    }
-}
-
-impl From<String> for LazyLabel {
-    fn from(label: String) -> Self {
-        Self::Shared(Arc::from(label))
-    }
-}
-
-impl From<Arc<str>> for LazyLabel {
-    fn from(label: Arc<str>) -> Self {
-        Self::Shared(label)
-    }
-}
-
-impl std::fmt::Debug for LazyLabel {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(&**self, formatter)
-    }
-}
-
-impl std::fmt::Display for LazyLabel {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(&**self, formatter)
-    }
-}
-
-impl PartialEq for LazyLabel {
-    fn eq(&self, other: &Self) -> bool {
-        **self == **other
-    }
-}
-
-impl Eq for LazyLabel {}
 
 pub struct LazyValue {
     edge: managed::ManagedLazyEdge,
@@ -858,61 +795,47 @@ impl LazyValue {
         values.with_runtime_value_access(|access| self.duplicate_in(&access))
     }
 
-    fn with_source_in(
-        access: &RuntimeValueAccess<'_>,
-        label: impl Into<LazyLabel>,
-        source: LazySource,
-    ) -> Self {
+    fn with_source_in(access: &RuntimeValueAccess<'_>, source: LazySource) -> Self {
         access
-            .construct_managed_lazy(label, source)
+            .construct_managed_lazy(source)
             .expect("managed lazy representation must fit one collector run")
     }
 
     pub(crate) fn computed_fixpoint_in(
         access: &RuntimeValueAccess<'_>,
-        label: impl Into<LazyLabel>,
         computation: FixpointComputation,
     ) -> Self {
-        Self::with_source_in(
-            access,
-            label,
-            LazySource::ComputedFixpoint(Arc::new(computation)),
-        )
+        Self::with_source_in(access, LazySource::ComputedFixpoint(Arc::new(computation)))
     }
 
     #[cfg(test)]
     pub(crate) fn computed_fixpoint(
         values: &CoreValueFactory,
-        label: impl Into<LazyLabel>,
         computation: FixpointComputation,
     ) -> Self {
-        values.with_runtime_value_access(|access| {
-            Self::computed_fixpoint_in(&access, label, computation)
-        })
+        values.with_runtime_value_access(|access| Self::computed_fixpoint_in(&access, computation))
     }
 
     #[cfg(test)]
     pub(crate) fn semantic_thunk_in(
         access: &RuntimeValueAccess<'_>,
-        label: impl Into<LazyLabel>,
         thunk: impl Fn(&EvaluatorStepContext<'_>) -> Result<Value, EvaluationHalt>
         + Send
         + Sync
         + 'static,
     ) -> Self {
-        Self::with_source_in(access, label, LazySource::SemanticThunk(Arc::new(thunk)))
+        Self::with_source_in(access, LazySource::SemanticThunk(Arc::new(thunk)))
     }
 
     #[cfg(test)]
     pub(crate) fn semantic_thunk(
         values: &CoreValueFactory,
-        label: impl Into<LazyLabel>,
         thunk: impl Fn(&EvaluatorStepContext<'_>) -> Result<Value, EvaluationHalt>
         + Send
         + Sync
         + 'static,
     ) -> Self {
-        values.with_runtime_value_access(|access| Self::semantic_thunk_in(&access, label, thunk))
+        values.with_runtime_value_access(|access| Self::semantic_thunk_in(&access, thunk))
     }
 
     /// Defers callback-free test work with every recursive value capture
@@ -923,25 +846,22 @@ impl LazyValue {
     #[cfg(test)]
     pub(crate) fn semantic_computation(
         values: &CoreValueFactory,
-        label: impl Into<LazyLabel>,
         captures: impl Into<Arc<[Value]>>,
         operation: SemanticOperation,
     ) -> Self {
         values.with_runtime_value_access(|access| {
-            Self::semantic_computation_in(&access, label, captures, operation)
+            Self::semantic_computation_in(&access, captures, operation)
         })
     }
 
     #[cfg(test)]
     pub(crate) fn semantic_computation_in(
         access: &RuntimeValueAccess<'_>,
-        label: impl Into<LazyLabel>,
         captures: impl Into<Arc<[Value]>>,
         operation: SemanticOperation,
     ) -> Self {
         Self::with_source_in(
             access,
-            label,
             LazySource::SemanticComputation(Arc::new(SemanticComputation {
                 operation,
                 captures: captures.into(),
@@ -951,12 +871,10 @@ impl LazyValue {
 
     pub(crate) fn list_effect_computation_in(
         access: &RuntimeValueAccess<'_>,
-        label: impl Into<LazyLabel>,
         computation: ListEffectComputation,
     ) -> Self {
         Self::with_source_in(
             access,
-            label,
             LazySource::ListEffectComputation(Arc::new(computation)),
         )
     }
@@ -964,7 +882,6 @@ impl LazyValue {
     #[cfg(test)]
     pub(crate) fn external_host_call(
         values: &CoreValueFactory,
-        label: impl Into<LazyLabel>,
         record: HostCallRecord,
         captures: impl Into<Arc<[Value]>>,
         producer: impl Fn(HostCallRootBundle) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>>
@@ -973,13 +890,12 @@ impl LazyValue {
         + 'static,
     ) -> Self {
         values.with_runtime_value_access(|access| {
-            Self::external_host_call_in(&access, label, record, captures, producer)
+            Self::external_host_call_in(&access, record, captures, producer)
         })
     }
 
     pub(crate) fn external_host_call_in(
         access: &RuntimeValueAccess<'_>,
-        label: impl Into<LazyLabel>,
         record: HostCallRecord,
         captures: impl Into<Arc<[Value]>>,
         producer: impl Fn(HostCallRootBundle) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>>
@@ -1002,7 +918,6 @@ impl LazyValue {
             }));
         Self::with_source_in(
             access,
-            label,
             LazySource::HostCall(Arc::new(HostCallProducer {
                 handle,
                 record,
@@ -1014,7 +929,6 @@ impl LazyValue {
     #[cfg(test)]
     pub(crate) fn host_call(
         values: &CoreValueFactory,
-        label: impl Into<LazyLabel>,
         producer: impl Fn(HostCallRootBundle) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>>
         + Send
         + Sync
@@ -1022,7 +936,6 @@ impl LazyValue {
     ) -> Self {
         Self::external_host_call(
             values,
-            label,
             HostCallRecord::external_without_semantic_values(
                 "host-call test fixture",
                 "test source",
@@ -1036,7 +949,6 @@ impl LazyValue {
     #[cfg(test)]
     pub(crate) fn host_call_in(
         access: &RuntimeValueAccess<'_>,
-        label: impl Into<LazyLabel>,
         producer: impl Fn(HostCallRootBundle) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>>
         + Send
         + Sync
@@ -1044,7 +956,6 @@ impl LazyValue {
     ) -> Self {
         Self::external_host_call_in(
             access,
-            label,
             HostCallRecord::external_without_semantic_values(
                 "host-call test fixture",
                 "test source",
@@ -1061,20 +972,15 @@ impl LazyValue {
     }
 
     pub(crate) fn error_in(access: &RuntimeValueAccess<'_>, message: impl Into<Arc<str>>) -> Self {
-        Self::failure_in(
-            access,
-            "error",
-            Arc::new(EvaluationFailure::message(message.into())),
-        )
+        Self::failure_in(access, Arc::new(EvaluationFailure::message(message.into())))
     }
 
     pub(crate) fn failure_in(
         access: &RuntimeValueAccess<'_>,
-        label: impl Into<LazyLabel>,
         failure: Arc<EvaluationFailure>,
     ) -> Self {
         access
-            .construct_failed_managed_lazy(label, failure)
+            .construct_failed_managed_lazy(failure)
             .expect("managed lazy representation must fit one collector run")
     }
 
@@ -1139,17 +1045,18 @@ impl PromisedValue {
     }
 
     #[cfg(test)]
-    pub(crate) fn new(values: &CoreValueFactory, label: impl Into<Arc<str>>) -> Self {
-        Self::with_cell(values, label)
+    pub(crate) fn new(values: &CoreValueFactory) -> Self {
+        values.with_runtime_value_access(|access| {
+            access
+                .construct_managed_promise()
+                .expect("managed promise representation must fit one collector run")
+        })
     }
 
-    pub(crate) fn fixpoint(
-        context: &EvalContext,
-        label: impl Into<Arc<str>>,
-    ) -> Result<Self, Arc<str>> {
+    pub(crate) fn fixpoint(context: &EvalContext) -> Result<Self, Arc<str>> {
         let (promise, root) = context.values().with_runtime_value_access(|access| {
             let root = access
-                .construct_rooted_managed_promise(label)
+                .construct_rooted_managed_promise()
                 .expect("managed promise representation must fit one collector run");
             let promise = Self::from_root(&root, &access);
             (promise, root)
@@ -1160,16 +1067,6 @@ impl PromisedValue {
             .with_runtime_value_access(|access| root.install_producer(&access, &producer))
             .map_err(|_| Arc::<str>::from("promise producer was installed twice"))?;
         Ok(promise)
-    }
-
-    #[cfg(test)]
-    fn with_cell(values: &CoreValueFactory, label: impl Into<Arc<str>>) -> Self {
-        let label = label.into();
-        values.with_runtime_value_access(|access| {
-            access
-                .construct_managed_promise(label)
-                .expect("managed promise representation must fit one collector run")
-        })
     }
 
     pub(crate) fn access<'access, 'scope>(
@@ -1957,10 +1854,7 @@ impl ReflectionComputation {
         completion: ReflectionCompletionKind,
     ) -> Self {
         let completion_promise = access
-            .construct_managed_promise(match completion {
-                ReflectionCompletionKind::Gate => "reflection annotation completion",
-                ReflectionCompletionKind::ReturnValue => "reflection task result completion",
-            })
+            .construct_managed_promise()
             .expect("managed reflection completion promise must fit one collector run");
         Self {
             effect,
@@ -2001,7 +1895,7 @@ impl LazyValue {
         path: Arc<[CoreDataKey]>,
         arguments: Arc<[Value]>,
     ) -> Self {
-        Self::with_source_in(access, "access", LazySource::Access { path, arguments })
+        Self::with_source_in(access, LazySource::Access { path, arguments })
     }
 
     #[cfg(test)]
@@ -2024,7 +1918,6 @@ impl LazyValue {
         );
         Self::with_source_in(
             access,
-            "application",
             LazySource::Application(Arc::new(LazyApplication {
                 function,
                 arguments,
@@ -2044,7 +1937,7 @@ impl LazyValue {
     }
 
     pub(crate) fn from_builtin_in(access: &RuntimeValueAccess<'_>, call: BuiltinCall) -> Self {
-        Self::with_source_in(access, "builtin call", LazySource::Builtin(call))
+        Self::with_source_in(access, LazySource::Builtin(call))
     }
 
     pub(crate) fn from_function_call_in(
@@ -2054,7 +1947,6 @@ impl LazyValue {
     ) -> Self {
         Self::with_source_in(
             access,
-            "function call",
             LazySource::FunctionCall {
                 stage: function.into_stage(),
                 arguments,
@@ -2071,7 +1963,6 @@ impl LazyValue {
     ) -> Self {
         Self::with_source_in(
             access,
-            "net computation",
             LazySource::FunctionCall {
                 stage: code,
                 arguments: captures,
@@ -2080,7 +1971,7 @@ impl LazyValue {
     }
 
     pub(crate) fn from_net_computation_in(access: &RuntimeValueAccess<'_>, net: NetValue) -> Self {
-        Self::with_source_in(access, "net computation", LazySource::NetComputation(net))
+        Self::with_source_in(access, LazySource::NetComputation(net))
     }
 
     #[cfg(test)]
@@ -2095,7 +1986,6 @@ impl LazyValue {
     ) -> Self {
         Self::with_source_in(
             access,
-            "reflection annotation",
             LazySource::ReflectionTask(Arc::new(ReflectionComputation::gate(
                 access, effect, target,
             ))),
@@ -2398,19 +2288,17 @@ impl Value {
     #[cfg(test)]
     pub(crate) fn semantic_thunk(
         values: &CoreValueFactory,
-        label: impl Into<LazyLabel>,
         thunk: impl Fn(&EvaluatorStepContext<'_>) -> Result<Value, EvaluationHalt>
         + Send
         + Sync
         + 'static,
     ) -> Self {
-        Self::Lazy(LazyValue::semantic_thunk(values, label, thunk))
+        Self::Lazy(LazyValue::semantic_thunk(values, thunk))
     }
 
     #[cfg(test)]
     pub(crate) fn external_host_call(
         values: &CoreValueFactory,
-        label: impl Into<LazyLabel>,
         record: HostCallRecord,
         captures: impl Into<Arc<[Value]>>,
         producer: impl Fn(HostCallRootBundle) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>>
@@ -2419,7 +2307,7 @@ impl Value {
         + 'static,
     ) -> Self {
         Self::Lazy(LazyValue::external_host_call(
-            values, label, record, captures, producer,
+            values, record, captures, producer,
         ))
     }
 
@@ -2444,7 +2332,6 @@ impl Value {
     ) -> Self {
         Self::Lazy(LazyValue::with_source_in(
             access,
-            "reflection task result",
             LazySource::ReflectionTask(Arc::new(ReflectionComputation::return_value(
                 access, effect,
             ))),
@@ -3442,18 +3329,15 @@ mod tests {
             &Ok::<Option<Value>, Value>(Some(Value::Number(4.into())))
         ));
 
-        let lazy =
-            LazyValue::semantic_thunk(&factory, "assertion lazy", |_| Ok(Value::Number(5.into())));
+        let lazy = LazyValue::semantic_thunk(&factory, |_| Ok(Value::Number(5.into())));
         let lazy_alias = lazy.duplicate_for_test(&factory);
-        let other_lazy = LazyValue::semantic_thunk(&factory, "other assertion lazy", |_| {
-            Ok(Value::Number(5.into()))
-        });
+        let other_lazy = LazyValue::semantic_thunk(&factory, |_| Ok(Value::Number(5.into())));
         factory.assert_same_representation_for_test(&lazy, &lazy_alias);
         assert!(!factory.same_representation_for_test(&lazy, &other_lazy));
 
-        let promise = PromisedValue::new(&factory, "assertion promise");
+        let promise = PromisedValue::new(&factory);
         let promise_alias = promise.duplicate_for_test(&factory);
-        let other_promise = PromisedValue::new(&factory, "other assertion promise");
+        let other_promise = PromisedValue::new(&factory);
         factory.assert_same_representation_for_test(&promise, &promise_alias);
         assert!(!factory.same_representation_for_test(&promise, &other_promise));
 
@@ -3846,7 +3730,7 @@ mod tests {
         let values = values();
         let dropped = Arc::new(AtomicBool::new(false));
         let signal = DropSignal(dropped.clone());
-        let lazy = LazyValue::semantic_thunk(&values, "source release", move |evaluator| {
+        let lazy = LazyValue::semantic_thunk(&values, move |evaluator| {
             let _keep_signal_captured = &signal;
             Ok(evaluator.with_value_access(|access| access.values().unit()))
         });
@@ -3989,7 +3873,7 @@ mod tests {
             let lazy = Value::Lazy(LazyValue::error_in(&access, "duplicate lazy"));
             let promise = Value::Promised(
                 access
-                    .construct_managed_promise("duplicate promise")
+                    .construct_managed_promise()
                     .expect("the managed promise fixture should fit one slot"),
             );
             let net = Value::Net(NetValue::new(
@@ -4126,7 +4010,7 @@ mod tests {
 
         values.with_runtime_value_access(|access| {
             let demand_signal = Arc::clone(&demanded);
-            let lazy = LazyValue::semantic_thunk_in(&access, "key conversion probe", move |_| {
+            let lazy = LazyValue::semantic_thunk_in(&access, move |_| {
                 demand_signal.store(true, Ordering::Release);
                 Ok(Value::Number(99.into()))
             });
@@ -4174,14 +4058,10 @@ mod tests {
 
         values.with_runtime_value_access(|access| {
             let demand_signal = Arc::clone(&demanded);
-            let lazy = Value::Lazy(LazyValue::semantic_thunk_in(
-                &access,
-                "representation comparison probe",
-                move |_| {
-                    demand_signal.store(true, Ordering::Release);
-                    Ok(Value::Number(99.into()))
-                },
-            ));
+            let lazy = Value::Lazy(LazyValue::semantic_thunk_in(&access, move |_| {
+                demand_signal.store(true, Ordering::Release);
+                Ok(Value::Number(99.into()))
+            }));
             let lazy_alias = access.duplicate_value(&lazy);
             let distinct_lazy = Value::Lazy(LazyValue::error_in(
                 &access,
@@ -4272,17 +4152,13 @@ mod tests {
 
         values.with_runtime_value_access(|access| {
             let demand_signal = Arc::clone(&demanded);
-            let lazy = Value::Lazy(LazyValue::semantic_thunk_in(
-                &access,
-                "private lazy diagnostic label",
-                move |_| {
-                    demand_signal.store(true, Ordering::Release);
-                    Ok(Value::binary_from_text("forced lazy payload"))
-                },
-            ));
+            let lazy = Value::Lazy(LazyValue::semantic_thunk_in(&access, move |_| {
+                demand_signal.store(true, Ordering::Release);
+                Ok(Value::binary_from_text("forced lazy payload"))
+            }));
             let promise = Value::Promised(
                 access
-                    .construct_managed_promise("private promise diagnostic label")
+                    .construct_managed_promise()
                     .expect("the diagnostic promise fixture should fit one managed slot"),
             );
             let net = Value::Net(NetValue::new(
@@ -4344,8 +4220,6 @@ mod tests {
                 );
             }
             for hidden in [
-                "private lazy diagnostic label",
-                "private promise diagnostic label",
                 "private list-tail diagnostic label",
                 "forced lazy payload",
                 "hidden metadata",
@@ -4421,7 +4295,7 @@ mod tests {
         // This semantic shape is reclaimed by the managed-promise metadata and
         // persistent-container fixtures in the GC integration suite.
         let values = values();
-        let promise = PromisedValue::new(&values, "metadata collection cycle");
+        let promise = PromisedValue::new(&values);
         let metadata = metadata_carrier(
             &values,
             Value::List(List::from_values(vec![Value::Promised(
@@ -4447,7 +4321,7 @@ mod tests {
             RuntimeIds::new(),
         );
         let domain = Arc::downgrade(values.value_domain());
-        let _promise = PromisedValue::new(&values, "weak publication authority");
+        let _promise = PromisedValue::new(&values);
 
         drop(values);
 
@@ -4467,8 +4341,8 @@ mod tests {
     #[test]
     fn evaluated_values_reject_deferred_outer_shells_only() {
         let values = values();
-        let field = Value::semantic_thunk(&values, "lazy field", |_| Ok(Value::Number(1.into())));
-        let promise = PromisedValue::new(&values, "promised field");
+        let field = Value::semantic_thunk(&values, |_| Ok(Value::Number(1.into())));
+        let promise = PromisedValue::new(&values);
         let container = Value::Dict(Dict::new_sync().insert(
             Key::atom_from_text("field"),
             field.duplicate_for_test(&values),
@@ -4501,8 +4375,8 @@ mod tests {
     #[test]
     fn promised_assignments_retain_deferred_aliases() {
         let values = values();
-        let target = PromisedValue::new(&values, "target");
-        let forwarding = PromisedValue::new(&values, "forwarding");
+        let target = PromisedValue::new(&values);
+        let forwarding = PromisedValue::new(&values);
         assert!(
             set_test_promise(&values, &forwarding, Value::Promised(target)).is_ok(),
             "new promise should accept its target"
@@ -4513,7 +4387,7 @@ mod tests {
             Some(Ok(Value::Promised(_)))
         ));
 
-        let ready = PromisedValue::new(&values, "ready");
+        let ready = PromisedValue::new(&values);
         assert!(
             set_test_promise(&values, &ready, Value::Number(42.into())).is_ok(),
             "new promise should accept its value"
@@ -4527,28 +4401,18 @@ mod tests {
     }
 
     #[test]
-    fn lazy_cycle_failures_retain_member_identity_and_labels() {
+    fn lazy_cycle_failures_retain_member_identity() {
         let values = values();
         let first = LazyValue::error(&values, "first failure");
         let second = LazyValue::error(&values, "second failure");
         let cycle = EvaluationFailure::dependency_cycle(Arc::new(LazyCycle {
-            members: vec![
-                LazyCycleMember {
-                    id: first.id(&values),
-                    label: "first".into(),
-                },
-                LazyCycleMember {
-                    id: second.id(&values),
-                    label: "second".into(),
-                },
-            ]
-            .into_boxed_slice(),
+            members: vec![first.id(&values), second.id(&values)].into_boxed_slice(),
         }));
 
         assert_eq!(
             cycle.to_string(),
             format!(
-                "lazy dependency cycle -> {} (first) -> {} (second) -> {}",
+                "lazy dependency cycle -> {} -> {} -> {}",
                 first.id(&values).get(),
                 second.id(&values).get(),
                 first.id(&values).get()
@@ -4608,12 +4472,12 @@ mod tests {
         values.with_runtime_value_access(|access| {
             let lazy = Value::Lazy(
                 access
-                    .construct_managed_lazy("number", LazySource::Error)
+                    .construct_managed_lazy(LazySource::Error)
                     .expect("the lazy fixture should fit one collector run"),
             );
             let promise = Value::Promised(
                 access
-                    .construct_managed_promise("number")
+                    .construct_managed_promise()
                     .expect("the promise fixture should fit one collector run"),
             );
             assert_eq!(access.key_from_value(&lazy), None);

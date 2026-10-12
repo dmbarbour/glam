@@ -99,19 +99,17 @@ pub(super) fn apply_builtin_in(
         | Builtin::ListEffectAlt
         | Builtin::ListEffectCut
         | Builtin::ListEffectFix => {
-            let deferred_list = |label: &'static str, computation: ListEffectComputation| {
+            let deferred_list = |computation: ListEffectComputation| {
                 List::from_thunk(
-                    LazyValue::list_effect_computation_in(access.values(), label, computation)
-                        .into(),
+                    LazyValue::list_effect_computation_in(access.values(), computation).into(),
                 )
             };
             match builtin {
                 Builtin::ListEffect => {
                     let [effect] = exact(arguments, "list effect")?;
-                    Ok(Value::List(deferred_list(
-                        "list effect",
-                        ListEffectComputation::Run { effect },
-                    )))
+                    Ok(Value::List(deferred_list(ListEffectComputation::Run {
+                        effect,
+                    })))
                 }
                 Builtin::ListEffectReturn => {
                     let [value] = exact(arguments, "list effect return")?;
@@ -119,12 +117,8 @@ pub(super) fn apply_builtin_in(
                 }
                 Builtin::ListEffectSeq => {
                     let [operation, continuation] = exact(arguments, "list effect seq")?;
-                    let results = deferred_list(
-                        "list effect",
-                        ListEffectComputation::Run { effect: operation },
-                    );
+                    let results = deferred_list(ListEffectComputation::Run { effect: operation });
                     Ok(Value::List(deferred_list(
-                        "list effect seq",
                         ListEffectComputation::Sequence {
                             results,
                             continuation,
@@ -133,23 +127,19 @@ pub(super) fn apply_builtin_in(
                 }
                 Builtin::ListEffectAlt => {
                     let [left, right] = exact(arguments, "list effect alt")?;
-                    let left =
-                        deferred_list("list effect", ListEffectComputation::Run { effect: left });
-                    let right =
-                        deferred_list("list effect", ListEffectComputation::Run { effect: right });
+                    let left = deferred_list(ListEffectComputation::Run { effect: left });
+                    let right = deferred_list(ListEffectComputation::Run { effect: right });
                     Ok(Value::List(List::concat(left, right)))
                 }
                 Builtin::ListEffectCut => {
                     let [operation] = exact(arguments, "list effect cut")?;
-                    Ok(Value::List(deferred_list(
-                        "list effect cut",
-                        ListEffectComputation::Cut { operation },
-                    )))
+                    Ok(Value::List(deferred_list(ListEffectComputation::Cut {
+                        operation,
+                    })))
                 }
                 Builtin::ListEffectFix => {
                     let [function] = exact(arguments, "list effect fix")?;
                     Ok(Value::List(deferred_list(
-                        "list effect fix",
                         ListEffectComputation::FixFunction {
                             function,
                             alternative: 0,

@@ -167,8 +167,8 @@ control-flow overview.
   rotated to the lowest `LazyId`, poisoned with one shared structured failure,
   and cleared. Any cycle involving a promise remains retryable, quiescent
   scheduler state and may only become a session-level deadlock; poisoning a
-  lazy from such a temporary dependency would be unsound. Deferred labels and
-  IDs belong in internal cycle diagnostics, never in the public value facade.
+  lazy from such a temporary dependency would be unsound. Deferred IDs belong
+  in internal cycle diagnostics, never in the public value facade.
 - A foreground pump may help exact producers and activated `launch_parent`
   descendants, including across demand sessions, but never arbitrary
   same-session work. A claimed or reserved causal child is `Busy` until a

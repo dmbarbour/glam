@@ -654,6 +654,27 @@ maps the short names used here to file names.
   `Syntax.md` "Errors" (partly).
 - **Recorded in:** PNC4 review PNC4R-001.
 
+### Lazies and promises carry no labels
+`lazies-carry-no-labels` · 2026-10-12 · maintainer · accepted
+- **Context:** every lazy carried a label, a name for what it computes,
+  copied into each root made for it, and every promise constructor took one
+  (discarded since 2026-09-09). Only a lazy dependency cycle's message read
+  it, and there it named runtime machinery (`net computation`, `builtin
+  call`, `application`), not source. Glam locates a failure with the
+  context annotations it passes through, such as each module definition's
+  origin and line.
+- **Decision:** remove lazy labels and the promise label parameter. A cycle
+  reports its members' lazy ids. The public `promise` constructors keep the
+  host's label, which only their resolver's messages use.
+- **Consequences:**
+  - The lazy cell shrinks from 152 to 128 bytes and its root from 40 to 16;
+    instructions fall 0.5 to 1.8% (`countdown_800` −1.5%, `list_sum_400`
+    −1.8%, `hello_elf` −1.0%), `append_walk_800` +0.15%.
+  - A runtime developer who needs a lazy's construction site could record
+    a `#[track_caller]` location in debug or profiling builds instead.
+- **Rule lives in:** `architecture/values.md` "Recursive Identities".
+- **Recorded in:** structural overheads plan, `perf-lazy-force`.
+
 ## Interaction nets
 
 ### Application nets start with their function copied in

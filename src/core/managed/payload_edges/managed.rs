@@ -272,16 +272,10 @@ mod tests {
         let marker_visits = Arc::new(AtomicUsize::new(0));
         let identity_visits = Arc::new(AtomicUsize::new(0));
 
-        let lazy = LazyValue::semantic_computation(
-            &values,
-            "raw lazy compatibility stop",
-            [marker()],
-            |context, captures| {
-                Ok(context
-                    .with_value_access(|access| access.values().duplicate_value(&captures[0])))
-            },
-        );
-        let promise = PromisedValue::new(&values, "raw promise compatibility stop");
+        let lazy = LazyValue::semantic_computation(&values, [marker()], |context, captures| {
+            Ok(context.with_value_access(|access| access.values().duplicate_value(&captures[0])))
+        });
+        let promise = PromisedValue::new(&values);
         assert!(
             crate::core::set_test_promise(&values, &promise, marker()).is_ok(),
             "the fresh raw promise should accept one assignment"

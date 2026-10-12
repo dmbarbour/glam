@@ -30,9 +30,7 @@ fn cached_lazy_success_delegates_to_its_value_without_a_boundary() {
     let context = EvalContext::isolated(values.clone());
     let poll = EvaluationPollContext::for_context(&context);
     let (lazy, mut computation) = lazy_computation(&values, |access| {
-        LazyValue::semantic_thunk_in(access, "cached success", |_| {
-            unreachable!("cached lazy source must not run")
-        })
+        LazyValue::semantic_thunk_in(access, |_| unreachable!("cached lazy source must not run"))
     });
     poll.with_value_access(&context, |access| {
         let root = lazy.root_in(access.values());
@@ -66,7 +64,7 @@ fn cached_lazy_failure_is_published_without_reopening_its_source() {
     let poll = EvaluationPollContext::for_context(&context);
     let failure = std::sync::Arc::new(crate::core::EvaluationFailure::message("cached failure"));
     let (_lazy, mut computation) = lazy_computation(&values, |access| {
-        LazyValue::failure_in(access, "cached failure", failure.clone())
+        LazyValue::failure_in(access, failure.clone())
     });
 
     let outcome = poll.with_value_access(&context, |access| {
@@ -85,7 +83,7 @@ fn uncached_lazy_leaves_as_its_exact_root_and_resumes_from_that_identity() {
     let context = EvalContext::isolated(values.clone());
     let poll = EvaluationPollContext::for_context(&context);
     let (lazy, mut computation) = lazy_computation(&values, |access| {
-        LazyValue::semantic_thunk_in(access, "uncached", |_| {
+        LazyValue::semantic_thunk_in(access, |_| {
             unreachable!("regional inspection must not run the producer")
         })
     });

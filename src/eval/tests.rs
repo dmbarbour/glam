@@ -342,11 +342,11 @@ fn wrapper_application_budget_probe_yields_without_publishing_a_cache() {
 fn object_local_name_resumes_a_lazy_parts_tail_without_replaying_its_name() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (tail, _tail_task, _tail_owner) = owner
-        .task_owned_promise(Arc::from("object local-name parts tail"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised parts tail");
     let name_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&name_demands);
-    let name = Value::semantic_thunk(observer.values(), "instrumented object name", move |_| {
+    let name = Value::semantic_thunk(observer.values(), move |_| {
         observed.fetch_add(1, Ordering::SeqCst);
         Ok(Value::binary_from_text("root"))
     });
@@ -406,13 +406,13 @@ fn object_local_name_resumes_a_lazy_parts_tail_without_replaying_its_name() {
 fn object_with_defs_resumes_a_promised_spec_without_replaying_its_object() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (spec, _spec_task, _spec_owner) = owner
-        .task_owned_promise(Arc::from("object extension specification"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised object specification");
     let object_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&object_demands);
     let values = observer.values().clone();
     let object_spec = spec.duplicate_for_test(&values);
-    let object = Value::semantic_thunk(observer.values(), "instrumented object", move |_| {
+    let object = Value::semantic_thunk(observer.values(), move |_| {
         observed.fetch_add(1, Ordering::SeqCst);
         Ok(Value::Dict(Dict::new_sync().insert(
             (*keys::SPEC).clone(),
@@ -483,24 +483,20 @@ fn object_with_defs_resumes_a_promised_spec_without_replaying_its_object() {
 fn composed_object_defs_resume_the_extension_without_replaying_prior_defs() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (extension, _extension_task, _extension_owner) = owner
-        .task_owned_promise(Arc::from("composed object extension"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised extension");
     let prior_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&prior_demands);
-    let prior = Value::semantic_thunk(
-        observer.values(),
-        "instrumented prior defs",
-        move |context| {
-            observed.fetch_add(1, Ordering::SeqCst);
-            Ok(closed_function_value_in(
-                context.context().values(),
-                2,
-                TestExpr::Value(Value::Dict(
-                    Dict::new_sync().insert(Key::binary_from_text("prior"), n(19)),
-                )),
-            ))
-        },
-    );
+    let prior = Value::semantic_thunk(observer.values(), move |context| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(closed_function_value_in(
+            context.context().values(),
+            2,
+            TestExpr::Value(Value::Dict(
+                Dict::new_sync().insert(Key::binary_from_text("prior"), n(19)),
+            )),
+        ))
+    });
     let application = apply_values(
         &observer,
         Value::Builtin(Builtin::ObjectComposedDefs),
@@ -561,48 +557,39 @@ fn composed_object_defs_resume_the_extension_without_replaying_prior_defs() {
 fn object_override_resumes_a_nested_prior_without_replaying_completed_prefix() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (nested_prior, _prior_task, _prior_owner) = owner
-        .task_owned_promise(Arc::from("nested object override prior"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised nested prior value");
     let update_demands = Arc::new(AtomicUsize::new(0));
     let observed_updates = Arc::clone(&update_demands);
-    let updates =
-        Value::semantic_thunk(
-            observer.values(),
-            "instrumented object override updates",
-            move |_| {
-                observed_updates.fetch_add(1, Ordering::SeqCst);
-                Ok(Value::Dict(
-                    Dict::new_sync()
-                        .insert(Key::binary_from_text("a_early"), n(42))
-                        .insert(
-                            Key::binary_from_text("z_nested"),
-                            Value::Dict(Dict::new_sync().insert(
-                                Key::binary_from_text("new"),
-                                Value::binary_from_text("new"),
-                            )),
-                        ),
-                ))
-            },
-        );
+    let updates = Value::semantic_thunk(observer.values(), move |_| {
+        observed_updates.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::Dict(
+            Dict::new_sync()
+                .insert(Key::binary_from_text("a_early"), n(42))
+                .insert(
+                    Key::binary_from_text("z_nested"),
+                    Value::Dict(
+                        Dict::new_sync()
+                            .insert(Key::binary_from_text("new"), Value::binary_from_text("new")),
+                    ),
+                ),
+        ))
+    });
     let base_demands = Arc::new(AtomicUsize::new(0));
     let observed_base = Arc::clone(&base_demands);
     let values = observer.values().clone();
     let nested_prior_value = nested_prior.duplicate_for_test(&values);
-    let base = Value::semantic_thunk(
-        observer.values(),
-        "instrumented object override base",
-        move |_| {
-            observed_base.fetch_add(1, Ordering::SeqCst);
-            Ok(Value::Dict(
-                Dict::new_sync()
-                    .insert(Key::binary_from_text("a_early"), n(19))
-                    .insert(
-                        Key::binary_from_text("z_nested"),
-                        Value::Promised(nested_prior_value.duplicate_for_test(&values)),
-                    ),
-            ))
-        },
-    );
+    let base = Value::semantic_thunk(observer.values(), move |_| {
+        observed_base.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::Dict(
+            Dict::new_sync()
+                .insert(Key::binary_from_text("a_early"), n(19))
+                .insert(
+                    Key::binary_from_text("z_nested"),
+                    Value::Promised(nested_prior_value.duplicate_for_test(&values)),
+                ),
+        ))
+    });
     let application = apply_values(
         &observer,
         Value::Builtin(Builtin::ObjectOverrideDefs),
@@ -700,20 +687,16 @@ fn object_instance_from_parts_builds_through_the_resumable_builtin_owner() {
 fn object_dict_defs_resume_the_dict_without_replaying_the_base() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (dict, _dict_task, _dict_owner) = owner
-        .task_owned_promise(Arc::from("dictionary object definitions"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised definitions dictionary");
     let base_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&base_demands);
-    let base = Value::semantic_thunk(
-        observer.values(),
-        "instrumented object definitions base",
-        move |_| {
-            observed.fetch_add(1, Ordering::SeqCst);
-            Ok(Value::Dict(
-                Dict::new_sync().insert(Key::binary_from_text("base"), n(19)),
-            ))
-        },
-    );
+    let base = Value::semantic_thunk(observer.values(), move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::Dict(
+            Dict::new_sync().insert(Key::binary_from_text("base"), n(19)),
+        ))
+    });
     let application = apply_values(
         &observer,
         Value::Builtin(Builtin::ObjectDictDefs),
@@ -776,27 +759,23 @@ fn object_dict_defs_resume_the_dict_without_replaying_the_base() {
 fn object_from_dict_resumes_a_promised_spec_without_replaying_its_dictionary() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (spec, _spec_task, _spec_owner) = owner
-        .task_owned_promise(Arc::from("plain-dictionary specification"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised specification");
     let dictionary_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&dictionary_demands);
     let values = observer.values().clone();
     let promised_spec = spec.duplicate_for_test(&values);
-    let dictionary = Value::semantic_thunk(
-        observer.values(),
-        "instrumented plain dictionary",
-        move |_| {
-            observed.fetch_add(1, Ordering::SeqCst);
-            Ok(Value::Dict(
-                Dict::new_sync()
-                    .insert(
-                        (*keys::SPEC).clone(),
-                        Value::Promised(promised_spec.duplicate_for_test(&values)),
-                    )
-                    .insert(Key::binary_from_text("answer"), n(42)),
-            ))
-        },
-    );
+    let dictionary = Value::semantic_thunk(observer.values(), move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::Dict(
+            Dict::new_sync()
+                .insert(
+                    (*keys::SPEC).clone(),
+                    Value::Promised(promised_spec.duplicate_for_test(&values)),
+                )
+                .insert(Key::binary_from_text("answer"), n(42)),
+        ))
+    });
     let application = apply_values(
         &observer,
         Value::Builtin(Builtin::ObjectFromDict),
@@ -984,14 +963,10 @@ fn terminal_lazy_evaluation_releases_successful_and_failed_sources() {
     let context = test_context();
     let success_dropped = Arc::new(AtomicBool::new(false));
     let success_signal = DropSignal(success_dropped.clone());
-    let success = LazyValue::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "successful source release",
-        move |_| {
-            let _keep_signal_captured = &success_signal;
-            Ok(unit_value())
-        },
-    );
+    let success = LazyValue::semantic_thunk(&crate::core::test_value_factory(), move |_| {
+        let _keep_signal_captured = &success_signal;
+        Ok(unit_value())
+    });
 
     context.values().assert_same_representation_for_test(
         &context
@@ -1007,14 +982,10 @@ fn terminal_lazy_evaluation_releases_successful_and_failed_sources() {
 
     let failure_dropped = Arc::new(AtomicBool::new(false));
     let failure_signal = DropSignal(failure_dropped.clone());
-    let failure = LazyValue::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "failed source release",
-        move |_| {
-            let _keep_signal_captured = &failure_signal;
-            Err(EvaluationHalt::new("expected lazy failure"))
-        },
-    );
+    let failure = LazyValue::semantic_thunk(&crate::core::test_value_factory(), move |_| {
+        let _keep_signal_captured = &failure_signal;
+        Err(EvaluationHalt::new("expected lazy failure"))
+    });
 
     let error = context
         .evaluate_compatibility_whnf(&Value::Lazy(failure.duplicate_for_test(context.values())))
@@ -1191,12 +1162,12 @@ fn net_arity_contextualizes_failure_while_demanding_its_arity() {
 #[test]
 fn net_arity_does_not_demand_the_net_before_its_arity() {
     let context = test_context();
-    let arity = PromisedValue::new(context.values(), "net arity");
+    let arity = PromisedValue::new(context.values());
     let net_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&net_demands);
     let net = closed_net(|builder| builder.data(n(42)));
     let values = context.values().clone();
-    let net = Value::semantic_thunk(context.values(), "instrumented net", move |_| {
+    let net = Value::semantic_thunk(context.values(), move |_| {
         observed.fetch_add(1, Ordering::SeqCst);
         Ok(Value::Net(net.duplicate_for_test(&values)))
     });
@@ -1232,11 +1203,11 @@ fn net_arity_resumes_its_net_without_replaying_the_completed_arity() {
     let context = isolated_test_context();
     let arity_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&arity_demands);
-    let arity = Value::semantic_thunk(context.values(), "instrumented arity", move |_| {
+    let arity = Value::semantic_thunk(context.values(), move |_| {
         observed.fetch_add(1, Ordering::SeqCst);
         Ok(n(1))
     });
-    let net = PromisedValue::new(context.values(), "net-arity net");
+    let net = PromisedValue::new(context.values());
     let application = apply_values(
         &context,
         Value::Builtin(Builtin::NetArity),
@@ -1550,18 +1521,15 @@ fn function_application_accepts_a_cursor_backed_function_argument_without_forcin
 #[test]
 fn batched_application_spine_keeps_unused_arguments_lazy() {
     let forced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let lazy_argument = |label: &'static str| {
+    let lazy_argument = || {
         let forced = forced.clone();
-        Value::semantic_thunk(&crate::core::test_value_factory(), label, move |_| {
+        Value::semantic_thunk(&crate::core::test_value_factory(), move |_| {
             forced.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(n(99))
         })
     };
     let function = closed_function_value(3, TestExpr::Local(2));
-    let application = apply_test_values(
-        function,
-        [n(11), lazy_argument("second"), lazy_argument("third")],
-    );
+    let application = apply_test_values(function, [n(11), lazy_argument(), lazy_argument()]);
 
     crate::core::test_value_factory().assert_same_representation_for_test(
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&test_context(), &application)
@@ -1625,7 +1593,7 @@ fn same_runtime_contexts() -> (
 #[test]
 fn promised_values_fail_fast_without_poisoning_later_assignment() {
     let context = test_context();
-    let promised = PromisedValue::new(&crate::core::test_value_factory(), "test promised value");
+    let promised = PromisedValue::new(&crate::core::test_value_factory());
     let value = Value::Promised(promised.duplicate_for_test(context.values()));
 
     assert_eq!(
@@ -1645,23 +1613,17 @@ fn promised_values_fail_fast_without_poisoning_later_assignment() {
 #[test]
 fn deferred_computation_blockage_does_not_poison_its_lazy_cache() {
     let session = test_context();
-    let (promise, _owner_task, _owner) = session
-        .task_owned_promise(Arc::from("deferred computation input"))
-        .unwrap();
+    let (promise, _owner_task, _owner) = session.task_owned_promise().unwrap();
     let observer = session.with_new_task().unwrap();
     let promised_value = Value::Promised(promise.duplicate_for_test(observer.values()));
     let attempts = Arc::new(AtomicUsize::new(0));
     let counted_attempts = attempts.clone();
-    let lazy = LazyValue::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "promise-demanding deferred computation",
-        move |context| {
-            counted_attempts.fetch_add(1, Ordering::SeqCst);
-            context
-                .context()
-                .evaluate_compatibility_whnf(&promised_value)
-        },
-    );
+    let lazy = LazyValue::semantic_thunk(&crate::core::test_value_factory(), move |context| {
+        counted_attempts.fetch_add(1, Ordering::SeqCst);
+        context
+            .context()
+            .evaluate_compatibility_whnf(&promised_value)
+    });
     let value = Value::Lazy(lazy.duplicate_for_test(observer.values()));
 
     let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value)
@@ -1718,20 +1680,16 @@ fn deferred_computation_caches_one_structured_failure() {
     let thunk_frame = frame.duplicate_for_test(context.values());
     let attempts = Arc::new(AtomicUsize::new(0));
     let counted_attempts = attempts.clone();
-    let lazy = LazyValue::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "structured deferred failure",
-        move |context| {
-            counted_attempts.fetch_add(1, Ordering::SeqCst);
-            Err(context
-                .context()
-                .values()
-                .with_runtime_value_access(|access| {
-                    EvaluationHalt::from_value(&access, access.duplicate_value(&thunk_emission))
-                        .with_context(&access, access.duplicate_value(&thunk_frame))
-                }))
-        },
-    );
+    let lazy = LazyValue::semantic_thunk(&crate::core::test_value_factory(), move |context| {
+        counted_attempts.fetch_add(1, Ordering::SeqCst);
+        Err(context
+            .context()
+            .values()
+            .with_runtime_value_access(|access| {
+                EvaluationHalt::from_value(&access, access.duplicate_value(&thunk_emission))
+                    .with_context(&access, access.duplicate_value(&thunk_frame))
+            }))
+    });
     let value = Value::Lazy(lazy.duplicate_for_test(context.values()));
 
     let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
@@ -1770,9 +1728,7 @@ fn deferred_computation_caches_one_structured_failure() {
 #[test]
 fn deferred_list_effect_work_blocks_and_resumes() {
     let session = test_context();
-    let (promise, _owner_task, _owner) = session
-        .task_owned_promise(Arc::from("deferred list effect input"))
-        .unwrap();
+    let (promise, _owner_task, _owner) = session.task_owned_promise().unwrap();
     let observer = session.with_new_task().unwrap();
     let handled = apply_builtin(
         &observer,
@@ -1803,9 +1759,8 @@ fn deferred_list_effect_work_blocks_and_resumes() {
 fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
     let session = test_context();
 
-    let (continuation, _continuation_task, _continuation_owner) = session
-        .task_owned_promise(Arc::from("list effect sequence continuation"))
-        .unwrap();
+    let (continuation, _continuation_task, _continuation_owner) =
+        session.task_owned_promise().unwrap();
     let Value::List(sequence) = apply_values(
         &session,
         Value::Builtin(Builtin::ListEffectSeq),
@@ -1835,9 +1790,7 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
         &[n(42)],
     );
 
-    let (cut_operation, _cut_task, _cut_owner) = session
-        .task_owned_promise(Arc::from("list effect cut operation"))
-        .unwrap();
+    let (cut_operation, _cut_task, _cut_owner) = session.task_owned_promise().unwrap();
     let Value::List(cut) = apply_values(
         &session,
         Value::Builtin(Builtin::ListEffectCut),
@@ -1862,9 +1815,7 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
         &[n(43)],
     );
 
-    let (fix_operation, _fix_task, _fix_owner) = session
-        .task_owned_promise(Arc::from("list effect fix operation"))
-        .unwrap();
+    let (fix_operation, _fix_task, _fix_owner) = session.task_owned_promise().unwrap();
     let fix_function = closed_function_value(
         1,
         TestExpr::Value(Value::Promised(
@@ -1898,22 +1849,18 @@ fn list_effect_recipes_resume_at_sequence_cut_and_fix_boundaries() {
 fn list_effect_fix_defers_function_demand_and_resumes_without_replay() {
     let session = test_context();
     let (function_promise, _function_task, _function_owner) = session
-        .task_owned_promise(Arc::from("list effect fix function"))
+        .task_owned_promise()
         .expect("the owner should allocate the fix function promise");
     let demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&demands);
     let values = session.values().clone();
     let promised_function = function_promise.duplicate_for_test(&values);
-    let function = Value::semantic_thunk(
-        session.values(),
-        "instrumented list effect fix function",
-        move |_| {
-            observed.fetch_add(1, Ordering::SeqCst);
-            Ok(Value::Promised(
-                promised_function.duplicate_for_test(&values),
-            ))
-        },
-    );
+    let function = Value::semantic_thunk(session.values(), move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::Promised(
+            promised_function.duplicate_for_test(&values),
+        ))
+    });
 
     let Value::List(fixed) = apply_values(
         &session,
@@ -1948,7 +1895,7 @@ fn list_effect_fix_defers_function_demand_and_resumes_without_replay() {
 fn interaction_net_builtin_dispatches_into_the_construction_owner() {
     let session = test_context();
     let (promise, _owner_task, _owner) = session
-        .task_owned_promise(Arc::from("pending builtin net effect"))
+        .task_owned_promise()
         .expect("the construction effect should have an owner");
     let observer = session
         .with_new_task()
@@ -1978,14 +1925,10 @@ fn deferred_computation_caches_one_text_failure() {
     let context = test_context();
     let attempts = Arc::new(AtomicUsize::new(0));
     let counted_attempts = attempts.clone();
-    let lazy = LazyValue::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "text deferred failure",
-        move |_| {
-            counted_attempts.fetch_add(1, Ordering::SeqCst);
-            Err(EvaluationHalt::new("text deferred failure"))
-        },
-    );
+    let lazy = LazyValue::semantic_thunk(&crate::core::test_value_factory(), move |_| {
+        counted_attempts.fetch_add(1, Ordering::SeqCst);
+        Err(EvaluationHalt::new("text deferred failure"))
+    });
     let value = Value::Lazy(lazy.duplicate_for_test(context.values()));
 
     let first = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
@@ -2015,23 +1958,19 @@ fn deferred_computation_preserves_context_annotation_frames() {
         (*keys::CONTEXT).clone(),
         frame.duplicate_for_test(context.values()),
     ));
-    let lazy = LazyValue::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "context-annotated deferred failure",
-        move |context| {
-            context.with_value_access(|access| {
-                apply_builtin_in(
-                    &access,
-                    Builtin::Anno,
-                    vec![access.values().duplicate_value(&annotation)],
-                    Value::error(
-                        &crate::core::test_value_factory(),
-                        "annotated deferred failure",
-                    ),
-                )
-            })
-        },
-    );
+    let lazy = LazyValue::semantic_thunk(&crate::core::test_value_factory(), move |context| {
+        context.with_value_access(|access| {
+            apply_builtin_in(
+                &access,
+                Builtin::Anno,
+                vec![access.values().duplicate_value(&annotation)],
+                Value::error(
+                    &crate::core::test_value_factory(),
+                    "annotated deferred failure",
+                ),
+            )
+        })
+    });
 
     let failure =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &Value::Lazy(lazy))
@@ -2045,7 +1984,7 @@ fn deferred_computation_preserves_context_annotation_frames() {
 #[test]
 fn computed_lazy_waits_on_an_empty_promise_without_caching_its_error() {
     let context = test_context();
-    let promise = PromisedValue::new(&crate::core::test_value_factory(), "late assignment");
+    let promise = PromisedValue::new(&crate::core::test_value_factory());
     let lazy = LazyValue::from_access(
         &crate::core::test_value_factory(),
         Arc::from([]),
@@ -2079,7 +2018,7 @@ fn computed_lazy_waits_on_an_empty_promise_without_caching_its_error() {
 #[test]
 fn resolver_failure_exactly_wakes_its_deferred_follower() {
     let context = test_context();
-    let promise = PromisedValue::new(context.values(), "failed resolver input");
+    let promise = PromisedValue::new(context.values());
     let lazy = LazyValue::from_access(
         context.values(),
         Arc::from([]),
@@ -2108,9 +2047,9 @@ fn resolver_failure_exactly_wakes_its_deferred_follower() {
 #[test]
 fn resolver_completion_wakes_only_its_cross_session_deferred_follower() {
     let (owner, observer, _executor) = same_runtime_contexts();
-    let promise_a = PromisedValue::new(owner.values(), "cross-session promise A");
+    let promise_a = PromisedValue::new(owner.values());
     let _promise_a_root = promise_a.root(owner.values());
-    let promise_b = PromisedValue::new(owner.values(), "cross-session promise B");
+    let promise_b = PromisedValue::new(owner.values());
     let _promise_b_root = promise_b.root(owner.values());
     let lazy_for = |promise: &PromisedValue| {
         let lazy = LazyValue::from_access(
@@ -2156,11 +2095,8 @@ fn resolver_completion_wakes_only_its_cross_session_deferred_follower() {
 #[test]
 fn promised_assignment_follows_a_lazy_without_resolving_the_raw_assignment() {
     let context = test_context();
-    let target =
-        LazyValue::semantic_thunk(&crate::core::test_value_factory(), "promise target", |_| {
-            Ok(n(42))
-        });
-    let promise = PromisedValue::new(&crate::core::test_value_factory(), "forwarding promise");
+    let target = LazyValue::semantic_thunk(&crate::core::test_value_factory(), |_| Ok(n(42)));
+    let promise = PromisedValue::new(&crate::core::test_value_factory());
     set_promise(
         &context,
         &promise,
@@ -2195,9 +2131,7 @@ fn promised_assignment_follows_a_lazy_without_resolving_the_raw_assignment() {
 #[test]
 fn promised_failure_preserves_structured_diagnostic_and_identity() {
     let session = test_context();
-    let (promise, _owner_task, _owner) = session
-        .task_owned_promise(Arc::from("structured promise failure"))
-        .unwrap();
+    let (promise, _owner_task, _owner) = session.task_owned_promise().unwrap();
     let observer = session.with_new_task().unwrap();
     let wait = promise
         .task(session.values())
@@ -2255,7 +2189,7 @@ fn promised_failure_preserves_structured_diagnostic_and_identity() {
 #[test]
 fn promise_only_cycle_remains_blocked_without_poisoning_its_assignment() {
     let context = test_context();
-    let promise = PromisedValue::new(&crate::core::test_value_factory(), "promise cycle");
+    let promise = PromisedValue::new(&crate::core::test_value_factory());
     set_promise(
         &context,
         &promise,
@@ -2283,7 +2217,7 @@ fn promise_only_cycle_remains_blocked_without_poisoning_its_assignment() {
 #[test]
 fn mixed_promise_lazy_cycle_remains_retryable_without_poisoning_the_lazy() {
     let context = test_context();
-    let promise = PromisedValue::new(&crate::core::test_value_factory(), "mixed promise");
+    let promise = PromisedValue::new(&crate::core::test_value_factory());
     let lazy = LazyValue::from_access(
         &crate::core::test_value_factory(),
         Arc::from([]),
@@ -2320,9 +2254,7 @@ fn mixed_promise_lazy_cycle_remains_retryable_without_poisoning_the_lazy() {
 #[test]
 fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
     let session = test_context();
-    let (fixpoint, _owner_task, owner) = session
-        .task_owned_promise(Arc::from("test fixpoint"))
-        .unwrap();
+    let (fixpoint, _owner_task, owner) = session.task_owned_promise().unwrap();
     let observer = session.with_new_task().unwrap();
     let wait = fixpoint
         .task(session.values())
@@ -2374,9 +2306,7 @@ fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
 #[test]
 fn failed_task_fails_its_unresolved_fixpoint_promises() {
     let session = test_context();
-    let (fixpoint, owner_task, _owner) = session
-        .task_owned_promise(Arc::from("test fixpoint"))
-        .unwrap();
+    let (fixpoint, owner_task, _owner) = session.task_owned_promise().unwrap();
     let observer = session.with_new_task().unwrap();
     let wait = fixpoint
         .task(session.values())
@@ -2419,9 +2349,7 @@ fn failed_task_fails_its_unresolved_fixpoint_promises() {
 #[test]
 fn panicked_task_leaves_its_fixpoint_promises_unassigned() {
     let session = test_context();
-    let (fixpoint, owner_task, _owner) = session
-        .task_owned_promise(Arc::from("test fixpoint"))
-        .unwrap();
+    let (fixpoint, owner_task, _owner) = session.task_owned_promise().unwrap();
     let observer = session.with_new_task().unwrap();
     let wait = fixpoint
         .task(session.values())
@@ -2455,9 +2383,7 @@ fn panicked_task_leaves_its_fixpoint_promises_unassigned() {
 #[test]
 fn explicitly_failed_task_promise_retires_its_wait_record() {
     let session = test_context();
-    let (fixpoint, _owner_task, _owner) = session
-        .task_owned_promise(Arc::from("test fixpoint"))
-        .unwrap();
+    let (fixpoint, _owner_task, _owner) = session.task_owned_promise().unwrap();
     let wait = fixpoint
         .task(session.values())
         .expect("task-owned fixpoint should expose its wait")
@@ -2481,9 +2407,7 @@ fn explicitly_failed_task_promise_retires_its_wait_record() {
 #[test]
 fn producer_failure_retires_every_owned_promise_wait() {
     let session = test_context();
-    let (promises, owner_task, _owner) = session
-        .task_owned_promises([Arc::from("first fixpoint"), Arc::from("second fixpoint")])
-        .unwrap();
+    let (promises, owner_task, _owner) = session.task_owned_promises(2).unwrap();
     let waits: Vec<_> = promises
         .iter()
         .map(|promise| {
@@ -2513,9 +2437,7 @@ fn producer_failure_retires_every_owned_promise_wait() {
 fn producer_completion_retires_a_dropped_task_promise() {
     let session = test_context();
     let (wait, owner_task) = {
-        let (promise, owner_task, _owner) = session
-            .task_owned_promise(Arc::from("abandoned fixpoint"))
-            .unwrap();
+        let (promise, owner_task, _owner) = session.task_owned_promise().unwrap();
         let wait = promise
             .task(session.values())
             .expect("task-owned fixpoint should expose its wait")
@@ -2547,7 +2469,6 @@ fn value_fixpoint_reports_its_strict_lazy_dependency_cycle() {
     let function = closed_function_value(1, TestExpr::Local(0));
     let fixpoint = Value::Lazy(LazyValue::computed_fixpoint(
         &crate::core::test_value_factory(),
-        "recursive value fixpoint",
         FixpointComputation::Function(function),
     ));
 
@@ -2572,7 +2493,7 @@ fn value_fixpoint_reports_its_strict_lazy_dependency_cycle() {
         cycle
             .members
             .iter()
-            .any(|member| member.id == fixpoint_lazy.id(context.values()))
+            .any(|member| *member == fixpoint_lazy.id(context.values()))
     );
 
     let observer = context.with_new_task().unwrap();
@@ -2600,7 +2521,7 @@ fn fixpoint_builtin_reports_a_strict_lazy_dependency_cycle() {
 fn fixpoint_builtin_resumes_from_its_exact_function_operand() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (function, _owner_task, _owner) = owner
-        .task_owned_promise(Arc::from("fixpoint function"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised function");
     let fixpoint = apply_values(
         &observer,
@@ -2637,7 +2558,6 @@ fn suspended_value_fixpoint_keeps_one_knot_for_concurrent_observers() {
     let function = closed_function_value(1, TestExpr::Value(gate));
     let fixpoint = Value::Lazy(LazyValue::computed_fixpoint(
         &crate::core::test_value_factory(),
-        "suspended value fixpoint",
         FixpointComputation::Function(function),
     ));
 
@@ -2669,17 +2589,13 @@ fn suspended_value_fixpoint_keeps_one_knot_for_concurrent_observers() {
 fn computed_fixpoint_uses_session_local_waits_while_sharing_its_result() {
     let first = test_context();
     let second = test_context();
-    let promise = PromisedValue::new(
-        &crate::core::test_value_factory(),
-        "cross-session fixpoint input",
-    );
+    let promise = PromisedValue::new(&crate::core::test_value_factory());
     let function = closed_function_value(
         1,
         TestExpr::Value(Value::Promised(promise.duplicate_for_test(first.values()))),
     );
     let lazy = LazyValue::computed_fixpoint(
         &crate::core::test_value_factory(),
-        "cross-session value fixpoint",
         FixpointComputation::Function(function),
     );
     let fixpoint = Value::Lazy(lazy.duplicate_for_test(first.values()));
@@ -2718,7 +2634,6 @@ fn computed_fixpoint_preserves_a_forwarded_structured_failure() {
     );
     let fixpoint = LazyValue::computed_fixpoint(
         &crate::core::test_value_factory(),
-        "failed value fixpoint",
         FixpointComputation::Function(function),
     );
 
@@ -2744,23 +2659,19 @@ fn computed_fixpoint_preserves_a_forwarded_structured_failure() {
 fn deferred_values_use_the_runtime_default_context() {
     let context = test_context();
     let expected_context = context.clone();
-    let value = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "context-sensitive test value",
-        move |actual_context| {
-            assert_eq!(
-                actual_context.context().values().runtime_id(),
-                expected_context.values().runtime_id(),
-            );
-            assert!(
-                !actual_context
-                    .context()
-                    .shares_session_with(&expected_context),
-                "lazy production must not be owned by its first observer",
-            );
-            Ok(n(42))
-        },
-    );
+    let value = Value::semantic_thunk(&crate::core::test_value_factory(), move |actual_context| {
+        assert_eq!(
+            actual_context.context().values().runtime_id(),
+            expected_context.values().runtime_id(),
+        );
+        assert!(
+            !actual_context
+                .context()
+                .shares_session_with(&expected_context),
+            "lazy production must not be owned by its first observer",
+        );
+        Ok(n(42))
+    });
 
     context.values().assert_same_representation_for_test(
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
@@ -2773,33 +2684,23 @@ fn forcing_a_lazy_value_reaches_outer_whnf_without_forcing_lazy_fields() {
     let context = test_context();
     let field_forces = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted_field_forces = field_forces.clone();
-    let field = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "lazy dictionary field",
-        move |_| {
-            counted_field_forces.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(n(42))
-        },
-    );
+    let field = Value::semantic_thunk(&crate::core::test_value_factory(), move |_| {
+        counted_field_forces.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(n(42))
+    });
     let values = context.values().clone();
     let expected_field = field.duplicate_for_test(&values);
     let field = field.duplicate_for_test(&values);
-    let forwarded = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "forwarded dictionary",
-        move |_| {
-            Ok(Value::Dict(Dict::new_sync().insert(
-                Key::atom_from_text("field"),
-                field.duplicate_for_test(&values),
-            )))
-        },
-    );
+    let forwarded = Value::semantic_thunk(&crate::core::test_value_factory(), move |_| {
+        Ok(Value::Dict(Dict::new_sync().insert(
+            Key::atom_from_text("field"),
+            field.duplicate_for_test(&values),
+        )))
+    });
     let values = context.values().clone();
-    let root = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "forwarding root",
-        move |_| Ok(forwarded.duplicate_for_test(&values)),
-    );
+    let root = Value::semantic_thunk(&crate::core::test_value_factory(), move |_| {
+        Ok(forwarded.duplicate_for_test(&values))
+    });
 
     let forced = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &root)
         .expect("root should reach dictionary WHNF");
@@ -2819,23 +2720,19 @@ fn guarded_lazy_self_reference_reaches_dictionary_whnf() {
     let self_reference = Arc::new(std::sync::OnceLock::<LazyValue>::new());
     let captured = self_reference.clone();
     let values = context.values().clone();
-    let lazy = LazyValue::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "guarded self reference",
-        move |_| {
-            Ok(Value::Dict(
-                Dict::new_sync().insert(
-                    Key::atom_from_text("tail"),
-                    Value::Lazy(
-                        captured
-                            .get()
-                            .expect("guarded self reference should be installed")
-                            .duplicate_for_test(&values),
-                    ),
+    let lazy = LazyValue::semantic_thunk(&crate::core::test_value_factory(), move |_| {
+        Ok(Value::Dict(
+            Dict::new_sync().insert(
+                Key::atom_from_text("tail"),
+                Value::Lazy(
+                    captured
+                        .get()
+                        .expect("guarded self reference should be installed")
+                        .duplicate_for_test(&values),
                 ),
-            ))
-        },
-    );
+            ),
+        ))
+    });
     self_reference
         .set(lazy.duplicate_for_test(context.values()))
         .expect_without_debug("guarded self reference should be installed once");
@@ -2857,19 +2754,15 @@ fn guarded_lazy_self_reference_reaches_dictionary_whnf() {
 #[test]
 fn lazy_aliases_share_and_cache_their_final_whnf() {
     let context = test_context();
-    let target = Value::semantic_thunk(&crate::core::test_value_factory(), "alias target", |_| {
-        Ok(n(42))
-    });
+    let target = Value::semantic_thunk(&crate::core::test_value_factory(), |_| Ok(n(42)));
     let Value::Lazy(target_lazy) = &target else {
         unreachable!()
     };
     let target_lazy = target_lazy.duplicate_for_test(context.values());
     let values = context.values().clone();
-    let root = LazyValue::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "shallow alias",
-        move |_| Ok(target.duplicate_for_test(&values)),
-    );
+    let root = LazyValue::semantic_thunk(&crate::core::test_value_factory(), move |_| {
+        Ok(target.duplicate_for_test(&values))
+    });
     let value = Value::Lazy(root.duplicate_for_test(context.values()));
 
     assert_eq!(context.deferred_task_count(), 0);
@@ -2908,7 +2801,7 @@ fn demanded_forwarding_chain_caches_its_ends_and_members_on_observation() {
     let values = crate::core::test_value_factory();
     let (leaf, middle, root, root_owner) = values.with_runtime_value_access(|access| {
         let identity = closed_function_value_with_access(&access, 1, TestExpr::Local(0));
-        let leaf = LazyValue::semantic_thunk_in(&access, "forwarding leaf", |_| Ok(n(42)));
+        let leaf = LazyValue::semantic_thunk_in(&access, |_| Ok(n(42)));
         let middle = LazyValue::from_application_in(
             &access,
             access.duplicate_value(&identity),
@@ -2953,7 +2846,7 @@ fn demanded_forwarding_chain_caches_its_ends_and_members_on_observation() {
 #[test]
 fn lazy_whnf_checkpoint_survives_yield_and_dependency_until_terminal_cache() {
     let context = isolated_test_context();
-    let promise = PromisedValue::new(context.values(), "lazy checkpoint dependency");
+    let promise = PromisedValue::new(context.values());
     let lazy = LazyValue::from_application(
         context.values(),
         closed_function_value_in(context.values(), 1, TestExpr::Local(0)),
@@ -3055,7 +2948,7 @@ fn concurrent_host_calls_share_one_rooted_producer_across_patient_client_demands
     let producer_values = values.clone();
     let producer_runs = Arc::new(AtomicUsize::new(0));
     let counted_runs = producer_runs.clone();
-    let lazy = LazyValue::host_call(&values, "contended host call", move |_| {
+    let lazy = LazyValue::host_call(&values, move |_| {
         producer_values
             .collect_managed_for_test()
             .expect("the host call must inherit no evaluator mutator");
@@ -3126,7 +3019,7 @@ fn host_call_rejects_a_foreign_runtime_root() {
         crate::runtime::allocate_evaluation_runtime_id(),
         crate::runtime::RuntimeIds::new(),
     );
-    let lazy = LazyValue::host_call(context.values(), "foreign host result", move |_| {
+    let lazy = LazyValue::host_call(context.values(), move |_| {
         Ok(crate::runtime::RuntimeValueRoot::new(&foreign, n(42)))
     });
 
@@ -3591,7 +3484,7 @@ fn list_concat_delays_invalid_strict_elements_until_their_output_is_observed() {
 fn list_concat_resumes_after_its_source_becomes_available() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (source, _owner_task, _owner) = owner
-        .task_owned_promise(Arc::from("list concat source"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised concat source");
     let application = apply_values(
         &observer,
@@ -3659,7 +3552,7 @@ fn lazy_list_chunks_error_when_they_do_not_evaluate_to_lists() {
 #[test]
 fn promised_list_chunks_remain_assignable_after_early_observation() {
     let context = test_context();
-    let promise = PromisedValue::new(context.values(), "promised list tail");
+    let promise = PromisedValue::new(context.values());
     let list = context.values().with_runtime_value_access(|access| {
         append_sequence(&access, Value::Promised(promise.duplicate_in(&access)))
             .expect("a promise remains a valid deferred list tail")
@@ -3747,14 +3640,10 @@ fn lazy_arguments_share_forced_values() {
     let context = isolated_test_context();
     let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count = force_count.clone();
-    let counted = TestExpr::Value(Value::semantic_thunk(
-        context.values(),
-        "counted",
-        move |_| {
-            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(n(2))
-        },
-    ));
+    let counted = TestExpr::Value(Value::semantic_thunk(context.values(), move |_| {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(n(2))
+    }));
     let expr = TestExpr::Apply(
         Arc::new(function_expr_in(
             context.values(),
@@ -4374,14 +4263,10 @@ fn compile_annotations_leave_calls_of_data_to_demand() {
     let identity = closed_function_value_in(values, 1, TestExpr::Local(0));
     let _identity_owner = RuntimeValueRoot::new(values, identity.duplicate_for_test(values));
     let callee_values = values.clone();
-    let callee = Value::Lazy(LazyValue::semantic_thunk(
-        values,
-        "counted callee",
-        move |_| {
-            observed.fetch_add(1, Ordering::SeqCst);
-            Ok(identity.duplicate_for_test(&callee_values))
-        },
-    ));
+    let callee = Value::Lazy(LazyValue::semantic_thunk(values, move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(identity.duplicate_for_test(&callee_values))
+    }));
     // `\x -> callee x`, the call a bare bind facing the callee.
     let net = closed_net_in(values, |builder| {
         let spine = builder.function_spine(1);
@@ -4595,7 +4480,7 @@ fn map_defers_concat_children_and_callable_until_the_selected_item_is_observed()
     let context = test_context();
     let callable_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&callable_demands);
-    let callable = Value::semantic_thunk(context.values(), "deferred map callable", move |_| {
+    let callable = Value::semantic_thunk(context.values(), move |_| {
         observed.fetch_add(1, Ordering::SeqCst);
         Ok(Value::Builtin(Builtin::Floor))
     });
@@ -4669,11 +4554,11 @@ fn map_delays_a_non_callable_failure_until_an_item_is_observed() {
 fn map_resumes_after_its_source_becomes_available_without_forcing_the_callable() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (source, _owner_task, _owner) = owner
-        .task_owned_promise(Arc::from("map source"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised map source");
     let callable_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&callable_demands);
-    let callable = Value::semantic_thunk(observer.values(), "map callable", move |_| {
+    let callable = Value::semantic_thunk(observer.values(), move |_| {
         observed.fetch_add(1, Ordering::SeqCst);
         Ok(Value::Builtin(Builtin::Floor))
     });
@@ -4850,18 +4735,14 @@ fn compiler_pattern_equality_mismatches_incompatible_values() {
 fn compiler_pattern_binary_list_equality_resumes_without_replaying_the_literal() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (item, _owner_task, _owner) = owner
-        .task_owned_promise(Arc::from("pattern equality list item"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised list item");
     let literal_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&literal_demands);
-    let expected = Value::semantic_thunk(
-        observer.values(),
-        "instrumented pattern literal",
-        move |_| {
-            observed.fetch_add(1, Ordering::SeqCst);
-            Ok(Value::binary_from_text("A"))
-        },
-    );
+    let expected = Value::semantic_thunk(observer.values(), move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::binary_from_text("A"))
+    });
     let application = apply_values(
         &observer,
         Value::Builtin(Builtin::PatternEqual),
@@ -4980,18 +4861,14 @@ fn compiler_pattern_path_equality_matches_keyable_lists_directionally() {
 fn compiler_pattern_path_equality_resumes_without_replaying_the_expected_path() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (actual_item, _owner_task, _owner) = owner
-        .task_owned_promise(Arc::from("pattern path subject item"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised path item");
     let expected_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&expected_demands);
-    let expected_item = Value::semantic_thunk(
-        observer.values(),
-        "instrumented expected path item",
-        move |_| {
-            observed.fetch_add(1, Ordering::SeqCst);
-            Ok(n(42))
-        },
-    );
+    let expected_item = Value::semantic_thunk(observer.values(), move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(n(42))
+    });
     let application = apply_values(
         &observer,
         Value::Builtin(Builtin::PatternPathEqual),
@@ -5087,7 +4964,7 @@ fn compiler_pattern_dictionary_operations_preserve_remainders() {
 fn compiler_pattern_dictionary_take_resumes_without_replaying_a_completed_prefix() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (leaf, _owner_task, _owner) = owner
-        .task_owned_promise(Arc::from("pattern dictionary leaf"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised dictionary leaf");
     let prefix_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&prefix_demands);
@@ -5096,17 +4973,13 @@ fn compiler_pattern_dictionary_take_resumes_without_replaying_a_completed_prefix
     let values = observer.values().clone();
     let promised_leaf = leaf.duplicate_for_test(&values);
     let captured_leaf = promised_leaf.duplicate_for_test(&values);
-    let child = Value::semantic_thunk(
-        observer.values(),
-        "instrumented pattern dictionary prefix",
-        move |_| {
-            observed.fetch_add(1, Ordering::SeqCst);
-            Ok(Value::Dict(Dict::new_sync().insert(
-                bar.clone(),
-                Value::Promised(captured_leaf.duplicate_for_test(&values)),
-            )))
-        },
-    );
+    let child = Value::semantic_thunk(observer.values(), move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::Dict(Dict::new_sync().insert(
+            bar.clone(),
+            Value::Promised(captured_leaf.duplicate_for_test(&values)),
+        )))
+    });
     let path = Value::List(List::from_values(vec![
         key_value(&foo),
         key_value(&Key::atom_from_text("bar")),
@@ -5202,7 +5075,6 @@ fn compiler_pattern_dictionary_mismatches_are_pass_fail() {
         key,
         Value::Lazy(LazyValue::semantic_thunk(
             &crate::core::test_value_factory(),
-            "empty dictionary field",
             |_| Ok(Value::Dict(Dict::new_sync())),
         )),
     );
@@ -5237,18 +5109,14 @@ fn compiler_pattern_dictionary_mismatches_are_pass_fail() {
 fn compiler_pattern_dictionary_emptiness_resumes_without_replaying_prior_members() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (second, _owner_task, _owner) = owner
-        .task_owned_promise(Arc::from("pattern dictionary second member"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised dictionary member");
     let first_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&first_demands);
-    let first = Value::semantic_thunk(
-        observer.values(),
-        "instrumented first undefined member",
-        move |_| {
-            observed.fetch_add(1, Ordering::SeqCst);
-            Ok(Value::Dict(Dict::new_sync()))
-        },
-    );
+    let first = Value::semantic_thunk(observer.values(), move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::Dict(Dict::new_sync()))
+    });
     let source = Value::Dict(
         Dict::new_sync()
             .insert(Key::Number(0.into()), first)
@@ -5505,7 +5373,7 @@ fn compiler_pattern_unsnoc_does_not_force_an_unrelated_prefix_hole() {
 fn compiler_pattern_unsnoc_resumes_a_promised_suffix_without_forcing_its_prefix() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (tail, _owner_task, _owner) = owner
-        .task_owned_promise(Arc::from("pattern unsnoc tail"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised list tail");
     let source = Value::List(List::concat(
         List::from_thunk(
@@ -5576,11 +5444,11 @@ fn text_lines_preserves_empty_and_trailing_lines() {
 fn text_lines_resumes_a_promised_item_without_replaying_its_prefix() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (item, _owner_task, _owner) = owner
-        .task_owned_promise(Arc::from("text-lines item"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised text byte");
     let prefix_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&prefix_demands);
-    let prefix = Value::semantic_thunk(observer.values(), "text-lines prefix", move |_| {
+    let prefix = Value::semantic_thunk(observer.values(), move |_| {
         observed.fetch_add(1, Ordering::SeqCst);
         Ok(n(b'a' as i64))
     });
@@ -5622,7 +5490,7 @@ fn text_lines_resumes_a_promised_item_without_replaying_its_prefix() {
 fn text_lines_resumes_a_promised_list_chunk() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (tail, _owner_task, _owner) = owner
-        .task_owned_promise(Arc::from("text-lines list tail"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised list tail");
     let source = Value::List(List::concat(
         List::from_bytes(Bytes::from_static(b"a")),
@@ -5775,14 +5643,10 @@ fn partial_builtins_share_lazy_arguments() {
     let context = isolated_test_context();
     let force_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count = force_count.clone();
-    let argument = TestExpr::Value(Value::semantic_thunk(
-        context.values(),
-        "partial argument",
-        move |_| {
-            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(n(40))
-        },
-    ));
+    let argument = TestExpr::Value(Value::semantic_thunk(context.values(), move |_| {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(n(40))
+    }));
     let make_partial = function_expr_in(
         context.values(),
         1,
@@ -5835,7 +5699,6 @@ fn net_list_literals_store_lazy_values_without_exporting_list_holes() {
         )),
         Arc::new(TestExpr::Value(Value::semantic_thunk(
             &crate::core::test_value_factory(),
-            "list value",
             move |_| {
                 count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(n(42))
@@ -5864,11 +5727,9 @@ fn net_list_literals_store_lazy_values_without_exporting_list_holes() {
 
 #[test]
 fn closed_semantic_list_holes_remain_host_observable() {
-    let Value::Lazy(hole) =
-        Value::semantic_thunk(&crate::core::test_value_factory(), "list hole", |_| {
-            Ok(Value::List(List::from_values(vec![n(42)])))
-        })
-    else {
+    let Value::Lazy(hole) = Value::semantic_thunk(&crate::core::test_value_factory(), |_| {
+        Ok(Value::List(List::from_values(vec![n(42)])))
+    }) else {
         unreachable!()
     };
     let list = List::from_thunk(hole.into());
@@ -5953,7 +5814,7 @@ fn effect_values_apply_by_extending_the_effect_function() {
 fn effect_apply_resumes_from_its_exact_function_operand() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (function, _owner_task, _owner) = owner
-        .task_owned_promise(Arc::from("effect apply function"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised function");
     let application = apply_values(
         &observer,
@@ -5984,17 +5845,17 @@ fn effect_apply_resumes_from_its_exact_function_operand() {
 fn effect_call_finishes_its_argument_spine_before_observing_the_api() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (tail, _owner_task, _owner) = owner
-        .task_owned_promise(Arc::from("effect call argument tail"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised argument tail");
     let method_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&method_demands);
-    let method = Value::semantic_thunk(observer.values(), "effect API method", move |_| {
+    let method = Value::semantic_thunk(observer.values(), move |_| {
         observed.fetch_add(1, Ordering::SeqCst);
         Ok(Value::Builtin(Builtin::Add))
     });
     let prefix_demands = Arc::new(AtomicUsize::new(0));
     let observed_prefix = Arc::clone(&prefix_demands);
-    let prefix = Value::semantic_thunk(observer.values(), "effect call prefix", move |_| {
+    let prefix = Value::semantic_thunk(observer.values(), move |_| {
         observed_prefix.fetch_add(1, Ordering::SeqCst);
         Ok(Value::List(List::from_values(vec![n(19)])))
     });
@@ -6055,7 +5916,7 @@ fn effect_call_finishes_its_argument_spine_before_observing_the_api() {
 fn effect_map_finishes_its_list_front_before_observing_the_api() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (tail, _owner_task, _owner) = owner
-        .task_owned_promise(Arc::from("effect map list tail"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised map tail");
     let method_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&method_demands);
@@ -6063,11 +5924,10 @@ fn effect_map_finishes_its_list_front_before_observing_the_api() {
         let return_method = closed_function_value_in(observer.values(), 1, TestExpr::Local(0));
         access.root_runtime_value(return_method)
     });
-    let return_method =
-        Value::semantic_thunk(observer.values(), "effect API return", move |context| {
-            observed.fetch_add(1, Ordering::SeqCst);
-            Ok(context.with_value_access(|access| access.clone_root(&return_method)))
-        });
+    let return_method = Value::semantic_thunk(observer.values(), move |context| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(context.with_value_access(|access| access.clone_root(&return_method)))
+    });
     let api = Value::Dict(Dict::new_sync().insert((*keys::R).clone(), return_method));
     let items = Value::List(List::from_thunk(ListThunk::Promised(
         tail.duplicate_for_test(observer.values()),
@@ -6405,22 +6265,18 @@ fn dictionary_unions_treat_empty_dictionary_values_as_undefined() {
 fn dictionary_union_resumes_without_replaying_a_completed_operand() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (right, _owner_task, _owner) = owner
-        .task_owned_promise(Arc::from("dictionary union right operand"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised operand");
     let attempts = Arc::new(AtomicUsize::new(0));
     let counted_attempts = attempts.clone();
     let left_key = Key::atom_from_text("left");
     let left_key_for_thunk = left_key.clone();
-    let left = LazyValue::semantic_thunk(
-        observer.values(),
-        "counted dictionary union left operand",
-        move |_context| {
-            counted_attempts.fetch_add(1, Ordering::SeqCst);
-            Ok(Value::Dict(
-                Dict::new_sync().insert(left_key_for_thunk.clone(), n(41)),
-            ))
-        },
-    );
+    let left = LazyValue::semantic_thunk(observer.values(), move |_context| {
+        counted_attempts.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::Dict(
+            Dict::new_sync().insert(left_key_for_thunk.clone(), n(41)),
+        ))
+    });
     let application = apply_values(
         &observer,
         Value::Builtin(Builtin::DictUnion),
@@ -6469,7 +6325,7 @@ fn dictionary_union_resumes_without_replaying_a_completed_operand() {
 fn dictionary_duplicate_merge_resumes_its_second_operand() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (right, _owner_task, _owner) = owner
-        .task_owned_promise(Arc::from("dictionary duplicate right operand"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised operand");
     let application = apply_values(
         &observer,
@@ -6515,18 +6371,14 @@ fn dictionary_duplicate_merge_resumes_its_second_operand() {
 fn list_at_resumes_without_replaying_a_completed_lazy_chunk() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (tail, _owner_task, _owner) = owner
-        .task_owned_promise(Arc::from("list-at deferred tail"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised list tail");
     let attempts = Arc::new(AtomicUsize::new(0));
     let counted_attempts = attempts.clone();
-    let prefix = LazyValue::semantic_thunk(
-        observer.values(),
-        "counted list-at prefix",
-        move |_context| {
-            counted_attempts.fetch_add(1, Ordering::SeqCst);
-            Ok(Value::List(List::from_values(vec![n(41)])))
-        },
-    );
+    let prefix = LazyValue::semantic_thunk(observer.values(), move |_context| {
+        counted_attempts.fetch_add(1, Ordering::SeqCst);
+        Ok(Value::List(List::from_values(vec![n(41)])))
+    });
     let list = Value::List(List::concat(
         List::from_thunk(prefix.into()),
         List::from_thunk(tail.duplicate_for_test(observer.values()).into()),
@@ -6558,7 +6410,7 @@ fn list_at_resumes_without_replaying_a_completed_lazy_chunk() {
 fn split_end_resumes_from_the_back_without_forcing_an_unrelated_prefix() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (tail, _owner_task, _owner) = owner
-        .task_owned_promise(Arc::from("split-end deferred tail"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised list tail");
     let lazy_prefix = LazyValue::error(
         observer.values(),
@@ -6606,10 +6458,9 @@ fn position_observers_take_whole_leaves_across_a_lazy_chunk() {
     // leaves its positions fall in and joins what it takes across them.
     let (_owner, observer, _executor) = same_runtime_contexts();
     let list = || {
-        let chunk =
-            LazyValue::semantic_thunk(observer.values(), "observed lazy chunk", |_context| {
-                Ok(Value::List(List::from_values((41..=45).map(n).collect())))
-            });
+        let chunk = LazyValue::semantic_thunk(observer.values(), |_context| {
+            Ok(Value::List(List::from_values((41..=45).map(n).collect())))
+        });
         Value::List(List::concat(
             List::concat(
                 List::from_values((1..=40).map(n).collect()),
@@ -7027,18 +6878,14 @@ fn assert_unit_annotation_has_optional_diagnostic_context() {
 fn assert_unit_annotation_resumes_diagnostic_context_after_collection_without_replay() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (diagnostic_context, _owner_task, _owner) = owner
-        .task_owned_promise(Arc::from("annotation diagnostic context"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised diagnostic context");
     let value_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&value_demands);
-    let value = Value::semantic_thunk(
-        observer.values(),
-        "instrumented annotation assertion value",
-        move |_| {
-            observed.fetch_add(1, Ordering::SeqCst);
-            Ok(n(42))
-        },
-    );
+    let value = Value::semantic_thunk(observer.values(), move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(n(42))
+    });
     let annotation = Value::Dict(
         Dict::new_sync().insert(
             Key::atom_from_text("assert_unit"),
@@ -7350,14 +7197,10 @@ fn metadata_annotation_initializes_the_canonical_sealed_carrier() {
     };
     let target_forces = Arc::new(AtomicUsize::new(0));
     let counted_target_forces = target_forces.clone();
-    let unit = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "metadata annotation unit",
-        move |_| {
-            counted_target_forces.fetch_add(1, Ordering::SeqCst);
-            Ok(unit_value())
-        },
-    );
+    let unit = Value::semantic_thunk(&crate::core::test_value_factory(), move |_| {
+        counted_target_forces.fetch_add(1, Ordering::SeqCst);
+        Ok(unit_value())
+    });
 
     let first = apply_values(
         &context,
@@ -7644,11 +7487,11 @@ fn metadata_update_reorders_copies_and_clears_hidden_values() {
 fn metadata_update_resumes_without_replaying_a_completed_carrier() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (second, _owner_task, _owner) = owner
-        .task_owned_promise(Arc::from("metadata annotation carrier"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised carrier");
     let first_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&first_demands);
-    let first = Value::semantic_thunk(observer.values(), "metadata carrier prefix", move |step| {
+    let first = Value::semantic_thunk(observer.values(), move |step| {
         observed.fetch_add(1, Ordering::SeqCst);
         Ok(step.with_value_access(|access| access.values().metadata_carrier(n(1))))
     });
@@ -7749,14 +7592,10 @@ fn metadata_update_preserves_input_arity_without_validating_output_length() {
 
     let extra_forces = Arc::new(AtomicUsize::new(0));
     let counted_extra_forces = extra_forces.clone();
-    let extra = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "unused metadata update result",
-        move |_| {
-            counted_extra_forces.fetch_add(1, Ordering::SeqCst);
-            Ok(n(9))
-        },
-    );
+    let extra = Value::semantic_thunk(&crate::core::test_value_factory(), move |_| {
+        counted_extra_forces.fetch_add(1, Ordering::SeqCst);
+        Ok(n(9))
+    });
     let too_long = run_metadata_update(
         &context,
         closed_function_value(
@@ -7785,24 +7624,16 @@ fn metadata_update_validates_inputs_strictly_but_not_hidden_metadata() {
     let counted_carrier_forces = carrier_forces.clone();
     let hidden_forces = Arc::new(AtomicUsize::new(0));
     let counted_hidden_forces = hidden_forces.clone();
-    let hidden = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "hidden metadata",
-        move |_| {
-            counted_hidden_forces.fetch_add(1, Ordering::SeqCst);
-            Ok(n(11))
-        },
-    );
+    let hidden = Value::semantic_thunk(&crate::core::test_value_factory(), move |_| {
+        counted_hidden_forces.fetch_add(1, Ordering::SeqCst);
+        Ok(n(11))
+    });
     let carrier = metadata_carrier(&context, hidden);
     let values = context.values().clone();
-    let lazy_carrier = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "lazy metadata carrier",
-        move |_| {
-            counted_carrier_forces.fetch_add(1, Ordering::SeqCst);
-            Ok(carrier.duplicate_for_test(&values))
-        },
-    );
+    let lazy_carrier = Value::semantic_thunk(&crate::core::test_value_factory(), move |_| {
+        counted_carrier_forces.fetch_add(1, Ordering::SeqCst);
+        Ok(carrier.duplicate_for_test(&values))
+    });
 
     let result = run_metadata_update(
         &context,
@@ -7861,14 +7692,10 @@ fn metadata_update_shares_update_failures_between_projections() {
     let context = test_context();
     let update_forces = Arc::new(AtomicUsize::new(0));
     let counted_update_forces = update_forces.clone();
-    let function = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "failing metadata update",
-        move |_| {
-            counted_update_forces.fetch_add(1, Ordering::SeqCst);
-            Err(EvaluationHalt::new("shared metadata update failed"))
-        },
-    );
+    let function = Value::semantic_thunk(&crate::core::test_value_factory(), move |_| {
+        counted_update_forces.fetch_add(1, Ordering::SeqCst);
+        Err(EvaluationHalt::new("shared metadata update failed"))
+    });
     let result = run_metadata_update(
         &context,
         function,
@@ -8079,11 +7906,9 @@ fn metadata_reflection_update_preserves_projection_semantics_and_input_validatio
     );
 
     let long_context = annotation_test_context();
-    let unused_extra = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "unused effectful metadata result",
-        |_| panic!("an extra metadata result must remain unused"),
-    );
+    let unused_extra = Value::semantic_thunk(&crate::core::test_value_factory(), |_| {
+        panic!("an extra metadata result must remain unused")
+    });
     long_context
         .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
             terminal: FixtureTaskTerminal::Complete(Value::List(List::from_values(vec![
@@ -8304,11 +8129,11 @@ fn list_annotations_rebalance_and_flatten_lists() {
 fn binary_annotation_resumes_without_replaying_a_completed_prefix() {
     let (owner, observer, _executor) = same_runtime_contexts();
     let (item, _owner_task, _owner) = owner
-        .task_owned_promise(Arc::from("binary annotation item"))
+        .task_owned_promise()
         .expect("the owner should allocate a promised byte");
     let prefix_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&prefix_demands);
-    let prefix = Value::semantic_thunk(observer.values(), "binary annotation prefix", move |_| {
+    let prefix = Value::semantic_thunk(observer.values(), move |_| {
         observed.fetch_add(1, Ordering::SeqCst);
         Ok(n(i64::from(b'a')))
     });
@@ -8464,7 +8289,7 @@ fn dropped_reflection_completion_activation_permit_terminalizes_managed_promise(
         .expect("the test runtime should retain its background demand");
     let (promise, completion, effect) = context.values().with_runtime_value_access(|access| {
         let completion = access
-            .construct_rooted_managed_promise("dropped reflection activation")
+            .construct_rooted_managed_promise()
             .expect("the managed completion promise must fit its reviewed slot");
         let promise = PromisedValue::from_root(&completion, &access);
         let effect = access.root_runtime_value(n(0));
@@ -8531,7 +8356,7 @@ fn reflection_task_result_returns_arbitrary_lazy_value_once() {
     let context = isolated_test_context();
     let result_forces = Arc::new(AtomicUsize::new(0));
     let counted_result_forces = result_forces.clone();
-    let result = Value::semantic_thunk(context.values(), "returned reflection result", move |_| {
+    let result = Value::semantic_thunk(context.values(), move |_| {
         counted_result_forces.fetch_add(1, Ordering::SeqCst);
         Ok(n(42))
     });
@@ -8640,7 +8465,7 @@ fn reflection_completion_activation_and_first_session_close_have_both_orders() {
         let (promise, completion, effect, retained) =
             owner.values().with_runtime_value_access(|access| {
                 let completion = access
-                    .construct_rooted_managed_promise("ordered reflection completion")
+                    .construct_rooted_managed_promise()
                     .expect("the completion promise should fit its managed slot");
                 let promise = PromisedValue::from_root(&completion, &access);
                 let retained =
@@ -8726,7 +8551,7 @@ fn unobserved_reflection_failure_remains_reportable_until_promise_propagation() 
         .expect("the runtime should retain its background demand");
     let (promise, completion, effect) = owner.values().with_runtime_value_access(|access| {
         let completion = access
-            .construct_rooted_managed_promise("unobserved reflection failure")
+            .construct_rooted_managed_promise()
             .expect("the completion promise must fit its reviewed slot");
         let promise = PromisedValue::from_root(&completion, &access);
         let effect = access.root_runtime_value(n(0));
@@ -8827,7 +8652,7 @@ fn reflection_gate_waits_before_continuing_target_demand() {
     let context = isolated_test_context();
     let forced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let forced_by_target = forced.clone();
-    let target = Value::semantic_thunk(context.values(), "reflection target", move |_| {
+    let target = Value::semantic_thunk(context.values(), move |_| {
         forced_by_target.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(n(42))
     });
@@ -9178,11 +9003,9 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_operator_call() {
 
 #[test]
 fn builtins_are_curried_and_do_not_force_arguments_early() {
-    let unforced = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "unforced builtin argument",
-        |_| panic!("partial builtin application forced its first argument"),
-    );
+    let unforced = Value::semantic_thunk(&crate::core::test_value_factory(), |_| {
+        panic!("partial builtin application forced its first argument")
+    });
     let partial = apply_values(
         &test_context(),
         Value::Builtin(Builtin::Append),
@@ -9232,14 +9055,10 @@ fn seq_forces_its_first_argument_before_continuing_target_demand() {
 
     let target_forces = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted_target_forces = target_forces.clone();
-    let target = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "seq target",
-        move |_| {
-            counted_target_forces.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(n(42))
-        },
-    );
+    let target = Value::semantic_thunk(&crate::core::test_value_factory(), move |_| {
+        counted_target_forces.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(n(42))
+    });
     let result = apply_values(&context, Value::Builtin(Builtin::Seq), vec![n(0), target]).unwrap();
 
     assert_eq!(target_forces.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -9253,11 +9072,9 @@ fn seq_forces_its_first_argument_before_continuing_target_demand() {
 #[test]
 fn zero_worker_spark_returns_target_without_forcing_work() {
     let context = test_context();
-    let unforced = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "discarded spark",
-        |_| panic!("zero-worker spark should be silently dropped"),
-    );
+    let unforced = Value::semantic_thunk(&crate::core::test_value_factory(), |_| {
+        panic!("zero-worker spark should be silently dropped")
+    });
     let result = apply_values(
         &context,
         Value::Builtin(Builtin::Spark),
@@ -9276,21 +9093,17 @@ fn strategies_demand_hidden_metadata_without_exposing_the_carrier() {
     let context = test_context();
     let metadata_forces = Arc::new(AtomicUsize::new(0));
     let counted_metadata_forces = metadata_forces.clone();
-    let metadata = Value::semantic_thunk(context.values(), "sequenced metadata", move |_| {
+    let metadata = Value::semantic_thunk(context.values(), move |_| {
         counted_metadata_forces.fetch_add(1, Ordering::SeqCst);
         Ok(n(7))
     });
     let carrier = metadata_carrier(&context, metadata);
     let target_forces = Arc::new(AtomicUsize::new(0));
     let counted_target_forces = target_forces.clone();
-    let target = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "metadata sequence target",
-        move |_| {
-            counted_target_forces.fetch_add(1, Ordering::SeqCst);
-            Ok(n(42))
-        },
-    );
+    let target = Value::semantic_thunk(&crate::core::test_value_factory(), move |_| {
+        counted_target_forces.fetch_add(1, Ordering::SeqCst);
+        Ok(n(42))
+    });
 
     let result = evaluate_strategy(&context, Builtin::Seq, carrier, target)
         .expect("seq should successfully demand hidden metadata");
@@ -9304,11 +9117,9 @@ fn strategies_demand_hidden_metadata_without_exposing_the_carrier() {
 #[test]
 fn zero_worker_spark_discards_hidden_metadata_demand() {
     let context = test_context();
-    let metadata = Value::semantic_thunk(
-        &crate::core::test_value_factory(),
-        "discarded metadata spark",
-        |_| panic!("zero-worker spark must not demand hidden metadata"),
-    );
+    let metadata = Value::semantic_thunk(&crate::core::test_value_factory(), |_| {
+        panic!("zero-worker spark must not demand hidden metadata")
+    });
     let carrier = metadata_carrier(&context, metadata);
     let result = apply_values(
         &context,
@@ -9365,7 +9176,7 @@ fn worker_spark_demands_metadata_behind_a_lazy_carrier_shell() {
     let context = EvalContext::new(&session);
     let (shell_sender, shell_receiver) = std::sync::mpsc::channel();
     let (metadata_sender, metadata_receiver) = std::sync::mpsc::channel();
-    let metadata = Value::semantic_thunk(context.values(), "worker metadata", move |_| {
+    let metadata = Value::semantic_thunk(context.values(), move |_| {
         metadata_sender
             .send(())
             .expect("metadata receiver should remain open");
@@ -9379,16 +9190,12 @@ fn worker_spark_demands_metadata_behind_a_lazy_carrier_shell() {
         carrier.duplicate_for_test(context.values()),
     );
     let values = context.values().clone();
-    let lazy_carrier = Value::semantic_thunk(
-        context.values(),
-        "lazy worker metadata carrier",
-        move |_| {
-            shell_sender
-                .send(())
-                .expect("carrier receiver should remain open");
-            Ok(carrier.duplicate_for_test(&values))
-        },
-    );
+    let lazy_carrier = Value::semantic_thunk(context.values(), move |_| {
+        shell_sender
+            .send(())
+            .expect("carrier receiver should remain open");
+        Ok(carrier.duplicate_for_test(&values))
+    });
 
     let result = evaluate_strategy(&context, Builtin::Spark, lazy_carrier, n(42))
         .expect("spark should immediately return its target");
@@ -9412,14 +9219,13 @@ fn metadata_strategy_failures_are_cached_and_seq_propagates_them() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let counted_attempts = attempts.clone();
     let (attempt_sender, attempt_receiver) = std::sync::mpsc::channel();
-    let metadata =
-        LazyValue::semantic_thunk(context.values(), "failing metadata strategy", move |_| {
-            counted_attempts.fetch_add(1, Ordering::SeqCst);
-            attempt_sender
-                .send(())
-                .expect("attempt receiver should remain open");
-            Err(EvaluationHalt::new("metadata strategy failed"))
-        });
+    let metadata = LazyValue::semantic_thunk(context.values(), move |_| {
+        counted_attempts.fetch_add(1, Ordering::SeqCst);
+        attempt_sender
+            .send(())
+            .expect("attempt receiver should remain open");
+        Err(EvaluationHalt::new("metadata strategy failed"))
+    });
     // The test holds `metadata` and `carrier` across worker quanta.
     let _metadata_root = metadata.root(context.values());
     let carrier = metadata_carrier(
@@ -9464,7 +9270,7 @@ fn strategies_stop_at_nested_metadata_carriers() {
     let context = EvalContext::new(&session);
     let hidden_forces = Arc::new(AtomicUsize::new(0));
     let counted_hidden_forces = hidden_forces.clone();
-    let hidden = Value::semantic_thunk(context.values(), "nested hidden metadata", move |_| {
+    let hidden = Value::semantic_thunk(context.values(), move |_| {
         counted_hidden_forces.fetch_add(1, Ordering::SeqCst);
         Ok(n(7))
     });
@@ -9485,18 +9291,14 @@ fn strategies_stop_at_nested_metadata_carriers() {
 
     context.spark(outer);
     let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
-    let sentinel = LazyValue::semantic_thunk(
-        context.values(),
-        "nested metadata spark sentinel",
-        move |step| {
-            finished_sender
-                .send(())
-                .expect("sentinel receiver should remain open");
-            // The worker evaluates this, so its result comes from the
-            // evaluating runtime, not the worker thread's test domain.
-            Ok(step.with_value_access(|access| access.values().unit()))
-        },
-    );
+    let sentinel = LazyValue::semantic_thunk(context.values(), move |step| {
+        finished_sender
+            .send(())
+            .expect("sentinel receiver should remain open");
+        // The worker evaluates this, so its result comes from the
+        // evaluating runtime, not the worker thread's test domain.
+        Ok(step.with_value_access(|access| access.values().unit()))
+    });
     context.spark(Value::Lazy(sentinel.duplicate_for_test(context.values())));
     finished_receiver
         .recv_timeout(std::time::Duration::from_secs(2))
@@ -9519,17 +9321,16 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
     // runs, it may collect anything the test holds unrooted.
     // The net lives in the shared test domain, which is never collected.
     let net = closed_net(|builder| builder.data(n(1)));
-    let unassigned = PromisedValue::new(context.values(), "unassigned spark input");
+    let unassigned = PromisedValue::new(context.values());
     let _unassigned_root = unassigned.root(context.values());
     let promised_forces = Arc::new(AtomicUsize::new(0));
     let counted_promised_forces = promised_forces.clone();
-    let promised_work =
-        LazyValue::semantic_thunk(context.values(), "promised spark work", move |_| {
-            counted_promised_forces.fetch_add(1, Ordering::SeqCst);
-            Ok(n(7))
-        });
+    let promised_work = LazyValue::semantic_thunk(context.values(), move |_| {
+        counted_promised_forces.fetch_add(1, Ordering::SeqCst);
+        Ok(n(7))
+    });
     let _promised_work_root = promised_work.root(context.values());
-    let promise = PromisedValue::new(context.values(), "resolved spark input");
+    let promise = PromisedValue::new(context.values());
     let _promise_root = promise.root(context.values());
     set_promise(
         &context,
@@ -9538,15 +9339,14 @@ fn spark_admission_drops_whnf_and_follows_completed_promises() {
     )
     .expect_without_debug("test promise should accept its one assignment");
     let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
-    let sentinel =
-        LazyValue::semantic_thunk(context.values(), "spark admission sentinel", move |step| {
-            finished_sender
-                .send(())
-                .expect("sentinel receiver should remain open");
-            // The worker evaluates this, so its result comes from the
-            // evaluating runtime, not the worker thread's test domain.
-            Ok(step.with_value_access(|access| access.values().unit()))
-        });
+    let sentinel = LazyValue::semantic_thunk(context.values(), move |step| {
+        finished_sender
+            .send(())
+            .expect("sentinel receiver should remain open");
+        // The worker evaluates this, so its result comes from the
+        // evaluating runtime, not the worker thread's test domain.
+        Ok(step.with_value_access(|access| access.values().unit()))
+    });
     let _sentinel_root = sentinel.root(context.values());
 
     context.spark(Value::Net(net));
@@ -9584,7 +9384,7 @@ fn spark_resumes_after_a_resolver_owned_promise_completes() {
         crate::evaluation::test_execution_resources(1).expect("test worker should start");
     let session = crate::evaluation::EvaluationSession::shared(&coordinator);
     let context = EvalContext::new(&session);
-    let promise = PromisedValue::new(context.values(), "later spark input");
+    let promise = PromisedValue::new(context.values());
     context.spark(Value::Promised(
         promise.duplicate_for_test(context.values()),
     ));
@@ -9595,7 +9395,7 @@ fn spark_resumes_after_a_resolver_owned_promise_completes() {
     );
 
     let (forced_sender, forced_receiver) = std::sync::mpsc::channel();
-    let assigned = LazyValue::semantic_thunk(context.values(), "resolved spark work", move |_| {
+    let assigned = LazyValue::semantic_thunk(context.values(), move |_| {
         forced_sender
             .send(())
             .expect("spark result receiver should remain open");
@@ -9630,10 +9430,7 @@ fn dropping_a_session_discards_its_blocked_sparks() {
     {
         let session = crate::evaluation::EvaluationSession::shared(&coordinator);
         let context = EvalContext::new(&session);
-        context.spark(Value::Promised(PromisedValue::new(
-            context.values(),
-            "discarded blocked spark",
-        )));
+        context.spark(Value::Promised(PromisedValue::new(context.values())));
         wait_for_blocked_sparks(
             &coordinator,
             1,
@@ -9650,9 +9447,7 @@ fn dropping_a_session_discards_its_blocked_sparks() {
 #[test]
 fn metadata_seq_preserves_retryable_promise_blockage() {
     let context = test_context();
-    let (promise, _owner_task, _owner) = context
-        .task_owned_promise(Arc::from("blocked metadata"))
-        .unwrap();
+    let (promise, _owner_task, _owner) = context.task_owned_promise().unwrap();
     let observer = context.with_new_task().unwrap();
     let carrier = metadata_carrier(
         &observer,
@@ -9686,7 +9481,7 @@ fn completed_metadata_updates_release_sources_and_task_records() {
     let context = EvalContext::isolated(values.clone());
     let prior_source_dropped = Arc::new(AtomicBool::new(false));
     let prior_signal = DropSignal(prior_source_dropped.clone());
-    let prior = Value::semantic_thunk(&values, "discardable prior metadata", move |_| {
+    let prior = Value::semantic_thunk(&values, move |_| {
         let _keep_signal_captured = &prior_signal;
         Ok(n(1))
     });
@@ -9751,11 +9546,9 @@ fn strategy_annotations_share_builtin_semantics() {
 
     let spark_annotation = Value::Dict(Dict::new_sync().insert(
         Key::atom_from_text("spark"),
-        Value::semantic_thunk(
-            &crate::core::test_value_factory(),
-            "discarded annotated spark",
-            |_| panic!("zero-worker annotated spark should be silently dropped"),
-        ),
+        Value::semantic_thunk(&crate::core::test_value_factory(), |_| {
+            panic!("zero-worker annotated spark should be silently dropped")
+        }),
     ));
     let result = apply_values(
         &context,

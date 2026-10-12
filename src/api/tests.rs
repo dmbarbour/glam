@@ -68,14 +68,13 @@ fn public_value(values: &crate::core::CoreValueFactory, value: CoreValue) -> Val
 
 fn public_semantic_thunk(
     values: &crate::core::CoreValueFactory,
-    label: &'static str,
     thunk: impl Fn(&crate::evaluation::EvaluatorStepContext<'_>) -> Result<CoreValue, EvaluationHalt>
     + Send
     + Sync
     + 'static,
 ) -> Value {
     Values::from_core_factory(values.clone()).with_access(|scoped| {
-        let lazy = LazyValue::semantic_thunk_in(scoped.runtime_access(), label, thunk);
+        let lazy = LazyValue::semantic_thunk_in(scoped.runtime_access(), thunk);
         scoped.wrap(CoreValue::Lazy(lazy))
     })
 }
@@ -227,7 +226,7 @@ fn runtimes_own_independent_local_identity_domains_and_value_factories() {
     let first_thunk_values = first_values.clone();
     let first_lazy = first_values.with_runtime_value_access(|access| {
         let first_unit = access.unit();
-        let lazy = LazyValue::semantic_thunk_in(&access, "first runtime", move |_| {
+        let lazy = LazyValue::semantic_thunk_in(&access, move |_| {
             Ok(first_unit.duplicate_for_test(&first_thunk_values))
         });
         lazy.root_in(&access)
@@ -236,7 +235,7 @@ fn runtimes_own_independent_local_identity_domains_and_value_factories() {
     let second_thunk_values = second_values.clone();
     let second_lazy = second_values.with_runtime_value_access(|access| {
         let second_unit = access.unit();
-        let lazy = LazyValue::semantic_thunk_in(&access, "second runtime", move |_| {
+        let lazy = LazyValue::semantic_thunk_in(&access, move |_| {
             Ok(second_unit.duplicate_for_test(&second_thunk_values))
         });
         lazy.root_in(&access)
@@ -676,7 +675,7 @@ fn access_and_annotation_construction_do_not_demand_inputs() {
     let core_values = assembler.core_values();
     let unit = core_values.with_runtime_value_access(|access| access.unit());
     let thunk_values = core_values.clone();
-    let lazy = public_semantic_thunk(&core_values, "no-demand facade fixture", move |_| {
+    let lazy = public_semantic_thunk(&core_values, move |_| {
         demanded_by_thunk.store(true, Ordering::SeqCst);
         Ok(unit.duplicate_for_test(&thunk_values))
     });
@@ -841,9 +840,8 @@ fn array_and_deque_annotations_preserve_lazy_elements() {
     let assembler = Assembler::new();
     let values = assembler.values();
     let core_values = assembler.core_values();
-    let element = public_semantic_thunk(&core_values, "lazy list element", |_| {
-        Ok(CoreValue::Number(Number::integer(7)))
-    });
+    let element =
+        public_semantic_thunk(&core_values, |_| Ok(CoreValue::Number(Number::integer(7))));
     let list = values
         .list([element.clone(), values.integer(8)])
         .expect("strict list spine should construct");
@@ -1294,9 +1292,8 @@ fn evaluated_array_items_accept_only_one_strict_value_leaf() {
     let assembler = Assembler::new();
     let values = assembler.values();
     let core_values = assembler.core_values();
-    let lazy_element = public_semantic_thunk(&core_values, "unevaluated array member", |_| {
-        Ok(CoreValue::Number(Number::integer(1)))
-    });
+    let lazy_element =
+        public_semantic_thunk(&core_values, |_| Ok(CoreValue::Number(Number::integer(1))));
     let array = EvaluatedValue::from_whnf(
         &values,
         values
@@ -1633,7 +1630,7 @@ fn value_evaluator_caches_lazy_success_and_preserves_structured_failure() {
     let core_values = assembler.core_values();
     let evaluations = Arc::new(AtomicUsize::new(0));
     let evaluations_by_thunk = evaluations.clone();
-    let lazy = public_semantic_thunk(&core_values, "one evaluation", move |_| {
+    let lazy = public_semantic_thunk(&core_values, move |_| {
         evaluations_by_thunk.fetch_add(1, Ordering::SeqCst);
         Ok(CoreValue::Number(Number::integer(42)))
     });
@@ -1677,10 +1674,9 @@ fn semantic_binary_slice_does_not_force_an_unused_poisoned_tail() {
     let values = assembler.values();
     let core_values = assembler.core_values();
     let (source, poison) = Values::from_core_factory(core_values.clone()).with_access(|scoped| {
-        let poison =
-            LazyValue::semantic_thunk_in(scoped.runtime_access(), "unused binary tail", |_| {
-                Err(EvaluationHalt::new("unused binary tail was forced"))
-            });
+        let poison = LazyValue::semantic_thunk_in(scoped.runtime_access(), |_| {
+            Err(EvaluationHalt::new("unused binary tail was forced"))
+        });
         let source = scoped.wrap(CoreValue::List(List::concat(
             List::from_bytes(Bytes::from_static(b"ok")),
             List::from_thunk(poison.duplicate_in(scoped.runtime_access()).into()),
@@ -2357,23 +2353,19 @@ fn synchronous_assembler_evaluation_waits_for_a_worker_claim() {
     let release = Arc::new((Mutex::new(false), CountedCondvar::new()));
     let producer_release = release.clone();
     let (started_sender, started_receiver) = std::sync::mpsc::channel();
-    let value = public_semantic_thunk(
-        &assembler.core_values(),
-        "worker-claimed public value",
-        move |_| {
-            started_sender
-                .send(())
-                .expect("test should still await the worker claim");
-            let (lock, changed) = &*producer_release;
-            let mut released = lock.lock().expect("test release lock was poisoned");
-            while !*released {
-                released = changed
-                    .wait(released)
-                    .expect("test release lock was poisoned");
-            }
-            Ok(CoreValue::Number(42.into()))
-        },
-    );
+    let value = public_semantic_thunk(&assembler.core_values(), move |_| {
+        started_sender
+            .send(())
+            .expect("test should still await the worker claim");
+        let (lock, changed) = &*producer_release;
+        let mut released = lock.lock().expect("test release lock was poisoned");
+        while !*released {
+            released = changed
+                .wait(released)
+                .expect("test release lock was poisoned");
+        }
+        Ok(CoreValue::Number(42.into()))
+    });
     assembler.eval_context().spark(value.clone_core_for_test());
     started_receiver
         .recv_timeout(std::time::Duration::from_secs(2))
@@ -2417,11 +2409,10 @@ fn panicking_evaluation_reports_a_panic_and_leaves_the_runtime_usable() {
     let values = assembler.values();
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = calls.clone();
-    let panicking =
-        public_semantic_thunk(&assembler.core_values(), "panicking fixture", move |_| {
-            observed.fetch_add(1, Ordering::SeqCst);
-            panic!("forced evaluation panic");
-        });
+    let panicking = public_semantic_thunk(&assembler.core_values(), move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        panic!("forced evaluation panic");
+    });
     let dependent = values
         .access(&panicking, values.atom_from_text("member"))
         .expect("same-runtime access construction should succeed");
@@ -2474,7 +2465,7 @@ fn panicking_host_call_is_never_replayed() {
     let core_values = assembler.core_values();
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = calls.clone();
-    let lazy = LazyValue::host_call(&core_values, "panicking host call", move |_| {
+    let lazy = LazyValue::host_call(&core_values, move |_| {
         observed.fetch_add(1, Ordering::SeqCst);
         panic!("forced host callback panic");
     });
@@ -2570,7 +2561,7 @@ fn worker_survives_a_panicking_sparked_value() {
         .build()
         .expect("assembler should build");
     let (started_sender, started_receiver) = std::sync::mpsc::channel();
-    let panicking = public_semantic_thunk(&assembler.core_values(), "panicking spark", {
+    let panicking = public_semantic_thunk(&assembler.core_values(), {
         let started_sender = started_sender.clone();
         move |_| {
             let _ = started_sender.send("panicking");
@@ -2588,7 +2579,7 @@ fn worker_survives_a_panicking_sparked_value() {
     );
 
     // Only a live worker can claim this spark: the client is not pumping.
-    let surviving = public_semantic_thunk(&assembler.core_values(), "surviving spark", move |_| {
+    let surviving = public_semantic_thunk(&assembler.core_values(), move |_| {
         let _ = started_sender.send("surviving");
         Ok(CoreValue::Number(42.into()))
     });
@@ -2614,7 +2605,7 @@ fn scheduler_panic_poisons_the_runtime_without_hanging_waiters() {
     let release = Arc::new((Mutex::new(false), CountedCondvar::new()));
     let producer_release = release.clone();
     let (started_sender, started_receiver) = std::sync::mpsc::channel();
-    let value = public_semantic_thunk(&assembler.core_values(), "parked worker value", move |_| {
+    let value = public_semantic_thunk(&assembler.core_values(), move |_| {
         let _ = started_sender.send(());
         let (lock, changed) = &*producer_release;
         let mut released = lock.lock().expect("test release lock was poisoned");

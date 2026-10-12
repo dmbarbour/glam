@@ -1836,7 +1836,7 @@ mod tests {
     #[test]
     fn exact_duplication_deltas_report_one_replaced_and_two_installed_payloads() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
-        let (payload_root, payload) = values.rooted_error_lazy_for_test("duplicated payload");
+        let (payload_root, payload) = values.rooted_error_lazy_for_test();
         let data = duplicating_runtime(
             &values,
             Value::Lazy(payload.duplicate_for_test(&values)),
@@ -1884,8 +1884,8 @@ mod tests {
     #[test]
     fn exact_call_lowering_deltas_report_copy_and_operator_payloads() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
-        let (old_root, old) = values.rooted_error_lazy_for_test("old callable");
-        let (new_root, new) = values.rooted_error_lazy_for_test("new operator");
+        let (old_root, old) = values.rooted_error_lazy_for_test();
+        let (new_root, new) = values.rooted_error_lazy_for_test();
         let old = Value::Lazy(old);
         let new = Value::Lazy(new);
 
@@ -1921,9 +1921,9 @@ mod tests {
     #[test]
     fn whole_copies_report_each_copied_payload() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
-        let (callable_root, callable) = values.rooted_error_lazy_for_test("callable");
-        let (data_root, data) = values.rooted_error_lazy_for_test("copied data");
-        let (operator_root, operator) = values.rooted_error_lazy_for_test("copied operator");
+        let (callable_root, callable) = values.rooted_error_lazy_for_test();
+        let (data_root, data) = values.rooted_error_lazy_for_test();
+        let (operator_root, operator) = values.rooted_error_lazy_for_test();
 
         // A bind holding data and an operator whose result is erased: no
         // active pair is left.
@@ -2180,9 +2180,9 @@ mod tests {
     #[test]
     fn exact_operator_completion_and_stuck_deltas_report_only_changed_payloads() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
-        let (first_root, first) = values.rooted_error_lazy_for_test("operator payload");
-        let (second_root, second) = values.rooted_error_lazy_for_test("operator argument");
-        let (third_root, third) = values.rooted_error_lazy_for_test("operator result");
+        let (first_root, first) = values.rooted_error_lazy_for_test();
+        let (second_root, second) = values.rooted_error_lazy_for_test();
+        let (third_root, third) = values.rooted_error_lazy_for_test();
         let first = Value::Lazy(first);
         let second = Value::Lazy(second);
         let third = Value::Lazy(third);
@@ -2217,7 +2217,7 @@ mod tests {
     #[test]
     fn exact_cursor_materialization_delta_reports_only_the_new_payload() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
-        let (payload_root, payload) = values.rooted_error_lazy_for_test("cursor payload");
+        let (payload_root, payload) = values.rooted_error_lazy_for_test();
         let payload = Value::Lazy(payload);
         let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
         let exposed = builder.data(payload);

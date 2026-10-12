@@ -590,7 +590,7 @@ mod tests {
     #[test]
     fn front_projection_uses_one_managed_root_and_survives_deferred_collection() {
         let context = context();
-        let chunk = PromisedValue::new(context.values(), "regional list-front chunk");
+        let chunk = PromisedValue::new(context.values());
         let list = context.values().construct_runtime_value_root(|access| {
             Value::List(List::concat(
                 List::from_thunk(ListThunk::Promised(chunk.duplicate_in(access))),

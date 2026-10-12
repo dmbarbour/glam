@@ -326,13 +326,7 @@ fn fail_forward_cycle(
         .expect("a forward cycle has a member");
     members.rotate_left(lowest);
     let cycle = Arc::new(crate::core::LazyCycle {
-        members: members
-            .iter()
-            .map(|lazy| crate::core::LazyCycleMember {
-                id: lazy.id(),
-                label: lazy.label().clone(),
-            })
-            .collect(),
+        members: members.iter().map(|lazy| lazy.id()).collect(),
     });
     let failure = Arc::new(EvaluationFailure::dependency_cycle(cycle));
     let mut canonical = None;
@@ -2333,7 +2327,7 @@ mod ownership_tests {
         let context = EvalContext::standalone();
         let (promise, promise_root) = context.values().with_runtime_value_access(|access| {
             let root = access
-                .construct_rooted_managed_promise("resumable promise follower")
+                .construct_rooted_managed_promise()
                 .expect("the resumable promise should fit its reviewed managed slot");
             let promise = PromisedValue::from_root(&root, &access);
             (promise, root)
@@ -2387,7 +2381,7 @@ mod ownership_tests {
     #[test]
     fn stale_access_route_adopts_the_exact_whnf_replacement() {
         let context = EvalContext::isolated(crate::core::private_test_value_factory());
-        let result = PromisedValue::new(context.values(), "access replacement result");
+        let result = PromisedValue::new(context.values());
         let source = LazyValue::from_access(
             context.values(),
             Arc::from([CoreDataKey::Index]),

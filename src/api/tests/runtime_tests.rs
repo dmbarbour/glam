@@ -1260,11 +1260,10 @@ fn output_journaling_preserves_lazy_payload_until_decoder_demand() {
         .expect("assembler should seal the runtime");
     let evaluations = Arc::new(AtomicUsize::new(0));
     let producer_evaluations = evaluations.clone();
-    let lazy =
-        super::public_semantic_thunk(&assembler.core_values(), "lazy output payload", move |_| {
-            producer_evaluations.fetch_add(1, Ordering::SeqCst);
-            Ok(CoreValue::Number(Number::integer(42)))
-        });
+    let lazy = super::public_semantic_thunk(&assembler.core_values(), move |_| {
+        producer_evaluations.fetch_add(1, Ordering::SeqCst);
+        Ok(CoreValue::Number(Number::integer(42)))
+    });
     let decoder = assembler.clone();
     let delivered = Arc::new(Mutex::new(Vec::new()));
     let delivered_values = delivered.clone();

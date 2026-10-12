@@ -210,17 +210,12 @@ pub(in crate::eval) fn apply_builder_builtin_in(
             state.sequence.insert(0, BuilderSequenceFrame::Cut);
             let state = encode_builder_state(access, state);
             let results = builder_effect_results(access, operation, state);
-            let selected = deferred_results(
-                access,
-                "builder cut",
-                ListEffectComputation::FirstResult { results },
-            );
+            let selected = deferred_results(access, ListEffectComputation::FirstResult { results });
             let Value::List(selected) = selected else {
                 unreachable!("first-result builder recipe must produce a list")
             };
             Ok(deferred_results(
                 access,
-                "builder cut continuation",
                 ListEffectComputation::FlatMapResults {
                     results: selected,
                     continuation: builder_continue(access, 0),
@@ -296,7 +291,6 @@ fn builder_fix(
     });
     let fixed = deferred_results(
         access,
-        "builder fix",
         ListEffectComputation::FixFunction {
             function: adapter,
             alternative: 0,
@@ -311,7 +305,6 @@ fn builder_fix(
     });
     Ok(deferred_results(
         access,
-        "builder fix restoration",
         ListEffectComputation::FlatMapResults {
             results: fixed,
             continuation: restore,
@@ -362,17 +355,12 @@ fn control_stage(
     if remaining_cuts == 0 {
         return Value::List(results);
     }
-    let selected = deferred_results(
-        access,
-        "builder captured cut",
-        ListEffectComputation::FirstResult { results },
-    );
+    let selected = deferred_results(access, ListEffectComputation::FirstResult { results });
     let Value::List(selected) = selected else {
         unreachable!("first-result builder recipe must produce a list")
     };
     deferred_results(
         access,
-        "builder captured cut continuation",
         ListEffectComputation::FlatMapResults {
             results: selected,
             continuation: builder_continue(access, remaining_cuts - 1),
@@ -389,13 +377,9 @@ pub(super) fn decode_outcome(
         .map_err(|_| EvaluationHalt::new("builder outcome has the wrong number of fields"))
 }
 
-fn deferred_results(
-    access: &RuntimeValueAccess<'_>,
-    label: &'static str,
-    computation: ListEffectComputation,
-) -> Value {
+fn deferred_results(access: &RuntimeValueAccess<'_>, computation: ListEffectComputation) -> Value {
     Value::List(List::from_thunk(
-        LazyValue::list_effect_computation_in(access, label, computation).into(),
+        LazyValue::list_effect_computation_in(access, computation).into(),
     ))
 }
 

@@ -250,9 +250,7 @@ mod tests {
     }
 
     fn recognize(context: &EvalContext, dict: &Dict, tag: &Key) -> Option<Value> {
-        let (owner, _) = context
-            .values()
-            .rooted_error_lazy_for_test("regional tagged-payload owner");
+        let (owner, _) = context.values().rooted_error_lazy_for_test();
         let poll_context = EvaluationPollContext::for_context(context);
         let mut machine = poll_context.with_value_access(context, |access| {
             RegionalTaggedPayload::new_in(&access, dict, tag, owner.id())
@@ -314,7 +312,7 @@ mod tests {
         let tag = Key::atom_from_text("tuple");
         let ignored = Key::atom_from_text("ignored");
         let nested = Key::atom_from_text("nested");
-        let promise = PromisedValue::new(context.values(), "nested undefined member");
+        let promise = PromisedValue::new(context.values());
         let dict = Dict::new_sync()
             .insert(tag.clone(), Value::Number(7.into()))
             .insert(
@@ -324,9 +322,7 @@ mod tests {
                     Value::Promised(promise.duplicate_for_test(context.values())),
                 )),
             );
-        let (owner, _) = context
-            .values()
-            .rooted_error_lazy_for_test("regional tagged-payload owner");
+        let (owner, _) = context.values().rooted_error_lazy_for_test();
         let poll_context = EvaluationPollContext::for_context(&context);
         let mut machine = poll_context.with_value_access(&context, |access| {
             RegionalTaggedPayload::new_in(&access, &dict, &tag, owner.id())

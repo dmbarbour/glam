@@ -512,7 +512,6 @@ fn object_instance_in(access: &EvaluationValueAccess<'_>, input: ObjectInstanceI
     };
     Value::Lazy(LazyValue::computed_fixpoint_in(
         access.values(),
-        "object self",
         FixpointComputation::ObjectInstance(spec),
     ))
 }
@@ -533,7 +532,6 @@ fn instance_from_plain_dict_in(access: &EvaluationValueAccess<'_>, value: &Value
     );
     Value::Lazy(LazyValue::computed_fixpoint_in(
         access.values(),
-        "object self",
         FixpointComputation::ObjectInstance(spec),
     ))
 }

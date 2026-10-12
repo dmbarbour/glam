@@ -68,7 +68,6 @@ fn lazy_alias_root(context: &EvalContext, leaf: Value) -> RuntimeValueRoot {
         for _ in 0..PRODUCER_DEPTH {
             let lazy = LazyValue::semantic_computation_in(
                 access,
-                "lazy alias",
                 Arc::from([access.duplicate_value(&current)]),
                 return_first_capture,
             );
@@ -81,7 +80,7 @@ fn lazy_alias_root(context: &EvalContext, leaf: Value) -> RuntimeValueRoot {
 fn promised_alias_root(context: &EvalContext, leaf: Value, depth: usize) -> RuntimeValueRoot {
     let mut current = leaf;
     for _ in 0..depth {
-        let promise = PromisedValue::new(context.values(), "promised alias");
+        let promise = PromisedValue::new(context.values());
         crate::core::set_test_promise(context.values(), &promise, current)
             .expect_without_debug("a fresh promised alias should accept its assignment");
         current = Value::Promised(promise);
@@ -170,7 +169,6 @@ fn fixpoint_chain_root(context: &EvalContext, leaf: Value) -> RuntimeValueRoot {
             let function = Value::Function(FunctionValue::new(stage, 1));
             current = Value::Lazy(LazyValue::computed_fixpoint_in(
                 access,
-                "fixpoint chain",
                 FixpointComputation::Function(function),
             ));
         }
@@ -220,7 +218,7 @@ fn assert_producer_chain(
 
     let (context, promise, handle, first_owner) = on_small_stack(suspension_thread, move || {
         let context = context();
-        let promise = PromisedValue::new(context.values(), "producer-chain suspension");
+        let promise = PromisedValue::new(context.values());
         let root = build(
             &context,
             Value::Promised(promise.duplicate_for_test(context.values())),
@@ -252,7 +250,7 @@ fn assert_producer_chain(
 
 fn promised_dictionary_chain(context: &EvalContext, depth: usize, key: &Key, leaf: Value) -> Value {
     (0..depth).fold(leaf, |value, _| {
-        let promise = PromisedValue::new(context.values(), "dictionary link");
+        let promise = PromisedValue::new(context.values());
         crate::core::set_test_promise(context.values(), &promise, value)
             .expect_without_debug("a fresh dictionary link should accept its assignment");
         Value::Dict(Dict::new_sync().insert(key.clone(), Value::Promised(promise)))
@@ -389,7 +387,7 @@ fn deep_lazy_aliases_complete_and_resume_on_a_forced_owner() {
     let (context, promise, handle, first_owner) =
         on_small_stack("lazy-alias-suspend-owner", || {
             let context = context();
-            let promise = PromisedValue::new(context.values(), "lazy alias suspension");
+            let promise = PromisedValue::new(context.values());
             let root = lazy_alias_root(
                 &context,
                 Value::Promised(promise.duplicate_for_test(context.values())),
@@ -437,7 +435,7 @@ fn deep_promise_aliases_complete_and_resume_on_a_forced_owner() {
     let (context, promise, handle, first_owner) =
         on_small_stack("promise-alias-suspend-owner", || {
             let context = context();
-            let promise = PromisedValue::new(context.values(), "promise alias suspension");
+            let promise = PromisedValue::new(context.values());
             let root = promised_alias_root(
                 &context,
                 Value::Promised(promise.duplicate_for_test(context.values())),
@@ -591,7 +589,7 @@ fn deep_aliases_preserve_one_structured_failure_on_the_small_stack() {
                     .with_context_in(&access, access.duplicate_value(&frame)),
             )
         });
-        let promise = PromisedValue::new(context.values(), "structured failure");
+        let promise = PromisedValue::new(context.values());
         crate::core::fail_test_promise(context.values(), &promise, failure.clone())
             .expect_without_debug("the fresh terminal promise should accept one failure");
         let root = promised_alias_root(&context, Value::Promised(promise), SEMANTIC_DEPTH);
@@ -615,7 +613,7 @@ fn lazy_route_checkpoint_resumes_on_another_small_stack_poller() {
     let (context, promise, wait, _lazy_root, first_owner) =
         on_small_stack("lazy-route-first-owner", || {
             let context = context();
-            let promise = PromisedValue::new(context.values(), "lazy-route suspension");
+            let promise = PromisedValue::new(context.values());
             let root = application_chain_root_with_depth(
                 &context,
                 Value::Promised(promise.duplicate_for_test(context.values())),
@@ -672,7 +670,7 @@ fn lazy_route_checkpoint_resumes_on_another_small_stack_poller() {
 fn reflection_hosted_checkpoint_resumes_on_another_small_stack_poller() {
     let (context, promise, task, first_owner) = on_small_stack("reflection-first-owner", || {
         let context = context();
-        let promise = PromisedValue::new(context.values(), "reflection suspension");
+        let promise = PromisedValue::new(context.values());
         let root = promised_alias_root(
             &context,
             Value::Promised(promise.duplicate_for_test(context.values())),
@@ -725,7 +723,7 @@ fn spark_checkpoint_resumes_on_another_small_stack_poller() {
     let (context, promise, lazy, root, first_owner) = on_small_stack("spark-first-owner", || {
         let context = context();
         context.start_manual_spark_worker_for_test();
-        let promise = PromisedValue::new(context.values(), "spark suspension");
+        let promise = PromisedValue::new(context.values());
         let root = application_chain_root_with_depth(
             &context,
             Value::Promised(promise.duplicate_for_test(context.values())),

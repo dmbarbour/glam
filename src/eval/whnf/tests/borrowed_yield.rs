@@ -86,9 +86,7 @@ fn borrowed_multi_frame_yield_preserves_containers_without_projection_or_roots()
 #[test]
 fn owned_and_borrowed_drivers_preserve_boundary_identity_and_budget() {
     let context = context();
-    let (expected, _) = context
-        .values()
-        .rooted_error_lazy_for_test("borrowed-driver boundary");
+    let (expected, _) = context.values().rooted_error_lazy_for_test();
     let poll = EvaluationPollContext::for_context(&context);
 
     poll.with_value_access(&context, |access| {

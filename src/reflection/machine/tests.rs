@@ -72,13 +72,10 @@ fn root_value(context: &EvalContext, value: Value) -> RuntimeValueRoot {
     context.values().construct_runtime_value_root(|_| value)
 }
 
-fn rooted_promise(
-    values: &CoreValueFactory,
-    label: &'static str,
-) -> (PromisedValue, ManagedPromiseRoot) {
+fn rooted_promise(values: &CoreValueFactory) -> (PromisedValue, ManagedPromiseRoot) {
     values.with_runtime_value_access(|access| {
         let root = access
-            .construct_rooted_managed_promise(label)
+            .construct_rooted_managed_promise()
             .expect("the rooted reflection promise fixture should fit one managed run");
         let promise = PromisedValue::from_root(&root, &access);
         (promise, root)
@@ -1619,7 +1616,7 @@ fn request_decode_resumes_the_exact_lazy_payload_without_replay() {
     let evaluations = Arc::new(AtomicUsize::new(0));
     let request = values.construct_runtime_value_root(|access| {
         let evaluations = evaluations.clone();
-        let payload = LazyValue::semantic_thunk_in(access, "request payload", move |_| {
+        let payload = LazyValue::semantic_thunk_in(access, move |_| {
             evaluations.fetch_add(1, Ordering::AcqRel);
             Ok(Value::List(List::from_values(vec![Value::Number(
                 41.into(),
@@ -1657,7 +1654,7 @@ fn request_decode_resumes_the_exact_lazy_list_chunk_without_replay() {
     let evaluations = Arc::new(AtomicUsize::new(0));
     let request = values.construct_runtime_value_root(|access| {
         let evaluations = evaluations.clone();
-        let chunk = LazyValue::semantic_thunk_in(access, "request list chunk", move |_| {
+        let chunk = LazyValue::semantic_thunk_in(access, move |_| {
             evaluations.fetch_add(1, Ordering::AcqRel);
             Ok(Value::List(List::from_values(vec![Value::Number(
                 42.into(),
@@ -1697,16 +1694,15 @@ fn resume_request_decodes_lazy_ids_once_in_source_order() {
     let continuation_evaluations = Arc::new(AtomicUsize::new(0));
     let request = values.construct_runtime_value_root(|access| {
         let task_evaluations = task_evaluations.clone();
-        let task = LazyValue::semantic_thunk_in(access, "resume task ID", move |_| {
+        let task = LazyValue::semantic_thunk_in(access, move |_| {
             task_evaluations.fetch_add(1, Ordering::AcqRel);
             Ok(Value::Number(7.into()))
         });
         let continuation_evaluations = continuation_evaluations.clone();
-        let continuation =
-            LazyValue::semantic_thunk_in(access, "resume continuation ID", move |_| {
-                continuation_evaluations.fetch_add(1, Ordering::AcqRel);
-                Ok(Value::Number(8.into()))
-            });
+        let continuation = LazyValue::semantic_thunk_in(access, move |_| {
+            continuation_evaluations.fetch_add(1, Ordering::AcqRel);
+            Ok(Value::Number(8.into()))
+        });
         let payload = Value::List(List::from_values(vec![
             Value::Lazy(task),
             Value::Lazy(continuation),
@@ -2125,39 +2121,27 @@ fn reset_stack_decoder_resumes_each_lazy_field_once_and_leaves_continuation_lazy
 
     let serialized = values.construct_runtime_value_root(|access| {
         let continuation_evaluations = continuation_evaluations.clone();
-        let continuation = Value::Lazy(LazyValue::semantic_thunk_in(
-            access,
-            "reset continuation",
-            move |_| {
-                continuation_evaluations.fetch_add(1, Ordering::AcqRel);
-                Ok(Value::Number(99.into()))
-            },
-        ));
+        let continuation = Value::Lazy(LazyValue::semantic_thunk_in(access, move |_| {
+            continuation_evaluations.fetch_add(1, Ordering::AcqRel);
+            Ok(Value::Number(99.into()))
+        }));
         let key_evaluations = key_evaluations.clone();
         let key = Value::List(List::from_values(vec![Value::Lazy(
-            LazyValue::semantic_thunk_in(access, "reset key element", move |_| {
+            LazyValue::semantic_thunk_in(access, move |_| {
                 key_evaluations.fetch_add(1, Ordering::AcqRel);
                 Ok(Value::binary_from_text("key"))
             }),
         )]));
         let scope_evaluations = scope_evaluations.clone();
-        let scope = Value::Lazy(LazyValue::semantic_thunk_in(
-            access,
-            "reset scope",
-            move |_| {
-                scope_evaluations.fetch_add(1, Ordering::AcqRel);
-                Ok(Value::Number(2.into()))
-            },
-        ));
+        let scope = Value::Lazy(LazyValue::semantic_thunk_in(access, move |_| {
+            scope_evaluations.fetch_add(1, Ordering::AcqRel);
+            Ok(Value::Number(2.into()))
+        }));
         let order_evaluations = order_evaluations.clone();
-        let order = Value::Lazy(LazyValue::semantic_thunk_in(
-            access,
-            "reset order",
-            move |_| {
-                order_evaluations.fetch_add(1, Ordering::AcqRel);
-                Ok(Value::Number(3.into()))
-            },
-        ));
+        let order = Value::Lazy(LazyValue::semantic_thunk_in(access, move |_| {
+            order_evaluations.fetch_add(1, Ordering::AcqRel);
+            Ok(Value::Number(3.into()))
+        }));
         Value::List(List::from_values(vec![Value::List(List::from_values(
             vec![key, continuation, scope, order],
         ))]))
@@ -2207,25 +2191,21 @@ fn reset_stack_decoder_resumes_each_lazy_structural_layer_once() {
         let serialized = values.construct_runtime_value_root(|access| match layer {
             Layer::StackShell => {
                 let evaluations = evaluations.clone();
-                Value::Lazy(LazyValue::semantic_thunk_in(
-                    access,
-                    "reset stack shell",
-                    move |_| {
-                        evaluations.fetch_add(1, Ordering::AcqRel);
-                        Ok(Value::List(List::from_values(vec![
-                            serialized_reset_frame(
-                                Value::binary_from_text("key"),
-                                Value::Number(8.into()),
-                                2,
-                                3,
-                            ),
-                        ])))
-                    },
-                ))
+                Value::Lazy(LazyValue::semantic_thunk_in(access, move |_| {
+                    evaluations.fetch_add(1, Ordering::AcqRel);
+                    Ok(Value::List(List::from_values(vec![
+                        serialized_reset_frame(
+                            Value::binary_from_text("key"),
+                            Value::Number(8.into()),
+                            2,
+                            3,
+                        ),
+                    ])))
+                }))
             }
             Layer::StackChunk => {
                 let evaluations = evaluations.clone();
-                let chunk = LazyValue::semantic_thunk_in(access, "reset stack chunk", move |_| {
+                let chunk = LazyValue::semantic_thunk_in(access, move |_| {
                     evaluations.fetch_add(1, Ordering::AcqRel);
                     Ok(Value::List(List::from_values(vec![
                         serialized_reset_frame(
@@ -2240,21 +2220,20 @@ fn reset_stack_decoder_resumes_each_lazy_structural_layer_once() {
             }
             Layer::FrameShell => {
                 let evaluations = evaluations.clone();
-                let deferred =
-                    LazyValue::semantic_thunk_in(access, "reset frame shell", move |_| {
-                        evaluations.fetch_add(1, Ordering::AcqRel);
-                        Ok(serialized_reset_frame(
-                            Value::binary_from_text("key"),
-                            Value::Number(8.into()),
-                            2,
-                            3,
-                        ))
-                    });
+                let deferred = LazyValue::semantic_thunk_in(access, move |_| {
+                    evaluations.fetch_add(1, Ordering::AcqRel);
+                    Ok(serialized_reset_frame(
+                        Value::binary_from_text("key"),
+                        Value::Number(8.into()),
+                        2,
+                        3,
+                    ))
+                });
                 Value::List(List::from_values(vec![Value::Lazy(deferred)]))
             }
             Layer::FrameChunk => {
                 let evaluations = evaluations.clone();
-                let fields = LazyValue::semantic_thunk_in(access, "reset frame chunk", move |_| {
+                let fields = LazyValue::semantic_thunk_in(access, move |_| {
                     evaluations.fetch_add(1, Ordering::AcqRel);
                     Ok(Value::List(List::from_values(vec![
                         Value::binary_from_text("key"),
@@ -2284,7 +2263,7 @@ fn reset_stack_decoder_resumes_each_lazy_structural_layer_once() {
 fn reset_stack_decoder_resumes_a_promised_numeric_field() {
     let values = Assembler::default().core_values();
     let context = EvalContext::isolated(values.clone());
-    let (promised, _promised_root) = rooted_promise(&values, "reset scope promise");
+    let (promised, _promised_root) = rooted_promise(&values);
     let serialized = values.construct_runtime_value_root(|access| {
         Value::List(List::from_values(vec![Value::List(List::from_values(
             vec![
@@ -2418,7 +2397,7 @@ fn dropping_a_blocked_reset_stack_decoder_releases_its_owner_without_consuming_t
     // process-global test value domain with concurrently running tests.
     let values = Assembler::default().core_values();
     let context = EvalContext::isolated(values.clone());
-    let (promised, _promised_root) = rooted_promise(&values, "abandoned reset stack");
+    let (promised, _promised_root) = rooted_promise(&values);
     let serialized = values
         .construct_runtime_value_root(|access| Value::Promised(promised.duplicate_in(access)));
     let mut decoder = ResetStackMachine::new(serialized);
@@ -2489,7 +2468,7 @@ fn shift_request_effect(
 fn reset_control_work_does_not_publish_before_its_key_resolves() {
     let values = Assembler::default().core_values();
     let tags = Tags::new();
-    let (key, _key_root) = rooted_promise(&values, "reset request key");
+    let (key, _key_root) = rooted_promise(&values);
     let effect = reset_request_effect(&values, &tags, &key);
     let mut task = EffectTask::new_rooted(
         &values,
@@ -2548,7 +2527,7 @@ fn reset_control_work_does_not_publish_before_its_key_resolves() {
 fn shift_control_work_does_not_capture_before_its_key_resolves() {
     let values = Assembler::default().core_values();
     let tags = Tags::new();
-    let (key, _key_root) = rooted_promise(&values, "shift request key");
+    let (key, _key_root) = rooted_promise(&values);
     let effect = shift_request_effect(&values, &tags, &key);
     let mut task = EffectTask::new_rooted(
         &values,
@@ -2605,7 +2584,7 @@ fn shift_control_work_does_not_capture_before_its_key_resolves() {
 #[test]
 fn captured_control_installation_waits_before_publishing_its_resume_layer() {
     let values = Assembler::default().core_values();
-    let (stack, _stack_root) = rooted_promise(&values, "captured caller reset stack");
+    let (stack, _stack_root) = rooted_promise(&values);
     let mut task = EffectTask::new_rooted(
         &values,
         rooted_constant_effect(&values, |access| {
@@ -2685,7 +2664,7 @@ fn captured_control_installation_waits_before_publishing_its_resume_layer() {
 fn initial_fixpoint_waits_for_the_reset_stack_before_allocating_control() {
     let (assembler, effect) = compile_effect(".fix (\\_loop -> .r \"fixed\")");
     let values = assembler.core_values();
-    let (stack, _stack_root) = rooted_promise(&values, "fixpoint reset stack");
+    let (stack, _stack_root) = rooted_promise(&values);
     let mut task = EffectTask::new(
         &values,
         effect.clone_core_for_test(),
@@ -2752,7 +2731,7 @@ fn fixpoint_restart_retains_its_selection_while_the_entry_stack_is_blocked() {
         .get(module.value(), "refl.function")
         .expect("restart fixture should define its function");
     let values = assembler.core_values();
-    let (stack, _stack_root) = rooted_promise(&values, "restart entry stack");
+    let (stack, _stack_root) = rooted_promise(&values);
     let (effect, state) = values.with_runtime_value_access(|access| (access.unit(), access.unit()));
     let mut entry = Branch::<TestEffects>::new(&values, effect, state);
     entry.state = values.construct_runtime_value_root(|access| {
@@ -2834,7 +2813,7 @@ fn fixpoint_restart_retains_its_selection_while_the_entry_stack_is_blocked() {
 fn delivery_selects_reset_or_delimiter_only_after_stack_decoding() {
     for reset_wins in [false, true] {
         let values = Assembler::default().core_values();
-        let (stack, _stack_root) = rooted_promise(&values, "delivery reset stack");
+        let (stack, _stack_root) = rooted_promise(&values);
         let mut task = EffectTask::new_rooted(
             &values,
             rooted_constant_effect(&values, |access| {
@@ -2926,7 +2905,7 @@ fn delivery_selects_reset_or_delimiter_only_after_stack_decoding() {
 #[test]
 fn restore_delimiter_waits_for_its_saved_stack_before_replacing_control() {
     let values = Assembler::default().core_values();
-    let (saved, _saved_root) = rooted_promise(&values, "saved restore stack");
+    let (saved, _saved_root) = rooted_promise(&values);
     let mut task = EffectTask::new_rooted(
         &values,
         rooted_constant_effect(&values, |access| {
@@ -3097,7 +3076,7 @@ fn malformed_restore_stack_fails_before_popping_the_delimiter() {
 fn retry_wake_and_terminalization_discard_blocked_control_work() {
     fn blocked_reset_task(values: &CoreValueFactory) -> EffectTask<TestEffects> {
         let tags = Tags::new();
-        let (key, _key_root) = rooted_promise(values, "discarded reset key");
+        let (key, _key_root) = rooted_promise(values);
         let mut task = EffectTask::new_rooted(
             values,
             reset_request_effect(values, &tags, &key),
@@ -3549,7 +3528,7 @@ fn fixpoint_frames_retain_the_shared_function_root_until_retirement() {
         },
         scope_depth: 0,
     });
-    let (_, handle) = rooted_promise(&core, "test fixpoint");
+    let (_, handle) = rooted_promise(&core);
     let active = ActiveFix {
         root: root.clone(),
         choices: vec![FixChoice::Left],
@@ -4650,9 +4629,7 @@ fn isolated_search_reports_and_resumes_lazy_dependencies() {
     let (assembler, function) =
         compile_effect("\\value -> .eval value >>= (\\result -> .r result.ok)");
     let session = EvalContext::isolated(assembler.core_values());
-    let (promised, _owner_task, _owner) = session
-        .task_owned_promise(Arc::from("isolated search dependency"))
-        .unwrap();
+    let (promised, _owner_task, _owner) = session.task_owned_promise().unwrap();
     let observer = session.with_new_task().unwrap();
     let effect = rooted_application(
         &observer,
@@ -6411,9 +6388,7 @@ fn suspended_nested_reflection_branch_resumes_without_replay_or_leakage() {
 fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
     let (assembler, function) = compile_effect("\\value -> .eval value");
     let session = EvalContext::isolated(assembler.core_values());
-    let (promised, _owner_task, _owner) = session
-        .task_owned_promise(Arc::from("eval test dependency"))
-        .unwrap();
+    let (promised, _owner_task, _owner) = session.task_owned_promise().unwrap();
     let observer = session.with_new_task().unwrap();
     let effect = rooted_application(
         &observer,
@@ -6467,9 +6442,7 @@ fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
 fn specialization_host_activity_is_not_reentered_after_owned_demand_suspends() {
     let (assembler, function) = compile_effect("\\value -> .evaluate value");
     let session = EvalContext::isolated(assembler.core_values());
-    let (promised, _owner_task, _owner) = session
-        .task_owned_promise(Arc::from("specialization demand dependency"))
-        .unwrap();
+    let (promised, _owner_task, _owner) = session.task_owned_promise().unwrap();
     let observer = session.with_new_task().unwrap();
     let promised_value = public_value(
         &assembler.core_values(),
@@ -6562,9 +6535,7 @@ fn specialization_request_completes_under_one_step_polling_without_replay() {
 fn specialization_request_propagates_terminal_demand_failure_without_replay() {
     let (assembler, function) = compile_effect("\\value -> .evaluate value");
     let session = EvalContext::isolated(assembler.core_values());
-    let (promised, _owner_task, _owner) = session
-        .task_owned_promise(Arc::from("failed specialization dependency"))
-        .unwrap();
+    let (promised, _owner_task, _owner) = session.task_owned_promise().unwrap();
     let observer = session.with_new_task().unwrap();
     let effect = rooted_application(
         &observer,
@@ -8633,13 +8604,7 @@ fn reflection_fixpoint_reports_recursive_self_observation() {
 fn task_failure_propagates_one_structured_failure_to_owned_promises() {
     let (assembler, _effect) = compile_effect(".r ()");
     let context = EvalContext::isolated(assembler.core_values());
-    let (promises, owner_task, owner) = context
-        .task_owned_promises([
-            Arc::from("first owned promise"),
-            Arc::from("second owned promise"),
-            Arc::from("resolved owned promise"),
-        ])
-        .unwrap();
+    let (promises, owner_task, owner) = context.task_owned_promises(3).unwrap();
     let _promise_roots = promises
         .iter()
         .map(|promise| promise.root(context.values()))
@@ -8744,9 +8709,7 @@ fn task_completion_and_cancellation_fail_unresolved_owned_promises() {
     ];
 
     for (cancel, expected) in cases {
-        let (promise, owner_task, owner) = context
-            .task_owned_promise(Arc::from("unfinished owned promise"))
-            .unwrap();
+        let (promise, owner_task, owner) = context.task_owned_promise().unwrap();
         let _promise_root = promise.root(context.values());
         let wait = promise
             .task(context.values())
