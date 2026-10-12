@@ -367,8 +367,16 @@ or `.heap.get ['k]`), and loops of 400 iterations through a recursive
   to the scheduler for a round trip. Per step: `.r ()` -5%, `.heap.set`
   -8%; `minimal` -5.7%, `hello_elf` -1.2%. The lazies' own routes remain
   most of a step (about 296 K): net WHNF evaluation of each small lazy
-  about 28 K, plus checkpoints and route claims. The store's change log
-  also grows with every step: dropping it costs about 37 K per step (R1).
+  about 28 K, plus checkpoints and route claims. Dropping the reflection
+  store at exit also costs about 37 K per step, but only because it holds
+  the last reference to the managed heap, whose teardown scales with what
+  the run allocated (about 85 slots per step); it is not R1's change log.
+- Remeasured against a baseline that compiles the same chain without
+  running it (`meta.bench` for `refl.bench`), after those changes: a
+  `.r ()` step costs 519 K, a `.heap.set` 685 K. Of a `.r ()` step: lazy
+  routes the task pumps 315 K (61%: net WHNF of the small lazies 135 K,
+  WHNF checkpoints 73 K, claim nets 55 K), the reflection machine 149 K,
+  validating new roots 41 K, allocation and free about 75 K.
 
 Reflection task polls hold no heap region (`perf-quantum-region`), since
 they call into their host between steps. Their pure steps, such as local
