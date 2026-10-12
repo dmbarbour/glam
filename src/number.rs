@@ -192,11 +192,7 @@ impl fmt::Display for Number {
 }
 
 fn parse_decimal_or_scientific(text: &str) -> Result<Number, String> {
-    // Plain digits that fit a machine word, as most literals are.
-    if !text.is_empty() && text.len() <= 18 && text.bytes().all(|byte| byte.is_ascii_digit()) {
-        let value = text
-            .parse::<i64>()
-            .expect("at most 18 decimal digits fit an i64");
+    if let Some(value) = machine_word_integer(text) {
         return Ok(Number::integer(value));
     }
     let (mantissa, negative_exponent, exponent) =
@@ -244,6 +240,31 @@ fn parse_decimal_or_scientific(text: &str) -> Result<Number, String> {
     }
 
     Ok(Number(rational))
+}
+
+/// `text` as an integer, if it is plain decimal digits, perhaps grouped by
+/// single `_` between digits, that fit a machine word, as most literals
+/// are. Anything else, malformed grouping included, is left to the general
+/// parse and its diagnostics.
+fn machine_word_integer(text: &str) -> Option<i64> {
+    let mut value = 0i64;
+    let mut digits = 0;
+    let mut after_digit = false;
+    for byte in text.bytes() {
+        match byte {
+            b'0'..=b'9' => {
+                digits += 1;
+                if digits > 18 {
+                    return None;
+                }
+                value = value * 10 + i64::from(byte - b'0');
+                after_digit = true;
+            }
+            b'_' if after_digit => after_digit = false,
+            _ => return None,
+        }
+    }
+    after_digit.then_some(value)
 }
 
 fn parse_exponent(text: &str) -> Result<(bool, u32), String> {
@@ -375,6 +396,22 @@ mod tests {
         assert_eq!(Number::parse("120e_1").unwrap(), Number::integer(12));
         assert_eq!(Number::parse("4.0").unwrap(), Number::integer(4));
         assert_eq!(Number::parse("007").unwrap(), Number::integer(7));
+        assert_eq!(
+            Number::parse("1_000_000").unwrap(),
+            Number::integer(1_000_000)
+        );
+        assert_eq!(
+            Number::parse("_123_456_789_012_345_678").unwrap(),
+            Number::integer(-123_456_789_012_345_678)
+        );
+        for malformed in ["1__0", "1_", "__1", "1_e3"] {
+            assert!(
+                Number::parse(malformed)
+                    .unwrap_err()
+                    .contains("digit separator placement"),
+                "{malformed}"
+            );
+        }
         assert_eq!(
             Number::parse("_123456789012345678").unwrap(),
             Number::integer(-123_456_789_012_345_678)
