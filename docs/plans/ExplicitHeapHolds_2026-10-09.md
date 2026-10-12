@@ -260,6 +260,15 @@ iterator inside their own access; diagnostic emission) and cycle poisoning
 (`pump.rs`, rooting a failure through a second access). Forbidding nesting
 outright broke 186 tests.
 
+Reflection steps (2026-10-12, `perf-reflection-step-cost`): a `.r ()`
+step in a `refl.*` chain costs 518 K instructions, with 64 root
+registrations, about 35 outer and 118 nested heap regions, and 80
+allocated slots. Root registration and validation are 11% of it by self
+cost (about 1,400 instructions per transient root with its allocation and
+release), heap region entry and the thread cache another 11%; most of the
+roots carry values between the accesses of lazy routes forced within one
+poll.
+
 ## Steps
 
 ### Hold and access API (`gc-hold-api`)

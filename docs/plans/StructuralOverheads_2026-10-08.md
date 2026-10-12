@@ -377,6 +377,16 @@ or `.heap.get ['k]`), and loops of 400 iterations through a recursive
   routes the task pumps 315 K (61%: net WHNF of the small lazies 135 K,
   WHNF checkpoints 73 K, claim nets 55 K), the reflection machine 149 K,
   validating new roots 41 K, allocation and free about 75 K.
+- By each function's own cost, a `.r ()` step (518 K) divides as: net
+  reduction 138 K (27%), `malloc`/`free` 112 K (22%), heap region entry
+  and thread cache 58 K (11%), root registration and validation 57 K
+  (11%), coordinator, pump and routes 51 K (10%), WHNF and checkpoints
+  44 K (8.5%), the reflection machine's own code 7 K. Per step: 64 root
+  registrations (value nodes most, then lazy cells, lazy checkpoints, net
+  cells, list fronts), about 35 outer and 118 nested heap regions, 80
+  allocated slots. Explicit heap holds would address the regions and the
+  transient roots, about a quarter to a third of a step directly
+  (maintainer, 2026-10-12: consider pushing them before the leftovers).
 
 Reflection task polls hold no heap region (`perf-quantum-region`), since
 they call into their host between steps. Their pure steps, such as local
