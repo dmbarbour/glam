@@ -2284,6 +2284,7 @@ fn claim_rejects_a_mismatched_registered_demand_before_machine_execution() {
         closed: Arc::new(AtomicBool::new(false)),
         coordinator: Arc::downgrade(&coordinator),
         poll_contexts: AtomicUsize::new(0),
+        drain_probe: std::sync::Mutex::new(None),
     });
     let original = coordinator
         .state

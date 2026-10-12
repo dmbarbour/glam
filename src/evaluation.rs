@@ -257,6 +257,23 @@ pub(crate) struct EvaluationDemandState {
     coordinator: Weak<EvaluationWorkCoordinator>,
     #[cfg(test)]
     poll_contexts: AtomicUsize,
+    /// Called at points in a session drain where a concurrent worker may
+    /// change the session's tasks, so tests can force those orderings.
+    #[cfg(test)]
+    drain_probe: std::sync::Mutex<Option<SessionDrainProbe>>,
+}
+
+#[cfg(test)]
+type SessionDrainProbe = Box<dyn FnMut(SessionDrainPoint) + Send>;
+
+/// A point in `run_until_quiescent` where a concurrent worker may change
+/// the session's tasks: just after a failed claim, and just before the
+/// drain decides it is quiescent.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionDrainPoint {
+    ClaimMissed,
+    BeforeQuiescence,
 }
 
 impl fmt::Debug for EvaluationDemandState {

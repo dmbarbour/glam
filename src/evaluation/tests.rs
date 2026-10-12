@@ -7248,6 +7248,97 @@ fn run_until_quiescent_drains_tasks_spawned_during_the_run() {
     assert_eq!(context.reflection_task_count(), 0);
 }
 
+/// A worker yielding a task back after the drain's claim missed it, as a
+/// concurrent worker may, leaves the drain to claim and finish it rather
+/// than report the session deadlocked: the drain reads the work generation
+/// before claiming.
+#[test]
+fn a_session_drain_claims_a_task_yielded_after_its_claim_missed() {
+    let context = isolated_standalone_context();
+    context.schedule_task(|_| Ok(Box::new(Complete))).unwrap();
+    let coordinator = context
+        .coordinator()
+        .expect("the context keeps its coordinator");
+    let held = super::pump::TestWorkerClaim::claim(&coordinator, context.session_id())
+        .expect("a worker should claim the queued task");
+    let held = Mutex::new(Some(held));
+    context.session.set_drain_probe(move |point| {
+        if point == super::SessionDrainPoint::ClaimMissed
+            && let Some(held) = held.lock().unwrap().take()
+        {
+            held.yield_back();
+        }
+    });
+
+    let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+        panic!("a task yielded back during the drain should still drain");
+    };
+    assert!(report.failures.is_empty());
+    assert!(report.unfinished.is_empty());
+}
+
+/// A worker claiming the task just before the drain decides, after its busy
+/// check saw the task queued, leaves the drain looking again and waiting for
+/// that worker rather than report the session deadlocked. The worker yields
+/// only once the drain has looked again, so the drain cannot see the task
+/// ready before deciding.
+#[test]
+fn a_session_drain_waits_for_a_task_claimed_before_it_decides() {
+    let context = isolated_standalone_context();
+    context.schedule_task(|_| Ok(Box::new(Complete))).unwrap();
+    let coordinator = context
+        .coordinator()
+        .expect("the context keeps its coordinator");
+    let session = context.session_id();
+    let held = super::pump::TestWorkerClaim::claim(&coordinator, session)
+        .expect("a worker should claim the queued task");
+    let mut held = Some(held);
+    let mut release = None::<mpsc::Sender<()>>;
+    let worker = Arc::new(Mutex::new(None::<std::thread::JoinHandle<()>>));
+    let worker_slot = worker.clone();
+    let probe_coordinator = coordinator.clone();
+    context.session.set_drain_probe(move |point| match point {
+        // The drain looked again: let the worker yield the task.
+        super::SessionDrainPoint::ClaimMissed if release.is_some() => {
+            let _ = release.take().expect("checked above").send(());
+        }
+        // First the worker yields the task the drain's claim missed.
+        super::SessionDrainPoint::ClaimMissed => {
+            if let Some(held) = held.take() {
+                held.yield_back();
+            }
+        }
+        // Then, once the busy check saw it queued, the worker claims it
+        // again, to yield it back only when signalled.
+        super::SessionDrainPoint::BeforeQuiescence => {
+            let mut slot = worker_slot.lock().unwrap();
+            if slot.is_some() {
+                return;
+            }
+            let claim = super::pump::TestWorkerClaim::claim(&probe_coordinator, session)
+                .expect("the yielded task should be queued again");
+            let (sender, receiver) = mpsc::channel();
+            release = Some(sender);
+            *slot = Some(std::thread::spawn(move || {
+                let _ = receiver.recv();
+                claim.yield_back();
+            }));
+        }
+    });
+
+    let run = context.run_until_quiescent();
+    // Dropping the probe lets a worker still waiting yield, so it can join.
+    context.session.set_drain_probe(|_| {});
+    if let Some(handle) = worker.lock().unwrap().take() {
+        handle.join().expect("the worker thread should finish");
+    }
+    let EvaluationSessionRun::Complete(report) = run else {
+        panic!("a task claimed before the drain decides should still drain");
+    };
+    assert!(report.failures.is_empty());
+    assert!(report.unfinished.is_empty());
+}
+
 #[test]
 fn run_until_quiescent_collects_failures_without_short_circuiting() {
     let context = isolated_standalone_context();

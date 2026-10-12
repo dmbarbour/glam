@@ -371,6 +371,8 @@ impl EvaluationSession {
             coordinator: Arc::downgrade(&coordinator),
             #[cfg(test)]
             poll_contexts: AtomicUsize::new(0),
+            #[cfg(test)]
+            drain_probe: std::sync::Mutex::new(None),
         });
         Arc::new(Self {
             demand,
@@ -394,6 +396,8 @@ impl EvaluationSession {
                 coordinator: Arc::downgrade(coordinator),
                 #[cfg(test)]
                 poll_contexts: AtomicUsize::new(0),
+                #[cfg(test)]
+                drain_probe: std::sync::Mutex::new(None),
             })
         })
     }

@@ -394,6 +394,8 @@ impl EvaluationDemandState {
                 if let Some(claimed) = self.claim_ready_task(&coordinator) {
                     break claimed;
                 }
+                #[cfg(test)]
+                self.probe_drain(super::SessionDrainPoint::ClaimMissed);
                 if self.task_is_running(&coordinator) {
                     if coordinator.wait_for_change_for(
                         generation,
@@ -413,6 +415,8 @@ impl EvaluationDemandState {
                     }
                     continue;
                 }
+                #[cfg(test)]
+                self.probe_drain(super::SessionDrainPoint::BeforeQuiescence);
                 // Any change since the claim attempt, such as a worker
                 // requeueing or claiming a task between the checks above,
                 // means the session may not be quiescent: look again.
@@ -1153,5 +1157,50 @@ impl EvaluationDemandState {
 
     fn task_is_running(&self, coordinator: &EvaluationWorkCoordinator) -> bool {
         coordinator.session_background_is_busy(self.id)
+    }
+
+    /// Installs `probe`, which a session drain calls at each
+    /// `SessionDrainPoint`.
+    #[cfg(test)]
+    pub(super) fn set_drain_probe(
+        &self,
+        probe: impl FnMut(super::SessionDrainPoint) + Send + 'static,
+    ) {
+        *self.drain_probe.lock().unwrap() = Some(Box::new(probe));
+    }
+
+    #[cfg(test)]
+    fn probe_drain(&self, point: super::SessionDrainPoint) {
+        // Unlocked while it runs, as it may change coordinator state.
+        let probe = self.drain_probe.lock().unwrap().take();
+        if let Some(mut probe) = probe {
+            probe(point);
+            *self.drain_probe.lock().unwrap() = Some(probe);
+        }
+    }
+}
+
+/// A session task claimed as a background worker would claim it, so a test
+/// can hold it running and yield it back at a chosen point.
+#[cfg(test)]
+pub(super) struct TestWorkerClaim(ClaimedTask);
+
+#[cfg(test)]
+impl TestWorkerClaim {
+    pub(super) fn claim(
+        coordinator: &Arc<EvaluationWorkCoordinator>,
+        session: EvaluationSessionId,
+    ) -> Option<Self> {
+        coordinator
+            .claim_ready_session_machine_for_test(session)
+            .map(|work| Self(ClaimedTask::new(coordinator.clone(), work)))
+    }
+
+    /// Releases the task unpolled, as a worker that yields, requeueing it.
+    pub(super) fn yield_back(self) {
+        let (_, _, released, _) = self.0.release(EvaluationMachinePoll::Yielded);
+        if let Some(machine) = released {
+            machine.finish();
+        }
     }
 }

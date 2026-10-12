@@ -287,7 +287,10 @@ Steps:
     deadlock with that task Queued or Running (about 1 run in 30 of
     `ordinary_result_is_identical_across_worker_counts` with 4 workers).
     The drain now reads the generation before claiming and looks again on
-    any change; 0 of 400 runs fail.
+    any change. Two tests force those orderings through a test-only drain
+    probe (`SessionDrainPoint`), each failing on its own fix's absence:
+    `a_session_drain_claims_a_task_yielded_after_its_claim_missed` and
+    `a_session_drain_waits_for_a_task_claimed_before_it_decides`.
   - Imported modules are objects (`f241ff4d`, 2026-07-11): `import ... as`
     builds an instance named by the target's abstract path, with the
     module's definitions as constant defs, so inheriting from one is
