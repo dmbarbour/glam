@@ -143,8 +143,9 @@ Design (maintainer, 2026-10-12):
   namespace's reflection-boundary task thunk in `meta.refl` would avoid
   redundant work per file and let the task be shared, extended,
   overridden or canceled. For `perf-reflection-scanner`.
-- **Dict `with`** becomes cheap, local, best-effort enforcement: `=` is a
-  dict union, which fails on a conflict, and `:=` a dict update.
+- **Dict `with`** could become cheap, local, best-effort enforcement: `=`
+  a dict union, `:=` a dict update. Deferred: union merges dict values
+  instead of conflicting.
 - A name the journal records stays defined: `x := {}` no longer frees `x`
   to be introduced again. Tests relying on that are deprecated.
 - The maintainer doubts it improves performance, but expects better
@@ -221,6 +222,8 @@ Steps:
   an undefined path and a declared path left undefined; `:=` and `extend`
   lose `assert_defined`.
 - `defs-with-union`: dict `with` lowers `=` to union and `:=` to update.
+  Deferred (maintainer, 2026-10-12): union merges dicts, so `f = {a: 1}`
+  and then `f = {b: 2}` would not conflict, which would confuse users.
 - Objects' members follow once the module form settles.
 
 ### Reflection scanner (`perf-reflection-scanner`)
