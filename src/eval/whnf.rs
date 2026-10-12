@@ -1229,8 +1229,6 @@ fn apply_whnf_function(
             stage.runtime().access(access.values()).request_jit();
         }
         Value::Function(FunctionValue::new(stage, remaining - consumed))
-    } else if let Some(operator) = function.wrapped_operator() {
-        super::operator::apply_wrapped_operator(access.values(), operator, saturating)
     } else if let Some(compiled) =
         super::net::compiled_for_application(access, function.stage().runtime(), remaining)
     {

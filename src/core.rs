@@ -1374,30 +1374,9 @@ impl FunctionCode {
     }
 }
 
-/// The operator a function's code applies to its parameters, in order, and
-/// does nothing else with them. Calling the function applies the operator
-/// instead of building a net from its code
-/// (`perf-thin-wrapper-applications`). It holds no values, so the
-/// function's stage stays its only managed edge.
-#[derive(Clone)]
-pub(crate) enum WrappedOperator {
-    /// An access along `path` of the first parameter, taking one index from
-    /// each parameter after it.
-    Access(Arc<[CoreDataKey]>),
-}
-
-impl WrappedOperator {
-    pub(crate) fn arity(&self) -> usize {
-        match self {
-            Self::Access(path) => crate::core_net::access_arity(path),
-        }
-    }
-}
-
 pub struct FunctionValue {
     stage: NetValue,
     remaining_arity: usize,
-    wrapped: Option<WrappedOperator>,
 }
 
 impl FunctionValue {
@@ -1409,24 +1388,7 @@ impl FunctionValue {
         Self {
             stage,
             remaining_arity,
-            wrapped: None,
         }
-    }
-
-    /// A function whose code, `stage`, only applies `operator` to its
-    /// parameters.
-    pub(crate) fn wrapping(stage: NetValue, operator: WrappedOperator) -> Self {
-        let arity = operator.arity();
-        Self {
-            wrapped: Some(operator),
-            ..Self::new(stage, arity)
-        }
-    }
-
-    /// The operator this function's code only applies to its remaining
-    /// parameters, if that is all it does.
-    pub(crate) fn wrapped_operator(&self) -> Option<&WrappedOperator> {
-        self.wrapped.as_ref()
     }
 
     pub(crate) fn stage(&self) -> &NetValue {
@@ -1449,7 +1411,6 @@ impl FunctionValue {
         Self {
             stage: self.duplicate_stage_in(access),
             remaining_arity: self.remaining_arity,
-            wrapped: self.wrapped.clone(),
         }
     }
 

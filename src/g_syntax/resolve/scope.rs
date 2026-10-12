@@ -389,8 +389,8 @@ mod resolver_context_tests {
     }
 
     /// Lowering asks `anno 'jit` of each function it builds: of a closed
-    /// lambda, and of a closure's code, which passes it on to each closure.
-    /// A lambda that only wraps an operator is applied as that operator.
+    /// lambda, including one that only wraps an operator, and of a
+    /// closure's code, which passes it on to each closure.
     #[test]
     fn direct_net_emitter_asks_jit_of_its_functions() {
         let values = crate::compiler::test_value_factory();
@@ -432,7 +432,7 @@ mod resolver_context_tests {
             path: vec![ResolvedPathPart::Key(crate::core::Key::atom_from_text("a"))],
         };
         let wrapper = ResolvedExpr::lambda(vec![inner], access);
-        assert_eq!(jit_requests(wrapper), [false]);
+        assert_eq!(jit_requests(wrapper), [true]);
     }
 
     #[test]

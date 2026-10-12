@@ -1,5 +1,5 @@
 use super::*;
-use crate::core::{RuntimeValueAccess, WrappedOperator};
+use crate::core::RuntimeValueAccess;
 use crate::evaluation::EvaluationValueAccess;
 use crate::interaction_net::{CompiledNet, CompiledOperand};
 
@@ -71,33 +71,6 @@ pub(crate) fn access_operator(
 ) -> CoreOperator {
     assert!(supplied.len() < crate::core_net::access_arity(&path));
     CoreOperator::Access { path, supplied }
-}
-
-/// The operator a wrapped function applies, with no operands yet.
-pub(super) fn wrapped_core_operator(
-    access: &RuntimeValueAccess<'_>,
-    operator: &WrappedOperator,
-) -> CoreOperator {
-    match operator {
-        WrappedOperator::Access(path) => access_operator(access, path.clone(), Arc::from([])),
-    }
-}
-
-/// Applies a function that only wraps `operator` to all of its arguments,
-/// giving what its net would: the operator's result.
-pub(super) fn apply_wrapped_operator(
-    access: &RuntimeValueAccess<'_>,
-    operator: &WrappedOperator,
-    arguments: Vec<Value>,
-) -> Value {
-    assert_eq!(
-        arguments.len(),
-        operator.arity(),
-        "a wrapped operator applies to all of its function's arguments"
-    );
-    match operator {
-        WrappedOperator::Access(path) => access_value(access, path.clone(), arguments),
-    }
 }
 
 /// Applies a compiled net to its inputs, giving what the net would: each
@@ -256,7 +229,6 @@ fn compiled_function(
         return None;
     };
     let compiled = function.remaining_arity() == arity
-        && function.wrapped_operator().is_none()
         && function
             .stage()
             .runtime()

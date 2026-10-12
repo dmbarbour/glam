@@ -5,9 +5,7 @@ use std::sync::Arc;
 
 #[cfg(test)]
 use crate::core::CoreValueFactory;
-use crate::core::{
-    FunctionCode, FunctionValue, NetValue, RuntimeValueAccess, Value, WrappedOperator,
-};
+use crate::core::{FunctionCode, FunctionValue, NetValue, RuntimeValueAccess, Value};
 use crate::core_net::{CoreDataKey, CoreOperator, CoreSpecialization};
 use crate::interaction_net::{NetBuilder, Port};
 
@@ -255,16 +253,11 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
         target: Port,
     ) {
         assert!(!parameters.is_empty(), "a function must bind an argument");
-        let wrapped = wrapped_operator(&parameters, &body);
         let (code, captures) = Self::lower_code_in(self.values, parameters, body);
         let code = Arc::new(code);
         if captures.is_empty() {
             let stage = NetValue::new(code.duplicate_runtime_in(self.values));
-            let function = match wrapped {
-                // Applied as its operator, it has no net worth compiling.
-                Some(operator) => Value::Function(FunctionValue::wrapping(stage, operator)),
-                None => jit(self.values, FunctionValue::new(stage, code.arity())),
-            };
+            let function = jit(self.values, FunctionValue::new(stage, code.arity()));
             self.data_into(function, target);
         } else {
             // Each closure is jit, as `anno 'jit` on it would make it: the
@@ -426,29 +419,6 @@ fn core_data_keys<V>(path: &[ResolvedPathPart<V>]) -> Arc<[CoreDataKey]> {
         .collect()
 }
 
-/// The operator `body` applies to `parameters`, in order, if that is all it
-/// does with them: an access of the first parameter, indexed by any others.
-fn wrapped_operator<V>(
-    parameters: &[BindingId],
-    body: &ResolvedExpr<V>,
-) -> Option<WrappedOperator> {
-    let ResolvedExpr::Access { base, path } = body else {
-        return None;
-    };
-    let indices = path.iter().filter_map(|part| match part {
-        ResolvedPathPart::Key(_) => None,
-        ResolvedPathPart::Index(expr) | ResolvedPathPart::PathIndex(expr) => Some(expr.as_ref()),
-    });
-    let operands = std::iter::once(base.as_ref()).chain(indices);
-    let locals = operands.map(|operand| match operand {
-        ResolvedExpr::Local(binding) => Some(*binding),
-        _ => None,
-    });
-    locals
-        .eq(parameters.iter().copied().map(Some))
-        .then(|| WrappedOperator::Access(core_data_keys(path)))
-}
-
 /// How a composed list literal joins its parts.
 enum ListTree {
     Part(ListPart),
@@ -560,38 +530,6 @@ mod tests {
                 leaves(right, depth + 1, found);
             }
         }
-    }
-
-    /// A function wraps an access only when its body accesses the first
-    /// parameter, indexed by each other parameter in order, with nothing
-    /// else.
-    #[test]
-    fn wrapped_operators_are_accesses_of_the_parameters_in_order() {
-        let [x, i, y] = [0, 1, 2].map(BindingId::from_local_index);
-        let local = |binding| Box::new(ResolvedExpr::<Value>::Local(binding));
-        let key = |name| ResolvedPathPart::Key(crate::core::Key::atom_from_text(name));
-        let index = |binding| ResolvedPathPart::Index(local(binding));
-        let access = |base, path| ResolvedExpr::Access { base, path };
-        let wrapped = |parameters: &[BindingId], body| {
-            wrapped_operator(parameters, &body).map(|operator| match &operator {
-                WrappedOperator::Access(path) => (path.len(), operator.arity()),
-            })
-        };
-
-        assert_eq!(
-            wrapped(&[x], access(local(x), vec![key("a"), key("b")])),
-            Some((2, 1))
-        );
-        assert_eq!(
-            wrapped(&[x, i], access(local(x), vec![key("a"), index(i)])),
-            Some((2, 2))
-        );
-        // Parameters out of order, unused, repeated, or a capture.
-        assert_eq!(wrapped(&[i, x], access(local(x), vec![index(i)])), None);
-        assert_eq!(wrapped(&[x, y], access(local(x), vec![key("a")])), None);
-        assert_eq!(wrapped(&[x], access(local(x), vec![index(x)])), None);
-        assert_eq!(wrapped(&[x], access(local(y), vec![key("a")])), None);
-        assert_eq!(wrapped(&[x], ResolvedExpr::Local(x)), None);
     }
 
     /// A finger-shaped join keeps its parts in order, every part within a

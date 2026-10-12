@@ -179,8 +179,10 @@ programs lowering emits:
 - Compiling a net only once it is normal keeps sharing: a closure's stage
   compiles with whatever its captures started as constants.
 - Lowering may fold the annotation for code it generates, provided its
-  program equals compiling the normal form. `WrappedOperator` is the
-  one-step case and moves into the same store.
+  program equals compiling the normal form. `WrappedOperator` was the
+  one-step case; it was removed on 2026-10-12 (decision
+  `thin-wrappers-compile`), as such functions compile to one step anyway:
+  instructions rose 0.06 to 0.5%.
 - Start (`perf-compiled-nets`): compile a code net or stage at
   application once it is normal, the test whole copies already make, and
   run the compiled form for saturated calls and completed thunks. Then

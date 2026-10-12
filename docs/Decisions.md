@@ -699,7 +699,7 @@ maps the short names used here to file names.
 - **Recorded in:** structural overheads plan, `perf-runtime-net-attach`.
 
 ### A function that only wraps an operator is called as that operator
-`functions-wrap-operators` · 2026-10-11 · agent · accepted
+`functions-wrap-operators` · 2026-10-11 · agent · superseded
 - **Context:** after lazy locals, the commonest application was a saturated
   call of a closed `\x -> x.path`, mostly the effect handlers
   `{eff: \api -> api.seq}` that every `if` and `do` step runs: an applied
@@ -725,6 +725,27 @@ maps the short names used here to file names.
 - **Rule lives in:** `wrapped_operator` (`g_syntax/net_lowering.rs`);
   `apply_whnf_function` (`eval/whnf.rs`) and `classify_core_callable_in`
   (`eval/net.rs`).
+- **Recorded in:** structural overheads plan,
+  `perf-thin-wrapper-applications`.
+- **Superseded by:** `thin-wrappers-compile`.
+
+### Functions that wrap an operator compile like any other
+`thin-wrappers-compile` · 2026-10-12 · maintainer · accepted
+- **Context:** `functions-wrap-operators` gave a closed `\x -> x.path` a
+  mark that calls apply directly. Compiled nets came after it and cover the
+  same case: such a function's net is normal and compiles to one access
+  step. The mark was a second acceleration for one shape, kept beside the
+  compiled store. The maintainer asked to remove it unless that cost too
+  much.
+- **Decision:** lowering builds these functions as it builds every closed
+  lambda, marked jit. A saturated call runs the compiled step, and a net
+  calls the function through the compiled path. Supersedes
+  `functions-wrap-operators`.
+- **Consequences:** instructions rise 0.06 to 0.5% (`minimal` +0.5%,
+  `do_chain_800` +0.35%, `hello_elf` +0.12%). `FunctionValue` loses its
+  operator field.
+- **Rule lives in:** `function_into` (`g_syntax/net_lowering.rs`);
+  `compiled_for_application` (`eval/net.rs`).
 - **Recorded in:** structural overheads plan,
   `perf-thin-wrapper-applications`.
 
@@ -859,9 +880,9 @@ maps the short names used here to file names.
     specialized to what it holds at its own first application.
   - Lowering marks each function it builds, as a front end could write
     `anno 'jit`: a closed lambda's net and a thunk's code directly, and a
-    lambda's code, which each closure built from it inherits. A lambda
-    that only wraps an operator is applied as that operator and is not
-    marked.
+    lambda's code, which each closure built from it inherits. (A lambda
+    that only wrapped an operator was applied as that operator and not
+    marked, until `thin-wrappers-compile`.)
   - A net already normal still compiles when applied, at most 64 nodes in
     a supported shape: that only changes representation.
   - A thunk is lowered as its code, a marked function of its captures,

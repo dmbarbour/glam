@@ -1435,10 +1435,6 @@ fn classify_core_callable_in(
             access.values(),
             call,
         ))),
-        // A function that only wraps an operator is called as that operator.
-        Value::Function(ref function) if let Some(operator) = function.wrapped_operator() => Ok(
-            CoreCallable::Operator(wrapped_core_operator(access.values(), operator)),
-        ),
         value @ (Value::Function(_) | Value::Dict(_)) => Ok(CoreCallable::Operator(
             applicable_operator(access.values(), value),
         )),
