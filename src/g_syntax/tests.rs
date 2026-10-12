@@ -7113,7 +7113,7 @@ fn journal_text(value: Value) -> String {
 }
 
 /// Each namespace journals what is introduced, overridden or updated in it,
-/// one list per stretch between imports.
+/// appending once per stretch between imports.
 #[test]
 fn modules_journal_their_definitions() {
     let context = CompileContext::default();
@@ -7141,12 +7141,12 @@ fn modules_journal_their_definitions() {
     assert_eq!(
         journal(&["meta", "journal"]),
         concat!(
-            "[[{}, intro foo@2], intro s@3, update foo@4, over bar@5, update f@6, ",
+            "[intro foo@2, intro s@3, update foo@4, over bar@5, update f@6, ",
             "intro refl.x@7, intro meta.a.b@8, intro Point@9, over Point@11, intro u@13]"
         )
     );
-    assert_eq!(journal(&["f", "meta", "journal"]), "[{}, update g@6]");
-    assert_eq!(journal(&["f", "g", "meta", "journal"]), "[{}, intro h@6]");
+    assert_eq!(journal(&["f", "meta", "journal"]), "[update g@6]");
+    assert_eq!(journal(&["f", "g", "meta", "journal"]), "[intro h@6]");
 
     // An inline built-in import updates each name it merges.
     let context = CompileContext::default();
@@ -7154,7 +7154,7 @@ fn modules_journal_their_definitions() {
     assert_eq!(lowered.diagnostics, []);
     let module = evaluated_module_value(&context, &lowered);
     let journal = journal_text(value_at_atom_path(&module, &["meta", "journal"]).unwrap());
-    assert!(journal.starts_with("[{}, update "), "{journal}");
+    assert!(journal.starts_with("[update "), "{journal}");
     assert!(journal.contains(", update list@2, "), "{journal}");
     assert!(journal.ends_with(", intro foo@3]"), "{journal}");
 }

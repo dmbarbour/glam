@@ -108,9 +108,10 @@ Design (maintainer, 2026-10-12):
   updated name counts as defined). Paths are lists. `at` is a context
   frame, so other front ends can use their own addressing; `origin` is
   the opaque token compilers hold, since they cannot observe the file.
-  Each stretch of declarations between imports writes `meta.journal =
-  [prior, entry, ...]`, where `prior` is the journal before it, or `{}`
-  if there was none, so recording never forces earlier entries.
+  Each stretch of declarations between top-level imports appends its
+  bundle of entries lazily, `meta.journal = (default [] prior) ++
+  bundle`, so the journal is a plain list (maintainer, 2026-10-12;
+  `default` is a builtin and in `std`).
   `meta.*` is the workspace of compilers and top-level macros, so this
   is a convention, not formal semantics.
 - **Hierarchy.** `f.foo = 1` records `intro:['foo]` in `f.meta.journal`
@@ -134,7 +135,14 @@ Design (maintainer, 2026-10-12):
   guard the namespace's own file uses. Declared objects are self-contained
   (an earlier decision): a definition in `object foo` carries only the
   object's boundary, and access to the object does not trigger the host's
-  reflection. Objects still appear in the host journal.
+  reflection. Objects still appear in the host journal. Only declared
+  objects: dicts and object expressions have no compiler-provided
+  boundary. A target within `refl`, `meta` or `spec`, at any depth,
+  carries no boundary (maintainer, 2026-10-12).
+- **Boundary in `meta.refl` (maintainer idea, 2026-10-12).** Keeping each
+  namespace's reflection-boundary task thunk in `meta.refl` would avoid
+  redundant work per file and let the task be shared, extended,
+  overridden or canceled. For `perf-reflection-scanner`.
 - **Dict `with`** becomes cheap, local, best-effort enforcement: `=` is a
   dict union, which fails on a conflict, and `:=` a dict update.
 - A name the journal records stays defined: `x := {}` no longer frees `x`
@@ -201,6 +209,17 @@ Steps:
   The small programs' cost is mostly the `asm` namespace's boundary,
   whose scanner is a second reflection task (`list_map`'s reflection
   steps rise from 492 to 853).
+- `defs-journal-flat`: journals become plain lists, `(default [] prior)
+  ++ bundle`, with a new `default` builtin (also `std.default`, and now
+  behind the `defined_or` helper, which built the conditional from
+  pattern builtins); targets within `refl`, `meta` or `spec` at any depth
+  carry no boundary. Done 2026-10-12: `minimal` -4.5%, `chain` -1%, others
+  within 0.4%.
+- `defs-declarations` (next, to settle): journal `declare` and `assume`
+  entries; the assembler seeds what it provides (`asm.args`, `env`) and
+  declares what it expects (`asm.result`); the replay reports overriding
+  an undefined path and a declared path left undefined; `:=` and `extend`
+  lose `assert_defined`.
 - `defs-with-union`: dict `with` lowers `=` to union and `:=` to update.
 - Objects' members follow once the module form settles.
 

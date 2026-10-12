@@ -99,7 +99,7 @@ where
 /// The results of `rest`, which gives results of its own, for each result
 /// of running `operation` with the list handler bound to `binding`, in
 /// order: a step of a search as the list handler runs it.
-pub(in crate::g_syntax) fn for_each_effect_result_resolved(
+fn for_each_effect_result_resolved(
     _access: &RuntimeValueAccess<'_>,
     operation: ResolvedExpr<Value>,
     binding: BindingId,

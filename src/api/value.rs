@@ -651,8 +651,8 @@ impl Values {
         })
     }
 
-    /// Returns the cached closed Glam helper `\fallback value -> ...` which
-    /// selects `fallback` exactly when `value` is logically equal to `{}`.
+    /// Returns the `default` builtin, `\fallback value -> ...`, which selects
+    /// `fallback` exactly when `value` is logically equal to `{}`.
     pub fn defined_or_function(&self) -> Value {
         Value::from_runtime_root(crate::g_syntax::defined_or_root(self.core()))
     }

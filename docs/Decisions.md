@@ -265,7 +265,8 @@ maps the short names used here to file names.
     (`structural-lazy-map-and-concat`), so results are still observed in
     source order and a later alternative runs only when the earlier ones
     are exhausted.
-  - The compiler's `defined_or` helper is built the same way.
+  - The compiler's `defined_or` helper was built the same way; since
+    2026-10-12 it is the `default` builtin (`definition-journal`).
 - **Consequences:**
   - Instructions against `nets-compile-on-request`: `countdown` −49.0%,
     `append_walk` −41.8%, `list_sum` −35.5%, `hello_elf` −12.0%, `minimal`
@@ -593,8 +594,9 @@ maps the short names used here to file names.
   - Each namespace records what is introduced, overridden or updated in it
     in `meta.journal`, as entries `{op:intro:['foo], at:g:{origin, line}}`
     (`over` for `:=`, `update` for `::=`). Each stretch of declarations
-    between imports writes `[prior, entry, ...]`. Paths are lists; `at` is
-    a context frame, so other front ends can use their own addressing.
+    between top-level imports appends its bundle lazily, `(default []
+    prior) ++ bundle`, so a journal is a plain list. Paths are lists; `at`
+    is a context frame, so other front ends can use their own addressing.
   - `f.foo = 1` records `intro:['foo]` in `f`'s journal and `update:['f]`
     in the host's; `refl` and `meta` keep no journals, so paths through
     them are recorded whole. A dict is a module insofar as it is used as
@@ -606,7 +608,8 @@ maps the short names used here to file names.
     reported, since names also come from outside journals (the
     assembler's `asm.args`, a dict's members). A nested definition
     carries its namespace's boundary as well as its file's; a definition in
-    a declared object carries only the object's.
+    a declared object carries only the object's. A target within `refl`,
+    `meta` or `spec` carries none.
 - **Consequences:**
   - `meta.*` conventions are not formal semantics; a macro can write the
     journal too.
@@ -616,6 +619,9 @@ maps the short names used here to file names.
   - Recording costs 1 to 2% of instructions on `chain` and `defs_unused`,
     mostly tracing the live journal at each collection; a nested boundary
     costs about 5 M instructions the first time.
+  - `default fallback value` became a builtin, also in `std`, replacing the
+    closed helper `defined_or`, which built the conditional from pattern
+    builtins.
 - **Rule lives in:** `src/g_syntax/module_lowering/journal.rs` module docs.
 - **Recorded in:** structural overheads plan, `perf-definition-assertions`.
 

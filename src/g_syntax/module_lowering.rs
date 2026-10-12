@@ -187,8 +187,8 @@ impl<'context> ModuleLowerer<'context> {
     /// The namespace path whose boundary a definition of `target` carries,
     /// if it is nested: the module's and the namespace's own, which checks
     /// the namespace's journal, or only a declared object's, as objects are
-    /// self-contained. A target within `refl`, `meta` or `spec` carries the
-    /// module's boundary or none, as before.
+    /// self-contained. A target within `refl`, `meta` or `spec` carries no
+    /// boundary at all.
     fn nested_reflection(&mut self, target: &[SyntaxKeyExpr]) -> Option<String> {
         let names = target
             .iter()

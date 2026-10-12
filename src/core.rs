@@ -2024,6 +2024,9 @@ pub enum Builtin {
     /// The constructor is exposed only through the reflection environment.
     InspectOrigin,
     MergeDuplicate,
+    /// `default fallback value`: `fallback` when `value` is logically `{}`,
+    /// the undefined value, and otherwise `value`.
+    Default,
     Floor,
     Mod,
     Slice,
@@ -2133,6 +2136,7 @@ impl Builtin {
             Self::NetArity => 2,
             Self::InspectOrigin => 1,
             Self::MergeDuplicate => 3,
+            Self::Default => 2,
             Self::Floor => 1,
             Self::Mod => 2,
             Self::Slice => 3,

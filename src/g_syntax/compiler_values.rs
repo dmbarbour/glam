@@ -243,6 +243,7 @@ impl GCompilerValues {
                 Dict::new_sync()
                     .insert(name_as_key("anno"), Value::Builtin(Builtin::Anno))
                     .insert(name_as_key("seq"), Value::Builtin(Builtin::Seq))
+                    .insert(name_as_key("default"), Value::Builtin(Builtin::Default))
                     .insert(name_as_key("spark"), Value::Builtin(Builtin::Spark))
                     .insert(
                         name_as_key("interaction_net"),
@@ -651,33 +652,8 @@ fn build_could(values: &CoreValueFactory, not: &RuntimeValueRoot) -> RuntimeValu
 }
 
 fn build_defined_or(values: &CoreValueFactory) -> RuntimeValueRoot {
-    evaluate_closed(values, |access| {
-        let mut locals = ResolverContext::default();
-        let fallback = locals.push_internal_binding("<defined-fallback>");
-        let candidate = locals.push_internal_binding("<defined-candidate>");
-        let condition = locals.push_internal_binding("<defined-condition>");
-        let is_undefined = apply_builtin(
-            access,
-            Builtin::PatternDictIsEmpty,
-            [ResolvedExpr::Local(candidate)],
-        );
-        // A pure conditional's results, as lowering builds them.
-        let use_fallback = assert_unit(
-            access,
-            "defined-or condition",
-            ResolvedExpr::Local(condition),
-            ResolvedExpr::List(vec![ResolvedExpr::Local(fallback)]),
-        );
-        let undefined_branch =
-            for_each_effect_result_resolved(access, is_undefined, condition, use_fallback);
-        let defined_branch = ResolvedExpr::List(vec![ResolvedExpr::Local(candidate)]);
-        let results = apply_builtin(
-            access,
-            Builtin::ListConcat,
-            [ResolvedExpr::List(vec![undefined_branch, defined_branch])],
-        );
-        let selected = apply_builtin(access, Builtin::IfResult, [results]);
-        ResolvedExpr::lambda(vec![fallback, candidate], selected)
+    evaluate_closed(values, |_| {
+        ResolvedExpr::Embedded(Value::Builtin(Builtin::Default))
     })
 }
 
@@ -1195,7 +1171,7 @@ mod tests {
         assert!(live.root_entries() >= roots.len());
         assert!(roots.iter().all(|root| matches!(
             project_test_value(&values, root),
-            Value::Dict(_) | Value::Function(_)
+            Value::Dict(_) | Value::Function(_) | Value::Builtin(_)
         )));
     }
 

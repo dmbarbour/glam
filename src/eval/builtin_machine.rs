@@ -186,6 +186,7 @@ impl RegionalBuiltinMachine {
                 | Builtin::DictSingleton
                 | Builtin::DictUnion
                 | Builtin::DictUpdate
+                | Builtin::Default
                 | Builtin::MergeDuplicate
                 | Builtin::Slice
                 | Builtin::ListLen
@@ -368,7 +369,8 @@ impl RegionalBuiltinMachine {
             Builtin::DictSingleton
             | Builtin::DictUnion
             | Builtin::DictUpdate
-            | Builtin::MergeDuplicate => Self::Dictionary(RegionalDictBuiltinMachine::new_in(
+            | Builtin::MergeDuplicate
+            | Builtin::Default => Self::Dictionary(RegionalDictBuiltinMachine::new_in(
                 access,
                 source_owner,
                 builtin,

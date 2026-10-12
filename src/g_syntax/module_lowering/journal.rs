@@ -1,15 +1,15 @@
 //! The journal a namespace keeps in `meta.journal` of the names introduced,
 //! overridden or updated in it (`perf-definition-assertions`).
 //!
-//! A stretch of declarations between imports writes each journal it touched
-//! once, as `[prior, entry, ...]`, where `prior` is the journal before it or
-//! `{}`, so recording never forces earlier entries. An entry is
-//! `{op:intro:['foo], at:g:{origin, line}}`, with `over` for `:=` and
-//! `update` for `::=`.
+//! A stretch of declarations between imports appends its entries to each
+//! journal it touched once, lazily, as `(default [] prior) ++ entries`. An
+//! entry is `{op:intro:['foo], at:g:{origin, line}}`, with `over` for `:=`
+//! and `update` for `::=`.
 
 use std::collections::BTreeMap;
 
 use super::super::*;
+use super::objects::apply_builtin_resolved;
 use crate::core::List;
 
 #[derive(Clone, Copy)]
@@ -103,28 +103,34 @@ impl PendingJournal {
                 .chain(["meta", "journal"])
                 .collect::<Vec<_>>()
                 .join(".");
-            let prior = lower_resolved_expr_in(
+            let prior = path_resolved_in_definitions(
                 access,
-                path_resolved_in_definitions(
-                    access,
-                    &target,
-                    ResolvedExpr::Provided(access.duplicate_value(&definitions)),
-                ),
+                &target,
+                ResolvedExpr::Provided(access.duplicate_value(&definitions)),
             );
-            let journal = std::iter::once(prior)
-                .chain(
-                    entries
-                        .into_iter()
-                        .map(|entry| parts.entry_in(access, entry)),
-                )
+            let entries = entries
+                .into_iter()
+                .map(|entry| parts.entry_in(access, entry))
                 .collect();
+            let journal = apply_builtin_resolved(
+                access,
+                Builtin::Append,
+                [
+                    apply_builtin_resolved(
+                        access,
+                        Builtin::Default,
+                        [ResolvedExpr::Provided(Value::List(List::empty())), prior],
+                    ),
+                    ResolvedExpr::Provided(Value::List(List::from_values(entries))),
+                ],
+            );
             definitions = lower_resolved_expr_in(
                 access,
                 update_module_resolved(
                     access,
                     ResolvedExpr::Provided(definitions),
                     &target,
-                    ResolvedExpr::Provided(Value::List(List::from_values(journal))),
+                    journal,
                 ),
             );
         }

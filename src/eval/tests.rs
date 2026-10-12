@@ -9522,29 +9522,32 @@ fn journal_entry(tag: &str, path: &[&str], line: i64) -> Value {
     )
 }
 
-/// The conflicts builtin replays nested stretches in order, forcing a lazy
-/// prior, and reports introductions of defined paths with their entries'
+/// The conflicts builtin replays a journal in order, forcing a lazy prior
+/// segment, and reports introductions of defined paths with their entries'
 /// `at`, then the earlier definition's. Defining `refl.x` defines `refl`;
 /// overriding `bar`, which may come from outside any journal, defines it.
 #[test]
-fn journal_conflicts_replay_nested_stretches() {
+fn journal_conflicts_replay_a_journal_in_order() {
     let context = isolated_test_context();
-    let prior = Value::semantic_thunk(context.values(), |_| {
+    let Value::Lazy(prior) = Value::semantic_thunk(context.values(), |_| {
         Ok(Value::List(List::from_values(vec![
-            Value::Dict(Dict::new_sync()),
             journal_entry("intro", &["foo"], 1),
             journal_entry("update", &["f"], 2),
         ])))
-    });
-    let journal = Value::List(List::from_values(vec![
-        prior,
-        journal_entry("intro", &["foo"], 3),
-        journal_entry("over", &["bar"], 4),
-        journal_entry("intro", &["f"], 5),
-        journal_entry("intro", &["refl", "x"], 6),
-        journal_entry("over", &["foo"], 7),
-        journal_entry("over", &["refl"], 8),
-    ]));
+    }) else {
+        panic!("a semantic thunk should be lazy");
+    };
+    let journal = Value::List(List::concat(
+        List::from_thunk(prior.into()),
+        List::from_values(vec![
+            journal_entry("intro", &["foo"], 3),
+            journal_entry("over", &["bar"], 4),
+            journal_entry("intro", &["f"], 5),
+            journal_entry("intro", &["refl", "x"], 6),
+            journal_entry("over", &["foo"], 7),
+            journal_entry("over", &["refl"], 8),
+        ]),
+    ));
     let application = apply_values(
         &context,
         Value::Builtin(Builtin::JournalConflicts),
@@ -9605,4 +9608,31 @@ fn journal_conflicts_replay_nested_stretches() {
             ),
         ]
     );
+}
+
+/// `default fallback value` is `fallback` exactly when `value` is `{}`, and
+/// forces only `value`.
+#[test]
+fn default_selects_its_fallback_only_for_undefined_values() {
+    let context = isolated_test_context();
+    let default = |fallback: Value, value: Value| {
+        let application = apply_values(
+            &context,
+            Value::Builtin(Builtin::Default),
+            vec![fallback, value],
+        )
+        .expect("default should build");
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &application)
+            .expect("default should evaluate")
+    };
+    let empty = || Value::List(List::empty());
+    let Value::List(selected) = default(empty(), Value::Dict(Dict::new_sync())) else {
+        panic!("an undefined value should select the fallback");
+    };
+    assert_eq!(selected.len(), 0);
+    let failing = Value::error(context.values(), "the fallback should stay unforced");
+    let lazy_value = Value::semantic_thunk(context.values(), |_| Ok(n(3)));
+    context
+        .values()
+        .assert_same_representation_for_test(&default(failing, lazy_value), &n(3));
 }

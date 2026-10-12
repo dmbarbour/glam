@@ -1,8 +1,8 @@
 //! Replays a definition journal for conflicts (`perf-definition-assertions`).
 //!
-//! A journal is `{}` or `[prior, entry, ...]`, whose `prior` is a journal
-//! too, and an entry is `{op:intro:path, at:Frame}` with `over` or `update`
-//! in place of `intro`. The builtin accelerates a fold a front end could
+//! A journal is a list of entries, or `{}` if a namespace has none, and an
+//! entry is `{op:intro:path, at:Frame}` with `over` or `update` in place of
+//! `intro`. The builtin accelerates a fold a front end could
 //! write in glam: it returns one diagnostic per introduction of a path
 //! already defined, in journal order, with the entry's `at` as context
 //! (`msg.context`), then the earlier definition's. Defining a path defines
@@ -50,11 +50,8 @@ struct JournalKeys {
 
 enum JournalFrame {
     Journal(RegionalWhnfWork),
-    /// A stretch's remaining items, the first of which is its prior journal.
-    Items {
-        front: RegionalListFront,
-        prior: bool,
-    },
+    /// The entries not yet read.
+    Items(RegionalListFront),
     Entry(RegionalWhnfWork),
     Op {
         op: Box<RegionalKeyConversion>,
@@ -100,10 +97,12 @@ impl RegionalJournalConflictsMachine {
         match value {
             Value::Dict(dict) if journal && dict.is_empty() => Ok(()),
             value @ Value::List(_) if journal => {
-                self.frames.push(JournalFrame::Items {
-                    front: RegionalListFront::new_in(access, value, Some(self.source_owner)),
-                    prior: true,
-                });
+                self.frames
+                    .push(JournalFrame::Items(RegionalListFront::new_in(
+                        access,
+                        value,
+                        Some(self.source_owner),
+                    )));
                 Ok(())
             }
             _ if journal => Err(failure_in("a definition journal must be `{}` or a list")),
@@ -155,18 +154,13 @@ impl RegionalJournalConflictsMachine {
                     return poll;
                 }
             }
-            JournalFrame::Items { front, prior } => match front.poll_in(access, step_budget) {
+            JournalFrame::Items(front) => match front.poll_in(access, step_budget) {
                 RegionalListFrontPoll::Ready(Some((item, tail))) => {
                     *front = RegionalListFront::new_in(access, tail, Some(self.source_owner));
-                    let journal = std::mem::take(prior);
                     if matches!(item, Value::Lazy(_) | Value::Promised(_)) {
                         let demand = demand_in(access, item, self.source_owner);
-                        self.frames.push(if journal {
-                            JournalFrame::Journal(demand)
-                        } else {
-                            JournalFrame::Entry(demand)
-                        });
-                    } else if let Err(poll) = self.accept(access, item, journal) {
+                        self.frames.push(JournalFrame::Entry(demand));
+                    } else if let Err(poll) = self.accept(access, item, false) {
                         return poll;
                     }
                 }
@@ -264,7 +258,7 @@ impl RegionalJournalConflictsMachine {
                 JournalFrame::Journal(demand) | JournalFrame::Entry(demand) => {
                     demand.trace_managed_edges(visitor);
                 }
-                JournalFrame::Items { front, .. } => front.trace_managed_edges(visitor),
+                JournalFrame::Items(front) => front.trace_managed_edges(visitor),
                 JournalFrame::Op { op, at } => {
                     op.trace_managed_edges(visitor);
                     if let Some(at) = at {

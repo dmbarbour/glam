@@ -155,7 +155,8 @@ pub(super) fn apply_builtin_in(
         Builtin::DictSingleton
         | Builtin::DictUnion
         | Builtin::DictUpdate
-        | Builtin::MergeDuplicate => Ok(deferred(arguments)),
+        | Builtin::MergeDuplicate
+        | Builtin::Default => Ok(deferred(arguments)),
         Builtin::ObjectSpec
         | Builtin::ObjectLocalName
         | Builtin::DiagnosticObject

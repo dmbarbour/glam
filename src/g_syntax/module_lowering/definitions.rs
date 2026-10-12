@@ -242,13 +242,17 @@ fn decorate_reflection_boundary(
     let Some(boundary) = &scope.reflection else {
         return Ok(value);
     };
-    let Some(SyntaxKeyExpr::Atom(root)) = target.first() else {
+    let Some(SyntaxKeyExpr::Atom(_)) = target.first() else {
         // Reflection namespaces are intentionally statically recognizable.
         // A computed root might evaluate to `refl`, `meta`, or `spec`, so it
         // cannot safely receive an automatic demand boundary.
         return Ok(value);
     };
-    if matches!(root.as_str(), "refl" | "meta" | "spec") {
+    // Nor does a target within `refl`, `meta` or `spec` at any depth: their
+    // evaluation omits reflection, as macros read `meta` while compiling.
+    if target.iter().any(|part| {
+        matches!(part, SyntaxKeyExpr::Atom(name) if matches!(name.as_str(), "refl" | "meta" | "spec"))
+    }) {
         return Ok(value);
     }
 
