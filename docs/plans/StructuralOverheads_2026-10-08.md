@@ -238,7 +238,15 @@ Steps:
 - `defs-with-union`: dict `with` lowers `=` to union and `:=` to update.
   Deferred (maintainer, 2026-10-12): union merges dicts, so `f = {a: 1}`
   and then `f = {b: 2}` would not conflict, which would confuse users.
-- Objects' members follow once the module form settles.
+- `defs-object-journals`: object bodies journal their members, `declare`
+  and `assume` (maintainer, 2026-10-12) in the object's own `meta.journal`,
+  one bundle per body, with whole paths. A declared object's boundary
+  replays it, so its members (and nested objects and `extend`s) drop their
+  run-time assertions; object expressions have no boundary and keep them.
+  Dict `with` bodies keep no journal and reject `declare` and `assume`.
+  `hello_object_extends_dict.g` now assumes the `target` its dict parent
+  provides. Done 2026-10-12: `hello_elf` -8.2% (756 M to 694 M, 7.6%
+  below `b7fd0c42`), others within 0.25%.
 
 ### Reflection scanner (`perf-reflection-scanner`)
 

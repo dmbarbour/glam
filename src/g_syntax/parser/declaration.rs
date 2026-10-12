@@ -11,7 +11,7 @@ use super::super::{
     SyntaxExpr, SyntaxKeyExpr, warn_unused_locals, warn_unused_with_alias,
 };
 use super::expression_context::{ExpressionContext, validate_expression_floor};
-use super::input::TokenView;
+use super::input::{ParseSession, TokenView};
 use super::layout::LayoutView;
 use super::lexical::{Delimiter, LeadingTrivia, TokenKind};
 use super::structural::{
@@ -22,6 +22,7 @@ use super::structural::{
 
 mod simple;
 
+use simple::parse_name_list_member;
 pub(super) use simple::{SimpleDeclaration, parse_simple_declaration};
 
 pub(super) fn validate_language_position(
@@ -145,6 +146,25 @@ pub(in crate::g_syntax::parser) fn parse_object_body(
     let mut body = Vec::with_capacity(statement_views.len());
     for (line, statement_view) in statement_views {
         let statement_view = trim_layout(statement_view);
+        let head = statement_view
+            .first_significant()
+            .map(|(_, token)| token.kind());
+        if let Some(TokenKind::Name(head @ ("declare" | "assume"))) = head {
+            let declare = *head == "declare";
+            let keyword = if declare { "declare" } else { "assume" };
+            let mut session = ParseSession::new(statement_view.source());
+            let names = parse_name_list_member(statement_view, line, keyword, &mut session);
+            diagnostics.extend(session.into_diagnostics());
+            if let Some(names) = names {
+                let kind = if declare {
+                    ObjectBodyDefinitionKind::Declare(names)
+                } else {
+                    ObjectBodyDefinitionKind::Assume(names)
+                };
+                body.push(ObjectBodyDefinition { line, kind });
+            }
+            continue;
+        }
         let context = parent_context.child_owner(statement_view);
         let kind = match parse_declaration_in_context(statement_view, line, context, diagnostics) {
             DeclarationKind::Object(object) => Some(ObjectBodyDefinitionKind::Object(object)),

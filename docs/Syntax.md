@@ -269,7 +269,7 @@ To localize errors, and to simplify analysis of name shadowing, names in use sha
 
 `declare` names what must be defined by the time a module's definitions are complete, e.g. by a later mixin; `=` may define it once and `:=` may override it. `assume` names what is already defined outside the module's journal, e.g. by a host or by a dict used as a module; `:=` may override it, and `=` conflicts.
 
-Compilers record both in the namespace's definition journal, `meta.journal`, beside each introduction (`=`), override (`:=`) and update (`::=`). A namespace's reflection boundary replays its journal when a definition in it is forced, and reports introducing a defined name, overriding an undefined one, and a declared name never defined. Hosts and compilers journal what they provide: the assembler introduces `asm.args` and `env` and declares `asm.result`, and `import ... as` introduces `env`.
+Both also appear in object bodies, recorded in the object's own journal; dict `with` bodies keep no journal and reject them. Compilers record both in the namespace's definition journal, `meta.journal`, beside each introduction (`=`), override (`:=`) and update (`::=`). A namespace's reflection boundary replays its journal when a definition in it is forced, and reports introducing a defined name, overriding an undefined one, and a declared name never defined. Hosts and compilers journal what they provide: the assembler introduces `asm.args` and `env` and declares `asm.result`, and `import ... as` introduces `env`.
 
 ### Associated Names (Convention)
 

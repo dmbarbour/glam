@@ -523,6 +523,8 @@ object foo extends bar, baz with
     def1 = ...              # names bind to self by default
     def2 := ...             # override inherited def2; _def2 = prior
     def3 = ^a + def1        # ^a escapes to host scope (^^a two levels)
+    declare def4            # expected by the final object, e.g. from a child
+    assume def5             # defined outside any journal, e.g. by a dict
 
 object hanging with def1 = ...
                     def2 = ... # hanging layout is also accepted

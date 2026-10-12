@@ -74,6 +74,22 @@ pub(in crate::g_syntax::parser) fn parse_simple_declaration<'lex, 'source: 'lex>
     }
 }
 
+/// An object body's `declare` or `assume` member: a name list, without
+/// the line start a module declaration begins with.
+pub(in crate::g_syntax::parser) fn parse_name_list_member<'lex, 'source: 'lex>(
+    view: TokenView<'lex, 'source>,
+    line: usize,
+    expected: &'static str,
+    session: &mut ParseSession,
+) -> Option<Vec<String>> {
+    let (output, errors) = keyword_name_list(expected)
+        .then_ignore(end())
+        .parse(view.chumsky_input())
+        .into_output_errors();
+    session.record_token_errors_at_line(view, line, errors);
+    output
+}
+
 fn parse_with<'lex, 'source: 'lex, P>(
     view: TokenView<'lex, 'source>,
     line: usize,

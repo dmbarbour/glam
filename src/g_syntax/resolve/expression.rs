@@ -363,6 +363,7 @@ pub(in crate::g_syntax) fn lower_dict_with_expr_resolved(
             context,
             &definitions,
             &body_scope,
+            false,
             locals,
         )?;
         definitions = body_bindings.bind(access, locals, "<with-visible-defs>", updated);

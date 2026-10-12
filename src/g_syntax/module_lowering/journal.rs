@@ -112,26 +112,15 @@ impl PendingJournal {
                 .chain(["meta", "journal"])
                 .collect::<Vec<_>>()
                 .join(".");
-            let prior = path_resolved_in_definitions(
-                access,
-                &target,
-                ResolvedExpr::Provided(access.duplicate_value(&definitions)),
-            );
             let entries = entries
                 .into_iter()
                 .map(|entry| parts.entry_in(access, entry))
                 .collect();
-            let journal = apply_builtin_resolved(
+            let journal = appended_journal_resolved(
                 access,
-                Builtin::Append,
-                [
-                    apply_builtin_resolved(
-                        access,
-                        Builtin::Default,
-                        [ResolvedExpr::Provided(Value::List(List::empty())), prior],
-                    ),
-                    ResolvedExpr::Provided(Value::List(List::from_values(entries))),
-                ],
+                &target,
+                ResolvedExpr::Provided(access.duplicate_value(&definitions)),
+                Value::List(List::from_values(entries)),
             );
             definitions = lower_resolved_expr_in(
                 access,
@@ -196,26 +185,41 @@ impl EntryParts {
     }
 }
 
-/// A journal of `entries`, each `(op, path, line)`, which a compiler writes
-/// for what it provides a module, such as `env` on `import ... as`.
-pub(in crate::g_syntax) fn seed_journal_in(
+/// A bundle of journal entries, each `(op, path, line)` with its path
+/// whole, as a compiler writes for what it provides a module (`env` on
+/// `import ... as`) or for an object body.
+pub(in crate::g_syntax) fn journal_bundle_in(
     access: &RuntimeValueAccess<'_>,
     context: &CompileContext,
-    entries: &[(JournalOp, &str, usize)],
+    entries: Vec<(JournalOp, Vec<Key>, usize)>,
 ) -> Value {
     let parts = EntryParts::new_in(access, context);
     let entries = entries
-        .iter()
-        .map(|(op, path, line)| {
-            parts.entry_in(
-                access,
-                JournalEntry {
-                    op: *op,
-                    path: path.split('.').map(name_as_key).collect(),
-                    line: *line,
-                },
-            )
-        })
+        .into_iter()
+        .map(|(op, path, line)| parts.entry_in(access, JournalEntry { op, path, line }))
         .collect();
     Value::List(List::from_values(entries))
+}
+
+/// The journal at `journal` in `definitions` with `bundle` appended:
+/// `(default [] prior) ++ bundle`.
+pub(in crate::g_syntax) fn appended_journal_resolved(
+    access: &RuntimeValueAccess<'_>,
+    journal: &str,
+    definitions: ResolvedExpr<Value>,
+    bundle: Value,
+) -> ResolvedExpr<Value> {
+    let prior = path_resolved_in_definitions(access, journal, definitions);
+    apply_builtin_resolved(
+        access,
+        Builtin::Append,
+        [
+            apply_builtin_resolved(
+                access,
+                Builtin::Default,
+                [ResolvedExpr::Provided(Value::List(List::empty())), prior],
+            ),
+            ResolvedExpr::Provided(bundle),
+        ],
+    )
 }

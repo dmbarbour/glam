@@ -7188,6 +7188,89 @@ fn modules_journal_their_definitions() {
     assert!(journal.ends_with(", intro foo@3]"), "{journal}");
 }
 
+/// An object body appends its members, declarations and assumptions to the
+/// object's own journal, with whole paths; a dict `with` body keeps none and
+/// cannot declare or assume.
+#[test]
+fn object_bodies_journal_their_members() {
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(
+        parse(concat!(
+            "language g0\n",
+            "object foo with\n",
+            "    a = 1\n",
+            "    b.c := 2\n",
+            "    declare d\n",
+            "    assume e, f.g\n",
+            "    object h\n",
+        )),
+        &context,
+    );
+    assert_eq!(lowered.diagnostics, []);
+    let module = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        journal_text(value_at_atom_path(&module, &["foo", "meta", "journal"]).unwrap()),
+        "[intro a@3, over b.c@4, declare d@5, assume e@6, assume f.g@6, intro h@7]"
+    );
+
+    let lowered = lower_parsed_source(
+        parse("language g0\nd = {} with\n    declare x\n"),
+        &CompileContext::default(),
+    );
+    assert_eq!(
+        lowered
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.line, diagnostic.message.as_str()))
+            .collect::<Vec<_>>(),
+        [(
+            3,
+            "`declare` and `assume` belong to modules and object bodies, not dict `with` bodies"
+        )]
+    );
+}
+
+/// A declared object's boundary replays its journal, inherited members
+/// included, in place of its members' run-time assertions.
+#[test]
+fn object_boundaries_report_member_conflicts() {
+    let source = r#"language g0
+import 'std
+object base with
+    x = 1
+    declare y
+object foo extends base with
+    x = 2
+    z := 3
+    assume w
+    w := 4
+    y = 5
+meta.probe = anno { refl:(.heap.get [[object_refl_marker, abstract_global_path foo],'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .r ()))) } "probe"
+"#;
+    let (_assembler, context, module, _module_root, diagnostics) =
+        reflection_test_module(source, &["object_journal_test"], &[("guard", "refl")]);
+
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["foo", "x"]),
+        &Value::Number(n(2)),
+    );
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["meta", "probe"]),
+        &Value::binary_from_text("probe"),
+    );
+    let messages = take_reflection_diagnostics(&diagnostics)
+        .iter()
+        .map(|diagnostic| diagnostic.message().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        messages,
+        [
+            "cannot introduce `x` because it is already defined",
+            "cannot override `z` because it is not defined",
+        ]
+    );
+}
+
 /// Module scope cannot define `spec`, which belongs to objects, except
 /// within `meta` or `refl`.
 #[test]

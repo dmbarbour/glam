@@ -1,5 +1,5 @@
 use super::super::*;
-use super::journal::{JournalOp, seed_journal_in};
+use super::journal::{JournalOp, journal_bundle_in};
 use super::objects::*;
 
 pub(in crate::g_syntax) fn lower_import(
@@ -175,7 +175,11 @@ fn import_as_prior_defs_in(
 ) -> Result<Value, Diagnostic> {
     let env = inherited_import_env_object_value_in(access, target, definitions, context)?;
     let prior = update_module_value_in(access, Value::Dict(Dict::new_sync()), "env", env);
-    let journal = seed_journal_in(access, context, &[(JournalOp::Introduce, "env", line)]);
+    let journal = journal_bundle_in(
+        access,
+        context,
+        vec![(JournalOp::Introduce, vec![name_as_key("env")], line)],
+    );
     Ok(update_module_value_in(
         access,
         prior,

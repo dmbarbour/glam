@@ -612,7 +612,11 @@ maps the short names used here to file names.
     journals `env`, and users write `assume Name`. `declare Name` (renamed
     from `abstract Name`, as abstract object methods are) concerns only the
     final state. A dict defined by value and then used as a module is its
-    author's responsibility. A nested definition
+    author's responsibility.
+  - Object bodies journal their members, `declare` and `assume` in the
+    object's own journal, with whole paths; a declared object's boundary
+    replays it in place of member assertions. Object expressions, which
+    have no boundary, keep their assertions. A nested definition
     carries its namespace's boundary as well as its file's; a definition in
     a declared object carries only the object's. A target within `refl`,
     `meta` or `spec` carries none.

@@ -1,5 +1,6 @@
 use super::super::*;
 use super::definitions::*;
+use super::journal::{JournalOp, appended_journal_resolved, journal_bundle_in};
 
 pub(in crate::g_syntax) fn lower_object(
     access: &RuntimeValueAccess<'_>,
@@ -208,7 +209,18 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
         remove_object_spec_resolved(access, ResolvedExpr::Local(prior_self)),
     );
 
+    // The object's journal checks its members where its boundary replays
+    // it; elsewhere they keep their run-time assertions.
+    let journaled = reflection_boundary.is_some();
+    let mut journal = Vec::new();
     for body_definition in body {
+        journal.extend(object_body_journal_entries(body_definition));
+        if matches!(
+            body_definition.kind,
+            ObjectBodyDefinitionKind::Declare(_) | ObjectBodyDefinitionKind::Assume(_)
+        ) {
+            continue;
+        }
         let scope = object_body_scope_resolved(
             access,
             alias,
@@ -225,6 +237,7 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
             context,
             &definitions,
             &scope,
+            journaled,
             locals,
         )?;
         definitions = bindings.bind(
@@ -234,18 +247,78 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
             remove_object_spec_resolved(access, updated),
         );
     }
+    if !journal.is_empty() {
+        let journal = appended_journal_resolved(
+            access,
+            "meta.journal",
+            definitions.expr(access),
+            journal_bundle_in(access, context, journal),
+        );
+        definitions = bindings.bind(
+            access,
+            locals,
+            "<object-journaled-defs>",
+            update_module_resolved(access, definitions.expr(access), "meta.journal", journal),
+        );
+    }
 
     let body = bindings.wrap(access, definitions.expr(access));
     locals.truncate(base_len);
     Ok(ResolvedExpr::lambda(vec![prior_self, final_self], body))
 }
 
+/// What an object body item records in the object's journal, with whole
+/// paths: an object's nested namespaces keep no journals of their own.
+fn object_body_journal_entries(item: &ObjectBodyDefinition) -> Vec<(JournalOp, Vec<Key>, usize)> {
+    let path = |target: &str| target.split('.').map(name_as_key).collect::<Vec<_>>();
+    let line = item.line;
+    match &item.kind {
+        ObjectBodyDefinitionKind::Definition(definition) if definition.expr.is_some() => {
+            let op = match definition.kind {
+                DefinitionKind::Introduce => JournalOp::Introduce,
+                DefinitionKind::Override => JournalOp::Override,
+                DefinitionKind::Update => JournalOp::Update,
+            };
+            // A computed target keeps its run-time assertion instead.
+            definition
+                .target
+                .iter()
+                .map(|key| match key {
+                    SyntaxKeyExpr::Atom(name) => Some(name_as_key(name)),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+                .map(|path| vec![(op, path, line)])
+                .unwrap_or_default()
+        }
+        ObjectBodyDefinitionKind::Definition(_) => Vec::new(),
+        ObjectBodyDefinitionKind::Object(object) => {
+            vec![(JournalOp::Introduce, path(&object.target), line)]
+        }
+        ObjectBodyDefinitionKind::Extend(extend) => {
+            vec![(JournalOp::Override, path(&extend.target), line)]
+        }
+        ObjectBodyDefinitionKind::Declare(paths) => paths
+            .iter()
+            .map(|target| (JournalOp::Declare, path(target), line))
+            .collect(),
+        ObjectBodyDefinitionKind::Assume(paths) => paths
+            .iter()
+            .map(|target| (JournalOp::Assume, path(target), line))
+            .collect(),
+    }
+}
+
+/// Lowers an object or dict `with` body item. A `journaled` one's object
+/// journal is checked by the object's boundary, in place of run-time
+/// assertions.
 pub(in crate::g_syntax) fn lower_object_body_item_resolved(
     access: &RuntimeValueAccess<'_>,
     item: &ObjectBodyDefinition,
     context: &CompileContext,
     definitions: &ResolvedRoot,
     scope: &NameScope<ResolvedRoot>,
+    journaled: bool,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     match &item.kind {
@@ -256,7 +329,7 @@ pub(in crate::g_syntax) fn lower_object_body_item_resolved(
             context,
             definitions,
             scope,
-            false,
+            journaled,
             locals,
         ),
         ObjectBodyDefinitionKind::Object(object) => lower_nested_object_resolved(
@@ -266,6 +339,7 @@ pub(in crate::g_syntax) fn lower_object_body_item_resolved(
             context,
             definitions,
             scope,
+            journaled,
             locals,
         ),
         ObjectBodyDefinitionKind::Extend(extend) => lower_nested_extend_resolved(
@@ -275,11 +349,19 @@ pub(in crate::g_syntax) fn lower_object_body_item_resolved(
             context,
             definitions,
             scope,
+            journaled,
             locals,
         ),
+        ObjectBodyDefinitionKind::Declare(_) | ObjectBodyDefinitionKind::Assume(_) => {
+            Err(Diagnostic::error(
+                item.line,
+                "`declare` and `assume` belong to modules and object bodies, not dict `with` bodies",
+            ))
+        }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::g_syntax) fn lower_nested_object_resolved(
     access: &RuntimeValueAccess<'_>,
     object: &ObjectDecl,
@@ -287,6 +369,7 @@ pub(in crate::g_syntax) fn lower_nested_object_resolved(
     context: &CompileContext,
     definitions: &ResolvedRoot,
     scope: &NameScope<ResolvedRoot>,
+    journaled: bool,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     let name = hierarchical_object_name_resolved(access, &object.target, line, scope)?;
@@ -300,13 +383,17 @@ pub(in crate::g_syntax) fn lower_nested_object_resolved(
         name,
         scope.reflection.is_some() && declared_target_has_reflection(&object.target),
     )?;
-    let target_context = DefinitionTargetContext::new(access, definitions, line, context, scope);
-    let object_value = target_context.annotate_static(
-        BuiltinAssertion::Undefined,
-        &object.target,
-        object_value,
-        locals,
-    )?;
+    // The object's journal checks the introduction where it is replayed.
+    let object_value = if journaled {
+        object_value
+    } else {
+        DefinitionTargetContext::new(access, definitions, line, context, scope).annotate_static(
+            BuiltinAssertion::Undefined,
+            &object.target,
+            object_value,
+            locals,
+        )?
+    };
     let object_value =
         annotate_definition_context(access, object_value, &object.target, line, context);
     Ok(update_module_resolved(
@@ -435,6 +522,7 @@ pub(in crate::g_syntax) fn lower_extend(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::g_syntax) fn lower_nested_extend_resolved(
     access: &RuntimeValueAccess<'_>,
     extend: &ObjectExtendDecl,
@@ -442,6 +530,7 @@ pub(in crate::g_syntax) fn lower_nested_extend_resolved(
     context: &CompileContext,
     definitions: &ResolvedRoot,
     scope: &NameScope<ResolvedRoot>,
+    journaled: bool,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     extend_object_resolved_in_scope(
@@ -453,7 +542,7 @@ pub(in crate::g_syntax) fn lower_nested_extend_resolved(
         scope,
         locals,
         scope.reflection.is_some() && declared_target_has_reflection(&extend.target),
-        false,
+        journaled,
     )
 }
 

@@ -132,19 +132,9 @@ impl FileNameAnalysis {
                 }
             }
             DeclarationKind::Declare(paths) => {
-                for path in paths {
-                    self.introduce_static_path(self.scopes[scope.0].definitions, path, line);
-                }
+                self.visit_name_declaration(paths, false, scope, line)
             }
-            // An assumed name was defined outside the journal, so a later
-            // introduction conflicts.
-            DeclarationKind::Assume(paths) => {
-                for path in paths {
-                    let definitions = self.scopes[scope.0].definitions;
-                    self.introduce_static_path(definitions, path, line);
-                    self.define_static_path(definitions, path, false, line);
-                }
-            }
+            DeclarationKind::Assume(paths) => self.visit_name_declaration(paths, true, scope, line),
             DeclarationKind::Unique(paths) => {
                 for path in paths {
                     let definitions = self.scopes[scope.0].definitions;
@@ -284,6 +274,30 @@ impl FileNameAnalysis {
                 ObjectBodyDefinitionKind::Extend(extend) => {
                     self.visit_extend_declaration(extend, item.line, scope, locals);
                 }
+                ObjectBodyDefinitionKind::Declare(paths) => {
+                    self.visit_name_declaration(paths, false, scope, item.line);
+                }
+                ObjectBodyDefinitionKind::Assume(paths) => {
+                    self.visit_name_declaration(paths, true, scope, item.line);
+                }
+            }
+        }
+    }
+
+    /// `declare` or `assume`: names a scope may use. An assumed name was
+    /// defined outside the journal, so a later introduction conflicts.
+    fn visit_name_declaration(
+        &mut self,
+        paths: &[String],
+        assume: bool,
+        scope: ResolutionScopeId,
+        line: usize,
+    ) {
+        let definitions = self.scopes[scope.0].definitions;
+        for path in paths {
+            self.introduce_static_path(definitions, path, line);
+            if assume {
+                self.define_static_path(definitions, path, false, line);
             }
         }
     }
