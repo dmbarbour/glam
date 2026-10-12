@@ -254,7 +254,9 @@ normalized helpers never applied. So the list-effect lazies in `list_map`
 do not come from helpers awaiting normalization.
 
 Follow-ups:
-- **`list_map`'s comparison**, above.
+- **`list_map`'s comparison**, above. Deferred to a future performance
+  review (maintainer, 2026-10-12); `nets-compile-on-request` records the
+  same inline forcing of map items' lazies.
 
 **Compile walk bound** (2026-10-11). The compiler bounds its walk back
 from the body by the net's node count, to stop at a cycle, but counted
