@@ -6982,7 +6982,7 @@ fn duplicate_introductions_fail_the_module() {
     );
 
     // An object, an import's name, a nested target and an update define
-    // names too.
+    // names too, and a nested target its namespace.
     let lowered = lower_parsed_source(
         parse(concat!(
             "language g0\n",
@@ -6992,6 +6992,8 @@ fn duplicate_introductions_fail_the_module() {
             "s = 3\n",
             "u ::= \\_ -> 1\n",
             "u = 4\n",
+            "v.w = 5\n",
+            "v = 6\n",
         )),
         &context,
     );
@@ -7008,6 +7010,190 @@ fn duplicate_introductions_fail_the_module() {
             ),
             (6, "cannot introduce `s` because line 5 already defines it"),
             (8, "cannot introduce `u` because line 7 already defines it"),
+            (10, "cannot introduce `v` because line 9 already defines it"),
+        ]
+    );
+}
+
+/// A fully evaluated list's items.
+fn list_items(list: &crate::core::List) -> Vec<Value> {
+    let items = std::cell::RefCell::new(Vec::new());
+    list.try_for_each_segment(
+        &mut |_| Err("journal lists hold no bytes".to_owned()),
+        &mut |values| {
+            items.borrow_mut().extend(
+                values
+                    .iter()
+                    .map(|value| value.duplicate_for_test(test_eval_context().values())),
+            );
+            Ok(())
+        },
+        &mut |thunk| match crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &test_eval_context(),
+            &match thunk {
+                crate::core::ListThunk::Lazy(lazy) => {
+                    Value::Lazy(lazy.duplicate_for_test(&crate::compiler::test_value_factory()))
+                }
+                crate::core::ListThunk::Promised(promise) => Value::Promised(
+                    promise.duplicate_for_test(&crate::compiler::test_value_factory()),
+                ),
+            },
+        )
+        .map_err(|err| err.to_string())?
+        {
+            Value::List(list) => Ok(list),
+            other => Err(format!(
+                "unexpected list chunk {}",
+                diagnostic_kind_name(&other)
+            )),
+        },
+    )
+    .expect("list should evaluate");
+    items.into_inner()
+}
+
+/// Renders a journal with each entry as `op path@line`, fully evaluated.
+fn journal_text(value: Value) -> String {
+    let key_text = |key: &Key| match key {
+        Key::Binary(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        Key::Atom(atom) => match atom.key() {
+            Key::Binary(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+            other => format!("{other:?}"),
+        },
+        other => format!("{other:?}"),
+    };
+    let field = |dict: &Dict, name: &str| {
+        fully_evaluated_value(
+            dict.get(&Key::atom_from_text(name))
+                .unwrap_or_else(|| panic!("journal entry should have `{name}`"))
+                .duplicate_for_test(test_eval_context().values()),
+        )
+    };
+    match fully_evaluated_value(value) {
+        Value::Dict(dict) if dict.is_empty() => "{}".to_owned(),
+        Value::List(list) => format!(
+            "[{}]",
+            list_items(&list)
+                .into_iter()
+                .map(journal_text)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Dict(entry) => {
+            let Value::Dict(op) = field(&entry, "op") else {
+                panic!("journal op should be a dict");
+            };
+            let (tag, path) = op.iter().next().expect("journal op should have a tag");
+            let Value::List(path) =
+                fully_evaluated_value(path.duplicate_for_test(test_eval_context().values()))
+            else {
+                panic!("journal path should be a list");
+            };
+            let path = list_items(&path)
+                .into_iter()
+                .map(|part| match fully_evaluated_value(part) {
+                    Value::Atom(atom) => key_text(&Key::Atom(atom)),
+                    other => format!("{:?}", diagnostic_kind_name(&other)),
+                })
+                .collect::<Vec<_>>()
+                .join(".");
+            let Value::Dict(at) = field(&entry, "at") else {
+                panic!("journal `at` should be a dict");
+            };
+            let Value::Dict(g) = field(&at, "g") else {
+                panic!("journal `at` should be a `g` frame");
+            };
+            let Value::Number(line) = field(&g, "line") else {
+                panic!("journal `at` should have a line");
+            };
+            format!("{} {path}@{line}", key_text(tag))
+        }
+        other => panic!("unexpected journal value {}", diagnostic_kind_name(&other)),
+    }
+}
+
+/// Each namespace journals what is introduced, overridden or updated in it,
+/// one list per stretch between imports.
+#[test]
+fn modules_journal_their_definitions() {
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(
+        parse(concat!(
+            "language g0\n",
+            "foo = 1\n",
+            "import 'std as s\n",
+            "foo ::= \\x -> x\n",
+            "bar := 2\n",
+            "f.g.h = 3\n",
+            "refl.x = .r ()\n",
+            "meta.a.b = 1\n",
+            "object Point with\n    x = 1\n",
+            "extend Point with\n    y = 2\n",
+            "unique u\n",
+        )),
+        &context,
+    );
+    assert_eq!(lowered.diagnostics, []);
+    let module = evaluated_module_value(&context, &lowered);
+    let journal = |path: &[&str]| {
+        journal_text(value_at_atom_path(&module, path).expect("journal should exist"))
+    };
+    assert_eq!(
+        journal(&["meta", "journal"]),
+        concat!(
+            "[[{}, intro foo@2], intro s@3, update foo@4, over bar@5, update f@6, ",
+            "intro refl.x@7, intro meta.a.b@8, intro Point@9, over Point@11, intro u@13]"
+        )
+    );
+    assert_eq!(journal(&["f", "meta", "journal"]), "[{}, update g@6]");
+    assert_eq!(journal(&["f", "g", "meta", "journal"]), "[{}, intro h@6]");
+
+    // An inline built-in import updates each name it merges.
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parse("language g0\nimport 'std\nfoo = 1\n"), &context);
+    assert_eq!(lowered.diagnostics, []);
+    let module = evaluated_module_value(&context, &lowered);
+    let journal = journal_text(value_at_atom_path(&module, &["meta", "journal"]).unwrap());
+    assert!(journal.starts_with("[{}, update "), "{journal}");
+    assert!(journal.contains(", update list@2, "), "{journal}");
+    assert!(journal.ends_with(", intro foo@3]"), "{journal}");
+}
+
+/// Module scope cannot define `spec`, which belongs to objects, except
+/// within `meta` or `refl`.
+#[test]
+fn module_scope_rejects_spec() {
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(
+        parse(concat!(
+            "language g0\n",
+            "spec = 1\n",
+            "f.spec.x = 2\n",
+            "meta.spec = 3\n",
+            "object spec\n",
+            "d = {} with\n    spec = 4\n",
+        )),
+        &context,
+    );
+    assert_eq!(
+        lowered
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.line, diagnostic.message.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                2,
+                "cannot define `spec` at module scope: `spec` belongs to objects"
+            ),
+            (
+                3,
+                "cannot define `f.spec.x` at module scope: `spec` belongs to objects"
+            ),
+            (
+                5,
+                "cannot define `spec` at module scope: `spec` belongs to objects"
+            ),
         ]
     );
 }
@@ -7033,7 +7219,6 @@ import 'std
 refl.notice = .log 'info { msg:{ text:"new reflection task" } }
 refl.notice := .log 'info { msg:{ text:"final reflection task" } }
 meta.hidden = "metadata"
-spec.hidden = "specification"
 ordinary = "ordinary"
 ordinary_two = "ordinary two"
 probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [guard,'tasks] >>= (\tasks -> .task.join (list.head tasks).task >>= (\_ -> .r ()))))) } "probe"
@@ -7044,10 +7229,6 @@ probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join scanne
     assert_same_value_representation(
         &resolved_value_at_path_with_context(&context, &module, &["meta", "hidden"]),
         &Value::binary_from_text("metadata"),
-    );
-    assert_same_value_representation(
-        &resolved_value_at_path_with_context(&context, &module, &["spec", "hidden"]),
-        &Value::binary_from_text("specification"),
     );
     assert!(take_reflection_diagnostics(&diagnostics).is_empty());
 

@@ -3,10 +3,12 @@ use crate::runtime::RuntimeValueRoot;
 
 mod definitions;
 mod imports;
+mod journal;
 mod objects;
 
 pub(in crate::g_syntax) use definitions::*;
 pub(in crate::g_syntax) use imports::*;
+use journal::{JournalOp, PendingJournal};
 pub(in crate::g_syntax) use objects::*;
 
 pub(in crate::g_syntax) fn lower_source(source: &[u8], context: &CompileContext) -> LoweredSource {
@@ -58,6 +60,7 @@ pub(in crate::g_syntax) struct ModuleLowerer<'context> {
     context: &'context CompileContext,
     definitions: RuntimeValueRoot,
     module_reflection: RuntimeValueRoot,
+    journal: PendingJournal,
     diagnostics: Vec<Diagnostic>,
     parsed_declarations: Vec<Declaration>,
 }
@@ -76,6 +79,7 @@ impl<'context> ModuleLowerer<'context> {
             context,
             definitions: context.prior_defs_root().clone(),
             module_reflection,
+            journal: PendingJournal::default(),
             diagnostics: Vec::new(),
             parsed_declarations: Vec::new(),
         }
@@ -83,6 +87,7 @@ impl<'context> ModuleLowerer<'context> {
 
     pub(in crate::g_syntax) fn lower_declaration(&mut self, declaration: Declaration) {
         let line = declaration.line;
+        self.record_journal(&declaration.kind, line);
         let result = match &declaration.kind {
             DeclarationKind::Import(_) | DeclarationKind::Unique(_) => {
                 let (result, definitions) =
@@ -152,6 +157,81 @@ impl<'context> ModuleLowerer<'context> {
         self.parsed_declarations.push(declaration);
     }
 
+    /// Records what `kind` defines in the journal, writing the stretch
+    /// recorded so far before an import.
+    fn record_journal(&mut self, kind: &DeclarationKind, line: usize) {
+        let static_path = |path: &str| path.split('.').map(str::to_owned).collect::<Vec<_>>();
+        let (op, target) = match kind {
+            DeclarationKind::Import(import) => {
+                self.flush_journal();
+                match &import.placement {
+                    ImportPlacement::As(target) => (JournalOp::Introduce, static_path(target)),
+                    ImportPlacement::At(target) => (JournalOp::Update, static_path(target)),
+                    ImportPlacement::Inline => {
+                        if let ImportReference::Builtin(name) = &import.reference {
+                            self.record_builtin_import(name, line);
+                        }
+                        return;
+                    }
+                }
+            }
+            DeclarationKind::Unique(names) => {
+                for name in names {
+                    self.journal
+                        .record(&[name.as_str()], JournalOp::Introduce, line);
+                }
+                return;
+            }
+            DeclarationKind::Definition(definition) if definition.expr.is_some() => {
+                let op = match definition.kind {
+                    DefinitionKind::Introduce => JournalOp::Introduce,
+                    DefinitionKind::Override => JournalOp::Override,
+                    DefinitionKind::Update => JournalOp::Update,
+                };
+                // A computed target keeps its run-time assertion instead.
+                let Some(target) = definition
+                    .target
+                    .iter()
+                    .map(|key| match key {
+                        SyntaxKeyExpr::Atom(name) => Some(name.clone()),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    return;
+                };
+                (op, target)
+            }
+            DeclarationKind::Object(object) => (JournalOp::Introduce, static_path(&object.target)),
+            DeclarationKind::Extend(extend) => (JournalOp::Override, static_path(&extend.target)),
+            _ => return,
+        };
+        let target = target.iter().map(String::as_str).collect::<Vec<_>>();
+        self.journal.record(&target, op, line);
+    }
+
+    /// An inline built-in import updates each name it merges.
+    fn record_builtin_import(&mut self, name: &str, line: usize) {
+        let keys = self.context.values().with_runtime_value_access(|access| {
+            match compiler_values::builtin_module(&access, name).map(|module| module.value) {
+                Some(Value::Dict(dict)) => dict.iter().map(|(key, _)| key.clone()).collect(),
+                _ => Vec::new(),
+            }
+        });
+        for key in keys {
+            self.journal.record_key(key, JournalOp::Update, line);
+        }
+    }
+
+    fn flush_journal(&mut self) {
+        let definitions = self.context.values().with_runtime_value_access(|access| {
+            let definitions = self.definitions.clone_core_with(&access);
+            let definitions = self.journal.flush_in(&access, self.context, definitions);
+            access.root_runtime_value(definitions)
+        });
+        self.definitions = definitions;
+    }
+
     pub(in crate::g_syntax) fn parsed_declarations(&self) -> &[Declaration] {
         &self.parsed_declarations
     }
@@ -161,9 +241,10 @@ impl<'context> ModuleLowerer<'context> {
     }
 
     pub(in crate::g_syntax) fn finish(
-        self,
+        mut self,
         mut source_diagnostics: Vec<Diagnostic>,
     ) -> LoweredSource {
+        self.flush_journal();
         source_diagnostics.extend(check_file_global_local_shadowing(&self.parsed_declarations));
         source_diagnostics.extend(self.diagnostics);
         let definitions_root = self.definitions;

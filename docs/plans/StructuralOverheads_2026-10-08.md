@@ -101,25 +101,40 @@ record and the boundary's check, adds the compile-time check, and
 measures with `chain` and `defs_unused`.
 
 Design (maintainer, 2026-10-12):
-- **Journal.** Modules record what they introduce and override in
-  `meta.journal`, a list of `{op:intro:'foo, file:File, line:Line}` and
-  `{op:over:'foo, file:File, line:Line}`, in order. `File` is the opaque
-  origin token compilers already hold for context annotations; they
-  cannot observe the file itself. `::=` records `{op:update:'foo, ...}`,
-  as the journal may serve more than conflict detection; an updated name
-  counts as defined. `meta.*` is the compiler's and top-level macros'
-  workspace, so the record is a de facto convention, not formal
-  semantics.
-- **Hierarchy.** A definition of `f.foo` records `intro:'foo` in
-  `f.meta.journal`, not the local journal. A dict is a module insofar as
-  it is used as one (`f = {env: ...}; import "file.g" at f` is legitimate),
-  so dicts get journals the same way; objects are told apart by `spec`.
-- **File-local conflicts** fail the module at compile time.
-- **Cross-file conflicts**, which top-level `import "file.g"` mixins can
-  bring (they are include-like and never lazy in practice; `import ... as
-  f` is lazy in `f`), are reported by one check at the reflection
-  boundary, which replays the final journal. Some redundancy with the
-  compile-time check is expected. An error diagnostic fails a batch run.
+- **Journal.** Each namespace records what is introduced, overridden or
+  updated in it in `meta.journal`: entries `{op:intro:['foo],
+  at:g:{origin, line}}`, `op:over:[...]` for `:=` and `op:update:[...]`
+  for `::=` (the journal may serve more than conflict detection; an
+  updated name counts as defined). Paths are lists. `at` is a context
+  frame, so other front ends can use their own addressing; `origin` is
+  the opaque token compilers hold, since they cannot observe the file.
+  Each stretch of declarations between imports writes `meta.journal =
+  [prior, entry, ...]`, where `prior` is the journal before it, or `{}`
+  if there was none, so recording never forces earlier entries.
+  `meta.*` is the workspace of compilers and top-level macros, so this
+  is a convention, not formal semantics.
+- **Hierarchy.** `f.foo = 1` records `intro:['foo]` in `f.meta.journal`
+  and `update:['f]` in the host's; `f.g.h = 1` records `update:['f]`,
+  `update:['g]` in `f`, and `intro:['h]` in `f.g`. A dict is a module
+  insofar as it is used as one (`f = {env: ...}; import "file.g" at f` is
+  legitimate). `refl.*` and `meta.*` get no journals of their own: a path
+  through them is recorded whole, e.g. `intro:['refl, 'x]`. Compilers
+  reject `spec` at module scope, as specifications never change through
+  `with`.
+- **Checks.** File-local conflicts fail the module at compile time.
+  Cross-file conflicts, which top-level `import "file.g"` mixins can bring
+  (include-like, never lazy in practice; `import ... as f` is lazy in
+  `f`), are logged as errors by a namespace's reflection boundary, which
+  replays its final journal with a bootstrap builtin; some redundancy
+  with the compile-time check is expected. An error fails a batch run.
+- **Lazy loading.** A namespace's journal and `refl.*` are evaluated only
+  when a definition in it is forced, which is essential to scaling. The
+  host's journal never refers to a nested one. A definition carries the
+  boundary of its target's namespace as well as its file's, sharing the
+  guard the namespace's own file uses. Declared objects are self-contained
+  (an earlier decision): a definition in `object foo` carries only the
+  object's boundary, and access to the object does not trigger the host's
+  reflection. Objects still appear in the host journal.
 - **Dict `with`** becomes cheap, local, best-effort enforcement: `=` is a
   dict union, which fails on a conflict, and `:=` a dict update.
 - A name the journal records stays defined: `x := {}` no longer frees `x`
@@ -127,14 +142,30 @@ Design (maintainer, 2026-10-12):
 - The maintainer doubts it improves performance, but expects better
   analysis and reports either way.
 
+Cost of a nested boundary, measured by giving `asm.result` the `asm`
+namespace's boundary as well as its file's (2026-10-12): about 5.3 M
+instructions for the first forced definition in each such namespace,
++30% on `minimal` (17.6 M to 22.9 M) and +0.6% on `hello_elf` (751 M to
+756 M). Accepted for now; `perf-reflection-scanner` would recover it for
+every boundary, and one task per definition, claiming both namespaces,
+would save a launch where both are new.
+
 Steps:
 - `defs-local-conflicts`: name analysis reports introducing a name the
   file already defined, by `=`, `:=`, `::=`, an object, `extend`, `import
   ... as` or `unique`. Done 2026-10-12.
-- `defs-journal`: lowering records the journal, one list per stretch of
-  definitions between inline imports.
-- `defs-journal-check`: the reflection boundary replays the final journal
-  and logs conflicts as errors.
+- `defs-journal`: lowering records the journals, one list per stretch of
+  declarations between imports; compilers reject `spec` at module scope;
+  a nested definition also counts as defining its namespace. Done
+  2026-10-12. An inline built-in import records an update of each name it
+  merges. A computed target records nothing and keeps its run-time
+  assertion. Instructions rise 1.2% on `chain`, 2% on `defs_unused`, 1.2%
+  on `chain_refl` and 0.4% on `hello_elf`, mostly from tracing the live
+  journal at each collection; `minimal` rises 3.8% (0.7 M) from its two
+  journal updates (`asm` and the host).
+- `defs-journal-check`: each reflection boundary replays its namespace's
+  final journal and logs conflicts as errors; nested definitions carry
+  their namespace's boundary.
 - `defs-drop-assertions`: module definitions, object declarations,
   `extend` and `language` lose their run-time assertions.
 - `defs-with-union`: dict `with` lowers `=` to union and `:=` to update.

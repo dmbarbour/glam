@@ -580,6 +580,42 @@ maps the short names used here to file names.
 - **Rule lives in:** `src/eval/list_observation_machine.rs` module docs.
 - **Recorded in:** structural overheads plan, `perf-list-leaf-walk`.
 
+### Namespaces journal their definitions in `meta.journal`
+`definition-journal` · 2026-10-12 · maintainer · accepted
+- **Context:** each module definition carried a run-time assertion that
+  the definitions before it did (or did not) define its name. It evaluated
+  only when the definition was demanded, so `x = 1` then `x = 2` passed
+  unless `x` was, and each assertion kept an intermediate dictionary alive:
+  about half of `chain`'s cost. Compilers cannot see other files' names,
+  since top-level `import "file.g"` mixins are include-like.
+- **Decision:**
+  - A file's own conflicts fail the module at compile time.
+  - Each namespace records what is introduced, overridden or updated in it
+    in `meta.journal`, as entries `{op:intro:['foo], at:g:{origin, line}}`
+    (`over` for `:=`, `update` for `::=`). Each stretch of declarations
+    between imports writes `[prior, entry, ...]`. Paths are lists; `at` is
+    a context frame, so other front ends can use their own addressing.
+  - `f.foo = 1` records `intro:['foo]` in `f`'s journal and `update:['f]`
+    in the host's; `refl` and `meta` keep no journals, so paths through
+    them are recorded whole. A dict is a module insofar as it is used as
+    one. Compilers reject `spec` at module scope.
+  - A namespace's reflection boundary replays its final journal and logs
+    conflicts as errors, so the check runs only when a definition in the
+    namespace is forced, compatible with lazy loading. A nested definition
+    carries its namespace's boundary as well as its file's; a definition in
+    a declared object carries only the object's.
+- **Consequences:**
+  - `meta.*` conventions are not formal semantics; a macro can write the
+    journal too.
+  - A name the journal records stays defined: `x := {}` no longer frees
+    `x` for reintroduction.
+  - A cross-file conflict is a diagnostic, not a failed value.
+  - Recording costs 1 to 2% of instructions on `chain` and `defs_unused`,
+    mostly tracing the live journal at each collection; a nested boundary
+    costs about 5 M instructions the first time.
+- **Rule lives in:** `src/g_syntax/module_lowering/journal.rs` module docs.
+- **Recorded in:** structural overheads plan, `perf-definition-assertions`.
+
 ## Diagnostics
 
 ### A failure's cause is a nested `msg` frame; the headline states only its own finding

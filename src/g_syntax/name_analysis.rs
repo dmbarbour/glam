@@ -4,7 +4,7 @@
 //! indexes only source-written namespace introductions and global-root uses so
 //! that local/global conflicts do not depend on declaration order. It also
 //! reports a file introducing a name it already defined, which fails the
-//! module (`defs-local-conflicts`).
+//! module (`defs-local-conflicts`), and module definitions of `spec`.
 
 use std::collections::BTreeMap;
 
@@ -15,6 +15,9 @@ struct NamespaceId(usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ResolutionScopeId(usize);
+
+/// The namespace of the module's own top-level definitions.
+const MODULE_NAMESPACE: NamespaceId = NamespaceId(0);
 
 #[derive(Debug, Default)]
 struct Namespace {
@@ -51,7 +54,7 @@ struct FileNameAnalysis {
 
 impl FileNameAnalysis {
     fn new() -> Self {
-        let root_namespace = NamespaceId(0);
+        let root_namespace = MODULE_NAMESPACE;
         Self {
             namespaces: vec![Namespace::default()],
             scopes: vec![ResolutionScope {
@@ -700,8 +703,9 @@ impl FileNameAnalysis {
         self.define_names(start, &names, introduction, line);
     }
 
-    /// Records that the file defines `names` below `start`, and reports
-    /// introducing a name it already defined.
+    /// Records that the file defines `names` below `start`, and each
+    /// namespace on the way, and reports introducing a name it already
+    /// defined or a module definition of `spec`.
     fn define_names(
         &mut self,
         start: NamespaceId,
@@ -712,9 +716,29 @@ impl FileNameAnalysis {
         let Some((leaf, parents)) = names.split_last() else {
             return;
         };
-        let namespace = parents.iter().fold(start, |namespace, name| {
-            self.child_namespace(namespace, name)
-        });
+        if start == MODULE_NAMESPACE
+            && names
+                .iter()
+                .take_while(|name| !matches!(**name, "meta" | "refl"))
+                .any(|name| *name == "spec")
+        {
+            self.conflicts.push(Diagnostic::error(
+                line,
+                format!(
+                    "cannot define `{}` at module scope: `spec` belongs to objects",
+                    names.join(".")
+                ),
+            ));
+            return;
+        }
+        let mut namespace = start;
+        for parent in parents {
+            self.namespaces[namespace.0]
+                .defined
+                .entry((*parent).to_owned())
+                .or_insert(line);
+            namespace = self.child_namespace(namespace, parent);
+        }
         let defined = &mut self.namespaces[namespace.0].defined;
         match defined.get(*leaf) {
             Some(first) if introduction => self.conflicts.push(Diagnostic::error(
