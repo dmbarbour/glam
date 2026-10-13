@@ -1201,5 +1201,9 @@ over a minute. The Loom suite runs in about three seconds.
 Compile-fail examples latch that a view or allocator cannot live across a
 suspension (E0502), that views cannot escape `mutate`, and that neither
 mutators nor views are `Send`; each was checked against its intended error.
-Miri and the sanitizers did not run: no nightly toolchain is installed.
+On 2026-10-13, with a nightly toolchain installed, `scripts/check.sh full`
+passed at `c864db35`, including Miri with strict provenance over the
+library suite and both sanitizers. Miri skips
+`trusted_hash::tests::trusted_keys_are_declared_only_here`, which reads the
+source tree, which Miri's isolation forbids.
 

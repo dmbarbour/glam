@@ -423,6 +423,20 @@ Slices, in order (2026-10-13):
    `quantum-mutator`.
 3. `gc-hold-reflection-polls`: reflection polls take the mutator for their
    pure steps and suspend around pumping and client callbacks.
+   Measured 2026-10-13 at `c864db35` (`.r ()` chain of 200 against its
+   compile-only baseline): 513 K instructions per step, 34.6 outer and
+   117.6 recursive heap entries. By call site, the reflection poll's outer
+   entries are single-access polls of its sub-machines: WHNF computations
+   (`whnf::poll_computation`) 15.3 per step, `EvaluatorStepContext::
+   project_root` 6.1, list fronts 5.1, application setup 3.1; pumped quanta
+   are the other 5. Holding a mutator per `EvaluationPollContext::evaluate`
+   phase, which is callback-free by contract, made a step 2% dearer
+   (524 K): outer entries stayed at 34.6 and recursive ones rose by 14,
+   since a phase averages one access. A mutator must span the step loop to
+   merge them, and the loop calls client code (`TaskHost` snapshot,
+   validate and commit, 18 sites) and pumps dependencies, so those sites
+   must suspend it from deep inside the machine (open question,
+   2026-10-13).
 4. The public API, the compile entry, the remaining waits and the
    production nesting sites.
 
