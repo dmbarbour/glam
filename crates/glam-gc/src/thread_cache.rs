@@ -1,5 +1,7 @@
 use crate::trusted_hash::TrustedHashMap;
 use std::any::TypeId;
+#[cfg(debug_assertions)]
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::num::NonZeroU64;
 use std::ptr::NonNull;
@@ -189,6 +191,12 @@ struct ThreadHeapState {
     /// The outer admission of a held region (`Heap::with_held_region`),
     /// while one is active and not yet released.
     held: Option<HeldAdmission>,
+    /// Whether an owned [`crate::Mutator`] holds this record's outer entry.
+    owned: bool,
+    /// Owned mutators of this heap suspended on this thread. A suspended
+    /// mutator keeps its record, so collection inside the suspension cannot
+    /// orphan it.
+    suspended: usize,
     captured_epoch: AllocationLeaseEpoch,
     cursors: ClassCursorCache,
     region_metrics: ThreadRegionMetrics,
@@ -264,6 +272,8 @@ impl ThreadHeapState {
             recursive_depth: 0,
             classes: TrustedHashMap::default(),
             held: None,
+            owned: false,
+            suspended: 0,
             captured_epoch,
             cursors: ClassCursorCache::default(),
             region_metrics: ThreadRegionMetrics::default(),
@@ -292,6 +302,25 @@ impl HeapCacheKey {
 }
 
 type SharedThreadHeapState = Rc<RefCell<ThreadHeapState>>;
+
+#[cfg(debug_assertions)]
+thread_local! {
+    /// Counts the ends of this thread's heap admissions. A view records it
+    /// when made and checks it on use, catching a view that outlived its
+    /// admission, which safe code cannot do.
+    static ADMISSION_GENERATION: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The calling thread's current admission generation.
+#[cfg(debug_assertions)]
+pub(crate) fn admission_generation() -> u64 {
+    ADMISSION_GENERATION.get()
+}
+
+fn end_admission_generation() {
+    #[cfg(debug_assertions)]
+    ADMISSION_GENERATION.set(ADMISSION_GENERATION.get().wrapping_add(1));
+}
 
 thread_local! {
     static THREAD_HEAPS: RefCell<TrustedHashMap<HeapCacheKey, SharedThreadHeapState>> =
@@ -501,6 +530,18 @@ impl PreparedThreadHeapEntry {
 }
 
 impl PreparedThreadHeapEntry {
+    /// Activates an outer entry for an owned [`crate::Mutator`].
+    pub(crate) fn activate_owned<'heap>(
+        self,
+        epoch: AllocationLeaseEpoch,
+        admission: MutatorAdmission<'heap>,
+    ) -> ThreadHeapEntry<'heap> {
+        let state = Rc::clone(&self.state);
+        let entry = self.activate(epoch, Some(admission));
+        state.borrow_mut().owned = true;
+        entry
+    }
+
     /// Activates an outer entry as a held region. The thread state keeps its
     /// admission; [`take_held_region`] ends it.
     pub(crate) fn activate_held(self, epoch: AllocationLeaseEpoch, admission: HeldAdmission) {
@@ -521,14 +562,24 @@ impl PreparedThreadHeapEntry {
 ///
 /// Returns `None` when the thread holds no region, or when a mutator is
 /// active inside it.
+///
+/// # Panics
+///
+/// Panics under an owned mutator, whose admission a release point must not
+/// end: the mutator suspends instead.
 pub(crate) fn take_held_region() -> Option<HeldAdmission> {
     CURRENT_HEAP.with_borrow(|current| {
         let (_, state) = current.as_ref()?;
         let mut state = state.borrow_mut();
+        assert!(
+            !state.owned,
+            "a held-region release point was reached under an owned mutator, which suspends instead"
+        );
         if state.held.is_none() || state.recursive_depth != 1 {
             return None;
         }
         state.recursive_depth = 0;
+        end_admission_generation();
         let metrics = std::mem::take(&mut state.region_metrics);
         state.counters.publish(metrics);
         state.held.take()
@@ -554,6 +605,36 @@ impl<'heap> ThreadHeapEntry<'heap> {
         ThreadCacheHandle {
             state: Rc::clone(&self.state),
         }
+    }
+
+    /// Panics unless this owned mutator's entry is its thread's only active
+    /// entry, which a suspension requires.
+    pub(crate) fn assert_suspendable(&self) {
+        let state = self.state.borrow();
+        assert!(state.owned, "only an owned mutator's entry can suspend");
+        assert_eq!(
+            state.recursive_depth, 1,
+            "a mutator cannot suspend while a heap access is open inside it"
+        );
+    }
+
+    /// Ends this owned mutator's admission for a suspension. The returned
+    /// record stays registered until the suspension ends.
+    pub(crate) fn suspend_owned(self) -> SuspendedThreadHeapEntry {
+        self.assert_suspendable();
+        {
+            let mut state = self.state.borrow_mut();
+            state.owned = false;
+            state.suspended = state
+                .suspended
+                .checked_add(1)
+                .expect("suspended mutator count exhausted");
+        }
+        let suspended = SuspendedThreadHeapEntry {
+            state: Rc::clone(&self.state),
+        };
+        drop(self);
+        suspended
     }
 
     /// Deactivates an outer TLS entry while preserving its coordinator lease.
@@ -584,12 +665,48 @@ impl<'heap> ThreadHeapEntry<'heap> {
             "coordinator obligation does not match outer mutator exit"
         );
         if prior_depth == 1 {
+            state.owned = false;
             let metrics = std::mem::take(&mut state.region_metrics);
             state.counters.publish(metrics);
+            end_admission_generation();
         }
         drop(state);
         self.active = false;
         prior_depth == 1
+    }
+}
+
+/// An owned mutator's thread record while the mutator is suspended.
+///
+/// Dropping it, on resumption or when the suspension unwinds, withdraws the
+/// suspension.
+pub(crate) struct SuspendedThreadHeapEntry {
+    state: SharedThreadHeapState,
+}
+
+impl SuspendedThreadHeapEntry {
+    /// Re-activates the suspended record once it has a new admission.
+    pub(crate) fn resume<'heap>(
+        self,
+        prepared: PreparedThreadHeapEntry,
+        epoch: AllocationLeaseEpoch,
+        admission: MutatorAdmission<'heap>,
+    ) -> ThreadHeapEntry<'heap> {
+        assert!(
+            Rc::ptr_eq(&self.state, &prepared.state),
+            "a suspended mutator's thread record was replaced"
+        );
+        prepared.activate_owned(epoch, admission)
+    }
+}
+
+impl Drop for SuspendedThreadHeapEntry {
+    fn drop(&mut self) {
+        let mut state = self.state.borrow_mut();
+        state.suspended = state
+            .suspended
+            .checked_sub(1)
+            .expect("suspended mutator count underflow");
     }
 }
 
@@ -599,10 +716,14 @@ pub(crate) fn release_current_thread_caches() -> usize {
         // still inside any mutator region gets a contract panic while every
         // cache record remains available for normal unwinding and exit.
         for state in registry.values() {
+            let state = state.borrow();
             assert_eq!(
-                state.borrow().recursive_depth,
-                0,
+                state.recursive_depth, 0,
                 "cannot release thread caches while a mutator is active"
+            );
+            assert_eq!(
+                state.suspended, 0,
+                "cannot release thread caches while a mutator is suspended"
             );
         }
 
@@ -637,11 +758,17 @@ pub(crate) fn remove_inactive_thread_cache(heap: &Arc<HeapInner>) {
         let Some(state) = registry.get(&key) else {
             return;
         };
+        let state = state.borrow();
         assert_eq!(
-            state.borrow().recursive_depth,
-            0,
+            state.recursive_depth, 0,
             "collector cannot remove an active thread cache"
         );
+        // A suspended mutator resumes into its own record, whose stale
+        // cursors its outer entry clears.
+        if state.suspended != 0 {
+            return;
+        }
+        drop(state);
         registry.remove(&key);
     });
     CURRENT_HEAP.with_borrow_mut(|current| {

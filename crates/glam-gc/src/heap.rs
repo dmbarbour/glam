@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use crate::{
-    Mutator, Root, Trace, Visitor,
+    Mutator, MutatorAccess, Root, Trace, Visitor,
     admission::{AdmissionGate, AdmissionPhase, CollectionEpoch, MutatorCoordinator},
     arena::{Arena, RunClaimTarget, RunLocation, RunOwner, RunPublicationError},
     class::{
@@ -17,8 +17,9 @@ use crate::{
     root::RootCell,
     run::{AllocationClassId, RunGeometry},
     thread_cache::{
-        AllocationCursor, AllocationLeaseEpoch, ThreadHeapEntry, ThreadRegionCounters,
-        ThreadRegionMetrics, remove_inactive_thread_cache, thread_has_any_active_mutator,
+        AllocationCursor, AllocationLeaseEpoch, PreparedThreadHeapEntry, SuspendedThreadHeapEntry,
+        ThreadHeapEntry, ThreadRegionCounters, ThreadRegionMetrics, remove_inactive_thread_cache,
+        thread_has_any_active_mutator,
     },
     trace::ErasedGc,
 };
@@ -512,6 +513,8 @@ impl Heap {
 
     /// Runs `operation` inside a scoped mutator region for this heap.
     ///
+    /// This is the legacy entry, kept while callers migrate to owned
+    /// mutators ([`Heap::mutate`]); inside one, it is a recursive entry.
     /// The outermost entry obtains one coordinator admission obligation.
     /// Recursive same-heap entries reuse that obligation. A thread holds
     /// mutators for at most one heap at a time; different heaps may be
@@ -522,8 +525,30 @@ impl Heap {
     /// Panics if this thread holds another heap's mutator, before entering
     /// this heap. Panics if a prior collection crossed an irreversible
     /// mutation boundary and then panicked, permanently poisoning this heap.
-    pub fn with_mutator<R>(&self, operation: impl for<'heap> FnOnce(&Mutator<'heap>) -> R) -> R {
+    pub fn with_mutator<R>(
+        &self,
+        operation: impl for<'heap> FnOnce(&MutatorAccess<'heap>) -> R,
+    ) -> R {
         self.with_mutator_after_admission(|| {}, operation)
+    }
+
+    /// Runs `operation` with this thread's owned mutator for this heap.
+    ///
+    /// The mutator holds heap admission until `operation` returns, except
+    /// while it suspends ([`Mutator::suspend`]). Access borrows it, so no
+    /// access or view outlives that admission. The brand `'mu` is fresh for
+    /// each call. Legacy [`Heap::with_mutator`] entries inside it are
+    /// recursive and take no admission.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this thread already has an active entry for any heap: a
+    /// thread holds at most one mutator, taken at its outermost boundary.
+    /// Inside a suspension, another mutator may be taken. Panics if this
+    /// heap is permanently poisoned.
+    pub fn mutate<R>(&self, operation: impl for<'mu> FnOnce(&mut Mutator<'mu>) -> R) -> R {
+        let mut mutator = Mutator::new(&self.inner, self.inner.admit_owned_entry());
+        operation(&mut mutator)
     }
 
     /// Holds this heap's mutator admission while `operation` runs, without
@@ -558,6 +583,11 @@ impl Heap {
     /// Ends the calling thread's held region early, if it holds one and no
     /// mutator is active inside it. Later entries in the region's scope enter
     /// the heap one by one again. Returns whether a region ended.
+    ///
+    /// # Panics
+    ///
+    /// Panics under an owned mutator ([`Heap::mutate`]), which suspends
+    /// instead ([`Mutator::suspend`]).
     pub fn release_held_region() -> bool {
         crate::thread_cache::take_held_region().is_some()
     }
@@ -565,7 +595,7 @@ impl Heap {
     fn with_mutator_after_admission<R>(
         &self,
         after_admission: impl FnOnce(),
-        operation: impl for<'heap> FnOnce(&Mutator<'heap>) -> R,
+        operation: impl for<'heap> FnOnce(&MutatorAccess<'heap>) -> R,
     ) -> R {
         let prepared =
             ThreadHeapEntry::prepare(&self.inner, self.inner.current_allocation_lease_epoch());
@@ -585,7 +615,7 @@ impl Heap {
         after_admission();
         let thread_entry =
             prepared.activate(self.inner.current_allocation_lease_epoch(), admission);
-        let mutator = Mutator::new(&self.inner, thread_entry.cache());
+        let mutator = MutatorAccess::new(&self.inner, thread_entry.cache());
         let result = operation(&mutator);
         drop(mutator);
         drop(thread_entry);
@@ -811,7 +841,7 @@ impl Heap {
     fn with_mutator_admission_hook<R>(
         &self,
         after_admission: impl FnOnce(),
-        operation: impl for<'heap> FnOnce(&Mutator<'heap>) -> R,
+        operation: impl for<'heap> FnOnce(&MutatorAccess<'heap>) -> R,
     ) -> R {
         self.with_mutator_after_admission(after_admission, operation)
     }
@@ -2623,6 +2653,37 @@ impl MarkAttempt {
 }
 
 impl HeapInner {
+    /// Admits this thread's owned mutator as its outer entry.
+    pub(crate) fn admit_owned_entry(self: &Arc<Self>) -> ThreadHeapEntry<'_> {
+        let (prepared, admission) = self.admit_owned();
+        prepared.activate_owned(self.current_allocation_lease_epoch(), admission)
+    }
+
+    /// Re-admits a suspended owned mutator into its own thread record.
+    pub(crate) fn resume_owned_entry(
+        self: &Arc<Self>,
+        suspended: SuspendedThreadHeapEntry,
+    ) -> ThreadHeapEntry<'_> {
+        let (prepared, admission) = self.admit_owned();
+        suspended.resume(prepared, self.current_allocation_lease_epoch(), admission)
+    }
+
+    fn admit_owned(self: &Arc<Self>) -> (PreparedThreadHeapEntry, MutatorAdmission<'_>) {
+        let prepared = ThreadHeapEntry::prepare(self, self.current_allocation_lease_epoch());
+        assert!(
+            prepared.is_outer(),
+            "a thread holds at most one mutator, taken outside every heap entry"
+        );
+        let (admission, collected) = self.admit_outer_mutator();
+        let prepared = if collected {
+            drop(prepared);
+            ThreadHeapEntry::prepare(self, self.current_allocation_lease_epoch())
+        } else {
+            prepared
+        };
+        (prepared, admission)
+    }
+
     /// Begins a held region unless this thread already has an entry for this
     /// heap.
     fn begin_held_region(self: &Arc<Self>) -> bool {
@@ -2988,7 +3049,7 @@ impl HeapInner {
         epoch: CollectionEpoch,
         continue_as_mutator: bool,
         post_mark_work: impl FnOnce(&PostMarkPlan, &mut ManagedData),
-        finalizer_work: impl for<'mutator> FnOnce(&Mutator<'mutator>),
+        finalizer_work: impl for<'mutator> FnOnce(&MutatorAccess<'mutator>),
     ) -> Option<MutatorAdmission<'heap>> {
         self.run_synthetic_collection_with_mark_work(
             epoch,
@@ -3005,7 +3066,7 @@ impl HeapInner {
         continue_as_mutator: bool,
         mark_work: impl FnOnce(&mut MarkAttempt, &mut ManagedData),
         post_mark_work: impl FnOnce(&PostMarkPlan, &mut ManagedData),
-        finalizer_work: impl for<'mutator> FnOnce(&Mutator<'mutator>),
+        finalizer_work: impl for<'mutator> FnOnce(&MutatorAccess<'mutator>),
     ) -> Option<MutatorAdmission<'heap>> {
         let coordinator = self
             .admission
@@ -3139,7 +3200,7 @@ impl HeapInner {
         let pause_duration = collection_started.elapsed();
         let thread_entry =
             prepared.activate(self.current_allocation_lease_epoch(), Some(admission));
-        let mutator = Mutator::new(self, thread_entry.cache());
+        let mutator = MutatorAccess::new(self, thread_entry.cache());
         #[cfg(feature = "deterministic-test-hooks")]
         self.pause_in_finalizing_phase();
         // Test-only/synthetic work observes the established Finalizing
@@ -3183,7 +3244,7 @@ impl HeapInner {
     fn run_finalization_batch(
         &self,
         collection: &mut CollectionAttempt<'_>,
-        mutator: &Mutator<'_>,
+        mutator: &MutatorAccess<'_>,
     ) -> FinalizationSummary {
         debug_assert!(std::ptr::eq(self, Arc::as_ptr(mutator.heap())));
         let mut summary = FinalizationSummary::default();
@@ -4401,6 +4462,9 @@ fn allocation_cursor(
 }
 
 #[cfg(test)]
+mod owned_mutator_tests;
+
+#[cfg(test)]
 #[expect(unsafe_code, reason = "reviewed allocation-class fixtures")]
 mod tests {
     use std::collections::HashSet;
@@ -5008,7 +5072,7 @@ mod tests {
     }
 
     fn connect_graph_nodes(
-        mutator: &crate::Mutator<'_>,
+        mutator: &crate::MutatorAccess<'_>,
         owner: &crate::Gc<GraphNode>,
         target: &crate::Gc<GraphNode>,
     ) {
@@ -10334,7 +10398,7 @@ mod tests {
             worker_heap.with_mutator(|mutator| {
                 assert_eq!(*root.get(mutator), 73);
                 assert_eq!(*alias.get(mutator), 73);
-                assert!(bare.same_allocation_in(&root.as_gc(mutator), mutator));
+                assert!(bare.same_allocation_in(&root.as_gc(mutator).edge(), mutator));
             });
 
             // The roots and bare edge remain on this thread while its only

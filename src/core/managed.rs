@@ -1,4 +1,4 @@
-use glam_gc::{Allocator, Gc, Mutator, Root, Trace, UnsupportedLayout, Visitor};
+use glam_gc::{Allocator, Gc, MutatorAccess, Root, Trace, UnsupportedLayout, Visitor};
 use std::any::Any;
 #[cfg(test)]
 use std::cell::Cell;
@@ -438,7 +438,7 @@ unsafe impl OpaquePayloadFamily for u64 {
 /// every pointer which must survive the region as an exactly traced edge or
 /// publish it as a root before returning.
 pub(crate) struct CoreValueAllocationScope<'scope> {
-    mutator: &'scope Mutator<'scope>,
+    mutator: &'scope MutatorAccess<'scope>,
 }
 
 /// Factory-qualified managed access for one bounded runtime operation.
@@ -923,7 +923,7 @@ impl RuntimeValueAccess<'_> {
     /// # Safety
     ///
     /// `owner` must be live in this exact access region. The visitors and
-    /// `transition` must satisfy [`Mutator::with_edge_transition`]'s graph and
+    /// `transition` must satisfy [`MutatorAccess::with_edge_transition`]'s graph and
     /// publication contract for that owner.
     pub(crate) unsafe fn with_managed_edge_transition<Owner, Leaving, Adding, Result>(
         &self,
@@ -961,7 +961,7 @@ impl RuntimeValueAccess<'_> {
     ///
     /// `owner` must be live in this exact access region. The state visitors
     /// and transition must satisfy
-    /// [`Mutator::with_edge_state_transition`]'s graph and publication
+    /// [`MutatorAccess::with_edge_state_transition`]'s graph and publication
     /// contract for that owner.
     pub(crate) unsafe fn with_managed_edge_state_transition<Owner, State, Leaving, Adding, Result>(
         &self,
@@ -1034,7 +1034,7 @@ impl CoreValueAllocationScope<'_> {
     /// Projects one registered root back to its exact interior edge while
     /// this allocation region keeps the allocation live.
     fn project_root<T: ManagedFamily>(&self, root: &Root<T>) -> Gc<T> {
-        root.as_gc(self.mutator)
+        root.as_gc(self.mutator).edge()
     }
 
     /// Borrows one exact managed edge discovered from an already authorized

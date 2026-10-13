@@ -1,16 +1,137 @@
 use std::fmt;
 use std::marker::PhantomData;
+use std::ops::Deref;
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-use crate::thread_cache::ThreadCacheHandle;
+use crate::thread_cache::{ThreadCacheHandle, ThreadHeapEntry};
 use crate::{Gc, Root, Trace, UnsupportedLayout, heap::HeapInner};
 use crate::{class::AllocationClass, class::metadata_for, run::RunGeometry};
 
 #[cfg(feature = "deterministic-test-hooks")]
 use crate::trace::ErasedGc;
 
-/// Scoped authority to access one [`crate::Heap`].
+/// A thread's owned heap admission for one [`crate::Heap`].
+///
+/// [`crate::Heap::mutate`] lends it to a closure. Access borrows it: it
+/// dereferences to the [`MutatorAccess`] every heap operation takes, and
+/// views ([`crate::GcRef`]) borrow it too. [`Mutator::suspend`] needs it
+/// mutably, so no access or view is live across a suspension:
+///
+/// ```compile_fail,E0502
+/// use glam_gc::Heap;
+///
+/// let heap = Heap::new();
+/// heap.mutate(|mutator| {
+///     let value = mutator.allocator::<u64>().unwrap().alloc(42_u64);
+///     let root = mutator.root(value);
+///     let view = root.as_gc(mutator);
+///     mutator.suspend(|| ());
+///     let _ = *view;
+/// });
+/// ```
+///
+/// The brand `'mu` is invariant and fresh for each `mutate` call, so nothing
+/// borrowed from a mutator escapes its closure:
+///
+/// ```compile_fail
+/// use glam_gc::Heap;
+///
+/// let heap = Heap::new();
+/// let root = heap.mutate(|mutator| {
+///     let value = mutator.allocator::<u64>().unwrap().alloc(42_u64);
+///     mutator.root(value)
+/// });
+/// let _escaped = heap.mutate(|mutator| root.as_gc(mutator));
+/// ```
+///
+/// A mutator is neither `Send` nor `Sync`:
+///
+/// ```compile_fail
+/// use glam_gc::Heap;
+///
+/// let heap = Heap::new();
+/// heap.mutate(|mutator| {
+///     std::thread::scope(|scope| {
+///         scope.spawn(|| {
+///             let _ = mutator.allocator::<u64>();
+///         });
+///     });
+/// });
+/// ```
+pub struct Mutator<'mu> {
+    access: MutatorAccess<'mu>,
+    /// The thread's outer entry for the heap, absent only after a
+    /// suspension failed to re-admit.
+    entry: Option<ThreadHeapEntry<'mu>>,
+    brand: PhantomData<fn(&'mu ()) -> &'mu ()>,
+}
+
+impl<'mu> Mutator<'mu> {
+    pub(crate) fn new(heap: &'mu Arc<HeapInner>, entry: ThreadHeapEntry<'mu>) -> Self {
+        Self {
+            access: MutatorAccess::new(heap, entry.cache()),
+            entry: Some(entry),
+            brand: PhantomData,
+        }
+    }
+
+    /// Releases heap admission, runs `operation`, and re-admits.
+    ///
+    /// A suspension is a scoped safepoint: collection may run while
+    /// `operation` does, including one `operation` starts, and `operation`
+    /// may take another mutator for this or another heap. Values that must
+    /// survive the suspension need a [`crate::Root`] or a traced owner. A
+    /// suspension belongs where the thread holds no lock a finalizer might
+    /// need, since re-admission may wait for a collection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a legacy [`crate::Heap::with_mutator`] access is open
+    /// inside this mutator. Re-admission panics if the heap became
+    /// permanently poisoned; the mutator then holds no admission, and any
+    /// later access through it panics. If `operation` unwinds, the mutator
+    /// stays suspended in the same way.
+    pub fn suspend<R>(&mut self, operation: impl FnOnce() -> R) -> R {
+        let entry = self
+            .entry
+            .as_ref()
+            .expect("a mutator that failed to re-admit cannot suspend");
+        entry.assert_suspendable();
+        let suspended = self.entry.take().expect("checked above").suspend_owned();
+        let result = operation();
+        self.entry = Some(self.access.heap().resume_owned_entry(suspended));
+        result
+    }
+}
+
+impl<'mu> Deref for Mutator<'mu> {
+    type Target = MutatorAccess<'mu>;
+
+    #[inline(always)]
+    fn deref(&self) -> &MutatorAccess<'mu> {
+        assert!(
+            self.entry.is_some(),
+            "a mutator that failed to re-admit grants no access"
+        );
+        &self.access
+    }
+}
+
+impl fmt::Debug for Mutator<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Mutator")
+            .field("admitted", &self.entry.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Access to one [`crate::Heap`], borrowed from an admitted mutator.
+///
+/// A [`Mutator`] dereferences to one. During migration,
+/// [`crate::Heap::with_mutator`] also lends one to a closure, as an entry of
+/// its own.
 ///
 /// It is intentionally neither `Send` nor `Sync`. Every operation remains
 /// qualified by the heap which created the token; holding another heap's token
@@ -31,13 +152,13 @@ use crate::trace::ErasedGc;
 ///     });
 /// });
 /// ```
-pub struct Mutator<'heap> {
+pub struct MutatorAccess<'heap> {
     heap: &'heap Arc<HeapInner>,
     cache: ThreadCacheHandle,
     marker: PhantomData<&'heap HeapInner>,
 }
 
-impl<'heap> Mutator<'heap> {
+impl<'heap> MutatorAccess<'heap> {
     pub(crate) fn new(heap: &'heap Arc<HeapInner>, cache: ThreadCacheHandle) -> Self {
         Self {
             heap,
@@ -99,7 +220,7 @@ impl<'heap> Mutator<'heap> {
         self.heap.debug_assert_access(pointer);
     }
 
-    pub(crate) fn heap(&self) -> &Arc<HeapInner> {
+    pub(crate) fn heap(&self) -> &'heap Arc<HeapInner> {
         self.heap
     }
 

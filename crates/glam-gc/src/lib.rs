@@ -66,8 +66,8 @@ pub use heap::{
     CollectionError, CollectionPolicy, CollectionReport, Heap, HeapActivity,
     HeapMaintenanceSnapshot, HeapMetrics, HeapStatistics,
 };
-pub use mutator::{Allocator, Mutator};
-pub use pointer::Gc;
+pub use mutator::{Allocator, Mutator, MutatorAccess};
+pub use pointer::{Gc, GcRef};
 pub use root::Root;
 pub use trace::{Trace, Visitor};
 

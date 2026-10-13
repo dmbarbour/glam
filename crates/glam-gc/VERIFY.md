@@ -1168,3 +1168,35 @@ waiters that do not keep the bit set. The last needs the three-party model.
 The two models with two-sided coordinator traffic run with a preemption bound
 of three, which still catches every planted fault; exhaustive search took
 over a minute. The Loom suite runs in about three seconds.
+
+## Owned mutators and views
+
+`gc-hold-api` (explicit heap holds plan) added `Heap::mutate`,
+`Mutator::suspend` and `GcRef`, and renamed the closure token
+`MutatorAccess`. `heap::owned_mutator_tests` covers:
+
+- allocation, roots and views under an owned mutator, and legacy entries
+  inside it counted as recursive;
+- one mutator per thread: a second, one for another heap, and one inside a
+  legacy access each panic and leave no entry behind;
+- a collection on another thread that starts only once the mutator has
+  suspended and finishes before the suspension ends, which would deadlock
+  without the release; resumption captures the new lease epoch and
+  allocates again;
+- a collection inside the suspension on the same thread, which must leave
+  the suspended record registered for resumption to find;
+- other mutators, for this heap and another, inside a suspension;
+- refusals: suspending inside a legacy access (the mutator stays usable),
+  a held-region release point under an owned mutator, and releasing thread
+  caches while a mutator is suspended;
+- failures: a suspended closure that unwinds and a re-admission into a
+  poisoned heap each leave the mutator without access, and the thread
+  without an active entry;
+- in debug builds, a view whose lifetime `unsafe` code extended across a
+  suspension fails its admission-generation check on use.
+
+Compile-fail examples latch that a view or allocator cannot live across a
+suspension (E0502), that views cannot escape `mutate`, and that neither
+mutators nor views are `Send`; each was checked against its intended error.
+Miri and the sanitizers did not run: no nightly toolchain is installed.
+

@@ -48,6 +48,11 @@ control-flow overview.
   released region is never reacquired. A forced collection inside a held
   poll reports an active mutator; probe for open value access with
   `thread_has_runtime_value_access_for_test` instead.
+- `glam-gc` also has owned mutators (`Heap::mutate`, `Mutator::suspend`,
+  `GcRef`), which Glam adopts from `gc-hold-boundaries` on. `mutate` must
+  be the thread's outer entry, and a held-region release point reached
+  under one panics: convert such a point to a suspension or move it to the
+  driver.
 - Every driver services collection pressure at each quantum boundary, after
   the poll's held region ends. A waiting `collect_full` sets the heap's
   request, which every pressure input honors, so drivers join it there

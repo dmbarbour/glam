@@ -1,6 +1,8 @@
+use std::marker::PhantomData;
+use std::ops::Deref;
 use std::ptr::NonNull;
 
-use crate::{Mutator, Trace, trace::ErasedGc};
+use crate::{MutatorAccess, Trace, trace::ErasedGc};
 
 /// A typed, non-rooting pointer to one managed allocation.
 ///
@@ -81,7 +83,7 @@ impl<T: Trace> Gc<T> {
     /// ownership and the canonical `T` representation before copying it.
     #[must_use = "a duplicated edge must be installed beneath a traced owner or registered root"]
     #[inline(always)]
-    pub fn duplicate_in(&self, mutator: &Mutator<'_>) -> Self {
+    pub fn duplicate_in(&self, mutator: &MutatorAccess<'_>) -> Self {
         mutator.debug_assert_access(self.pointer);
 
         // SAFETY: this copies an allocator-validated address only after the
@@ -97,7 +99,7 @@ impl<T: Trace> Gc<T> {
     /// canonical `T` representation before comparing their addresses.
     #[must_use]
     #[inline(always)]
-    pub fn same_allocation_in(&self, other: &Self, mutator: &Mutator<'_>) -> bool {
+    pub fn same_allocation_in(&self, other: &Self, mutator: &MutatorAccess<'_>) -> bool {
         mutator.debug_assert_access(self.pointer);
         mutator.debug_assert_access(other.pointer);
         self.pointer == other.pointer
@@ -108,7 +110,7 @@ impl<T: Trace> Gc<T> {
     }
 
     #[cfg(debug_assertions)]
-    pub(crate) fn debug_assert_owned_by(&self, mutator: &Mutator<'_>) {
+    pub(crate) fn debug_assert_owned_by(&self, mutator: &MutatorAccess<'_>) {
         mutator.debug_assert_access(self.pointer);
     }
 }
@@ -125,13 +127,131 @@ impl<T: Trace> Gc<T> {
     /// Debug and test builds verify heap ownership and representation through
     /// indexed arena/run/class metadata before dereferencing. Those checks are
     /// diagnostics, not the release-build safety proof.
-    pub unsafe fn get_unchecked<'access>(&self, mutator: &'access Mutator<'_>) -> &'access T {
+    pub unsafe fn get_unchecked<'access>(&self, mutator: &'access MutatorAccess<'_>) -> &'access T {
         mutator.debug_assert_access(self.pointer);
 
         // SAFETY: the caller proves liveness, heap ownership, representation,
         // and shared-reference validity. The returned lifetime is bounded by
         // the borrow of the mutator token.
         unsafe { self.pointer.as_ref() }
+    }
+
+    /// Views the managed value for as long as `mutator` stays borrowed.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Gc::get_unchecked`]: this pointer must be live, belong to
+    /// `mutator`'s heap, and identify an initialized `T`.
+    pub unsafe fn view_unchecked<'m>(&self, mutator: &'m MutatorAccess<'_>) -> GcRef<'m, T> {
+        // SAFETY: the caller's proof is the view's.
+        unsafe { GcRef::new(self.pointer, mutator) }
+    }
+}
+
+/// A view of one managed value, valid while its mutator stays borrowed.
+///
+/// A view borrows the [`crate::Mutator`] (through its [`MutatorAccess`]),
+/// whose heap admission excludes collection until the borrow ends; a
+/// suspension needs the mutator mutably, so no view lives across one. A
+/// view is a plain pointer: it registers no root and is `Copy`. It is
+/// neither `Send` nor `Sync`.
+///
+/// Safe code makes views from roots ([`crate::Root::as_gc`]); viewing a bare
+/// [`Gc`] stays `unsafe` ([`Gc::view_unchecked`]), since safe code can hold a
+/// detached `Gc` past its liveness. Debug builds check on use that the
+/// thread's admission has not ended since the view was made, which catches
+/// a view an `unsafe` caller kept too long.
+///
+/// A view cannot cross a thread boundary, whose heap admission it does not
+/// prove:
+///
+/// ```compile_fail
+/// use glam_gc::Heap;
+///
+/// let heap = Heap::new();
+/// heap.mutate(|mutator| {
+///     let value = mutator.allocator::<u64>().unwrap().alloc(42_u64);
+///     let root = mutator.root(value);
+///     let view = root.as_gc(mutator);
+///     std::thread::scope(|scope| {
+///         scope.spawn(move || {
+///             let _ = *view;
+///         });
+///     });
+/// });
+/// ```
+#[must_use = "a view grants access only while it is used"]
+pub struct GcRef<'m, T: Trace> {
+    pointer: NonNull<T>,
+    #[cfg(debug_assertions)]
+    generation: u64,
+    marker: PhantomData<(&'m T, &'m MutatorAccess<'m>)>,
+}
+
+impl<'m, T: Trace> GcRef<'m, T> {
+    /// # Safety
+    ///
+    /// `pointer` must identify a live, initialized `T` in `mutator`'s heap.
+    pub(crate) unsafe fn new(pointer: NonNull<T>, mutator: &'m MutatorAccess<'_>) -> Self {
+        mutator.debug_assert_access(pointer);
+        Self {
+            pointer,
+            #[cfg(debug_assertions)]
+            generation: crate::thread_cache::admission_generation(),
+            marker: PhantomData,
+        }
+    }
+
+    /// Borrows the viewed value for the rest of the view's lifetime.
+    #[must_use]
+    #[inline(always)]
+    pub fn get(self) -> &'m T {
+        #[cfg(debug_assertions)]
+        assert_eq!(
+            self.generation,
+            crate::thread_cache::admission_generation(),
+            "a managed view outlived its heap admission"
+        );
+        // SAFETY: the view's constructor proved the value live, initialized
+        // and in its mutator's heap, and the borrow `'m` of that mutator
+        // excludes collection while the view exists.
+        unsafe { self.pointer.as_ref() }
+    }
+
+    /// Detaches the viewed value's edge.
+    ///
+    /// Like any [`Gc`], the edge keeps nothing alive: install it beneath a
+    /// traced owner or register it as a root before the mutator suspends or
+    /// ends.
+    #[must_use = "a detached edge must be installed beneath a traced owner or registered root"]
+    #[inline(always)]
+    pub fn edge(self) -> Gc<T> {
+        // SAFETY: the view proves the address a live managed `T`.
+        unsafe { Gc::from_raw(self.pointer) }
+    }
+
+    /// Returns whether two views show the same managed allocation.
+    #[must_use]
+    #[inline(always)]
+    pub fn same_allocation(self, other: GcRef<'_, T>) -> bool {
+        self.pointer == other.pointer
+    }
+}
+
+impl<T: Trace> Clone for GcRef<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: Trace> Copy for GcRef<'_, T> {}
+
+impl<T: Trace> Deref for GcRef<'_, T> {
+    type Target = T;
+
+    #[inline(always)]
+    fn deref(&self) -> &T {
+        (*self).get()
     }
 }
 
@@ -283,7 +403,7 @@ mod tests {
         assert_eq!(report.root_entries(), 1);
         assert_eq!(report.marked_slots(), 1);
         heap.with_mutator(|mutator| {
-            assert!(value.same_allocation_in(&root.as_gc(mutator), mutator));
+            assert!(value.same_allocation_in(&root.as_gc(mutator).edge(), mutator));
             assert_eq!(*root.get(mutator), 42);
         });
     }

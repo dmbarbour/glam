@@ -2,13 +2,13 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::{Arc, Weak};
 
-use crate::{Gc, Mutator, Trace, heap::HeapInner, trace::ErasedGc};
+use crate::{Gc, GcRef, MutatorAccess, Trace, heap::HeapInner, trace::ErasedGc};
 
 /// A shareable liveness claim for one managed allocation in a live heap.
 ///
 /// A root keeps its root cell alive but refers only weakly to the heap. It does
 /// not extend the containing value domain's lifetime and cannot enter that
-/// heap on its own. Access always requires a live matching [`Mutator`].
+/// heap on its own. Access always requires a live matching [`MutatorAccess`].
 #[must_use = "dropping the last root permits its managed value to be collected"]
 pub struct Root<T: Trace> {
     cell: Arc<RootCell>,
@@ -38,19 +38,18 @@ impl<T: Trace> Root<T> {
         )
     }
 
-    /// Projects this registered root as its typed, non-rooting managed edge.
+    /// Views the rooted value while `mutator` stays borrowed.
     ///
-    /// `mutator` must belong to this root's live heap. Its admitted region
-    /// prevents collection while the returned edge is intended to be used;
-    /// the edge itself does not retain that region, the heap, or this root.
-    /// Consequently, retaining the returned `Gc<T>` after all independent
-    /// liveness proofs end leaves the same potentially stale pointer as any
-    /// other unrooted managed edge.
+    /// `mutator` must belong to this root's live heap. The view does not
+    /// retain the heap or this root; it borrows the mutator, whose admission
+    /// keeps the value live even if the root is dropped meanwhile.
+    /// [`GcRef::edge`](crate::GcRef::edge) detaches a non-rooting edge from
+    /// it.
     ///
     /// Panics if `mutator` belongs to another heap. A root whose heap has been
     /// dropped cannot acquire such a mutator and therefore cannot be
     /// projected.
-    pub fn as_gc(&self, mutator: &Mutator<'_>) -> Gc<T> {
+    pub fn as_gc<'m>(&self, mutator: &'m MutatorAccess<'_>) -> GcRef<'m, T> {
         assert!(
             self.belongs_to(mutator.heap()),
             "root does not belong to this heap"
@@ -58,9 +57,9 @@ impl<T: Trace> Root<T> {
 
         // SAFETY: the private constructor runs the all-build allocation,
         // canonical-metadata, and heap-provenance validation before sealing
-        // this erased pointer behind `Root<T>`. The matching admitted mutator
-        // excludes collection while the projection is intended to be used.
-        unsafe { Gc::from_raw(self.cell.value.as_ptr().cast::<T>()) }
+        // this erased pointer behind `Root<T>`, and the root keeps it live
+        // until the view borrows the matching admitted mutator.
+        unsafe { GcRef::new(self.cell.value.as_ptr().cast::<T>(), mutator) }
     }
 
     /// Borrows the rooted value under its live heap's mutator authority.
@@ -68,11 +67,8 @@ impl<T: Trace> Root<T> {
     /// Panics if `mutator` belongs to another heap. A root whose heap has been
     /// dropped therefore remains cloneable and droppable but cannot be read.
     #[must_use]
-    pub fn get<'access>(&self, mutator: &'access Mutator<'_>) -> &'access T {
-        let value = self.as_gc(mutator);
-        // SAFETY: the root invariant above proves liveness and representation,
-        // and the release-visible heap identity check proves ownership.
-        unsafe { value.get_unchecked(mutator) }
+    pub fn get<'access>(&self, mutator: &'access MutatorAccess<'_>) -> &'access T {
+        self.as_gc(mutator).get()
     }
 
     /// Returns whether two handles share the same registered root cell.
@@ -161,8 +157,17 @@ mod tests {
         let alias = root.clone();
 
         heap.with_mutator(|mutator| {
-            assert!(root.as_gc(mutator).same_allocation_in(&value, mutator));
-            assert!(alias.as_gc(mutator).same_allocation_in(&value, mutator));
+            assert!(
+                root.as_gc(mutator)
+                    .edge()
+                    .same_allocation_in(&value, mutator)
+            );
+            assert!(
+                alias
+                    .as_gc(mutator)
+                    .edge()
+                    .same_allocation_in(&value, mutator)
+            );
             assert_eq!(*root.get(mutator), 42);
             assert_eq!(*alias.get(mutator), 42);
         });
@@ -187,19 +192,21 @@ mod tests {
         assert_eq!(heap.root_registrations_for_verification(), 2);
 
         heap.with_mutator(|mutator| {
-            let projected = first_root.as_gc(mutator);
+            let projected = first_root.as_gc(mutator).edge();
             assert!(projected.same_allocation_in(&first, mutator));
             assert!(
                 first_alias
                     .as_gc(mutator)
+                    .edge()
                     .same_allocation_in(&projected, mutator)
             );
             assert!(
                 second_root
                     .as_gc(mutator)
+                    .edge()
                     .same_allocation_in(&second, mutator)
             );
-            assert!(!projected.same_allocation_in(&second_root.as_gc(mutator), mutator));
+            assert!(!projected.same_allocation_in(&second_root.as_gc(mutator).edge(), mutator));
         });
         assert_eq!(heap.root_registrations_for_verification(), 2);
 
@@ -298,7 +305,7 @@ mod tests {
         });
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            let _ = observer.with_mutator(|mutator| root.as_gc(mutator));
+            let _ = observer.with_mutator(|mutator| root.as_gc(mutator).edge());
         }));
 
         assert!(panic.is_err());

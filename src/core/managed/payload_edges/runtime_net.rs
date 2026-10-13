@@ -296,7 +296,7 @@ mod tests {
         type CallableCheckpoint = ();
     }
 
-    impl RuntimeNetPayloadDuplicator<ManagedNetFixtureSpecialization> for glam_gc::Mutator<'_> {
+    impl RuntimeNetPayloadDuplicator<ManagedNetFixtureSpecialization> for glam_gc::MutatorAccess<'_> {
         fn duplicate_data(&self, data: &Gc<ManagedNetFixtureNode>) -> Gc<ManagedNetFixtureNode> {
             data.duplicate_in(self)
         }

@@ -1,6 +1,6 @@
-use crate::{Gc, Mutator, Trace, Visitor, trace::ErasedGc};
+use crate::{Gc, MutatorAccess, Trace, Visitor, trace::ErasedGc};
 
-impl Mutator<'_> {
+impl MutatorAccess<'_> {
     /// Reports mutable representation state immediately before and after one
     /// post-publication edge transition.
     ///
@@ -91,7 +91,7 @@ impl Mutator<'_> {
     ///
     /// This compatibility convenience delegates to the same edge-set
     /// transition contract. New aggregate representations should use
-    /// [`Mutator::with_edge_transition`] directly instead of flattening their
+    /// [`MutatorAccess::with_edge_transition`] directly instead of flattening their
     /// semantic edges into repeated unrelated calls.
     ///
     /// # Safety

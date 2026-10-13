@@ -8,7 +8,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use crate::{
-    Gc, Mutator, Trace, UnsupportedLayout, Visitor,
+    Gc, MutatorAccess, Trace, UnsupportedLayout, Visitor,
     class::metadata_for,
     heap::trace_work_item_bytes_for_measurement,
     run::{RUN_HEADER_SIZE, RUN_SIZE, RunGeometry},
@@ -98,7 +98,7 @@ pub fn geometry_measurement<T: Trace>() -> Result<GeometryMeasurement, Unsupport
 /// This private-feature operation exists only to measure finalization lookup
 /// costs. It provides no liveness and is not a supported observation API.
 #[must_use]
-pub fn is_rootable_for_measurement<T: Trace>(mutator: &Mutator<'_>, value: &Gc<T>) -> bool {
+pub fn is_rootable_for_measurement<T: Trace>(mutator: &MutatorAccess<'_>, value: &Gc<T>) -> bool {
     mutator.is_rootable_for_measurement(value)
 }
 
@@ -330,7 +330,7 @@ pub(crate) struct EdgeTransitionProbeState {
 impl EdgeTransitionProbeState {
     pub(crate) fn observe<Leaving, Adding>(
         &self,
-        mutator: &Mutator<'_>,
+        mutator: &MutatorAccess<'_>,
         leaving: &Leaving,
         adding: &Adding,
     ) where
@@ -358,7 +358,7 @@ impl EdgeTransitionProbeState {
 
     pub(crate) fn observe_state_transition<State, Leaving, Adding, Result>(
         &self,
-        mutator: &Mutator<'_>,
+        mutator: &MutatorAccess<'_>,
         state: &mut State,
         leaving: &Leaving,
         adding: &Adding,
@@ -390,7 +390,7 @@ impl EdgeTransitionProbeState {
     }
 }
 
-fn count_and_validate<Edges>(mutator: &Mutator<'_>, edges: &Edges) -> usize
+fn count_and_validate<Edges>(mutator: &MutatorAccess<'_>, edges: &Edges) -> usize
 where
     Edges: for<'visit> Fn(&mut Visitor<'visit>),
 {
@@ -404,7 +404,7 @@ where
 }
 
 fn count_state_and_validate<State, Edges>(
-    mutator: &Mutator<'_>,
+    mutator: &MutatorAccess<'_>,
     state: &State,
     edges: &Edges,
 ) -> usize

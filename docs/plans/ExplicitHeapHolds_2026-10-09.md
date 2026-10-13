@@ -1,6 +1,7 @@
 # Explicit Heap Holds — 2026-10-09
 
-Status: design adopted, not started. The maintainer adopted the 2026-10-10
+Status: in progress; `gc-hold-api` landed on 2026-10-13. The maintainer
+adopted the 2026-10-10
 design review on 2026-10-12 (see "Decisions, 2026-10-12") and suggested
 pulling this plan forward, ahead of the leftovers of
 `perf-reflection-step-cost`. Since the plan was written, a per-thread
@@ -333,6 +334,43 @@ today's closure token keeps working under a temporary name
 while an owned mutator is live panics or does nothing, and views carry a
 suspend generation checked on use in debug builds and tests.
 
+Landed 2026-10-13. `Heap::mutate(|mutator: &mut Mutator<'mu>| ...)` takes
+the owned mutator, which dereferences to `MutatorAccess` (today's token,
+renamed), so every existing operation accepts it. `Heap::with_mutator`
+keeps its name and lends a `MutatorAccess`; inside a mutator it is a
+recursive entry. `GcRef<'m, T>` is one pointer, `Copy`, `!Send`, with
+`get`, `Deref`, `edge` (detach to `Gc`) and `same_allocation`;
+`Root::as_gc` returns one, `Root::get` reads through one, and
+`Gc::view_unchecked` is the `unsafe` view of a bare `Gc`. Glam's one
+`as_gc` caller (`project_root`) detaches with `edge`. Tests in
+`crates/glam-gc/src/heap/owned_mutator_tests.rs`; compile-fail examples
+latch the suspend borrow (E0502), escape, and `!Send` for mutators and
+views.
+
+Agent decisions in this step, for review:
+
+- **`mutate` must be the thread's outer entry.** It panics inside any
+  active entry, legacy ones included; inside a suspension another mutator
+  may be taken. Converting boundaries outside-in therefore cannot nest a
+  converted boundary inside an unconverted access (see the open question
+  under `gc-hold-boundaries`).
+- **A legacy release point panics under an owned mutator**, rather than
+  doing nothing: doing nothing could leave a wait blocking a collection.
+- **A suspended record stays registered.** The collector skips removing
+  it, `Heap::release_current_thread_caches` panics, and other heaps may be
+  entered inside the suspension; resumption asserts it found the same
+  record.
+- **Failure leaves the mutator without access.** If the suspended closure
+  or re-admission unwinds, the suspension is withdrawn and the mutator
+  keeps no entry; dereferencing it panics in every build (one branch per
+  dereference), so catching the unwind cannot reach the heap without
+  admission. Re-admission is not attempted while unwinding.
+- **The generation is per thread, not per mutator**: every end of a heap
+  admission on the thread advances it (debug builds only), so the view
+  check also covers legacy entries.
+- `Mutator::suspend` refuses while a legacy access is open inside the
+  mutator, before taking anything, so the refusal keeps the mutator usable.
+
 ### Boundaries (`gc-hold-boundaries`)
 
 Convert Glam's boundaries to take the mutator: the public API, the
@@ -349,6 +387,14 @@ result wait, the runtime activity wait, the reflection lifecycle waits,
 nested drivers and pressure servicing. Fix the production nesting sites:
 collect a caller's iterator before taking access, and reuse an open
 access in diagnostics and cycle poisoning.
+
+Open question (2026-10-13): since `mutate` must be outermost, a converted
+boundary reached inside an unconverted access panics. Public-API
+boundaries are reached that way from tests (through
+`eval/test_support` and value-access closures) until `gc-hold-tests`
+converts them. Either convert boundaries and their test helpers together,
+or let `mutate` inside a legacy entry yield a nested mutator that cannot
+suspend, as a transition aid.
 
 ### Tests and enforcement (`gc-hold-tests`)
 

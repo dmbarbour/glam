@@ -4,11 +4,11 @@
 //! wrappers free of setup or observation policy so their optimized bodies show
 //! the exact cost of the two operations.
 
-use glam_gc::{Gc, Mutator};
+use glam_gc::{Gc, MutatorAccess};
 
 #[unsafe(no_mangle)]
 #[inline(never)]
-pub fn glam_gc_codegen_duplicate_u64(value: &Gc<u64>, mutator: &Mutator<'_>) -> Gc<u64> {
+pub fn glam_gc_codegen_duplicate_u64(value: &Gc<u64>, mutator: &MutatorAccess<'_>) -> Gc<u64> {
     value.duplicate_in(mutator)
 }
 
@@ -17,7 +17,7 @@ pub fn glam_gc_codegen_duplicate_u64(value: &Gc<u64>, mutator: &Mutator<'_>) -> 
 pub fn glam_gc_codegen_same_allocation_u64(
     left: &Gc<u64>,
     right: &Gc<u64>,
-    mutator: &Mutator<'_>,
+    mutator: &MutatorAccess<'_>,
 ) -> bool {
     left.same_allocation_in(right, mutator)
 }

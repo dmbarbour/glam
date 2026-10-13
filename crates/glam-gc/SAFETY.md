@@ -304,14 +304,36 @@ and every unsafe function, implementation, and block are checked into
   one of those exact owners before its independent liveness proof ends.
   Collector-private `ErasedGc` is the sole copyable address identity exception;
   it never grants access and remains private to collector work and metadata.
-- `Mutator<'heap>` contains a reference to exactly one `HeapInner`. Its
-  thread-cache handle contains thread-local `Rc<RefCell<_>>` state, making the
-  token neither `Send` nor `Sync`; the lifetime prevents it from outliving that
-  heap entry.
-- `Mutator::allocator` returns `Allocator<'mutator, T>` with real borrows of
-  that mutator's heap and thread cache. The higher-ranked `with_mutator`
-  boundary prevents the allocator from escaping its admitted region or being
-  sent to another thread. `Allocator::alloc` accepts only `T: Trace`; its inline
+- `MutatorAccess<'heap>`, the access every heap operation takes, contains a
+  reference to exactly one `HeapInner`. Its thread-cache handle contains
+  thread-local `Rc<RefCell<_>>` state, making the token neither `Send` nor
+  `Sync`; the lifetime prevents it from outliving that heap entry. It is
+  borrowed from an owned `Mutator<'mu>` (`Heap::mutate`), which dereferences
+  to it, or, during migration, lent by `Heap::with_mutator` as an entry of
+  its own.
+- `Mutator<'mu>` owns its thread's outer entry for the heap and is neither
+  `Send` nor `Sync`. `'mu` is invariant and fresh for each `Heap::mutate`
+  call, whose higher-ranked closure keeps everything borrowed from the
+  mutator inside it. Access is a shared borrow; `Mutator::suspend` takes it
+  mutably, so no access, allocator or view is live across a suspension
+  (E0502, latched by a compile-fail example). After a suspension that did not
+  re-admit, the mutator holds no entry and its dereference panics in every
+  build, so a caller that catches the unwind cannot reach the heap through
+  it.
+- `GcRef<'m, T>` is a one-pointer view that borrows `&'m MutatorAccess`.
+  It is `Copy`, registers no root, and is neither `Send` nor `Sync`. The
+  borrow is its liveness proof: no mark or sweep runs while the mutator is
+  admitted, so the view stays valid until the borrow ends. Safe code makes
+  views only from roots (`Root::as_gc`); viewing a bare `Gc` stays `unsafe`
+  (`Gc::view_unchecked`), because safe code can hold a detached `Gc` past its
+  liveness (`GcRef::edge`, `duplicate_in`). Debug builds stamp each view with
+  the thread's admission generation, which every end of a heap admission on
+  the thread advances, and check it on use. That catches a view an `unsafe`
+  caller kept too long; it is a diagnostic, not the release-build proof.
+- `MutatorAccess::allocator` returns `Allocator<'mutator, T>` with real
+  borrows of that access's heap and thread cache. The higher-ranked
+  `mutate` and `with_mutator` boundaries prevent the allocator from escaping
+  its admitted region or being sent to another thread. `Allocator::alloc` accepts only `T: Trace`; its inline
   const assertion rejects zero-sized types while compiling an invalid
   monomorphization, before any allocation can run. A public foreign
   allocator/heap combination is unrepresentable.
@@ -364,15 +386,23 @@ implementation performs the available debug/test indexed heap and canonical
 metadata checks before `as_ref`; its result lifetime is bounded by the mutator
 borrow.
 
-`Root::get` is the collector crate's direct production caller. Its still-live
-registered root cell is visited by every exclusive root walk, so the allocation
-is marked before reclamation; the matching mutator then excludes collection
-for the returned reference's lifetime. Glam may also consume the typed edge
-from `Root::as_gc` through its separately audited access gateways. Other
-internal/test callers must establish equivalent liveness explicitly.
+Glam consumes typed edges through its separately audited access gateways.
+Internal and test callers establish liveness explicitly. `Root::get` reads
+through a view instead (below).
 Wrong-heap and wrong-representation tests deliberately arrange a diagnostic
 mismatch and establish that indexed validation panics before `as_ref` runs.
 Those checks are not part of the release-build proof.
+
+### `pointer::GcRef` construction, access, and detachment
+
+`GcRef::new` (crate-private) and `Gc::view_unchecked` require the same proof
+as `get_unchecked`: a live initialized `T` in the supplied access's heap.
+Both run the debug/test indexed check first. `GcRef::get` then forms a
+shared reference for the rest of `'m`, which the borrow of the access
+bounds: the mutator stays admitted, so no collection reclaims the value
+before the borrow ends, and `T` permits shared access. `GcRef::edge`
+reconstructs a `Gc<T>` from the view's address; the edge is non-rooting and
+grants no access by itself.
 
 ### Canonical object metadata and erased dispatch
 
@@ -468,6 +498,29 @@ the separate liveness and exactly-once obligations at each call site.
   it creates a TLS record or takes admission; entering the current heap again
   reuses its record without a registry lookup. A collection can therefore
   never wait on a thread that is itself blocked entering another heap.
+- An owned mutator (`Heap::mutate`) is its thread's outer entry, taken
+  only when the thread has no active entry for any heap; otherwise it
+  panics. Legacy `with_mutator` entries inside it are recursive, and a held
+  region inside it adds nothing. A legacy release point
+  (`Heap::release_held_region`) reached while an owned mutator holds the
+  thread's record panics: a release would end admission beneath the
+  mutator's borrows, and doing nothing could leave a wait blocking a
+  collection.
+- `Mutator::suspend` is a scoped safepoint. It refuses while a legacy access
+  is open inside the mutator. It marks the record suspended, ends the entry
+  (cache quiescence before the coordinator obligation, as at any outer
+  exit), runs its closure, and re-admits into the same record, asserting its
+  identity. While suspended, the record does not count as an active
+  mutator, so a collection on this or another thread may run, and the
+  closure may take another mutator for this heap or, after leaving it,
+  another heap. The suspended record stays registered: the collector skips
+  removing it, and `Heap::release_current_thread_caches` panics. Re-admission
+  is an ordinary outer admission: it may wait for or elect a collection,
+  then the outer entry's epoch check clears cursors that a collection made
+  stale. If the closure or re-admission unwinds, the suspension is
+  withdrawn from the record and the mutator keeps no entry. Re-admission
+  may wait, so a suspension belongs where the thread holds no lock a
+  finalizer might need.
 - A held region (`Heap::with_held_region`) is an outer entry without a
   mutator. The thread's heap state owns its admission, with an `Arc` of the
   heap (one per region, not per access), so `Heap::release_held_region`
@@ -554,7 +607,7 @@ the separate liveness and exactly-once obligations at each call site.
   remembered type takes neither the metadata registry nor the managed-data
   mutex.
 - A public `Allocator<'mutator, T>` is constructible only through an admitted
-  `Mutator` after metadata and geometry agreement. Its real heap/cache borrows
+  `MutatorAccess` after metadata and geometry agreement. Its real heap/cache borrows
   make reuse after that region impossible in safe Rust. Repeated scoped
   discovery selects the same heap-owned class and frontier state; no
   cross-region cache is added yet.
@@ -631,6 +684,10 @@ the separate liveness and exactly-once obligations at each call site.
   entry never scans or prunes unrelated records. Thread exit drops the complete
   registry, while `Heap::release_current_thread_caches` validates that every
   recursive depth is zero before clearing all records without heap access.
+- A record also notes whether an owned mutator holds its outer entry and
+  how many owned mutators of its heap are suspended on the thread. The
+  collector's removal of its own thread's inactive record skips a suspended
+  one, whose mutator resumes into it.
 - Same-heap recursive regions share one TLS entry and checked depth. An RAII
   entry guard balances normal return and unwinding. Different heaps entered
   in turn on one thread keep independent records; their regions never
@@ -1269,7 +1326,10 @@ copies those same already initialized metadata bytes without returning a
 ### Test call sites
 
 The remaining inventoried unsafe blocks call `get_unchecked` or
-`with_edge_replacement` from focused tests. Correct-access sites state their
+`with_edge_replacement` from focused tests, or extend a view's lifetime with
+`transmute` so the debug admission-generation check can reject its use after
+a suspension; a root keeps that view's value live, so the rejected read
+could not dangle. Correct-access sites state their
 heap, liveness, representation, and replacement proofs inline. Mismatch sites
 run only with debug assertions and test that the relevant gateway panics
 before dereference or mutation. No test creates a Rust reference with an
@@ -1351,15 +1411,14 @@ original heap. The cell never upgrades that weak reference merely to read a
 value, and a root does not retain or re-enter its value domain.
 
 `Root::as_gc` rejects a nonmatching mutator in every build before
-reconstructing the private typed `Gc<T>`. The edge is non-rooting and not
-lifetime-branded; retaining it beyond the admitted region does not retain the
-heap or provide a later liveness proof. The matching mutator prevents
-collection while the projection is intended to be consumed. `Root::get`
-delegates to that single typed reconstruction boundary and then invokes the
-existing unsafe access gateway. The private root constructor established the
-representation, allocation, and heap invariants; registry publication makes
-every still-live root cell a collection seed, and the live matching mutator
-prevents reclamation for the returned reference's lifetime. Dropping
+constructing the typed view. The view borrows the matching access, so it
+cannot outlive the admitted region; `GcRef::edge` detaches a non-rooting
+edge that retains neither the heap nor a later liveness proof. `Root::get`
+reads through that single view boundary. The private root constructor
+established the representation, allocation, and heap invariants; registry
+publication makes every still-live root cell a collection seed, and the live
+matching mutator prevents reclamation for the view's lifetime, even if the
+root is dropped meanwhile. Dropping
 `RootCell` releases only its weak heap reference and pointer bits; it never
 dereferences or destroys the managed payload and invokes no user code.
 
@@ -1372,7 +1431,7 @@ successful upgrade conservatively keeps its seed live for that collection even
 if the final public root is dropped concurrently; a failed upgrade cannot later
 become live because no strong cell reference remains.
 
-### `mutation::Mutator` edge-transition gateways
+### `mutation::MutatorAccess` edge-transition gateways
 
 `with_edge_transition` is the raw owner-qualified gateway for arbitrary
 leaving and adding edge sets. Its synchronous visitor closures describe the
@@ -1609,9 +1668,9 @@ create no competing semantic rules.
   moving collector can add edge rewriting. `Gc<T>` has no `Hash` for the same
   reason.
 - **Structural mutation goes through owner-qualified gateways.** Every
-  replacement of a managed edge passes through a `Mutator` edge-transition
-  gateway. Its collector hook is empty for this collector; a future barrier
-  belongs there.
+  replacement of a managed edge passes through a `MutatorAccess`
+  edge-transition gateway. Its collector hook is empty for this collector; a
+  future barrier belongs there.
 - **Opaque values are external handles.** A Glam opaque value stores only a
   passive external-owner handle. Host data never lives in the heap and never
   holds a `Gc<T>`, an unrooted value, or a root that would hide a managed
