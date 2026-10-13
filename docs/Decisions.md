@@ -2020,7 +2020,10 @@ maps the short names used here to file names.
   performance, matter more than the Rust expression. The poll context
   packages the mutator as a parameter, with static borrows (no `RefCell`):
   machine polls take it mutably, value access borrows it shared, and
-  `suspend` needs it exclusively.
+  `suspend` needs it exclusively. Suspend only around operations with a
+  long or unbounded wait on the world outside the heap, and avoid those
+  where feasible (maintainer, 2026-10-13); the required suspension sites
+  get a later review to reduce them.
 - **Consequences:** reflection polls hold a mutator and suspend around host
   callbacks and specialization requests (started and polled under one
   suspension). Work a quantum pumps shares its mutator, and releasing it

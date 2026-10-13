@@ -7,9 +7,12 @@ pulling this plan forward, ahead of the leftovers of
 `perf-reflection-step-cost`. Since the plan was written, a per-thread
 allocation-class cache landed (`perf-allocation-path`) and transient-root
 avoidance landed (`perf-transient-root-avoidance`, `2484ad2a`). Steps, in
-order: `gc-hold-api`, `gc-hold-boundaries`, `gc-hold-tests`,
-`gc-hold-transient-roots`, then `gc-hold-thread-context`;
-`gc-hold-class-cache` is narrowed to a measurement. The Steps use the
+order: `gc-hold-api`, `gc-hold-boundaries` through its third slice,
+`gc-hold-transient-roots`, the rest of `gc-hold-boundaries`,
+`gc-hold-tests`, `gc-hold-suspension-review`, then
+`gc-hold-thread-context`; `gc-hold-class-cache` is narrowed to a
+measurement. The maintainer moved transient roots ahead of the remaining
+enforcement on 2026-10-13, once every poll lent its mutator. The Steps use the
 review's vocabulary: an owned `Mutator`, not a `Hold`.
 
 ## Decisions, 2026-10-12
@@ -511,6 +514,43 @@ those accesses unless it suspends, so such values become views, rooted
 only across a suspend. First slice: the WHNF request and
 `follow_forwards` into the inline stack, then the reflection machine's
 demand and decode carriers.
+
+Measured 2026-10-13 at `35ebeeb9`, with a probe build recording each root's
+call site and whether it was dropped within the heap admission that made
+it:
+
+- A `.r ()` step registers 64.1 roots; 44.7 die within their admission.
+  By site (made, same admission): the WHNF lazy request in
+  `reduce_semantic_shell` 16.3 (11.2); reflection decode and list-front
+  carriers 11.2 (8.1); WHNF results rooted by `regional_status_poll` 10.2
+  (9.2); seed promotion 7.1 (5.1); net-WHNF checkpoint transitions 7.1
+  (7.1); step-boundary results (`EvaluatorStepContext::root_value`) 5.1
+  (0); reflection application arguments 3.1 (0); the effect's `eff` and
+  the request payload selection 2.0 each (2.0).
+- `countdown_800` registers 27,254 roots; 25,879 (95%) die within their
+  admission, and 24,595 are WHNF lazy requests.
+- A registration costs about 1,130 instructions, of which validation
+  (`validate_rootable_in_state`: the pending-finalization check and slot
+  topology, each resolving the slot's owner through the arena) is about
+  790. Validation guards against rooting a dead `Gc`; Glam's root sites
+  root edges they have just dereferenced unchecked under the same access,
+  so there it proves nothing new.
+- Experiment: release builds without root validation (debug builds kept
+  it). Per `.r ()` step 480.5 K to 438.4 K instructions (-8.8%);
+  `countdown_800` -6.8%, `sum_800` -8.8%, `list_sum_400` -6.3%,
+  `chain_800` -3.7%.
+
+### Suspension review (`gc-hold-suspension-review`)
+
+Suspend only around operations with a long or unbounded wait on the world
+outside the heap, and avoid those where feasible (maintainer,
+2026-10-13). Review the suspension sites that `gc-hold-lend-mutator`
+needed: `TaskHost` snapshot, validate and commit; specialization
+requests; host calls; releasing pumped work; the reflection launches and
+contention wait deferred until after admission; and the test fixtures
+that wait inside polls. For each, decide whether it waits on the outside
+world, and whether it could run under the mutator or return its request
+to a driver instead.
 
 ### Heap context in Glam (`gc-hold-thread-context`)
 
