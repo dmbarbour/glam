@@ -1023,12 +1023,7 @@ fn client_demand_can_follow_a_lazy_producer_owned_by_another_session() {
     let (promise, _promise_root) = rooted_promise(owner.values());
     let (lazy, root) = rooted_semantic_lazy_value(owner.values(), {
         let promise = promise.duplicate_for_test(owner.values());
-        let values = owner.values().clone();
-        move |context| {
-            context
-                .context()
-                .evaluate_compatibility_whnf(&Value::Promised(promise.duplicate_for_test(&values)))
-        }
+        move |context| context.promise_or_block_for_test(&promise)
     });
     let retained_lazy_root = root.clone();
     let owner_demand = owner
@@ -4420,10 +4415,10 @@ fn worker_releases_mutator_before_sleep() {
 }
 
 #[test]
-fn an_evaluation_poll_holds_one_region_until_released() {
+fn an_evaluation_poll_holds_its_mutator_and_defers_host_work_past_it() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
-    let observed = Arc::new(Mutex::new(None));
+    let observed = Arc::new(Mutex::new((None, None)));
     let (lazy, _root) = rooted_semantic_lazy_value(context.values(), {
         let values = context.values().clone();
         let observed = observed.clone();
@@ -4433,9 +4428,11 @@ fn an_evaluation_poll_holds_one_region_until_released() {
                 Err(CollectionError::ActiveMutator)
             );
             let outside_access = !crate::core::thread_has_runtime_value_access_for_test();
-            crate::core::release_held_region();
-            let collected = values.collect_managed_for_test().is_ok();
-            *observed.lock().unwrap() = Some((held, outside_access, collected));
+            observed.lock().unwrap().0 = Some((held, outside_access));
+            evaluator.after_admission({
+                let (values, observed) = (values.clone(), observed.clone());
+                move || observed.lock().unwrap().1 = Some(values.collect_managed_for_test().is_ok())
+            });
             Ok(evaluator.with_value_access(|access| access.values().unit()))
         }
     });
@@ -4444,8 +4441,8 @@ fn an_evaluation_poll_holds_one_region_until_released() {
         .expect("the probe should complete");
     assert_eq!(
         *observed.lock().unwrap(),
-        Some((true, true, true)),
-        "the poll should hold its region outside value access, and releasing it should let a collection run"
+        (Some((true, true)), Some(true)),
+        "the poll should hold its mutator outside value access, and deferred work should run after it, when a collection can"
     );
 }
 
@@ -4468,12 +4465,18 @@ fn scheduled_nested_dependency_runs_outside_the_outer_value_access() {
         }
     });
 
+    // Host work is where production nests a synchronous driver: it runs
+    // once its quantum's mutator has ended.
     let nested_for_outer = nested.duplicate_for_test(context.values());
-    let nested_values = context.values().clone();
-    let (outer, _outer_root) = rooted_semantic_lazy_value(context.values(), move |ctx| {
-        ctx.context().evaluate_compatibility_whnf(&Value::Lazy(
-            nested_for_outer.duplicate_for_test(&nested_values),
-        ))
+    let outer_context = context.clone();
+    let outer = LazyValue::host_call(context.values(), move |_| {
+        let values = outer_context.values();
+        let value = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &outer_context,
+            &Value::Lazy(nested_for_outer.duplicate_for_test(values)),
+        )
+        .map_err(EvaluationHalt::into_permanent_failure)?;
+        Ok(RuntimeValueRoot::new(values, value))
     });
 
     let actual =
@@ -9748,14 +9751,9 @@ fn closing_a_session_abandons_a_blocked_spark_and_releases_its_lazy_claim() {
     let session = EvaluationSession::shared(&coordinator);
     let context = EvalContext::new(&session);
     let (promise, _promise_root) = rooted_promise(context.values());
-    let values = context.values().clone();
-    let followed_promise = promise.duplicate_for_test(&values);
+    let followed_promise = promise.duplicate_for_test(context.values());
     let (lazy, root) = rooted_semantic_lazy_value(context.values(), move |context| {
-        context
-            .context()
-            .evaluate_compatibility_whnf(&Value::Promised(
-                followed_promise.duplicate_for_test(&values),
-            ))
+        context.promise_or_block_for_test(&followed_promise)
     });
     // The abandoned spark releases its root, and the test reclaims the lazy
     // afterwards, so it keeps its own.

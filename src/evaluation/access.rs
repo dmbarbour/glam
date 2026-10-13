@@ -143,11 +143,29 @@ impl EvaluatorStepContext<'_> {
         self.context
     }
 
+    /// Reads `promise` as an evaluator step would: its assignment, or a halt
+    /// blocked on it while it is unassigned. Test sources use this to depend
+    /// on an input without nesting a synchronous driver inside their poll,
+    /// which may not wait under the poll's mutator.
+    #[cfg(test)]
+    pub(crate) fn promise_or_block_for_test(
+        &self,
+        promise: &PromisedValue,
+    ) -> Result<Value, crate::core::EvaluationHalt> {
+        self.with_value_access(|access| match access.promise(promise).assignment() {
+            Some(Ok(value)) => Ok(value),
+            Some(Err(failure)) => Err(crate::core::EvaluationHalt::failure(failure)),
+            None => Err(crate::core::EvaluationHalt::unassigned_root(
+                promise.root_in(access.values()),
+            )),
+        })
+    }
+
     /// Runs `work` once its poll's heap admission ends; see
-    /// [`EvaluationPollContext::after_region`].
-    pub(crate) fn after_region(&self, work: impl FnOnce() + 'static) {
+    /// [`EvaluationPollContext::after_admission`].
+    pub(crate) fn after_admission(&self, work: impl FnOnce() + 'static) {
         match self.admission {
-            EvaluatorStepAdmission::Poll(poll) => poll.after_region(work),
+            EvaluatorStepAdmission::Poll(poll) => poll.after_admission(work),
         }
     }
 
@@ -265,12 +283,12 @@ impl EvaluatorStepContext<'_> {
         drop(managed);
         // A launcher may be client code, so it runs outside heap admission.
         for task in pending {
-            poll.after_region(move || task.activate());
+            poll.after_admission(move || task.activate());
         }
     }
 }
 
-/// Work a held poll runs once its heap admission ends.
+/// Work a quantum runs once its heap admission ends.
 type DeferredWork = Vec<Box<dyn FnOnce()>>;
 
 /// Ephemeral poll authority for opening bounded evaluator regions.
@@ -283,9 +301,9 @@ type DeferredWork = Vec<Box<dyn FnOnce()>>;
 /// effect/search poll and is not exposed to the machine.
 pub(crate) struct EvaluationPollContext {
     demand: Arc<EvaluationDemandState>,
-    /// Work deferred until a held poll's heap admission ends, present only
-    /// while the poll holds its region.
-    after_region: RefCell<Option<DeferredWork>>,
+    /// Work deferred until a quantum's heap admission ends, present only
+    /// while the poll holds its mutator.
+    after_admission: RefCell<Option<DeferredWork>>,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -296,7 +314,7 @@ impl EvaluationPollContext {
         demand.poll_contexts.fetch_add(1, Ordering::Relaxed);
         Self {
             demand,
-            after_region: RefCell::new(None),
+            after_admission: RefCell::new(None),
             _thread_bound: PhantomData,
         }
     }
@@ -315,20 +333,24 @@ impl EvaluationPollContext {
             .fetch_add(1, Ordering::Relaxed);
         Self {
             demand: context.session.clone(),
-            after_region: RefCell::new(None),
+            after_admission: RefCell::new(None),
             _thread_bound: PhantomData,
         }
     }
 
-    /// Holds the runtime's heap admission across this poll, so its value
-    /// accesses are recursive entries. The scheduler's quantum boundaries
-    /// call this around one claimed poll; the region ends before the
-    /// boundary services collection pressure.
+    /// Holds the runtime's mutator across this poll, so its value accesses
+    /// are recursive entries. The scheduler's quantum boundaries call this
+    /// around one claimed poll; the mutator ends before the boundary services
+    /// collection pressure.
     ///
-    /// Work the poll defers with [`Self::after_region`] runs once the region
-    /// has ended, in order, before this returns and so before the driver
-    /// releases its claim. If the poll unwinds, deferred work is dropped.
-    pub(in crate::evaluation) fn with_held_region<R>(&self, operation: impl FnOnce() -> R) -> R {
+    /// Work the poll defers with [`Self::after_admission`] runs once the
+    /// mutator has ended, in order, before this returns and so before the
+    /// driver releases its claim. If the poll unwinds, deferred work is
+    /// dropped.
+    pub(in crate::evaluation) fn with_quantum_mutator<R>(
+        &self,
+        operation: impl FnOnce() -> R,
+    ) -> R {
         struct EndDeferral<'context>(&'context RefCell<Option<DeferredWork>>);
 
         impl Drop for EndDeferral<'_> {
@@ -337,11 +359,14 @@ impl EvaluationPollContext {
             }
         }
 
-        let prior = self.after_region.replace(Some(Vec::new()));
-        assert!(prior.is_none(), "a poll holds at most one region");
-        let deferral = EndDeferral(&self.after_region);
-        let result = self.demand.values.with_held_region(operation);
-        let deferred = self.after_region.borrow_mut().take().unwrap_or_default();
+        let prior = self.after_admission.replace(Some(Vec::new()));
+        assert!(prior.is_none(), "a poll holds at most one mutator");
+        let deferral = EndDeferral(&self.after_admission);
+        let result = self
+            .demand
+            .values
+            .hold_recursive_runtime_value_mutator(operation);
+        let deferred = self.after_admission.borrow_mut().take().unwrap_or_default();
         drop(deferral);
         for work in deferred {
             work();
@@ -350,10 +375,11 @@ impl EvaluationPollContext {
     }
 
     /// Runs `work` once this poll's heap admission ends: at once outside a
-    /// held region, otherwise after it. Work that waits on another thread or
-    /// calls client code belongs here, so a collection never waits for it.
-    pub(crate) fn after_region(&self, work: impl FnOnce() + 'static) {
-        let mut deferred = self.after_region.borrow_mut();
+    /// quantum, otherwise after its mutator. Work that waits on another
+    /// thread or calls client code belongs here, so a collection never waits
+    /// for it.
+    pub(crate) fn after_admission(&self, work: impl FnOnce() + 'static) {
+        let mut deferred = self.after_admission.borrow_mut();
         match deferred.as_mut() {
             Some(deferred) => deferred.push(Box::new(work)),
             None => {
@@ -363,10 +389,10 @@ impl EvaluationPollContext {
         }
     }
 
-    /// Whether this held poll has deferred work, so it should end its
-    /// quantum rather than poll on.
+    /// Whether this quantum has deferred work, so it should end rather than
+    /// poll on.
     pub(crate) fn has_deferred_work(&self) -> bool {
-        self.after_region
+        self.after_admission
             .borrow()
             .as_ref()
             .is_some_and(|deferred| !deferred.is_empty())
@@ -718,30 +744,30 @@ mod tests {
     }
 
     #[test]
-    fn a_held_poll_runs_deferred_work_after_its_region_in_order() {
+    fn a_quantum_runs_deferred_work_after_its_mutator_in_order() {
         let values = value_factory();
         let context = EvalContext::isolated(values.clone());
         let poll = EvaluationPollContext::for_context(&context);
         let log = Rc::new(RefCell::new(Vec::new()));
 
-        // Outside a held region, deferred work runs at once.
-        poll.after_region({
+        // Outside a quantum, deferred work runs at once.
+        poll.after_admission({
             let log = log.clone();
             move || log.borrow_mut().push("immediate")
         });
         assert!(!poll.has_deferred_work());
 
-        let result = poll.with_held_region(|| {
+        let result = poll.with_quantum_mutator(|| {
             assert!(matches!(
                 values.collect_managed_for_test(),
                 Err(CollectionError::ActiveMutator)
             ));
             for name in ["first", "second"] {
                 let (log, values) = (log.clone(), values.clone());
-                poll.after_region(move || {
+                poll.after_admission(move || {
                     values
                         .collect_managed_for_test()
-                        .expect("deferred work runs once the region has ended");
+                        .expect("deferred work runs once the mutator has ended");
                     log.borrow_mut().push(name);
                 });
             }
@@ -755,16 +781,16 @@ mod tests {
     }
 
     #[test]
-    fn an_unwinding_held_poll_drops_its_deferred_work() {
+    fn an_unwinding_quantum_drops_its_deferred_work() {
         let values = value_factory();
         let context = EvalContext::isolated(values.clone());
         let poll = EvaluationPollContext::for_context(&context);
         let ran = Rc::new(RefCell::new(false));
 
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            poll.with_held_region(|| {
+            poll.with_quantum_mutator(|| {
                 let ran = ran.clone();
-                poll.after_region(move || *ran.borrow_mut() = true);
+                poll.after_admission(move || *ran.borrow_mut() = true);
                 panic!("the poll unwinds");
             })
         }));
@@ -772,9 +798,9 @@ mod tests {
         assert!(!*ran.borrow());
         values
             .collect_managed_for_test()
-            .expect("the unwound region must have ended");
+            .expect("the unwound mutator must have ended");
 
-        // The context holds a region again afterwards.
-        poll.with_held_region(|| {});
+        // The context holds a mutator again afterwards.
+        poll.with_quantum_mutator(|| {});
     }
 }

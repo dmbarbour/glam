@@ -1907,7 +1907,7 @@ maps the short names used here to file names.
 - **Recorded in:** structural overheads plan, `gc-one-heap-per-thread`.
 
 ### Each evaluation quantum holds one heap region
-`quantum-held-region` · 2026-10-09 · maintainer and agent · accepted
+`quantum-held-region` · 2026-10-09 · maintainer and agent · superseded
 - **Context:** the evaluator opened about one outer access region per
   reduction, each an admission. A bounded collection wait also needs a
   boundary where an entrant holds no lock, and the quantum boundary is one.
@@ -1928,6 +1928,7 @@ maps the short names used here to file names.
 - **Rule lives in:** `crates/glam-gc/SAFETY.md` "Regional Mutator Admission
   Invariants"; `agent_context/evaluation.md` "Values and Forcing".
 - **Recorded in:** structural overheads plan, `perf-quantum-region`.
+- **Superseded by:** `quantum-mutator`.
 
 ### A waiting collection is bounded at quantum boundaries
 `quantum-boundary-collection-join` · 2026-10-09 · maintainer and agent · accepted
@@ -2006,6 +2007,27 @@ maps the short names used here to file names.
 - **Rule lives in:** `crates/glam-gc/SAFETY.md` "Regional Mutator
   Admission Invariants".
 - **Recorded in:** explicit heap holds plan, `gc-hold-api`.
+
+### Each evaluation quantum holds the thread's mutator; host work runs after it
+`quantum-mutator` · 2026-10-13 · agent · accepted
+- **Context:** `owned-mutator-views` replaces held regions with owned
+  mutators, under which a release point panics.
+- **Decision:** quanta hold a mutator instead of a held region
+  (`EvaluationPollContext::with_quantum_mutator`), through
+  `Heap::mutate_recursive` while some quanta still run inside another
+  access. Work that waits on another thread or calls out to a host is
+  deferred with `after_admission` and runs once the mutator ends, before
+  the driver releases its claim: host calls, reflection activations and
+  the net contention wait. A poll with deferred work ends its quantum.
+  Nested synchronous drivers do not run inside quanta; test sources that
+  did now read their inputs as evaluator steps or run as host calls.
+  Supersedes `quantum-held-region`, whose release points no longer exist
+  inside quanta.
+- **Consequences:** a release point reached inside a quantum panics instead
+  of silently ending admission; reflection polls, which hold no mutator yet,
+  are next.
+- **Recorded in:** explicit heap holds plan, `gc-hold-defer-release-points`
+  and `gc-hold-quantum-mutator`.
 
 ### Clear mark bitmaps before marking
 `clear-before-mark-bitmaps` · 2026-08-22 · agent · accepted

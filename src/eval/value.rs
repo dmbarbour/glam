@@ -1580,7 +1580,7 @@ impl LazyTaskMachine {
                 Transition::Pending(Ok(NetWhnfAccessPoll::Contended(contention))) => {
                     // The wait is for another thread, which a collection may
                     // be waiting on, so it runs once heap admission ends.
-                    context.after_region(move || contention.wait_for_disturbance());
+                    context.after_admission(move || contention.wait_for_disturbance());
                     return EvaluationMachinePoll::Yielded;
                 }
                 Transition::Pending(Ok(NetWhnfAccessPoll::Semantic(action))) => {
@@ -1686,7 +1686,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             // Host code may block or call out, so it runs once the poll's
             // heap admission ends: a collection must not wait for it.
             let lazy = self.lazy.clone();
-            poll_context.after_region(move || invoke_host_call(&durable_context, &lazy));
+            poll_context.after_admission(move || invoke_host_call(&durable_context, &lazy));
             // The callback's result becomes a traced managed edge. A later
             // poll performs the host-to-WHNF family handoff.
             return EvaluationMachinePoll::Yielded;

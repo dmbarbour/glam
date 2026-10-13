@@ -202,7 +202,7 @@ impl ClaimedTask {
         // its region ended, such as a host call.
         let polled = catch_unwind(AssertUnwindSafe(|| {
             if holds_region {
-                context.with_held_region(poll)
+                context.with_quantum_mutator(poll)
             } else {
                 poll()
             }
@@ -1082,7 +1082,7 @@ impl EvaluationWorkCoordinator {
         let context = EvaluationPollContext::for_claim(&claimed.demand);
         let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
         let polled = catch_unwind(AssertUnwindSafe(|| {
-            context.with_held_region(|| claimed.poll(&context, &mut budget))
+            context.with_quantum_mutator(|| claimed.poll(&context, &mut budget))
         }));
         drop(context);
         let poll = match polled {
@@ -1118,7 +1118,7 @@ impl EvaluationWorkCoordinator {
             return;
         }
         let result = catch_unwind(AssertUnwindSafe(|| {
-            poll_context.with_held_region(|| {
+            poll_context.with_quantum_mutator(|| {
                 poll_context.evaluate(&context, |evaluator| {
                     claimed.poll(&poll_context, evaluator, &context, &mut budget)
                 })

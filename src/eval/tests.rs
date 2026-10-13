@@ -1615,14 +1615,12 @@ fn deferred_computation_blockage_does_not_poison_its_lazy_cache() {
     let session = test_context();
     let (promise, _owner_task, _owner) = session.task_owned_promise().unwrap();
     let observer = session.with_new_task().unwrap();
-    let promised_value = Value::Promised(promise.duplicate_for_test(observer.values()));
+    let input = promise.duplicate_for_test(observer.values());
     let attempts = Arc::new(AtomicUsize::new(0));
     let counted_attempts = attempts.clone();
     let lazy = LazyValue::semantic_thunk(&crate::core::test_value_factory(), move |context| {
         counted_attempts.fetch_add(1, Ordering::SeqCst);
-        context
-            .context()
-            .evaluate_compatibility_whnf(&promised_value)
+        context.promise_or_block_for_test(&input)
     });
     let value = Value::Lazy(lazy.duplicate_for_test(observer.values()));
 

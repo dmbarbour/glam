@@ -411,8 +411,16 @@ Slices, in order (2026-10-13):
    boundary. Audit: the contention wait in `LazyTaskMachine` is the only
    production disturbance wait in held polls; `NetWhnfMachine::poll`'s is
    reached only from tests.
-2. `gc-hold-quantum-mutator`: quanta take a mutator instead of a held
-   region, through a Glam-level mutator whose access is a borrow.
+2. `gc-hold-quantum-mutator` (landed): quanta hold a mutator instead of a
+   held region (`CoreValueFactory::hold_recursive_runtime_value_mutator`,
+   not yet lent to machines), so a release point inside one panics. Only
+   test fixtures reached one: test-only semantic sources that blocked on a
+   condvar or nested a synchronous driver inside their poll. Blocking ones
+   became host calls; those reading an input use
+   `EvaluatorStepContext::promise_or_block_for_test`, keeping their
+   assertions; the nested-pumping test now nests inside a host call, the
+   production site for it. Production quanta reached none. Decision:
+   `quantum-mutator`.
 3. `gc-hold-reflection-polls`: reflection polls take the mutator for their
    pure steps and suspend around pumping and client callbacks.
 4. The public API, the compile entry, the remaining waits and the

@@ -168,6 +168,7 @@ mod tests {
     /// Every trusted key is declared in this file, where the claim that no
     /// client chooses it is reviewed.
     #[test]
+    #[cfg_attr(miri, ignore = "reads the source tree, which Miri's isolation forbids")]
     fn trusted_keys_are_declared_only_here() {
         let mut pending = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
         let this_file =

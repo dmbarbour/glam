@@ -585,13 +585,20 @@ impl CoreValueFactory {
         })
     }
 
-    /// Holds this runtime's heap admission across one scheduler quantum, so
-    /// each value access inside it is a recursive entry rather than an
-    /// admission. Code inside it that waits on another thread or calls out to
-    /// a host first calls [`release_held_region`]. See
-    /// `glam_gc::Heap::with_held_region`.
-    pub(crate) fn with_held_region<R>(&self, operation: impl FnOnce() -> R) -> R {
-        self.domain.heap.with_held_region(operation)
+    /// Holds this runtime's heap admission across one scheduler quantum as
+    /// the thread's mutator, so each value access inside it is a recursive
+    /// entry rather than an admission. Inside another access it is itself a
+    /// recursive entry (`glam_gc::Heap::mutate_recursive`, a migration aid
+    /// until every quantum is its thread's outer entry).
+    ///
+    /// Nothing inside may wait on another thread or call out to a host: a
+    /// release point under the mutator panics. Such work runs after it
+    /// instead (`EvaluationPollContext::after_admission`).
+    pub(crate) fn hold_recursive_runtime_value_mutator<R>(
+        &self,
+        operation: impl FnOnce() -> R,
+    ) -> R {
+        self.domain.heap.mutate_recursive(|_| operation())
     }
 
     /// Issues one weak observer for values successfully evaluated by this

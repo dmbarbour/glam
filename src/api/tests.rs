@@ -79,6 +79,32 @@ fn public_semantic_thunk(
     })
 }
 
+/// A lazy whose host callback reports `started`, blocks until `release` is
+/// set, and returns 42. The worker that claims it runs the callback once its
+/// quantum's heap admission ends, holding the claim, as host work does.
+fn public_blocking_host_call(
+    values: &crate::core::CoreValueFactory,
+    started: std::sync::mpsc::Sender<()>,
+    release: Arc<(Mutex<bool>, CountedCondvar)>,
+) -> Value {
+    let root_values = values.clone();
+    let lazy = LazyValue::host_call(values, move |_| {
+        let _ = started.send(());
+        let (lock, changed) = &*release;
+        let mut released = lock.lock().expect("test release lock was poisoned");
+        while !*released {
+            released = changed
+                .wait(released)
+                .expect("test release lock was poisoned");
+        }
+        Ok(crate::runtime::RuntimeValueRoot::new(
+            &root_values,
+            CoreValue::Number(42.into()),
+        ))
+    });
+    public_value(values, CoreValue::Lazy(lazy))
+}
+
 fn value_i64(assembler: &Assembler, value: &Value) -> Option<i64> {
     assembler.evaluator().eval(value).unwrap().as_i64().unwrap()
 }
@@ -2351,21 +2377,9 @@ fn synchronous_assembler_evaluation_waits_for_a_worker_claim() {
         .build()
         .expect("assembler should build");
     let release = Arc::new((Mutex::new(false), CountedCondvar::new()));
-    let producer_release = release.clone();
     let (started_sender, started_receiver) = std::sync::mpsc::channel();
-    let value = public_semantic_thunk(&assembler.core_values(), move |_| {
-        started_sender
-            .send(())
-            .expect("test should still await the worker claim");
-        let (lock, changed) = &*producer_release;
-        let mut released = lock.lock().expect("test release lock was poisoned");
-        while !*released {
-            released = changed
-                .wait(released)
-                .expect("test release lock was poisoned");
-        }
-        Ok(CoreValue::Number(42.into()))
-    });
+    let value =
+        public_blocking_host_call(&assembler.core_values(), started_sender, release.clone());
     assembler.eval_context().spark(value.clone_core_for_test());
     started_receiver
         .recv_timeout(std::time::Duration::from_secs(2))
@@ -2603,19 +2617,9 @@ fn scheduler_panic_poisons_the_runtime_without_hanging_waiters() {
         .build()
         .expect("assembler should build");
     let release = Arc::new((Mutex::new(false), CountedCondvar::new()));
-    let producer_release = release.clone();
     let (started_sender, started_receiver) = std::sync::mpsc::channel();
-    let value = public_semantic_thunk(&assembler.core_values(), move |_| {
-        let _ = started_sender.send(());
-        let (lock, changed) = &*producer_release;
-        let mut released = lock.lock().expect("test release lock was poisoned");
-        while !*released {
-            released = changed
-                .wait(released)
-                .expect("test release lock was poisoned");
-        }
-        Ok(CoreValue::Number(42.into()))
-    });
+    let value =
+        public_blocking_host_call(&assembler.core_values(), started_sender, release.clone());
     assembler.eval_context().spark(value.clone_core_for_test());
     started_receiver
         .recv_timeout(std::time::Duration::from_secs(2))

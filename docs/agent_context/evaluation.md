@@ -37,25 +37,28 @@ control-flow overview.
   (`gc-one-heap-per-thread`). Close one runtime's access before entering
   another's. The rule keeps a collection waiting on one heap from depending
   on a thread blocked entering a different heap.
-- Evaluation polls hold one heap region per quantum
-  (`perf-quantum-region`): deferred and lazy-route task polls, client
-  demands and sparks run inside `with_held_region`, so their value accesses
-  are recursive entries. Reflection task polls do not, since they call into
-  their host between steps. Inside a held poll, work that waits on another
-  thread or calls out to a host is deferred with
-  `EvaluationPollContext::after_region` (or `EvaluatorStepContext::
-  after_region`); the poll then ends its quantum, and the work runs once
-  the region ends, before the claim is released. Host calls, reflection
-  launchers and the net contention wait do this. Elsewhere, `CountedCondvar`
-  waits, synchronous drivers (`drive_client_demand`) and pressure servicing
-  still release the region first; a released region is never reacquired. A forced collection inside a held
+- Evaluation polls hold the thread's mutator for one quantum
+  (`quantum-mutator`): deferred and lazy-route task polls, client demands
+  and sparks run inside `EvaluationPollContext::with_quantum_mutator`, so
+  their value accesses are recursive entries. Reflection task polls do not
+  yet. Nothing inside a quantum may wait on another thread or call out to a
+  host: a release point there panics. Defer such work with
+  `EvaluationPollContext::after_admission` (or
+  `EvaluatorStepContext::after_admission`); the poll then ends its quantum,
+  and the work runs once the mutator ends, before the claim is released.
+  Host calls, reflection launchers and the net contention wait do this.
+  Nested synchronous drivers do not run inside quanta; a test source that
+  depends on an input reads it with `promise_or_block_for_test` or runs as
+  a host call. Outside quanta, `CountedCondvar` waits, synchronous drivers
+  (`drive_client_demand`) and pressure servicing still release a held
+  region first, which is a no-op without one. A forced collection inside a held
   poll reports an active mutator; probe for open value access with
   `thread_has_runtime_value_access_for_test` instead.
 - `glam-gc` also has owned mutators (`Heap::mutate`, `Mutator::suspend`,
   `GcRef`), which Glam adopts from `gc-hold-boundaries` on. `mutate` must
-  be the thread's outer entry, and a held-region release point reached
-  under one panics: convert such a point to a suspension or move it to the
-  driver.
+  be the thread's outer entry (`mutate_recursive` is the migration aid),
+  and a held-region release point reached under an owned mutator panics:
+  convert such a point to a suspension or defer it past admission.
 - Every driver services collection pressure at each quantum boundary, after
   the poll's held region ends. A waiting `collect_full` sets the heap's
   request, which every pressure input honors, so drivers join it there
