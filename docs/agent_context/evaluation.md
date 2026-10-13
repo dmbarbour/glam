@@ -41,11 +41,14 @@ control-flow overview.
   (`perf-quantum-region`): deferred and lazy-route task polls, client
   demands and sparks run inside `with_held_region`, so their value accesses
   are recursive entries. Reflection task polls do not, since they call into
-  their host between steps. Inside a held poll, release the region before
-  waiting on another thread or calling out to a host; `CountedCondvar`
-  waits, host calls (`HostCallProducer::invoke`), reflection launchers,
-  synchronous drivers (`drive_client_demand`) and pressure servicing do. A
-  released region is never reacquired. A forced collection inside a held
+  their host between steps. Inside a held poll, work that waits on another
+  thread or calls out to a host is deferred with
+  `EvaluationPollContext::after_region` (or `EvaluatorStepContext::
+  after_region`); the poll then ends its quantum, and the work runs once
+  the region ends, before the claim is released. Host calls, reflection
+  launchers and the net contention wait do this. Elsewhere, `CountedCondvar`
+  waits, synchronous drivers (`drive_client_demand`) and pressure servicing
+  still release the region first; a released region is never reacquired. A forced collection inside a held
   poll reports an active mutator; probe for open value access with
   `thread_has_runtime_value_access_for_test` instead.
 - `glam-gc` also has owned mutators (`Heap::mutate`, `Mutator::suspend`,

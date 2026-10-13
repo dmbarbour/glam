@@ -546,16 +546,19 @@ pub(crate) fn poll_lazy_route(
             idle_yields = 0;
             continue;
         }
+        // Work deferred until the poll's heap admission ends, such as a wait
+        // for another thread, ends the quantum instead of a repoll.
+        let deferred = poll_context.has_deferred_work();
         match poll {
             // A family handoff: poll again rather than suspend.
             EvaluationMachinePoll::Yielded
-                if budget.remaining() > 0 && budget.remaining() < before =>
+                if !deferred && budget.remaining() > 0 && budget.remaining() < before =>
             {
                 idle_yields = 0;
                 continue;
             }
             EvaluationMachinePoll::Yielded
-                if budget.remaining() > 0 && idle_yields < IDLE_YIELD_REPOLLS =>
+                if !deferred && budget.remaining() > 0 && idle_yields < IDLE_YIELD_REPOLLS =>
             {
                 idle_yields += 1;
                 continue;
@@ -1575,7 +1578,9 @@ impl LazyTaskMachine {
                     return EvaluationMachinePoll::Yielded;
                 }
                 Transition::Pending(Ok(NetWhnfAccessPoll::Contended(contention))) => {
-                    contention.wait_for_disturbance();
+                    // The wait is for another thread, which a collection may
+                    // be waiting on, so it runs once heap admission ends.
+                    context.after_region(move || contention.wait_for_disturbance());
                     return EvaluationMachinePoll::Yielded;
                 }
                 Transition::Pending(Ok(NetWhnfAccessPoll::Semantic(action))) => {
@@ -1625,6 +1630,47 @@ impl LazyTaskMachine {
     }
 }
 
+/// Invokes a host-call lazy's callback, whose permit its machine retired,
+/// and completes the checkpoint with the outcome.
+fn invoke_host_call(context: &EvalContext, lazy: &ManagedLazyRoot) {
+    let producer = context.values().with_runtime_value_access(|access| {
+        let lazy = lazy
+            .access(&access)
+            .expect("host-call route and lazy must share one runtime");
+        lazy.checkpoint_snapshot()
+            .and_then(|checkpoint| checkpoint.host_call_producer_in(&access))
+    });
+    let Some(producer) = producer else {
+        // Another terminal publication won before invocation. A
+        // later poll observes that cache.
+        return;
+    };
+    // Outside a held poll, a direct driver may still sit inside another
+    // poll's region, which a collection must not wait on.
+    crate::core::release_held_region();
+    let outcome = match producer.invoke(context.values()) {
+        Ok(value) if value.runtime_id() != context.values().runtime_id() => {
+            Err(Arc::new(EvaluationFailure::message(format!(
+                "host call returned a value from evaluation runtime {}, expected evaluation runtime {}",
+                value.runtime_id().get(),
+                context.values().runtime_id().get()
+            ))))
+        }
+        Ok(value) => Ok(value),
+        Err(failure) => Err(failure),
+    };
+    context.values().with_runtime_value_access(|access| {
+        let lazy = lazy
+            .access(&access)
+            .expect("host-call route and lazy must share one runtime");
+        let checkpoint = lazy
+            .checkpoint_snapshot()
+            .expect("invoked host call must retain its checkpoint");
+        let outcome = outcome.map(|value| value.clone_core_with(&access));
+        checkpoint.complete_host_call_in(&access, outcome);
+    });
+}
+
 impl EvaluationTaskMachine for LazyTaskMachine {
     fn poll(
         &mut self,
@@ -1637,50 +1683,12 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             // Rust. If the callback unwinds, this route and every later route
             // observe only the non-replayable `Invoking` checkpoint.
             self.work = LazyTaskWork::HostCallCheckpoint;
-            let producer = durable_context
-                .values()
-                .with_runtime_value_access(|access| {
-                    let lazy = self
-                        .lazy
-                        .access(&access)
-                        .expect("host-call route and lazy must share one runtime");
-                    lazy.checkpoint_snapshot()
-                        .and_then(|checkpoint| checkpoint.host_call_producer_in(&access))
-                });
-            let Some(producer) = producer else {
-                // Another terminal publication won before invocation. The
-                // ordinary evaluator path below observes that cache.
-                return EvaluationMachinePoll::Yielded;
-            };
-            // Host code may block or call out: a collection must not wait
-            // for it.
-            crate::core::release_held_region();
-            let outcome = match producer.invoke(durable_context.values()) {
-                Ok(value) if value.runtime_id() != durable_context.values().runtime_id() => {
-                    Err(Arc::new(EvaluationFailure::message(format!(
-                        "host call returned a value from evaluation runtime {}, expected evaluation runtime {}",
-                        value.runtime_id().get(),
-                        durable_context.values().runtime_id().get()
-                    ))))
-                }
-                Ok(value) => Ok(value),
-                Err(failure) => Err(failure),
-            };
-            durable_context
-                .values()
-                .with_runtime_value_access(|access| {
-                    let lazy = self
-                        .lazy
-                        .access(&access)
-                        .expect("host-call route and lazy must share one runtime");
-                    let checkpoint = lazy
-                        .checkpoint_snapshot()
-                        .expect("invoked host call must retain its checkpoint");
-                    let outcome = outcome.map(|value| value.clone_core_with(&access));
-                    checkpoint.complete_host_call_in(&access, outcome);
-                });
-            // The rooted callback result has become a traced managed edge.
-            // A later poll performs the host-to-WHNF family handoff.
+            // Host code may block or call out, so it runs once the poll's
+            // heap admission ends: a collection must not wait for it.
+            let lazy = self.lazy.clone();
+            poll_context.after_region(move || invoke_host_call(&durable_context, &lazy));
+            // The callback's result becomes a traced managed edge. A later
+            // poll performs the host-to-WHNF family handoff.
             return EvaluationMachinePoll::Yielded;
         }
         poll_context.evaluate(&durable_context, |context| {

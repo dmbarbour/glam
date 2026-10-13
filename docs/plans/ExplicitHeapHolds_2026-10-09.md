@@ -347,7 +347,7 @@ recursive entry. `GcRef<'m, T>` is one pointer, `Copy`, `!Send`, with
 latch the suspend borrow (E0502), escape, and `!Send` for mutators and
 views.
 
-Agent decisions in this step, for review:
+Agent decisions in this step, accepted by the maintainer on 2026-10-13:
 
 - **`mutate` must be the thread's outer entry.** It panics inside any
   active entry, legacy ones included; inside a suspension another mutator
@@ -388,13 +388,35 @@ nested drivers and pressure servicing. Fix the production nesting sites:
 collect a caller's iterator before taking access, and reuse an open
 access in diagnostics and cycle poisoning.
 
-Open question (2026-10-13): since `mutate` must be outermost, a converted
-boundary reached inside an unconverted access panics. Public-API
-boundaries are reached that way from tests (through
-`eval/test_support` and value-access closures) until `gc-hold-tests`
-converts them. Either convert boundaries and their test helpers together,
-or let `mutate` inside a legacy entry yield a nested mutator that cannot
-suspend, as a transition aid.
+Nesting during migration (maintainer, 2026-10-13): since `mutate` must be
+outermost, a converted boundary reached inside an unconverted access, as
+public-API boundaries are from tests, would panic. A separately named
+aid, `Heap::mutate_recursive`, is `mutate` outside every entry and a
+recursive mutator that cannot suspend inside one. Distinct names show
+where a feature's transition has stabilized: a boundary moves from
+`mutate_recursive` to `mutate` once every caller takes its own mutator,
+and `gc-hold-tests` removes the aid with the legacy token.
+
+Slices, in order (2026-10-13):
+
+1. `gc-hold-defer-release-points` (landed): the release points inside held
+   evaluator polls move out of the poll. `EvaluationPollContext` gains an
+   after-region queue: work deferred with `after_region` runs once the
+   poll's region ends, before the driver releases its claim, and at once
+   outside a held region. Host calls (`invoke_host_call`), reflection
+   activations from `EvaluatorStepContext::finish`, and the net contention
+   wait defer through it, and the inline loop ends its quantum when work
+   is deferred, spilling an inline lazy as for any suspension. Drivers
+   catch panics outside the region, so deferred work keeps its panic
+   boundary. Audit: the contention wait in `LazyTaskMachine` is the only
+   production disturbance wait in held polls; `NetWhnfMachine::poll`'s is
+   reached only from tests.
+2. `gc-hold-quantum-mutator`: quanta take a mutator instead of a held
+   region, through a Glam-level mutator whose access is a borrow.
+3. `gc-hold-reflection-polls`: reflection polls take the mutator for their
+   pure steps and suspend around pumping and client callbacks.
+4. The public API, the compile entry, the remaining waits and the
+   production nesting sites.
 
 ### Tests and enforcement (`gc-hold-tests`)
 
