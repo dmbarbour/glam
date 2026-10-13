@@ -435,8 +435,27 @@ Slices, in order (2026-10-13):
    since a phase averages one access. A mutator must span the step loop to
    merge them, and the loop calls client code (`TaskHost` snapshot,
    validate and commit, 18 sites) and pumps dependencies, so those sites
-   must suspend it from deep inside the machine (open question,
-   2026-10-13).
+   must suspend it from deep inside the machine.
+
+   Decided (maintainer, 2026-10-13): coarse-grained evaluation. The
+   evaluation budget alone bounds how long a mutator is held, and several
+   operations share one suspension where that costs little. Local
+   reasoning about safety and refactoring, and performance, matter more
+   than the Rust expression; threading the mutator through the poll
+   context packages it as a parameter. Static borrows, not `RefCell`.
+
+   `gc-hold-lend-mutator`, first part (landed): a quantum's
+   `EvaluationPollContext` carries the mutator as a `RuntimeValueMutator`
+   (`EvaluationPollContext::quantum`), and value access through the
+   context or an evaluator step borrows it instead of entering the heap.
+   Evaluate phases carry the borrowed `RuntimeValueAccess`. Against
+   `373725e6`: countdown and sum -13%, append_walk and list_sum -12%,
+   chain and `hello_elf` -6.5 to -7%, `.r ()` steps -5.4%, `minimal`
+   -2.8%; `parse_ifs_16` +0.6%. Accesses that open their own region
+   through `CoreValueFactory::with_runtime_value_access` stay recursive
+   entries until they take access from the context. Second part: the
+   machine poll takes the context mutably, reflection polls hold a
+   mutator, and their host callbacks and pumping suspend it.
 4. The public API, the compile entry, the remaining waits and the
    production nesting sites.
 

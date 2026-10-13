@@ -1170,12 +1170,12 @@ mod tests {
             let admission = admission.clone();
             let values = values.clone();
             move || {
-                values.hold_recursive_runtime_value_mutator(|| {
+                values.with_recursive_runtime_value_mutator(|_| {
                     quantum_tx.send(()).unwrap();
                     boundary_rx.recv().unwrap();
                 });
                 admission.service_collection_pressure(&values);
-                values.hold_recursive_runtime_value_mutator(|| {
+                values.with_recursive_runtime_value_mutator(|_| {
                     values.completed_collection_epoch_for_test()
                 })
             }

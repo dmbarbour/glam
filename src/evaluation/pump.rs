@@ -188,23 +188,22 @@ impl ClaimedTask {
                 torn: false,
             };
         }
-        let context = EvaluationPollContext::for_claim(self.kind.demand());
-        // A reflection task calls back into its host between evaluation
-        // steps, so only evaluation work holds one region per quantum.
-        let holds_region = !matches!(self.kind, ClaimedTaskKind::Reflection(_));
+        let demand = self.kind.demand().demand();
         let kind = &mut self.kind;
-        let mut poll = || match kind {
-            ClaimedTaskKind::Reflection(task) => task.poll(&context, step_budget),
-            ClaimedTaskKind::Deferred(task) => task.poll(&context, step_budget),
-            ClaimedTaskKind::LazyRoute(route) => route.poll(&context, step_budget),
-        };
         // The boundary also catches a panic in work the poll deferred until
-        // its region ended, such as a host call.
-        let polled = catch_unwind(AssertUnwindSafe(|| {
-            if holds_region {
-                context.with_quantum_mutator(poll)
-            } else {
-                poll()
+        // its mutator ended, such as a host call. A reflection task calls
+        // back into its host between evaluation steps, so it holds no
+        // mutator yet.
+        let polled = catch_unwind(AssertUnwindSafe(|| match kind {
+            ClaimedTaskKind::Reflection(task) => task.poll(
+                &EvaluationPollContext::for_claim(task.demand()),
+                step_budget,
+            ),
+            ClaimedTaskKind::Deferred(task) => {
+                EvaluationPollContext::quantum(demand, |context| task.poll(context, step_budget))
+            }
+            ClaimedTaskKind::LazyRoute(route) => {
+                EvaluationPollContext::quantum(demand, |context| route.poll(context, step_budget))
             }
         }));
         match polled {
@@ -1079,12 +1078,11 @@ impl EvaluationWorkCoordinator {
             self.release_client_demand(claimed, coordinator::ClientDemandPoll::Panicked(report));
             return;
         }
-        let context = EvaluationPollContext::for_claim(&claimed.demand);
+        let demand = claimed.demand.demand();
         let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
         let polled = catch_unwind(AssertUnwindSafe(|| {
-            context.with_quantum_mutator(|| claimed.poll(&context, &mut budget))
+            EvaluationPollContext::quantum(demand, |context| claimed.poll(context, &mut budget))
         }));
-        drop(context);
         let poll = match polled {
             Ok(coordinator::ClientDemandPoll::Blocked(dependency)) => {
                 match dependency.panic_report() {
@@ -1106,7 +1104,7 @@ impl EvaluationWorkCoordinator {
     pub(super) fn poll_claimed_spark(self: &Arc<Self>, claimed: coordinator::ClaimedSparkWork) {
         let mut claimed = claimed;
         claimed.assert_runtime(self.runtime_id());
-        let poll_context = EvaluationPollContext::for_claim(claimed.demand());
+        let demand = claimed.demand().demand();
         let context = EvalContext::for_spark(claimed.demand_session());
         let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
         // A spark is speculative and nobody waits on it. When it panics, or
@@ -1118,9 +1116,9 @@ impl EvaluationWorkCoordinator {
             return;
         }
         let result = catch_unwind(AssertUnwindSafe(|| {
-            poll_context.with_quantum_mutator(|| {
+            EvaluationPollContext::quantum(demand, |poll_context| {
                 poll_context.evaluate(&context, |evaluator| {
-                    claimed.poll(&poll_context, evaluator, &context, &mut budget)
+                    claimed.poll(poll_context, evaluator, &context, &mut budget)
                 })
             })
         }));

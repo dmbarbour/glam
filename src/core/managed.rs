@@ -1,4 +1,4 @@
-use glam_gc::{Allocator, Gc, MutatorAccess, Root, Trace, UnsupportedLayout, Visitor};
+use glam_gc::{Allocator, Gc, Mutator, MutatorAccess, Root, Trace, UnsupportedLayout, Visitor};
 use std::any::Any;
 #[cfg(test)]
 use std::cell::Cell;
@@ -441,6 +441,37 @@ pub(crate) struct CoreValueAllocationScope<'scope> {
     mutator: &'scope MutatorAccess<'scope>,
 }
 
+/// This thread's mutator for one value domain, lent to a bounded poll.
+///
+/// Access is a shared borrow of it ([`Self::with_access`]), which enters no
+/// heap region.
+pub(crate) struct RuntimeValueMutator<'lend, 'mu> {
+    values: &'lend CoreValueFactory,
+    mutator: &'lend mut Mutator<'mu>,
+}
+
+impl RuntimeValueMutator<'_, '_> {
+    /// Borrows value access for `operation`, without entering the heap.
+    pub(crate) fn with_access<R>(
+        &self,
+        operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,
+    ) -> R {
+        #[cfg(test)]
+        let _access_depth = RuntimeValueAccessDepthGuard::enter();
+        operation(self.access())
+    }
+
+    /// The value access this mutator grants while it stays borrowed.
+    pub(crate) fn access(&self) -> RuntimeValueAccess<'_> {
+        RuntimeValueAccess {
+            values: self.values,
+            scope: CoreValueAllocationScope {
+                mutator: self.mutator,
+            },
+        }
+    }
+}
+
 /// Factory-qualified managed access for one bounded runtime operation.
 ///
 /// This combines the narrow allocation scope with the exact factory view which
@@ -585,20 +616,25 @@ impl CoreValueFactory {
         })
     }
 
-    /// Holds this runtime's heap admission across one scheduler quantum as
-    /// the thread's mutator, so each value access inside it is a recursive
-    /// entry rather than an admission. Inside another access it is itself a
-    /// recursive entry (`glam_gc::Heap::mutate_recursive`, a migration aid
-    /// until every quantum is its thread's outer entry).
+    /// Lends this thread's mutator for this runtime's heap to `operation`,
+    /// which borrows value access from it instead of entering the heap.
+    /// Inside another access it is a recursive entry that cannot suspend
+    /// (`glam_gc::Heap::mutate_recursive`, a migration aid until every
+    /// holder is its thread's outer entry).
     ///
-    /// Nothing inside may wait on another thread or call out to a host: a
-    /// release point under the mutator panics. Such work runs after it
-    /// instead (`EvaluationPollContext::after_admission`).
-    pub(crate) fn hold_recursive_runtime_value_mutator<R>(
+    /// Nothing under the mutator may wait on another thread or call out to
+    /// a host: a release point there panics. Such work suspends the mutator
+    /// or runs after it (`EvaluationPollContext::after_admission`).
+    pub(crate) fn with_recursive_runtime_value_mutator<R>(
         &self,
-        operation: impl FnOnce() -> R,
+        operation: impl for<'lend, 'mu> FnOnce(RuntimeValueMutator<'lend, 'mu>) -> R,
     ) -> R {
-        self.domain.heap.mutate_recursive(|_| operation())
+        self.domain.heap.mutate_recursive(|mutator| {
+            operation(RuntimeValueMutator {
+                values: self,
+                mutator,
+            })
+        })
     }
 
     /// Issues one weak observer for values successfully evaluated by this
@@ -796,6 +832,22 @@ impl RuntimeValueObserver {
 }
 
 impl RuntimeValueAccess<'_> {
+    /// Reborrows this access for `operation`, as a nested region would but
+    /// without entering the heap.
+    pub(crate) fn with_reborrow<R>(
+        &self,
+        operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,
+    ) -> R {
+        #[cfg(test)]
+        let _access_depth = RuntimeValueAccessDepthGuard::enter();
+        operation(RuntimeValueAccess {
+            values: self.values,
+            scope: CoreValueAllocationScope {
+                mutator: self.scope.mutator,
+            },
+        })
+    }
+
     pub(crate) fn unit(&self) -> super::Value {
         self.atom_for_key(&super::keys::UNIT)
     }
