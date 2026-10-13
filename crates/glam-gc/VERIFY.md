@@ -1207,3 +1207,14 @@ library suite and both sanitizers. Miri skips
 `trusted_hash::tests::trusted_keys_are_declared_only_here`, which reads the
 source tree, which Miri's isolation forbids.
 
+Root evidence (`root-evidence`): `MutatorAccess::root` registers a viewed
+value without validation in release builds, and `root_checked` validates a
+bare `Gc` in every build. Tests show that roots made from a fresh view and
+from a root's view keep their values through a collection while an unrooted
+fresh view's value is reclaimed, and that, in debug builds, rooting a view
+kept across a suspension fails its admission-generation check without
+registering. The edited compile-fail examples were checked against their
+intended errors (E0502, an escaping view, `!Send`). `scripts/check.sh full`
+passed at `e2e6e2a2`, including Miri (232 passed) and both sanitizers; it
+also passed at `35ebeeb9`.
+

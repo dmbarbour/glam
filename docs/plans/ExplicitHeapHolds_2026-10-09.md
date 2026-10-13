@@ -564,6 +564,55 @@ Slices, in order:
    that die within their admission, starting with WHNF lazy requests and
    inline forcing, and review it before building it.
 
+   Measured 2026-10-13 at `e2e6e2a2`: a registration and its drop cost
+   about 530 instructions without validation (a loop of `root` and drop,
+   with the deferred free at collection): the `Arc` cell's allocation and
+   free, the registry push under the heap's data mutex, and the counter.
+   Dead cells stay in the registry until a collection, or until heap
+   teardown when none runs: a 200-step reflection chain spends 11 M
+   instructions (6.7%) tearing down its heaps, about 3 M of it freeing dead
+   root cells. Carrying the roots that die within their admission would
+   save about 23 K of a 434 K `.r ()` step (5%) once every carrier
+   converts, 6 K (1.3%) for WHNF lazy requests alone, and about 13 M of
+   `countdown_800`'s 229 M (5.7%), nearly all WHNF lazy requests.
+
+   Proposed design, `gc-hold-local-roots` (for review):
+
+   - `glam-gc` gains `LocalRoot<T>`, a slot in its owned mutator's local
+     table: `MutatorAccess::carry(&self, GcRef) -> LocalRoot<T>` writes the
+     pointer into a free slot, with no allocation, lock or atomic.
+     `LocalRoot::as_gc` views it under the same mutator;
+     `LocalRoot::into_root` registers an ordinary root for state that
+     outlives the quantum. Dropping one frees its slot. A recursive entry
+     carries into its owned mutator's table.
+   - `Mutator::suspend` publishes the table to the heap under the data
+     mutex before releasing admission, and withdraws it after re-admission,
+     so the collector marks its live slots; the cost scales with suspends,
+     not values. A local root dropped while its mutator is suspended
+     defers its release to a thread-private list applied on resume. The
+     table lives in its own allocation, so the collector's reads never
+     overlap a live `&mut` on the owning thread (Miri).
+   - Local roots carry no lifetime. Glam's access closures are
+     higher-ranked, so a carrier made inside one cannot name the mutator's
+     brand without a second lifetime on every access type (about 690
+     parameters). Instead a local root is `!Send`, and `as_gc` and
+     `into_root` check, in every build, that it belongs to the current
+     admitted mutator: a carrier kept past its quantum panics on use rather
+     than dangling, and its drop does nothing.
+   - Glam's first slice: WHNF lazy requests carry a local lazy root; the
+     inline stack's frames and claims hold it, the base keeps the route's
+     durable root, and persistent consumers (`lazy_root_wait`, spills)
+     convert with `into_root`. Later slices: WHNF results rooted as value
+     nodes, seed promotion, net-WHNF transitions, reflection decode
+     carriers.
+
+   Rejected: relying on each inline lazy being reachable from the frame
+   below, which holds by the stack's construction but rests on invariants
+   spread across forwards, cycles and failure; and a cheaper `Root`
+   (pooled cells, a pruned registry), which keeps the lock and reference
+   counts. Pruning dead registry entries when the registry grows would
+   still bound its memory to the live roots, an independent idea.
+
 ### Suspension review (`gc-hold-suspension-review`)
 
 Suspend only around operations with a long or unbounded wait on the world
