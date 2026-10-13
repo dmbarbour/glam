@@ -2971,9 +2971,12 @@ impl EvaluationTaskMachine for SpawnThenYieldAfterRelease {
         started
             .send(())
             .expect("mixed-attribution observer should remain live");
-        self.release
-            .recv_timeout(Duration::from_secs(2))
-            .expect("mixed-attribution poll should be released");
+        // Waiting on the test is host work, so it suspends the mutator.
+        context.suspend(|| {
+            self.release
+                .recv_timeout(Duration::from_secs(2))
+                .expect("mixed-attribution poll should be released")
+        });
         EvaluationMachinePoll::Yielded
     }
 }
@@ -3017,9 +3020,12 @@ impl EvaluationTaskMachine for YieldAfterRelease {
         started
             .send(())
             .expect("test start receiver should remain live");
-        self.release
-            .recv_timeout(Duration::from_secs(2))
-            .expect("test should release the yielding task");
+        // Waiting on the test is host work, so it suspends the mutator.
+        context.suspend(|| {
+            self.release
+                .recv_timeout(Duration::from_secs(2))
+                .expect("test should release the yielding task")
+        });
         EvaluationMachinePoll::Yielded
     }
 }
@@ -3054,9 +3060,12 @@ impl EvaluationTaskMachine for CompleteAfterRelease {
                 .send(())
                 .expect("test start receiver should remain open");
         }
-        self.release
-            .recv_timeout(Duration::from_secs(2))
-            .expect("test should release the task");
+        // Waiting on the test is host work, so it suspends the mutator.
+        _context.suspend(|| {
+            self.release
+                .recv_timeout(Duration::from_secs(2))
+                .expect("test should release the task")
+        });
         EvaluationMachinePoll::Complete(_context.root_unit())
     }
 }
@@ -3080,9 +3089,13 @@ impl EvaluationTaskMachine for AssignPromiseAfterRelease {
                 .send(())
                 .expect("test start receiver should remain open");
         }
-        self.release
-            .recv_timeout(Duration::from_secs(2))
-            .expect("test should release the promise producer");
+        // Waiting on the test is host work: it suspends the poll's mutator,
+        // so a collection the test runs meanwhile need not wait for it.
+        _context.suspend(|| {
+            self.release
+                .recv_timeout(Duration::from_secs(2))
+                .expect("test should release the promise producer")
+        });
         let published = self.values.with_runtime_value_access(|access| {
             self.promise
                 .publish(&access, Ok(access.duplicate_value(&self.value)))
@@ -3110,9 +3123,12 @@ impl EvaluationTaskMachine for FailAfterRelease {
                 .send(())
                 .expect("test start receiver should remain open");
         }
-        self.release
-            .recv_timeout(Duration::from_secs(2))
-            .expect("test should release the task");
+        // Waiting on the test is host work, so it suspends the mutator.
+        context.suspend(|| {
+            self.release
+                .recv_timeout(Duration::from_secs(2))
+                .expect("test should release the task")
+        });
         EvaluationMachinePoll::Failed(
             context.root_failure(evaluation_failure("acknowledged task failure")),
         )
@@ -3136,9 +3152,12 @@ impl EvaluationTaskMachine for CancellableAfterRelease {
                 .send(())
                 .expect("test start receiver should remain open");
         }
-        self.release
-            .recv_timeout(Duration::from_secs(2))
-            .expect("test should release the task");
+        // Waiting on the test is host work, so it suspends the mutator.
+        context.suspend(|| {
+            self.release
+                .recv_timeout(Duration::from_secs(2))
+                .expect("test should release the task")
+        });
         EvaluationMachinePoll::Failed(context.root_failure(evaluation_failure(
             "cancellation should replace this poll result",
         )))
