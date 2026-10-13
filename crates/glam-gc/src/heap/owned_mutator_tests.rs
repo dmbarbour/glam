@@ -21,7 +21,7 @@ fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
 fn an_owned_mutator_allocates_roots_and_views() {
     let heap = Heap::new();
     let root = heap.mutate(|mutator| {
-        let value = mutator.allocator::<u64>().unwrap().alloc(42_u64);
+        let value = mutator.allocator::<u64>().unwrap().alloc_view(42_u64);
         let root = mutator.root(value);
         let view = root.as_gc(mutator);
         assert_eq!(*view, 42);
@@ -40,7 +40,7 @@ fn legacy_entries_inside_an_owned_mutator_are_recursive() {
     let heap = Heap::new();
     heap.mutate(|mutator| {
         let value = heap.with_mutator(|access| access.allocator::<u64>().unwrap().alloc(5_u64));
-        let root = mutator.root(value);
+        let root = mutator.root_checked(value);
         assert_eq!(*root.get(mutator), 5);
         // A held region inside the mutator adds nothing.
         heap.with_held_region(|| heap.with_mutator(|_| {}));
@@ -88,7 +88,7 @@ fn a_recursive_mutator_nests_inside_other_entries_without_suspending() {
 
     heap.with_mutator(|_| {
         heap.mutate_recursive(|mutator| {
-            let root = mutator.root(mutator.allocator::<u64>().unwrap().alloc(3_u64));
+            let root = mutator.root_checked(mutator.allocator::<u64>().unwrap().alloc(3_u64));
             assert_eq!(*root.get(mutator), 3);
             let panic = catch_unwind(AssertUnwindSafe(|| mutator.suspend(|| {})))
                 .expect_err("a recursive mutator should not suspend");
@@ -134,7 +134,7 @@ fn a_suspension_admits_a_collection_on_another_thread() {
 
     heap.mutate(|mutator| {
         let allocator = mutator.allocator::<u64>().unwrap();
-        let root = mutator.root(allocator.alloc(7_u64));
+        let root = mutator.root_checked(allocator.alloc(7_u64));
         let _garbage = allocator.alloc(8_u64);
         let epoch = heap.inner.current_allocation_lease_epoch();
 
@@ -157,7 +157,7 @@ fn a_suspension_admits_a_collection_on_another_thread() {
         );
         assert_eq!(*root.get(mutator), 7);
         let after = mutator.allocator::<u64>().unwrap().alloc(9_u64);
-        assert_eq!(*mutator.root(after).get(mutator), 9);
+        assert_eq!(*mutator.root_checked(after).get(mutator), 9);
     });
     collector.join().expect("collector thread panicked");
 }
@@ -166,7 +166,7 @@ fn a_suspension_admits_a_collection_on_another_thread() {
 fn a_collection_inside_a_suspension_keeps_the_mutator_record() {
     let heap = Heap::new();
     heap.mutate(|mutator| {
-        let root = mutator.root(mutator.allocator::<u64>().unwrap().alloc(11_u64));
+        let root = mutator.root_checked(mutator.allocator::<u64>().unwrap().alloc(11_u64));
         let report = mutator.suspend(|| heap.collect_full().unwrap());
         assert_eq!(report.root_entries(), 1);
         assert_eq!(*root.get(mutator), 11);
@@ -180,15 +180,15 @@ fn a_suspension_may_take_other_mutators() {
     let heap = Heap::new();
     let other = Heap::new();
     heap.mutate(|mutator| {
-        let root = mutator.root(mutator.allocator::<u64>().unwrap().alloc(1_u64));
+        let root = mutator.root_checked(mutator.allocator::<u64>().unwrap().alloc(1_u64));
         let (same, foreign) = mutator.suspend(|| {
             let same = heap.mutate(|inner| {
                 let value = inner.allocator::<u64>().unwrap().alloc(2_u64);
-                inner.root(value)
+                inner.root_checked(value)
             });
             let foreign = other.mutate(|inner| {
                 let value = inner.allocator::<u64>().unwrap().alloc(3_u64);
-                *inner.root(value).get(inner)
+                *inner.root_checked(value).get(inner)
             });
             (same, foreign)
         });
@@ -202,7 +202,7 @@ fn a_suspension_may_take_other_mutators() {
 fn a_mutator_cannot_suspend_inside_a_legacy_access() {
     let heap = Heap::new();
     heap.mutate(|mutator| {
-        let root = mutator.root(mutator.allocator::<u64>().unwrap().alloc(4_u64));
+        let root = mutator.root_checked(mutator.allocator::<u64>().unwrap().alloc(4_u64));
         let panic = catch_unwind(AssertUnwindSafe(|| {
             heap.with_mutator(|_| mutator.suspend(|| {}));
         }))
@@ -290,7 +290,7 @@ fn re_admission_into_a_poisoned_heap_leaves_the_mutator_without_access() {
     let heap = Heap::new();
     heap.mutate(|mutator| {
         let allocator = mutator.allocator::<u64>().unwrap();
-        let _root = mutator.root(allocator.alloc(10_u64));
+        let _root = mutator.root_checked(allocator.alloc(10_u64));
         let _dead = allocator.alloc(20_u64);
         let _dropping = mutator
             .allocator::<CountedDrop>()
@@ -321,7 +321,7 @@ fn re_admission_into_a_poisoned_heap_leaves_the_mutator_without_access() {
 fn a_view_kept_across_a_suspension_by_unsafe_code_fails_on_use() {
     let heap = Heap::new();
     heap.mutate(|mutator| {
-        let root = mutator.root(mutator.allocator::<u64>().unwrap().alloc(6_u64));
+        let root = mutator.root_checked(mutator.allocator::<u64>().unwrap().alloc(6_u64));
         // SAFETY: deliberately unsound lifetime extension, so the debug check
         // can reject the view after the suspension. The root keeps the value
         // live, so the rejected read could not dangle in this test.
@@ -331,4 +331,22 @@ fn a_view_kept_across_a_suspension_by_unsafe_code_fails_on_use() {
             .expect_err("a view kept across a suspension should fail on use");
         assert!(panic_message(panic).contains("outlived its heap admission"));
     });
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn rooting_a_view_kept_across_a_suspension_fails() {
+    let heap = Heap::new();
+    heap.mutate(|mutator| {
+        let root = mutator.root(mutator.allocator::<u64>().unwrap().alloc_view(6_u64));
+        // SAFETY: deliberately unsound lifetime extension, so the debug check
+        // can reject the view after the suspension. The root keeps the value
+        // live, so the rejected registration could not root a dead value.
+        let kept: crate::GcRef<'static, u64> = unsafe { std::mem::transmute(root.as_gc(mutator)) };
+        mutator.suspend(|| {});
+        let panic = catch_unwind(AssertUnwindSafe(|| mutator.root(kept)))
+            .expect_err("rooting a view kept across a suspension should fail");
+        assert!(panic_message(panic).contains("outlived its heap admission"));
+    });
+    assert_eq!(heap.root_registrations_for_verification(), 1);
 }

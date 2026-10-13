@@ -458,15 +458,15 @@ impl KeyListMachine {
 
 impl ManagedKeyConversionRoot {
     fn new_in(access: &EvaluationValueAccess<'_>, state: ManagedKeyConversionState) -> Self {
-        let edge = access
+        let value = access
             .values()
             .allocator::<ManagedKeyConversionCell>()
             .expect("managed key conversion representation must fit one collector run")
-            .alloc(ManagedKeyConversionCell {
+            .alloc_view(ManagedKeyConversionCell {
                 state: Mutex::new(state),
             });
         Self {
-            root: access.values().root(edge),
+            root: access.values().root(value),
         }
     }
 

@@ -22,6 +22,12 @@ control-flow overview.
   beneath an exact traced owner or published as a registered root. Do not put a
   root inside the managed graph to solve a liveness problem; that hides the
   cycles collection is meant to reclaim.
+- A root names its liveness evidence (`root-evidence`). Root a fresh
+  allocation through its view (`CoreValueAllocator::alloc_view`), and an edge
+  a value holds through `RuntimeValueAccess::view_edge`, whose `EdgeLiveness`
+  argument names the claim; add a variant rather than stretching one. Neither
+  validates in release builds. `root_checked` validates a bare `Gc` and is
+  for tests.
 - Managed access is callback-free. Close it before acquiring coordinator or
   host lifecycle locks, waiting, invoking user/loader/logger callbacks,
   delivering events, or sleeping a worker. The retained allocation scope in

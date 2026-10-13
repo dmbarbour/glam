@@ -589,7 +589,7 @@ fn runtime_value_domain_has_no_scheduler_or_profile_backedge() {
         let allocator = scope
             .allocator::<u64>()
             .expect("the lifecycle fixture should fit one managed slot");
-        scope.root(allocator.alloc(41))
+        scope.root(allocator.alloc_view(41))
     });
     let assembler = Assembler::builder()
         .evaluation_runtime(runtime.clone())

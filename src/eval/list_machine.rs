@@ -390,15 +390,15 @@ impl RegionalListBack {
 
 impl ManagedListFrontRoot {
     fn new_in(access: &EvaluationValueAccess<'_>, state: RegionalListFront) -> Self {
-        let edge = access
+        let value = access
             .values()
             .allocator::<ManagedListFrontCell>()
             .expect("managed list-front representation must fit one collector run")
-            .alloc(ManagedListFrontCell {
+            .alloc_view(ManagedListFrontCell {
                 state: Mutex::new(state),
             });
         Self {
-            root: access.values().root(edge),
+            root: access.values().root(value),
         }
     }
 

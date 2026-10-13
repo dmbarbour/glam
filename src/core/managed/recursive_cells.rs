@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError, TryLockError};
 
 use glam_gc::{Gc, Root, Trace, UnsupportedLayout, Visitor};
 
+use super::EdgeLiveness;
 use crate::core::{
     EvaluationFailure, EvaluationPanic, LazyId, LazyResult, LazySource, LazyValue, PromiseId,
     PromisedValue, RuntimeValueAccess, Value,
@@ -313,7 +314,7 @@ impl RuntimeValueAccess<'_> {
         let id = value.id();
         ManagedLazyRoot {
             id,
-            root: self.root(self.duplicate_edge(&edge.0)),
+            root: self.root(self.view_edge(&edge.0, EdgeLiveness::HeldValue)),
         }
     }
 
@@ -325,7 +326,7 @@ impl RuntimeValueAccess<'_> {
         let id = value.id();
         ManagedPromiseRoot {
             id,
-            root: self.root(self.duplicate_edge(&edge.0)),
+            root: self.root(self.view_edge(&edge.0, EdgeLiveness::HeldValue)),
             terminal: Arc::clone(&value.cell.terminal),
             completion: Arc::clone(&value.cell.completion),
             producer: Arc::clone(&value.cell.producer),
@@ -334,7 +335,7 @@ impl RuntimeValueAccess<'_> {
 
     pub(crate) fn root_managed_core_net(&self, edge: &ManagedCoreNetEdge) -> ManagedCoreNetRoot {
         ManagedCoreNetRoot {
-            root: self.root(self.duplicate_edge(&edge.0)),
+            root: self.root(self.view_edge(&edge.0, EdgeLiveness::HeldValue)),
         }
     }
 

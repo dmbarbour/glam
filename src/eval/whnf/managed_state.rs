@@ -62,10 +62,13 @@ impl ManagedWhnfRoot {
         access: &EvaluationValueAccess<'_>,
         work: RegionalWhnfWork,
     ) -> Result<Self, UnsupportedLayout> {
-        let edge = ManagedLazyCheckpointEdge::allocate_regional_in(access, work)?;
+        let state = access
+            .values()
+            .allocator::<ManagedLazyCheckpointCell>()?
+            .alloc_view(ManagedLazyCheckpointCell::from_state(work.0));
         Ok(Self {
             runtime: access.values().runtime_id(),
-            root: access.values().root(edge.into_whnf()),
+            root: access.values().root(state),
         })
     }
 

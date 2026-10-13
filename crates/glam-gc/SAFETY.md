@@ -324,12 +324,15 @@ and every unsafe function, implementation, and block are checked into
   It is `Copy`, registers no root, and is neither `Send` nor `Sync`. The
   borrow is its liveness proof: no mark or sweep runs while the mutator is
   admitted, so the view stays valid until the borrow ends. Safe code makes
-  views only from roots (`Root::as_gc`); viewing a bare `Gc` stays `unsafe`
+  views only from roots (`Root::as_gc`) and fresh allocations
+  (`Allocator::alloc_view`); viewing a bare `Gc` stays `unsafe`
   (`Gc::view_unchecked`), because safe code can hold a detached `Gc` past its
-  liveness (`GcRef::edge`, `duplicate_in`). Debug builds stamp each view with
-  the thread's admission generation, which every end of a heap admission on
-  the thread advances, and check it on use. That catches a view an `unsafe`
-  caller kept too long; it is a diagnostic, not the release-build proof.
+  liveness (`GcRef::edge`, `duplicate_in`). A view is the evidence for an
+  unvalidated root (`MutatorAccess::root`, below). Debug builds stamp each
+  view with the thread's admission generation, which every end of a heap
+  admission on the thread advances, and check it on use. That catches a
+  view an `unsafe` caller kept too long; it is a diagnostic, not the
+  release-build proof.
 - `MutatorAccess::allocator` returns `Allocator<'mutator, T>` with real
   borrows of that access's heap and thread cache. The higher-ranked
   `mutate` and `with_mutator` boundaries prevent the allocator from escaping
@@ -397,7 +400,10 @@ Those checks are not part of the release-build proof.
 
 `GcRef::new` (crate-private) and `Gc::view_unchecked` require the same proof
 as `get_unchecked`: a live initialized `T` in the supplied access's heap.
-Both run the debug/test indexed check first. `GcRef::get` then forms a
+Both run the debug/test indexed check first. `GcRef::fresh` (crate-private)
+views a value `Allocator::alloc_view` has just allocated: the allocator
+initialized it and published its allocation bit, and the view's `'m` is the
+allocator's borrow of its admitted access. `GcRef::get` then forms a
 shared reference for the rest of `'m`, which the borrow of the access
 bounds: the mutator stays admitted, so no collection reclaims the value
 before the borrow ends, and `T` permits shared access. `GcRef::edge`
@@ -1393,20 +1399,32 @@ metadata checks required before dereference.
 
 ### `root::Root<T>` construction and access
 
-`Mutator::root` resolves the candidate address through the heap's indexed
-chunk, run, class, and slot topology under managed data, compares the run's
-canonical metadata with `metadata_for::<T>()`, and loads the atomic allocation
-bit with Acquire ordering. It publishes one `Weak<RootCell>` into the same
-locked managed data before returning the first public root. Rejected input is
-reported only after releasing the mutex, so a caller contract violation does
-not poison an otherwise valid heap. Clones share the existing cell and neither
-clone nor drop touches the registry.
+A root names its liveness evidence at construction (`root-evidence`).
+`MutatorAccess::root` takes a view, which proves the value live, allocated
+and a `T` in this heap: the view borrows an admitted access, and a thread
+holds accesses for one heap at a time (`one-heap-per-thread`), so the view's
+heap is the access's. It registers without validating in release builds;
+debug builds check the view's admission generation and run the indexed
+access check. The view proves the value only for its borrow, which the
+registration completes within.
+
+`MutatorAccess::root_checked` takes a bare `Gc`, which proves nothing, and
+validates it in every build: it resolves the candidate address through the
+heap's indexed chunk, run, class, and slot topology under managed data,
+compares the run's canonical metadata with `metadata_for::<T>()`, and loads
+the atomic allocation bit with Acquire ordering. Rejected input is reported
+only after releasing the mutex, so a caller contract violation does not
+poison an otherwise valid heap.
+
+Both publish one `Weak<RootCell>` into locked managed data before returning
+the first public root. Clones share the existing cell and neither clone nor
+drop touches the registry.
 
 The `Arc<RootCell>` and its weak registration candidate are constructed before
 the managed-data mutex is acquired. Holding one critical section across validation and
 the vector push is a one-lock implementation choice, not the semantic barrier:
 the calling `Mutator` already prevents an exclusive collection or reclamation
-from intervening. Current validation nevertheless needs the mutex to read the
+from intervening. Checked validation nevertheless needs the mutex to read the
 arena chunk index and class topology; only its final allocation-bit load is
 independently atomic.
 
@@ -1421,8 +1439,9 @@ value, and a root does not retain or re-enter its value domain.
 constructing the typed view. The view borrows the matching access, so it
 cannot outlive the admitted region; `GcRef::edge` detaches a non-rooting
 edge that retains neither the heap nor a later liveness proof. `Root::get`
-reads through that single view boundary. The private root constructor
-established the representation, allocation, and heap invariants; registry
+reads through that single view boundary. The root's construction
+established the representation, allocation, and heap invariants, from a view
+or by validation; registry
 publication makes every still-live root cell a collection seed, and the live
 matching mutator prevents reclamation for the view's lifetime, even if the
 root is dropped meanwhile. Dropping

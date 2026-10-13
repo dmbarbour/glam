@@ -698,7 +698,7 @@ mod tests {
                 .values
                 .allocator::<u64>()
                 .expect("the scoped u64 allocation should fit");
-            access.values.root(allocator.alloc(29))
+            access.values.root(allocator.alloc_view(29))
         });
 
         evaluator.with_value_access(|access| {

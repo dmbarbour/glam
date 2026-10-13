@@ -3426,7 +3426,7 @@ mod tests {
             let allocator = scope
                 .allocator::<u64>()
                 .expect("the factory fixture should fit one managed slot");
-            scope.root(allocator.alloc(42))
+            scope.root(allocator.alloc_view(42))
         });
 
         factory.with_managed_values(|scope| {
@@ -3452,7 +3452,7 @@ mod tests {
             let allocator = scope
                 .allocator::<u64>()
                 .expect("the factory fixture should fit one managed slot");
-            scope.root(allocator.alloc(7))
+            scope.root(allocator.alloc_view(7))
         });
 
         drop(coordinator);
@@ -3485,7 +3485,7 @@ mod tests {
             let allocator = scope
                 .allocator::<ManagedFamilyLayoutProbe>()
                 .expect("Glam's minimum requested slot extent should be supported");
-            scope.root(allocator.alloc(ManagedFamilyLayoutProbe([29])))
+            scope.root(allocator.alloc_view(ManagedFamilyLayoutProbe([29])))
         });
 
         factory.with_managed_values(|scope| {

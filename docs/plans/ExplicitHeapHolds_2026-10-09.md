@@ -540,6 +540,30 @@ it:
   `countdown_800` -6.8%, `sum_800` -8.8%, `list_sum_400` -6.3%,
   `chain_800` -3.7%.
 
+Decided (maintainer, 2026-10-13): skip validation that proves nothing,
+and name each root's evidence at construction (`root-evidence`). Evidence
+by kind, per `.r ()` step: fresh allocations 40.8 (value nodes 25.5, WHNF
+checkpoints 10.2, list fronts 5.1), proven by construction; edges held in
+values 23.3 (lazies 16.3, nets 7.1), proven by provenance, a claim that
+will include the tag check once `Value` holds immediates; views reached
+from roots, none yet; unproven pointers, tests only.
+
+Slices, in order:
+
+1. `gc-hold-root-evidence` (landed): `glam-gc` roots views without
+   validation in release builds (`MutatorAccess::root`), allocation returns
+   views (`Allocator::alloc_view`), and the validated path for a bare `Gc`
+   is renamed `root_checked`. Glam roots fresh allocations through views and
+   held edges through `RuntimeValueAccess::view_edge`, whose
+   `EdgeLiveness` argument names the claim (`HeldValue` is the only one so
+   far); `root_checked` remains only in tests. Per `.r ()` step 480.5 K to
+   434.1 K instructions (-9.7%); across the profiling workloads -8.9% to
+   +0.1% (`sum` -8 to -9%, `countdown` and `append_walk` about -7%, `chain`
+   and `hello_elf` about -4%, `minimal` -4.4%, `parse_ifs_16` +0.1%).
+2. Measure, then design carrying values without registration for roots
+   that die within their admission, starting with WHNF lazy requests and
+   inline forcing, and review it before building it.
+
 ### Suspension review (`gc-hold-suspension-review`)
 
 Suspend only around operations with a long or unbounded wait on the world

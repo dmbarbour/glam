@@ -5,10 +5,9 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 use crate::thread_cache::{ThreadCacheHandle, ThreadHeapEntry};
-use crate::{Gc, Root, Trace, UnsupportedLayout, heap::HeapInner};
+use crate::{Gc, GcRef, Root, Trace, UnsupportedLayout, heap::HeapInner};
 use crate::{class::AllocationClass, class::metadata_for, run::RunGeometry};
 
-#[cfg(feature = "deterministic-test-hooks")]
 use crate::trace::ErasedGc;
 
 /// A thread's owned heap admission for one [`crate::Heap`].
@@ -23,9 +22,7 @@ use crate::trace::ErasedGc;
 ///
 /// let heap = Heap::new();
 /// heap.mutate(|mutator| {
-///     let value = mutator.allocator::<u64>().unwrap().alloc(42_u64);
-///     let root = mutator.root(value);
-///     let view = root.as_gc(mutator);
+///     let view = mutator.allocator::<u64>().unwrap().alloc_view(42_u64);
 ///     mutator.suspend(|| ());
 ///     let _ = *view;
 /// });
@@ -39,7 +36,7 @@ use crate::trace::ErasedGc;
 ///
 /// let heap = Heap::new();
 /// let root = heap.mutate(|mutator| {
-///     let value = mutator.allocator::<u64>().unwrap().alloc(42_u64);
+///     let value = mutator.allocator::<u64>().unwrap().alloc_view(42_u64);
 ///     mutator.root(value)
 /// });
 /// let _escaped = heap.mutate(|mutator| root.as_gc(mutator));
@@ -217,12 +214,29 @@ impl<'heap> MutatorAccess<'heap> {
         })
     }
 
-    /// Constructs and publishes an external root for one managed allocation.
+    /// Constructs and publishes an external root for one viewed value.
     ///
-    /// The value must belong to this mutator's heap and have the canonical
-    /// representation for `T`. Publication into the heap's weak root registry
+    /// The view is the evidence: it proves the value live, allocated and of
+    /// type `T` in this heap, the one heap the thread holds, so release
+    /// builds register the root without validating it. Debug builds validate
+    /// it as for any access. Publication into the heap's weak root registry
     /// completes before this method returns.
-    pub fn root<T: Trace>(&self, value: Gc<T>) -> Root<T> {
+    pub fn root<T: Trace>(&self, value: GcRef<'_, T>) -> Root<T> {
+        let pointer = value.pointer();
+        self.debug_assert_access(pointer);
+        self.heap
+            .register_proven_root(ErasedGc::new(pointer.cast()))
+    }
+
+    /// Constructs and publishes an external root for a bare managed pointer,
+    /// which proves nothing.
+    ///
+    /// Every build checks that the value belongs to this mutator's heap, is
+    /// allocated, and has the canonical representation for `T`, and panics
+    /// if not. Publication into the heap's weak root registry completes
+    /// before this method returns. Prefer [`MutatorAccess::root`] where a
+    /// view proves the value live.
+    pub fn root_checked<T: Trace>(&self, value: Gc<T>) -> Root<T> {
         let expected = self
             .cache
             .cached_metadata::<T>()
@@ -277,7 +291,7 @@ pub struct Allocator<'mutator, T: Trace> {
     class: AllocationClass<T>,
 }
 
-impl<T: Trace> Allocator<'_, T> {
+impl<'mutator, T: Trace> Allocator<'mutator, T> {
     /// Allocates one value through this scoped heap-local allocation class.
     ///
     /// The surrounding admitted mutator region is the liveness witness for
@@ -328,6 +342,18 @@ impl<T: Trace> Allocator<'_, T> {
         // SAFETY: the worker-local allocator initialized `T` in its exclusively
         // leased range and published the allocation bit.
         unsafe { Gc::from_raw(pointer) }
+    }
+
+    /// Allocates one value, as [`Allocator::alloc`], and views it.
+    ///
+    /// A fresh allocation is live for as long as the allocator's access
+    /// stays borrowed, so the view is evidence for [`MutatorAccess::root`].
+    pub fn alloc_view(&self, value: T) -> GcRef<'mutator, T> {
+        let edge = self.alloc(value);
+        // SAFETY: `alloc` just initialized a live `T` in this allocator's
+        // heap, and the allocator borrows its admitted access for
+        // `'mutator`.
+        unsafe { GcRef::fresh(edge) }
     }
 
     #[cfg(test)]

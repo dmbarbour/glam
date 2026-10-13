@@ -388,7 +388,7 @@ mod tests {
                         );
                     });
             }
-            scope.root(node)
+            scope.root_checked(node)
         });
 
         let live = values

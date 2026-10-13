@@ -245,7 +245,7 @@ mod tests {
                 &identity_visits,
                 &owner_drops,
             ));
-            access.root(node)
+            access.root_checked(node)
         });
 
         let live = values
@@ -307,7 +307,7 @@ mod tests {
                     &identity_visits,
                     &owner_drops,
                 ));
-            scope.root(node)
+            scope.root_checked(node)
         });
 
         values

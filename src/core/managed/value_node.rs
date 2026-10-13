@@ -184,7 +184,7 @@ impl RuntimeValueAccess<'_> {
         value: Value,
     ) -> Result<Root<ManagedValueNode>, UnsupportedLayout> {
         let allocator = self.allocator::<ManagedValueNode>()?;
-        Ok(self.root(allocator.alloc(ManagedValueNode { value })))
+        Ok(self.root(allocator.alloc_view(ManagedValueNode { value })))
     }
 }
 

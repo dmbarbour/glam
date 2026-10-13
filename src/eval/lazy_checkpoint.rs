@@ -93,30 +93,6 @@ impl ManagedLazyCheckpointEdge {
         Self(ManagedLazyCheckpointKind::Whnf(edge))
     }
 
-    pub(in crate::eval) fn into_whnf(self) -> Gc<ManagedLazyCheckpointCell> {
-        match self.0 {
-            ManagedLazyCheckpointKind::Whnf(edge) => edge,
-            ManagedLazyCheckpointKind::HostCall(_) => {
-                panic!("a host-call checkpoint cannot be projected as WHNF state")
-            }
-            ManagedLazyCheckpointKind::NetWhnf(_) => {
-                panic!("a net-WHNF checkpoint cannot be projected as ordinary WHNF state")
-            }
-            ManagedLazyCheckpointKind::Access(_) => {
-                panic!("an access checkpoint cannot be projected as ordinary WHNF state")
-            }
-            ManagedLazyCheckpointKind::ObjectFixpoint(_) => {
-                panic!("an object-fixpoint checkpoint cannot be projected as ordinary WHNF state")
-            }
-            ManagedLazyCheckpointKind::ListEffect(_) => {
-                panic!("a list-effect checkpoint cannot be projected as ordinary WHNF state")
-            }
-            ManagedLazyCheckpointKind::Builtin(_) => {
-                panic!("a builtin checkpoint cannot be projected as ordinary WHNF state")
-            }
-        }
-    }
-
     pub(in crate::eval) fn kind(&self) -> ManagedLazyCheckpointKindTag {
         match &self.0 {
             ManagedLazyCheckpointKind::Whnf(_) => ManagedLazyCheckpointKindTag::Whnf,

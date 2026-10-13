@@ -658,7 +658,9 @@ fn every_real_value_variant_has_passive_managed_destruction() {
         variants
             .into_iter()
             .map(|value| {
-                scope.root(allocator.alloc(ClosedCompatibilityValue::new(value, &managed_drops)))
+                scope.root(
+                    allocator.alloc_view(ClosedCompatibilityValue::new(value, &managed_drops)),
+                )
             })
             .collect::<Vec<_>>()
     });

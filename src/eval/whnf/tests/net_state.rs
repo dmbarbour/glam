@@ -297,7 +297,7 @@ fn net_state_trace_retains_every_value_position_through_collection() {
                 .values()
                 .allocator::<NetWhnfState>()
                 .expect("state must fit one managed run");
-            let state_root = access.values().root(allocator.alloc(state));
+            let state_root = access.values().root(allocator.alloc_view(state));
             (state_root, expected_lazy_ids, source_owner, promise_id)
         });
 

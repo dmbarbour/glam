@@ -2036,6 +2036,33 @@ maps the short names used here to file names.
   `agent_context/evaluation.md` "Values and Forcing".
 - **Recorded in:** explicit heap holds plan, `gc-hold-lend-mutator`.
 
+### Each root construction states its liveness evidence
+`root-evidence` · 2026-10-13 · maintainer · accepted
+- **Context:** every root construction validated heap ownership,
+  representation and the allocation bit in every build, about 790 of a
+  registration's 1,130 instructions. Glam's root sites root edges they
+  have just dereferenced unchecked under the same access, where the check
+  proves nothing new. Validation-free release builds measured -8.8% per
+  reflection step and -4 to -9% on lazy-heavy workloads. With immediates
+  in `Value`, a pointer will be told apart by its tag, so some proofs must
+  rest on provenance rather than type.
+- **Decision:** a root names its evidence at construction. A view
+  (`GcRef`) is proof: `MutatorAccess::root` takes one and skips
+  validation in release builds; debug builds validate when a view is
+  made. Fresh allocations return views (`Allocator::alloc_view`). Glam
+  views a detached edge through one function whose `EdgeLiveness`
+  argument names its provenance claim, so each claim can be found and
+  audited; it costs nothing at run time. A bare `Gc` roots through
+  `root_checked`, validated in every build.
+- **Consequences:** a false provenance claim roots a dead edge, which is
+  undefined behaviour in release builds rather than a panic; debug builds
+  and tests still validate. The same evidence argument may later extend
+  to Glam's unchecked edge reads (`get_edge`, `duplicate_edge`), when
+  immediates make their claims more varied.
+- **Rule lives in:** `crates/glam-gc/SAFETY.md` "`root::Root<T>`
+  construction and access".
+- **Recorded in:** explicit heap holds plan, `gc-hold-root-evidence`.
+
 ### Each evaluation quantum holds the thread's mutator; host work runs after it
 `quantum-mutator` · 2026-10-13 · agent · accepted
 - **Context:** `owned-mutator-views` replaces held regions with owned

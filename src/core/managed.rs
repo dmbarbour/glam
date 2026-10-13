@@ -1,4 +1,6 @@
-use glam_gc::{Allocator, Gc, Mutator, MutatorAccess, Root, Trace, UnsupportedLayout, Visitor};
+use glam_gc::{
+    Allocator, Gc, GcRef, Mutator, MutatorAccess, Root, Trace, UnsupportedLayout, Visitor,
+};
 use std::any::Any;
 #[cfg(test)]
 use std::cell::Cell;
@@ -681,7 +683,7 @@ impl CoreValueFactory {
             let allocator = scope
                 .allocator::<RecoverableTracePanicFixture>()
                 .expect("trace-panic fixture should fit a managed run");
-            scope.root(allocator.alloc(RecoverableTracePanicFixture { panicked }))
+            scope.root(allocator.alloc_view(RecoverableTracePanicFixture { panicked }))
         })
     }
 
@@ -708,7 +710,7 @@ impl CoreValueFactory {
                 .allocator::<RuntimePressureFixture>()
                 .expect("pressure fixture should fit a managed run");
             (0..128)
-                .map(|_| scope.root(allocator.alloc(RuntimePressureFixture { _value: 0 })))
+                .map(|_| scope.root(allocator.alloc_view(RuntimePressureFixture { _value: 0 })))
                 .collect()
         })
     }
@@ -945,9 +947,32 @@ impl RuntimeValueAccess<'_> {
         self.scope.allocator()
     }
 
-    /// Publishes a root before a managed pointer leaves this region.
-    pub(crate) fn root<T: ManagedFamily>(&self, value: Gc<T>) -> Root<T> {
+    /// Publishes a root before a managed value leaves this region. The view
+    /// is the evidence that the value is live, so the root is not
+    /// revalidated (`root-evidence`).
+    pub(crate) fn root<T: ManagedFamily>(&self, value: GcRef<'_, T>) -> Root<T> {
         self.scope.root(value)
+    }
+
+    /// Publishes a root for a bare managed pointer, validating it in every
+    /// build. Prefer [`Self::root`] with a view.
+    #[cfg(test)]
+    pub(crate) fn root_checked<T: ManagedFamily>(&self, value: Gc<T>) -> Root<T> {
+        self.scope.root_checked(value)
+    }
+
+    /// Views a detached edge without validation, under the provenance claim
+    /// `because` names (`root-evidence`).
+    pub(crate) fn view_edge<T: ManagedFamily>(
+        &self,
+        edge: &Gc<T>,
+        because: EdgeLiveness,
+    ) -> GcRef<'_, T> {
+        let EdgeLiveness::HeldValue = because;
+        // SAFETY: `because` names the caller's claim that `edge` is a live,
+        // exactly typed edge in this heap: one held by a value under this
+        // access, as for `get_edge`. Debug builds validate the view.
+        unsafe { edge.view_unchecked(self.scope.mutator) }
     }
 
     /// Borrows one same-domain root under this region's mutator authority.
@@ -1101,9 +1126,17 @@ impl CoreValueAllocationScope<'_> {
             .map(|allocator| CoreValueAllocator { allocator })
     }
 
-    /// Publishes an external root before a managed pointer leaves this region.
-    pub(crate) fn root<T: ManagedFamily>(&self, value: Gc<T>) -> Root<T> {
+    /// Publishes an external root for a viewed value before it leaves this
+    /// region.
+    pub(crate) fn root<T: ManagedFamily>(&self, value: GcRef<'_, T>) -> Root<T> {
         self.mutator.root(value)
+    }
+
+    /// Publishes an external root for a bare managed pointer, validating it
+    /// in every build.
+    #[cfg(test)]
+    pub(crate) fn root_checked<T: ManagedFamily>(&self, value: Gc<T>) -> Root<T> {
+        self.mutator.root_checked(value)
     }
 
     /// Borrows one same-domain root while this region supplies access
@@ -1135,11 +1168,32 @@ impl CoreValueAllocationScope<'_> {
     }
 }
 
-impl<T: ManagedFamily> CoreValueAllocator<'_, T> {
+impl<'scope, T: ManagedFamily> CoreValueAllocator<'scope, T> {
     /// Allocates through the class already selected for this region.
     pub(crate) fn alloc(&self, value: T) -> Gc<T> {
         self.allocator.alloc(value)
     }
+
+    /// Allocates as [`Self::alloc`] and views the fresh value, which is the
+    /// evidence for rooting it.
+    pub(crate) fn alloc_view(&self, value: T) -> GcRef<'scope, T> {
+        self.allocator.alloc_view(value)
+    }
+}
+
+/// Why a detached managed edge is live under the current access: the
+/// provenance claim behind viewing it without validation
+/// (`root-evidence`).
+///
+/// It costs nothing at run time. Naming the claim at each site lets every
+/// claim be found and audited; once values hold immediates, a claim will
+/// include the tag that marks a pointer. Debug builds validate each view.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum EdgeLiveness {
+    /// A value under this access holds the edge: a value read from a live
+    /// owner during this heap admission, before which nothing is collected,
+    /// or one that a registered root or traced owner keeps live.
+    HeldValue,
 }
 
 #[cfg(test)]
@@ -1390,7 +1444,7 @@ mod tests {
             let allocator = scope
                 .allocator::<PassiveManagedFixture>()
                 .expect("the passive fixture should fit one collector slot");
-            scope.root(allocator.alloc(PassiveManagedFixture {
+            scope.root(allocator.alloc_view(PassiveManagedFixture {
                 child: None,
                 direct_drops: Arc::clone(direct_drops),
                 resource: PassiveResource(Arc::clone(resource_drops)),
@@ -1472,7 +1526,7 @@ mod tests {
                 .alloc(TransitionFixture {
                     edges: Mutex::new(Vec::new()),
                 });
-            let root = access.root(owner.duplicate_in(access.scope.mutator));
+            let root = access.root_checked(owner.duplicate_in(access.scope.mutator));
             (root, owner)
         });
         let changed = AtomicUsize::new(0);

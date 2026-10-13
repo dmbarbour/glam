@@ -336,7 +336,10 @@ Representation Refinement, not leftover recursive `Arc` ownership.
 
 Fresh allocation is temporarily live only for its mutator region. Before that
 region ends it must be installed under an exactly traced owner or published as
-a registered root. Post-publication lazy, promise, and net changes go through
+a registered root. A root names its evidence: a view of a fresh allocation, or
+an edge viewed under a named provenance claim (`EdgeLiveness`). The view
+proves the value live, so registration does not revalidate it in release
+builds. Post-publication lazy, promise, and net changes go through
 their collector-owned mutation gateways; the current stop-the-world policy
 makes those barriers structural no-ops while preserving the exact sites a
 future concurrent policy needs. No managed destructor may open the runtime,

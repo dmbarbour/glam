@@ -152,7 +152,7 @@ mod tests {
         let (value, root) = heap.with_mutator(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             let value = allocator.alloc(42_u64);
-            (value.duplicate_in(mutator), mutator.root(value))
+            (value.duplicate_in(mutator), mutator.root_checked(value))
         });
         let alias = root.clone();
 
@@ -182,9 +182,9 @@ mod tests {
             let second = allocator.alloc(11);
             (
                 first.duplicate_in(mutator),
-                mutator.root(first),
+                mutator.root_checked(first),
                 second.duplicate_in(mutator),
-                mutator.root(second),
+                mutator.root_checked(second),
             )
         });
         assert_eq!(heap.root_registrations_for_verification(), 2);
@@ -216,12 +216,34 @@ mod tests {
     }
 
     #[test]
+    fn viewed_roots_keep_their_values_through_a_collection() {
+        let heap = Heap::new();
+        let (fresh, projected) = heap.mutate(|mutator| {
+            let allocator = mutator.allocator::<u64>().unwrap();
+            let fresh = mutator.root(allocator.alloc_view(5));
+            let checked = mutator.root_checked(allocator.alloc(6));
+            let projected = mutator.root(checked.as_gc(mutator));
+            let _unrooted = allocator.alloc_view(7);
+            (fresh, projected)
+        });
+        assert_eq!(heap.root_registrations_for_verification(), 3);
+
+        let report = heap.collect_full().unwrap();
+        assert_eq!(report.root_entries(), 2);
+        assert_eq!(report.marked_slots(), 2);
+        heap.mutate(|mutator| {
+            assert_eq!(*fresh.get(mutator), 5);
+            assert_eq!(*projected.get(mutator), 6);
+        });
+    }
+
+    #[test]
     fn checked_root_can_cross_threads_with_its_live_heap() {
         let heap = Heap::new();
         let root = heap.with_mutator(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             let value = allocator.alloc(73_u64);
-            mutator.root(value)
+            mutator.root_checked(value)
         });
         let worker_heap = heap.clone();
 
@@ -247,7 +269,7 @@ mod tests {
                 heap.with_mutator(|mutator| {
                     start.wait();
                     for _ in 0..1_024 {
-                        drop(mutator.root(value.duplicate_in(mutator)));
+                        drop(mutator.root_checked(value.duplicate_in(mutator)));
                     }
                     finish.wait();
                 });
@@ -272,7 +294,7 @@ mod tests {
         let value = owner.with_mutator(|mutator| mutator.allocator::<u64>().unwrap().alloc(42_u64));
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            let _ = observer.with_mutator(|mutator| mutator.root(value));
+            let _ = observer.with_mutator(|mutator| mutator.root_checked(value));
         }));
 
         assert!(panic.is_err());
@@ -288,7 +310,7 @@ mod tests {
         let reinterpreted = unsafe { Gc::<u32>::from_raw(value.erase().as_ptr().cast()) };
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            let _ = heap.with_mutator(|mutator| mutator.root(reinterpreted));
+            let _ = heap.with_mutator(|mutator| mutator.root_checked(reinterpreted));
         }));
 
         assert!(panic.is_err());
@@ -301,7 +323,7 @@ mod tests {
         let root = owner.with_mutator(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             let value = allocator.alloc(42_u64);
-            mutator.root(value)
+            mutator.root_checked(value)
         });
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
@@ -318,7 +340,7 @@ mod tests {
         let observer = Heap::new();
         let root = owner.with_mutator(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
-            mutator.root(allocator.alloc(42_u64))
+            mutator.root_checked(allocator.alloc(42_u64))
         });
 
         assert!(owner.owns(&root));
@@ -340,7 +362,7 @@ mod tests {
         let heap = Heap::new();
         let root = heap.with_mutator(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
-            mutator.root(allocator.alloc(73_u64))
+            mutator.root_checked(allocator.alloc(73_u64))
         });
         let start = Arc::new(Barrier::new(THREADS));
         let workers = (0..THREADS)
@@ -373,7 +395,7 @@ mod tests {
         let root = heap.with_mutator(|mutator| {
             let allocator = mutator.allocator::<DropProbe>().unwrap();
             let value = allocator.alloc(DropProbe(Arc::clone(&drops)));
-            mutator.root(value)
+            mutator.root_checked(value)
         });
 
         drop(heap);

@@ -170,9 +170,7 @@ impl<T: Trace> Gc<T> {
 ///
 /// let heap = Heap::new();
 /// heap.mutate(|mutator| {
-///     let value = mutator.allocator::<u64>().unwrap().alloc(42_u64);
-///     let root = mutator.root(value);
-///     let view = root.as_gc(mutator);
+///     let view = mutator.allocator::<u64>().unwrap().alloc_view(42_u64);
 ///     std::thread::scope(|scope| {
 ///         scope.spawn(move || {
 ///             let _ = *view;
@@ -202,20 +200,41 @@ impl<'m, T: Trace> GcRef<'m, T> {
         }
     }
 
+    /// Views a value its allocator has just initialized.
+    ///
+    /// # Safety
+    ///
+    /// `edge` must come from an allocation made through an allocator that
+    /// borrows an admitted access for `'m`.
+    pub(crate) unsafe fn fresh(edge: Gc<T>) -> Self {
+        Self {
+            pointer: edge.pointer,
+            #[cfg(debug_assertions)]
+            generation: crate::thread_cache::admission_generation(),
+            marker: PhantomData,
+        }
+    }
+
     /// Borrows the viewed value for the rest of the view's lifetime.
     #[must_use]
     #[inline(always)]
     pub fn get(self) -> &'m T {
+        // SAFETY: the view's constructor proved the value live, initialized
+        // and in its mutator's heap, and the borrow `'m` of that mutator
+        // excludes collection while the view exists.
+        unsafe { self.pointer().as_ref() }
+    }
+
+    /// The viewed address, which the view proves live for `'m`.
+    #[inline(always)]
+    pub(crate) fn pointer(self) -> NonNull<T> {
         #[cfg(debug_assertions)]
         assert_eq!(
             self.generation,
             crate::thread_cache::admission_generation(),
             "a managed view outlived its heap admission"
         );
-        // SAFETY: the view's constructor proved the value live, initialized
-        // and in its mutator's heap, and the borrow `'m` of that mutator
-        // excludes collection while the view exists.
-        unsafe { self.pointer.as_ref() }
+        self.pointer
     }
 
     /// Detaches the viewed value's edge.
@@ -394,7 +413,7 @@ mod tests {
         let heap = Heap::new();
         let (value, root) = heap.with_mutator(|mutator| {
             let value = mutator.allocator::<u64>().unwrap().alloc(42_u64);
-            let rooted = mutator.root(value.duplicate_in(mutator));
+            let rooted = mutator.root_checked(value.duplicate_in(mutator));
             (value, rooted)
         });
 
@@ -427,7 +446,7 @@ mod tests {
             let owner = mutator.allocator::<Holder>().unwrap().alloc(Holder {
                 edge: target.duplicate_in(mutator),
             });
-            (target, mutator.root(owner))
+            (target, mutator.root_checked(owner))
         });
 
         assert_eq!(heap.root_registrations_for_verification(), 1);
@@ -450,7 +469,7 @@ mod tests {
         let observer = Heap::new();
         let value = owner.with_mutator(|mutator| {
             let value = mutator.allocator::<u64>().unwrap().alloc(42_u64);
-            (value.duplicate_in(mutator), mutator.root(value))
+            (value.duplicate_in(mutator), mutator.root_checked(value))
         });
 
         let duplicate_panic = catch_unwind(AssertUnwindSafe(|| {

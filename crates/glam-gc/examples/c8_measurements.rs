@@ -240,7 +240,7 @@ fn deep_trace_workload() {
         for _ in 1..GRAPH_COUNT {
             head = allocator.alloc(GraphNode { edges: vec![head] });
         }
-        mutator.root(head)
+        mutator.root_checked(head)
     });
     let started = Instant::now();
     let report = heap.collect_full().expect("deep trace collection failed");
@@ -266,7 +266,7 @@ fn wide_trace_workload() {
         let edges = (0..GRAPH_COUNT)
             .map(|_| allocator.alloc(GraphNode { edges: Vec::new() }))
             .collect::<Vec<_>>();
-        mutator.root(allocator.alloc(GraphNode { edges }))
+        mutator.root_checked(allocator.alloc(GraphNode { edges }))
     });
     let started = Instant::now();
     let report = heap.collect_full().expect("wide trace collection failed");

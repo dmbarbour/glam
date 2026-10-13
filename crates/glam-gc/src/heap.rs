@@ -4048,6 +4048,20 @@ impl HeapInner {
             drop(state);
             error.raise();
         }
+        self.publish_root(&mut state, registration);
+        root
+    }
+
+    /// Registers a root for a value its caller proved live, allocated and of
+    /// type `T` in this heap, without revalidating it.
+    pub(crate) fn register_proven_root<T: Trace>(self: &Arc<Self>, value: ErasedGc) -> Root<T> {
+        let (root, registration) = Root::<T>::candidate(self, value);
+        let mut state = self.data.lock().expect("heap state should not be poisoned");
+        self.publish_root(&mut state, registration);
+        root
+    }
+
+    fn publish_root(&self, state: &mut ManagedData, registration: Weak<RootCell>) {
         state
             .roots
             .try_reserve(1)
@@ -4057,7 +4071,6 @@ impl HeapInner {
             .fetch_add(1, Ordering::Relaxed)
             .checked_add(1)
             .expect("root registration count exhausted");
-        root
     }
 
     #[cfg(test)]
@@ -4882,7 +4895,7 @@ mod tests {
                     );
                     assert_eq!(cache_snapshot(&self.heap.inner).unwrap().recursive_depth, 2);
                     let value = mutator.allocator::<u64>().unwrap().alloc(73);
-                    let root = mutator.root(value);
+                    let root = mutator.root_checked(value);
                     assert!(self.published.lock().unwrap().replace(root).is_none());
                 });
             }
@@ -4927,7 +4940,7 @@ mod tests {
                     published: self.published.clone(),
                 });
                 let owner = collector_slot(&heap, &replacement).owner;
-                let root = mutator.root(replacement);
+                let root = mutator.root_checked(replacement);
                 self.published
                     .send((root, owner.location, owner.slot_index))
                     .expect("finalizer test receiver disappeared");
@@ -5192,7 +5205,7 @@ mod tests {
                 .allocator::<InvalidEdgeHolder>()
                 .unwrap()
                 .alloc(InvalidEdgeHolder { edge, traces });
-            mutator.root(holder)
+            mutator.root_checked(holder)
         })
     }
 
@@ -5694,7 +5707,7 @@ mod tests {
         arrived.wait();
         let root = heap.with_mutator(|mutator| {
             let value = mutator.allocator::<u64>().unwrap().alloc(42);
-            let root = mutator.root(value);
+            let root = mutator.root_checked(value);
             for _ in 0..FIXED_SURVIVOR_RUN_HEADROOM {
                 heap.inner.prepare_run(&class).unwrap();
             }
@@ -5931,7 +5944,7 @@ mod tests {
             for value in 0..=geometry.slot_count {
                 last = Some(allocator.alloc(value as u64));
             }
-            mutator.root(last.expect("fixture must allocate at least one slot"))
+            mutator.root_checked(last.expect("fixture must allocate at least one slot"))
         });
         let prior_epoch = cache_snapshot(&heap.inner).unwrap().captured_epoch;
         assert_eq!(heap.statistics().assigned_runs(), 2);
@@ -6080,7 +6093,7 @@ mod tests {
         let heap = Heap::new();
         let root = heap.with_mutator(|mutator| {
             let value = mutator.allocator::<u64>().unwrap().alloc(42);
-            mutator.root(value)
+            mutator.root_checked(value)
         });
         let (active_tx, active_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -6574,7 +6587,8 @@ mod tests {
                     .map(|value| allocator.alloc(WideSlot { value }))
                     .collect::<Vec<_>>()
             });
-            let root = heap.with_mutator(|mutator| mutator.root(values[0].duplicate_in(mutator)));
+            let root =
+                heap.with_mutator(|mutator| mutator.root_checked(values[0].duplicate_in(mutator)));
             let slots = values
                 .iter()
                 .map(|value| collector_slot(&heap, value))
@@ -6713,7 +6727,7 @@ mod tests {
                     .chain(leaves.iter())
                     .map(|value| collector_slot(&heap, value))
                     .collect::<Vec<_>>();
-                (mutator.root(root_value), slots)
+                (mutator.root_checked(root_value), slots)
             });
 
             let panic = catch_unwind(AssertUnwindSafe(|| heap.collect_full()))
@@ -6779,7 +6793,7 @@ mod tests {
                     .chain(leaves.iter())
                     .map(|value| collector_slot(&heap, value))
                     .collect::<Vec<_>>();
-                (mutator.root(root_value), slots)
+                (mutator.root_checked(root_value), slots)
             });
 
             heap.request_collection();
@@ -6841,7 +6855,7 @@ mod tests {
                 .allocator::<GraphNode>()
                 .unwrap()
                 .alloc(graph_node(Arc::clone(&foreign_traces)));
-            (value.duplicate_in(mutator), mutator.root(value))
+            (value.duplicate_in(mutator), mutator.root_checked(value))
         });
         let holder_traces = Arc::new(AtomicUsize::new(0));
         let holder = invalid_edge_holder(&owner, foreign_value, Arc::clone(&holder_traces));
@@ -6862,7 +6876,7 @@ mod tests {
         assert_eq!(owner.collect_full().unwrap().epoch(), 1);
         owner.with_mutator(|mutator| {
             let value = mutator.allocator::<u64>().unwrap().alloc(42);
-            let root = mutator.root(value);
+            let root = mutator.root_checked(value);
             assert_eq!(*root.get(mutator), 42);
         });
     }
@@ -6976,11 +6990,11 @@ mod tests {
                 .collect::<Vec<_>>();
             connect_graph_nodes(mutator, &nodes[0], &nodes[1]);
             connect_graph_nodes(mutator, &nodes[0], &nodes[1]);
-            let first_root = mutator.root(nodes[0].duplicate_in(mutator));
+            let first_root = mutator.root_checked(nodes[0].duplicate_in(mutator));
             let root_alias = first_root.clone();
             (
                 first_root,
-                mutator.root(nodes[0].duplicate_in(mutator)),
+                mutator.root_checked(nodes[0].duplicate_in(mutator)),
                 root_alias,
             )
         });
@@ -7028,7 +7042,7 @@ mod tests {
                 .allocator::<DropCounter>()
                 .unwrap()
                 .alloc(DropCounter(Arc::clone(&drops)));
-            mutator.root(live)
+            mutator.root_checked(live)
         });
 
         let report = heap.collect_full().unwrap();
@@ -7173,7 +7187,7 @@ mod tests {
                         armed: Arc::clone(&armed),
                         traces: Arc::clone(&traces),
                     });
-            mutator.root(value)
+            mutator.root_checked(value)
         });
         let panic = catch_unwind(AssertUnwindSafe(|| heap.collect_full()));
         assert!(panic.is_err());
@@ -7254,7 +7268,7 @@ mod tests {
                 }
                 let roots = ROOT_INDICES
                     .iter()
-                    .map(|index| mutator.root(nodes[*index].duplicate_in(mutator)))
+                    .map(|index| mutator.root_checked(nodes[*index].duplicate_in(mutator)))
                     .collect::<Vec<_>>();
                 (nodes, roots)
             });
@@ -7321,7 +7335,7 @@ mod tests {
         let all_roots = heap.with_mutator(|mutator| {
             values[..geometry.slot_count]
                 .iter()
-                .map(|value| mutator.root(value.duplicate_in(mutator)))
+                .map(|value| mutator.root_checked(value.duplicate_in(mutator)))
                 .collect::<Vec<_>>()
         });
         let all = heap.collect_full().unwrap();
@@ -7374,7 +7388,7 @@ mod tests {
                         armed: Arc::clone(&armed),
                         traces: Arc::clone(&traces),
                     });
-            mutator.root(value)
+            mutator.root_checked(value)
         });
 
         let panic = catch_unwind(AssertUnwindSafe(|| heap.collect_full()))
@@ -7410,14 +7424,14 @@ mod tests {
                 let allocator = mutator.allocator::<GraphNode>().unwrap();
                 let value = allocator.alloc(graph_node(Arc::clone(&traces)));
                 let dead = allocator.alloc(graph_node(Arc::new(AtomicUsize::new(0))));
-                let first_root = mutator.root(value.duplicate_in(mutator));
+                let first_root = mutator.root_checked(value.duplicate_in(mutator));
                 let root_alias = first_root.clone();
                 (
                     value.duplicate_in(mutator),
                     first_root,
-                    mutator.root(value),
+                    mutator.root_checked(value),
                     root_alias,
-                    mutator.root(dead),
+                    mutator.root_checked(dead),
                 )
             });
         drop(dead_root);
@@ -7481,7 +7495,7 @@ mod tests {
             connect_graph_nodes(mutator, &nodes[1], &nodes[3]);
             connect_graph_nodes(mutator, &nodes[2], &nodes[3]);
             connect_graph_nodes(mutator, &nodes[3], &nodes[0]);
-            let root = mutator.root(nodes[0].duplicate_in(mutator));
+            let root = mutator.root_checked(nodes[0].duplicate_in(mutator));
             (nodes, root)
         });
         let slots = nodes
@@ -7525,7 +7539,7 @@ mod tests {
             }
             (
                 nodes[DEPTH - 1].duplicate_in(mutator),
-                mutator.root(nodes[0].duplicate_in(mutator)),
+                mutator.root_checked(nodes[0].duplicate_in(mutator)),
             )
         });
 
@@ -7570,7 +7584,7 @@ mod tests {
             }
             (
                 tail[TAIL_DEPTH - 1].duplicate_in(mutator),
-                mutator.root(root_node),
+                mutator.root_checked(root_node),
             )
         });
 
@@ -7600,7 +7614,7 @@ mod tests {
             for _ in 1..NODE_COUNT {
                 head = allocator.alloc(graph_node_with_edge(Arc::clone(&traces), head));
             }
-            (tail, mutator.root(head))
+            (tail, mutator.root_checked(head))
         });
 
         let report = heap.collect_full().unwrap();
@@ -7629,7 +7643,7 @@ mod tests {
                 .collect::<Vec<_>>();
             let last = edges[EDGE_COUNT - 1].duplicate_in(mutator);
             let root = allocator.alloc(graph_node_with_edges(Arc::clone(&traces), edges));
-            (last, mutator.root(root))
+            (last, mutator.root_checked(root))
         });
 
         let report = heap.collect_full().unwrap();
@@ -7759,7 +7773,7 @@ mod tests {
         let heap = Heap::new();
         let value = allocate(&heap, 42_u64);
         let slot = collector_slot(&heap, &value);
-        let root = heap.with_mutator(|mutator| mutator.root(value));
+        let root = heap.with_mutator(|mutator| mutator.root_checked(value));
         let post_mark_seen = AtomicBool::new(false);
 
         heap.request_collection();
@@ -7806,7 +7820,7 @@ mod tests {
         let plain_dead_a = allocate(&heap, 20_u64);
         let plain_dead_b = allocate(&heap, 30_u64);
         let plain_root =
-            heap.with_mutator(|mutator| mutator.root(plain_live.duplicate_in(mutator)));
+            heap.with_mutator(|mutator| mutator.root_checked(plain_live.duplicate_in(mutator)));
         let plain_live_slot = collector_slot(&heap, &plain_live);
         let plain_dead_slots = [
             collector_slot(&heap, &plain_dead_a),
@@ -7817,7 +7831,7 @@ mod tests {
         let dropping_live = allocate(&heap, DropCounter(Arc::clone(&drops)));
         let dropping_dead = allocate(&heap, DropCounter(Arc::clone(&drops)));
         let dropping_root =
-            heap.with_mutator(|mutator| mutator.root(dropping_live.duplicate_in(mutator)));
+            heap.with_mutator(|mutator| mutator.root_checked(dropping_live.duplicate_in(mutator)));
         let dropping_live_slot = collector_slot(&heap, &dropping_live);
         let dropping_dead_slot = collector_slot(&heap, &dropping_dead);
 
@@ -7938,7 +7952,7 @@ mod tests {
         let roots = heap.with_mutator(|mutator| {
             rooted_indices
                 .iter()
-                .map(|&index| mutator.root(values[index].duplicate_in(mutator)))
+                .map(|&index| mutator.root_checked(values[index].duplicate_in(mutator)))
                 .collect::<Vec<_>>()
         });
 
@@ -8010,7 +8024,8 @@ mod tests {
             let allocator = mutator.allocator::<u64>().unwrap();
             (allocator.alloc(10), allocator.alloc(20))
         });
-        let live_root = heap.with_mutator(|mutator| mutator.root(live.duplicate_in(mutator)));
+        let live_root =
+            heap.with_mutator(|mutator| mutator.root_checked(live.duplicate_in(mutator)));
         let live_slot = collector_slot(&heap, &live);
         let dead_slot = collector_slot(&heap, &dead);
         assert_eq!(live_slot.owner.location, dead_slot.owner.location);
@@ -8069,7 +8084,7 @@ mod tests {
             let allocator = mutator.allocator::<u64>().unwrap();
             (allocator.alloc(10), allocator.alloc(20))
         });
-        let root = heap.with_mutator(|mutator| mutator.root(live.duplicate_in(mutator)));
+        let root = heap.with_mutator(|mutator| mutator.root_checked(live.duplicate_in(mutator)));
         let live_slot = collector_slot(&heap, &live);
         let dead_slot = collector_slot(&heap, &dead);
         assert_eq!(live_slot.owner.location, dead_slot.owner.location);
@@ -8112,7 +8127,7 @@ mod tests {
         let roots = heap.with_mutator(|mutator| {
             [0_usize, u64::BITS as usize]
                 .into_iter()
-                .map(|index| mutator.root(values[index].duplicate_in(mutator)))
+                .map(|index| mutator.root_checked(values[index].duplicate_in(mutator)))
                 .collect::<Vec<_>>()
         });
         let first_slot = collector_slot(&heap, &values[0]);
@@ -8171,7 +8186,8 @@ mod tests {
                     })
                 })
                 .collect::<Vec<_>>();
-            let live_root = mutator.root(values[2 * u64::BITS as usize].duplicate_in(mutator));
+            let live_root =
+                mutator.root_checked(values[2 * u64::BITS as usize].duplicate_in(mutator));
             (values, live_root)
         });
         let first_owner = collector_slot(&heap, &values[0]).owner;
@@ -8228,7 +8244,8 @@ mod tests {
                     })
                 })
                 .collect::<Vec<_>>();
-            let live_root = mutator.root(values[2 * u64::BITS as usize].duplicate_in(mutator));
+            let live_root =
+                mutator.root_checked(values[2 * u64::BITS as usize].duplicate_in(mutator));
             (values, live_root)
         });
         let first_owner = collector_slot(&heap, &values[0]).owner;
@@ -8262,7 +8279,7 @@ mod tests {
         let (replacement_root, replacement_owner) = heap.with_mutator(|mutator| {
             assert!(
                 catch_unwind(AssertUnwindSafe(|| {
-                    mutator.root(values[0].duplicate_in(mutator))
+                    mutator.root_checked(values[0].duplicate_in(mutator))
                 }))
                 .is_err(),
                 "the durable map must reject roots while its local run batch executes"
@@ -8276,7 +8293,7 @@ mod tests {
                 },
             );
             (
-                mutator.root(replacement.duplicate_in(mutator)),
+                mutator.root_checked(replacement.duplicate_in(mutator)),
                 collector_slot(&heap, &replacement).owner,
             )
         });
@@ -8334,7 +8351,8 @@ mod tests {
                     })
                 })
                 .collect::<Vec<_>>();
-            let live_root = mutator.root(values[2 * u64::BITS as usize].duplicate_in(mutator));
+            let live_root =
+                mutator.root_checked(values[2 * u64::BITS as usize].duplicate_in(mutator));
             (values, live_root)
         });
         let first_owner = collector_slot(&heap, &values[0]).owner;
@@ -8401,7 +8419,7 @@ mod tests {
         let replacement_owner = collector_slot(&heap, &replacement).owner;
         assert_eq!(replacement_owner.location, first_owner.location);
         assert_eq!(replacement_owner.slot_index, first_owner.slot_index);
-        let replacement_root = heap.with_mutator(|mutator| mutator.root(replacement));
+        let replacement_root = heap.with_mutator(|mutator| mutator.root_checked(replacement));
 
         drop(live_root);
         drop(replacement_root);
@@ -8489,7 +8507,7 @@ mod tests {
                 live.duplicate_in(mutator),
                 partial_dead,
                 whole_dead,
-                mutator.root(live),
+                mutator.root_checked(live),
             )
         });
         let live_slot = collector_slot(&heap, &live);
@@ -8523,13 +8541,13 @@ mod tests {
         heap.with_mutator(|mutator| {
             assert!(
                 catch_unwind(AssertUnwindSafe(|| {
-                    mutator.root(partial_dead.duplicate_in(mutator))
+                    mutator.root_checked(partial_dead.duplicate_in(mutator))
                 }))
                 .is_err()
             );
             assert!(
                 catch_unwind(AssertUnwindSafe(|| {
-                    mutator.root(whole_dead.duplicate_in(mutator))
+                    mutator.root_checked(whole_dead.duplicate_in(mutator))
                 }))
                 .is_err()
             );
@@ -8575,8 +8593,8 @@ mod tests {
             let values = (0..3)
                 .map(|_| allocator.alloc(DropCounter(Arc::clone(&drops))))
                 .collect::<Vec<_>>();
-            let first_root = mutator.root(values[0].duplicate_in(mutator));
-            let later_root = mutator.root(values[2].duplicate_in(mutator));
+            let first_root = mutator.root_checked(values[0].duplicate_in(mutator));
+            let later_root = mutator.root_checked(values[2].duplicate_in(mutator));
             (values, first_root, later_root)
         });
         let slots = values
@@ -8613,7 +8631,7 @@ mod tests {
         heap.with_mutator(|mutator| {
             assert!(
                 catch_unwind(AssertUnwindSafe(|| {
-                    mutator.root(values[2].duplicate_in(mutator))
+                    mutator.root_checked(values[2].duplicate_in(mutator))
                 }))
                 .is_err()
             );
@@ -8666,7 +8684,7 @@ mod tests {
             let heap = heap.clone();
             move || {
                 heap.with_mutator(|mutator| {
-                    catch_unwind(AssertUnwindSafe(|| mutator.root(dead))).is_err()
+                    catch_unwind(AssertUnwindSafe(|| mutator.root_checked(dead))).is_err()
                 })
             }
         })
@@ -8748,7 +8766,7 @@ mod tests {
                 allocate_on_drop: true,
                 panic_after_drop: false,
             });
-            (live.duplicate_in(mutator), dead, mutator.root(live))
+            (live.duplicate_in(mutator), dead, mutator.root_checked(live))
         });
         assert_eq!(
             collector_slot(&heap, &live).owner.location,
@@ -8813,7 +8831,7 @@ mod tests {
                 allocate_on_drop: true,
                 panic_after_drop: true,
             });
-            (live.duplicate_in(mutator), dead, mutator.root(live))
+            (live.duplicate_in(mutator), dead, mutator.root_checked(live))
         });
         assert_eq!(
             collector_slot(&heap, &live).owner.location,
@@ -8953,8 +8971,8 @@ mod tests {
             0
         );
         heap.with_mutator(|mutator| {
-            assert!(catch_unwind(AssertUnwindSafe(|| mutator.root(panicking))).is_err());
-            assert!(catch_unwind(AssertUnwindSafe(|| mutator.root(deferred))).is_err());
+            assert!(catch_unwind(AssertUnwindSafe(|| mutator.root_checked(panicking))).is_err());
+            assert!(catch_unwind(AssertUnwindSafe(|| mutator.root_checked(deferred))).is_err());
         });
 
         drop(heap);
@@ -8982,7 +9000,7 @@ mod tests {
                 panic: false,
                 events: Arc::clone(&events),
             });
-            (panicking, deferred, mutator.root(live))
+            (panicking, deferred, mutator.root_checked(live))
         });
         let panicking_slot = collector_slot(&heap, &panicking);
         let deferred_slot = collector_slot(&heap, &deferred);
@@ -9067,7 +9085,7 @@ mod tests {
                 .collect::<Vec<_>>();
             let roots = values[2..]
                 .iter()
-                .map(|value| mutator.root(value.duplicate_in(mutator)))
+                .map(|value| mutator.root_checked(value.duplicate_in(mutator)))
                 .collect::<Vec<_>>();
             (values, roots)
         });
@@ -9233,7 +9251,8 @@ mod tests {
             .map(|value| collector_slot(&heap, value).owner.location)
             .collect::<Vec<_>>();
         let class_id = collector_slot(&heap, &values[1]).owner.class_id;
-        let root = heap.with_mutator(|mutator| mutator.root(values[1].duplicate_in(mutator)));
+        let root =
+            heap.with_mutator(|mutator| mutator.root_checked(values[1].duplicate_in(mutator)));
 
         heap.collect_full().unwrap();
         assert_eq!(drops.load(Ordering::Relaxed), 2);
@@ -9264,7 +9283,7 @@ mod tests {
         let heap = Heap::new();
         let live = allocate(&heap, 10_u64);
         let _dead = allocate(&heap, 20_u64);
-        let root = heap.with_mutator(|mutator| mutator.root(live));
+        let root = heap.with_mutator(|mutator| mutator.root_checked(live));
         let captured = Mutex::new(None);
 
         heap.request_collection();
@@ -9308,7 +9327,7 @@ mod tests {
         let heap = Heap::new();
         let live = allocate(&heap, 10_u64);
         let _dead = allocate(&heap, 20_u64);
-        let root = heap.with_mutator(|mutator| mutator.root(live));
+        let root = heap.with_mutator(|mutator| mutator.root_checked(live));
         let _dropping = allocate(
             &heap,
             PoisonedHeapDrop {
@@ -9493,10 +9512,10 @@ mod tests {
     fn successful_post_sweep_publishes_final_leases_frontiers_and_epoch() {
         let heap = Heap::new();
         let plain = allocate(&heap, 10_u64);
-        let plain_root = heap.with_mutator(|mutator| mutator.root(plain));
+        let plain_root = heap.with_mutator(|mutator| mutator.root_checked(plain));
         let drops = Arc::new(AtomicUsize::new(0));
         let dropping = allocate(&heap, DropCounter(Arc::clone(&drops)));
-        let dropping_root = heap.with_mutator(|mutator| mutator.root(dropping));
+        let dropping_root = heap.with_mutator(|mutator| mutator.root_checked(dropping));
 
         let before = Mutex::new(None);
         let after = Mutex::new(None);
@@ -9589,7 +9608,7 @@ mod tests {
             move || {
                 let first = heap.with_mutator(|mutator| {
                     let value = mutator.allocator::<u64>().unwrap().alloc(10);
-                    let root = mutator.root(value.duplicate_in(mutator));
+                    let root = mutator.root_checked(value.duplicate_in(mutator));
                     let location = collector_slot(&heap, &value).owner.location;
                     (root, location)
                 });
@@ -9645,7 +9664,7 @@ mod tests {
                 .collect::<Vec<_>>();
             let roots = [0_usize, 2, 4]
                 .into_iter()
-                .map(|index| mutator.root(values[index].duplicate_in(mutator)))
+                .map(|index| mutator.root_checked(values[index].duplicate_in(mutator)))
                 .collect::<Vec<_>>();
             (values, roots)
         });
@@ -9667,7 +9686,7 @@ mod tests {
             (allocator.alloc(10), allocator.alloc(20))
         });
         let plain_slot = collector_slot(&heap, &plain_live);
-        let plain_root = heap.with_mutator(|mutator| mutator.root(plain_live));
+        let plain_root = heap.with_mutator(|mutator| mutator.root_checked(plain_live));
 
         let drops = Arc::new(AtomicUsize::new(0));
         let dropping_dead = allocate(&heap, DropCounter(Arc::clone(&drops)));
@@ -9781,7 +9800,7 @@ mod tests {
                 .collect::<Vec<_>>();
             let roots = [0_usize, 2, 3]
                 .into_iter()
-                .map(|index| mutator.root(values[index].duplicate_in(mutator)))
+                .map(|index| mutator.root_checked(values[index].duplicate_in(mutator)))
                 .collect::<Vec<_>>();
             (values, roots)
         });
@@ -9851,7 +9870,7 @@ mod tests {
             let allocator = mutator.allocator::<WideSlot>().unwrap();
             let live = allocator.alloc(WideSlot { value: 10 });
             let dead = allocator.alloc(WideSlot { value: 20 });
-            (live.duplicate_in(mutator), dead, mutator.root(live))
+            (live.duplicate_in(mutator), dead, mutator.root_checked(live))
         });
         assert_ne!(
             collector_slot(&heap, &live).owner.location,
@@ -10406,14 +10425,14 @@ mod tests {
         let heap = Heap::new();
         let value = allocate(&heap, 42_u64);
         assert_eq!(heap.root_registrations_for_verification(), 0);
-        let first = heap.with_mutator(|mutator| mutator.root(value.duplicate_in(mutator)));
+        let first = heap.with_mutator(|mutator| mutator.root_checked(value.duplicate_in(mutator)));
         assert_eq!(heap.root_registrations_for_verification(), 1);
         let first_clone = first.clone();
         assert_eq!(heap.root_registrations_for_verification(), 1);
 
         assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 1);
 
-        let second = heap.with_mutator(|mutator| mutator.root(value.duplicate_in(mutator)));
+        let second = heap.with_mutator(|mutator| mutator.root_checked(value.duplicate_in(mutator)));
         assert_eq!(heap.root_registrations_for_verification(), 2);
         assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 2);
 
@@ -10426,7 +10445,7 @@ mod tests {
         let weak = Arc::downgrade(&heap.inner);
         let (root, bare) = heap.with_mutator(|mutator| {
             let value = mutator.allocator::<u64>().unwrap().alloc(73);
-            (mutator.root(value.duplicate_in(mutator)), value)
+            (mutator.root_checked(value.duplicate_in(mutator)), value)
         });
         let collector_heap = heap.clone();
         let retained_facade = heap.clone();
@@ -10478,7 +10497,7 @@ mod tests {
         let heap = Heap::new();
         let root = heap.with_mutator(|mutator| {
             let value = mutator.allocator::<u64>().unwrap().alloc(91);
-            mutator.root(value)
+            mutator.root_checked(value)
         });
         let (entered_tx, entered_rx) = mpsc::channel();
         let mut releases = Vec::new();
@@ -10562,7 +10581,7 @@ mod tests {
             let leaf = allocator.alloc(graph_node(Arc::new(AtomicUsize::new(0))));
             let branch = allocator.alloc(graph_node_with_edge(Arc::new(AtomicUsize::new(0)), leaf));
             let top = allocator.alloc(graph_node_with_edge(Arc::new(AtomicUsize::new(0)), branch));
-            mutator.root(top)
+            mutator.root_checked(top)
         });
 
         for expected_epoch in 1..=ROUNDS {
@@ -10607,7 +10626,7 @@ mod tests {
         let [first, middle, last] = heap.with_mutator(|mutator| {
             values
                 .each_ref()
-                .map(|value| mutator.root(value.duplicate_in(mutator)))
+                .map(|value| mutator.root_checked(value.duplicate_in(mutator)))
         });
         drop(middle);
 
@@ -10637,8 +10656,10 @@ mod tests {
             let allocator = mutator.allocator::<u64>().unwrap();
             [allocator.alloc(41_u64), allocator.alloc(42_u64)]
         });
-        let live = heap.with_mutator(|mutator| mutator.root(values[0].duplicate_in(mutator)));
-        let dead = heap.with_mutator(|mutator| mutator.root(values[1].duplicate_in(mutator)));
+        let live =
+            heap.with_mutator(|mutator| mutator.root_checked(values[0].duplicate_in(mutator)));
+        let dead =
+            heap.with_mutator(|mutator| mutator.root_checked(values[1].duplicate_in(mutator)));
         drop(dead);
         assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 2);
 
@@ -10661,9 +10682,9 @@ mod tests {
             )
         });
         let dropping_root =
-            heap.with_mutator(|mutator| mutator.root(dropping_value.duplicate_in(mutator)));
+            heap.with_mutator(|mutator| mutator.root_checked(dropping_value.duplicate_in(mutator)));
         let plain_root =
-            heap.with_mutator(|mutator| mutator.root(plain_value.duplicate_in(mutator)));
+            heap.with_mutator(|mutator| mutator.root_checked(plain_value.duplicate_in(mutator)));
         let dropping_address = dropping_value.erase().as_ptr().as_ptr() as usize;
         let plain_address = plain_value.erase().as_ptr().as_ptr() as usize;
         let dropping_registration = heap.inner.data.lock().unwrap().roots[0].clone();
@@ -10717,13 +10738,14 @@ mod tests {
     fn failed_upgrade_cannot_race_root_publication_during_exclusive_collection() {
         let heap = Heap::new();
         let value = allocate(&heap, 42_u64);
-        let expired = heap.with_mutator(|mutator| mutator.root(value.duplicate_in(mutator)));
+        let expired =
+            heap.with_mutator(|mutator| mutator.root_checked(value.duplicate_in(mutator)));
         drop(expired);
         assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 1);
         let exclusive = heap.inner.enter_synthetic_exclusive();
         let worker = std::thread::spawn({
             let heap = heap.clone();
-            move || heap.with_mutator(|mutator| mutator.root(value))
+            move || heap.with_mutator(|mutator| mutator.root_checked(value))
         });
 
         heap.inner.wait_for_blocked_outer_mutators(1);
@@ -10743,7 +10765,7 @@ mod tests {
         let value = allocate(&owner, 42_u64);
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            let _ = observer.with_mutator(|mutator| mutator.root(value));
+            let _ = observer.with_mutator(|mutator| mutator.root_checked(value));
         }));
 
         assert!(panic.is_err());
@@ -10844,7 +10866,7 @@ mod tests {
                     let managed = allocator.alloc(WideSlot {
                         value: value as u64,
                     });
-                    roots.push(mutator.root(managed.duplicate_in(mutator)));
+                    roots.push(mutator.root_checked(managed.duplicate_in(mutator)));
                     managed
                 })
                 .collect::<Vec<_>>();
@@ -11084,7 +11106,7 @@ mod tests {
                 panicking,
                 deferred,
                 live.duplicate_in(mutator),
-                mutator.root(live),
+                mutator.root_checked(live),
             )
         });
         let location = collector_slot(&heap, &panicking).owner.location;
@@ -11145,7 +11167,7 @@ mod tests {
             let values = (0..slot_count + 3)
                 .map(|_| allocator.alloc(TerminalPanickingDrop { _not_zero_sized: 0 }))
                 .collect::<Vec<_>>();
-            let live_root = mutator.root(values[slot_count + 2].duplicate_in(mutator));
+            let live_root = mutator.root_checked(values[slot_count + 2].duplicate_in(mutator));
             (values, live_root)
         });
         let owners = values
@@ -11227,7 +11249,7 @@ mod tests {
             for _ in 1..3 {
                 let _ = allocator.alloc(TerminalPanickingDrop { _not_zero_sized: 0 });
             }
-            mutator.root(first)
+            mutator.root_checked(first)
         });
 
         let panic = catch_unwind(AssertUnwindSafe(|| drop(heap)))
