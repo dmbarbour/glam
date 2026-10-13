@@ -156,7 +156,7 @@ pub(crate) enum EvaluationMachinePoll {
 pub(crate) trait EvaluationTaskMachine: Send {
     fn poll(
         &mut self,
-        context: &super::super::EvaluationPollContext,
+        context: &mut super::super::EvaluationPollContext,
         step_budget: &mut super::super::EvaluationStepBudget,
     ) -> EvaluationMachinePoll;
 

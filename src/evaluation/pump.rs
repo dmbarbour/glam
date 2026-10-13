@@ -182,6 +182,16 @@ impl ClaimedTask {
     /// as `Panicked` without polling, because polling would reinstall the
     /// panicked work.
     fn poll(&mut self, step_budget: &mut super::EvaluationStepBudget) -> EvaluationMachinePoll {
+        self.poll_within(None, step_budget)
+    }
+
+    /// Polls as [`Self::poll`] does, within `parent`'s quantum when a
+    /// quantum pumps this work, sharing its mutator.
+    fn poll_within(
+        &mut self,
+        parent: Option<&mut EvaluationPollContext>,
+        step_budget: &mut super::EvaluationStepBudget,
+    ) -> EvaluationMachinePoll {
         if let Some(report) = self.kind.prior_dependency_panic() {
             return EvaluationMachinePoll::Panicked {
                 report,
@@ -191,19 +201,17 @@ impl ClaimedTask {
         let demand = self.kind.demand().demand();
         let kind = &mut self.kind;
         // The boundary also catches a panic in work the poll deferred until
-        // its mutator ended, such as a host call. A reflection task calls
-        // back into its host between evaluation steps, so it holds no
-        // mutator yet.
-        let polled = catch_unwind(AssertUnwindSafe(|| match kind {
-            ClaimedTaskKind::Reflection(task) => task.poll(
-                &EvaluationPollContext::for_claim(task.demand()),
-                step_budget,
-            ),
-            ClaimedTaskKind::Deferred(task) => {
-                EvaluationPollContext::quantum(demand, |context| task.poll(context, step_budget))
-            }
-            ClaimedTaskKind::LazyRoute(route) => {
-                EvaluationPollContext::quantum(demand, |context| route.poll(context, step_budget))
+        // its mutator ended, such as a host call. A reflection task suspends
+        // its mutator around its host callbacks and the work it pumps.
+        let polled = catch_unwind(AssertUnwindSafe(|| {
+            let poll = |context: &mut EvaluationPollContext| match kind {
+                ClaimedTaskKind::Reflection(task) => task.poll(context, step_budget),
+                ClaimedTaskKind::Deferred(task) => task.poll(context, step_budget),
+                ClaimedTaskKind::LazyRoute(route) => route.poll(context, step_budget),
+            };
+            match parent {
+                Some(parent) => parent.nested_quantum(demand, poll),
+                None => EvaluationPollContext::quantum(demand, poll),
             }
         }));
         match polled {
@@ -224,9 +232,9 @@ impl ClaimedTask {
         Option<ReleasedTaskMachine>,
         Option<ExactRouteRelease>,
     ) {
-        // The quantum boundary: the poll's access region has closed, its
-        // result is rooted, and the work is still claimed, so readiness stays
-        // `Busy` through any collection here.
+        // The quantum boundary: the poll's mutator has ended or is
+        // suspended, its result is rooted, and the work is still claimed, so
+        // readiness stays `Busy` through any collection here.
         self.coordinator.service_collection_pressure();
         let (poll, spark) = match poll {
             EvaluationMachinePoll::ScheduleSpark(value) => {
@@ -557,6 +565,7 @@ pub(super) fn pump_demand(
         target,
         &mut reservation_allowance,
         &mut ExactDemandRoute::default(),
+        None,
     )
 }
 
@@ -569,6 +578,7 @@ pub(super) fn pump_demand_on_route(
     target: &EvaluationWaitToken,
     reservation_allowance: &mut usize,
     route: &mut ExactDemandRoute,
+    mut parent: Option<&mut EvaluationPollContext>,
 ) -> EvaluationPumpOutcome {
     if target.terminal_poll().is_some() {
         return EvaluationPumpOutcome::TargetReady;
@@ -623,26 +633,35 @@ pub(super) fn pump_demand_on_route(
         let quantum = (*reservation_allowance).min(TASK_POLL_QUANTUM);
         *reservation_allowance -= quantum;
         let mut budget = super::EvaluationStepBudget::new(quantum);
-        let poll = claimed.poll(&mut budget);
+        let poll = claimed.poll_within(parent.as_deref_mut(), &mut budget);
         debug_assert_eq!(budget.spent() + budget.remaining(), budget.granted());
         let yielded = matches!(
             poll,
             EvaluationMachinePoll::Yielded | EvaluationMachinePoll::ScheduleSpark(_)
         );
-        let (_, _, released, route_release) = claimed.release(poll);
-        if exact_claim {
-            if let Some(release) = route_release {
-                let _handed_off = coordinator.reconcile_exact_route_release(target, route, release);
-                #[cfg(any(test, feature = "glam-prof"))]
-                if _handed_off {
-                    coordinator.record_exact_route_handoffs(1);
+        // Releasing may publish terminal status, which can evaluate a
+        // diagnostic, and may collect: within a quantum, it runs suspended.
+        let release = || {
+            let (_, _, released, route_release) = claimed.release(poll);
+            if exact_claim {
+                if let Some(release) = route_release {
+                    let _handed_off =
+                        coordinator.reconcile_exact_route_release(target, route, release);
+                    #[cfg(any(test, feature = "glam-prof"))]
+                    if _handed_off {
+                        coordinator.record_exact_route_handoffs(1);
+                    }
+                } else {
+                    route.invalidate_missing_release();
                 }
-            } else {
-                route.invalidate_missing_release();
             }
-        }
-        if let Some(machine) = released {
-            machine.finish();
+            if let Some(machine) = released {
+                machine.finish();
+            }
+        };
+        match parent.as_deref_mut() {
+            Some(quantum) => quantum.suspend(release),
+            None => release(),
         }
         if yielded && !exact_claim {
             // Causal launch provenance is not an exact zipper edge. Preserve

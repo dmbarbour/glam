@@ -1920,7 +1920,7 @@ mod tests {
     impl EvaluationTaskMachine for CompleteTask {
         fn poll(
             &mut self,
-            _context: &crate::evaluation::EvaluationPollContext,
+            _context: &mut crate::evaluation::EvaluationPollContext,
             _step_budget: &mut crate::evaluation::EvaluationStepBudget,
         ) -> EvaluationMachinePoll {
             EvaluationMachinePoll::Complete(_context.duplicate_and_root_value(&self.0))

@@ -127,7 +127,7 @@ struct WhnfReflectionTask {
 impl EvaluationTaskMachine for WhnfReflectionTask {
     fn poll(
         &mut self,
-        poll_context: &EvaluationPollContext,
+        poll_context: &mut EvaluationPollContext,
         step_budget: &mut EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         match poll_whnf_computation(

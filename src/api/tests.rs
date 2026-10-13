@@ -158,7 +158,7 @@ fn assert_unobserved_promise(assembler: &Assembler, value: &Value) {
 impl EvaluationTaskMachine for FailedReasoningTask {
     fn poll(
         &mut self,
-        context: &crate::evaluation::EvaluationPollContext,
+        context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Failed(context.root_failure(Arc::new(

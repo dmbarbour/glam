@@ -179,7 +179,7 @@ struct PendingTestPromiseTask;
 impl EvaluationTaskMachine for PendingTestPromiseTask {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        _context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {

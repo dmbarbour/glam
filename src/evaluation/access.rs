@@ -25,7 +25,6 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::Ordering;
 
-use super::coordinator::ClaimedDemandSession;
 use super::{EvalContext, EvaluationDemandState, ReflectionTaskReservation};
 
 /// A matching-runtime evaluator view over one active managed-access region.
@@ -165,6 +164,7 @@ impl EvaluatorStepContext<'_> {
         self.poll.after_admission(work);
     }
 
+    #[inline]
     pub(crate) fn with_value_access<R>(
         &self,
         operation: impl for<'scope> FnOnce(EvaluationValueAccess<'scope>) -> R,
@@ -360,19 +360,20 @@ pub(crate) struct EvaluationPollContext<'lend, 'mu> {
     _thread_bound: PhantomData<Rc<()>>,
 }
 
+#[cfg(test)]
 impl EvaluationPollContext<'static, 'static> {
-    pub(in crate::evaluation) fn for_claim(claim: &ClaimedDemandSession) -> Self {
-        Self::without_mutator(claim.demand())
-    }
-
-    /// Opens the same ephemeral orchestration carrier for a caller-driven
-    /// poll which has no detached coordinator claim.
-    ///
-    /// Direct effect runs and isolated searches own an explicit demand
-    /// session instead. This constructor does not activate managed access;
-    /// it only retains that checked session for the duration of one poll.
+    /// A context without a mutator, whose value accesses each enter the
+    /// heap, for fixtures that poll directly. Production polls run in a
+    /// quantum ([`EvaluationPollContext::quantum_for_context`]).
     pub(crate) fn for_context(context: &EvalContext) -> Self {
         Self::without_mutator(context.session.clone())
+    }
+
+    /// As [`Self::for_context`], for a detached coordinator claim.
+    pub(in crate::evaluation) fn for_claim(
+        claim: &super::coordinator::ClaimedDemandSession,
+    ) -> Self {
+        Self::without_mutator(claim.demand())
     }
 
     fn without_mutator(demand: Arc<EvaluationDemandState>) -> Self {
@@ -415,12 +416,72 @@ impl EvaluationPollContext<'_, '_> {
         result
     }
 
+    /// Runs a quantum of `demand`'s work that this quantum pumps, sharing
+    /// this quantum's mutator, so the pumped poll's value accesses borrow it
+    /// too and the pump enters no heap region. Work the pumped poll defers
+    /// runs once it ends, under one suspension of this quantum. Outside a
+    /// quantum, or for another runtime, the pumped poll runs a quantum of its
+    /// own.
+    pub(in crate::evaluation) fn nested_quantum<R>(
+        &mut self,
+        demand: Arc<EvaluationDemandState>,
+        operation: impl FnOnce(&mut EvaluationPollContext<'_, '_>) -> R,
+    ) -> R {
+        let runtime = demand.values.runtime_id();
+        let Some(mutator) = self
+            .mutator
+            .as_mut()
+            .filter(|mutator| mutator.runtime_id() == runtime)
+        else {
+            return self.suspend(|| EvaluationPollContext::quantum(demand, operation));
+        };
+        let mut context = EvaluationPollContext {
+            shared: PollShared::new(demand, true),
+            mutator: Some(mutator.reborrow()),
+            _thread_bound: PhantomData,
+        };
+        let result = operation(&mut context);
+        let deferred = context.shared.after_admission.take().unwrap_or_default();
+        drop(context);
+        if !deferred.is_empty() {
+            self.suspend(|| {
+                for work in deferred {
+                    work();
+                }
+            });
+        }
+        result
+    }
+
+    /// Runs one quantum, as [`Self::quantum`] does, for a caller-driven poll
+    /// which has no detached coordinator claim.
+    pub(crate) fn quantum_for_context<R>(
+        context: &EvalContext,
+        operation: impl FnOnce(&mut EvaluationPollContext<'_, '_>) -> R,
+    ) -> R {
+        Self::quantum(context.session.clone(), operation)
+    }
+
     /// Runs `work` once this poll's heap admission ends: at once outside a
     /// quantum, otherwise after its mutator. Work that waits on another
     /// thread or calls client code belongs here, so a collection never waits
-    /// for it.
+    /// for it. Machines reach it through their evaluator step
+    /// ([`EvaluatorStepContext::after_admission`]).
+    #[cfg(test)]
     pub(crate) fn after_admission(&self, work: impl FnOnce() + 'static) {
         self.shared.after_admission(work);
+    }
+
+    /// Releases this quantum's heap admission while `operation` runs, then
+    /// re-admits; outside a quantum, just runs it. Client callbacks and work
+    /// that waits on another thread run here when their result is needed at
+    /// once. A suspension costs about two heap entries, so adjacent
+    /// operations share one.
+    pub(crate) fn suspend<R>(&mut self, operation: impl FnOnce() -> R) -> R {
+        match &mut self.mutator {
+            Some(mutator) => mutator.suspend(operation),
+            None => operation(),
+        }
     }
 
     /// Whether this quantum has deferred work, so it should end rather than
@@ -437,6 +498,7 @@ impl EvaluationPollContext<'_, '_> {
         self.shared.assert_context(context);
     }
 
+    #[inline]
     pub(crate) fn with_value_access<R>(
         &self,
         context: &EvalContext,
@@ -457,6 +519,7 @@ impl EvaluationPollContext<'_, '_> {
     }
 
     /// Derives the thread-bound evaluator authority for one machine substep.
+    #[inline]
     pub(crate) fn evaluator<'step>(
         &'step self,
         context: &'step EvalContext,
@@ -474,6 +537,7 @@ impl EvaluationPollContext<'_, '_> {
 
     /// Runs one callback-free evaluator phase, then activates every external
     /// reflection task it discovered only after its evaluator carrier ends.
+    #[inline]
     pub(crate) fn evaluate<R>(
         &self,
         context: &EvalContext,

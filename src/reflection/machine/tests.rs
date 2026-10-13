@@ -1311,7 +1311,15 @@ fn assert_execution_root_inventory(
             branch,
             scope_depth,
         } = specializing.as_ref();
-        let _: &<TestEffects as TaskSpecialization>::RequestWork = request;
+        match request {
+            SpecializationRequest::Unstarted { request, arguments } => {
+                let _: &<TestEffects as TaskSpecialization>::Request = request;
+                let _: &Vec<PublicValue> = arguments;
+            }
+            SpecializationRequest::Started(work) => {
+                let _: &<TestEffects as TaskSpecialization>::RequestWork = work;
+            }
+        }
         let _: &Option<SpecializationRequestInput> = input;
         let _: &Option<crate::eval::whnf::WhnfComputation> = demand;
         let _: &Branch<TestEffects> = branch;
@@ -3103,7 +3111,11 @@ fn retry_wake_and_terminalization_discard_blocked_control_work() {
             .clone(),
         scope_depth: retried.execution.active_scope_depth(),
     };
-    retried.apply_wake(WakeAction::ReplaceWork(Box::new(replacement)));
+    let eval_context = retried.eval_context.clone();
+    retried.apply_wake(
+        &mut EvaluationPollContext::for_context(&eval_context),
+        WakeAction::ReplaceWork(Box::new(replacement)),
+    );
     assert!(retried.execution.controlling.is_none());
     assert!(matches!(retried.execution.work, MachineWork::Drive { .. }));
 
@@ -4723,11 +4735,11 @@ fn nested_effect_work_cannot_renew_one_shared_poll_budget() {
         host,
     )
     .unwrap();
-    let poll_context = EvaluationPollContext::for_context(&task.eval_context);
+    let mut poll_context = EvaluationPollContext::for_context(&task.eval_context);
     let mut budget = crate::evaluation::EvaluationStepBudget::new(3);
 
     assert!(matches!(
-        task.poll_with_context(&poll_context, &mut budget),
+        task.poll_with_context(&mut poll_context, &mut budget),
         EffectTaskPoll::Yielded
     ));
     assert_eq!(budget.granted(), 3);
@@ -4742,14 +4754,14 @@ fn scheduled_effect_wrapper_rejects_an_unrelated_poll_context() {
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let (task_context, _task_owner) = EvalContext::isolated(assembler.core_values()).into_parts();
     let unrelated = EvalContext::isolated(assembler.core_values());
-    let poll_context = crate::evaluation::EvaluationPollContext::for_context(&unrelated);
+    let mut poll_context = crate::evaluation::EvaluationPollContext::for_context(&unrelated);
     let effect = root_value(&task_context, effect.clone_core_for_test());
     let task = EffectTask::new_in_context(effect, TestEffects, host, task_context)
         .expect("effect task should build");
     let mut machine = ValueEffectTask(task);
 
     let _ = machine.poll(
-        &poll_context,
+        &mut poll_context,
         &mut crate::evaluation::EvaluationStepBudget::new(1),
     );
 }
@@ -4777,7 +4789,7 @@ fn completed_effect_root_is_not_recreated_after_scope() {
 
 fn poll_machine_exit(
     machine: &mut dyn EvaluationTaskMachine,
-    poll_context: &crate::evaluation::EvaluationPollContext,
+    poll_context: &mut crate::evaluation::EvaluationPollContext,
     context: &EvalContext,
 ) -> EvaluationExitBlock {
     loop {
@@ -4820,7 +4832,7 @@ fn internal_exit_success_projects_through_both_scheduled_effect_wrappers() {
 
     for require_unit in [false, true] {
         let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
-        let poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
+        let mut poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
         let task = EffectTask::new_exit_in_context(
             effect.clone_core_for_test(),
             TestEffects,
@@ -4834,12 +4846,12 @@ fn internal_exit_success_projects_through_both_scheduled_effect_wrappers() {
             Box::new(ValueEffectTask(task))
         };
 
-        let exit = poll_machine_exit(machine.as_mut(), &poll_context, &context);
+        let exit = poll_machine_exit(machine.as_mut(), &mut poll_context, &context);
         assert_eq!(exit.intent, ExitIntent::Success);
         assert_eq!(exit.observed_epoch, None);
         assert!(matches!(
             machine.poll(
-                &poll_context,
+                &mut poll_context,
                 &mut crate::evaluation::EvaluationStepBudget::new(1)
             ),
             EvaluationMachinePoll::Exit(EvaluationExitBlock {
@@ -4856,7 +4868,7 @@ fn internal_exit_error_forces_and_roots_its_message() {
     let (assembler, effect) =
         compile_effect(".exit.error ((\\message -> message) {msg:{text:\"stop\"}, detail:7})");
     let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
-    let poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
+    let mut poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
     let task = EffectTask::new_exit_in_context(
         effect.clone_core_for_test(),
         TestEffects,
@@ -4866,7 +4878,7 @@ fn internal_exit_error_forces_and_roots_its_message() {
     .expect("internal exit task should initialize");
     let mut machine = ValueEffectTask(task);
 
-    let exit = poll_machine_exit(&mut machine, &poll_context, &context);
+    let exit = poll_machine_exit(&mut machine, &mut poll_context, &context);
     let ExitIntent::Error(message) = exit.intent else {
         panic!("error exit should retain its message")
     };
@@ -4895,7 +4907,7 @@ fn internal_exit_error_message_resumes_without_replay() {
             builds: builds.clone(),
         }))
         .expect("fresh exit fixture should accept a launcher");
-    let poll_context = EvaluationPollContext::for_context(&context);
+    let mut poll_context = EvaluationPollContext::for_context(&context);
     let task = EffectTask::new_exit_in_context(
         effect.clone_core_for_test(),
         TestEffects,
@@ -4905,7 +4917,7 @@ fn internal_exit_error_message_resumes_without_replay() {
     .expect("internal exit task should initialize");
     let mut machine = ValueEffectTask(task);
 
-    let exit = poll_machine_exit(&mut machine, &poll_context, &context);
+    let exit = poll_machine_exit(&mut machine, &mut poll_context, &context);
     assert!(matches!(exit.intent, ExitIntent::Error(_)));
     assert_eq!(
         builds.load(Ordering::Acquire),
@@ -4965,7 +4977,7 @@ fn permanent_exit_discards_every_speculative_cut_resource() {
         .install_reflection_launcher(launcher)
         .expect("fresh exit fixture should accept its task profile");
     let (context, owner) = owned.into_parts();
-    let poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
+    let mut poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
     let observer = context.clone();
     let task = EffectTask::new_exit_in_context(
         effect.clone_core_for_test(),
@@ -4976,7 +4988,7 @@ fn permanent_exit_discards_every_speculative_cut_resource() {
     .expect("internal exit task should initialize");
     let mut machine = ValueEffectTask(task);
 
-    let exit = poll_machine_exit(&mut machine, &poll_context, &context);
+    let exit = poll_machine_exit(&mut machine, &mut poll_context, &context);
     assert_eq!(exit.intent, ExitIntent::Success);
     assert_eq!(exit.observed_epoch, None);
     assert!(
@@ -5002,7 +5014,7 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
     );
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
-    let poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
+    let mut poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
     let task = EffectTask::new_exit_in_context(
         effect.clone_core_for_test(),
         TestEffects,
@@ -5012,7 +5024,7 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
     .expect("internal exit task should initialize");
     let mut machine = ValueEffectTask(task);
 
-    let first = poll_machine_exit(&mut machine, &poll_context, &context);
+    let first = poll_machine_exit(&mut machine, &mut poll_context, &context);
     assert_eq!(first.intent, ExitIntent::Success);
     assert!(first.observed_epoch.is_some());
     assert!(
@@ -5024,7 +5036,7 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
     assert!(host.diagnostics().is_empty());
     assert!(matches!(
         machine.poll(
-            &poll_context,
+            &mut poll_context,
             &mut crate::evaluation::EvaluationStepBudget::new(256)
         ),
         EvaluationMachinePoll::Exit(EvaluationExitBlock {
@@ -5042,7 +5054,7 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
 
     let value = loop {
         match machine.poll(
-            &poll_context,
+            &mut poll_context,
             &mut crate::evaluation::EvaluationStepBudget::new(256),
         ) {
             EvaluationMachinePoll::Yielded => {}

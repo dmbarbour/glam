@@ -615,9 +615,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
     /// it pumps while waiting. Each pass charges at least one step, so a call
     /// never spends more than `steps`.
     pub(super) fn poll(&mut self, steps: usize) -> EffectTaskPoll {
-        let context = EvaluationPollContext::for_context(&self.eval_context);
         let mut budget = crate::evaluation::EvaluationStepBudget::new(steps.max(1));
-        self.poll_pumping(&context, &mut budget)
+        let eval_context = self.eval_context.clone();
+        EvaluationPollContext::quantum_for_context(&eval_context, |context| {
+            self.poll_pumping(context, &mut budget)
+        })
     }
 
     /// Polls within `budget`, pumping a dependency it blocks on within the
@@ -625,7 +627,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
     /// lazy is forced by this poll.
     pub(super) fn poll_pumping(
         &mut self,
-        context: &EvaluationPollContext,
+        context: &mut EvaluationPollContext,
         budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EffectTaskPoll {
         while budget.remaining() != 0 {
@@ -647,11 +649,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
             let Some(WorkDependency::Wait(wait)) = &blocked.dependency else {
                 return poll;
             };
-            match self.eval_context.pump_wait_on_route_within(
+            // Pumped work shares this poll's mutator.
+            let pumped = self.eval_context.pump_wait_on_route_within(
+                context,
                 wait,
                 budget,
                 &mut self.exact_demand_route,
-            ) {
+            );
+            match pumped {
                 EvaluationPumpOutcome::TargetReady => {}
                 EvaluationPumpOutcome::BudgetExhausted => return EffectTaskPoll::Yielded,
                 EvaluationPumpOutcome::Busy | EvaluationPumpOutcome::NoProgress => {
@@ -671,17 +676,17 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
     pub(super) fn poll_with_context(
         &mut self,
-        context: &EvaluationPollContext,
+        context: &mut EvaluationPollContext,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EffectTaskPoll {
         context.assert_context(&self.eval_context);
         if let Some(terminal) = &self.terminal {
             return terminal.poll();
         }
-        if let Some(poll) = self.poll_exit() {
+        if let Some(poll) = self.poll_exit(context) {
             return poll;
         }
-        if let Some(blocked) = self.poll_blocked(step_budget) {
+        if let Some(blocked) = self.poll_blocked(context, step_budget) {
             return blocked;
         }
 
@@ -701,7 +706,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     ControlStep::Blocked(controlling, dependency) => {
                         self.execution.controlling = Some(controlling);
                         let blocked = BlockedExecution::waiting_on(dependency, self.retry_wake());
-                        if let Some(poll) = self.install_blocked(blocked) {
+                        if let Some(poll) = self.install_blocked(context, blocked) {
                             return poll;
                         }
                     }
@@ -711,7 +716,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     }
                     ControlStep::Failed(controlling, error) => {
                         self.execution.controlling = Some(controlling);
-                        return self.handle_step_error(error);
+                        return self.handle_step_error(context, error);
                     }
                 }
                 step_budget.charge_if_unchanged(previous_remaining);
@@ -727,7 +732,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     SpecializationStep::Blocked(specializing, dependency) => {
                         self.execution.specializing = Some(specializing);
                         let blocked = BlockedExecution::waiting_on(dependency, self.retry_wake());
-                        if let Some(poll) = self.install_blocked(blocked) {
+                        if let Some(poll) = self.install_blocked(context, blocked) {
                             return poll;
                         }
                     }
@@ -737,7 +742,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     }
                     SpecializationStep::Failed(specializing, error) => {
                         self.execution.specializing = Some(specializing);
-                        return self.handle_step_error(error);
+                        return self.handle_step_error(context, error);
                     }
                 }
                 step_budget.charge_if_unchanged(previous_remaining);
@@ -768,7 +773,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             unreachable!("one scalar completion cannot begin specialized work")
                         }
                         MachineStep::Blocked(blocked) => {
-                            if let Some(poll) = self.install_blocked(blocked) {
+                            if let Some(poll) = self.install_blocked(context, blocked) {
                                 return poll;
                             }
                         }
@@ -786,7 +791,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     ScalarDemandStep::Blocked(demanding, dependency) => {
                         self.execution.demanding = Some(demanding);
                         let blocked = BlockedExecution::waiting_on(dependency, self.retry_wake());
-                        if let Some(poll) = self.install_blocked(blocked) {
+                        if let Some(poll) = self.install_blocked(context, blocked) {
                             return poll;
                         }
                     }
@@ -796,7 +801,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     }
                     ScalarDemandStep::Failed(demanding, error) => {
                         self.execution.demanding = Some(demanding);
-                        return self.handle_step_error(error);
+                        return self.handle_step_error(context, error);
                     }
                 }
                 step_budget.charge_if_unchanged(previous_remaining);
@@ -810,7 +815,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     StatePathStep::Blocked(pathing, dependency) => {
                         self.execution.pathing = Some(pathing);
                         let blocked = BlockedExecution::waiting_on(dependency, self.retry_wake());
-                        if let Some(poll) = self.install_blocked(blocked) {
+                        if let Some(poll) = self.install_blocked(context, blocked) {
                             return poll;
                         }
                     }
@@ -820,7 +825,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     }
                     StatePathStep::Failed(pathing, error) => {
                         self.execution.pathing = Some(pathing);
-                        return self.handle_step_error(error);
+                        return self.handle_step_error(context, error);
                     }
                 }
                 step_budget.charge_if_unchanged(previous_remaining);
@@ -836,7 +841,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     EffectDecodeStep::Blocked(decoding, dependency) => {
                         self.execution.decoding = Some(decoding);
                         let blocked = BlockedExecution::waiting_on(dependency, self.retry_wake());
-                        if let Some(poll) = self.install_blocked(blocked) {
+                        if let Some(poll) = self.install_blocked(context, blocked) {
                             return poll;
                         }
                     }
@@ -846,7 +851,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     }
                     EffectDecodeStep::Failed(decoding, error) => {
                         self.execution.decoding = Some(decoding);
-                        return self.handle_step_error(error);
+                        return self.handle_step_error(context, error);
                     }
                 }
                 step_budget.charge_if_unchanged(previous_remaining);
@@ -892,7 +897,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     self.execution.specializing = Some(specializing);
                 }
                 Ok(MachineStep::Blocked(blocked)) => {
-                    if let Some(poll) = self.install_blocked(blocked) {
+                    if let Some(poll) = self.install_blocked(context, blocked) {
                         return poll;
                     }
                 }
@@ -906,7 +911,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     self.exit = Some(exit);
                     return EffectTaskPoll::Exit(poll);
                 }
-                Err(error) => return self.handle_step_error(error),
+                Err(error) => return self.handle_step_error(context, error),
             }
         }
         EffectTaskPoll::Yielded
@@ -940,12 +945,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
     }
 
-    fn handle_step_error(&mut self, error: TaskHalt) -> EffectTaskPoll {
+    fn handle_step_error(
+        &mut self,
+        context: &mut EvaluationPollContext,
+        error: TaskHalt,
+    ) -> EffectTaskPoll {
         if let Some(retry) = self.retry_wake() {
             let blocked =
                 BlockedExecution::evaluation_error(error, retry, self.eval_context.values());
             return self
-                .install_blocked(blocked)
+                .install_blocked(context, blocked)
                 .unwrap_or(EffectTaskPoll::Yielded);
         }
         self.finish(TaskTerminal::Failed(error));
@@ -1022,7 +1031,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
     fn specialization_step(
         &mut self,
-        context: &EvaluationPollContext,
+        context: &mut EvaluationPollContext,
         mut specializing: Box<SpecializationWork<S>>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> SpecializationStep<S> {
@@ -1056,16 +1065,21 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
         let checkpoint = specializing.branch.retry_candidate();
         let mut activity = RequestActivity::default();
-        let result = specializing.request.poll(
-            &self.specialization,
-            specializing.input.take(),
-            &mut RequestContext {
-                eval_context: &self.eval_context,
-                host: &self.host,
-                transaction: specializing.branch.transaction.as_mut(),
-                activity: &mut activity,
-            },
-        );
+        // The request is the specialization's code, which may call its host:
+        // one suspension covers starting it and polling it.
+        let result = context.suspend(|| {
+            let work = &mut *specializing;
+            work.request.started(&self.specialization).poll(
+                &self.specialization,
+                work.input.take(),
+                &mut RequestContext {
+                    eval_context: &self.eval_context,
+                    host: &self.host,
+                    transaction: work.branch.transaction.as_mut(),
+                    activity: &mut activity,
+                },
+            )
+        });
         if let Some(generation) = activity.observed_generation {
             specializing.branch.observe(checkpoint, generation);
         }
@@ -1819,7 +1833,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
     fn state_path_step(
         &mut self,
-        context: &EvaluationPollContext,
+        context: &mut EvaluationPollContext,
         mut pathing: StatePathWork<S>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> StatePathStep<S> {
@@ -1835,6 +1849,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             .expect("key path continuation must remain owned");
                         if let StatePathAfterKeys::Store(operation) = after {
                             return self.store_path_step(
+                                context,
                                 operation,
                                 keys,
                                 pathing.branch,
@@ -1975,6 +1990,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
     fn store_path_step(
         &mut self,
+        context: &mut EvaluationPollContext,
         operation: StorePathOperation,
         path: Vec<Key>,
         mut branch: Branch<S>,
@@ -1992,8 +2008,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     }
                     heap
                 } else {
-                    let snapshot = self.host.snapshot();
-                    snapshot.store().root().clone()
+                    context.suspend(|| self.host.snapshot().store().root().clone())
                 };
                 let value = self
                     .eval_context
@@ -2020,14 +2035,18 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             }),
                     );
                 }
-                let snapshot = self.host.snapshot();
-                let mut store = StoreJournal::new(snapshot.store().clone());
-                store.write(path, PublicValue::from_runtime_root(value));
-                self.host.commit(TaskCommit::new(
-                    store,
-                    snapshot.extra().clone(),
-                    S::Journal::default(),
-                ))
+                // One suspension covers the snapshot, the edit and the
+                // commit.
+                context.suspend(|| {
+                    let snapshot = self.host.snapshot();
+                    let mut store = StoreJournal::new(snapshot.store().clone());
+                    store.write(path, PublicValue::from_runtime_root(value));
+                    self.host.commit(TaskCommit::new(
+                        store,
+                        snapshot.extra().clone(),
+                        S::Journal::default(),
+                    ))
+                })
             }
             StorePathOperation::HeapRewrite(updater) => {
                 if let Some(transaction) = branch.transaction.as_mut() {
@@ -2042,14 +2061,18 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             }),
                     );
                 }
-                let snapshot = self.host.snapshot();
-                let mut store = StoreJournal::new(snapshot.store().clone());
-                store.rewrite(path, PublicValue::from_runtime_root(updater));
-                self.host.commit(TaskCommit::new(
-                    store,
-                    snapshot.extra().clone(),
-                    S::Journal::default(),
-                ))
+                // One suspension covers the snapshot, the edit and the
+                // commit.
+                context.suspend(|| {
+                    let snapshot = self.host.snapshot();
+                    let mut store = StoreJournal::new(snapshot.store().clone());
+                    store.rewrite(path, PublicValue::from_runtime_root(updater));
+                    self.host.commit(TaskCommit::new(
+                        store,
+                        snapshot.extra().clone(),
+                        S::Journal::default(),
+                    ))
+                })
             }
             StorePathOperation::VolumeGet(volume) => {
                 let checkpoint = branch.retry_candidate();
@@ -2062,8 +2085,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     }
                     root
                 } else {
-                    let snapshot = self.host.snapshot();
-                    snapshot.store().volume(volume).cloned()
+                    context.suspend(|| self.host.snapshot().store().volume(volume).cloned())
                 };
                 let value = match root {
                     Some(root) => self
@@ -2103,14 +2125,18 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             }),
                     );
                 }
-                let snapshot = self.host.snapshot();
-                let mut store = StoreJournal::new(snapshot.store().clone());
-                store.write_volume(volume, path, PublicValue::from_runtime_root(value));
-                self.host.commit(TaskCommit::new(
-                    store,
-                    snapshot.extra().clone(),
-                    S::Journal::default(),
-                ))
+                // One suspension covers the snapshot, the edit and the
+                // commit.
+                context.suspend(|| {
+                    let snapshot = self.host.snapshot();
+                    let mut store = StoreJournal::new(snapshot.store().clone());
+                    store.write_volume(volume, path, PublicValue::from_runtime_root(value));
+                    self.host.commit(TaskCommit::new(
+                        store,
+                        snapshot.extra().clone(),
+                        S::Journal::default(),
+                    ))
+                })
             }
             StorePathOperation::VolumeRewrite(volume, updater) => {
                 if let Some(transaction) = branch.transaction.as_mut() {
@@ -2127,14 +2153,18 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             }),
                     );
                 }
-                let snapshot = self.host.snapshot();
-                let mut store = StoreJournal::new(snapshot.store().clone());
-                store.rewrite_volume(volume, path, PublicValue::from_runtime_root(updater));
-                self.host.commit(TaskCommit::new(
-                    store,
-                    snapshot.extra().clone(),
-                    S::Journal::default(),
-                ))
+                // One suspension covers the snapshot, the edit and the
+                // commit.
+                context.suspend(|| {
+                    let snapshot = self.host.snapshot();
+                    let mut store = StoreJournal::new(snapshot.store().clone());
+                    store.rewrite_volume(volume, path, PublicValue::from_runtime_root(updater));
+                    self.host.commit(TaskCommit::new(
+                        store,
+                        snapshot.extra().clone(),
+                        S::Journal::default(),
+                    ))
+                })
             }
         };
         StatePathStep::Complete(match result {
@@ -2243,7 +2273,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
     fn step(
         &mut self,
-        context: &EvaluationPollContext,
+        context: &mut EvaluationPollContext,
         work: MachineWork<S>,
     ) -> Result<MachineStep<S>, TaskHalt> {
         match work {
@@ -2300,7 +2330,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
     fn interpret_decoded_drive(
         &mut self,
-        context: &EvaluationPollContext,
+        context: &mut EvaluationPollContext,
         request: Request<S::Request>,
         mut branch: Branch<S>,
         scope_depth: usize,
@@ -2351,7 +2381,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
     fn finish_fused_delivery(
         &mut self,
-        context: &EvaluationPollContext,
+        context: &mut EvaluationPollContext,
         branch: Branch<S>,
         value: RuntimeValueRoot,
         scope_depth: usize,
@@ -2372,7 +2402,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
     fn interpret_request(
         &mut self,
-        context: &EvaluationPollContext,
+        context: &mut EvaluationPollContext,
         request: Request<S::Request>,
         mut branch: Branch<S>,
         scope_depth: usize,
@@ -2439,6 +2469,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             },
             Request::Cut(operation) => {
                 return Ok(MachineStep::Continue(self.enter_cut(
+                    context,
                     operation,
                     branch,
                     scope_depth,
@@ -2570,13 +2601,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 ))));
             }
             Request::Specialized(request, arguments) => {
-                let request = self.specialization.start_request(
+                let request = SpecializationRequest::Unstarted {
                     request,
-                    arguments
+                    arguments: arguments
                         .into_iter()
                         .map(PublicValue::from_runtime_root)
                         .collect(),
-                );
+                };
                 return Ok(MachineStep::Specialize(Box::new(SpecializationWork::new(
                     request,
                     branch,
@@ -2773,6 +2804,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
     fn enter_cut(
         &mut self,
+        context: &mut EvaluationPollContext,
         operation: RuntimeValueRoot,
         mut outer: Branch<S>,
         parent_scope_depth: usize,
@@ -2791,18 +2823,18 @@ impl<S: TaskSpecialization> EffectTask<S> {
             observed_failure: false,
         };
         frame.owns_transaction = frame.outer.transaction.is_none();
-        self.begin_cut_attempt(&mut frame);
+        self.begin_cut_attempt(context, &mut frame);
         let work = frame.next_alternative();
         self.execution.cuts.push(frame);
         work
     }
 
-    fn begin_cut_attempt(&mut self, frame: &mut CutFrame<S>) {
+    fn begin_cut_attempt(&mut self, context: &mut EvaluationPollContext, frame: &mut CutFrame<S>) {
         frame.alternatives.clear();
         frame.retry = None;
         frame.observed_failure = false;
         if frame.owns_transaction {
-            let snapshot = self.host.snapshot();
+            let snapshot = context.suspend(|| self.host.snapshot());
             frame.outer.transaction = Some(Transaction::new(snapshot));
         }
         let mut initial = frame
@@ -2815,7 +2847,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
     fn handle_outcome(
         &mut self,
-        context: &EvaluationPollContext,
+        context: &mut EvaluationPollContext,
         outcome: BranchOutcome<S>,
         scope_depth: usize,
     ) -> Result<MachineStep<S>, TaskHalt> {
@@ -2852,7 +2884,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         transaction.snapshot.extra().clone(),
                         transaction.journal.clone(),
                     );
-                    match self.host.commit(commit) {
+                    match context.suspend(|| self.host.commit(commit)) {
                         CommitResult::Committed => {
                             completed.transaction = None;
                         }
@@ -2864,7 +2896,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                                 .expect("checked nonempty cut stack");
                             frame.observed_failure = true;
                             frame.retry = Some(completed);
-                            return self.finish_cut_attempt();
+                            return self.finish_cut_attempt(context);
                         }
                         CommitResult::MissingVolume(volume) => {
                             return Err(missing_volume_error(volume));
@@ -2924,7 +2956,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 if !frame.alternatives.is_empty() {
                     return Ok(MachineStep::Continue(frame.next_alternative()));
                 }
-                self.finish_cut_attempt()
+                self.finish_cut_attempt(context)
             }
             BranchOutcome::Cancelled => {
                 let parent_scope = self
@@ -2941,7 +2973,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
     }
 
-    fn finish_cut_attempt(&mut self) -> Result<MachineStep<S>, TaskHalt> {
+    fn finish_cut_attempt(
+        &mut self,
+        context: &mut EvaluationPollContext,
+    ) -> Result<MachineStep<S>, TaskHalt> {
         let mut frame = self
             .execution
             .cuts
@@ -2981,7 +3016,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .transaction
             .as_ref()
             .map(|transaction| transaction.snapshot.generation())
-            .unwrap_or_else(|| self.host.snapshot().generation());
+            .unwrap_or_else(|| context.suspend(|| self.host.snapshot().generation()));
         let validation = failed.transaction.clone();
         frame.retry = Some(failed);
         let index = self.execution.cuts.len();
@@ -3198,20 +3233,24 @@ impl<S: TaskSpecialization> EffectTask<S> {
         })
     }
 
-    fn install_blocked(&mut self, blocked: BlockedExecution<S>) -> Option<EffectTaskPoll> {
+    fn install_blocked(
+        &mut self,
+        context: &mut EvaluationPollContext,
+        blocked: BlockedExecution<S>,
+    ) -> Option<EffectTaskPoll> {
         self.blocked = Some(blocked);
         // A resumed machine may have acquired a new transactional observation
         // after the publication which woke its previous dependency. Validate
         // the complete read set before exposing the new blocked state; no
         // later publication is required to rescue a stale subscription.
-        match self.validate_blocked_retry() {
+        match self.validate_blocked_retry(context) {
             BlockedRetryPoll::Stable => Some(self.blocked_poll()),
             BlockedRetryPoll::Restarted => None,
             BlockedRetryPoll::Terminal(poll) => Some(poll),
         }
     }
 
-    fn validate_blocked_retry(&mut self) -> BlockedRetryPoll {
+    fn validate_blocked_retry(&mut self, context: &mut EvaluationPollContext) -> BlockedRetryPoll {
         let retry_validation = self
             .blocked
             .as_ref()
@@ -3219,10 +3258,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .retry
             .as_ref()
             .and_then(|retry| {
-                retry
-                    .validation
-                    .as_ref()
-                    .map(|transaction| self.host.validate(transaction.validation()))
+                retry.validation.as_ref().map(|transaction| {
+                    context.suspend(|| self.host.validate(transaction.validation()))
+                })
             });
         match retry_validation {
             Some(ValidationResult::Current { generation }) => {
@@ -3239,7 +3277,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     .take()
                     .and_then(|blocked| blocked.retry)
                     .expect("conflicting blocked work must retain its wake action");
-                self.apply_wake(retry.action);
+                self.apply_wake(context, retry.action);
                 BlockedRetryPoll::Restarted
             }
             Some(ValidationResult::MissingVolume(volume)) => {
@@ -3257,7 +3295,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
             None => {
                 let changed = self.blocked.as_ref().is_some_and(|blocked| {
                     blocked.retry.as_ref().is_some_and(|retry| {
-                        self.host.snapshot().generation() != retry.observed_generation
+                        context.suspend(|| self.host.snapshot().generation())
+                            != retry.observed_generation
                     })
                 });
                 if changed {
@@ -3266,7 +3305,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         .take()
                         .and_then(|blocked| blocked.retry)
                         .expect("changed retry generation must retain its wake action");
-                    self.apply_wake(retry.action);
+                    self.apply_wake(context, retry.action);
                     BlockedRetryPoll::Restarted
                 } else {
                     BlockedRetryPoll::Stable
@@ -3277,10 +3316,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
     fn poll_blocked(
         &mut self,
+        context: &mut EvaluationPollContext,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> Option<EffectTaskPoll> {
         self.blocked.as_ref()?;
-        match self.validate_blocked_retry() {
+        match self.validate_blocked_retry(context) {
             BlockedRetryPoll::Stable => {}
             BlockedRetryPoll::Restarted => return None,
             BlockedRetryPoll::Terminal(poll) => return Some(poll),
@@ -3303,14 +3343,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
         };
         match self.eval_context.poll_wait(wait) {
             EvaluationWaitPoll::Pending(_) => {
-                if matches!(
-                    self.eval_context.pump_wait_on_route_within(
-                        wait,
-                        step_budget,
-                        &mut self.exact_demand_route,
-                    ),
-                    EvaluationPumpOutcome::TargetReady
-                ) {
+                // Pumped work shares this poll's mutator.
+                let pumped = self.eval_context.pump_wait_on_route_within(
+                    context,
+                    wait,
+                    step_budget,
+                    &mut self.exact_demand_route,
+                );
+                if matches!(pumped, EvaluationPumpOutcome::TargetReady) {
                     self.blocked = None;
                     None
                 } else {
@@ -3330,12 +3370,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
     }
 
-    fn poll_exit(&mut self) -> Option<EffectTaskPoll> {
+    fn poll_exit(&mut self, context: &mut EvaluationPollContext) -> Option<EffectTaskPoll> {
         let validation = self.exit.as_ref()?.restart.as_ref().and_then(|retry| {
             retry
                 .validation
                 .as_ref()
-                .map(|transaction| self.host.validate(transaction.validation()))
+                .map(|transaction| context.suspend(|| self.host.validate(transaction.validation())))
         });
         match validation {
             Some(ValidationResult::Current { generation }) => {
@@ -3359,7 +3399,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
             None => {
                 let exit = self.exit.as_ref().expect("checked exit state above");
                 let changed = exit.restart.as_ref().is_some_and(|retry| {
-                    self.host.snapshot().generation() != retry.observed_generation
+                    context.suspend(|| self.host.snapshot().generation())
+                        != retry.observed_generation
                 });
                 if !changed {
                     return Some(EffectTaskPoll::Exit(exit.poll.clone()));
@@ -3372,7 +3413,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .take()
             .and_then(|exit| exit.restart)
             .expect("a changed exit observation must retain its restart capsule");
-        self.apply_wake(retry.action);
+        self.apply_wake(context, retry.action);
         None
     }
 
@@ -3437,7 +3478,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         })
     }
 
-    fn apply_wake(&mut self, wake: WakeAction<S>) {
+    fn apply_wake(&mut self, context: &mut EvaluationPollContext, wake: WakeAction<S>) {
         self.execution.decoding = None;
         self.execution.demanding = None;
         self.execution.pathing = None;
@@ -3445,12 +3486,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.execution.specializing = None;
         match wake {
             WakeAction::ReplaceWork(work) => self.execution.work = *work,
-            WakeAction::RestartCut(index) => self.restart_cut(index),
-            WakeAction::RestartSearch => self.restart_search(),
+            WakeAction::RestartCut(index) => self.restart_cut(context, index),
+            WakeAction::RestartSearch => self.restart_search(context),
         }
     }
 
-    fn restart_search(&mut self) {
+    fn restart_search(&mut self, context: &mut EvaluationPollContext) {
         self.execution.decoding = None;
         self.execution.demanding = None;
         self.execution.pathing = None;
@@ -3461,14 +3502,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .search
             .restart()
             .expect("only isolated search can restart its outer boundary");
-        root.transaction = Some(Transaction::new(self.host.snapshot()));
+        root.transaction = Some(Transaction::new(context.suspend(|| self.host.snapshot())));
         self.execution.work = MachineWork::Drive {
             branch: root,
             scope_depth: 0,
         };
     }
 
-    fn restart_cut(&mut self, index: usize) {
+    fn restart_cut(&mut self, context: &mut EvaluationPollContext, index: usize) {
         self.execution.decoding = None;
         self.execution.demanding = None;
         self.execution.pathing = None;
@@ -3481,7 +3522,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .pop()
             .expect("blocked cut must remain on the cut stack");
         frame.outer.transaction = None;
-        self.begin_cut_attempt(&mut frame);
+        self.begin_cut_attempt(context, &mut frame);
         let work = frame.next_alternative();
         self.execution.cuts.push(frame);
         self.execution.work = work;
@@ -3550,7 +3591,7 @@ impl<S: TaskSpecialization> ContextualValueEffectTask<S> {
 impl<S: TaskSpecialization> EvaluationTaskMachine for ValueEffectTask<S> {
     fn poll(
         &mut self,
-        context: &crate::evaluation::EvaluationPollContext,
+        context: &mut crate::evaluation::EvaluationPollContext,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         poll_value_effect_task(&mut self.0, context, step_budget)
@@ -3564,7 +3605,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for ValueEffectTask<S> {
 impl<S: TaskSpecialization> EvaluationTaskMachine for ContextualValueEffectTask<S> {
     fn poll(
         &mut self,
-        context: &crate::evaluation::EvaluationPollContext,
+        context: &mut crate::evaluation::EvaluationPollContext,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         match poll_value_effect_task(&mut self.task, context, step_budget) {
@@ -3590,7 +3631,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for ContextualValueEffectTask<
 
 fn poll_value_effect_task<S: TaskSpecialization>(
     task: &mut EffectTask<S>,
-    context: &crate::evaluation::EvaluationPollContext,
+    context: &mut crate::evaluation::EvaluationPollContext,
     step_budget: &mut crate::evaluation::EvaluationStepBudget,
 ) -> EvaluationMachinePoll {
     let observed_epoch = task.eval_context.current_observation_epoch();
@@ -3633,7 +3674,7 @@ fn poll_value_effect_task<S: TaskSpecialization>(
 impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
     fn poll(
         &mut self,
-        context: &crate::evaluation::EvaluationPollContext,
+        context: &mut crate::evaluation::EvaluationPollContext,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let observed_epoch = self.0.eval_context.current_observation_epoch();
@@ -4003,15 +4044,38 @@ enum ScalarDemandStep<S: TaskSpecialization> {
 /// transaction retry reconstructs fresh request work from the branch
 /// checkpoint.
 struct SpecializationWork<S: TaskSpecialization> {
-    request: S::RequestWork,
+    request: SpecializationRequest<S>,
     input: Option<SpecializationRequestInput>,
     demand: Option<WhnfComputation>,
     branch: Branch<S>,
     scope_depth: usize,
 }
 
+/// A specialized request, started by its first poll: starting runs the
+/// specialization's code, which shares that poll's suspension.
+enum SpecializationRequest<S: TaskSpecialization> {
+    Unstarted {
+        request: S::Request,
+        arguments: Vec<PublicValue>,
+    },
+    Started(S::RequestWork),
+}
+
+impl<S: TaskSpecialization> SpecializationRequest<S> {
+    fn started(&mut self, specialization: &S) -> &mut S::RequestWork {
+        if let Self::Unstarted { request, arguments } = self {
+            let work = specialization.start_request(request.clone(), std::mem::take(arguments));
+            *self = Self::Started(work);
+        }
+        match self {
+            Self::Started(work) => work,
+            Self::Unstarted { .. } => unreachable!("started above"),
+        }
+    }
+}
+
 impl<S: TaskSpecialization> SpecializationWork<S> {
-    fn new(request: S::RequestWork, branch: Branch<S>, scope_depth: usize) -> Self {
+    fn new(request: SpecializationRequest<S>, branch: Branch<S>, scope_depth: usize) -> Self {
         Self {
             request,
             input: None,

@@ -444,14 +444,16 @@ pub(crate) struct CoreValueAllocationScope<'scope> {
 /// This thread's mutator for one value domain, lent to a bounded poll.
 ///
 /// Access is a shared borrow of it ([`Self::with_access`]), which enters no
-/// heap region.
+/// heap region; [`Self::suspend`] needs it exclusively, so no access is open
+/// across a suspension.
 pub(crate) struct RuntimeValueMutator<'lend, 'mu> {
     values: &'lend CoreValueFactory,
     mutator: &'lend mut Mutator<'mu>,
 }
 
-impl RuntimeValueMutator<'_, '_> {
+impl<'mu> RuntimeValueMutator<'_, 'mu> {
     /// Borrows value access for `operation`, without entering the heap.
+    #[inline]
     pub(crate) fn with_access<R>(
         &self,
         operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,
@@ -461,7 +463,26 @@ impl RuntimeValueMutator<'_, '_> {
         operation(self.access())
     }
 
+    /// Releases heap admission while `operation` runs, then re-admits.
+    /// Collection may run meanwhile; values that must survive it are rooted.
+    pub(crate) fn suspend<R>(&mut self, operation: impl FnOnce() -> R) -> R {
+        self.mutator.suspend(operation)
+    }
+
+    /// Lends this mutator on, for as long as the reborrow lasts.
+    pub(crate) fn reborrow(&mut self) -> RuntimeValueMutator<'_, 'mu> {
+        RuntimeValueMutator {
+            values: self.values,
+            mutator: &mut *self.mutator,
+        }
+    }
+
+    pub(crate) fn runtime_id(&self) -> crate::runtime::EvaluationRuntimeId {
+        self.values.runtime_id()
+    }
+
     /// The value access this mutator grants while it stays borrowed.
+    #[inline]
     pub(crate) fn access(&self) -> RuntimeValueAccess<'_> {
         RuntimeValueAccess {
             values: self.values,
@@ -834,6 +855,7 @@ impl RuntimeValueObserver {
 impl RuntimeValueAccess<'_> {
     /// Reborrows this access for `operation`, as a nested region would but
     /// without entering the heap.
+    #[inline]
     pub(crate) fn with_reborrow<R>(
         &self,
         operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,

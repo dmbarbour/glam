@@ -171,7 +171,7 @@ struct RecordPollOrder {
 impl EvaluationTaskMachine for RecordPollOrder {
     fn poll(
         &mut self,
-        context: &super::EvaluationPollContext,
+        context: &mut super::EvaluationPollContext,
         _step_budget: &mut EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         self.polls

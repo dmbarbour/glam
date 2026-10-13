@@ -243,7 +243,7 @@ impl LazyTaskMachine {
     /// One poll, including the host-call permit's immediate second poll.
     fn poll_route_step(
         &mut self,
-        poll_context: &crate::evaluation::EvaluationPollContext,
+        poll_context: &mut crate::evaluation::EvaluationPollContext,
         budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let poll = self.poll(poll_context, budget);
@@ -474,7 +474,7 @@ fn spill_inline(
 /// have been without inlining. A panic inside an inline lazy marks that lazy
 /// panicked before the scheduler's boundary records it for the claimed one.
 pub(crate) fn poll_lazy_route(
-    poll_context: &crate::evaluation::EvaluationPollContext,
+    poll_context: &mut crate::evaluation::EvaluationPollContext,
     demand: Arc<crate::evaluation::EvaluationDemandState>,
     lazy: &ManagedLazyRoot,
     budget: &mut crate::evaluation::EvaluationStepBudget,
@@ -1645,9 +1645,6 @@ fn invoke_host_call(context: &EvalContext, lazy: &ManagedLazyRoot) {
         // later poll observes that cache.
         return;
     };
-    // Outside a held poll, a direct driver may still sit inside another
-    // poll's region, which a collection must not wait on.
-    crate::core::release_held_region();
     let outcome = match producer.invoke(context.values()) {
         Ok(value) if value.runtime_id() != context.values().runtime_id() => {
             Err(Arc::new(EvaluationFailure::message(format!(
@@ -1674,7 +1671,7 @@ fn invoke_host_call(context: &EvalContext, lazy: &ManagedLazyRoot) {
 impl EvaluationTaskMachine for LazyTaskMachine {
     fn poll(
         &mut self,
-        poll_context: &crate::evaluation::EvaluationPollContext,
+        poll_context: &mut crate::evaluation::EvaluationPollContext,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let durable_context = self.context.clone();
@@ -1683,12 +1680,11 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             // Rust. If the callback unwinds, this route and every later route
             // observe only the non-replayable `Invoking` checkpoint.
             self.work = LazyTaskWork::HostCallCheckpoint;
-            // Host code may block or call out, so it runs once the poll's
-            // heap admission ends: a collection must not wait for it.
-            let lazy = self.lazy.clone();
-            poll_context.after_admission(move || invoke_host_call(&durable_context, &lazy));
-            // The callback's result becomes a traced managed edge. A later
-            // poll performs the host-to-WHNF family handoff.
+            // Host code may block or call out, so it runs with the poll's
+            // mutator suspended: a collection must not wait for it. The
+            // route's claim stays held, and the next poll of this quantum
+            // performs the host-to-WHNF family handoff from its result.
+            poll_context.suspend(|| invoke_host_call(&durable_context, &self.lazy));
             return EvaluationMachinePoll::Yielded;
         }
         poll_context.evaluate(&durable_context, |context| {
@@ -1983,7 +1979,7 @@ struct PromiseFollower {
 impl EvaluationTaskMachine for PromiseFollower {
     fn poll(
         &mut self,
-        poll_context: &crate::evaluation::EvaluationPollContext,
+        poll_context: &mut crate::evaluation::EvaluationPollContext,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let durable_context = self.context.clone();
@@ -2245,10 +2241,10 @@ mod ownership_tests {
                 &promise_root,
             ),
         };
-        let poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
+        let mut poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
 
         let pending = follower.poll(
-            &poll_context,
+            &mut poll_context,
             &mut crate::evaluation::EvaluationStepBudget::new(1),
         );
         let EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
@@ -2267,13 +2263,13 @@ mod ownership_tests {
         );
         assert!(matches!(
             follower.poll(
-                &poll_context,
+                &mut poll_context,
                 &mut crate::evaluation::EvaluationStepBudget::new(1)
             ),
             EvaluationMachinePoll::Yielded
         ));
         let EvaluationMachinePoll::Complete(value) = follower.poll(
-            &poll_context,
+            &mut poll_context,
             &mut crate::evaluation::EvaluationStepBudget::new(1),
         ) else {
             panic!("the yielded follower must resume from the assigned value")
@@ -2315,9 +2311,12 @@ mod ownership_tests {
             inline_request: None,
             inline_completed: false,
         };
-        let poll = crate::evaluation::EvaluationPollContext::for_context(&context);
-        let step = |machine: &mut LazyTaskMachine| {
-            machine.poll(&poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+        let mut poll = crate::evaluation::EvaluationPollContext::for_context(&context);
+        let mut step = |machine: &mut LazyTaskMachine| {
+            machine.poll(
+                &mut poll,
+                &mut crate::evaluation::EvaluationStepBudget::new(1),
+            )
         };
 
         assert!(matches!(step(&mut first), EvaluationMachinePoll::Yielded));

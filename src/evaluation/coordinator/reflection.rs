@@ -832,7 +832,7 @@ impl ClaimedReflectionWork {
 
     pub(in crate::evaluation) fn poll(
         &mut self,
-        context: &super::super::EvaluationPollContext,
+        context: &mut super::super::EvaluationPollContext,
         step_budget: &mut super::super::EvaluationStepBudget,
     ) -> super::EvaluationMachinePoll {
         self.machine

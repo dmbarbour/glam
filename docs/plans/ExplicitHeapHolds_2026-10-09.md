@@ -453,9 +453,27 @@ Slices, in order (2026-10-13):
    chain and `hello_elf` -6.5 to -7%, `.r ()` steps -5.4%, `minimal`
    -2.8%; `parse_ifs_16` +0.6%. Accesses that open their own region
    through `CoreValueFactory::with_runtime_value_access` stay recursive
-   entries until they take access from the context. Second part: the
-   machine poll takes the context mutably, reflection polls hold a
-   mutator, and their host callbacks and pumping suspend it.
+   entries until they take access from the context.
+
+   Second part (landed): the machine poll takes the context mutably, and
+   every production poll holds a mutator, reflection polls and direct
+   effect runs included (`quantum_for_context`); a mutator-free context
+   remains only for test fixtures. Suspension sites: `TaskHost` snapshot,
+   validate and commit (a snapshot, edit and commit share one), a
+   specialization request (started and polled under one), host calls
+   (whose result the same quantum consumes), and releasing pumped work.
+   Pumped work shares the pumping quantum's mutator through
+   `EvaluationPollContext::nested_quantum`, and suspends it only to run
+   deferred work. A first version suspended around each pump: it livelocked
+   when one pump was missed, and cost a suspension per pump; the shared
+   mutator avoids both. Releasing pumped work stays suspended, since
+   settling a terminal task can evaluate a diagnostic through a nested
+   driver. Pump entry points that may wait are release points. Per `.r ()`
+   step: 487 K to 480 K instructions, 15.4 outer and 3.0 recursive heap
+   entries. Elsewhere within -0.5% to +0.4% of the first part (`chain`
+   +0.4%, `hello_elf` +0.3%), after `#[inline]` on the access wrappers
+   recovered a codegen regression of up to 1.9% from the `&mut` context.
+   64 roots per step remain, about 18% of a step: the next target.
 4. The public API, the compile entry, the remaining waits and the
    production nesting sites.
 

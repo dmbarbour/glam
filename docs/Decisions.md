@@ -2008,6 +2008,31 @@ maps the short names used here to file names.
   Admission Invariants".
 - **Recorded in:** explicit heap holds plan, `gc-hold-api`.
 
+### Coarse-grained mutators: the budget bounds them, suspensions are packed
+`coarse-grained-mutator` · 2026-10-13 · maintainer · accepted
+- **Context:** reflection steps made about 30 single-access heap entries
+  each, and their step loop calls client code and pumps dependencies, so a
+  mutator spanning it must suspend from deep inside the machine.
+- **Decision:** coarse-grained evaluation. A poll holds its mutator for its
+  whole quantum, and only the evaluation budget bounds how long; adjacent
+  operations that must not run under it share one suspension where that
+  costs little. Local reasoning about safety and refactoring, and
+  performance, matter more than the Rust expression. The poll context
+  packages the mutator as a parameter, with static borrows (no `RefCell`):
+  machine polls take it mutably, value access borrows it shared, and
+  `suspend` needs it exclusively.
+- **Consequences:** reflection polls hold a mutator and suspend around host
+  callbacks and specialization requests (started and polled under one
+  suspension). Work a quantum pumps shares its mutator, and releasing it
+  runs suspended, since settling may evaluate diagnostics. Host calls run
+  suspended, and the same quantum consumes their result. Per `.r ()` step,
+  heap entries fell from 34.6 outer and 117.6 recursive to 15.4 and 3.0;
+  instructions per step 515 K to 480 K. `#[inline]` on the access wrappers
+  recovered a codegen regression from the `&mut` context.
+- **Rule lives in:** `docs/architecture/evaluation.md`;
+  `agent_context/evaluation.md` "Values and Forcing".
+- **Recorded in:** explicit heap holds plan, `gc-hold-lend-mutator`.
+
 ### Each evaluation quantum holds the thread's mutator; host work runs after it
 `quantum-mutator` · 2026-10-13 · agent · accepted
 - **Context:** `owned-mutator-views` replaces held regions with owned
@@ -2017,15 +2042,16 @@ maps the short names used here to file names.
   `Heap::mutate_recursive` while some quanta still run inside another
   access. Work that waits on another thread or calls out to a host is
   deferred with `after_admission` and runs once the mutator ends, before
-  the driver releases its claim: host calls, reflection activations and
-  the net contention wait. A poll with deferred work ends its quantum.
+  the driver releases its claim: reflection activations and the net
+  contention wait (host calls too, until `coarse-grained-mutator` let them
+  suspend instead). A poll with deferred work ends its quantum.
   Nested synchronous drivers do not run inside quanta; test sources that
   did now read their inputs as evaluator steps or run as host calls.
   Supersedes `quantum-held-region`, whose release points no longer exist
   inside quanta.
 - **Consequences:** a release point reached inside a quantum panics instead
-  of silently ending admission; reflection polls, which hold no mutator yet,
-  are next.
+  of silently ending admission. Reflection polls joined under
+  `coarse-grained-mutator`.
 - **Recorded in:** explicit heap holds plan, `gc-hold-defer-release-points`
   and `gc-hold-quantum-mutator`.
 

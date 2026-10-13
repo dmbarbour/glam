@@ -863,7 +863,7 @@ struct GateFailureMachine(Arc<EvaluationFailure>);
 impl EvaluationTaskMachine for GateFailureMachine {
     fn poll(
         &mut self,
-        context: &crate::evaluation::EvaluationPollContext,
+        context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Failed(context.root_failure(self.0.clone()))
@@ -939,7 +939,7 @@ struct FixtureTaskMachine {
 impl EvaluationTaskMachine for FixtureTaskMachine {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        _context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         match self

@@ -244,12 +244,19 @@ still match its exact subscription epoch and dependency key, so completing the
 claimed tip can expose only its immediate parent. Causal `.task.new`
 descendants are a separate helping route and never become zipper frames.
 
-Each evaluation quantum (a deferred or lazy-route task poll, a client
-demand, or a spark) holds one heap region, so the many short value accesses
-inside it are recursive entries rather than admissions. The region ends
-before the quantum boundary services collection pressure, and earlier
-wherever the poll waits on another thread or calls out to a host. Reflection
-task polls hold none, because they call into their host between steps.
+Each poll quantum (a deferred, lazy-route or reflection task poll, a client
+demand, or a spark) holds the thread's mutator
+(`EvaluationPollContext::quantum`), which its poll context lends: the many
+short value accesses inside it borrow the mutator rather than enter the heap.
+The mutator ends before the quantum boundary services collection pressure.
+Work that waits on another thread or calls out to a host either suspends it
+(`suspend`: host calls, whose result the same quantum then consumes,
+reflection host callbacks, specialization requests, and releasing pumped
+work) or runs after it (`after_admission`: reflection launches and the net
+contention wait, after which the quantum ends). Pumped work shares the
+pumping quantum's mutator. A suspension costs about two heap entries, so
+adjacent operations share one; the evaluation budget alone bounds how long a
+quantum holds its mutator.
 
 Ordinary worker quantums preserve their thread's inactive per-heap allocation
 cursors for reuse. Worker-thread termination is the stronger collector
@@ -260,15 +267,18 @@ higher-ranked callback. Full collection, rather than TLS eviction, recovers
 the forgotten allocation ranges.
 
 After a claim is detached from coordinator locks, `evaluation/pump.rs` derives
-one `EvaluationPollContext` from that checked session and supplies it to every
-type-erased task poll. Caller-driven effect runs and isolated searches derive
-the same carrier from their explicitly owned demand session; they do not
-manufacture a coordinator claim. Client demands and sparks use the common
-coordinator-owned adapter in cooperative and executor paths, so the executor
-contains no separate value-admission policy. Every carrier temporarily retains
-the validated demand state but exposes neither that route nor a mutator to the
-machine. Its only managed-access operation opens a lifetime-bound region for a
-bounded callback-free substep and closes it before returning. Whole-value,
+one `EvaluationPollContext` from that checked session, holding the thread's
+mutator, and supplies it mutably to every type-erased task poll.
+Caller-driven effect runs and isolated searches derive the same carrier from
+their explicitly owned demand session
+(`EvaluationPollContext::quantum_for_context`); they do not manufacture a
+coordinator claim. Client demands and sparks use the common coordinator-owned
+adapter in cooperative and executor paths, so the executor contains no
+separate value-admission policy. Every carrier temporarily retains the
+validated demand state but exposes neither that route nor the mutator to the
+machine. Its managed-access operation lends a lifetime-bound access for a
+bounded callback-free substep, which ends before returning; suspending needs
+the carrier mutably, so no access is open across a suspension. Whole-value,
 lazy-source, and effect operations may reach dependencies or callbacks, so they
 do not open one poll-wide region; spark demand enters through its scoped
 strategy implementation. Resumable scheduler-visible machine boundaries

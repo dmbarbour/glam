@@ -2166,7 +2166,7 @@ struct Complete;
 impl EvaluationTaskMachine for Complete {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        _context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Complete(_context.root_unit())
@@ -2178,7 +2178,7 @@ struct CompleteWithValue(Option<Value>);
 impl EvaluationTaskMachine for CompleteWithValue {
     fn poll(
         &mut self,
-        context: &crate::evaluation::EvaluationPollContext,
+        context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Complete(
@@ -2206,7 +2206,7 @@ struct ProbePollOutcomeMachine(ProbePollOutcome);
 impl EvaluationTaskMachine for ProbePollOutcomeMachine {
     fn poll(
         &mut self,
-        context: &crate::evaluation::EvaluationPollContext,
+        context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         match self.0 {
@@ -2236,7 +2236,7 @@ struct ExitVote(EvaluationExitBlock);
 impl EvaluationTaskMachine for ExitVote {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        _context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Exit(self.0.clone())
@@ -2251,7 +2251,7 @@ struct ExitUntilObservation {
 impl EvaluationTaskMachine for ExitUntilObservation {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        _context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         if self.context.current_observation_epoch() == self.observed {
@@ -2447,7 +2447,7 @@ struct AwaitWithObservation {
 impl EvaluationTaskMachine for Await {
     fn poll(
         &mut self,
-        poll_context: &crate::evaluation::EvaluationPollContext,
+        poll_context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         match self.context.poll_wait(&self.dependency) {
@@ -2488,7 +2488,7 @@ impl EvaluationTaskMachine for Await {
 impl EvaluationTaskMachine for AwaitWithObservation {
     fn poll(
         &mut self,
-        poll_context: &crate::evaluation::EvaluationPollContext,
+        poll_context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         match self.context.poll_wait(&self.dependency) {
@@ -2530,7 +2530,7 @@ struct AwaitPromise {
 impl EvaluationTaskMachine for AwaitPromise {
     fn poll(
         &mut self,
-        poll_context: &crate::evaluation::EvaluationPollContext,
+        poll_context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         poll_context.evaluate(&self.context, |context| {
@@ -2557,7 +2557,7 @@ struct AwaitCell {
 impl EvaluationTaskMachine for AwaitCell {
     fn poll(
         &mut self,
-        poll_context: &crate::evaluation::EvaluationPollContext,
+        poll_context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let dependency = self
@@ -2716,7 +2716,7 @@ struct AlwaysBlocked;
 impl EvaluationTaskMachine for AlwaysBlocked {
     fn poll(
         &mut self,
-        context: &crate::evaluation::EvaluationPollContext,
+        context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
@@ -2734,7 +2734,7 @@ struct BlockedWithFailure(Arc<EvaluationFailure>);
 impl EvaluationTaskMachine for BlockedWithFailure {
     fn poll(
         &mut self,
-        context: &crate::evaluation::EvaluationPollContext,
+        context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
@@ -2753,7 +2753,7 @@ struct ScopedThenBlocked {
 impl EvaluationTaskMachine for ScopedThenBlocked {
     fn poll(
         &mut self,
-        poll_context: &crate::evaluation::EvaluationPollContext,
+        poll_context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         poll_context.with_value_access(&self.context, |access| {
@@ -2784,7 +2784,7 @@ struct ScopedCompleteWithDropCheck {
 impl EvaluationTaskMachine for ScopedCompleteWithDropCheck {
     fn poll(
         &mut self,
-        poll_context: &crate::evaluation::EvaluationPollContext,
+        poll_context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         poll_context.with_value_access(&self.context, |_| {
@@ -2813,7 +2813,7 @@ struct CountedBlocked {
 impl EvaluationTaskMachine for CountedBlocked {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        _context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         *self
@@ -2833,7 +2833,7 @@ struct AlwaysYields;
 impl EvaluationTaskMachine for AlwaysYields {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        _context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Yielded
@@ -2848,7 +2848,7 @@ struct YieldThenComplete {
 impl EvaluationTaskMachine for YieldThenComplete {
     fn poll(
         &mut self,
-        context: &crate::evaluation::EvaluationPollContext,
+        context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         self.polls.fetch_add(1, Ordering::AcqRel);
@@ -2870,7 +2870,7 @@ struct RecordPollOrder {
 impl EvaluationTaskMachine for RecordPollOrder {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        _context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         self.polls
@@ -2890,7 +2890,7 @@ struct Fail;
 impl EvaluationTaskMachine for Fail {
     fn poll(
         &mut self,
-        context: &crate::evaluation::EvaluationPollContext,
+        context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Failed(context.root_failure(evaluation_failure("reasoning failed")))
@@ -2902,7 +2902,7 @@ struct FailWith(Arc<EvaluationFailure>);
 impl EvaluationTaskMachine for FailWith {
     fn poll(
         &mut self,
-        context: &crate::evaluation::EvaluationPollContext,
+        context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Failed(context.root_failure(self.0.clone()))
@@ -2914,7 +2914,7 @@ struct Signal(Option<mpsc::Sender<()>>);
 impl EvaluationTaskMachine for Signal {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        _context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         if let Some(signal) = self.0.take() {
@@ -2943,7 +2943,7 @@ struct SpawnThenYieldAfterRelease {
 impl EvaluationTaskMachine for SpawnThenYield {
     fn poll(
         &mut self,
-        context: &crate::evaluation::EvaluationPollContext,
+        context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let Some(signal) = self.signal.take() else {
@@ -2959,7 +2959,7 @@ impl EvaluationTaskMachine for SpawnThenYield {
 impl EvaluationTaskMachine for SpawnThenYieldAfterRelease {
     fn poll(
         &mut self,
-        context: &crate::evaluation::EvaluationPollContext,
+        context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let Some(started) = self.started.take() else {
@@ -2981,7 +2981,7 @@ impl EvaluationTaskMachine for SpawnThenYieldAfterRelease {
 impl EvaluationTaskMachine for SpawnSignal {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        _context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let signal = self
@@ -3008,7 +3008,7 @@ struct YieldAfterRelease {
 impl EvaluationTaskMachine for YieldAfterRelease {
     fn poll(
         &mut self,
-        context: &crate::evaluation::EvaluationPollContext,
+        context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let Some(started) = self.started.take() else {
@@ -3029,7 +3029,7 @@ struct BlockOnceOnWait(Option<EvaluationWaitToken>);
 impl EvaluationTaskMachine for BlockOnceOnWait {
     fn poll(
         &mut self,
-        context: &crate::evaluation::EvaluationPollContext,
+        context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         match self.0.take() {
@@ -3046,7 +3046,7 @@ impl EvaluationTaskMachine for BlockOnceOnWait {
 impl EvaluationTaskMachine for CompleteAfterRelease {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        _context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         if let Some(started) = self.started.take() {
@@ -3072,7 +3072,7 @@ struct AssignPromiseAfterRelease {
 impl EvaluationTaskMachine for AssignPromiseAfterRelease {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        _context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         if let Some(started) = self.started.take() {
@@ -3102,7 +3102,7 @@ struct FailAfterRelease {
 impl EvaluationTaskMachine for FailAfterRelease {
     fn poll(
         &mut self,
-        context: &crate::evaluation::EvaluationPollContext,
+        context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         if let Some(started) = self.started.take() {
@@ -3128,7 +3128,7 @@ struct CancellableAfterRelease {
 impl EvaluationTaskMachine for CancellableAfterRelease {
     fn poll(
         &mut self,
-        context: &crate::evaluation::EvaluationPollContext,
+        context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         if let Some(started) = self.started.take() {
@@ -3158,7 +3158,7 @@ struct AssignPromiseThenYield {
 impl EvaluationTaskMachine for AssignPromiseThenYield {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        _context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let promise = self
@@ -3187,7 +3187,7 @@ struct CompleteAndSignalDrop {
 impl EvaluationTaskMachine for CompleteAndSignalDrop {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        _context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Complete(_context.root_unit())
@@ -3214,7 +3214,7 @@ struct CompleteAndCheckTerminalPublication {
 impl EvaluationTaskMachine for CompleteAndCheckTerminalPublication {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        _context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Complete(_context.root_unit())
@@ -3234,7 +3234,7 @@ impl Drop for CompleteAndCheckTerminalPublication {
 impl EvaluationTaskMachine for CompleteAndCheckReflectionDrop {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        _context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Complete(_context.root_unit())
@@ -3261,7 +3261,7 @@ struct CacheLazyFailure {
 impl EvaluationTaskMachine for CacheLazyFailure {
     fn poll(
         &mut self,
-        context: &crate::evaluation::EvaluationPollContext,
+        context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let result = self.values.with_runtime_value_access(|access| {
@@ -3284,7 +3284,7 @@ struct SpawnOnce {
 impl EvaluationTaskMachine for SpawnOnce {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        _context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         if !self.spawned {
@@ -3304,7 +3304,7 @@ struct Cancellable {
 impl EvaluationTaskMachine for Cancellable {
     fn poll(
         &mut self,
-        _context: &crate::evaluation::EvaluationPollContext,
+        _context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         EvaluationMachinePoll::Yielded
@@ -3589,10 +3589,12 @@ fn budgeted_route_pump_charges_its_reserved_quantum() {
     let mut route = ExactDemandRoute::default();
     let mut budget = crate::evaluation::EvaluationStepBudget::new(1_000);
 
-    assert_eq!(
-        context.pump_wait_on_route_within(&task.wait, &mut budget, &mut route),
-        EvaluationPumpOutcome::TargetReady
-    );
+    // Pumped within a quantum, the task shares its mutator.
+    let pumped =
+        crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |quantum| {
+            context.pump_wait_on_route_within(quantum, &task.wait, &mut budget, &mut route)
+        });
+    assert_eq!(pumped, EvaluationPumpOutcome::TargetReady);
     // The pump reserved one poll quantum for the task and charged it to the
     // caller, so a caller's total budget bounds everything it pumps.
     assert!(budget.remaining() < 1_000);
@@ -3601,8 +3603,9 @@ fn budgeted_route_pump_charges_its_reserved_quantum() {
     let pending = context
         .schedule_task(|_| Ok(Box::new(Complete)))
         .expect("task should schedule");
+    let mut quantum = crate::evaluation::EvaluationPollContext::for_context(&context);
     assert_eq!(
-        context.pump_wait_on_route_within(&pending.wait, &mut exhausted, &mut route),
+        context.pump_wait_on_route_within(&mut quantum, &pending.wait, &mut exhausted, &mut route),
         EvaluationPumpOutcome::BudgetExhausted
     );
 }
@@ -4611,7 +4614,7 @@ fn patient_deferred_demand_retries_when_disturbance_races_no_progress() {
     impl EvaluationTaskMachine for CompleteAfterObservation {
         fn poll(
             &mut self,
-            context: &EvaluationPollContext,
+            context: &mut EvaluationPollContext,
             _step_budget: &mut crate::evaluation::EvaluationStepBudget,
         ) -> EvaluationMachinePoll {
             if self.context.current_observation_epoch() == self.observed {
@@ -8459,7 +8462,7 @@ fn forced_kill_publishes_task_status_and_fails_owned_promises() {
     impl EvaluationTaskMachine for BlockedWithDropCheck {
         fn poll(
             &mut self,
-            _context: &crate::evaluation::EvaluationPollContext,
+            _context: &mut crate::evaluation::EvaluationPollContext,
             _step_budget: &mut crate::evaluation::EvaluationStepBudget,
         ) -> EvaluationMachinePoll {
             EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
@@ -8581,7 +8584,7 @@ fn exit_settlement_fails_owned_promises_and_drops_reusable_machine_after_unlock(
     impl EvaluationTaskMachine for ExitWithDropCheck {
         fn poll(
             &mut self,
-            _context: &crate::evaluation::EvaluationPollContext,
+            _context: &mut crate::evaluation::EvaluationPollContext,
             _step_budget: &mut crate::evaluation::EvaluationStepBudget,
         ) -> EvaluationMachinePoll {
             EvaluationMachinePoll::Exit(EvaluationExitBlock {

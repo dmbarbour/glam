@@ -79,7 +79,7 @@ struct PausedHostWorker {
 impl EvaluationTaskMachine for PausedHostWorker {
     fn poll(
         &mut self,
-        poll_context: &crate::evaluation::EvaluationPollContext,
+        poll_context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         self.entered
@@ -87,12 +87,13 @@ impl EvaluationTaskMachine for PausedHostWorker {
             .expect("host worker fixture should run once")
             .send(())
             .expect("host-worker observer should remain live");
-        // Host work inside a poll first ends the poll's held region, as host
-        // calls do, so a collection need not wait for it.
-        crate::core::release_held_region();
-        self.release
-            .recv()
-            .expect("host-worker release should remain live");
+        // Host work inside a poll suspends the poll's mutator, so a
+        // collection need not wait for it.
+        poll_context.suspend(|| {
+            self.release
+                .recv()
+                .expect("host-worker release should remain live")
+        });
         EvaluationMachinePoll::Complete(poll_context.root_unit())
     }
 }
@@ -100,7 +101,7 @@ impl EvaluationTaskMachine for PausedHostWorker {
 impl EvaluationTaskMachine for PausedManagedWorker {
     fn poll(
         &mut self,
-        poll_context: &crate::evaluation::EvaluationPollContext,
+        poll_context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         poll_context.with_value_access(&self.context, |_| {

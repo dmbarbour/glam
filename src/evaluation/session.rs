@@ -2145,6 +2145,9 @@ impl EvalContext {
         reservation_allowance: usize,
         route: &mut ExactDemandRoute,
     ) -> EvaluationPumpOutcome {
+        // Pumped work takes its own mutator and may wait, so a pump runs
+        // outside any: under an owned mutator this release point panics.
+        crate::core::release_held_region();
         let Some(coordinator) = self.coordinator() else {
             return if wait.terminal_poll().is_some() {
                 EvaluationPumpOutcome::TargetReady
@@ -2153,13 +2156,23 @@ impl EvalContext {
             };
         };
         let mut reservation_allowance = reservation_allowance;
-        pump_demand_on_route(&coordinator, self, wait, &mut reservation_allowance, route)
+        pump_demand_on_route(
+            &coordinator,
+            self,
+            wait,
+            &mut reservation_allowance,
+            route,
+            None,
+        )
     }
 
     /// Pumps toward `wait` within `budget`, charging it for every poll
-    /// quantum the pump reserves.
+    /// quantum the pump reserves. The pumped polls share `quantum`'s mutator
+    /// (`EvaluationPollContext::nested_quantum`); the pump itself never
+    /// waits.
     pub(crate) fn pump_wait_on_route_within(
         &self,
+        quantum: &mut super::EvaluationPollContext,
         wait: &EvaluationWaitToken,
         budget: &mut super::EvaluationStepBudget,
         route: &mut ExactDemandRoute,
@@ -2173,7 +2186,14 @@ impl EvalContext {
         };
         let granted = budget.remaining();
         let mut allowance = granted;
-        let outcome = pump_demand_on_route(&coordinator, self, wait, &mut allowance, route);
+        let outcome = pump_demand_on_route(
+            &coordinator,
+            self,
+            wait,
+            &mut allowance,
+            route,
+            Some(quantum),
+        );
         budget.consume(granted - allowance);
         outcome
     }
