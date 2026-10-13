@@ -1988,7 +1988,7 @@ maps the short names used here to file names.
 - **Recorded in:** explicit heap holds plan, "Decisions, 2026-10-12".
 
 ### An owned mutator is taken outermost; legacy release under it panics
-`owned-mutator-outermost` · 2026-10-13 · agent · accepted
+`owned-mutator-outermost` · 2026-10-13 · maintainer · accepted
 - **Context:** `gc-hold-api` added `Heap::mutate`, `Mutator::suspend` and
   `GcRef` beside the legacy closure token, renamed `MutatorAccess`.
 - **Decision:** `mutate` panics inside any active heap entry, legacy ones
@@ -1997,10 +1997,12 @@ maps the short names used here to file names.
   mutator's thread record stays registered. A suspension whose closure or
   re-admission unwinds leaves the mutator without access, which panics on
   use. Views check a per-thread admission generation in debug builds.
-- **Consequences:** boundaries convert outside-in; a converted boundary
-  reached inside an unconverted access, as public-API calls from tests
-  are, panics until its callers convert or a nested, non-suspending
-  mutator is added as a transition aid.
+- **Consequences:** boundaries convert outside-in. During migration, a
+  boundary still reached inside unconverted accesses uses the separately
+  named `Heap::mutate_recursive`, a recursive mutator that cannot suspend
+  when nested, and moves to `mutate` once its callers convert, so the
+  names show where a transition has stabilized (maintainer). The aid
+  retires with the legacy token in `gc-hold-tests`.
 - **Rule lives in:** `crates/glam-gc/SAFETY.md` "Regional Mutator
   Admission Invariants".
 - **Recorded in:** explicit heap holds plan, `gc-hold-api`.

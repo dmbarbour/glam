@@ -1186,6 +1186,9 @@ over a minute. The Loom suite runs in about three seconds.
 - a collection inside the suspension on the same thread, which must leave
   the suspended record registered for resumption to find;
 - other mutators, for this heap and another, inside a suspension;
+- `mutate_recursive`: owned and suspendable outside every entry; inside a
+  legacy access, an owned mutator or a held region, a recursive entry whose
+  suspension panics and under which a release point does nothing;
 - refusals: suspending inside a legacy access (the mutator stays usable),
   a held-region release point under an owned mutator, and releasing thread
   caches while a mutator is suspended;

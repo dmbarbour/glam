@@ -79,6 +79,44 @@ fn a_thread_holds_at_most_one_mutator() {
 }
 
 #[test]
+fn a_recursive_mutator_nests_inside_other_entries_without_suspending() {
+    let heap = Heap::new();
+    let other = Heap::new();
+
+    // Outside every entry, it is an owned mutator.
+    heap.mutate_recursive(|mutator| mutator.suspend(|| {}));
+
+    heap.with_mutator(|_| {
+        heap.mutate_recursive(|mutator| {
+            let root = mutator.root(mutator.allocator::<u64>().unwrap().alloc(3_u64));
+            assert_eq!(*root.get(mutator), 3);
+            let panic = catch_unwind(AssertUnwindSafe(|| mutator.suspend(|| {})))
+                .expect_err("a recursive mutator should not suspend");
+            assert!(panic_message(panic).contains("recursive mutator cannot suspend"));
+            assert_eq!(*root.get(mutator), 3);
+        });
+    });
+    heap.mutate(|_| heap.mutate_recursive(|_| {}));
+
+    // Inside a held region, a release point leaves the region alone while
+    // the recursive mutator is active.
+    heap.with_held_region(|| {
+        heap.mutate_recursive(|_| assert!(!Heap::release_held_region()));
+        assert!(Heap::release_held_region());
+    });
+
+    heap.mutate(|_| {
+        let foreign = catch_unwind(AssertUnwindSafe(|| other.mutate_recursive(|_| {})))
+            .expect_err("a recursive mutator for another heap should panic");
+        assert!(panic_message(foreign).contains("only one heap at a time"));
+    });
+
+    let metrics = heap.metrics();
+    assert_eq!(metrics.outer_mutator_entries(), 6);
+    assert_eq!(metrics.recursive_mutator_entries(), 3);
+}
+
+#[test]
 fn a_suspension_admits_a_collection_on_another_thread() {
     let heap = Heap::new();
     let (suspended, suspension) = mpsc::channel();

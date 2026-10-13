@@ -61,17 +61,25 @@ use crate::trace::ErasedGc;
 /// ```
 pub struct Mutator<'mu> {
     access: MutatorAccess<'mu>,
-    /// The thread's outer entry for the heap, absent only after a
-    /// suspension failed to re-admit.
+    /// The thread's entry for the heap, absent only after a suspension
+    /// failed to re-admit.
     entry: Option<ThreadHeapEntry<'mu>>,
+    /// Whether the entry is recursive ([`crate::Heap::mutate_recursive`]),
+    /// holding no admission of its own.
+    recursive: bool,
     brand: PhantomData<fn(&'mu ()) -> &'mu ()>,
 }
 
 impl<'mu> Mutator<'mu> {
-    pub(crate) fn new(heap: &'mu Arc<HeapInner>, entry: ThreadHeapEntry<'mu>) -> Self {
+    pub(crate) fn new(
+        heap: &'mu Arc<HeapInner>,
+        entry: ThreadHeapEntry<'mu>,
+        recursive: bool,
+    ) -> Self {
         Self {
             access: MutatorAccess::new(heap, entry.cache()),
             entry: Some(entry),
+            recursive,
             brand: PhantomData,
         }
     }
@@ -87,12 +95,17 @@ impl<'mu> Mutator<'mu> {
     ///
     /// # Panics
     ///
-    /// Panics if a legacy [`crate::Heap::with_mutator`] access is open
-    /// inside this mutator. Re-admission panics if the heap became
+    /// Panics if this mutator is a recursive entry
+    /// ([`crate::Heap::mutate_recursive`]), or if a legacy
+    /// [`crate::Heap::with_mutator`] access is open inside it. Re-admission panics if the heap became
     /// permanently poisoned; the mutator then holds no admission, and any
     /// later access through it panics. If `operation` unwinds, the mutator
     /// stays suspended in the same way.
     pub fn suspend<R>(&mut self, operation: impl FnOnce() -> R) -> R {
+        assert!(
+            !self.recursive,
+            "a recursive mutator cannot suspend; take it with `Heap::mutate` at the outer boundary"
+        );
         let entry = self
             .entry
             .as_ref()
@@ -123,6 +136,7 @@ impl fmt::Debug for Mutator<'_> {
         formatter
             .debug_struct("Mutator")
             .field("admitted", &self.entry.is_some())
+            .field("recursive", &self.recursive)
             .finish_non_exhaustive()
     }
 }
