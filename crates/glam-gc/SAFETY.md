@@ -492,31 +492,30 @@ the separate liveness and exactly-once obligations at each call site.
   enters normally and leaves the hint latched. One
   epoch identifies the active collection, and synchronous waiters join it
   rather than requiring a follow-up epoch.
-- Preparing a thread-local heap entry obtains or validates its weak heap-
-  qualified record without activating it. The entry then obtains one
-  coordinator obligation before activating its cache. A panic or block
-  between preparation and activation therefore leaves the TLS record
-  inactive, and the admission token's destructor rolls back the active count.
-- No entry nests (`no-recursive-heap-entries`): activating an entry asserts
-  that the record is inactive, so each active record holds exactly one
-  coordinator obligation. Code under a mutator borrows its access instead
-  of entering again.
-- A thread holds mutators for at most one heap at a time; Glam's runtimes
-  never nest heaps, and the collector serves only Glam (maintainer,
-  2026-10-09). A thread-local current-heap slot names the heap the thread
-  entered last, so any active mutator on the thread belongs to it.
-  Preparing an entry for another heap while that one is active panics before
-  it creates a TLS record or takes admission; entering the current heap again
-  reuses its record without a registry lookup. A collection can therefore
-  never wait on a thread that is itself blocked entering another heap.
+- An entry first checks that its thread holds no entry, then obtains one
+  coordinator obligation, and only then finds or creates its weak heap-
+  qualified TLS record and activates it. A panic or block before activation
+  therefore leaves no active TLS state, and the admission token's destructor
+  rolls back the active count. An entry-elected collection, which removes
+  the thread's inactive record, runs before the record is found.
+- No entry nests (`no-recursive-heap-entries`), and a thread holds an entry
+  for at most one heap at a time; Glam's runtimes never nest heaps, and the
+  collector serves only Glam (maintainer, 2026-10-09). A thread-local slot
+  names the heap of the thread's active entry, with the root free list
+  moved out of its record; an entry for any heap panics while it is set,
+  before taking admission, so each active record holds exactly one
+  coordinator obligation and a collection never waits on a thread that is
+  itself blocked entering another heap. Code under a mutator borrows its
+  access instead of entering again. A second slot names the heap the thread
+  entered last, so entering it again reuses its record without a registry
+  lookup.
 - An owned mutator (`Heap::mutate`) is its thread's only entry, taken
   only when the thread has no active entry for any heap; otherwise it
-  panics. `Heap::thread_holds_mutator` reports whether the thread has an
-  active entry, so code that waits or calls out can assert it holds none.
+  panics. `Heap::thread_holds_mutator` reads the active-entry slot, so code
+  that waits or calls out can assert it holds none.
 - `Mutator::suspend` is a scoped safepoint. It marks the record suspended, ends the entry
   (cache quiescence before the coordinator obligation, as at any outer
-  exit), runs its closure, and re-admits into the same record, asserting its
-  identity. While suspended, the record does not count as an active
+  exit), runs its closure, and re-admits into the same record, which it keeps. While suspended, the record does not count as an active
   mutator, so a collection on this or another thread may run, and the
   closure may take another mutator for this heap or, after leaving it,
   another heap. The suspended record stays registered: the collector skips
@@ -673,7 +672,7 @@ the separate liveness and exactly-once obligations at each call site.
 ## Thread-Local Allocation Cache Lifecycle
 
 - Each thread's registry holds only a weak heap identity, a nonzero captured
-  allocation-lease epoch, its entry depth (zero or one), and a fixed 64-entry direct-mapped
+  allocation-lease epoch, whether an entry holds it, and a fixed 64-entry direct-mapped
   cursor array. The heap has no cache registry or TLS back-reference.
 - The weak Arc identity prevents its allocation address from being reused while
   a stale TLS record exists without keeping the dead heap alive. Ordinary heap
@@ -1551,8 +1550,8 @@ mutation closure runs.
   rejection of non-slot addresses, and non-publication after invalid or
   repeated initialization.
 - C3 tests force class discovery behind exclusive admission,
-  prepare/admit/activate state, rollback before activation, same-heap recursive
-  entry with a request latched, one heap per thread, authoritative exclusion
+  admit-then-activate state, rollback before activation, class discovery
+  under a mutator with a request latched, one heap per thread, authoritative exclusion
   of fresh outer entry, mutator-exit visibility, idle-entry election, direct
   admission handoff, collector-cache reset, request coalescing, any-mutator
   synchronous rejection, no exit-time service, the no-gap finalizer handoff,
@@ -1689,7 +1688,7 @@ create no competing semantic rules.
   race a trace or sweep. Allocated payloads never move.
 - **One heap per runtime; no cross-heap edge.** In Glam each
   `EvaluationRuntime` value domain owns one heap, and a thread holds at most
-  one heap's mutator at a time. Mutator authority, entry depth, and
+  one heap's mutator at a time. Mutator authority, active entries, and
   allocation caches are heap-qualified. Root construction and access reject a
   foreign heap in every
   build. Tracing rejects a foreign, stale, interior, or unallocated edge before

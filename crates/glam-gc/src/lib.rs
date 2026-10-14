@@ -175,7 +175,7 @@ mod tests {
                 second_heap.mutate(|_| {});
             }))
             .expect_err("entering a second heap inside the first should panic");
-            assert!(panic_message(nested).contains("only one heap at a time"));
+            assert!(panic_message(nested).contains("at most one mutator"));
 
             // SAFETY: `first` was allocated by this heap's mutator and is live.
             assert_eq!(unsafe { *first.get_unchecked(first_mutator) }, 11);

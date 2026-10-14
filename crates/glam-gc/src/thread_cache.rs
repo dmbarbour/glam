@@ -185,13 +185,13 @@ struct CachedClass {
 struct ThreadHeapState {
     heap: Weak<HeapInner>,
     heap_id: HeapId,
-    entry_depth: usize,
+    /// Whether an entry holds this record: an owned [`crate::Mutator`] or a
+    /// collection's finalizing entry. A thread holds at most one entry.
+    active: bool,
     /// Classes by managed type, so acquiring an allocator for a known type
     /// takes neither the process-wide metadata registry nor the heap's data
     /// mutex.
     classes: TrustedHashMap<TypeId, CachedClass>,
-    /// Whether an owned [`crate::Mutator`] holds this record's outer entry.
-    owned: bool,
     /// Owned mutators of this heap suspended on this thread. A suspended
     /// mutator keeps its record, so collection inside the suspension cannot
     /// orphan it.
@@ -275,9 +275,8 @@ impl ThreadHeapState {
         Self {
             heap: Arc::downgrade(heap),
             heap_id: heap.id(),
-            entry_depth: 0,
+            active: false,
             classes: TrustedHashMap::default(),
-            owned: false,
             suspended: 0,
             captured_epoch,
             cursors: ClassCursorCache::default(),
@@ -288,31 +287,16 @@ impl ThreadHeapState {
         }
     }
 
-    /// Moves this record's free root slots into the thread's active list.
-    fn activate_roots(&mut self) {
-        debug_assert!(
-            ACTIVE_ROOTS.get().heap.is_none(),
-            "another admission's root list is still active"
+    /// Activates this record for an admitted entry of `heap` in
+    /// `current_epoch`, and makes it the thread's active entry.
+    fn activate(&mut self, heap: &Arc<HeapInner>, current_epoch: AllocationLeaseEpoch) {
+        // The cached `Weak` keeps the heap's allocation, so no other heap can
+        // reuse its address while this record exists.
+        assert!(
+            std::ptr::eq(self.heap.as_ptr(), Arc::as_ptr(heap)),
+            "thread heap-cache identity collision"
         );
-        ACTIVE_ROOTS.set(ActiveRoots {
-            heap: Some(self.heap_id),
-            head: self.root_free.take(),
-            lease: self.root_lease.take(),
-            registrations: 0,
-        });
-    }
-
-    /// Moves the thread's active free root slots back into this record.
-    fn deactivate_roots(&mut self) {
-        let active = ACTIVE_ROOTS.replace(ActiveRoots::NONE);
-        debug_assert_eq!(active.heap, Some(self.heap_id));
-        self.root_free = active.head;
-        self.root_lease = active.lease;
-        self.region_metrics.root_registrations += active.registrations;
-    }
-
-    fn begin_outer_entry(&mut self, current_epoch: AllocationLeaseEpoch) {
-        debug_assert_eq!(self.entry_depth, 0);
+        debug_assert!(!self.active);
         if self.captured_epoch != current_epoch {
             // Stale records are inert. Forget them wholesale without reading a
             // run or attempting to return leases which collection rebuilt.
@@ -321,6 +305,33 @@ impl ThreadHeapState {
             self.root_lease = None;
             self.captured_epoch = current_epoch;
         }
+        // The last deactivation took the region's other metrics.
+        self.region_metrics.outer_entries = 1;
+        debug_assert!(
+            ACTIVE_ENTRY.get().heap.is_none(),
+            "the thread already holds an entry"
+        );
+        ACTIVE_ENTRY.set(ActiveEntry {
+            heap: Some(self.heap_id),
+            root_free: self.root_free.take(),
+            root_lease: self.root_lease.take(),
+            root_registrations: 0,
+        });
+        self.active = true;
+    }
+
+    /// Ends this record's entry and publishes its region's metrics.
+    fn deactivate(&mut self) {
+        debug_assert!(self.active);
+        let active = ACTIVE_ENTRY.replace(ActiveEntry::NONE);
+        debug_assert_eq!(active.heap, Some(self.heap_id));
+        self.root_free = active.root_free;
+        self.root_lease = active.root_lease;
+        self.region_metrics.root_registrations += active.root_registrations;
+        self.active = false;
+        let metrics = std::mem::take(&mut self.region_metrics);
+        self.counters.publish(metrics);
+        end_admission_generation();
     }
 }
 
@@ -335,32 +346,31 @@ impl HeapCacheKey {
 
 type SharedThreadHeapState = Rc<RefCell<ThreadHeapState>>;
 
-/// The free root slots of the heap this thread holds admission to, moved
-/// out of its record for the admission so that taking a slot touches no
-/// `RefCell`.
+/// The heap this thread holds an entry for, if any, with the free root
+/// slots moved out of its record for the entry so that taking a slot touches
+/// no `RefCell`.
 #[derive(Clone, Copy)]
-struct ActiveRoots {
+struct ActiveEntry {
     heap: Option<HeapId>,
-    head: Option<NonNull<RootSlot>>,
-    /// The pool chunk `head`'s list came from, which this thread leases.
-    lease: Option<usize>,
-    registrations: u64,
+    root_free: Option<NonNull<RootSlot>>,
+    /// The pool chunk `root_free`'s list came from, which this thread leases.
+    root_lease: Option<usize>,
+    root_registrations: u64,
 }
 
-impl ActiveRoots {
+impl ActiveEntry {
     const NONE: Self = Self {
         heap: None,
-        head: None,
-        lease: None,
-        registrations: 0,
+        root_free: None,
+        root_lease: None,
+        root_registrations: 0,
     };
 }
 
 thread_local! {
-    /// Set only while the thread holds an outer entry; a thread holds
-    /// admission to one heap at a time.
-    static ACTIVE_ROOTS: std::cell::Cell<ActiveRoots> =
-        const { std::cell::Cell::new(ActiveRoots::NONE) };
+    /// Set only while the thread holds an entry, which is for one heap.
+    static ACTIVE_ENTRY: std::cell::Cell<ActiveEntry> =
+        const { std::cell::Cell::new(ActiveEntry::NONE) };
 }
 
 #[cfg(debug_assertions)]
@@ -385,30 +395,20 @@ fn end_admission_generation() {
 thread_local! {
     static THREAD_HEAPS: RefCell<TrustedHashMap<HeapCacheKey, SharedThreadHeapState>> =
         RefCell::new(TrustedHashMap::default());
-    /// The heap this thread entered last, and its cache state. A thread holds
-    /// mutators for at most one heap at a time, so any active mutator on this
-    /// thread belongs to this heap. Entering it again needs no registry
-    /// lookup.
+    /// The heap this thread entered last, and its cache state, so that
+    /// entering it again needs no registry lookup.
     static CURRENT_HEAP: RefCell<Option<(HeapCacheKey, SharedThreadHeapState)>> =
         const { RefCell::new(None) };
 }
 
 /// The cache state for `heap`, which becomes the thread's current heap.
-///
-/// Panics if the thread holds another heap's mutator: a thread holds
-/// mutators for at most one heap at a time.
 fn enter_current_heap(heap: &Arc<HeapInner>, epoch: AllocationLeaseEpoch) -> SharedThreadHeapState {
     let key = HeapCacheKey::new(heap);
     CURRENT_HEAP.with_borrow_mut(|current| {
-        if let Some((current_key, state)) = current.as_ref() {
-            if *current_key == key {
-                return Rc::clone(state);
-            }
-            assert_eq!(
-                state.borrow().entry_depth,
-                0,
-                "a thread may hold mutators for only one heap at a time"
-            );
+        if let Some((current_key, state)) = current.as_ref()
+            && *current_key == key
+        {
+            return Rc::clone(state);
         }
         let state = THREAD_HEAPS.with_borrow_mut(|registry| {
             Rc::clone(
@@ -435,7 +435,7 @@ impl ThreadCacheHandle {
         value: T,
     ) -> Result<NonNull<T>, T> {
         let mut state = self.state.borrow_mut();
-        assert_ne!(state.entry_depth, 0, "mutator cache is not active");
+        assert!(state.active, "mutator cache is not active");
         let Some(cursor) = state.cursors.get_mut(class_id) else {
             state.region_metrics.class_cache_misses += 1;
             return Err(value);
@@ -458,7 +458,7 @@ impl ThreadCacheHandle {
         value: T,
     ) -> Result<NonNull<T>, T> {
         let mut state = self.state.borrow_mut();
-        assert_ne!(state.entry_depth, 0, "mutator cache is not active");
+        assert!(state.active, "mutator cache is not active");
         let cursor = state
             .cursors
             .get_mut(class_id)
@@ -474,7 +474,7 @@ impl ThreadCacheHandle {
         before_initialize: impl FnOnce(),
     ) -> Result<NonNull<T>, T> {
         let mut state = self.state.borrow_mut();
-        assert_ne!(state.entry_depth, 0, "mutator cache is not active");
+        assert!(state.active, "mutator cache is not active");
         let Some(cursor) = state.cursors.get_mut(class_id) else {
             return Err(value);
         };
@@ -519,19 +519,19 @@ impl ThreadCacheHandle {
     /// registration.
     #[inline]
     pub(crate) fn take_root_slot(&self) -> Option<NonNull<RootSlot>> {
-        ACTIVE_ROOTS.with(|active| {
+        ACTIVE_ENTRY.with(|active| {
             let mut roots = active.get();
             debug_assert_eq!(
                 roots.heap,
                 Some(self.state.borrow().heap_id),
                 "mutator cache is not active"
             );
-            let slot = roots.head?;
+            let slot = roots.root_free?;
             // SAFETY: the thread's list holds free slots of its heap's live
             // chunks, taken in the current lease epoch, and only this thread
             // uses it.
-            roots.head = unsafe { RootSlot::next_free(slot) };
-            roots.registrations += 1;
+            roots.root_free = unsafe { RootSlot::next_free(slot) };
+            roots.root_registrations += 1;
             active.set(roots);
             Some(slot)
         })
@@ -539,117 +539,65 @@ impl ThreadCacheHandle {
 
     /// Installs a free list this thread took from its heap's root pool.
     pub(crate) fn install_root_free_list(&self, head: NonNull<RootSlot>, lease: usize) {
-        ACTIVE_ROOTS.with(|active| {
+        ACTIVE_ENTRY.with(|active| {
             let mut roots = active.get();
             assert_eq!(
                 roots.heap,
                 Some(self.state.borrow().heap_id),
                 "mutator cache is not active"
             );
-            assert!(roots.head.is_none(), "root free list is still in use");
-            roots.head = Some(head);
-            roots.lease = Some(lease);
+            assert!(roots.root_free.is_none(), "root free list is still in use");
+            roots.root_free = Some(head);
+            roots.root_lease = Some(lease);
             active.set(roots);
         });
     }
 
     /// The pool chunk this thread's exhausted free list came from.
     pub(crate) fn root_lease(&self) -> Option<usize> {
-        ACTIVE_ROOTS.get().lease
+        ACTIVE_ENTRY.get().root_lease
     }
 
     pub(crate) fn install(&self, cursor: AllocationCursor) {
         let mut state = self.state.borrow_mut();
-        assert_ne!(state.entry_depth, 0, "mutator cache is not active");
+        assert!(state.active, "mutator cache is not active");
         state.cursors.insert(cursor);
     }
 }
 
-/// A TLS entry found or created before coordinator admission.
+/// One thread's active entry for a heap, holding its admission.
 ///
-/// Preparation never changes recursive depth or activates a cache, so a
-/// blocked or panicking admission leaves no active thread-local state.
-pub(crate) struct PreparedThreadHeapEntry {
-    state: SharedThreadHeapState,
-    outer: bool,
-}
-
-impl PreparedThreadHeapEntry {
-    pub(crate) fn prepare(heap: &Arc<HeapInner>, epoch: AllocationLeaseEpoch) -> Self {
-        let state = enter_current_heap(heap, epoch);
-        let outer = {
-            let state = state.borrow();
-            // The cached `Weak` keeps the heap's allocation, so no other heap
-            // can reuse its address while this entry exists.
-            assert!(
-                std::ptr::eq(state.heap.as_ptr(), Arc::as_ptr(heap)),
-                "thread heap-cache identity collision"
-            );
-            state.entry_depth == 0
-        };
-        Self { state, outer }
-    }
-
-    pub(crate) fn is_outer(&self) -> bool {
-        self.outer
-    }
-
-    /// Activates the thread's entry for this heap under `admission`. A
-    /// thread has at most one entry for a heap: no entry nests.
-    pub(crate) fn activate<'heap>(
-        self,
-        epoch: AllocationLeaseEpoch,
-        admission: MutatorAdmission<'heap>,
-    ) -> ThreadHeapEntry<'heap> {
-        assert!(
-            self.outer,
-            "a thread holds at most one entry for a heap, taken outside every other"
-        );
-        {
-            let mut state = self.state.borrow_mut();
-            state.begin_outer_entry(epoch);
-            state.region_metrics = ThreadRegionMetrics {
-                outer_entries: 1,
-                ..ThreadRegionMetrics::default()
-            };
-            state.activate_roots();
-            state.entry_depth = 1;
-        }
-        ThreadHeapEntry {
-            state: self.state,
-            outer_admission: Some(admission),
-            active: true,
-        }
-    }
-}
-
-impl PreparedThreadHeapEntry {
-    /// Activates an outer entry for an owned [`crate::Mutator`].
-    pub(crate) fn activate_owned<'heap>(
-        self,
-        epoch: AllocationLeaseEpoch,
-        admission: MutatorAdmission<'heap>,
-    ) -> ThreadHeapEntry<'heap> {
-        let state = Rc::clone(&self.state);
-        let entry = self.activate(epoch, admission);
-        state.borrow_mut().owned = true;
-        entry
-    }
-}
-
-/// Balances one activated same-thread heap entry.
+/// Dropping it ends the entry, then retires the admission.
 pub(crate) struct ThreadHeapEntry<'heap> {
     state: SharedThreadHeapState,
-    outer_admission: Option<MutatorAdmission<'heap>>,
-    active: bool,
+    /// `None` once [`ThreadHeapEntry::into_admission`] or
+    /// [`ThreadHeapEntry::suspend`] has ended the entry.
+    admission: Option<MutatorAdmission<'heap>>,
 }
 
 impl<'heap> ThreadHeapEntry<'heap> {
-    pub(crate) fn prepare(
+    /// Activates this thread's record for `heap` under `admission`, finding
+    /// or creating it. The caller checked, before admission, that the thread
+    /// holds no entry.
+    pub(crate) fn activate(
         heap: &Arc<HeapInner>,
         epoch: AllocationLeaseEpoch,
-    ) -> PreparedThreadHeapEntry {
-        PreparedThreadHeapEntry::prepare(heap, epoch)
+        admission: MutatorAdmission<'heap>,
+    ) -> Self {
+        Self::activate_record(enter_current_heap(heap, epoch), heap, epoch, admission)
+    }
+
+    fn activate_record(
+        state: SharedThreadHeapState,
+        heap: &Arc<HeapInner>,
+        epoch: AllocationLeaseEpoch,
+        admission: MutatorAdmission<'heap>,
+    ) -> Self {
+        state.borrow_mut().activate(heap, epoch);
+        Self {
+            state,
+            admission: Some(admission),
+        }
     }
 
     pub(crate) fn cache(&self) -> ThreadCacheHandle {
@@ -658,71 +606,40 @@ impl<'heap> ThreadHeapEntry<'heap> {
         }
     }
 
-    /// Panics unless this owned mutator's entry is its thread's only active
-    /// entry, which a suspension requires.
-    pub(crate) fn assert_suspendable(&self) {
-        let state = self.state.borrow();
-        assert!(state.owned, "only an owned mutator's entry can suspend");
-        assert_eq!(
-            state.entry_depth, 1,
-            "a mutator cannot suspend while a heap access is open inside it"
-        );
-    }
-
-    /// Ends this owned mutator's admission for a suspension. The returned
-    /// record stays registered until the suspension ends.
-    pub(crate) fn suspend_owned(self) -> SuspendedThreadHeapEntry {
-        self.assert_suspendable();
+    /// Ends this owned mutator's entry and admission for a suspension. The
+    /// returned record stays registered until the suspension ends.
+    pub(crate) fn suspend(mut self) -> SuspendedThreadHeapEntry {
+        let admission = self.take_admission();
         {
             let mut state = self.state.borrow_mut();
-            state.owned = false;
+            state.deactivate();
             state.suspended = state
                 .suspended
                 .checked_add(1)
                 .expect("suspended mutator count exhausted");
         }
-        let suspended = SuspendedThreadHeapEntry {
+        // Cache quiescence must precede retirement of the coordinator
+        // obligation, because zero active mutators admits exclusive work.
+        drop(admission);
+        SuspendedThreadHeapEntry {
             state: Rc::clone(&self.state),
-        };
-        drop(self);
-        suspended
+        }
     }
 
-    /// Deactivates an outer TLS entry while preserving its coordinator lease.
+    /// Ends this entry and hands its admission to the caller.
     ///
-    /// The collector uses this to transfer its finalizer mutator obligation
-    /// directly into the outer mutator entry which elected collection.
-    pub(crate) fn into_outer_admission(mut self) -> MutatorAdmission<'heap> {
-        let was_outer = self.deactivate();
-        assert!(
-            was_outer,
-            "only an outer mutator admission can be transferred"
-        );
-        self.outer_admission
-            .take()
-            .expect("outer mutator entry must own one coordinator obligation")
+    /// The collector uses this to transfer its finalizing entry's admission
+    /// directly to the entry which elected the collection.
+    pub(crate) fn into_admission(mut self) -> MutatorAdmission<'heap> {
+        let admission = self.take_admission();
+        self.state.borrow_mut().deactivate();
+        admission
     }
 
-    fn deactivate(&mut self) -> bool {
-        assert!(self.active, "mutator entry is already inactive");
-        let mut state = self.state.borrow_mut();
-        assert_eq!(
-            state.entry_depth, 1,
-            "mutator entry depth does not match its exit"
-        );
-        assert!(
-            self.outer_admission.is_some(),
-            "an active entry must own its coordinator obligation"
-        );
-        state.entry_depth = 0;
-        state.owned = false;
-        state.deactivate_roots();
-        let metrics = std::mem::take(&mut state.region_metrics);
-        state.counters.publish(metrics);
-        end_admission_generation();
-        drop(state);
-        self.active = false;
-        true
+    fn take_admission(&mut self) -> MutatorAdmission<'heap> {
+        self.admission
+            .take()
+            .expect("an active entry holds its admission")
     }
 }
 
@@ -735,18 +652,17 @@ pub(crate) struct SuspendedThreadHeapEntry {
 }
 
 impl SuspendedThreadHeapEntry {
-    /// Re-activates the suspended record once it has a new admission.
+    /// Re-activates the suspended record once it has a new admission. The
+    /// caller checked, before admission, that the thread holds no entry.
     pub(crate) fn resume<'heap>(
         self,
-        prepared: PreparedThreadHeapEntry,
+        heap: &Arc<HeapInner>,
         epoch: AllocationLeaseEpoch,
         admission: MutatorAdmission<'heap>,
     ) -> ThreadHeapEntry<'heap> {
-        assert!(
-            Rc::ptr_eq(&self.state, &prepared.state),
-            "a suspended mutator's thread record was replaced"
-        );
-        prepared.activate_owned(epoch, admission)
+        let state = Rc::clone(&self.state);
+        drop(self);
+        ThreadHeapEntry::activate_record(state, heap, epoch, admission)
     }
 }
 
@@ -767,8 +683,8 @@ pub(crate) fn release_current_thread_caches() -> usize {
         // cache record remains available for normal unwinding and exit.
         for state in registry.values() {
             let state = state.borrow();
-            assert_eq!(
-                state.entry_depth, 0,
+            assert!(
+                !state.active,
                 "cannot release thread caches while a mutator is active"
             );
             assert_eq!(
@@ -788,30 +704,17 @@ pub(crate) fn release_current_thread_caches() -> usize {
 /// `heap`, which its counters publish only when the region ends.
 #[cfg(any(test, feature = "deterministic-test-hooks"))]
 pub(crate) fn unpublished_root_registrations(heap: &Arc<HeapInner>) -> u64 {
-    let roots = ACTIVE_ROOTS.get();
+    let roots = ACTIVE_ENTRY.get();
     if roots.heap == Some(heap.id()) {
-        roots.registrations
+        roots.root_registrations
     } else {
         0
     }
 }
 
+/// Whether this thread holds an entry for any heap.
 pub(crate) fn thread_has_any_active_mutator() -> bool {
-    let active = CURRENT_HEAP.with_borrow(|current| {
-        current
-            .as_ref()
-            .is_some_and(|(_, state)| state.borrow().entry_depth != 0)
-    });
-    debug_assert_eq!(
-        active,
-        THREAD_HEAPS.with_borrow(|registry| {
-            registry
-                .values()
-                .any(|state| state.borrow().entry_depth != 0)
-        }),
-        "an active mutator belongs to a heap other than the thread's current heap"
-    );
-    active
+    ACTIVE_ENTRY.get().heap.is_some()
 }
 
 pub(crate) fn remove_inactive_thread_cache(heap: &Arc<HeapInner>) {
@@ -821,8 +724,8 @@ pub(crate) fn remove_inactive_thread_cache(heap: &Arc<HeapInner>) {
             return;
         };
         let state = state.borrow();
-        assert_eq!(
-            state.entry_depth, 0,
+        assert!(
+            !state.active,
             "collector cannot remove an active thread cache"
         );
         // A suspended mutator resumes into its own record, whose stale
@@ -845,20 +748,20 @@ pub(crate) fn remove_inactive_thread_cache(heap: &Arc<HeapInner>) {
 
 impl Drop for ThreadHeapEntry<'_> {
     fn drop(&mut self) {
-        if !self.active {
+        let Some(admission) = self.admission.take() else {
             return;
-        }
-        self.deactivate();
-        // Cache quiescence above must precede retirement of the coordinator
+        };
+        self.state.borrow_mut().deactivate();
+        // Cache quiescence must precede retirement of the coordinator
         // obligation, because zero active mutators admits exclusive work.
-        drop(self.outer_admission.take());
+        drop(admission);
     }
 }
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CacheSnapshot {
-    pub(crate) entry_depth: usize,
+    pub(crate) active: bool,
     pub(crate) captured_epoch: AllocationLeaseEpoch,
     pub(crate) cursor_count: usize,
 }
@@ -874,7 +777,7 @@ pub(crate) fn cache_snapshot(heap: &Arc<HeapInner>) -> Option<CacheSnapshot> {
     let state = state_for(heap)?;
     let state = state.borrow();
     Some(CacheSnapshot {
-        entry_depth: state.entry_depth,
+        active: state.active,
         captured_epoch: state.captured_epoch,
         cursor_count: state.cursors.len(),
     })
@@ -884,7 +787,7 @@ pub(crate) fn cache_snapshot(heap: &Arc<HeapInner>) -> Option<CacheSnapshot> {
 pub(crate) fn insert_cursor(heap: &Arc<HeapInner>, cursor: AllocationCursor) {
     let state = state_for(heap).expect("test cursor insertion requires a heap-cache entry");
     let mut state = state.borrow_mut();
-    assert_ne!(state.entry_depth, 0);
+    assert!(state.active);
     state.cursors.insert(cursor);
 }
 

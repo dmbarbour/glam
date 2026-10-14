@@ -1,7 +1,7 @@
 # Explicit Heap Holds — 2026-10-09
 
 Status: in progress; `gc-hold-api` landed on 2026-10-13, and the steps
-through `gc-hold-pass-access` by 2026-10-14. The maintainer adopted the 2026-10-10
+through `gc-hold-entry-cost` by 2026-10-14. The maintainer adopted the 2026-10-10
 design review on 2026-10-12 (see "Decisions, 2026-10-12") and suggested
 pulling this plan forward, ahead of the leftovers of
 `perf-reflection-step-cost`. Since the plan was written, a per-thread
@@ -798,6 +798,23 @@ ending the thread entry 90, activating it 64, finding and preparing the
 thread record 78, three layers of admission 107, merging region metrics 23,
 the admission gate's exit 21. After `gc-hold-pass-access`, which removes the
 legacy and recursive entry paths this one shares code with.
+
+Landed 2026-10-14. Removing the legacy and recursive paths
+(`gc-hold-pass-access`) brought an entry to 354 instructions and a
+suspension with resumption to 452, measured with the
+`glam-gc` example `entry_cost`, which loops either. With nesting gone,
+an entry checks a thread-local slot naming its thread's active heap
+instead of preparing its record first, takes admission, and only then
+finds and activates the record in one borrow. The prepared-entry type
+went, with the re-preparation after an entry-elected collection, the
+owned flag and the suspension's assertions that no access was open inside,
+which no entry can now violate; the record's depth became a flag. The
+same slot answers `Heap::thread_holds_mutator`. An entry now costs 270
+instructions and a suspension with resumption 296. What remains is
+spread over the admission's atomic operations, the record lookup and
+activation, the region metrics' publication and the heap-identity
+assertion, a few instructions each. Across the profiling workloads, 0.09%
+fewer instructions (0.43% for `minimal`).
 
 ### Class cache (`gc-hold-class-cache`), narrowed
 

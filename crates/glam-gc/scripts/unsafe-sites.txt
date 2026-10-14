@@ -173,7 +173,7 @@ crates/glam-gc/src/root_pool.rs:    unsafe fn free(chunk: NonNull<Self>) {
 crates/glam-gc/src/root_pool.rs:    unsafe fn has_references(chunk: NonNull<Self>) -> bool {
 crates/glam-gc/src/root_pool.rs:unsafe impl Send for OrphanedChunk {}
 crates/glam-gc/src/root_pool.rs:unsafe impl Send for RootPool {}
-crates/glam-gc/src/thread_cache.rs:            roots.head = unsafe { RootSlot::next_free(slot) };
+crates/glam-gc/src/thread_cache.rs:            roots.root_free = unsafe { RootSlot::next_free(slot) };
 crates/glam-gc/src/thread_cache.rs:        let current = unsafe { allocation_word.as_ref() }.load(Ordering::Relaxed);
 crates/glam-gc/src/thread_cache.rs:        let pointer = unsafe { self.run.pointer().add(offset).cast::<T>() };
 crates/glam-gc/src/thread_cache.rs:        unsafe {

@@ -17,9 +17,9 @@ use crate::{
     root_pool::{HeapId, RootPool},
     run::{AllocationClassId, RunGeometry},
     thread_cache::{
-        AllocationCursor, AllocationLeaseEpoch, PreparedThreadHeapEntry, SuspendedThreadHeapEntry,
-        ThreadCacheHandle, ThreadHeapEntry, ThreadRegionCounters, ThreadRegionMetrics,
-        remove_inactive_thread_cache, thread_has_any_active_mutator,
+        AllocationCursor, AllocationLeaseEpoch, SuspendedThreadHeapEntry, ThreadCacheHandle,
+        ThreadHeapEntry, ThreadRegionCounters, ThreadRegionMetrics, remove_inactive_thread_cache,
+        thread_has_any_active_mutator,
     },
     trace::ErasedGc,
 };
@@ -767,9 +767,13 @@ impl Heap {
         after_admission: impl FnOnce(),
         operation: impl for<'mu> FnOnce(&mut Mutator<'mu>) -> R,
     ) -> R {
-        let (prepared, admission) = self.inner.admit_owned(self.inner.prepare_entry());
+        let admission = self.inner.admit_owned();
         after_admission();
-        let entry = prepared.activate_owned(self.inner.current_allocation_lease_epoch(), admission);
+        let entry = ThreadHeapEntry::activate(
+            &self.inner,
+            self.inner.current_allocation_lease_epoch(),
+            admission,
+        );
         operation(&mut Mutator::new(&self.inner, entry))
     }
 }
@@ -2552,10 +2556,10 @@ impl MarkAttempt {
 }
 
 impl HeapInner {
-    /// Admits this thread's owned mutator as its outer entry.
+    /// Admits this thread's owned mutator as its entry.
     pub(crate) fn admit_owned_entry(self: &Arc<Self>) -> ThreadHeapEntry<'_> {
-        let (prepared, admission) = self.admit_owned(self.prepare_entry());
-        prepared.activate_owned(self.current_allocation_lease_epoch(), admission)
+        let admission = self.admit_owned();
+        ThreadHeapEntry::activate(self, self.current_allocation_lease_epoch(), admission)
     }
 
     /// Re-admits a suspended owned mutator into its own thread record.
@@ -2563,39 +2567,27 @@ impl HeapInner {
         self: &Arc<Self>,
         suspended: SuspendedThreadHeapEntry,
     ) -> ThreadHeapEntry<'_> {
-        let (prepared, admission) = self.admit_owned(self.prepare_entry());
-        suspended.resume(prepared, self.current_allocation_lease_epoch(), admission)
+        let admission = self.admit_owned();
+        suspended.resume(self, self.current_allocation_lease_epoch(), admission)
     }
 
-    fn prepare_entry(self: &Arc<Self>) -> PreparedThreadHeapEntry {
-        ThreadHeapEntry::prepare(self, self.current_allocation_lease_epoch())
-    }
-
-    fn admit_owned(
-        self: &Arc<Self>,
-        prepared: PreparedThreadHeapEntry,
-    ) -> (PreparedThreadHeapEntry, MutatorAdmission<'_>) {
+    /// Admits an owned mutator. Its thread record is found once admitted,
+    /// since an entry-elected collection removes the thread's inactive one.
+    fn admit_owned(self: &Arc<Self>) -> MutatorAdmission<'_> {
         assert!(
-            prepared.is_outer(),
+            !thread_has_any_active_mutator(),
             "a thread holds at most one mutator, taken outside every heap entry"
         );
-        let (admission, collected) = self.admit_outer_mutator();
-        let prepared = if collected {
-            drop(prepared);
-            self.prepare_entry()
-        } else {
-            prepared
-        };
-        (prepared, admission)
+        self.admit_outer_mutator()
     }
 
-    fn admit_outer_mutator(self: &Arc<Self>) -> (MutatorAdmission<'_>, bool) {
+    fn admit_outer_mutator(self: &Arc<Self>) -> MutatorAdmission<'_> {
         let collection_requested = || {
             self.collection_policy == CollectionPolicy::Automatic
                 && self.collection_requested.load(Ordering::Acquire)
         };
         if self.admission.try_enter(collection_requested) {
-            return (MutatorAdmission { heap: self }, false);
+            return MutatorAdmission { heap: self };
         }
         let elected = {
             let mut coordinator = self
@@ -2645,14 +2637,11 @@ impl HeapInner {
         };
 
         let Some(epoch) = elected else {
-            return (MutatorAdmission { heap: self }, false);
+            return MutatorAdmission { heap: self };
         };
         add_metric(&self.entry_elected_collections, 1);
-        (
-            self.run_synthetic_collection(epoch, true, |_, _| {}, |_| {})
-                .expect("entry-elected collection must preserve its mutator admission"),
-            true,
-        )
+        self.run_synthetic_collection(epoch, true, |_, _| {}, |_| {})
+            .expect("entry-elected collection must preserve its mutator admission")
     }
 
     fn request_collection(&self) {
@@ -3068,14 +3057,13 @@ impl HeapInner {
         let sweep_duration = sweep_started.elapsed();
         attempt.publish_allocator_view();
 
-        // Prepare the TLS record without activating it. Under the coordinator
-        // mutex, exclusive authority is then converted directly into one
-        // collector-owned mutator obligation. No ordinary entrant can observe
-        // a gap in which neither authority is present.
-        let prepared = ThreadHeapEntry::prepare(self, self.current_allocation_lease_epoch());
+        // Under the coordinator mutex, exclusive authority is converted
+        // directly into one collector-owned mutator obligation. No ordinary
+        // entrant can observe a gap in which neither authority is present.
+        // The thread's record is activated once that obligation exists.
         assert!(
-            prepared.is_outer(),
-            "collector thread unexpectedly holds a mutator for its target heap"
+            !thread_has_any_active_mutator(),
+            "collector thread unexpectedly holds a mutator"
         );
         let admission = {
             self.admission
@@ -3085,7 +3073,8 @@ impl HeapInner {
             MutatorAdmission { heap: self }
         };
         let pause_duration = collection_started.elapsed();
-        let thread_entry = prepared.activate(self.current_allocation_lease_epoch(), admission);
+        let thread_entry =
+            ThreadHeapEntry::activate(self, self.current_allocation_lease_epoch(), admission);
         let mutator = MutatorAccess::new(self, thread_entry.cache());
         #[cfg(feature = "deterministic-test-hooks")]
         self.pause_in_finalizing_phase();
@@ -3097,7 +3086,7 @@ impl HeapInner {
         let finalization_summary = self.run_finalization_batch(&mut attempt, &mutator);
         let finalization_duration = finalization_started.elapsed();
         drop(mutator);
-        let admission = thread_entry.into_outer_admission();
+        let admission = thread_entry.into_admission();
 
         attempt.complete(CollectionSummary {
             mark: mark_summary,
@@ -5233,7 +5222,7 @@ mod tests {
             heap.request_collection();
             let class_id = mutator.allocator::<SecondType>().unwrap().id();
             assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 1);
-            assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 1);
+            assert!(cache_snapshot(&heap.inner).unwrap().active);
             assert!(heap.inner.coordinator_snapshot().collection_requested);
             class_id
         });
@@ -5251,7 +5240,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_entry_is_inert_until_admission_activates_it() {
+    fn the_thread_record_is_found_and_activated_after_admission() {
         let heap = Heap::new();
 
         heap.mutate_admission_hook(
@@ -5259,16 +5248,17 @@ mod tests {
                 let coordinator = heap.inner.coordinator_snapshot();
                 assert_eq!(coordinator.phase, AdmissionPhase::Ordinary);
                 assert_eq!(coordinator.active_outer_mutators, 1);
-                assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 0);
+                assert!(cache_snapshot(&heap.inner).is_none());
+                assert!(!Heap::thread_holds_mutator());
             },
             |_| {
                 assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 1);
-                assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 1);
+                assert!(cache_snapshot(&heap.inner).unwrap().active);
             },
         );
 
         assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 0);
-        assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 0);
+        assert!(!cache_snapshot(&heap.inner).unwrap().active);
     }
 
     #[test]
@@ -5284,7 +5274,8 @@ mod tests {
 
         assert!(panic.is_err());
         assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 0);
-        assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 0);
+        assert!(cache_snapshot(&heap.inner).is_none());
+        assert!(!Heap::thread_holds_mutator());
         heap.mutate(|_| {});
     }
 
@@ -5617,13 +5608,13 @@ mod tests {
                 assert_eq!(coordinator.completed_collection_epoch, 1);
                 assert_eq!(coordinator.active_outer_mutators, 1);
                 assert!(!coordinator.collection_requested);
-                assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 0);
+                assert!(!cache_snapshot(&heap.inner).unwrap().active);
             },
             |_| {
                 let coordinator = heap.inner.coordinator_snapshot();
                 assert_eq!(coordinator.completed_collection_epoch, 1);
                 assert_eq!(coordinator.active_outer_mutators, 1);
-                assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 1);
+                assert!(cache_snapshot(&heap.inner).unwrap().active);
             },
         );
 
@@ -5643,7 +5634,7 @@ mod tests {
         heap.mutate_admission_hook(
             || {
                 let cache = cache_snapshot(&heap.inner).unwrap();
-                assert_eq!(cache.entry_depth, 0);
+                assert!(!cache.active);
                 assert_eq!(cache.cursor_count, 0);
             },
             |mutator| {
@@ -9924,7 +9915,7 @@ mod tests {
                 let coordinator = heap.inner.coordinator_snapshot();
                 assert_eq!(coordinator.phase, AdmissionPhase::Finalizing);
                 assert_eq!(coordinator.active_outer_mutators, 1);
-                assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 1);
+                assert!(cache_snapshot(&heap.inner).unwrap().active);
                 assert!(
                     heap.inner
                         .data
@@ -9947,7 +9938,7 @@ mod tests {
         assert_eq!(completed.phase, AdmissionPhase::Ordinary);
         assert_eq!(completed.active_outer_mutators, 0);
         assert_eq!(completed.completed_collection_epoch, 1);
-        assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 0);
+        assert!(!cache_snapshot(&heap.inner).unwrap().active);
     }
 
     #[test]
@@ -10096,7 +10087,7 @@ mod tests {
         assert_eq!(restored.active_collection, None);
         assert_eq!(restored.latest_collection_report, None);
         assert!(restored.collection_requested);
-        assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 0);
+        assert!(!cache_snapshot(&heap.inner).unwrap().active);
         assert_eq!(
             heap.inner.current_allocation_lease_epoch().get(),
             initial_lease_epoch.get() + 1,
@@ -11742,7 +11733,7 @@ mod tests {
         let class = internal_class::<FirstType>(&first);
 
         first.mutate(|_| {
-            assert_eq!(cache_snapshot(&first.inner).unwrap().entry_depth, 1);
+            assert!(cache_snapshot(&first.inner).unwrap().active);
             assert_eq!(first.inner.coordinator_snapshot().active_outer_mutators, 1);
             insert_cursor(&first.inner, test_cursor(class.id()));
             assert_eq!(cache_snapshot(&first.inner).unwrap().cursor_count, 1);
@@ -11751,20 +11742,20 @@ mod tests {
             // anything.
             let nested = catch_unwind(AssertUnwindSafe(|| second.mutate(|_| {})));
             assert!(nested.is_err());
-            assert_eq!(cache_snapshot(&first.inner).unwrap().entry_depth, 1);
+            assert!(cache_snapshot(&first.inner).unwrap().active);
             assert!(cache_snapshot(&second.inner).is_none());
             assert_eq!(second.inner.coordinator_snapshot().active_outer_mutators, 0);
         });
 
         second.mutate(|_| {
-            assert_eq!(cache_snapshot(&second.inner).unwrap().entry_depth, 1);
+            assert!(cache_snapshot(&second.inner).unwrap().active);
             assert_eq!(second.inner.coordinator_snapshot().active_outer_mutators, 1);
         });
-        assert_eq!(cache_snapshot(&second.inner).unwrap().entry_depth, 0);
+        assert!(!cache_snapshot(&second.inner).unwrap().active);
 
         // The first heap's inactive cache outlives the switch to the second.
         let retained = cache_snapshot(&first.inner).unwrap();
-        assert_eq!(retained.entry_depth, 0);
+        assert!(!retained.active);
         assert_eq!(retained.cursor_count, 1);
         assert_eq!(first.inner.coordinator_snapshot().active_outer_mutators, 0);
     }
@@ -11837,7 +11828,7 @@ mod tests {
             let panic = catch_unwind(AssertUnwindSafe(Heap::release_current_thread_caches));
             assert!(panic.is_err());
             assert!(cache_snapshot(&first.inner).is_some());
-            assert_eq!(cache_snapshot(&second.inner).unwrap().entry_depth, 1);
+            assert!(cache_snapshot(&second.inner).unwrap().active);
         });
 
         assert_eq!(Heap::release_current_thread_caches(), 2);
@@ -11877,7 +11868,7 @@ mod tests {
             heap.mutate(|_| panic!("injected mutator-region unwind"));
         }));
         assert!(panic.is_err());
-        assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 0);
+        assert!(!cache_snapshot(&heap.inner).unwrap().active);
     }
 
     #[cfg(feature = "deterministic-test-hooks")]

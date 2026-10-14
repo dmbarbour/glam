@@ -58,13 +58,7 @@ fn a_thread_holds_at_most_one_mutator() {
 
         let foreign = catch_unwind(AssertUnwindSafe(|| other.mutate(|_| {})))
             .expect_err("a mutator for another heap should panic");
-        assert!(panic_message(foreign).contains("only one heap at a time"));
-    });
-
-    heap.mutate(|_| {
-        let inside_legacy = catch_unwind(AssertUnwindSafe(|| heap.mutate(|_| {})))
-            .expect_err("a mutator inside a legacy access should panic");
-        assert!(panic_message(inside_legacy).contains("at most one mutator"));
+        assert!(panic_message(foreign).contains("at most one mutator"));
     });
 
     // The failed attempts left no entry behind.
@@ -107,7 +101,7 @@ fn a_suspension_admits_a_collection_on_another_thread() {
 
         // Resumption captured the new lease epoch before allocating again.
         let snapshot = cache_snapshot(&heap.inner).unwrap();
-        assert_eq!(snapshot.entry_depth, 1);
+        assert!(snapshot.active);
         assert_eq!(
             snapshot.captured_epoch,
             heap.inner.current_allocation_lease_epoch()
@@ -186,7 +180,7 @@ fn an_unwinding_suspension_leaves_the_mutator_without_access() {
     });
 
     // Nothing of the failed mutator stays behind.
-    assert!(cache_snapshot(&heap.inner).is_some_and(|snapshot| snapshot.entry_depth == 0));
+    assert!(cache_snapshot(&heap.inner).is_some_and(|snapshot| !snapshot.active));
     heap.mutate(|mutator| {
         let _ = mutator.allocator::<u64>().unwrap().alloc(1_u64);
     });
@@ -215,7 +209,7 @@ fn a_mutator_readmits_once_its_unwind_is_caught() {
         mutator.readmit();
         let _ = mutator.allocator::<u64>().unwrap().alloc(8_u64);
     });
-    assert!(cache_snapshot(&heap.inner).is_some_and(|snapshot| snapshot.entry_depth == 0));
+    assert!(cache_snapshot(&heap.inner).is_some_and(|snapshot| !snapshot.active));
     assert_eq!(Heap::release_current_thread_caches(), 1);
 }
 
@@ -262,7 +256,7 @@ fn re_admission_into_a_poisoned_heap_leaves_the_mutator_without_access() {
         .expect_err("a mutator that did not re-admit should grant no access");
         assert!(panic_message(access).contains("grants no access"));
     });
-    assert!(cache_snapshot(&heap.inner).is_some_and(|snapshot| snapshot.entry_depth == 0));
+    assert!(cache_snapshot(&heap.inner).is_some_and(|snapshot| !snapshot.active));
 }
 
 #[cfg(debug_assertions)]

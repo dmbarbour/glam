@@ -89,12 +89,11 @@ impl<'mu> Mutator<'mu> {
     /// later access through it panics. If `operation` unwinds, the mutator
     /// stays suspended in the same way.
     pub fn suspend<R>(&mut self, operation: impl FnOnce() -> R) -> R {
-        let entry = self
+        let suspended = self
             .entry
-            .as_ref()
-            .expect("a mutator that failed to re-admit cannot suspend");
-        entry.assert_suspendable();
-        let suspended = self.entry.take().expect("checked above").suspend_owned();
+            .take()
+            .expect("a mutator that failed to re-admit cannot suspend")
+            .suspend();
         let result = operation();
         self.entry = Some(self.access.heap().resume_owned_entry(suspended));
         result
