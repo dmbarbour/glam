@@ -238,7 +238,7 @@ impl<'source> StagedSourceParser<'source> {
                 return Vec::new();
             }
         };
-        let environment = context.values().with_runtime_value_access(|access| {
+        let environment = context.values().with_boundary_access(|access| {
             let base_environment = base_environment.clone_core_with(&access);
             let language = declared_language_value(&access, language);
             super::super::compiler_values::macro_environment(&access, base_environment, language)
@@ -260,7 +260,7 @@ impl<'source> StagedSourceParser<'source> {
                 .collect::<Vec<_>>();
             let effect = match macro_lookup(execution, prior_definitions, &keys, true) {
                 Ok(effect)
-                    if !context.values().with_runtime_value_access(|access| {
+                    if !context.values().with_boundary_access(|access| {
                         effect
                             .with_core(&access, |value| {
                                 access.same_representation(value, &Value::Dict(Dict::new_sync()))
@@ -672,7 +672,7 @@ fn macro_lookup(
         current = execution
             .lookup_context()
             .values()
-            .with_runtime_value_access(|access| {
+            .with_boundary_access(|access| {
                 evaluated
                     .with_core(&access, |value| {
                         let Value::Dict(dict) = value else {

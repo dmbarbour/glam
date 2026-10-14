@@ -72,7 +72,11 @@ control-flow overview.
   the work it polls. A suspension costs about two heap entries; let
   adjacent operations share one. Nested synchronous drivers do not run
   inside quanta; a test source that depends on an input reads it with
-  `promise_or_block_for_test` or runs as a host call. `CountedCondvar`
+  `promise_or_block_for_test` or runs as a host call. Code that may be a
+  thread's outermost heap entry takes access with
+  `CoreValueFactory::with_boundary_access` (or `Values::with_access`), which
+  takes a mutator or nests; `with_runtime_value_access` is for code under
+  one. `CountedCondvar`
   waits, launchers and pressure servicing assert that the thread holds no
   mutator (`assert_outside_mutator`), so they run suspended. A forced collection inside a quantum reports an active
   mutator; probe for open value access with

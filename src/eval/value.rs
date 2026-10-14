@@ -1633,7 +1633,7 @@ impl LazyTaskMachine {
 /// Invokes a host-call lazy's callback, whose permit its machine retired,
 /// and completes the checkpoint with the outcome.
 fn invoke_host_call(context: &EvalContext, lazy: &ManagedLazyRoot) {
-    let producer = context.values().with_runtime_value_access(|access| {
+    let producer = context.values().with_boundary_access(|access| {
         let lazy = lazy
             .access(&access)
             .expect("host-call route and lazy must share one runtime");
@@ -1656,7 +1656,7 @@ fn invoke_host_call(context: &EvalContext, lazy: &ManagedLazyRoot) {
         Ok(value) => Ok(value),
         Err(failure) => Err(failure),
     };
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         let lazy = lazy
             .access(&access)
             .expect("host-call route and lazy must share one runtime");

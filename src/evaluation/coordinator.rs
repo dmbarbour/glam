@@ -265,7 +265,7 @@ impl TaskOwnedPromiseObligation {
             .value_observer()
             .upgrade()
             .expect("a registered promise root must retain a live value domain owner");
-        let (publication, wake) = values.with_runtime_value_access(|access| {
+        let (publication, wake) = values.with_boundary_access(|access| {
             let assignment = self
                 .terminal
                 .assignment(&access, terminal, unresolved_failure);

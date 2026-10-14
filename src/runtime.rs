@@ -1031,7 +1031,7 @@ impl std::fmt::Debug for RuntimeFailureRoot {
 
 impl RuntimeFailureRoot {
     pub(crate) fn new(values: &CoreValueFactory, failure: Arc<EvaluationFailure>) -> Self {
-        values.with_runtime_value_access(|access| access.root_runtime_failure(failure))
+        values.with_boundary_access(|access| access.root_runtime_failure(failure))
     }
 
     pub(crate) fn from_observer(

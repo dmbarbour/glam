@@ -202,7 +202,7 @@ pub(in crate::g_syntax) fn run_macro_effect(
             branch.journal().active_cases.iter().cloned(),
         )
     })?;
-    let (is_unit, kind) = values.with_runtime_value_access(|access| {
+    let (is_unit, kind) = values.with_boundary_access(|access| {
         value
             .with_core(&access, |value| {
                 (
@@ -301,7 +301,7 @@ pub(in crate::g_syntax) fn render_macro_case(
     let immediate = execution
         .macro_context()
         .values()
-        .with_runtime_value_access(|access| {
+        .with_boundary_access(|access| {
             value
                 .with_core(&access, |value| match value {
                     Value::Binary(bytes) => Ok(String::from_utf8(bytes.to_vec())

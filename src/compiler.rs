@@ -461,7 +461,7 @@ pub(crate) fn import_failure(
     let Some(values) = values else {
         return Arc::new(EvaluationFailure::message(message));
     };
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         import_failure_in(&access, message, request, trace, importer_source)
     })
 }

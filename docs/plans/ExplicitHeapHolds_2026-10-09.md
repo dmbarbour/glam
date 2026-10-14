@@ -605,6 +605,17 @@ Slices, in order (2026-10-13):
    each member's failure through its own access, which is now a boundary of
    its own since it runs at a suspended quantum boundary.
 
+   Remaining boundaries (2026-10-14): the 19 other sites the public-API
+   integration tests reached outside any mutator became boundaries
+   (`with_boundary_access`): the core construction helpers
+   (`construct_runtime_value_root`, `RuntimeFailureRoot::new`,
+   `from_producer`), the diagnostic helpers that evaluate, host calls,
+   terminal promise publication, the compiler's import failures, macro
+   expansion's accesses and the lowerer's construction. Probed again, those
+   tests open no heap entry outside a mutator; unit tests still do, through
+   production functions they call directly, which `gc-hold-tests` gives
+   boundaries. Instructions level (`.r ()` step 413.0 K).
+
 ### Tests and enforcement (`gc-hold-tests`)
 
 Convert the test helpers, then remove the shim, so access without a

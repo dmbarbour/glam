@@ -451,7 +451,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .work
             .branch_mut()
             .expect("a fresh effect task must contain its initial branch");
-        let diagnostic_context = values.with_runtime_value_access(|access| {
+        let diagnostic_context = values.with_boundary_access(|access| {
             branch.root_value(&access, Value::binary_from_text(&diagnostic_context))
         });
         branch

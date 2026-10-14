@@ -85,7 +85,7 @@ pub(in crate::g_syntax) struct ModuleLowerer<'context> {
 impl<'context> ModuleLowerer<'context> {
     pub(in crate::g_syntax) fn new(context: &'context CompileContext) -> Self {
         compiler_values::prepare(context.values());
-        let module_reflection = context.values().with_runtime_value_access(|access| {
+        let module_reflection = context.values().with_boundary_access(|access| {
             compiler_values::reflection_boundary_root(
                 &access,
                 context.namespace_name(&access, ""),

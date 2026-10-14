@@ -338,7 +338,7 @@ pub(crate) fn failure_diagnostic_root_with(
     values: &CoreValueFactory,
     failure: &EvaluationFailure,
 ) -> RuntimeValueRoot {
-    let (emission, contexts) = values.with_runtime_value_access(|access| {
+    let (emission, contexts) = values.with_boundary_access(|access| {
         let emission = match failure.emission_value_in(&access) {
             Some(Value::Binary(text)) => {
                 text_message_in(&access, None, String::from_utf8_lossy(text))
@@ -484,7 +484,7 @@ pub(crate) fn prepend_contexts_root(
 ) -> Result<RuntimeValueRoot, crate::core::EvaluationHalt> {
     let context = crate::evaluation::EvalContext::isolated(values.clone());
     let message = diagnostic_object_root(&context, message)?;
-    let interface = values.with_runtime_value_access(|access| {
+    let interface = values.with_boundary_access(|access| {
         message.with_core(&access, |message| match message {
             Value::Dict(message) => message
                 .get(&*keys::MSG)
@@ -549,7 +549,7 @@ fn diagnostic_object_root(
     message: crate::runtime::RuntimeValueRoot,
 ) -> Result<crate::runtime::RuntimeValueRoot, crate::core::EvaluationHalt> {
     let message = context.evaluate_root_whnf(message)?;
-    let spec = context.values().with_runtime_value_access(|access| {
+    let spec = context.values().with_boundary_access(|access| {
         message
             .with_core(&access, |message| match message {
                 Value::Dict(message) => message
@@ -561,7 +561,7 @@ fn diagnostic_object_root(
     });
     let has_defined_spec = if let Some(spec) = spec {
         let spec = context.evaluate_root_whnf(spec)?;
-        context.values().with_runtime_value_access(|access| {
+        context.values().with_boundary_access(|access| {
             spec.with_core(
                 &access,
                 |spec| !matches!(spec, Value::Dict(spec) if spec.is_empty()),

@@ -359,7 +359,7 @@ struct CoreValues {
 
 impl CoreValues {
     fn new(values: &CoreValueFactory) -> Self {
-        values.with_runtime_value_access(|access| Self {
+        values.with_boundary_access(|access| Self {
             initial_metadata: access
                 .root_runtime_value(access.metadata_carrier(Value::Dict(Dict::new_sync()))),
         })
@@ -454,7 +454,7 @@ impl CoreValueFactory {
         &self,
         construction: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> Result<Value, E>,
     ) -> Result<RuntimeValueRoot, E> {
-        self.with_runtime_value_access(|access| {
+        self.with_boundary_access(|access| {
             construction(&access).map(|value| access.root_runtime_value(value))
         })
     }
@@ -1616,7 +1616,7 @@ pub(crate) struct HostCallRootBundle {
 
 impl HostCallRootBundle {
     fn from_producer(values: &CoreValueFactory, producer: &HostCallProducer) -> Self {
-        let roots = values.with_runtime_value_access(|access| {
+        let roots = values.with_boundary_access(|access| {
             producer
                 .captures
                 .iter()
