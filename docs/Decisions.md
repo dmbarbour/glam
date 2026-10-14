@@ -1583,6 +1583,29 @@ maps the short names used here to file names.
   paragraphs.
 - **Recorded in:** structural overheads plan, `perf-worker-scaling`.
 
+### Nothing evaluates under the runtime mutation gate; a failed status's diagnostic is built first
+`status-diagnostic-before-gate` · 2026-10-14 · agent · accepted
+- **Context:** publishing a failed reflection task's `.task.status` built
+  the failure's diagnostic under the gate's shared guard, through an
+  isolated session and a nested driver that took the gate again. The gate
+  is a `std::sync::RwLock`, which on Linux refuses readers while a writer
+  waits, so a settlement that queued between the two reads deadlocked both
+  threads. A test that queues one there hung.
+- **Decision:** a `RuntimeFailureRoot` builds its diagnostic once and
+  shares it (`RuntimeFailureRoot::diagnostic`). Settlement builds it before
+  taking the gate when the task's protected status publisher will publish
+  it, checking under the same coordinator lock that takes the update and
+  retrying once if it found it unbuilt. Debug builds panic when a thread
+  takes the gate it already holds. Rejected: building it for every failed
+  task, which forces diagnostics nobody reads; and publishing it lazily,
+  which changes what a status reader sees.
+- **Consequences:** with the fix disabled, the check fails 12 existing
+  tests that publish failed statuses, besides the new one. The gate check
+  runs in every debug build and test.
+- **Rule lives in:** `agent_context/evaluation.md` "Values and Forcing".
+- **Recorded in:** explicit heap holds plan, `gc-hold-boundaries` (fourth
+  slice, `status-diagnostic-before-gate`).
+
 ## Assembly
 
 ### Manifest writes are identity-checked and atomically published

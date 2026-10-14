@@ -4763,6 +4763,69 @@ fn terminal_reflection_machines_drop_after_releasing_runtime_locks() {
     );
 }
 
+/// Publishing a failed reflection task's `.task.status` builds the failure's
+/// diagnostic, which evaluates. Publication holds the runtime mutation gate
+/// for reading, and Linux's `RwLock` refuses further readers once a writer
+/// queues, so a diagnostic built under the gate must not take it again, as
+/// the quanta of a nested driver do. The publisher queues a settlement before
+/// building the status value.
+#[cfg(target_os = "linux")]
+#[test]
+fn failed_status_publication_never_retakes_the_gate_behind_a_queued_settlement() {
+    let (finished, finish) = mpsc::channel();
+    let scenario = thread::spawn(move || {
+        let fixture = SameRuntimeFixture::new();
+        let context = fixture.context();
+        let coordinator = context
+            .coordinator()
+            .expect("test task must retain its coordinator");
+        let task = context
+            .schedule_task(|_| Ok(Box::new(ProbePollOutcomeMachine(ProbePollOutcome::Failed))))
+            .expect("reflection task should schedule");
+        let settlement = Arc::new(Mutex::new(None));
+        let publisher = TaskStatusPublisher::new({
+            let coordinator = Arc::downgrade(&coordinator);
+            let values = crate::api::Values::from_core_factory(context.values().clone());
+            let settlement = settlement.clone();
+            move |_mutation, status| {
+                if matches!(status, EvaluationTaskStatus::Failed(_)) {
+                    let coordinator = coordinator
+                        .upgrade()
+                        .expect("publication must retain its coordinator");
+                    *settlement.lock().expect("settlement slot") =
+                        Some(coordinator.queue_settlement_for_test());
+                    drop(crate::reflection::task_status_public_value_for_test(
+                        &values, status,
+                    ));
+                }
+                TaskStatusWake::new(|| {})
+            }
+        });
+        assert!(coordinator.attach_reflection_status_publisher(task.work, publisher));
+        assert_eq!(
+            context.pump_wait(task.wait(), 256),
+            EvaluationPumpOutcome::TargetReady
+        );
+        settlement
+            .lock()
+            .expect("settlement slot")
+            .take()
+            .expect("the failed status must publish")
+            .join()
+            .expect("the queued settlement must complete");
+        let _ = finished.send(());
+    });
+    match finish.recv_timeout(Duration::from_secs(30)) {
+        Ok(()) => scenario.join().expect("the scenario completed"),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("publishing a failed task status deadlocked behind a queued settlement")
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            std::panic::resume_unwind(scenario.join().expect_err("the scenario panicked"))
+        }
+    }
+}
+
 #[test]
 fn terminal_status_is_authoritative_and_notified_before_machine_retirement() {
     let fixture = SameRuntimeFixture::new();

@@ -1659,6 +1659,23 @@ impl EvaluationWorkCoordinator {
             .expect("exact selection probe was poisoned") = Some(Box::new(probe));
     }
 
+    /// Starts a settlement on another thread and returns once it is queued on
+    /// the mutation gate behind the caller's mutation guard.
+    #[cfg(test)]
+    pub(super) fn queue_settlement_for_test(&self) -> std::thread::JoinHandle<()> {
+        let admission = self.admission.clone();
+        let settlement = std::thread::spawn(move || drop(admission.settlement_guard()));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !self.admission.settlement_waits_for_test() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the settlement never queued on the mutation gate"
+            );
+            std::thread::yield_now();
+        }
+        settlement
+    }
+
     #[cfg(test)]
     pub(super) fn settlement_admission_is_free(&self) -> bool {
         self.admission.try_settlement_guard().is_some()
@@ -2731,18 +2748,51 @@ impl EvaluationWorkCoordinator {
         self.settle_work(work, EvaluationWaitTerminal::Panicked(report), None)
     }
 
+    /// The failure whose diagnostic `work`'s protected `.task.status`
+    /// publisher would build under the mutation gate, if it is not built yet
+    /// (`status-diagnostic-before-gate`).
+    fn unbuilt_status_diagnostic(
+        state: &mut WorkCoordinatorState,
+        work: EvaluationWorkId,
+        terminal: &EvaluationWaitTerminal,
+    ) -> Option<crate::runtime::RuntimeFailureRoot> {
+        let EvaluationWaitTerminal::Failed(failure) = terminal else {
+            return None;
+        };
+        let publishes_status = state
+            .work
+            .get_mut(&work)
+            .and_then(|record| record.obligations.task_publisher_mut())
+            .is_some_and(|publisher| publisher.protected_status.is_some());
+        (publishes_status && !failure.has_diagnostic()).then(|| failure.clone())
+    }
+
     fn settle_work(
         self: &Arc<Self>,
         work: EvaluationWorkId,
         terminal: EvaluationWaitTerminal,
         promise_failure: Option<Arc<EvaluationFailure>>,
     ) -> EvaluationWaitTerminal {
-        let mutation = self.admission.mutation_guard();
-        let (producer, status_update, promises) = {
+        let (mutation, producer, status_update, promises) = loop {
+            let mutation = self.admission.mutation_guard();
             let mut state = self
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
+            if let Some(failure) = Self::unbuilt_status_diagnostic(&mut state, work, &terminal) {
+                // Building it evaluates through a nested driver whose quanta
+                // take the gate again, which `RwLock` refuses once a
+                // settlement queues behind this guard. Build it first, then
+                // look again: a status publisher may attach meanwhile.
+                drop(state);
+                drop(mutation);
+                let values = self
+                    .value_observer()
+                    .upgrade()
+                    .expect("a task publishing its status must retain a live value domain");
+                drop(failure.diagnostic(&values));
+                continue;
+            }
             let (producer, failure, status_update, promises) = {
                 let record = state
                     .work
@@ -2782,7 +2832,7 @@ impl EvaluationWorkCoordinator {
                     RouteHazard::None,
                 );
             }
-            (producer, status_update, promises)
+            break (mutation, producer, status_update, promises);
         };
         let wait = match &producer {
             ProducerSettlementObligation::ReflectionTask(publisher) => &publisher.wait,

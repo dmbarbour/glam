@@ -1625,11 +1625,18 @@ fn task_status_query_value(
     }
 }
 
+/// The value a `.task.status` query publishes for `status`.
+#[cfg(test)]
+pub(crate) fn task_status_public_value_for_test(
+    values: &Values,
+    status: EvaluationTaskStatus,
+) -> Value {
+    task_status_public_value(values, status)
+}
+
 fn task_status_public_value(values: &Values, status: EvaluationTaskStatus) -> Value {
     let failure_diagnostic = match &status {
-        EvaluationTaskStatus::Failed(error) => Some(
-            crate::diagnostic::failure_diagnostic_root_with(values.core(), error.as_failure()),
-        ),
+        EvaluationTaskStatus::Failed(error) => Some(error.diagnostic(values.core())),
         _ => None,
     };
     Value::from_runtime_root(values.core().construct_runtime_value_root(|access| {

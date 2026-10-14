@@ -521,6 +521,18 @@ Slices, in order (2026-10-13):
    steps cost so many instructions. Rejected: driving without a mutator,
    with access phases taking short ones.
 
+   First, a fix the driver analysis found (`status-diagnostic-before-gate`,
+   2026-10-14): publishing a failed reflection task's `.task.status` built
+   its diagnostic under the runtime mutation gate through a nested driver,
+   which took the gate again and deadlocked behind a queued settlement. A
+   test forcing that order hung; the diagnostic is now built before the
+   gate, and debug builds panic when a thread takes the gate twice. The
+   same analysis found that release between quanta runs client callbacks
+   and, for failed statuses, nested drivers, so for now each quantum
+   boundary is one suspension covering the quantum's deferred work, its
+   release and collection pressure, as pumps already do; shrinking it
+   belongs to `gc-hold-suspension-review`.
+
    Order: drivers (the worker loop, the client demand driver, the pump
    entry points and the coordinator's claimed polls); the compile entry,
    suspending around macro runs; the public API, one mutator per method

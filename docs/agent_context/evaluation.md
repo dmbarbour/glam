@@ -418,6 +418,12 @@ control-flow overview.
   destroy machines while holding a coordinator/component mutex or runtime
   mutation admission. Protected status itself is published under the guard;
   notifications and destruction happen after it is released.
+- Never evaluate or start a driver while holding runtime mutation admission:
+  a second read of the gate on one thread waits behind any queued
+  settlement, which waits for the first. Debug builds panic when a thread
+  takes the gate twice. A failed task's status diagnostic is built on its
+  `RuntimeFailureRoot` before settlement takes the gate
+  (`status-diagnostic-before-gate`).
 
 ## Sessions and Workers
 

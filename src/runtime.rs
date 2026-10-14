@@ -7,7 +7,9 @@
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
+use std::sync::{
+    Arc, Mutex, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak,
+};
 
 use crate::counted_condvar::CountedCondvar;
 
@@ -85,25 +87,84 @@ impl RuntimeMutationAdmission {
         if self.poisoned.load(Ordering::Acquire) {
             panic!("{RUNTIME_POISONED}");
         }
+        #[cfg(debug_assertions)]
+        self.assert_gate_not_held();
+        let guard = self.gate.read().expect(RUNTIME_POISONED);
+        #[cfg(debug_assertions)]
+        self.record_gate_held();
         RuntimeMutationGuard {
-            guard: Some(self.gate.read().expect(RUNTIME_POISONED)),
+            guard: Some(guard),
             admission: self,
         }
     }
 
     pub(crate) fn try_settlement_guard(&self) -> Option<RuntimeSettlementGuard<'_>> {
-        self.gate
-            .try_write()
-            .ok()
-            .map(|guard| RuntimeSettlementGuard {
-                guard: Some(guard),
-                admission: self,
-            })
+        let guard = self.gate.try_write().ok()?;
+        #[cfg(debug_assertions)]
+        self.record_gate_held();
+        Some(RuntimeSettlementGuard {
+            guard: Some(guard),
+            admission: self,
+        })
+    }
+
+    /// Panics if this thread already holds the gate. A thread never takes it
+    /// twice: a second read waits behind any queued settlement, which waits
+    /// for the first (`status-diagnostic-before-gate`). Unwinding skips the
+    /// check, so a destructor that settles does not turn one report into an
+    /// abort.
+    #[cfg(debug_assertions)]
+    fn assert_gate_not_held(&self) {
+        if std::thread::panicking() {
+            return;
+        }
+        let gate = std::ptr::from_ref(self).addr();
+        HELD_GATES.with_borrow(|held| {
+            assert!(
+                !held.contains(&gate),
+                "this thread already holds the runtime mutation gate, and taking it again \
+                 deadlocks behind a queued settlement"
+            );
+        });
+    }
+
+    #[cfg(debug_assertions)]
+    fn record_gate_held(&self) {
+        HELD_GATES.with_borrow_mut(|held| held.push(std::ptr::from_ref(self).addr()));
+    }
+
+    #[cfg(debug_assertions)]
+    fn exit_gate(&self) {
+        let gate = std::ptr::from_ref(self).addr();
+        HELD_GATES.with_borrow_mut(|held| {
+            let index = held
+                .iter()
+                .rposition(|&entry| entry == gate)
+                .expect("a released gate guard was recorded");
+            held.swap_remove(index);
+        });
+    }
+
+    /// Whether a settlement waits on the gate, asked while the caller holds a
+    /// mutation guard: no writer can hold the gate then, so a refused read
+    /// means one is queued. Linux's `RwLock` refuses readers behind a queued
+    /// writer.
+    #[cfg(test)]
+    pub(crate) fn settlement_waits_for_test(&self) -> bool {
+        matches!(
+            self.gate.try_read(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
     }
 
     pub(crate) fn settlement_guard(&self) -> RuntimeSettlementGuard<'_> {
+        #[cfg(debug_assertions)]
+        self.assert_gate_not_held();
+        let guard = self.gate.write().expect(RUNTIME_POISONED);
+        #[cfg(debug_assertions)]
+        self.record_gate_held();
         RuntimeSettlementGuard {
-            guard: Some(self.gate.write().expect(RUNTIME_POISONED)),
+            guard: Some(guard),
             admission: self,
         }
     }
@@ -512,9 +573,17 @@ impl RuntimeMutationAuthority for RuntimeMutationGuard<'_> {}
 impl mutation_authority::Sealed for RuntimeSettlementGuard<'_> {}
 impl RuntimeMutationAuthority for RuntimeSettlementGuard<'_> {}
 
+#[cfg(debug_assertions)]
+thread_local! {
+    /// The runtime mutation gates this thread holds, by admission address.
+    static HELD_GATES: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 impl Drop for RuntimeMutationGuard<'_> {
     fn drop(&mut self) {
         drop(self.guard.take());
+        #[cfg(debug_assertions)]
+        self.admission.exit_gate();
         // Every runtime-core mutation holds this authority, so a panic that
         // tears core state unwinds through here. The check consults actual
         // core poison: contained evaluation panics also unwind through
@@ -533,6 +602,8 @@ impl Drop for RuntimeMutationGuard<'_> {
 impl Drop for RuntimeSettlementGuard<'_> {
     fn drop(&mut self) {
         drop(self.guard.take());
+        #[cfg(debug_assertions)]
+        self.admission.exit_gate();
         if std::thread::panicking() {
             let _ = self.admission.is_poisoned();
         }
@@ -898,6 +969,7 @@ impl crate::core::RuntimeValueAccess<'_> {
             values: self.values().runtime_value_observer(),
             value_roots: RuntimeFailureRoot::root_direct_values(self, &failure),
             failure,
+            diagnostic: OnceLock::new(),
         }))
     }
 }
@@ -946,6 +1018,8 @@ struct RuntimeFailureRootInner {
         )
     )]
     value_roots: Box<[RuntimeValueRoot]>,
+    /// The diagnostic object this failure publishes, once built.
+    diagnostic: OnceLock<RuntimeValueRoot>,
 }
 
 impl std::fmt::Debug for RuntimeFailureRoot {
@@ -996,6 +1070,27 @@ impl RuntimeFailureRoot {
 
     pub(crate) fn as_failure(&self) -> &Arc<EvaluationFailure> {
         &self.0.failure
+    }
+
+    /// The failure normalized to a diagnostic object, built on first use and
+    /// shared by every publication of this failure.
+    ///
+    /// Building it evaluates through a nested driver, which takes the runtime
+    /// mutation gate, so the caller must hold no runtime lock
+    /// (`status-diagnostic-before-gate`). A concurrent first use builds its
+    /// own and keeps whichever was stored first.
+    pub(crate) fn diagnostic(&self, values: &CoreValueFactory) -> RuntimeValueRoot {
+        debug_assert_eq!(values.runtime_id(), self.runtime_id());
+        if let Some(diagnostic) = self.0.diagnostic.get() {
+            return diagnostic.clone();
+        }
+        let built = crate::diagnostic::failure_diagnostic_root_with(values, &self.0.failure);
+        self.0.diagnostic.get_or_init(|| built).clone()
+    }
+
+    /// Whether this failure's diagnostic is already built.
+    pub(crate) fn has_diagnostic(&self) -> bool {
+        self.0.diagnostic.get().is_some()
     }
 
     pub(crate) fn into_failure(self) -> Arc<EvaluationFailure> {

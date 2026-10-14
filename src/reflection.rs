@@ -33,6 +33,8 @@ pub use search::{
 
 #[cfg(test)]
 pub(crate) use requests::assert_task_handle_family_shape;
+#[cfg(test)]
+pub(crate) use requests::task_status_public_value_for_test;
 pub(crate) use requests::{
     KeyListRequestWork, PreparationPoll, ValuePathRequestWork, parse_evaluated_severity,
 };
