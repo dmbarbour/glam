@@ -1,7 +1,7 @@
 use glam_gc::EdgeTransitionObservation;
 
 use crate::core::{CoreValueFactory, Value};
-use crate::evaluation::{EvalContext, EvaluationPollContext};
+use crate::evaluation::EvalContext;
 use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
 use super::*;
@@ -23,11 +23,10 @@ fn one_poll_aggregates_every_focus_and_frame_edit_into_one_edge_transition() {
     let mut computation = WhnfComputation::from_root(focus);
     let expected = new_root.clone();
     let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
-    let poll = EvaluationPollContext::for_context(&context);
 
     let mut transition = 0;
     let mut budget = WhnfStepBudget::new(4);
-    let outcome = poll.with_value_access(&context, |access| {
+    let outcome = crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         computation.poll_in(&access, &mut budget, |_access, work| {
             transition += 1;
             match transition {
@@ -80,10 +79,9 @@ fn managed_checkpoint_resumes_on_another_worker_after_collection() {
     let values = context.values().clone();
     let initial = values.construct_runtime_value_root(|_| Value::Number(1.into()));
     let mut computation = WhnfComputation::from_root(initial);
-    let poll = EvaluationPollContext::for_context(&context);
 
     let mut first_budget = WhnfStepBudget::new(1);
-    let first = poll.with_value_access(&context, |access| {
+    let first = crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         computation.poll_in(&access, &mut first_budget, |access, work| {
             access
                 .values()
@@ -102,23 +100,23 @@ fn managed_checkpoint_resumes_on_another_worker_after_collection() {
 
     let worker_context = context.clone();
     std::thread::spawn(move || {
-        let poll = EvaluationPollContext::for_context(&worker_context);
         let mut resume_budget = WhnfStepBudget::new(1);
-        let resumed = poll.with_value_access(&worker_context, |access| {
-            computation.poll_in(&access, &mut resume_budget, |access, work| {
-                access
-                    .values()
-                    .assert_same_representation_for_test(&work.focus, &Value::Number(3.into()));
-                let WhnfContinuation::Application { arguments, next } = &work.frames[0] else {
-                    panic!("cross-worker resumption must retain its exact frame")
-                };
-                assert_eq!(*next, 0);
-                access
-                    .values()
-                    .assert_same_representation_for_test(arguments, &[Value::Number(2.into())]);
-                RegionalWhnfStep::Ready(Value::Number(5.into()))
-            })
-        });
+        let resumed =
+            crate::evaluation::EvalContext::with_test_value_access(&worker_context, |access| {
+                computation.poll_in(&access, &mut resume_budget, |access, work| {
+                    access
+                        .values()
+                        .assert_same_representation_for_test(&work.focus, &Value::Number(3.into()));
+                    let WhnfContinuation::Application { arguments, next } = &work.frames[0] else {
+                        panic!("cross-worker resumption must retain its exact frame")
+                    };
+                    assert_eq!(*next, 0);
+                    access
+                        .values()
+                        .assert_same_representation_for_test(arguments, &[Value::Number(2.into())]);
+                    RegionalWhnfStep::Ready(Value::Number(5.into()))
+                })
+            });
         assert_eq!(
             (resume_budget.spent(), resume_budget.remaining()),
             (0, 1),

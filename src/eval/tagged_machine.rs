@@ -229,7 +229,7 @@ impl RegionalSemanticUndefined {
 mod tests {
     use super::*;
     use crate::core::{CoreValueFactory, PromisedValue};
-    use crate::evaluation::{EvalContext, EvaluationPollContext, EvaluationStepBudget};
+    use crate::evaluation::{EvalContext, EvaluationStepBudget};
     use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
     fn context() -> crate::evaluation::OwnedEvalContext {
@@ -243,18 +243,17 @@ mod tests {
         machine: &mut RegionalTaggedPayload,
         context: &EvalContext,
     ) -> RegionalTaggedPayloadPoll {
-        let poll = EvaluationPollContext::for_context(context);
-        poll.with_value_access(context, |access| {
+        crate::evaluation::EvalContext::with_test_value_access(context, |access| {
             machine.poll_in(&access, &mut EvaluationStepBudget::new(64))
         })
     }
 
     fn recognize(context: &EvalContext, dict: &Dict, tag: &Key) -> Option<Value> {
         let (owner, _) = context.values().rooted_error_lazy_for_test();
-        let poll_context = EvaluationPollContext::for_context(context);
-        let mut machine = poll_context.with_value_access(context, |access| {
-            RegionalTaggedPayload::new_in(&access, dict, tag, owner.id())
-        });
+        let mut machine =
+            crate::evaluation::EvalContext::with_test_value_access(context, |access| {
+                RegionalTaggedPayload::new_in(&access, dict, tag, owner.id())
+            });
         loop {
             match poll(&mut machine, context) {
                 RegionalTaggedPayloadPoll::Ready(payload) => return payload,
@@ -323,10 +322,10 @@ mod tests {
                 )),
             );
         let (owner, _) = context.values().rooted_error_lazy_for_test();
-        let poll_context = EvaluationPollContext::for_context(&context);
-        let mut machine = poll_context.with_value_access(&context, |access| {
-            RegionalTaggedPayload::new_in(&access, &dict, &tag, owner.id())
-        });
+        let mut machine =
+            crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
+                RegionalTaggedPayload::new_in(&access, &dict, &tag, owner.id())
+            });
 
         loop {
             match poll(&mut machine, &context) {

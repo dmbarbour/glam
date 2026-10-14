@@ -1584,15 +1584,16 @@ fn drive_request_decode(
     context: &EvalContext,
     tags: &Tags,
 ) -> Result<Request<TestRequest>, TaskHalt> {
-    let poll_context = EvaluationPollContext::for_context(context);
     for _ in 0..64 {
-        match decoder.poll(
-            &poll_context,
-            context,
-            tags,
-            &[],
-            &mut crate::evaluation::EvaluationStepBudget::new(1),
-        ) {
+        match EvaluationPollContext::quantum_for_context(context, |poll_context| {
+            decoder.poll(
+                poll_context,
+                context,
+                tags,
+                &[],
+                &mut crate::evaluation::EvaluationStepBudget::new(1),
+            )
+        }) {
             RequestDecodePoll::Ready(request) => return Ok(request),
             RequestDecodePoll::Continue => {}
             RequestDecodePoll::Yielded => {}
@@ -1639,7 +1640,7 @@ fn request_decode_resumes_the_exact_lazy_payload_without_replay() {
     else {
         panic!("fixture should decode a return request")
     };
-    EvaluationPollContext::for_context(&context).evaluate(&context, |evaluator| {
+    crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
         evaluator.project_root(&value, |access, value| {
             access
                 .values()
@@ -1678,7 +1679,7 @@ fn request_decode_resumes_the_exact_lazy_list_chunk_without_replay() {
     else {
         panic!("fixture should decode a return request")
     };
-    EvaluationPollContext::for_context(&context).evaluate(&context, |evaluator| {
+    crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
         evaluator.project_root(&value, |access, value| {
             access
                 .values()
@@ -1727,7 +1728,7 @@ fn resume_request_decodes_lazy_ids_once_in_source_order() {
     };
     assert_eq!(task.get(), 7);
     assert_eq!(continuation, 8);
-    EvaluationPollContext::for_context(&context).evaluate(&context, |evaluator| {
+    crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
         evaluator.project_root(&value, |access, value| {
             access
                 .values()
@@ -1984,13 +1985,14 @@ fn drive_reset_stack_decoder(
     decoder: &mut ResetStackMachine,
     context: &EvalContext,
 ) -> Result<DecodedResetStack, TaskHalt> {
-    let poll_context = EvaluationPollContext::for_context(context);
     for _ in 0..512 {
-        match decoder.poll(
-            &poll_context,
-            context,
-            &mut crate::evaluation::EvaluationStepBudget::new(1),
-        ) {
+        match crate::evaluation::EvaluationPollContext::quantum_for_context(context, |poll| {
+            decoder.poll(
+                poll,
+                context,
+                &mut crate::evaluation::EvaluationStepBudget::new(1),
+            )
+        }) {
             ResetStackPoll::Ready(stack) => return Ok(stack),
             ResetStackPoll::Continue | ResetStackPoll::Yielded => {}
             ResetStackPoll::Pending(WorkDependency::Wait(wait)) => {
@@ -2065,7 +2067,7 @@ fn reset_stack_decoder_preserves_strict_frames_and_serialized_root() {
     assert_eq!(decoded.frames[1].key, Key::binary_from_text("second"));
     assert_eq!(decoded.frames[1].scope_depth, 3);
     assert_eq!(decoded.frames[1].order, 4);
-    EvaluationPollContext::for_context(&context).evaluate(&context, |evaluator| {
+    crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
         evaluator.project_root(&decoded.frames[0].continuation, |access, value| {
             access
                 .values()
@@ -2283,13 +2285,14 @@ fn reset_stack_decoder_resumes_a_promised_numeric_field() {
         ))]))
     });
     let mut decoder = ResetStackMachine::new(serialized);
-    let poll_context = EvaluationPollContext::for_context(&context);
     let dependency = loop {
-        match decoder.poll(
-            &poll_context,
-            &context,
-            &mut crate::evaluation::EvaluationStepBudget::new(1),
-        ) {
+        match crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
+            decoder.poll(
+                poll,
+                &context,
+                &mut crate::evaluation::EvaluationStepBudget::new(1),
+            )
+        }) {
             ResetStackPoll::Continue | ResetStackPoll::Yielded => {}
             ResetStackPoll::Pending(WorkDependency::Promise(dependency)) => break dependency,
             ResetStackPoll::Pending(other) => panic!("unexpected dependency: {other:?}"),
@@ -2409,13 +2412,14 @@ fn dropping_a_blocked_reset_stack_decoder_releases_its_owner_without_consuming_t
     let serialized = values
         .construct_runtime_value_root(|access| Value::Promised(promised.duplicate_in(access)));
     let mut decoder = ResetStackMachine::new(serialized);
-    let poll_context = EvaluationPollContext::for_context(&context);
     loop {
-        match decoder.poll(
-            &poll_context,
-            &context,
-            &mut crate::evaluation::EvaluationStepBudget::new(1),
-        ) {
+        match crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
+            decoder.poll(
+                poll,
+                &context,
+                &mut crate::evaluation::EvaluationStepBudget::new(1),
+            )
+        }) {
             ResetStackPoll::Continue | ResetStackPoll::Yielded => {}
             ResetStackPoll::Pending(WorkDependency::Promise(_)) => break,
             ResetStackPoll::Pending(other) => panic!("unexpected dependency: {other:?}"),
@@ -2507,15 +2511,12 @@ fn reset_control_work_does_not_publish_before_its_key_resolves() {
         .execution
         .active_branch()
         .expect("blocked control work should retain its branch");
-    EvaluationPollContext::for_context(&task.eval_context).evaluate(
-        &task.eval_context,
-        |evaluator| {
-            let Value::Dict(state) = evaluator.project_root(&branch.state, |_, value| value) else {
-                panic!("reset branch state must remain a dictionary")
-            };
-            assert!(state.get(&tags.continuation_state).is_none());
-        },
-    );
+    crate::evaluation::EvalContext::evaluate_test_step(&task.eval_context, |evaluator| {
+        let Value::Dict(state) = evaluator.project_root(&branch.state, |_, value| value) else {
+            panic!("reset branch state must remain a dictionary")
+        };
+        assert!(state.get(&tags.continuation_state).is_none());
+    });
 
     crate::core::set_test_promise(&values, &key, Value::binary_from_text("prompt"))
         .expect_without_debug("reset key should publish once");
@@ -2772,11 +2773,12 @@ fn fixpoint_restart_retains_its_selection_while_the_entry_stack_is_blocked() {
         Arc::new(TestHost::with_values(values.clone())),
     )
     .expect("restart control fixture should construct");
-    let poll_context = EvaluationPollContext::for_context(&task.eval_context);
-    let work = task
-        .restart_fixpoint_at_scope(&poll_context, &mut failed, 0)
-        .expect("restart selection should succeed")
-        .expect("matching restart should be selected");
+    let eval_context = task.eval_context.clone();
+    let work = EvaluationPollContext::quantum_for_context(&eval_context, |poll| {
+        task.restart_fixpoint_at_scope(poll, &mut failed, 0)
+    })
+    .expect("restart selection should succeed")
+    .expect("matching restart should be selected");
     task.execution.work = MachineWork::Outcome {
         outcome: BranchOutcome::Cancelled,
         scope_depth: 0,
@@ -2987,18 +2989,15 @@ fn restore_delimiter_waits_for_its_saved_stack_before_replacing_control() {
         panic!("restore should redeliver after replacing control")
     };
     assert!(branch.control.delimiters.is_empty());
-    EvaluationPollContext::for_context(&task.eval_context).evaluate(
-        &task.eval_context,
-        |evaluator| {
-            let Value::Dict(state) = evaluator.project_root(&branch.state, |_, value| value) else {
-                panic!("restored state must remain a dictionary")
-            };
-            assert!(matches!(
-                state.get(&task.tags.continuation_state),
-                Some(Value::Promised(_))
-            ));
-        },
-    );
+    crate::evaluation::EvalContext::evaluate_test_step(&task.eval_context, |evaluator| {
+        let Value::Dict(state) = evaluator.project_root(&branch.state, |_, value| value) else {
+            panic!("restored state must remain a dictionary")
+        };
+        assert!(matches!(
+            state.get(&task.tags.continuation_state),
+            Some(Value::Promised(_))
+        ));
+    });
     let TaskOutcome::Complete(result) = task.run().expect("restore should complete") else {
         panic!("restore should complete")
     };
@@ -3117,10 +3116,9 @@ fn retry_wake_and_terminalization_discard_blocked_control_work() {
         scope_depth: retried.execution.active_scope_depth(),
     };
     let eval_context = retried.eval_context.clone();
-    retried.apply_wake(
-        &mut EvaluationPollContext::for_context(&eval_context),
-        WakeAction::ReplaceWork(Box::new(replacement)),
-    );
+    EvaluationPollContext::quantum_for_context(&eval_context, |poll| {
+        retried.apply_wake(poll, WakeAction::ReplaceWork(Box::new(replacement)))
+    });
     assert!(retried.execution.controlling.is_none());
     assert!(matches!(retried.execution.work, MachineWork::Drive { .. }));
 
@@ -4743,11 +4741,13 @@ fn nested_effect_work_cannot_renew_one_shared_poll_budget() {
         host,
     )
     .unwrap();
-    let mut poll_context = EvaluationPollContext::for_context(&task.eval_context);
     let mut budget = crate::evaluation::EvaluationStepBudget::new(3);
 
+    let eval_context = task.eval_context.clone();
     assert!(matches!(
-        task.poll_with_context(&mut poll_context, &mut budget),
+        EvaluationPollContext::quantum_for_context(&eval_context, |poll| {
+            task.poll_with_context(poll, &mut budget)
+        }),
         EffectTaskPoll::Yielded
     ));
     assert_eq!(budget.granted(), 3);
@@ -4762,16 +4762,14 @@ fn scheduled_effect_wrapper_rejects_an_unrelated_poll_context() {
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let (task_context, _task_owner) = EvalContext::isolated(assembler.core_values()).into_parts();
     let unrelated = EvalContext::isolated(assembler.core_values());
-    let mut poll_context = crate::evaluation::EvaluationPollContext::for_context(&unrelated);
     let effect = root_value(&task_context, effect.clone_core_for_test());
     let task = EffectTask::new_in_context(effect, TestEffects, host, task_context)
         .expect("effect task should build");
     let mut machine = ValueEffectTask(task);
 
-    let _ = machine.poll(
-        &mut poll_context,
-        &mut crate::evaluation::EvaluationStepBudget::new(1),
-    );
+    let _ = crate::evaluation::EvaluationPollContext::quantum_for_context(&unrelated, |poll| {
+        machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+    });
 }
 
 #[test]
@@ -4795,16 +4793,19 @@ fn completed_effect_root_is_not_recreated_after_scope() {
     );
 }
 
+/// Polls `machine` until it exits, each poll in a quantum of its own, and
+/// pumps a dependency it blocks on between polls, as a driver does.
 fn poll_machine_exit(
     machine: &mut dyn EvaluationTaskMachine,
-    poll_context: &mut crate::evaluation::EvaluationPollContext,
     context: &EvalContext,
 ) -> EvaluationExitBlock {
     loop {
-        match machine.poll(
-            poll_context,
-            &mut crate::evaluation::EvaluationStepBudget::new(256),
-        ) {
+        match EvaluationPollContext::quantum_for_context(context, |poll_context| {
+            machine.poll(
+                poll_context,
+                &mut crate::evaluation::EvaluationStepBudget::new(256),
+            )
+        }) {
             EvaluationMachinePoll::Yielded => {}
             EvaluationMachinePoll::ScheduleSpark(_) => {
                 panic!("exit fixture unexpectedly scheduled a spark")
@@ -4840,7 +4841,6 @@ fn internal_exit_success_projects_through_both_scheduled_effect_wrappers() {
 
     for require_unit in [false, true] {
         let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
-        let mut poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
         let task = EffectTask::new_exit_in_context(
             effect.clone_core_for_test(),
             TestEffects,
@@ -4854,14 +4854,12 @@ fn internal_exit_success_projects_through_both_scheduled_effect_wrappers() {
             Box::new(ValueEffectTask(task))
         };
 
-        let exit = poll_machine_exit(machine.as_mut(), &mut poll_context, &context);
+        let exit = poll_machine_exit(machine.as_mut(), &context);
         assert_eq!(exit.intent, ExitIntent::Success);
         assert_eq!(exit.observed_epoch, None);
         assert!(matches!(
-            machine.poll(
-                &mut poll_context,
-                &mut crate::evaluation::EvaluationStepBudget::new(1)
-            ),
+            crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| machine
+                .poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))),
             EvaluationMachinePoll::Exit(EvaluationExitBlock {
                 intent: ExitIntent::Success,
                 observed_epoch: None,
@@ -4876,7 +4874,6 @@ fn internal_exit_error_forces_and_roots_its_message() {
     let (assembler, effect) =
         compile_effect(".exit.error ((\\message -> message) {msg:{text:\"stop\"}, detail:7})");
     let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
-    let mut poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
     let task = EffectTask::new_exit_in_context(
         effect.clone_core_for_test(),
         TestEffects,
@@ -4886,7 +4883,7 @@ fn internal_exit_error_forces_and_roots_its_message() {
     .expect("internal exit task should initialize");
     let mut machine = ValueEffectTask(task);
 
-    let exit = poll_machine_exit(&mut machine, &mut poll_context, &context);
+    let exit = poll_machine_exit(&mut machine, &context);
     let ExitIntent::Error(message) = exit.intent else {
         panic!("error exit should retain its message")
     };
@@ -4915,7 +4912,6 @@ fn internal_exit_error_message_resumes_without_replay() {
             builds: builds.clone(),
         }))
         .expect("fresh exit fixture should accept a launcher");
-    let mut poll_context = EvaluationPollContext::for_context(&context);
     let task = EffectTask::new_exit_in_context(
         effect.clone_core_for_test(),
         TestEffects,
@@ -4925,7 +4921,7 @@ fn internal_exit_error_message_resumes_without_replay() {
     .expect("internal exit task should initialize");
     let mut machine = ValueEffectTask(task);
 
-    let exit = poll_machine_exit(&mut machine, &mut poll_context, &context);
+    let exit = poll_machine_exit(&mut machine, &context);
     assert!(matches!(exit.intent, ExitIntent::Error(_)));
     assert_eq!(
         builds.load(Ordering::Acquire),
@@ -4985,7 +4981,6 @@ fn permanent_exit_discards_every_speculative_cut_resource() {
         .install_reflection_launcher(launcher)
         .expect("fresh exit fixture should accept its task profile");
     let (context, owner) = owned.into_parts();
-    let mut poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
     let observer = context.clone();
     let task = EffectTask::new_exit_in_context(
         effect.clone_core_for_test(),
@@ -4996,7 +4991,7 @@ fn permanent_exit_discards_every_speculative_cut_resource() {
     .expect("internal exit task should initialize");
     let mut machine = ValueEffectTask(task);
 
-    let exit = poll_machine_exit(&mut machine, &mut poll_context, &context);
+    let exit = poll_machine_exit(&mut machine, &context);
     assert_eq!(exit.intent, ExitIntent::Success);
     assert_eq!(exit.observed_epoch, None);
     assert!(
@@ -5022,7 +5017,6 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
     );
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
-    let mut poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
     let task = EffectTask::new_exit_in_context(
         effect.clone_core_for_test(),
         TestEffects,
@@ -5032,7 +5026,7 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
     .expect("internal exit task should initialize");
     let mut machine = ValueEffectTask(task);
 
-    let first = poll_machine_exit(&mut machine, &mut poll_context, &context);
+    let first = poll_machine_exit(&mut machine, &context);
     assert_eq!(first.intent, ExitIntent::Success);
     assert!(first.observed_epoch.is_some());
     assert!(
@@ -5043,10 +5037,8 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
     assert!(host.stderr().is_empty());
     assert!(host.diagnostics().is_empty());
     assert!(matches!(
-        machine.poll(
-            &mut poll_context,
-            &mut crate::evaluation::EvaluationStepBudget::new(256)
-        ),
+        crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| machine
+            .poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(256))),
         EvaluationMachinePoll::Exit(EvaluationExitBlock {
             intent: ExitIntent::Success,
             observed_epoch: Some(_),
@@ -5061,10 +5053,9 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
     ));
 
     let value = loop {
-        match machine.poll(
-            &mut poll_context,
-            &mut crate::evaluation::EvaluationStepBudget::new(256),
-        ) {
+        match crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
+            machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(256))
+        }) {
             EvaluationMachinePoll::Yielded => {}
             EvaluationMachinePoll::ScheduleSpark(_) => {
                 panic!("disturbed exit retry unexpectedly scheduled a spark")

@@ -1,10 +1,9 @@
 //! Scoped managed-value authority for evaluator substeps.
 //!
-//! A poll context carries no active mutator. It may open a
-//! bounded callback-free evaluator region, whose lifetime-bound authority
-//! cannot enter durable machine state or cross a thread. Production machine,
-//! client-demand, spark, direct-effect, and isolated-search polls receive this
-//! context.
+//! A poll context lends its quantum's mutator to bounded callback-free
+//! evaluator regions, whose lifetime-bound authority cannot enter durable
+//! machine state or cross a thread. Machine, client-demand, spark,
+//! direct-effect, and isolated-search polls receive this context.
 
 #[cfg(test)]
 use crate::core::ManagedCoreNetRoot;
@@ -41,8 +40,8 @@ pub(crate) struct EvaluationValueAccess<'scope> {
 /// admission its only entry route.
 pub(crate) struct EvaluatorStepContext<'step> {
     poll: &'step PollShared,
-    /// Access borrowed from the poll's mutator, when it holds one.
-    access: Option<RuntimeValueAccess<'step>>,
+    /// Access borrowed from the poll's mutator.
+    access: RuntimeValueAccess<'step>,
     context: &'step EvalContext,
     pending_reflection_activations: RefCell<Vec<ReflectionTaskReservation>>,
     pending_managed_publications: RefCell<Vec<PendingManagedPublication>>,
@@ -170,15 +169,12 @@ impl EvaluatorStepContext<'_> {
         &self,
         operation: impl for<'scope> FnOnce(EvaluationValueAccess<'scope>) -> R,
     ) -> R {
-        match &self.access {
-            Some(values) => values.with_reborrow(|values| {
-                operation(
-                    EvaluationValueAccess::try_new(self.context, values)
-                        .expect("poll context and managed access must share one value domain"),
-                )
-            }),
-            None => self.poll.with_value_access(self.context, operation),
-        }
+        self.access.with_reborrow(|values| {
+            operation(
+                EvaluationValueAccess::try_new(self.context, values)
+                    .expect("poll context and managed access must share one value domain"),
+            )
+        })
     }
 
     /// Roots one bare evaluator result in a collector-backed runtime root at
@@ -305,30 +301,22 @@ pub(in crate::evaluation) fn run_deferred(deferred: DeferredWork) {
 /// route, and the work it defers until its heap admission ends.
 pub(crate) struct PollShared {
     demand: Arc<EvaluationDemandState>,
-    /// Work deferred until the poll's mutator ends, present only while a
-    /// quantum holds one.
-    after_admission: RefCell<Option<DeferredWork>>,
+    /// Work deferred until the poll's mutator ends.
+    after_admission: RefCell<DeferredWork>,
 }
 
 impl PollShared {
-    fn new(demand: Arc<EvaluationDemandState>, holds_mutator: bool) -> Self {
+    fn new(demand: Arc<EvaluationDemandState>) -> Self {
         #[cfg(test)]
         demand.poll_contexts.fetch_add(1, Ordering::Relaxed);
         Self {
             demand,
-            after_admission: RefCell::new(holds_mutator.then(Vec::new)),
+            after_admission: RefCell::new(Vec::new()),
         }
     }
 
     fn after_admission(&self, work: impl FnOnce() + 'static) {
-        let mut deferred = self.after_admission.borrow_mut();
-        match deferred.as_mut() {
-            Some(deferred) => deferred.push(Box::new(work)),
-            None => {
-                drop(deferred);
-                work();
-            }
-        }
+        self.after_admission.borrow_mut().push(Box::new(work));
     }
 
     fn assert_context(&self, context: &EvalContext) {
@@ -337,71 +325,29 @@ impl PollShared {
             "poll context and evaluator context must share one demand session"
         );
     }
-
-    /// Opens a value-access region for a poll that holds no mutator.
-    fn with_value_access<R>(
-        &self,
-        context: &EvalContext,
-        operation: impl for<'scope> FnOnce(EvaluationValueAccess<'scope>) -> R,
-    ) -> R {
-        self.assert_context(context);
-        self.demand.values.with_runtime_value_access(|values| {
-            let access = EvaluationValueAccess::try_new(context, values)
-                .expect("poll context and managed access must share one value domain");
-            operation(access)
-        })
-    }
 }
 
 /// Ephemeral poll authority for evaluator work.
 ///
 /// A quantum's context carries the thread's mutator for its runtime
 /// ([`Self::quantum`]): value access borrows it rather than entering the heap,
-/// and work that must not run under it is deferred until it ends. Any other
-/// context carries no mutator, and each `with_value_access` opens and closes
-/// its own region. The context's temporary strong demand route comes from
+/// and work that must not run under it is deferred until it ends. Tests poll
+/// in quanta too. The context's temporary strong demand route comes from
 /// either a detached, runtime-checked claim or the explicit owner of a direct
 /// effect/search poll and is not exposed to the machine.
 pub(crate) struct EvaluationPollContext<'lend, 'mu> {
     shared: PollShared,
-    mutator: Option<RuntimeValueMutator<'lend, 'mu>>,
+    mutator: RuntimeValueMutator<'lend, 'mu>,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
-#[cfg(test)]
-impl EvaluationPollContext<'static, 'static> {
-    /// A context without a mutator, whose value accesses each enter the
-    /// heap, for fixtures that poll directly. Production polls run in a
-    /// quantum ([`EvaluationPollContext::quantum_for_context`]).
-    pub(crate) fn for_context(context: &EvalContext) -> Self {
-        Self::without_mutator(context.session.clone())
-    }
-
-    /// As [`Self::for_context`], for a detached coordinator claim.
-    pub(in crate::evaluation) fn for_claim(
-        claim: &super::coordinator::ClaimedDemandSession,
-    ) -> Self {
-        Self::without_mutator(claim.demand())
-    }
-
-    fn without_mutator(demand: Arc<EvaluationDemandState>) -> Self {
-        Self {
-            shared: PollShared::new(demand, false),
-            mutator: None,
-            _thread_bound: PhantomData,
-        }
-    }
-}
-
 impl<'lend, 'mu> EvaluationPollContext<'lend, 'mu> {
-    /// This quantum's mutator, when it holds one for `runtime`.
+    /// This quantum's mutator, when it is the one for `runtime`.
     pub(in crate::evaluation) fn mutator_for(
         &mut self,
         runtime: crate::runtime::EvaluationRuntimeId,
     ) -> Option<&mut RuntimeValueMutator<'lend, 'mu>> {
-        self.mutator
-            .as_mut()
-            .filter(|mutator| mutator.runtime_id() == runtime)
+        Some(&mut self.mutator).filter(|mutator| mutator.runtime_id() == runtime)
     }
 }
 
@@ -415,7 +361,7 @@ impl EvaluationPollContext<'_, '_> {
     /// mutator has ended, in order, before this returns and so before the
     /// driver releases its claim. If the poll unwinds, deferred work is
     /// dropped.
-    pub(in crate::evaluation) fn quantum<R>(
+    pub(crate) fn quantum<R>(
         demand: Arc<EvaluationDemandState>,
         operation: impl FnOnce(&mut EvaluationPollContext<'_, '_>) -> R,
     ) -> R {
@@ -438,12 +384,12 @@ impl EvaluationPollContext<'_, '_> {
     ) -> (R, DeferredWork) {
         debug_assert_eq!(mutator.runtime_id(), demand.values.runtime_id());
         let mut context = EvaluationPollContext {
-            shared: PollShared::new(demand, true),
-            mutator: Some(mutator.reborrow()),
+            shared: PollShared::new(demand),
+            mutator: mutator.reborrow(),
             _thread_bound: PhantomData,
         };
         let result = operation(&mut context);
-        let deferred = context.shared.after_admission.take().unwrap_or_default();
+        let deferred = context.shared.after_admission.take();
         (result, deferred)
     }
 
@@ -471,8 +417,7 @@ impl EvaluationPollContext<'_, '_> {
         Self::quantum(context.session.clone(), operation)
     }
 
-    /// Runs `work` once this poll's heap admission ends: at once outside a
-    /// quantum, otherwise after its mutator. Work that waits on another
+    /// Runs `work` once this poll's mutator ends. Work that waits on another
     /// thread or calls client code belongs here, so a collection never waits
     /// for it. Machines reach it through their evaluator step
     /// ([`EvaluatorStepContext::after_admission`]).
@@ -482,25 +427,18 @@ impl EvaluationPollContext<'_, '_> {
     }
 
     /// Releases this quantum's heap admission while `operation` runs, then
-    /// re-admits; outside a quantum, just runs it. Client callbacks and work
+    /// re-admits. Client callbacks and work
     /// that waits on another thread run here when their result is needed at
     /// once. A suspension costs about two heap entries, so adjacent
     /// operations share one.
     pub(crate) fn suspend<R>(&mut self, operation: impl FnOnce() -> R) -> R {
-        match &mut self.mutator {
-            Some(mutator) => mutator.suspend(operation),
-            None => operation(),
-        }
+        self.mutator.suspend(operation)
     }
 
     /// Whether this quantum has deferred work, so it should end rather than
     /// poll on.
     pub(crate) fn has_deferred_work(&self) -> bool {
-        self.shared
-            .after_admission
-            .borrow()
-            .as_ref()
-            .is_some_and(|deferred| !deferred.is_empty())
+        !self.shared.after_admission.borrow().is_empty()
     }
 
     pub(crate) fn assert_context(&self, context: &EvalContext) {
@@ -513,18 +451,13 @@ impl EvaluationPollContext<'_, '_> {
         context: &EvalContext,
         operation: impl for<'scope> FnOnce(EvaluationValueAccess<'scope>) -> R,
     ) -> R {
-        match &self.mutator {
-            Some(mutator) => {
-                self.shared.assert_context(context);
-                mutator.with_access(|values| {
-                    operation(
-                        EvaluationValueAccess::try_new(context, values)
-                            .expect("poll context and managed access must share one value domain"),
-                    )
-                })
-            }
-            None => self.shared.with_value_access(context, operation),
-        }
+        self.shared.assert_context(context);
+        self.mutator.with_access(|values| {
+            operation(
+                EvaluationValueAccess::try_new(context, values)
+                    .expect("poll context and managed access must share one value domain"),
+            )
+        })
     }
 
     /// Derives the thread-bound evaluator authority for one machine substep.
@@ -536,7 +469,7 @@ impl EvaluationPollContext<'_, '_> {
         self.shared.assert_context(context);
         EvaluatorStepContext {
             poll: &self.shared,
-            access: self.mutator.as_ref().map(RuntimeValueMutator::access),
+            access: self.mutator.access(),
             context,
             pending_reflection_activations: RefCell::new(Vec::new()),
             pending_managed_publications: RefCell::new(Vec::new()),
@@ -558,16 +491,12 @@ impl EvaluationPollContext<'_, '_> {
         result
     }
 
-    /// Borrows this quantum's runtime access for `operation`. A fixture's
-    /// context without a mutator takes a boundary of its own.
+    /// Borrows this quantum's runtime access for `operation`.
     pub(crate) fn with_runtime_access<R>(
         &self,
         operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,
     ) -> R {
-        match &self.mutator {
-            Some(mutator) => mutator.with_access(operation),
-            None => self.shared.demand.values.with_boundary_access(operation),
-        }
+        self.mutator.with_access(operation)
     }
 
     /// Test-fixture convenience for publishing a compatibility result.
@@ -669,64 +598,64 @@ mod tests {
     }
 
     #[test]
-    fn poll_context_opens_two_scopes_around_a_mutator_free_callback() {
+    fn a_quantum_suspends_its_mutator_around_a_callback() {
         let values = value_factory();
         let baseline = values
             .collect_managed_for_test()
             .expect("canonical roots should collect before the access fixture");
         let context = EvalContext::isolated(values.clone());
-        let poll = EvaluationPollContext::for_context(&context);
-        let evaluator = poll.evaluator(&context);
+        EvaluationPollContext::quantum_for_context(&context, |poll| {
+            let first = poll.with_value_access(&context, |access| {
+                assert!(access.values.belongs_to(context.values()));
+                assert!(matches!(
+                    values.collect_managed_for_test(),
+                    Err(CollectionError::ActiveMutator)
+                ));
+                17
+            });
+            assert_eq!(first, 17);
 
-        let first = evaluator.with_value_access(|access| {
-            assert!(access.values.belongs_to(context.values()));
-            assert!(matches!(
-                values.collect_managed_for_test(),
-                Err(CollectionError::ActiveMutator)
-            ));
-            17
-        });
-        assert_eq!(first, 17);
+            let mut callback_ran = false;
+            let callback_result = poll.suspend(|| {
+                invoke_callback(|| {
+                    callback_ran = true;
+                    let collector_values = values.clone();
+                    std::thread::spawn(move || collector_values.collect_managed_for_test())
+                        .join()
+                        .expect("the cross-thread collection probe must not panic")
+                        .expect("the callback must run without an active mutator")
+                })
+            });
+            assert!(callback_ran);
+            assert_eq!(callback_result.root_entries(), baseline.root_entries());
 
-        let mut callback_ran = false;
-        let callback_result = invoke_callback(|| {
-            callback_ran = true;
-            let collector_values = values.clone();
-            std::thread::spawn(move || collector_values.collect_managed_for_test())
-                .join()
-                .expect("the cross-thread collection probe must not panic")
-                .expect("the callback must run without an active mutator")
-        });
-        assert!(callback_ran);
-        assert_eq!(callback_result.root_entries(), baseline.root_entries());
+            let second = poll.with_value_access(&context, |access| {
+                assert!(matches!(
+                    values.collect_managed_for_test(),
+                    Err(CollectionError::ActiveMutator)
+                ));
+                let allocator = access
+                    .values
+                    .allocator::<u64>()
+                    .expect("the scoped u64 allocation should fit");
+                access.values.root(allocator.alloc_view(29))
+            });
 
-        let second = evaluator.with_value_access(|access| {
-            assert!(matches!(
-                values.collect_managed_for_test(),
-                Err(CollectionError::ActiveMutator)
-            ));
-            let allocator = access
-                .values
-                .allocator::<u64>()
-                .expect("the scoped u64 allocation should fit");
-            access.values.root(allocator.alloc_view(29))
-        });
-
-        evaluator.with_value_access(|access| {
-            assert_eq!(*access.values.get(&second), 29);
+            poll.with_value_access(&context, |access| {
+                assert_eq!(*access.values.get(&second), 29);
+            });
         });
     }
 
     #[test]
-    fn evaluator_step_guards_fresh_managed_results_until_containing_root_publication() {
+    fn evaluator_step_results_survive_until_their_containing_root_publishes() {
         let values = value_factory();
         values
             .collect_managed_for_test()
             .expect("the evaluator publication fixture should start collectible");
         let context = EvalContext::isolated(values.clone());
-        let poll = EvaluationPollContext::for_context(&context);
 
-        let root = poll.evaluate(&context, |evaluator| {
+        let root = crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
             let lazy = evaluator
                 .construct_lazy(|access| LazyValue::error_in(access, "guarded evaluator lazy"));
             let promise = evaluator.construct_promise();
@@ -737,14 +666,12 @@ mod tests {
                 evaluator.with_value_access(|access| template.instantiate_with(access.values()));
             let net = evaluator.construct_core_net(runtime);
 
-            let intervening = values
-                .collect_managed_for_test()
-                .expect("temporary evaluator owners should permit collection between regions");
-            assert_eq!(
-                intervening.finalized_slots(),
-                0,
-                "no fresh evaluator result may die before its containing owner is published"
-            );
+            // The step holds its quantum's mutator, so no collection runs
+            // before its fresh results reach their containing root.
+            assert!(matches!(
+                values.collect_managed_for_test(),
+                Err(CollectionError::ActiveMutator)
+            ));
 
             evaluator.root_value(|_| {
                 Value::List(crate::core::List::from_values(vec![
@@ -767,33 +694,26 @@ mod tests {
     }
 
     #[test]
-    fn evaluation_scope_reuses_recursive_same_heap_entry() {
+    fn nested_evaluator_accesses_borrow_one_quantum_mutator() {
         let values = value_factory();
         let context = EvalContext::isolated(values.clone());
-        let poll = EvaluationPollContext::for_context(&context);
 
-        poll.with_value_access(&context, |outer| {
-            assert!(matches!(
-                values.collect_managed_for_test(),
-                Err(CollectionError::ActiveMutator)
-            ));
-            poll.with_value_access(&context, |inner| {
-                assert!(outer.values.belongs_to(context.values()));
-                assert!(inner.values.belongs_to(context.values()));
+        EvaluationPollContext::quantum_for_context(&context, |poll| {
+            poll.with_value_access(&context, |outer| {
                 assert!(matches!(
                     values.collect_managed_for_test(),
                     Err(CollectionError::ActiveMutator)
                 ));
+                poll.with_value_access(&context, |inner| {
+                    assert!(outer.values.belongs_to(context.values()));
+                    assert!(inner.values.belongs_to(context.values()));
+                });
             });
-            assert!(matches!(
-                values.collect_managed_for_test(),
-                Err(CollectionError::ActiveMutator)
-            ));
         });
 
         values
             .collect_managed_for_test()
-            .expect("recursive admission must release the outermost mutator once");
+            .expect("the quantum's mutator ends with the quantum");
     }
 
     #[test]
@@ -845,12 +765,11 @@ mod tests {
     fn poll_context_without_scope_carries_no_heap_authority() {
         let values = value_factory();
         let context = EvalContext::isolated(values.clone());
-        let poll = EvaluationPollContext::for_context(&context);
 
         values
             .collect_managed_for_test()
             .expect("constructing a poll context must not enter the managed heap");
-        poll.with_value_access(&context, |access| {
+        crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
             assert!(access.values.belongs_to(&values));
             assert!(matches!(
                 values.collect_managed_for_test(),
@@ -866,15 +785,7 @@ mod tests {
     fn a_quantum_runs_deferred_work_after_its_mutator_in_order() {
         let values = value_factory();
         let context = EvalContext::isolated(values.clone());
-        let poll = EvaluationPollContext::for_context(&context);
         let log = Rc::new(RefCell::new(Vec::new()));
-
-        // Outside a quantum, deferred work runs at once.
-        poll.after_admission({
-            let log = log.clone();
-            move || log.borrow_mut().push("immediate")
-        });
-        assert!(!poll.has_deferred_work());
 
         let result = EvaluationPollContext::quantum(context.session.clone(), |quantum| {
             assert!(matches!(
@@ -899,7 +810,7 @@ mod tests {
             7
         });
         assert_eq!(result, 7);
-        assert_eq!(*log.borrow(), ["immediate", "poll", "first", "second"]);
+        assert_eq!(*log.borrow(), ["poll", "first", "second"]);
     }
 
     #[test]

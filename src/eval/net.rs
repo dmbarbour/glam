@@ -1034,37 +1034,30 @@ impl NormalizationRequest {
     }
 
     #[cfg(test)]
-    fn drive_in(
-        &self,
-        context: &EvaluatorStepContext<'_>,
-    ) -> Result<NetInterfaceOutcome, EvaluationHalt> {
-        drive_net_interface(context, self)
-    }
-
-    #[cfg(test)]
     fn drive(&self, context: &EvalContext) -> Result<NetInterfaceOutcome, EvaluationHalt> {
-        crate::evaluation::EvalContext::evaluate_test_step(context, |evaluator| {
-            self.drive_in(evaluator)
-        })
+        drive_net_interface(context, self)
     }
 }
 
 #[cfg(test)]
 fn drive_net_interface(
-    context: &EvaluatorStepContext<'_>,
+    context: &EvalContext,
     request: &NormalizationRequest,
 ) -> Result<NetInterfaceOutcome, EvaluationHalt> {
     drive_net_interface_with_contention_handoff(context, request, || {})
 }
 
 #[cfg(test)]
+/// Drives `request` to its interface, one evaluator step per pass. A
+/// contended pass waits between steps, holding no mutator, as a poll's
+/// contention wait runs after its admission.
 fn drive_net_interface_with_contention_handoff(
-    context: &EvaluatorStepContext<'_>,
+    context: &EvalContext,
     request: &NormalizationRequest,
     mut before_handoff: impl FnMut(),
 ) -> Result<NetInterfaceOutcome, EvaluationHalt> {
     loop {
-        match drive_net_work_in(context, request)? {
+        match context.evaluate_test_step(|evaluator| drive_net_work_in(evaluator, request))? {
             NetDriverOutcome::Progressed => continue,
             NetDriverOutcome::BudgetExhausted => {
                 unreachable!("the test-only driver receives an unbounded budget")
@@ -3060,16 +3053,13 @@ mod driver_tests {
         let follower = std::thread::spawn(move || {
             let context = EvalContext::isolated(follower_values);
             let mut registered_tx = Some(registered_tx);
-            let result =
-                crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
-                    drive_net_interface_with_contention_handoff(evaluator, &request, || {
-                        registered_tx
-                            .take()
-                            .expect("one evaluator handoff should register once")
-                            .send(())
-                            .unwrap();
-                    })
-                });
+            let result = drive_net_interface_with_contention_handoff(&context, &request, || {
+                registered_tx
+                    .take()
+                    .expect("one evaluator handoff should register once")
+                    .send(())
+                    .unwrap();
+            });
             result_tx.send(result).unwrap();
         });
 

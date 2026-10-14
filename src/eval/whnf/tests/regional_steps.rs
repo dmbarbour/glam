@@ -1,5 +1,5 @@
 use crate::core::{CoreValueFactory, Value};
-use crate::evaluation::{EvalContext, EvaluationPollContext};
+use crate::evaluation::EvalContext;
 use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
 use super::*;
@@ -11,8 +11,7 @@ fn isolated_values() -> CoreValueFactory {
 #[test]
 fn immediate_completion_returns_whnf_without_spending_budget() {
     let context = EvalContext::isolated(isolated_values());
-    let poll = EvaluationPollContext::for_context(&context);
-    poll.with_value_access(&context, |access| {
+    crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         let expected = Value::binary_from_text("immediate");
         let work = RegionalWhnfWork::from_parts(
             &access,
@@ -42,9 +41,8 @@ fn tail_delegation_is_iterative_and_does_not_push_or_root() {
 
     let values = isolated_values();
     let context = EvalContext::isolated(values.clone());
-    let poll = EvaluationPollContext::for_context(&context);
     let roots_before = values.managed_root_registrations_for_test();
-    poll.with_value_access(&context, |access| {
+    crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         let expected = Value::binary_from_text("tail");
         let frames = Vec::with_capacity(8);
         let frame_capacity = frames.capacity();
@@ -89,8 +87,7 @@ fn tail_delegation_is_iterative_and_does_not_push_or_root() {
 #[test]
 fn budget_yield_retains_work_without_inventing_a_dependency() {
     let context = EvalContext::isolated(isolated_values());
-    let poll = EvaluationPollContext::for_context(&context);
-    poll.with_value_access(&context, |access| {
+    crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         let work = RegionalWhnfWork::from_parts(
             &access,
             Value::binary_from_text("yield"),

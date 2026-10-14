@@ -5,7 +5,7 @@ use crate::core::LazyValue;
 use crate::core::{
     CoreValueFactory, EvaluationFailure, Value, thread_has_runtime_value_access_for_test,
 };
-use crate::evaluation::{EvalContext, EvaluationPollContext};
+use crate::evaluation::EvalContext;
 use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
 use super::*;
@@ -26,13 +26,12 @@ fn text(value: &'static str) -> Value {
 fn boundary_publishes_the_complete_checkpoint_before_access_closes() {
     let values = isolated_values();
     let context = EvalContext::isolated(values.clone());
-    let poll = EvaluationPollContext::for_context(&context);
     let mut computation = WhnfComputation::from_root(root(&values, text("initial")));
     let (deferred, _) = values.rooted_error_lazy_for_test();
     let registrations_before = values.managed_root_registrations_for_test();
 
     let mut budget = WhnfStepBudget::new(1);
-    let outcome = poll.with_value_access(&context, |access| {
+    let outcome = crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         let outcome = computation.poll_in(&access, &mut budget, |access, work| {
             access
                 .values()
@@ -72,7 +71,7 @@ fn boundary_publishes_the_complete_checkpoint_before_access_closes() {
     assert!(callback_ran);
 
     let mut resume_budget = WhnfStepBudget::new(1);
-    let completed = poll.with_value_access(&context, |access| {
+    let completed = crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         computation.poll_in(&access, &mut resume_budget, |access, work| {
             access
                 .values()
@@ -101,12 +100,11 @@ fn boundary_publishes_the_complete_checkpoint_before_access_closes() {
 fn permanent_failure_is_rooted_inside_the_regional_poll() {
     let values = isolated_values();
     let context = EvalContext::isolated(values.clone());
-    let poll = EvaluationPollContext::for_context(&context);
     let mut computation = WhnfComputation::from_root(root(&values, Value::Number(0.into())));
     let registrations_before = values.managed_root_registrations_for_test();
 
     let mut budget = WhnfStepBudget::new(1);
-    let failed = poll.with_value_access(&context, |access| {
+    let failed = crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         let failed = computation.poll_in(&access, &mut budget, |access, _work| {
             let failure = EvaluationFailure::emission_in(access.values(), text("failure"))
                 .with_context_in(access.values(), text("context"));
@@ -133,11 +131,10 @@ fn permanent_failure_is_rooted_inside_the_regional_poll() {
 fn unwind_poison_faults_without_reentering_the_reducer() {
     let values = isolated_values();
     let context = EvalContext::isolated(values.clone());
-    let poll = EvaluationPollContext::for_context(&context);
     let mut computation = WhnfComputation::from_root(root(&values, text("initial")));
 
     let mut install_budget = WhnfStepBudget::new(1);
-    let installed = poll.with_value_access(&context, |access| {
+    let installed = crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         computation.poll_in(&access, &mut install_budget, |_access, work| {
             work.frames.push(WhnfContinuation::Application {
                 arguments: vec![text("retained")],
@@ -150,7 +147,7 @@ fn unwind_poison_faults_without_reentering_the_reducer() {
 
     let unwind = catch_unwind(AssertUnwindSafe(|| {
         let mut panic_budget = WhnfStepBudget::new(1);
-        poll.with_value_access(&context, |access| {
+        crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
             computation.poll_in(&access, &mut panic_budget, |access, work| {
                 access
                     .values()
@@ -169,7 +166,7 @@ fn unwind_poison_faults_without_reentering_the_reducer() {
     // before the reducer runs again, and the poll boundary contains that.
     let resumed = catch_unwind(AssertUnwindSafe(|| {
         let mut resume_budget = WhnfStepBudget::new(1);
-        poll.with_value_access(&context, |access| {
+        crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
             computation.poll_in(&access, &mut resume_budget, |_access, _work| {
                 panic!("a poisoned state must fault before reducer reentry")
             })
@@ -189,11 +186,10 @@ fn dropping_a_suspended_computation_retires_its_complete_checkpoint() {
         .collect_managed_for_test()
         .expect("the cancellation fixture should begin collectible");
     let context = EvalContext::isolated(values.clone());
-    let poll = EvaluationPollContext::for_context(&context);
     let mut computation = WhnfComputation::from_root(root(&values, text("initial")));
 
     let mut budget = WhnfStepBudget::new(1);
-    let yielded = poll.with_value_access(&context, |access| {
+    let yielded = crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         computation.poll_in(&access, &mut budget, |_access, work| {
             work.frames = vec![WhnfContinuation::Application {
                 arguments: vec![text("first"), text("second")],
@@ -233,7 +229,6 @@ fn collection_between_polls_preserves_only_the_installed_checkpoint() {
         .collect_managed_for_test()
         .expect("the collection fixture should begin collectible");
     let context = EvalContext::isolated(values.clone());
-    let poll = EvaluationPollContext::for_context(&context);
 
     let mut prior_id = None;
     let initial = values.construct_runtime_value_root(|access| {
@@ -246,7 +241,7 @@ fn collection_between_polls_preserves_only_the_installed_checkpoint() {
 
     let mut replacement_id = None;
     let mut budget = WhnfStepBudget::new(1);
-    let yielded = poll.with_value_access(&context, |access| {
+    let yielded = crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         computation.poll_in(&access, &mut budget, |access, work| {
             let Value::Lazy(prior) = &work.focus else {
                 panic!("the initial checkpoint should retain its lazy")
@@ -274,7 +269,7 @@ fn collection_between_polls_preserves_only_the_installed_checkpoint() {
     );
 
     let mut resume_budget = WhnfStepBudget::new(1);
-    let resumed = poll.with_value_access(&context, |access| {
+    let resumed = crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         computation.poll_in(&access, &mut resume_budget, |access, work| {
             let Value::Lazy(replacement) = &work.focus else {
                 panic!("the replacement checkpoint should retain its lazy")

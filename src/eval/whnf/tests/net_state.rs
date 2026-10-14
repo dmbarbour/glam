@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::core::{CoreValueFactory, DeferredValueId, LazyValue, PromisedValue, Value};
-use crate::evaluation::{EvalContext, EvaluationPollContext};
+use crate::evaluation::EvalContext;
 use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
 use super::*;
@@ -54,9 +54,8 @@ fn retained_values(work: &WhnfState) -> Vec<&Value> {
 fn net_state_round_trip_preserves_empty_frames_and_scalar_identity() {
     let values = isolated_values();
     let context = EvalContext::isolated(values);
-    let poll = EvaluationPollContext::for_context(&context);
 
-    poll.with_value_access(&context, |access| {
+    crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         let regional = RegionalWhnfWork::from_parts(
             &access,
             Value::Number(17.into()),
@@ -133,9 +132,8 @@ fn container_identities(work: &WhnfState) -> Vec<(&'static str, usize, usize, us
 fn regional_net_role_handoffs_preserve_every_container_allocation() {
     let values = isolated_values();
     let context = EvalContext::isolated(values.clone());
-    let poll = EvaluationPollContext::for_context(&context);
 
-    poll.with_value_access(&context, |access| {
+    crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         let frames = Vec::with_capacity(8);
         let mut regional = RegionalWhnfWork::from_parts(
             &access,
@@ -208,12 +206,11 @@ fn regional_net_role_handoffs_preserve_every_container_allocation() {
 fn net_state_trace_retains_every_value_position_through_collection() {
     let values = isolated_values();
     let context = EvalContext::isolated(values.clone());
-    let poll = EvaluationPollContext::for_context(&context);
     let roots_before = values.managed_root_registrations_for_test();
     let baseline_marked = values.collect_managed_for_test().unwrap().marked_slots();
 
     let (state_root, expected_lazy_ids, source_owner, promise_id) =
-        poll.with_value_access(&context, |access| {
+        crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
             let mut next = 0;
             let mut make = || {
                 let value = sentinel(&values);
@@ -313,7 +310,7 @@ fn net_state_trace_retains_every_value_position_through_collection() {
         "the rooted state, every lazy sentinel, and the promise breadcrumb must survive"
     );
 
-    poll.with_value_access(&context, |access| {
+    crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         let state = access.values().get(&state_root);
         let actual_lazy_ids = retained_values(&state.0)
             .into_iter()
@@ -393,9 +390,8 @@ fn reduce_shell(
 fn net_state_and_durable_work_share_exact_budget_split_semantics() {
     let values = isolated_values();
     let context = EvalContext::isolated(values);
-    let poll = EvaluationPollContext::for_context(&context);
 
-    poll.with_value_access(&context, |access| {
+    crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         let mut uninterrupted_budget = WhnfStepBudget::new(4);
         let (RegionalWhnfStatus::Ready(uninterrupted), _) = drive_net_state(
             &access,
@@ -447,9 +443,8 @@ fn net_driver_retains_frame_state_on_yield_boundary_and_failure() {
     let values = isolated_values();
     let (deferred, _) = values.rooted_error_lazy_for_test();
     let context = EvalContext::isolated(values);
-    let poll = EvaluationPollContext::for_context(&context);
 
-    poll.with_value_access(&context, |access| {
+    crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         let make_state = || {
             NetWhnfState::from_regional(
                 &access,

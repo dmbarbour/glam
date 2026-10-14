@@ -141,7 +141,7 @@ pub(crate) fn interpret_poll(
 #[cfg(test)]
 mod tests {
     use crate::core::{LazyValue, PromisedValue, Value};
-    use crate::evaluation::{EvalContext, EvaluationPollContext};
+    use crate::evaluation::EvalContext;
 
     use super::*;
 
@@ -157,15 +157,17 @@ mod tests {
             }))
         });
         let mut computation = WhnfComputation::from_root(focus);
-        let poll_context = EvaluationPollContext::for_context(&context);
 
         assert_eq!(context.deferred_task_count(), 0);
-        let result = poll_computation(
-            &mut computation,
-            &poll_context,
-            &context,
-            &mut crate::evaluation::EvaluationStepBudget::new(1),
-        );
+        let result =
+            crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
+                poll_computation(
+                    &mut computation,
+                    poll,
+                    &context,
+                    &mut crate::evaluation::EvaluationStepBudget::new(1),
+                )
+            });
         let WhnfOwnerPoll::Pending(WorkDependency::Wait(wait)) = result else {
             panic!("uncached lazy must admit its canonical producer after inspection")
         };
@@ -189,14 +191,16 @@ mod tests {
             access.duplicate_value(&Value::Promised(promise))
         });
         let mut computation = WhnfComputation::from_root(focus);
-        let poll_context = EvaluationPollContext::for_context(&context);
 
-        let result = poll_computation(
-            &mut computation,
-            &poll_context,
-            &context,
-            &mut crate::evaluation::EvaluationStepBudget::new(1),
-        );
+        let result =
+            crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
+                poll_computation(
+                    &mut computation,
+                    poll,
+                    &context,
+                    &mut crate::evaluation::EvaluationStepBudget::new(1),
+                )
+            });
         let WhnfOwnerPoll::Pending(WorkDependency::Promise(promise)) = result else {
             panic!("resolver promise must remain the exact completion dependency")
         };
@@ -218,14 +222,16 @@ mod tests {
             access.duplicate_value(&Value::Promised(promise))
         });
         let mut computation = WhnfComputation::from_root(focus);
-        let poll_context = EvaluationPollContext::for_context(&owner);
 
-        let result = poll_computation(
-            &mut computation,
-            &poll_context,
-            &owner,
-            &mut crate::evaluation::EvaluationStepBudget::new(1),
-        );
+        let result =
+            crate::evaluation::EvaluationPollContext::quantum_for_context(&owner, |poll| {
+                poll_computation(
+                    &mut computation,
+                    poll,
+                    &owner,
+                    &mut crate::evaluation::EvaluationStepBudget::new(1),
+                )
+            });
         let WhnfOwnerPoll::Failed(failure) = result else {
             panic!("a producer task cannot wait on its own promise")
         };

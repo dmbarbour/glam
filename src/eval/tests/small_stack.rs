@@ -258,11 +258,13 @@ fn promised_dictionary_chain(context: &EvalContext, depth: usize, key: &Key, lea
 }
 
 fn poll_key_conversion(context: &EvalContext, machine: &mut KeyConversionMachine) -> Key {
-    let poll = EvaluationPollContext::for_context(context);
     loop {
-        let result = poll.evaluate(context, |evaluator| {
-            machine.poll(&poll, evaluator, context, &mut EvaluationStepBudget::new(1))
-        });
+        let result =
+            crate::evaluation::EvaluationPollContext::quantum_for_context(context, |poll| {
+                poll.evaluate(context, |evaluator| {
+                    machine.poll(poll, evaluator, context, &mut EvaluationStepBudget::new(1))
+                })
+            });
         match result {
             ConversionPoll::Ready(key) => return key,
             ConversionPoll::Yielded => {}
@@ -275,11 +277,13 @@ fn poll_key_conversion(context: &EvalContext, machine: &mut KeyConversionMachine
 }
 
 fn poll_key_list(context: &EvalContext, machine: &mut KeyListMachine) -> Vec<Key> {
-    let poll = EvaluationPollContext::for_context(context);
     loop {
-        let result = poll.evaluate(context, |evaluator| {
-            machine.poll(&poll, evaluator, context, &mut EvaluationStepBudget::new(1))
-        });
+        let result =
+            crate::evaluation::EvaluationPollContext::quantum_for_context(context, |poll| {
+                poll.evaluate(context, |evaluator| {
+                    machine.poll(poll, evaluator, context, &mut EvaluationStepBudget::new(1))
+                })
+            });
         match result {
             ConversionPoll::Ready(keys) => return keys,
             ConversionPoll::Yielded => {}
@@ -344,8 +348,7 @@ fn explicit_whnf_worklist_completes_at_the_recursive_control_depth() {
     on_small_stack("explicit-whnf-worklist", || {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
         let context = EvalContext::isolated(values);
-        let poll = EvaluationPollContext::for_context(&context);
-        poll.with_value_access(&context, |access| {
+        crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
             let expected = Value::Number(Number::from_usize(SEMANTIC_DEPTH));
             let work =
                 RegionalWhnfWork::from_focus(&access, access.values().duplicate_value(&expected));

@@ -731,6 +731,21 @@ Slices, in order:
    exercised only implicit outer entries, recursive entries or held regions
    retire.
 
+Slice 1 landed 2026-10-14: a poll context always holds its quantum's
+mutator, so the mutator-less constructors (`for_context`, `for_claim`) and
+the legacy access behind them went. Fixtures poll in quanta
+(`quantum_for_context`, or `quantum` for a claim's demand), and
+`EvalContext::evaluate_test_step` and `with_test_value_access` each run
+one. Test helpers that forced a list chunk or waited on net contention
+inside an evaluator step now force and wait between steps, as drivers do;
+two access tests became their runtime counterparts (a quantum suspending
+around a callback, nested accesses borrowing one mutator). Finding: a step
+now holds its quantum's mutator throughout and cannot suspend while an
+evaluator borrows its context, so no collection runs inside a step, and the
+temporary owners an evaluator step registers for fresh results
+(`construct_lazy` and kin) may be redundant; worth measuring under
+`gc-hold-transient-roots`.
+
 ### Mutator entry cost (`gc-hold-entry-cost`)
 
 Added by the maintainer on 2026-10-14: make taking, ending, suspending and

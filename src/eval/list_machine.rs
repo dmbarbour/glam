@@ -579,14 +579,15 @@ mod tests {
         context: &EvalContext,
         allowance: usize,
     ) -> ListFrontPoll {
-        let poll = EvaluationPollContext::for_context(context);
-        poll.evaluate(context, |evaluator| {
-            machine.poll(
-                &poll,
-                evaluator,
-                context,
-                &mut crate::evaluation::EvaluationStepBudget::new(allowance),
-            )
+        crate::evaluation::EvaluationPollContext::quantum_for_context(context, |poll| {
+            poll.evaluate(context, |evaluator| {
+                machine.poll(
+                    poll,
+                    evaluator,
+                    context,
+                    &mut crate::evaluation::EvaluationStepBudget::new(allowance),
+                )
+            })
         })
     }
 

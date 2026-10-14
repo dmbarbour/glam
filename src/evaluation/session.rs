@@ -942,10 +942,7 @@ impl EvalContext {
             .values()
             .construct_runtime_value_root(|access| access.duplicate_value(value));
         let value = self.evaluate_root_whnf(input)?;
-        let poll = EvaluationPollContext::for_context(self);
-        Ok(poll.evaluate(self, |evaluator| {
-            evaluator.project_root(&value, |_, value| value)
-        }))
+        Ok(self.evaluate_test_step(|evaluator| evaluator.project_root(&value, |_, value| value)))
     }
 
     /// Runs one explicitly bounded evaluator quantum for a regional test.
@@ -959,8 +956,19 @@ impl EvalContext {
         &self,
         operation: impl FnOnce(&EvaluatorStepContext<'_>) -> R,
     ) -> R {
-        let poll = EvaluationPollContext::for_context(self);
-        poll.evaluate(self, operation)
+        EvaluationPollContext::quantum_for_context(self, |poll| poll.evaluate(self, operation))
+    }
+
+    /// Borrows evaluator access from one quantum's mutator, as a machine's
+    /// poll does, for a regional test.
+    #[cfg(test)]
+    pub(crate) fn with_test_value_access<R>(
+        &self,
+        operation: impl for<'scope> FnOnce(crate::evaluation::EvaluationValueAccess<'scope>) -> R,
+    ) -> R {
+        EvaluationPollContext::quantum_for_context(self, |poll| {
+            poll.with_value_access(self, operation)
+        })
     }
 
     /// Demands one already-owned value and preserves the client-demand result

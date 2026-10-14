@@ -555,11 +555,12 @@ fn client_demand_exactly_restarts_after_promise_assignment() {
     let mut claimed = coordinator
         .claim_client_demand(handle.work())
         .expect("assigned promise demand should be ready");
-    let poll_context = EvaluationPollContext::for_claim(&claimed.demand);
-    let poll = claimed.poll(
-        &poll_context,
-        &mut crate::evaluation::EvaluationStepBudget::new(1),
-    );
+    let poll = EvaluationPollContext::quantum(claimed.demand.demand(), |poll_context| {
+        claimed.poll(
+            poll_context,
+            &mut crate::evaluation::EvaluationStepBudget::new(1),
+        )
+    });
     assert!(matches!(poll, ClientDemandPoll::Yielded));
     coordinator.release_client_demand(claimed, poll);
     assert!(matches!(
@@ -591,11 +592,12 @@ fn lazy_producer_completion_before_client_subscription_requeues_exactly_once() {
     let mut claimed = coordinator
         .claim_client_demand(handle.work())
         .expect("client demand should be ready");
-    let poll_context = EvaluationPollContext::for_claim(&claimed.demand);
-    let poll = claimed.poll(
-        &poll_context,
-        &mut crate::evaluation::EvaluationStepBudget::new(64),
-    );
+    let poll = EvaluationPollContext::quantum(claimed.demand.demand(), |poll_context| {
+        claimed.poll(
+            poll_context,
+            &mut crate::evaluation::EvaluationStepBudget::new(64),
+        )
+    });
     let ClientDemandPoll::Blocked(WorkDependency::Wait(wait)) = &poll else {
         panic!("uncached lazy demand should expose its canonical producer wait")
     };
@@ -3526,12 +3528,12 @@ fn wait_completion_projection_requires_scoped_access() {
     assert_eq!(root.runtime_id(), context.values().runtime_id());
 
     let expected = unit(&context);
-    let poll = EvaluationPollContext::for_context(&context);
-    let evaluator = poll.evaluator(&context);
-    context.values().assert_same_representation_for_test(
-        &evaluator.project_root(&root, |_, value| value),
-        &expected,
-    );
+    let projected = crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
+        evaluator.project_root(&root, |_, value| value)
+    });
+    context
+        .values()
+        .assert_same_representation_for_test(&projected, &expected);
     context
         .values()
         .collect_managed_for_test()
@@ -3622,9 +3624,10 @@ fn budgeted_route_pump_charges_its_reserved_quantum() {
     let pending = context
         .schedule_task(|_| Ok(Box::new(Complete)))
         .expect("task should schedule");
-    let mut quantum = crate::evaluation::EvaluationPollContext::for_context(&context);
     assert_eq!(
-        context.pump_wait_on_route_within(&mut quantum, &pending.wait, &mut exhausted, &mut route),
+        crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |quantum| {
+            context.pump_wait_on_route_within(quantum, &pending.wait, &mut exhausted, &mut route)
+        }),
         EvaluationPumpOutcome::BudgetExhausted
     );
 }
@@ -9952,11 +9955,12 @@ fn permanent_spark_failure_retires_without_a_dependency_subscription() {
     let coordinator::CoordinatorSelection::Spark(mut claimed) = coordinator.select_worker() else {
         panic!("the failing spark should be claimable")
     };
-    let poll_context = EvaluationPollContext::for_claim(claimed.demand());
     let spark_context = EvalContext::for_spark(claimed.demand_session());
     let mut budget = EvaluationStepBudget::new(256);
-    let poll = poll_context.evaluate(&spark_context, |evaluator| {
-        claimed.poll(&poll_context, evaluator, &spark_context, &mut budget)
+    let poll = EvaluationPollContext::quantum(claimed.demand().demand(), |poll_context| {
+        poll_context.evaluate(&spark_context, |evaluator| {
+            claimed.poll(poll_context, evaluator, &spark_context, &mut budget)
+        })
     });
     assert!(matches!(
         poll,

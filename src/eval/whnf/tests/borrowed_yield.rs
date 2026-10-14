@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::core::{CoreValueFactory, Value};
-use crate::evaluation::{EvalContext, EvaluationPollContext};
+use crate::evaluation::EvalContext;
 use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
 use super::*;
@@ -48,9 +48,8 @@ fn borrowed_multi_frame_yield_preserves_containers_without_projection_or_roots()
     let context = context();
     let values = context.values();
     let registrations_before = values.managed_root_registrations_for_test();
-    let poll = EvaluationPollContext::for_context(&context);
 
-    poll.with_value_access(&context, |access| {
+    crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         let mut work = multi_frame_work(&access);
         let identities = work.container_identities_for_test();
         let mut budget = WhnfStepBudget::new(1);
@@ -87,9 +86,8 @@ fn borrowed_multi_frame_yield_preserves_containers_without_projection_or_roots()
 fn owned_and_borrowed_drivers_preserve_boundary_identity_and_budget() {
     let context = context();
     let (expected, _) = context.values().rooted_error_lazy_for_test();
-    let poll = EvaluationPollContext::for_context(&context);
 
-    poll.with_value_access(&context, |access| {
+    crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         let boundary = |_access: &EvaluationValueAccess<'_>, _state: &mut RegionalWhnfState<'_>| {
             RegionalWhnfStep::Boundary(RegionalBoundaryRequest::Deferred(
                 WhnfDeferredRequest::Lazy(expected.clone()),

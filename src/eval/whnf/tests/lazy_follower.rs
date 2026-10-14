@@ -1,5 +1,5 @@
 use crate::core::{CoreValueFactory, EvaluatedValue, LazyValue, Value};
-use crate::evaluation::{EvalContext, EvaluationPollContext};
+use crate::evaluation::EvalContext;
 use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
 use super::*;
@@ -28,11 +28,10 @@ fn lazy_computation(
 fn cached_lazy_success_delegates_to_its_value_without_a_boundary() {
     let values = isolated_values();
     let context = EvalContext::isolated(values.clone());
-    let poll = EvaluationPollContext::for_context(&context);
     let (lazy, mut computation) = lazy_computation(&values, |access| {
         LazyValue::semantic_thunk_in(access, |_| unreachable!("cached lazy source must not run"))
     });
-    poll.with_value_access(&context, |access| {
+    crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         let root = lazy.root_in(access.values());
         let cached = root.cache(
             access.values(),
@@ -44,7 +43,7 @@ fn cached_lazy_success_delegates_to_its_value_without_a_boundary() {
         assert!(cached.is_ok());
     });
 
-    let outcome = poll.with_value_access(&context, |access| {
+    let outcome = crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         computation.poll_semantic_in(&access, &mut WhnfStepBudget::new(2))
     });
     let WhnfPoll::Ready(value) = outcome else {
@@ -61,13 +60,12 @@ fn cached_lazy_success_delegates_to_its_value_without_a_boundary() {
 fn cached_lazy_failure_is_published_without_reopening_its_source() {
     let values = isolated_values();
     let context = EvalContext::isolated(values.clone());
-    let poll = EvaluationPollContext::for_context(&context);
     let failure = std::sync::Arc::new(crate::core::EvaluationFailure::message("cached failure"));
     let (_lazy, mut computation) = lazy_computation(&values, |access| {
         LazyValue::failure_in(access, failure.clone())
     });
 
-    let outcome = poll.with_value_access(&context, |access| {
+    let outcome = crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         computation.poll_semantic_in(&access, &mut WhnfStepBudget::new(1))
     });
     let WhnfPoll::Failed(actual) = outcome else {
@@ -81,15 +79,16 @@ fn cached_lazy_failure_is_published_without_reopening_its_source() {
 fn uncached_lazy_leaves_as_its_exact_root_and_resumes_from_that_identity() {
     let values = isolated_values();
     let context = EvalContext::isolated(values.clone());
-    let poll = EvaluationPollContext::for_context(&context);
     let (lazy, mut computation) = lazy_computation(&values, |access| {
         LazyValue::semantic_thunk_in(access, |_| {
             unreachable!("regional inspection must not run the producer")
         })
     });
-    let expected_id = poll.with_value_access(&context, |access| access.lazy(&lazy).id());
+    let expected_id = crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
+        access.lazy(&lazy).id()
+    });
 
-    let request = poll.with_value_access(&context, |access| {
+    let request = crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         computation.poll_semantic_in(&access, &mut WhnfStepBudget::new(1))
     });
     let WhnfPoll::Deferred(WhnfDeferredRequest::Lazy(root)) = request else {
@@ -98,7 +97,7 @@ fn uncached_lazy_leaves_as_its_exact_root_and_resumes_from_that_identity() {
     assert_eq!(root.id(), expected_id);
     assert_eq!(context.deferred_task_count(), 0);
 
-    poll.with_value_access(&context, |access| {
+    crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         let cached = root.cache(
             access.values(),
             Ok(
@@ -108,7 +107,7 @@ fn uncached_lazy_leaves_as_its_exact_root_and_resumes_from_that_identity() {
         );
         assert!(cached.is_ok());
     });
-    let resumed = poll.with_value_access(&context, |access| {
+    let resumed = crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         computation.poll_semantic_in(&access, &mut WhnfStepBudget::new(2))
     });
     let WhnfPoll::Ready(value) = resumed else {

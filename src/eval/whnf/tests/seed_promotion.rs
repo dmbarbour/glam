@@ -4,7 +4,7 @@ use crate::core::{
     CoreValueFactory, LazyValue, Value, max_runtime_value_access_depth_for_test,
     reset_runtime_value_access_depth_for_test,
 };
-use crate::evaluation::{EvalContext, EvaluationPollContext};
+use crate::evaluation::EvalContext;
 use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
 use super::*;
@@ -32,8 +32,7 @@ fn poll_with(
     reduce: impl FnMut(&EvaluationValueAccess<'_>, &mut RegionalWhnfState<'_>) -> RegionalWhnfStep,
 ) -> WhnfPoll {
     *access_entries += 1;
-    let poll = EvaluationPollContext::for_context(context);
-    poll.with_value_access(context, |access| {
+    crate::evaluation::EvalContext::with_test_value_access(context, |access| {
         computation.poll_in(&access, budget, reduce)
     })
 }
@@ -187,23 +186,24 @@ fn structured_constructors_publish_canonical_state_under_existing_access() {
     let retained_lazy_id = retained_lazy.id();
     let registrations_before = values.managed_root_registrations_for_test();
 
-    let poll_context = EvaluationPollContext::for_context(&context);
-    let (mut application, mut access_path) = poll_context.with_value_access(&context, |access| {
-        let retained_argument = Value::Lazy(LazyValue::from_root(&retained_lazy, access.values()));
-        let application = WhnfComputation::from_application_checkpoint_in(
-            &access,
-            Value::Number(1.into()),
-            &[retained_argument],
-            Some(retained_lazy_id),
-        );
-        let access_path = WhnfComputation::from_static_access_checkpoint_in(
-            &access,
-            Value::Number(2.into()),
-            Arc::from([crate::core::Key::atom_from_text("member")]),
-            Some(retained_lazy_id),
-        );
-        (application, access_path)
-    });
+    let (mut application, mut access_path) =
+        crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
+            let retained_argument =
+                Value::Lazy(LazyValue::from_root(&retained_lazy, access.values()));
+            let application = WhnfComputation::from_application_checkpoint_in(
+                &access,
+                Value::Number(1.into()),
+                &[retained_argument],
+                Some(retained_lazy_id),
+            );
+            let access_path = WhnfComputation::from_static_access_checkpoint_in(
+                &access,
+                Value::Number(2.into()),
+                Arc::from([crate::core::Key::atom_from_text("member")]),
+                Some(retained_lazy_id),
+            );
+            (application, access_path)
+        });
 
     assert_eq!(
         max_runtime_value_access_depth_for_test(),

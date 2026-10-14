@@ -1,19 +1,11 @@
 #[cfg(test)]
-use super::value::{evaluation_context_frame_in, force_list_thunk_in};
+use super::value::{evaluation_context_frame_in, force_list_thunk};
 use super::*;
 use crate::core::RuntimeValueAccess;
 
 #[cfg(test)]
 pub(crate) fn list_to_value_items(
     context: &EvalContext,
-    list: &List,
-) -> Result<Vec<Value>, EvaluationHalt> {
-    context.evaluate_test_step(|evaluator| list_to_value_items_in(evaluator, list))
-}
-
-#[cfg(test)]
-pub(crate) fn list_to_value_items_in(
-    context: &EvaluatorStepContext<'_>,
     list: &List,
 ) -> Result<Vec<Value>, EvaluationHalt> {
     let items = std::cell::RefCell::new(Vec::new());
@@ -27,7 +19,7 @@ pub(crate) fn list_to_value_items_in(
             Ok::<_, EvaluationHalt>(())
         },
         &mut |values| {
-            context.with_value_access(|access| {
+            context.with_test_value_access(|access| {
                 items.borrow_mut().extend(
                     values
                         .iter()
@@ -36,7 +28,7 @@ pub(crate) fn list_to_value_items_in(
             });
             Ok(())
         },
-        &mut |thunk| force_list_thunk_in(context, thunk),
+        &mut |thunk| force_list_thunk(context, thunk),
     )?;
     Ok(items.into_inner())
 }
@@ -44,15 +36,6 @@ pub(crate) fn list_to_value_items_in(
 #[cfg(test)]
 pub(super) fn list_to_binary_bytes(
     context: &EvalContext,
-    list: &List,
-    subject: &str,
-) -> Result<Vec<u8>, EvaluationHalt> {
-    context.evaluate_test_step(|evaluator| list_to_binary_bytes_in(evaluator, list, subject))
-}
-
-#[cfg(test)]
-pub(super) fn list_to_binary_bytes_in(
-    context: &EvaluatorStepContext<'_>,
     list: &List,
     subject: &str,
 ) -> Result<Vec<u8>, EvaluationHalt> {
@@ -65,10 +48,9 @@ pub(super) fn list_to_binary_bytes_in(
         &mut |values| {
             for value in values.iter() {
                 match context
-                    .context()
                     .evaluate_compatibility_whnf(value)
                     .map_err(|error| {
-                        context.with_value_access(|access| {
+                        context.with_test_value_access(|access| {
                             error.with_context(
                                 access.values(),
                                 evaluation_context_frame_in(access.values(), "binary_extraction"),
@@ -84,7 +66,7 @@ pub(super) fn list_to_binary_bytes_in(
                         bytes.borrow_mut().push(byte);
                     }
                     other => {
-                        let other = context.with_value_access(|access| {
+                        let other = context.with_test_value_access(|access| {
                             format!("{:?}", access.values().diagnostic_debug(&other))
                         });
                         return Err(EvaluationHalt::new(format!(
@@ -96,8 +78,8 @@ pub(super) fn list_to_binary_bytes_in(
             Ok(())
         },
         &mut |thunk| {
-            force_list_thunk_in(context, thunk).map_err(|error| {
-                context.with_value_access(|access| {
+            force_list_thunk(context, thunk).map_err(|error| {
+                context.with_test_value_access(|access| {
                     error.with_context(
                         access.values(),
                         evaluation_context_frame_in(access.values(), "binary_extraction"),

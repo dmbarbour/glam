@@ -29,7 +29,6 @@ fn lazy_source_result_is_installed_once_before_following_a_promise() {
         ))
     });
     let (lazy, mut machine) = lazy_machine(&context, lazy);
-    let mut poll = crate::evaluation::EvaluationPollContext::for_context(&context);
     context
         .values()
         .collect_managed_for_test()
@@ -39,10 +38,9 @@ fn lazy_source_result_is_installed_once_before_following_a_promise() {
         let EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
             dependency: Some(WorkDependency::Promise(dependency)),
             ..
-        }) = machine.poll(
-            &mut poll,
-            &mut crate::evaluation::EvaluationStepBudget::new(1),
-        )
+        }) = crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
+            machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+        })
         else {
             panic!("the retained source result must wait on its exact promise")
         };
@@ -53,16 +51,15 @@ fn lazy_source_result_is_installed_once_before_following_a_promise() {
     crate::core::set_test_promise(context.values(), &promise, Value::Number(79.into()))
         .expect_without_debug("the source-result promise should accept one assignment");
     assert!(matches!(
-        machine.poll(
-            &mut poll,
-            &mut crate::evaluation::EvaluationStepBudget::new(1)
-        ),
+        crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| machine
+            .poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))),
         EvaluationMachinePoll::Yielded
     ));
-    let EvaluationMachinePoll::Complete(value) = machine.poll(
-        &mut poll,
-        &mut crate::evaluation::EvaluationStepBudget::new(1),
-    ) else {
+    let EvaluationMachinePoll::Complete(value) =
+        crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
+            machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+        })
+    else {
         panic!("the assigned promise must complete the owning lazy")
     };
     context.values().assert_same_representation_for_test(
@@ -94,21 +91,22 @@ fn lazy_source_failure_is_cached_without_replaying_the_source() {
         Err(EvaluationHalt::new("source failed permanently"))
     });
     let (_root, mut machine) = lazy_machine(&context, lazy);
-    let mut poll = crate::evaluation::EvaluationPollContext::for_context(&context);
 
-    let EvaluationMachinePoll::Failed(failure) = machine.poll(
-        &mut poll,
-        &mut crate::evaluation::EvaluationStepBudget::new(1),
-    ) else {
+    let EvaluationMachinePoll::Failed(failure) =
+        crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
+            machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+        })
+    else {
         panic!("a permanent source failure must fail its lazy task")
     };
     assert!(failure.to_string().contains("source failed permanently"));
     assert_eq!(evaluations.load(Ordering::SeqCst), 1);
 
-    let EvaluationMachinePoll::Failed(failure) = machine.poll(
-        &mut poll,
-        &mut crate::evaluation::EvaluationStepBudget::new(1),
-    ) else {
+    let EvaluationMachinePoll::Failed(failure) =
+        crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
+            machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+        })
+    else {
         panic!("a repeated poll must observe the cached source failure")
     };
     assert!(failure.to_string().contains("source failed permanently"));

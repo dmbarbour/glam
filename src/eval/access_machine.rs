@@ -1134,14 +1134,15 @@ mod tests {
         context: &EvalContext,
         allowance: usize,
     ) -> ConversionPoll<Key> {
-        let poll = EvaluationPollContext::for_context(context);
-        poll.evaluate(context, |evaluator| {
-            machine.poll(
-                &poll,
-                evaluator,
-                context,
-                &mut EvaluationStepBudget::new(allowance),
-            )
+        crate::evaluation::EvaluationPollContext::quantum_for_context(context, |poll| {
+            poll.evaluate(context, |evaluator| {
+                machine.poll(
+                    poll,
+                    evaluator,
+                    context,
+                    &mut EvaluationStepBudget::new(allowance),
+                )
+            })
         })
     }
 
@@ -1150,22 +1151,22 @@ mod tests {
         context: &EvalContext,
         allowance: usize,
     ) -> ConversionPoll<Vec<Key>> {
-        let poll = EvaluationPollContext::for_context(context);
-        poll.evaluate(context, |evaluator| {
-            machine.poll(
-                &poll,
-                evaluator,
-                context,
-                &mut EvaluationStepBudget::new(allowance),
-            )
+        crate::evaluation::EvaluationPollContext::quantum_for_context(context, |poll| {
+            poll.evaluate(context, |evaluator| {
+                machine.poll(
+                    poll,
+                    evaluator,
+                    context,
+                    &mut EvaluationStepBudget::new(allowance),
+                )
+            })
         })
     }
 
     #[test]
     fn shared_managed_key_checkpoint_replays_its_terminal_result() {
         let context = context();
-        let poll = EvaluationPollContext::for_context(&context);
-        poll.with_value_access(&context, |access| {
+        crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
             let root = ManagedKeyConversionRoot::new_in(
                 &access,
                 ManagedKeyConversionState::Key(Box::new(RegionalKeyConversion::new(
@@ -1201,8 +1202,7 @@ mod tests {
     #[test]
     fn regional_key_conversion_replays_its_terminal_result() {
         let context = context();
-        let poll = EvaluationPollContext::for_context(&context);
-        poll.with_value_access(&context, |access| {
+        crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
             let expected = Key::binary_from_text("shared");
             let mut conversion =
                 RegionalKeyConversion::new(&access, Value::binary_from_text("shared"), None);

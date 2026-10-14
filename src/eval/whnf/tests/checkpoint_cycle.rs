@@ -1,5 +1,5 @@
 use crate::core::{CoreValueFactory, DeferredValueId, Value};
-use crate::evaluation::{EvalContext, EvaluationPollContext};
+use crate::evaluation::EvalContext;
 use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
 use super::managed_state::ManagedLazyCheckpointEdge;
@@ -17,8 +17,7 @@ fn install_self_checkpoint(
     root: &crate::core::ManagedLazyRoot,
     lazy: &crate::core::LazyValue,
 ) {
-    let poll = EvaluationPollContext::for_context(context);
-    poll.with_value_access(context, |access| {
+    crate::evaluation::EvalContext::with_test_value_access(context, |access| {
         let work = RegionalWhnfWork::from_parts(
             &access,
             Value::Lazy(lazy.duplicate_in(access.values())),
@@ -74,8 +73,7 @@ fn reachable_lazy_retains_and_resumes_its_checkpoint() {
     assert_eq!(retained.root_entries(), baseline.root_entries() + 1);
     assert!(retained.marked_slots() >= baseline.marked_slots() + 2);
 
-    let poll = EvaluationPollContext::for_context(&context);
-    poll.with_value_access(&context, |access| {
+    crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         let checkpoint = access
             .lazy_root(&root)
             .checkpoint_snapshot()
@@ -96,7 +94,7 @@ fn reachable_lazy_retains_and_resumes_its_checkpoint() {
     values
         .collect_managed_for_test()
         .expect("updated rooted checkpoint must remain traceable");
-    poll.with_value_access(&context, |access| {
+    crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         let checkpoint = access
             .lazy_root(&root)
             .checkpoint_snapshot()

@@ -1,5 +1,5 @@
 use crate::core::{CoreValueFactory, Dict, Key, PromisedValue, Value};
-use crate::evaluation::{EvalContext, EvaluationPollContext, OwnedEvalContext};
+use crate::evaluation::{EvalContext, OwnedEvalContext};
 use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 use crate::test_support::ResultTestExt as _;
 
@@ -17,8 +17,7 @@ fn static_access(
     base: Value,
     keys: impl IntoIterator<Item = Key>,
 ) -> WhnfComputation {
-    let poll = EvaluationPollContext::for_context(context);
-    poll.with_value_access(context, |access| {
+    crate::evaluation::EvalContext::with_test_value_access(context, |access| {
         WhnfComputation::from_static_access_checkpoint_in(
             &access,
             base,
@@ -29,8 +28,7 @@ fn static_access(
 }
 
 fn poll(context: &EvalContext, computation: &mut WhnfComputation) -> WhnfPoll {
-    let poll = EvaluationPollContext::for_context(context);
-    poll.with_value_access(context, |access| {
+    crate::evaluation::EvalContext::with_test_value_access(context, |access| {
         computation.poll_semantic_in(&access, &mut WhnfStepBudget::new(1))
     })
 }

@@ -2071,17 +2071,20 @@ pub(super) fn format_name_part(key: &Key) -> String {
     }
 }
 
+/// Forces a list chunk for a test walking a list. The walk holds no
+/// mutator: forcing runs a driver, which takes its own.
 #[cfg(test)]
-pub(super) fn force_list_thunk_in(
-    context: &EvaluatorStepContext<'_>,
+pub(super) fn force_list_thunk(
+    context: &EvalContext,
     thunk: &ListThunk,
 ) -> Result<List, EvaluationHalt> {
-    let thunk = context.with_value_access(|access| thunk.duplicate_as_value_in(access.values()));
-    match context.context().evaluate_compatibility_whnf(&thunk)? {
+    let thunk =
+        context.with_test_value_access(|access| thunk.duplicate_as_value_in(access.values()));
+    match context.evaluate_compatibility_whnf(&thunk)? {
         Value::Binary(bytes) => Ok(List::from_bytes(bytes)),
         Value::List(list) => Ok(list),
         other => {
-            let other = context.with_value_access(|access| {
+            let other = context.with_test_value_access(|access| {
                 format!("{:?}", access.values().diagnostic_debug(&other))
             });
             Err(EvaluationHalt::new(format!(
@@ -2096,18 +2099,12 @@ pub(crate) fn pop_list_front(
     context: &EvalContext,
     list: &List,
 ) -> Result<Option<(Value, List)>, EvaluationHalt> {
-    context.evaluate_test_step(|evaluator| pop_list_front_in(evaluator, list))
-}
-
-#[cfg(test)]
-pub(crate) fn pop_list_front_in(
-    context: &EvaluatorStepContext<'_>,
-    list: &List,
-) -> Result<Option<(Value, List)>, EvaluationHalt> {
     Ok(list
         .try_pop_front_by(
-            &mut |value| context.with_value_access(|access| access.values().duplicate_value(value)),
-            &mut |thunk| force_list_thunk_in(context, thunk),
+            &mut |value| {
+                context.with_test_value_access(|access| access.values().duplicate_value(value))
+            },
+            &mut |thunk| force_list_thunk(context, thunk),
         )?
         .map(|(item, tail)| {
             let value = match item {
@@ -2243,12 +2240,11 @@ mod ownership_tests {
             context: (*context).clone(),
             computation: crate::eval::whnf::WhnfComputation::from_promise_root(&promise_root),
         };
-        let mut poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
 
-        let pending = follower.poll(
-            &mut poll_context,
-            &mut crate::evaluation::EvaluationStepBudget::new(1),
-        );
+        let pending =
+            crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
+                follower.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+            });
         let EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
             dependency: Some(WorkDependency::Promise(dependency)),
             ..
@@ -2264,16 +2260,16 @@ mod ownership_tests {
                 .is_ok()
         );
         assert!(matches!(
-            follower.poll(
-                &mut poll_context,
-                &mut crate::evaluation::EvaluationStepBudget::new(1)
-            ),
+            crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
+                follower.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+            }),
             EvaluationMachinePoll::Yielded
         ));
-        let EvaluationMachinePoll::Complete(value) = follower.poll(
-            &mut poll_context,
-            &mut crate::evaluation::EvaluationStepBudget::new(1),
-        ) else {
+        let EvaluationMachinePoll::Complete(value) =
+            crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
+                follower.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+            })
+        else {
             panic!("the yielded follower must resume from the assigned value")
         };
         context.values().assert_same_representation_for_test(
@@ -2313,12 +2309,10 @@ mod ownership_tests {
             inline_request: None,
             inline_completed: false,
         };
-        let mut poll = crate::evaluation::EvaluationPollContext::for_context(&context);
-        let mut step = |machine: &mut LazyTaskMachine| {
-            machine.poll(
-                &mut poll,
-                &mut crate::evaluation::EvaluationStepBudget::new(1),
-            )
+        let step = |machine: &mut LazyTaskMachine| {
+            crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
+                machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+            })
         };
 
         assert!(matches!(step(&mut first), EvaluationMachinePoll::Yielded));

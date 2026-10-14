@@ -4,7 +4,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use glam_gc::{EdgeTransitionObservation, Trace};
 
 use crate::core::{CoreValueFactory, Value};
-use crate::evaluation::{EvalContext, EvaluationPollContext};
+use crate::evaluation::EvalContext;
 use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 
 use super::managed_state::{ManagedWhnfAccessError, ManagedWhnfRoot};
@@ -34,14 +34,13 @@ fn work(access: &EvaluationValueAccess<'_>, focus: Value) -> RegionalWhnfWork {
 #[test]
 fn managed_root_projects_only_under_matching_runtime_access() {
     let owner = context();
-    let owner_poll = EvaluationPollContext::for_context(&owner);
-    let root = owner_poll.with_value_access(&owner, |access| {
+    let root = owner.with_test_value_access(|access| {
         ManagedWhnfRoot::from_regional_in(&access, work(&access, Value::Number(7.into())))
             .expect("managed WHNF state should fit one collector slot")
     });
     assert_eq!(root.runtime_id(), owner.values().runtime_id());
 
-    owner_poll.with_value_access(&owner, |access| {
+    owner.with_test_value_access(|access| {
         let state = root
             .access(&access)
             .expect("owner access must project root");
@@ -56,7 +55,7 @@ fn managed_root_projects_only_under_matching_runtime_access() {
     });
 
     let unrelated = context();
-    EvaluationPollContext::for_context(&unrelated).with_value_access(&unrelated, |access| {
+    unrelated.with_test_value_access(|access| {
         assert!(matches!(
             root.access(&access),
             Err(ManagedWhnfAccessError::RuntimeMismatch)
@@ -71,13 +70,12 @@ fn managed_transition_reports_complete_before_and_after_edge_sets() {
     let (old_root, old) = values.rooted_error_lazy_for_test();
     let (new_root, new) = values.rooted_error_lazy_for_test();
     let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
-    let poll = EvaluationPollContext::for_context(&context);
 
-    let state = poll.with_value_access(&context, |access| {
+    let state = crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         ManagedWhnfRoot::from_regional_in(&access, work(&access, Value::Lazy(old)))
             .expect("managed WHNF state should fit one collector slot")
     });
-    poll.with_value_access(&context, |access| {
+    crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         state
             .access(&access)
             .expect("state and access must share one runtime")
@@ -102,9 +100,10 @@ fn forced_collection_traces_every_edge_owned_by_the_managed_state() {
         .collect_managed_for_test()
         .expect("managed WHNF trace fixture should begin collectible");
     let (sentinel_root, sentinel) = values.rooted_error_lazy_for_test();
-    let poll = EvaluationPollContext::for_context(&context);
-    let sentinel_id = poll.with_value_access(&context, |access| access.lazy(&sentinel).id());
-    let state = poll.with_value_access(&context, |access| {
+    let sentinel_id = crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
+        access.lazy(&sentinel).id()
+    });
+    let state = crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         ManagedWhnfRoot::from_regional_in(&access, work(&access, Value::Lazy(sentinel)))
             .expect("managed WHNF state should fit one collector slot")
     });
@@ -115,7 +114,7 @@ fn forced_collection_traces_every_edge_owned_by_the_managed_state() {
         .expect("rooted managed WHNF state should trace its sentinel");
     assert_eq!(retained.root_entries(), baseline.root_entries() + 1);
     assert!(retained.marked_slots() >= baseline.marked_slots() + 2);
-    poll.with_value_access(&context, |access| {
+    crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         let state = state.access(&access).expect("state must remain rooted");
         let observed = state
             .inspect(|state| {
@@ -143,15 +142,14 @@ fn poisoned_state_remains_traceable_but_repolling_observes_poison() {
         .collect_managed_for_test()
         .expect("poison fixture should begin collectible");
     let (sentinel_root, sentinel) = values.rooted_error_lazy_for_test();
-    let poll = EvaluationPollContext::for_context(&context);
-    let state = poll.with_value_access(&context, |access| {
+    let state = crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         ManagedWhnfRoot::from_regional_in(&access, work(&access, Value::Lazy(sentinel)))
             .expect("managed WHNF state should fit one collector slot")
     });
     drop(sentinel_root);
 
     let panic = catch_unwind(AssertUnwindSafe(|| {
-        poll.with_value_access(&context, |access| {
+        crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
             let state = state
                 .access(&access)
                 .expect("state must project before unwind");
@@ -167,7 +165,7 @@ fn poisoned_state_remains_traceable_but_repolling_observes_poison() {
         .expect("poisoned managed WHNF state must remain traceable");
     assert_eq!(retained.root_entries(), baseline.root_entries() + 1);
     assert!(retained.marked_slots() >= baseline.marked_slots() + 2);
-    poll.with_value_access(&context, |access| {
+    crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
         let state = state
             .access(&access)
             .expect("poison does not change provenance");
