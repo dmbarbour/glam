@@ -621,19 +621,22 @@ impl EvaluationWorkCoordinator {
             );
             (retirement, obsolete_subscription, exact_subscription)
         };
-        if let Some(subscription) = obsolete_subscription {
-            subscription.unsubscribe();
-        }
         let promoted_wait = exact_subscription
             .as_ref()
             .and_then(|(dependency, _)| dependency.producer_wait());
         let woke = exact_subscription.is_some_and(|(dependency, registration)| {
             self.subscribe_dependency_guarded(&mutation, dependency, registration)
         });
-        if let Some(wait) = promoted_wait {
-            self.promote_deferred_wait_guarded(&mutation, &wait);
+        if let Some(wait) = &promoted_wait {
+            self.promote_deferred_wait_guarded(&mutation, wait);
         }
         drop(mutation);
+        // A route's last lease, here or in the superseded subscription,
+        // releases the route, which takes the gate.
+        drop(promoted_wait);
+        if let Some(subscription) = obsolete_subscription {
+            subscription.unsubscribe();
+        }
         if let Some(retirement) = retirement {
             retirement.finish();
         }

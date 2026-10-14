@@ -251,7 +251,11 @@ control-flow overview.
   it for terminal destruction. Abandonment and pure-cycle terminalization
   likewise take machines during the authoritative coordinator transition.
   Machine cancellation/destruction and captured-value release happen only
-  after coordinator/component locks and mutation admission are released. The
+  after coordinator/component locks and mutation admission are released. So
+  does dropping a task block, a dependency or a wait cloned from one: it may
+  hold a lazy route's last demand lease, and releasing that lease takes the
+  mutation gate and the coordinator lock. Detaching work returns its block
+  for the caller to drop. The
   coordinator work record retains task/wait lookup, failure policy, and a
   `TaskTerminalPublisher` containing the wait, current status, and optional
   protected-query publisher. The latter retains a narrow runtime query writer,

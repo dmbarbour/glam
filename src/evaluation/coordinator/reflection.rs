@@ -372,9 +372,10 @@ impl EvaluationWorkCoordinator {
             if !reserved {
                 false
             } else {
+                let (machine, block) = detach_reflection(&mut state, id, false);
                 assert!(
-                    detach_reflection(&mut state, id, false).is_none(),
-                    "an uncommitted reflection reservation cannot own a machine"
+                    machine.is_none() && block.is_none(),
+                    "an uncommitted reflection reservation cannot own a machine or a block"
                 );
                 state.advance_work_generation(
                     CoordinatorMutationKind::WorkRetirement,
@@ -637,8 +638,10 @@ impl EvaluationWorkCoordinator {
             release.made_progress = true;
             release.remains_blocked = false;
         }
-        if let Some(wait) = promoted_wait {
-            let promoted = self.promote_deferred_wait_guarded(&mutation, &wait);
+        #[cfg(test)]
+        self.run_reflection_release_status_probe();
+        if let Some(wait) = &promoted_wait {
+            let promoted = self.promote_deferred_wait_guarded(&mutation, wait);
             route_tracker.changed(promoted);
         }
         let observation_woke = release.remains_blocked && self.recheck_observation_wait(id);
@@ -647,8 +650,6 @@ impl EvaluationWorkCoordinator {
             release.made_progress = true;
             release.remains_blocked = false;
         }
-        #[cfg(test)]
-        self.run_reflection_release_status_probe();
         let status_wakes = if !release.terminal && !release.exit_waiting {
             let updates = {
                 let mut state = self
@@ -700,6 +701,8 @@ impl EvaluationWorkCoordinator {
             route_tracker.finish(&state)
         });
         drop(mutation);
+        // A route's last lease releases the route, which takes the gate.
+        drop(promoted_wait);
         self.notify_all(CoordinatorMutationKind::WorkRelease);
         for wake in status_wakes {
             wake.notify();
@@ -713,7 +716,7 @@ impl EvaluationWorkCoordinator {
         id: EvaluationWorkId,
     ) -> Option<Box<dyn EvaluationTaskMachine>> {
         let mutation = self.admission.mutation_guard();
-        let machine = {
+        let (machine, block) = {
             let mut state = self
                 .state
                 .lock()
@@ -723,14 +726,15 @@ impl EvaluationWorkCoordinator {
                 .get(&id)
                 .expect("terminal reflection work must remain registered");
             assert!(matches!(record.state, WorkState::Terminalizing));
-            let machine = detach_reflection(&mut state, id, true);
+            let detached = detach_reflection(&mut state, id, true);
             state.advance_work_generation(
                 CoordinatorMutationKind::WorkRetirement,
                 RouteHazard::Works(std::slice::from_ref(&id)),
             );
-            machine
+            detached
         };
         drop(mutation);
+        drop(block);
         self.notify_all(CoordinatorMutationKind::WorkRetirement);
         machine
     }
@@ -1070,11 +1074,17 @@ pub(super) fn remove_task_failure(
     true
 }
 
+/// Removes reflection work from the coordinator, returning its machine and
+/// its block for the caller to drop after releasing its locks: a block's
+/// dependency may hold a lazy route's last lease, whose release takes them.
 pub(super) fn detach_reflection(
     state: &mut WorkCoordinatorState,
     id: EvaluationWorkId,
     require_settled: bool,
-) -> Option<Box<dyn EvaluationTaskMachine>> {
+) -> (
+    Option<Box<dyn EvaluationTaskMachine>>,
+    Option<EvaluationTaskBlock>,
+) {
     state.observation_waiters.remove(&id);
     remove_ready_reflection(state, id);
     unregister_background_root(state, id);
@@ -1154,5 +1164,5 @@ pub(super) fn detach_reflection(
         }
     }
     prune_closed_session_registration(state, record.demand_session);
-    reflection.machine
+    (reflection.machine, reflection.block)
 }

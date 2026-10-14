@@ -572,13 +572,17 @@ impl EvaluationWorkCoordinator {
                     assert!(record.obligations.is_empty());
                     match record.kind {
                         WorkKind::Reflection(_) => {
-                            let detached = detach_reflection(&mut state, selected.work, true);
+                            let (machine, block) =
+                                detach_reflection(&mut state, selected.work, true);
                             assert!(
-                                detached.is_none(),
-                                "settlement must detach a reflection machine before retirement"
+                                machine.is_none() && block.is_none(),
+                                "settlement must detach a reflection machine and block before retirement"
                             );
                         }
-                        WorkKind::Deferred(_) => detach_deferred(&mut state, selected.work),
+                        WorkKind::Deferred(_) => assert!(
+                            detach_deferred(&mut state, selected.work).is_none(),
+                            "settlement must detach a deferred block before retirement"
+                        ),
                         WorkKind::LazyRoute(_) => {
                             retired_routes.push(detach_lazy_route(&mut state, selected.work))
                         }

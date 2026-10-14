@@ -354,10 +354,12 @@ impl EvaluationWorkCoordinator {
         if let Some((dependency, registration)) = exact_subscription {
             self.subscribe_dependency_guarded(&mutation, dependency, registration);
         }
-        if let Some(wait) = promoted_wait {
-            self.promote_deferred_wait_guarded(&mutation, &wait);
+        if let Some(wait) = &promoted_wait {
+            self.promote_deferred_wait_guarded(&mutation, wait);
         }
         drop(mutation);
+        // A route's last lease releases the route, which takes the gate.
+        drop(promoted_wait);
         self.notify_all(CoordinatorMutationKind::WorkRelease);
         if let Some(dependency) = obsolete_dependency {
             dependency.abandon();

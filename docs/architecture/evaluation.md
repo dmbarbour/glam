@@ -713,7 +713,9 @@ canonical work and wait. Closure may win between reservation and activation;
 activation then declines the already-terminalizing record rather than
 asserting that it remains reserved. Blocked reflection and deferred work
 retain their machines in their coordinator records. Terminal work retires from
-coordinator indexes and destroys its detached machine outside runtime locks.
+coordinator indexes and destroys its detached machine and block outside runtime
+locks: a block's dependency may hold a lazy route's last demand lease, whose
+release takes the mutation gate and the coordinator lock.
 
 An `anno refl:Task` or metadata-reflection lazy has a boxed
 `ReflectionComputation` source. It traces the immutable effect, the optional

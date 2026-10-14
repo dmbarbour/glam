@@ -1620,10 +1620,38 @@ maps the short names used here to file names.
   which changes what a status reader sees.
 - **Consequences:** with the fix disabled, the check fails 12 existing
   tests that publish failed statuses, besides the new one. The gate check
-  runs in every debug build and test.
+  runs in every debug build and test; the maintainer kept it as a panic on
+  2026-10-14. It then found `route-leases-drop-outside-locks`.
 - **Rule lives in:** `agent_context/evaluation.md` "Values and Forcing".
 - **Recorded in:** explicit heap holds plan, `gc-hold-boundaries` (fourth
   slice, `status-diagnostic-before-gate`).
+
+### A task block, dependency or wait is dropped outside runtime locks
+`route-leases-drop-outside-locks` · 2026-10-14 · agent · accepted
+- **Context:** a wait cloned from a lazy route's demand holds a lease on
+  the route, and dropping the last one releases the route's demand, which
+  takes the mutation gate and the coordinator lock. Releasing claimed work
+  dropped its clone of the dependency's wait under the gate, and the gate
+  check fired once a CLI test's woken task was claimed and completed in
+  between, dropping its block first. Retiring abandoned work dropped its
+  block under the coordinator lock as well, which relocks that mutex: a
+  hang in every build when the block held the last lease.
+- **Decision:** the rule that machines are destroyed after runtime locks
+  are released extends to task blocks, dependencies and waits cloned from
+  them. Work releases drop their promoted wait, and a client demand its
+  superseded subscription, after their guards; detaching reflection or
+  deferred work returns its block for the caller to drop. Rejected for now:
+  deferring a lease's release whenever its thread holds the gate, a new
+  mechanism where the existing rule covers the sites.
+- **Consequences:** two tests force the orderings: a second thread claims
+  and completes a woken task while its first release pauses, and a closing
+  session retires a task blocked on a route only it demands. Both failed
+  before the fix, the first through the gate check, the second through it
+  on the way to the relocked mutex.
+- **Rule lives in:** `architecture/evaluation.md`; `agent_context/evaluation.md`
+  "Values and Forcing".
+- **Recorded in:** explicit heap holds plan, `gc-hold-tests` (preliminary
+  fix).
 
 ## Assembly
 

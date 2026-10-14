@@ -123,8 +123,8 @@ impl EvaluationWorkCoordinator {
             release.made_progress = true;
             release.remains_blocked = false;
         }
-        if let Some(wait) = promoted_wait {
-            let promoted = self.promote_deferred_wait_guarded(&mutation, &wait);
+        if let Some(wait) = &promoted_wait {
+            let promoted = self.promote_deferred_wait_guarded(&mutation, wait);
             route_tracker.changed(promoted);
         }
         let observation_woke = release.remains_blocked && self.recheck_observation_wait(claimed.id);
@@ -141,6 +141,8 @@ impl EvaluationWorkCoordinator {
             route_tracker.finish(&state)
         });
         drop(mutation);
+        // A route's last lease releases the route, which takes the gate.
+        drop(promoted_wait);
         if !release.terminal {
             self.retire_unsubscribed_lazy_route(claimed.id, false);
         }
@@ -630,8 +632,8 @@ impl EvaluationWorkCoordinator {
             release.made_progress = true;
             release.remains_blocked = false;
         }
-        if let Some(wait) = promoted_wait {
-            let promoted = self.promote_deferred_wait_guarded(&mutation, &wait);
+        if let Some(wait) = &promoted_wait {
+            let promoted = self.promote_deferred_wait_guarded(&mutation, wait);
             route_tracker.changed(promoted);
         }
         let observation_woke = release.remains_blocked && self.recheck_observation_wait(claimed.id);
@@ -648,13 +650,15 @@ impl EvaluationWorkCoordinator {
             route_tracker.finish(&state)
         });
         drop(mutation);
+        // A route's last lease releases the route, which takes the gate.
+        drop(promoted_wait);
         self.notify_all(CoordinatorMutationKind::WorkRelease);
         release
     }
 
     pub(in crate::evaluation) fn retire_deferred(&self, id: EvaluationWorkId) {
         let mutation = self.admission.mutation_guard();
-        {
+        let block = {
             let mut state = self
                 .state
                 .lock()
@@ -664,13 +668,15 @@ impl EvaluationWorkCoordinator {
                 .get(&id)
                 .expect("terminal deferred work must remain registered");
             assert!(matches!(record.state, WorkState::Terminalizing));
-            detach_deferred(&mut state, id);
+            let block = detach_deferred(&mut state, id);
             state.advance_work_generation(
                 CoordinatorMutationKind::WorkRetirement,
                 RouteHazard::Works(std::slice::from_ref(&id)),
             );
-        }
+            block
+        };
         drop(mutation);
+        drop(block);
         self.notify_all(CoordinatorMutationKind::WorkRetirement);
     }
 
@@ -1364,7 +1370,13 @@ pub(super) fn begin_deferred_abandonment(
     abandoned
 }
 
-pub(super) fn detach_deferred(state: &mut WorkCoordinatorState, id: EvaluationWorkId) {
+/// Removes deferred work from the coordinator, returning its block for the
+/// caller to drop after releasing its locks: a block's dependency may hold a
+/// lazy route's last lease, whose release takes them.
+pub(super) fn detach_deferred(
+    state: &mut WorkCoordinatorState,
+    id: EvaluationWorkId,
+) -> Option<EvaluationTaskBlock> {
     state.observation_waiters.remove(&id);
     remove_ready_deferred(state, id);
     let record = state
@@ -1395,4 +1407,5 @@ pub(super) fn detach_deferred(state: &mut WorkCoordinatorState, id: EvaluationWo
         }
     }
     prune_closed_session_registration(state, record.demand_session);
+    deferred.block
 }

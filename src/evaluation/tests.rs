@@ -4827,6 +4827,142 @@ fn failed_status_publication_never_retakes_the_gate_behind_a_queued_settlement()
     }
 }
 
+/// A lazy route whose only demand lease is `wait`: finished, or blocked on a
+/// promise that stays unresolved.
+fn sole_route_lease(
+    context: &EvalContext,
+    finished: bool,
+) -> (EvaluationWaitToken, ManagedLazyRoot, Option<PromisedValue>) {
+    let promise = (!finished).then(|| PromisedValue::new(context.values()));
+    let values = context.values().clone();
+    let followed = promise
+        .as_ref()
+        .map(|promise| promise.duplicate_for_test(&values));
+    let (lazy, lazy_value) = rooted_semantic_lazy_value(context.values(), move |_| {
+        Ok(match &followed {
+            Some(promise) => Value::Promised(promise.duplicate_for_test(&values)),
+            None => Value::Number(5.into()),
+        })
+    });
+    let root = lazy.root(context.values());
+    drop(lazy_value);
+    let wait = crate::eval::lazy_root_wait(context, &root).expect("the route should admit");
+    let settled = if finished {
+        EvaluationPumpOutcome::TargetReady
+    } else {
+        EvaluationPumpOutcome::NoProgress
+    };
+    assert!(
+        (0..8).any(|_| context.pump_wait(&wait, 64) == settled),
+        "the route should settle as {settled:?}"
+    );
+    (wait, root, promise)
+}
+
+fn block_on(wait: EvaluationWaitToken) -> ReflectionWorkPoll {
+    ReflectionWorkPoll::Blocked(EvaluationTaskBlock {
+        dependency: Some(WorkDependency::Wait(wait)),
+        observed_epoch: None,
+        error: None,
+    })
+}
+
+/// A task blocks on a finished lazy route, handing its block the route's
+/// only lease, so its release's subscription wakes it at once. Another
+/// thread claims and completes it meanwhile, dropping the block. The
+/// release's own clone of the wait is then the last lease, and releasing a
+/// lease takes the mutation gate: the release must drop it after ending its
+/// own guard. Taken twice, the gate deadlocks behind a queued settlement;
+/// debug builds report it.
+#[test]
+fn a_release_drops_the_last_route_lease_after_its_guard() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let coordinator = context
+        .coordinator()
+        .expect("test task must retain its coordinator");
+    let (wait, _, _) = sole_route_lease(&context, true);
+    let task = context
+        .schedule_task(|_| {
+            Ok(Box::new(ProbePollOutcomeMachine(
+                ProbePollOutcome::Complete,
+            )))
+        })
+        .expect("reflection task should schedule");
+    let Some(ClaimedTaskWork::Reflection(first)) = coordinator.claim_work(task.work) else {
+        panic!("the scheduled task should be claimable")
+    };
+    let (paused, release_paused) = mpsc::channel();
+    let (resume, resumed) = mpsc::channel();
+    coordinator.set_reflection_release_status_probe(move || {
+        paused.send(()).expect("the test should observe the pause");
+        resumed.recv().expect("the test should resume the release");
+    });
+    thread::scope(|scope| {
+        let releasing = coordinator.clone();
+        let release = scope.spawn(move || releasing.release_reflection(first, block_on(wait)));
+        release_paused
+            .recv()
+            .expect("the release should pause after its subscription");
+        let Some(ClaimedTaskWork::Reflection(second)) = coordinator.claim_work(task.work) else {
+            panic!("the finished route should have woken the task")
+        };
+        assert!(
+            coordinator
+                .release_reflection(second, ReflectionWorkPoll::Terminal)
+                .terminal
+        );
+        resume.send(()).expect("the release should still be paused");
+        assert!(
+            release
+                .join()
+                .expect("the release must not take the gate again")
+                .made_progress
+        );
+    });
+    coordinator.settle_terminal_work(
+        task.work,
+        EvaluationWaitTerminal::Cancelled,
+        evaluation_failure("test settlement"),
+    );
+    drop(coordinator.retire_reflection(task.work));
+}
+
+/// A session closing abandons its blocked task, whose block holds a blocked
+/// lazy route's only lease. Retiring the task drops that block, and
+/// releasing the lease takes the mutation gate and the coordinator lock, so
+/// retirement must drop it after releasing both.
+#[test]
+fn retiring_a_blocked_task_drops_its_route_lease_after_its_locks() {
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let coordinator = context
+        .coordinator()
+        .expect("test task must retain its coordinator");
+    let (wait, root, _promise) = sole_route_lease(&context, false);
+    let task = context
+        .schedule_task(|_| {
+            Ok(Box::new(ProbePollOutcomeMachine(
+                ProbePollOutcome::Complete,
+            )))
+        })
+        .expect("reflection task should schedule");
+    let Some(ClaimedTaskWork::Reflection(claimed)) = coordinator.claim_work(task.work) else {
+        panic!("the scheduled task should be claimable")
+    };
+    assert!(
+        coordinator
+            .release_reflection(claimed, block_on(wait))
+            .remains_blocked
+    );
+    drop(task);
+    drop(context);
+    assert!(
+        coordinator.deferred_wait(root.id().into()).is_none(),
+        "the route should retire with its last lease"
+    );
+}
+
 #[test]
 fn terminal_status_is_authoritative_and_notified_before_machine_retirement() {
     let fixture = SameRuntimeFixture::new();
