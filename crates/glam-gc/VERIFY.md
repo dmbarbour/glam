@@ -1251,3 +1251,8 @@ passed at `8d326eaa` (Miri 234 passed), and at `fdc9c60a` and `450f5a83`
 (Miri 235 passed), with both sanitizers each time. At `64b811e2` its
 aggressive-GC stage failed two Glam session drain tests whose probes
 released work under the drain's mutator; `1cacdd99` fixed them.
+
+Glam's tail-call forwarding borrows its quantum's access instead of opening
+a legacy recursive entry, and release builds use one codegen unit:
+`scripts/check.sh full` passed at `225775e3` (Miri 235 passed), with both
+sanitizers.
