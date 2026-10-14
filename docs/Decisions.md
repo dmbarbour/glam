@@ -2085,8 +2085,9 @@ maps the short names used here to file names.
   named `Heap::mutate_recursive`, a recursive mutator that cannot suspend
   when nested, and moves to `mutate` once its callers convert, so the
   names show where a transition has stabilized (maintainer). The aid
-  retired on 2026-10-14, ahead of the legacy token
-  (`gc-hold-outer-boundaries`, `no-recursive-heap-entries`).
+  retired on 2026-10-14, ahead of the legacy token, which retired the
+  same day with its release points (`gc-hold-outer-boundaries`,
+  `gc-hold-pass-access`, `no-recursive-heap-entries`).
 - **Rule lives in:** `crates/glam-gc/SAFETY.md` "Regional Mutator
   Admission Invariants".
 - **Recorded in:** explicit heap holds plan, `gc-hold-api`.
@@ -2138,9 +2139,14 @@ maps the short names used here to file names.
   views, which a nested entry would have to root. Entry cost was not the
   reason: the profiling workloads make 17 to 23 recursive entries a run
   outside one per definition. Whether a plain `Values` handle nests inside
-  a client scope is left to `gc-hold-values-api`.
-- **Rule lives in:** `agent_context/evaluation.md` "Values and Forcing",
-  once the steps land.
+  a client scope is left to `gc-hold-values-api`. Landed 2026-10-14
+  (`gc-hold-pass-access`): `Heap::with_mutator` and held regions went, a
+  thread record's depth is 0 or 1, and `Heap::thread_holds_mutator`
+  answers whether a thread may wait. A managed destructor may not enter
+  the heap on its own thread, which would nest the finalizer's entry; it
+  hands such work to another thread.
+- **Rule lives in:** `agent_context/evaluation.md` "Values and Forcing";
+  `crates/glam-gc/SAFETY.md` "Regional Mutator Admission Invariants".
 - **Recorded in:** explicit heap holds plan, "Decisions, 2026-10-14".
 
 ### Drivers hold the thread's mutator across quanta

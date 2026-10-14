@@ -85,7 +85,7 @@ mod tests {
     fn empty_heap_can_be_entered_and_dropped() {
         let heap = Heap::new();
 
-        let result = heap.with_mutator(|_| 42);
+        let result = heap.mutate(|_| 42);
 
         assert_eq!(result, 42);
         drop(heap);
@@ -102,7 +102,7 @@ mod tests {
                 let heap = heap.clone();
                 let entries = Arc::clone(&entries);
                 std::thread::spawn(move || {
-                    heap.with_mutator(|_| {
+                    heap.mutate(|_| {
                         entries.fetch_add(1, Ordering::Relaxed);
                     });
                 })
@@ -122,7 +122,7 @@ mod tests {
         let threads = (0..8)
             .map(|_| {
                 std::thread::spawn(|| {
-                    Heap::new().with_mutator(|_| ());
+                    Heap::new().mutate(|_| ());
                 })
             })
             .collect::<Vec<_>>();
@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn managed_pointer_can_cross_threads_when_its_value_can() {
         let heap = Heap::new();
-        let (value, root) = heap.with_mutator(|mutator| {
+        let (value, root) = heap.mutate(|mutator| {
             let value = mutator.allocator::<u64>().unwrap().alloc(42_u64);
             let root = mutator.root_checked(value.duplicate_in(mutator));
             (value, root)
@@ -150,7 +150,7 @@ mod tests {
         let worker_heap = heap.clone();
 
         let observed = std::thread::spawn(move || {
-            worker_heap.with_mutator(|mutator| {
+            worker_heap.mutate(|mutator| {
                 // SAFETY: `root` remains live in the joining thread, so every
                 // intervening collection retains `value`; the matching
                 // mutator excludes collection during this access.
@@ -169,10 +169,10 @@ mod tests {
         let first_heap = Heap::new();
         let second_heap = Heap::new();
 
-        first_heap.with_mutator(|first_mutator| {
+        first_heap.mutate(|first_mutator| {
             let first = first_mutator.allocator::<u64>().unwrap().alloc(11_u64);
             let nested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                second_heap.with_mutator(|_| {});
+                second_heap.mutate(|_| {});
             }))
             .expect_err("entering a second heap inside the first should panic");
             assert!(panic_message(nested).contains("only one heap at a time"));
@@ -182,12 +182,12 @@ mod tests {
         });
 
         // Entered one after the other, each heap keeps its own authority.
-        second_heap.with_mutator(|second_mutator| {
+        second_heap.mutate(|second_mutator| {
             let second = second_mutator.allocator::<u64>().unwrap().alloc(22_u64);
             // SAFETY: `second` was allocated by this heap's mutator and is live.
             assert_eq!(unsafe { *second.get_unchecked(second_mutator) }, 22);
         });
-        first_heap.with_mutator(|first_mutator| {
+        first_heap.mutate(|first_mutator| {
             let first = first_mutator.allocator::<u64>().unwrap().alloc(33_u64);
             // SAFETY: as above, for the first heap.
             assert_eq!(unsafe { *first.get_unchecked(first_mutator) }, 33);
@@ -199,10 +199,10 @@ mod tests {
     fn wrong_heap_access_fails_before_dereference() {
         let owner = Heap::new();
         let other = Heap::new();
-        let value = owner.with_mutator(|mutator| mutator.allocator::<u64>().unwrap().alloc(42_u64));
+        let value = owner.mutate(|mutator| mutator.allocator::<u64>().unwrap().alloc(42_u64));
 
         let panic = std::panic::catch_unwind(|| {
-            other.with_mutator(|mutator| {
+            other.mutate(|mutator| {
                 // SAFETY: this deliberately violates the heap precondition to
                 // verify that indexed arena ownership rejects it before
                 // dereference.

@@ -78,18 +78,17 @@ control-flow overview.
   `Values::with_access`). Neither nests: code that holds access or the
   mutator passes it on (`_in` forms such as `StoreJournal::write_in` and
   `TaskHalt::root_in`, or `EvaluationPollContext::with_runtime_access`)
-  instead of calling a boundary (`no-recursive-heap-entries`).
-  `with_runtime_value_access` is for code under a mutator until
-  `gc-hold-pass-access`. `CountedCondvar`
+  instead of calling a boundary (`no-recursive-heap-entries`); the source
+  audit `evaluation::access_inventory` rejects a boundary opened inside
+  another or in a function that receives access. `CountedCondvar`
   waits, launchers and pressure servicing assert that the thread holds no
   mutator (`assert_outside_mutator`), so they run suspended. A forced collection inside a quantum reports an active
   mutator; probe for open value access with
   `thread_has_runtime_value_access_for_test` instead.
-- `glam-gc` also has owned mutators (`Heap::mutate`, `Mutator::suspend`,
-  `GcRef`), which Glam adopts from `gc-hold-boundaries` on. `mutate` must
-  be the thread's outer entry, and a held-region release point reached
-  under an owned mutator panics:
-  convert such a point to a suspension or defer it past admission.
+- `glam-gc` has one entry, the owned mutator (`Heap::mutate`, with
+  `Mutator::suspend` and `GcRef`), which must be the thread's only entry.
+  Work that waits or calls out runs suspended or deferred past admission;
+  `assert_outside_mutator` (`Heap::thread_holds_mutator`) checks it.
 - Every driver services collection pressure at each quantum boundary, with
   its mutator suspended. A waiting `collect_full` sets the heap's
   request, which every pressure input honors, so drivers join it there

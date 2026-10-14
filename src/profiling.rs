@@ -237,7 +237,6 @@ impl RuntimeProfileSnapshot {
                 ),
                 ("root_registrations", heap.root_registrations()),
                 ("outer_access_regions", heap.outer_mutator_entries()),
-                ("recursive_access_regions", heap.recursive_mutator_entries()),
                 ("collection_attempts", heap.collection_attempts()),
                 ("successful_collections", heap.successful_collections()),
                 ("assigned_runs", heap.assigned_runs() as u64),

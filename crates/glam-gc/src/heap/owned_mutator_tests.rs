@@ -18,6 +18,18 @@ fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
 }
 
 #[test]
+fn a_thread_reports_whether_it_holds_a_mutator() {
+    let heap = Heap::new();
+    assert!(!Heap::thread_holds_mutator());
+    heap.mutate(|mutator| {
+        assert!(Heap::thread_holds_mutator());
+        mutator.suspend(|| assert!(!Heap::thread_holds_mutator()));
+        assert!(Heap::thread_holds_mutator());
+    });
+    assert!(!Heap::thread_holds_mutator());
+}
+
+#[test]
 fn an_owned_mutator_allocates_roots_and_views() {
     let heap = Heap::new();
     let root = heap.mutate(|mutator| {
@@ -32,23 +44,6 @@ fn an_owned_mutator_allocates_roots_and_views() {
     heap.mutate(|mutator| assert_eq!(*root.get(mutator), 42));
     let metrics = heap.metrics();
     assert_eq!(metrics.outer_mutator_entries(), 2);
-    assert_eq!(metrics.recursive_mutator_entries(), 0);
-}
-
-#[test]
-fn legacy_entries_inside_an_owned_mutator_are_recursive() {
-    let heap = Heap::new();
-    heap.mutate(|mutator| {
-        let value = heap.with_mutator(|access| access.allocator::<u64>().unwrap().alloc(5_u64));
-        let root = mutator.root_checked(value);
-        assert_eq!(*root.get(mutator), 5);
-        // A held region inside the mutator adds nothing.
-        heap.with_held_region(|| heap.with_mutator(|_| {}));
-    });
-
-    let metrics = heap.metrics();
-    assert_eq!(metrics.outer_mutator_entries(), 1);
-    assert_eq!(metrics.recursive_mutator_entries(), 2);
 }
 
 #[test]
@@ -66,7 +61,7 @@ fn a_thread_holds_at_most_one_mutator() {
         assert!(panic_message(foreign).contains("only one heap at a time"));
     });
 
-    heap.with_mutator(|_| {
+    heap.mutate(|_| {
         let inside_legacy = catch_unwind(AssertUnwindSafe(|| heap.mutate(|_| {})))
             .expect_err("a mutator inside a legacy access should panic");
         assert!(panic_message(inside_legacy).contains("at most one mutator"));
@@ -112,7 +107,7 @@ fn a_suspension_admits_a_collection_on_another_thread() {
 
         // Resumption captured the new lease epoch before allocating again.
         let snapshot = cache_snapshot(&heap.inner).unwrap();
-        assert_eq!(snapshot.recursive_depth, 1);
+        assert_eq!(snapshot.entry_depth, 1);
         assert_eq!(
             snapshot.captured_epoch,
             heap.inner.current_allocation_lease_epoch()
@@ -161,40 +156,6 @@ fn a_suspension_may_take_other_mutators() {
 }
 
 #[test]
-fn a_mutator_cannot_suspend_inside_a_legacy_access() {
-    let heap = Heap::new();
-    heap.mutate(|mutator| {
-        let root = mutator.root_checked(mutator.allocator::<u64>().unwrap().alloc(4_u64));
-        let panic = catch_unwind(AssertUnwindSafe(|| {
-            heap.with_mutator(|_| mutator.suspend(|| {}));
-        }))
-        .expect_err("suspending under a legacy access should panic");
-        assert!(panic_message(panic).contains("heap access is open"));
-
-        // The refused suspension kept the mutator's admission.
-        assert_eq!(*root.get(mutator), 4);
-        mutator.suspend(|| {});
-        assert_eq!(*root.get(mutator), 4);
-    });
-}
-
-#[test]
-fn release_points_panic_under_an_owned_mutator() {
-    let heap = Heap::new();
-    heap.mutate(|mutator| {
-        let panic = catch_unwind(Heap::release_held_region)
-            .expect_err("a release point under an owned mutator should panic");
-        assert!(panic_message(panic).contains("under an owned mutator"));
-
-        // Inside a suspension, held regions and their release points work.
-        mutator.suspend(|| {
-            heap.with_held_region(|| assert!(Heap::release_held_region()));
-            assert!(!Heap::release_held_region());
-        });
-    });
-}
-
-#[test]
 fn thread_caches_stay_while_a_mutator_is_suspended() {
     let heap = Heap::new();
     heap.mutate(|mutator| {
@@ -225,7 +186,7 @@ fn an_unwinding_suspension_leaves_the_mutator_without_access() {
     });
 
     // Nothing of the failed mutator stays behind.
-    assert!(cache_snapshot(&heap.inner).is_some_and(|snapshot| snapshot.recursive_depth == 0));
+    assert!(cache_snapshot(&heap.inner).is_some_and(|snapshot| snapshot.entry_depth == 0));
     heap.mutate(|mutator| {
         let _ = mutator.allocator::<u64>().unwrap().alloc(1_u64);
     });
@@ -254,7 +215,7 @@ fn a_mutator_readmits_once_its_unwind_is_caught() {
         mutator.readmit();
         let _ = mutator.allocator::<u64>().unwrap().alloc(8_u64);
     });
-    assert!(cache_snapshot(&heap.inner).is_some_and(|snapshot| snapshot.recursive_depth == 0));
+    assert!(cache_snapshot(&heap.inner).is_some_and(|snapshot| snapshot.entry_depth == 0));
     assert_eq!(Heap::release_current_thread_caches(), 1);
 }
 
@@ -301,7 +262,7 @@ fn re_admission_into_a_poisoned_heap_leaves_the_mutator_without_access() {
         .expect_err("a mutator that did not re-admit should grant no access");
         assert!(panic_message(access).contains("grants no access"));
     });
-    assert!(cache_snapshot(&heap.inner).is_some_and(|snapshot| snapshot.recursive_depth == 0));
+    assert!(cache_snapshot(&heap.inner).is_some_and(|snapshot| snapshot.entry_depth == 0));
 }
 
 #[cfg(debug_assertions)]

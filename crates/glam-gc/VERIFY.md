@@ -319,18 +319,20 @@ cleared and contribute no conservative retention to a later collection.
 Pre-collection slot snapshots preserve bitmap verification without attempting
 to resolve stale post-destruction `Gc` identities.
 
-`managed_destructor_runs_outside_locks_with_the_recursive_finalizer_mutator`
-uses a real managed Rust `Drop` implementation to reenter the same heap,
-discover an allocation class, allocate `u64`, and publish a root. It observes
-recursive depth two and validates the fresh value after collection. Completion
-proves erased dispatch held neither managed data nor the coordinator mutex and
-that the successful dying allocation bit was retired exactly once.
+`managed_destructor_runs_outside_locks_while_another_thread_allocates`
+uses a real managed Rust `Drop` implementation that has another thread enter
+the same heap during finalization, discover an allocation class, allocate
+`u64`, and publish a root, and validates the fresh value after collection.
+(Before `no-recursive-heap-entries`, the destructor reentered the heap on its
+own thread.) Completion proves erased dispatch held neither managed data nor
+the coordinator mutex and that the successful dying allocation bit was
+retired exactly once.
 
 Focused Miri runs are:
 
 ```sh
 cargo +nightly miri test --package glam-gc --lib --all-features \
-  managed_destructor_runs_outside_locks_with_the_recursive_finalizer_mutator
+  managed_destructor_runs_outside_locks_while_another_thread_allocates
 ```
 
 The collection-time erased `drop_in_place` call and exact allocation retirement
@@ -1157,10 +1159,9 @@ beneath an abstract copy of the coordinator's phases:
   bit clears sees the collector's writes;
 - the election and handoff models, now over the gate.
 
-Held regions (`perf-quantum-region`) have native tests: inner entries are
-recursive and admit nothing, a collection on the holding thread reports an
-active mutator, an early release lets another thread's waiting collection
-finish while the region's scope continues, and a panic ends the region.
+Held regions (`perf-quantum-region`) had native tests here; they retired
+with held regions and recursive entries (`no-recursive-heap-entries`,
+`gc-hold-pass-access`), when `Heap::mutate` became the only entry.
 
 Four planted faults were each caught: an exit that never takes the lock, a
 count read that does not set `COORDINATED`, a relaxed lock-free entry, and
@@ -1175,10 +1176,10 @@ over a minute. The Loom suite runs in about three seconds.
 `Mutator::suspend` and `GcRef`, and renamed the closure token
 `MutatorAccess`. `heap::owned_mutator_tests` covers:
 
-- allocation, roots and views under an owned mutator, and legacy entries
-  inside it counted as recursive;
-- one mutator per thread: a second, one for another heap, and one inside a
-  legacy access each panic and leave no entry behind;
+- allocation, roots and views under an owned mutator, and
+  `Heap::thread_holds_mutator` inside it, outside it and in a suspension;
+- one mutator per thread: a second, and one for another heap, each panic
+  and leave no entry behind;
 - a collection on another thread that starts only once the mutator has
   suspended and finishes before the suspension ends, which would deadlock
   without the release; resumption captures the new lease epoch and
@@ -1186,9 +1187,7 @@ over a minute. The Loom suite runs in about three seconds.
 - a collection inside the suspension on the same thread, which must leave
   the suspended record registered for resumption to find;
 - other mutators, for this heap and another, inside a suspension;
-- refusals: suspending inside a legacy access (the mutator stays usable),
-  a held-region release point under an owned mutator, and releasing thread
-  caches while a mutator is suspended;
+- refusals: releasing thread caches while a mutator is suspended;
 - failures: a suspended closure that unwinds and a re-admission into a
   poisoned heap each leave the mutator without access, and the thread
   without an active entry; once the unwind is caught, `readmit` restores

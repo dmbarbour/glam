@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn replacement_gateway_executes_the_reported_edge_update_once() {
         let heap = Heap::new();
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let leaves = mutator.allocator::<Leaf>().unwrap();
             let nodes = mutator.allocator::<MutableNode>().unwrap();
             let old = leaves.alloc(Leaf { _value: 1 });
@@ -275,7 +275,7 @@ mod tests {
         let heap = Heap::new();
         let probe = heap.install_edge_transition_probe(EdgeTransitionObservation::Both);
         let transitions = AtomicUsize::new(0);
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let leaves = mutator.allocator::<Leaf>().unwrap();
             let nodes = mutator.allocator::<MutableNode>().unwrap();
             let old = leaves.alloc(Leaf { _value: 1 });
@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn stw_transition_gateway_does_not_walk_either_edge_set() {
         let heap = Heap::new();
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let leaves = mutator.allocator::<Leaf>().unwrap();
             let nodes = mutator.allocator::<MutableNode>().unwrap();
             let old = leaves.alloc(Leaf { _value: 1 });
@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn synthetic_observer_selects_distinct_empty_singleton_and_multi_edge_sets() {
         let heap = Heap::new();
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let leaves = mutator.allocator::<Leaf>().unwrap();
             let first = leaves.alloc(Leaf { _value: 1 });
             let second = leaves.alloc(Leaf { _value: 2 });
@@ -385,7 +385,7 @@ mod tests {
     #[test]
     fn proposed_addition_may_be_observed_even_when_publication_loses() {
         let heap = Heap::new();
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let leaves = mutator.allocator::<Leaf>().unwrap();
             let proposed = leaves.alloc(Leaf { _value: 1 });
             let observed = mutator.observe_edge_transition_for_test(
@@ -410,7 +410,7 @@ mod tests {
     fn replacement_gateway_rejects_a_foreign_heap_before_mutation() {
         let owner_heap = Heap::new();
         let other_heap = Heap::new();
-        let owner = owner_heap.with_mutator(|mutator| {
+        let owner = owner_heap.mutate(|mutator| {
             mutator
                 .allocator::<MutableNode>()
                 .unwrap()
@@ -421,7 +421,7 @@ mod tests {
         let ran = AtomicBool::new(false);
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            other_heap.with_mutator(|mutator| {
+            other_heap.mutate(|mutator| {
                 // SAFETY: this deliberately violates the owner-heap
                 // precondition to verify rejection before the closure runs.
                 unsafe {

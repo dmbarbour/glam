@@ -214,7 +214,7 @@ fn emit_workload(
 fn allocator_workload() {
     let heap = Heap::new_with_policy(CollectionPolicy::NoAuto);
     let started = Instant::now();
-    heap.with_mutator(|mutator| {
+    heap.mutate(|mutator| {
         let allocator = mutator
             .allocator::<SmallValue>()
             .expect("small-value layout is supported");
@@ -232,7 +232,7 @@ fn allocator_workload() {
 
 fn deep_trace_workload() {
     let heap = Heap::new_with_policy(CollectionPolicy::NoAuto);
-    let root = heap.with_mutator(|mutator| {
+    let root = heap.mutate(|mutator| {
         let allocator = mutator
             .allocator::<GraphNode>()
             .expect("graph-node layout is supported");
@@ -259,7 +259,7 @@ fn deep_trace_workload() {
 
 fn wide_trace_workload() {
     let heap = Heap::new_with_policy(CollectionPolicy::NoAuto);
-    let root = heap.with_mutator(|mutator| {
+    let root = heap.mutate(|mutator| {
         let allocator = mutator
             .allocator::<GraphNode>()
             .expect("graph-node layout is supported");
@@ -287,7 +287,7 @@ fn wide_trace_workload() {
 fn finalization_workload() {
     let heap = Heap::new_with_policy(CollectionPolicy::NoAuto);
     let drops = Arc::new(AtomicUsize::new(0));
-    heap.with_mutator(|mutator| {
+    heap.mutate(|mutator| {
         let allocator = mutator
             .allocator::<DropCounter>()
             .expect("drop-counter layout is supported");
@@ -315,7 +315,7 @@ fn finalization_workload() {
 
 fn reclamation_workload() {
     let heap = Heap::new_with_policy(CollectionPolicy::NoAuto);
-    heap.with_mutator(|mutator| {
+    heap.mutate(|mutator| {
         let allocator = mutator
             .allocator::<SmallValue>()
             .expect("small-value layout is supported");
@@ -390,7 +390,7 @@ fn geometry_workload() {
 fn assigned_run_scan_workload() {
     const SCANS: usize = 10_000;
     let heap = Heap::new_with_policy(CollectionPolicy::NoAuto);
-    heap.with_mutator(|mutator| {
+    heap.mutate(|mutator| {
         let allocator = mutator
             .allocator::<SmallValue>()
             .expect("small-value layout is supported");
@@ -440,7 +440,7 @@ fn sparse_finalization_workload() {
     let dropped = (0..VALUES)
         .map(|_| AtomicBool::new(false))
         .collect::<Arc<[_]>>();
-    let mut values = heap.with_mutator(|mutator| {
+    let mut values = heap.mutate(|mutator| {
         let allocator = mutator
             .allocator::<SparseFinalizer>()
             .expect("sparse-finalizer layout is supported");
@@ -486,7 +486,7 @@ fn sparse_finalization_workload() {
         .take()
         .expect("pending finalizer handle disappeared");
     let started = Instant::now();
-    heap.with_mutator(|mutator| {
+    heap.mutate(|mutator| {
         for _ in 0..ROOTABILITY_CHECKS {
             assert!(!is_rootable_for_measurement(mutator, &pending));
         }

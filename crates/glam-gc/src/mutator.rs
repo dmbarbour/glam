@@ -84,8 +84,7 @@ impl<'mu> Mutator<'mu> {
     ///
     /// # Panics
     ///
-    /// Panics if a legacy [`crate::Heap::with_mutator`] access is open inside
-    /// it. Re-admission panics if the heap became
+    /// Re-admission panics if the heap became
     /// permanently poisoned; the mutator then holds no admission, and any
     /// later access through it panics. If `operation` unwinds, the mutator
     /// stays suspended in the same way.
@@ -152,9 +151,8 @@ impl fmt::Debug for Mutator<'_> {
 
 /// Access to one [`crate::Heap`], borrowed from an admitted mutator.
 ///
-/// A [`Mutator`] dereferences to one. During migration,
-/// [`crate::Heap::with_mutator`] also lends one to a closure, as an entry of
-/// its own.
+/// A [`Mutator`] dereferences to one; the collector lends one to
+/// finalization.
 ///
 /// It is intentionally neither `Send` nor `Sync`. Every operation remains
 /// qualified by the heap which created the token; holding another heap's token
@@ -167,7 +165,7 @@ impl fmt::Debug for Mutator<'_> {
 /// use glam_gc::Heap;
 ///
 /// let heap = Heap::new();
-/// heap.with_mutator(|mutator| {
+/// heap.mutate(|mutator| {
 ///     std::thread::scope(|scope| {
 ///         scope.spawn(move || {
 ///             let _ = mutator.allocator::<u64>();
@@ -202,7 +200,7 @@ impl<'heap> MutatorAccess<'heap> {
     /// use glam_gc::Heap;
     ///
     /// let heap = Heap::new();
-    /// let _allocator = heap.with_mutator(|mutator| {
+    /// let _allocator = heap.mutate(|mutator| {
     ///     mutator.allocator::<u64>().unwrap()
     /// });
     /// ```
@@ -287,7 +285,7 @@ impl<'heap> MutatorAccess<'heap> {
 /// use glam_gc::Heap;
 ///
 /// let heap = Heap::new();
-/// heap.with_mutator(|mutator| {
+/// heap.mutate(|mutator| {
 ///     let allocator = mutator.allocator::<u64>().unwrap();
 ///     std::thread::scope(|scope| {
 ///         scope.spawn(move || {
@@ -318,7 +316,7 @@ impl<'mutator, T: Trace> Allocator<'mutator, T> {
     /// use glam_gc::Heap;
     ///
     /// let heap = Heap::new();
-    /// heap.with_mutator(|mutator| {
+    /// heap.mutate(|mutator| {
     ///     let allocator = mutator.allocator::<()>().unwrap();
     ///     let _ = allocator.alloc(());
     /// });

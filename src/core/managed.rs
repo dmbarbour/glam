@@ -154,13 +154,13 @@ impl Drop for RuntimeValueAccessDepthGuard {
 }
 
 /// Asserts, before the thread waits on another thread or calls out to a
-/// host, that it holds no owned mutator: such work runs with its mutator
-/// suspended or after it ends (`driver-mutator`). Glam opens no held
-/// regions, so this releases none; under a legacy access it does nothing
-/// until `gc-hold-tests` retires those.
+/// host, that it holds no mutator: such work runs with its mutator
+/// suspended or after it ends (`driver-mutator`).
 pub(crate) fn assert_outside_mutator() {
-    let released = glam_gc::Heap::release_held_region();
-    debug_assert!(!released, "Glam opens no held regions");
+    assert!(
+        !glam_gc::Heap::thread_holds_mutator(),
+        "a thread must not wait or call out to a host while it holds a mutator; suspend it"
+    );
 }
 
 /// Anything a test can borrow runtime-value access from: a value factory

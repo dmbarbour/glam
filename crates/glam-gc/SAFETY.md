@@ -311,8 +311,7 @@ and every unsafe function, implementation, and block are checked into
   thread-local `Rc<RefCell<_>>` state, making the token neither `Send` nor
   `Sync`; the lifetime prevents it from outliving that heap entry. It is
   borrowed from an owned `Mutator<'mu>` (`Heap::mutate`), which dereferences
-  to it, or, during migration, lent by `Heap::with_mutator` as an entry of
-  its own.
+  to it, or lent by the collector to finalization.
 - `Mutator<'mu>` owns its thread's outer entry for the heap and is neither
   `Send` nor `Sync`. `'mu` is invariant and fresh for each `Heap::mutate`
   call, whose higher-ranked closure keeps everything borrowed from the
@@ -340,7 +339,7 @@ and every unsafe function, implementation, and block are checked into
   release-build proof.
 - `MutatorAccess::allocator` returns `Allocator<'mutator, T>` with real
   borrows of that access's heap and thread cache. The higher-ranked
-  `mutate` and `with_mutator` boundaries prevent the allocator from escaping
+  `mutate` boundary prevents the allocator from escaping
   its admitted region or being sent to another thread. `Allocator::alloc` accepts only `T: Trace`; its inline
   const assertion rejects zero-sized types while compiling an invalid
   monomorphization, before any allocation can run. A public foreign
@@ -494,13 +493,14 @@ the separate liveness and exactly-once obligations at each call site.
   epoch identifies the active collection, and synchronous waiters join it
   rather than requiring a follow-up epoch.
 - Preparing a thread-local heap entry obtains or validates its weak heap-
-  qualified record without changing recursive depth. An outer preparation then
-  obtains one coordinator obligation before activating its cache. A panic or
-  block between preparation and activation therefore leaves the TLS record
+  qualified record without activating it. The entry then obtains one
+  coordinator obligation before activating its cache. A panic or block
+  between preparation and activation therefore leaves the TLS record
   inactive, and the admission token's destructor rolls back the active count.
-- Recursive same-heap entry observes nonzero thread-local depth and reuses the
-  outer coordinator obligation. It remains available while exclusive work is
-  requested so an already-admitted mutator can finish its bounded region.
+- No entry nests (`no-recursive-heap-entries`): activating an entry asserts
+  that the record is inactive, so each active record holds exactly one
+  coordinator obligation. Code under a mutator borrows its access instead
+  of entering again.
 - A thread holds mutators for at most one heap at a time; Glam's runtimes
   never nest heaps, and the collector serves only Glam (maintainer,
   2026-10-09). A thread-local current-heap slot names the heap the thread
@@ -509,16 +509,11 @@ the separate liveness and exactly-once obligations at each call site.
   it creates a TLS record or takes admission; entering the current heap again
   reuses its record without a registry lookup. A collection can therefore
   never wait on a thread that is itself blocked entering another heap.
-- An owned mutator (`Heap::mutate`) is its thread's outer entry, taken
+- An owned mutator (`Heap::mutate`) is its thread's only entry, taken
   only when the thread has no active entry for any heap; otherwise it
-  panics. Legacy `with_mutator` entries inside it are recursive, and a held
-  region inside it adds nothing. A legacy release point
-  (`Heap::release_held_region`) reached while an owned mutator holds the
-  thread's record panics: a release would end admission beneath the
-  mutator's borrows, and doing nothing could leave a wait blocking a
-  collection.
-- `Mutator::suspend` is a scoped safepoint. It refuses while a legacy access
-  is open inside the mutator. It marks the record suspended, ends the entry
+  panics. `Heap::thread_holds_mutator` reports whether the thread has an
+  active entry, so code that waits or calls out can assert it holds none.
+- `Mutator::suspend` is a scoped safepoint. It marks the record suspended, ends the entry
   (cache quiescence before the coordinator obligation, as at any outer
   exit), runs its closure, and re-admits into the same record, asserting its
   identity. While suspended, the record does not count as an active
@@ -533,18 +528,7 @@ the separate liveness and exactly-once obligations at each call site.
   that caught the unwind calls `Mutator::readmit`. Re-admission
   may wait, so a suspension belongs where the thread holds no lock a
   finalizer might need.
-- A held region (`Heap::with_held_region`) is an outer entry without a
-  mutator. The thread's heap state owns its admission, with an `Arc` of the
-  heap (one per region, not per access), so `Heap::release_held_region`
-  deeper on the stack can end it. Entries inside it are recursive and take
-  no admission. Release succeeds only while the region is the thread's only
-  active entry; inside a mutator it does nothing, so no `Mutator` borrow
-  outlives its admission. A released region is not reacquired: later entries
-  in its scope admit one by one, so a release point never blocks on
-  admission while its caller may hold other locks. Collection waits for a
-  held region as for any outer mutator, and `thread_has_any_active_mutator`
-  counts it.
-- Entry destruction first decrements recursive depth and makes the outer cache
+- Entry destruction first makes the record inactive and its cache
   quiescent, then retires the coordinator obligation with a Release
   decrement. Consequently, observing zero active mutators through the gate's
   Acquire count read also observes all work sequenced before those outer
@@ -557,9 +541,9 @@ the separate liveness and exactly-once obligations at each call site.
 - Before exclusive work, the collecting thread clears its complete inactive
   cursor cache for the target heap. The collector-to-finalizer handoff then
   changes `Exclusive` directly to `Finalizing` while installing one active
-  mutator obligation under the same coordinator mutex. Ordinary finalization
-  work and recursive same-heap entry therefore run with normal mutator
-  authority. On
+  mutator obligation under the same coordinator mutex. Finalization work
+  therefore runs with normal mutator authority; a destructor cannot enter
+  the heap again on that thread, while mutators on other threads may. On
   successful completion an entry-elected collector carries that obligation
   directly into its originally requested outer entry; `collect_full` drops it.
   Successful completion resets pressure and clears the request while holding
@@ -689,21 +673,20 @@ the separate liveness and exactly-once obligations at each call site.
 ## Thread-Local Allocation Cache Lifecycle
 
 - Each thread's registry holds only a weak heap identity, a nonzero captured
-  allocation-lease epoch, recursive depth, and a fixed 64-entry direct-mapped
+  allocation-lease epoch, its entry depth (zero or one), and a fixed 64-entry direct-mapped
   cursor array. The heap has no cache registry or TLS back-reference.
 - The weak Arc identity prevents its allocation address from being reused while
   a stale TLS record exists without keeping the dead heap alive. Ordinary heap
   entry never scans or prunes unrelated records. Thread exit drops the complete
   registry, while `Heap::release_current_thread_caches` validates that every
-  recursive depth is zero before clearing all records without heap access.
+  record is inactive before clearing all records without heap access.
 - A record also notes whether an owned mutator holds its outer entry and
   how many owned mutators of its heap are suspended on the thread. The
   collector's removal of its own thread's inactive record skips a suspended
   one, whose mutator resumes into it.
-- Same-heap recursive regions share one TLS entry and checked depth. An RAII
-  entry guard balances normal return and unwinding. Different heaps entered
-  in turn on one thread keep independent records; their regions never
-  nest.
+- An entry activates its heap's TLS record once; an RAII entry guard
+  balances normal return and unwinding. Different heaps entered in turn on
+  one thread keep independent records; their entries never nest.
 - Only outer entry compares the heap's current lease epoch. Mismatch clears the
   entire cursor array and captures the new epoch. Clearing, collision eviction,
   ordinary exit, and TLS destruction do not dereference runs, return leases, or
@@ -720,8 +703,8 @@ the separate liveness and exactly-once obligations at each call site.
   withdraws raw class frontiers, reconstructs exact post-sweep lease masks,
   republishes eligible frontiers, and only then publishes a new heap-wide lease
   epoch with Release ordering. A later outer entry's Acquire epoch load clears
-  the complete local cursor array before allocation. Recursive entry cannot
-  straddle that change because exclusive collection requires zero active outer
+  the complete local cursor array before allocation. An entry cannot
+  straddle that change because exclusive collection requires zero active
   mutators.
 
 ## Worker-Local Allocation-Word Invariants
@@ -1706,7 +1689,7 @@ create no competing semantic rules.
   race a trace or sweep. Allocated payloads never move.
 - **One heap per runtime; no cross-heap edge.** In Glam each
   `EvaluationRuntime` value domain owns one heap, and a thread holds at most
-  one heap's mutator at a time. Mutator authority, recursive depth, and
+  one heap's mutator at a time. Mutator authority, entry depth, and
   allocation caches are heap-qualified. Root construction and access reject a
   foreign heap in every
   build. Tracing rejects a foreign, stale, interior, or unallocated edge before
@@ -1724,9 +1707,10 @@ create no competing semantic rules.
   destroy values, or call host or runtime code.
 - **Finalization grants no authority and takes no collector lock.**
   Destructors run outside every collector lock and must remain safe without a
-  matching-heap mutator. The collector supplies one during ordinary
-  finalization and none at last-owner teardown. Glam's managed payloads are
-  passive and never use it.
+  matching-heap mutator. The collector holds the finalizing entry during
+  ordinary finalization, so a destructor cannot enter the heap on its thread;
+  none exists at last-owner teardown. Glam's managed payloads are passive and
+  never enter it.
 - **Stable addresses are an implementation fact, not an API promise.**
   Edges are reported through a visitor rather than offset tables, so a later
   moving collector can add edge rewriting. `Gc<T>` has no `Hash` for the same

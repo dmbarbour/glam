@@ -196,8 +196,8 @@ fn empty_heap_entry_runs_under_loom() {
         let heap = Heap::new();
         let other = heap.clone();
 
-        let thread = loom::thread::spawn(move || other.with_mutator(|_| ()));
-        heap.with_mutator(|_| ());
+        let thread = loom::thread::spawn(move || other.mutate(|_| ()));
+        heap.mutate(|_| ());
         thread.join().expect("modeled empty-heap worker panicked");
         assert_eq!(Heap::release_current_thread_caches(), 1);
     });

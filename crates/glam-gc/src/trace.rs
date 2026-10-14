@@ -81,7 +81,7 @@ pub unsafe trait Trace: Send + Sync + 'static {
     /// }
     ///
     /// let heap = Heap::new();
-    /// let _ = heap.with_mutator(|mutator| mutator.allocator::<InvalidRequest>());
+    /// let _ = heap.mutate(|mutator| mutator.allocator::<InvalidRequest>());
     /// ```
     const REQUESTED_SLOT_SIZE: Option<usize> = None;
 
@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn manual_struct_and_recursive_enum_traces_match_expected_edges() {
         let heap = Heap::new();
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let leaves = mutator.allocator::<Leaf>().unwrap();
             let nodes = mutator.allocator::<Node>().unwrap();
             let first_leaf = leaves.alloc(Leaf { _value: 1 });
@@ -292,7 +292,7 @@ mod tests {
     #[test]
     fn visitor_panic_leaves_the_value_traceable_from_the_beginning() {
         let heap = Heap::new();
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let leaves = mutator.allocator::<Leaf>().unwrap();
             let nodes = mutator.allocator::<Node>().unwrap();
             let leaf = leaves.alloc(Leaf { _value: 1 });

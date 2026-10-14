@@ -285,7 +285,6 @@ pub struct HeapMetrics {
     explicit_collection_requests: u64,
     coalesced_collection_requests: u64,
     outer_mutator_entries: u64,
-    recursive_mutator_entries: u64,
     root_registrations: u64,
     root_chunks: usize,
     class_cache_hits: u64,
@@ -330,7 +329,6 @@ metric_accessors! {
     (explicit_collection_requests, explicit_collection_requests, u64, "Returns nonblocking explicit collection requests."),
     (coalesced_collection_requests, coalesced_collection_requests, u64, "Returns requests observing an already-pending request."),
     (outer_mutator_entries, outer_mutator_entries, u64, "Returns completed outer mutator regions."),
-    (recursive_mutator_entries, recursive_mutator_entries, u64, "Returns completed recursive same-heap entries."),
     (root_registrations, root_registrations, u64, "Returns external roots registered over the heap's life."),
     (root_chunks, root_chunks, usize, "Returns chunks in the heap's root slot pool."),
     (class_cache_hits, class_cache_hits, u64, "Returns allocations served by an existing worker-local cursor."),
@@ -513,34 +511,12 @@ impl Heap {
         crate::thread_cache::release_current_thread_caches()
     }
 
-    /// Runs `operation` inside a scoped mutator region for this heap.
-    ///
-    /// This is the legacy entry, kept while callers migrate to owned
-    /// mutators ([`Heap::mutate`]); inside one, it is a recursive entry.
-    /// The outermost entry obtains one coordinator admission obligation.
-    /// Recursive same-heap entries reuse that obligation. A thread holds
-    /// mutators for at most one heap at a time; different heaps may be
-    /// entered in turn.
-    ///
-    /// # Panics
-    ///
-    /// Panics if this thread holds another heap's mutator, before entering
-    /// this heap. Panics if a prior collection crossed an irreversible
-    /// mutation boundary and then panicked, permanently poisoning this heap.
-    pub fn with_mutator<R>(
-        &self,
-        operation: impl for<'heap> FnOnce(&MutatorAccess<'heap>) -> R,
-    ) -> R {
-        self.with_mutator_after_admission(|| {}, operation)
-    }
-
     /// Runs `operation` with this thread's owned mutator for this heap.
     ///
     /// The mutator holds heap admission until `operation` returns, except
     /// while it suspends ([`Mutator::suspend`]). Access borrows it, so no
     /// access or view outlives that admission. The brand `'mu` is fresh for
-    /// each call. Legacy [`Heap::with_mutator`] entries inside it are
-    /// recursive and take no admission.
+    /// each call.
     ///
     /// # Panics
     ///
@@ -551,78 +527,6 @@ impl Heap {
     pub fn mutate<R>(&self, operation: impl for<'mu> FnOnce(&mut Mutator<'mu>) -> R) -> R {
         let mut mutator = Mutator::new(&self.inner, self.inner.admit_owned_entry());
         operation(&mut mutator)
-    }
-
-    /// Holds this heap's mutator admission while `operation` runs, without
-    /// creating a mutator.
-    ///
-    /// Every [`Heap::with_mutator`] inside the region is a recursive entry,
-    /// which takes no admission. Collection waits for the region to end, so
-    /// code inside it should call [`Heap::release_held_region`] before it
-    /// waits on another thread or calls out to a host. Inside another entry
-    /// for this heap the region adds nothing.
-    ///
-    /// # Panics
-    ///
-    /// Panics if this thread holds another heap's mutator, or if this heap is
-    /// permanently poisoned.
-    pub fn with_held_region<R>(&self, operation: impl FnOnce() -> R) -> R {
-        struct EndHeldRegion;
-
-        impl Drop for EndHeldRegion {
-            fn drop(&mut self) {
-                drop(crate::thread_cache::take_held_region());
-            }
-        }
-
-        if !self.inner.begin_held_region() {
-            return operation();
-        }
-        let _end = EndHeldRegion;
-        operation()
-    }
-
-    /// Ends the calling thread's held region early, if it holds one and no
-    /// mutator is active inside it. Later entries in the region's scope enter
-    /// the heap one by one again. Returns whether a region ended.
-    ///
-    /// # Panics
-    ///
-    /// Panics under an owned mutator ([`Heap::mutate`]), which suspends
-    /// instead ([`Mutator::suspend`]).
-    pub fn release_held_region() -> bool {
-        crate::thread_cache::take_held_region().is_some()
-    }
-
-    fn with_mutator_after_admission<R>(
-        &self,
-        after_admission: impl FnOnce(),
-        operation: impl for<'heap> FnOnce(&MutatorAccess<'heap>) -> R,
-    ) -> R {
-        let prepared =
-            ThreadHeapEntry::prepare(&self.inner, self.inner.current_allocation_lease_epoch());
-        let outer = prepared.is_outer();
-        let (prepared, admission) = if outer {
-            let (admission, collected) = self.inner.admit_outer_mutator();
-            let prepared = if collected {
-                drop(prepared);
-                ThreadHeapEntry::prepare(&self.inner, self.inner.current_allocation_lease_epoch())
-            } else {
-                prepared
-            };
-            (prepared, Some(admission))
-        } else {
-            (prepared, None)
-        };
-        after_admission();
-        let thread_entry =
-            prepared.activate(self.inner.current_allocation_lease_epoch(), admission);
-        let mutator = MutatorAccess::new(&self.inner, thread_entry.cache());
-        let result = operation(&mutator);
-        drop(mutator);
-        drop(thread_entry);
-
-        result
     }
 
     /// Records an idempotent, nonblocking full-collection request.
@@ -847,13 +751,26 @@ impl Heap {
         self.inner.collect_full()
     }
 
+    /// Whether this thread holds a mutator for any heap: an owned mutator,
+    /// or a collection's finalizing entry. Code that waits on another thread
+    /// or calls out to a host checks that it holds none.
+    #[must_use]
+    pub fn thread_holds_mutator() -> bool {
+        thread_has_any_active_mutator()
+    }
+
+    /// As [`Heap::mutate`], running `after_admission` between the entry's
+    /// admission and its activation.
     #[cfg(test)]
-    fn with_mutator_admission_hook<R>(
+    fn mutate_admission_hook<R>(
         &self,
         after_admission: impl FnOnce(),
-        operation: impl for<'heap> FnOnce(&MutatorAccess<'heap>) -> R,
+        operation: impl for<'mu> FnOnce(&mut Mutator<'mu>) -> R,
     ) -> R {
-        self.with_mutator_after_admission(after_admission, operation)
+        let (prepared, admission) = self.inner.admit_owned(self.inner.prepare_entry());
+        after_admission();
+        let entry = prepared.activate_owned(self.inner.current_allocation_lease_epoch(), admission);
+        operation(&mut Mutator::new(&self.inner, entry))
     }
 }
 
@@ -1036,7 +953,7 @@ impl RegionCounterRegistry {
 
 /// One outer mutator's coordinator obligation.
 ///
-/// The token borrows the heap already retained by `Heap::with_mutator`; it
+/// The token borrows the heap already retained by its entry's caller; it
 /// adds no per-entry shared-owner clone. Dropping it is the only ordinary path
 /// which retires the active-mutator count.
 pub(crate) struct MutatorAdmission<'heap> {
@@ -1049,35 +966,6 @@ struct SyntheticExclusiveAdmission<'heap> {
 }
 
 impl Drop for MutatorAdmission<'_> {
-    fn drop(&mut self) {
-        self.heap.release_outer_mutator();
-    }
-}
-
-impl MutatorAdmission<'_> {
-    /// Moves this obligation into a held region's owned admission.
-    fn into_held(self, heap: &Arc<HeapInner>) -> HeldAdmission {
-        assert!(
-            std::ptr::eq(self.heap, Arc::as_ptr(heap)),
-            "held admission must keep its own heap"
-        );
-        std::mem::forget(self);
-        HeldAdmission {
-            heap: Arc::clone(heap),
-        }
-    }
-}
-
-/// A held region's coordinator obligation.
-///
-/// The calling thread's heap state owns it, rather than a stack frame, so a
-/// release point deeper on the stack can end the region. It keeps a heap
-/// owner, one per held region rather than one per access.
-pub(crate) struct HeldAdmission {
-    heap: Arc<HeapInner>,
-}
-
-impl Drop for HeldAdmission {
     fn drop(&mut self) {
         self.heap.release_outer_mutator();
     }
@@ -2701,27 +2589,6 @@ impl HeapInner {
         (prepared, admission)
     }
 
-    /// Begins a held region unless this thread already has an entry for this
-    /// heap.
-    fn begin_held_region(self: &Arc<Self>) -> bool {
-        let prepared = ThreadHeapEntry::prepare(self, self.current_allocation_lease_epoch());
-        if !prepared.is_outer() {
-            return false;
-        }
-        let (admission, collected) = self.admit_outer_mutator();
-        let prepared = if collected {
-            drop(prepared);
-            ThreadHeapEntry::prepare(self, self.current_allocation_lease_epoch())
-        } else {
-            prepared
-        };
-        prepared.activate_held(
-            self.current_allocation_lease_epoch(),
-            admission.into_held(self),
-        );
-        true
-    }
-
     fn admit_outer_mutator(self: &Arc<Self>) -> (MutatorAdmission<'_>, bool) {
         let collection_requested = || {
             self.collection_policy == CollectionPolicy::Automatic
@@ -2894,7 +2761,6 @@ impl HeapInner {
                 .coalesced_collection_requests
                 .load(Ordering::Relaxed),
             outer_mutator_entries: region_metrics.outer_entries,
-            recursive_mutator_entries: region_metrics.recursive_entries,
             root_registrations: region_metrics.root_registrations,
             root_chunks: data.root_pool.chunk_count(),
             class_cache_hits: region_metrics.class_cache_hits,
@@ -3219,8 +3085,7 @@ impl HeapInner {
             MutatorAdmission { heap: self }
         };
         let pause_duration = collection_started.elapsed();
-        let thread_entry =
-            prepared.activate(self.current_allocation_lease_epoch(), Some(admission));
+        let thread_entry = prepared.activate(self.current_allocation_lease_epoch(), admission);
         let mutator = MutatorAccess::new(self, thread_entry.cache());
         #[cfg(feature = "deterministic-test-hooks")]
         self.pause_in_finalizing_phase();
@@ -4530,7 +4395,7 @@ mod tests {
     }
 
     fn allocate<T: Trace>(heap: &Heap, value: T) -> crate::Gc<T> {
-        heap.with_mutator(|mutator| mutator.allocator::<T>().unwrap().alloc(value))
+        heap.mutate(|mutator| mutator.allocator::<T>().unwrap().alloc(value))
     }
 
     fn collector_slot<T: Trace>(heap: &Heap, value: &crate::Gc<T>) -> CollectorSlot {
@@ -4858,15 +4723,23 @@ mod tests {
         fn drop(&mut self) {
             self.drops.fetch_add(1, Ordering::Relaxed);
             if self.allocate_on_drop {
-                self.heap.with_mutator(|mutator| {
-                    assert_eq!(
-                        self.heap.inner.coordinator_snapshot().phase,
-                        AdmissionPhase::Finalizing
-                    );
-                    assert_eq!(cache_snapshot(&self.heap.inner).unwrap().recursive_depth, 2);
-                    let value = mutator.allocator::<u64>().unwrap().alloc(73);
-                    let root = mutator.root_checked(value);
-                    assert!(self.published.lock().unwrap().replace(root).is_none());
+                // A destructor cannot enter the heap its finalizer holds; a
+                // mutator on another thread may allocate meanwhile.
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            self.heap.mutate(|mutator| {
+                                assert_eq!(
+                                    self.heap.inner.coordinator_snapshot().phase,
+                                    AdmissionPhase::Finalizing
+                                );
+                                let value = mutator.allocator::<u64>().unwrap().alloc(73);
+                                let root = mutator.root_checked(value);
+                                assert!(self.published.lock().unwrap().replace(root).is_none());
+                            });
+                        })
+                        .join()
+                        .unwrap();
                 });
             }
             assert!(
@@ -4902,18 +4775,27 @@ mod tests {
                     .upgrade()
                     .expect("finalizer test heap disappeared during Drop"),
             };
-            heap.with_mutator(|mutator| {
-                let replacement = mutator.allocator::<Self>().unwrap().alloc(Self {
-                    heap: Arc::downgrade(&heap.inner),
-                    drops: Arc::clone(&self.drops),
-                    allocate_on_drop: false,
-                    published: self.published.clone(),
-                });
-                let owner = collector_slot(&heap, &replacement).owner;
-                let root = mutator.root_checked(replacement);
-                self.published
-                    .send((root, owner.location, owner.slot_index))
-                    .expect("finalizer test receiver disappeared");
+            // A destructor cannot enter the heap its finalizer holds; a
+            // mutator on another thread may allocate meanwhile.
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        heap.mutate(|mutator| {
+                            let replacement = mutator.allocator::<Self>().unwrap().alloc(Self {
+                                heap: Arc::downgrade(&heap.inner),
+                                drops: Arc::clone(&self.drops),
+                                allocate_on_drop: false,
+                                published: self.published.clone(),
+                            });
+                            let owner = collector_slot(&heap, &replacement).owner;
+                            let root = mutator.root_checked(replacement);
+                            self.published
+                                .send((root, owner.location, owner.slot_index))
+                                .expect("finalizer test receiver disappeared");
+                        });
+                    })
+                    .join()
+                    .unwrap();
             });
         }
     }
@@ -5170,7 +5052,7 @@ mod tests {
         edge: crate::Gc<GraphNode>,
         traces: Arc<AtomicUsize>,
     ) -> crate::Root<InvalidEdgeHolder> {
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let holder = mutator
                 .allocator::<InvalidEdgeHolder>()
                 .unwrap()
@@ -5263,7 +5145,7 @@ mod tests {
         const THREADS: usize = 12;
 
         let heap = Heap::new();
-        let expected = heap.with_mutator(|mutator| {
+        let expected = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<FirstType>().unwrap();
             (
                 allocator.id(),
@@ -5275,7 +5157,7 @@ mod tests {
             .map(|_| {
                 let heap = heap.clone();
                 std::thread::spawn(move || {
-                    heap.with_mutator(|mutator| {
+                    heap.mutate(|mutator| {
                         let allocator = mutator.allocator::<FirstType>().unwrap();
                         (
                             allocator.id(),
@@ -5300,7 +5182,7 @@ mod tests {
         let worker = std::thread::spawn({
             let heap = heap.clone();
             move || {
-                heap.with_mutator(|mutator| {
+                heap.mutate(|mutator| {
                     let allocator = mutator.allocator::<FirstType>().unwrap();
                     (allocator.id(), allocator.belongs_to(&heap.inner))
                 })
@@ -5323,10 +5205,10 @@ mod tests {
     #[test]
     fn repeated_scoped_allocator_discovery_reuses_the_heap_class() {
         let heap = Heap::new();
-        let first_id = heap.with_mutator(|mutator| mutator.allocator::<FirstType>().unwrap().id());
+        let first_id = heap.mutate(|mutator| mutator.allocator::<FirstType>().unwrap().id());
         assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 0);
 
-        let (second_id, metadata, value) = heap.with_mutator(|mutator| {
+        let (second_id, metadata, value) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<FirstType>().unwrap();
             (
                 allocator.id(),
@@ -5344,15 +5226,14 @@ mod tests {
     }
 
     #[test]
-    fn recursive_class_discovery_reuses_admission_while_collection_is_requested() {
+    fn class_discovery_under_a_mutator_ignores_a_requested_collection() {
         let heap = Heap::new();
 
-        let class_id = heap.with_mutator(|_| {
+        let class_id = heap.mutate(|mutator| {
             heap.request_collection();
-            let class_id =
-                heap.with_mutator(|mutator| mutator.allocator::<SecondType>().unwrap().id());
+            let class_id = mutator.allocator::<SecondType>().unwrap().id();
             assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 1);
-            assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 1);
+            assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 1);
             assert!(heap.inner.coordinator_snapshot().collection_requested);
             class_id
         });
@@ -5362,7 +5243,7 @@ mod tests {
             heap.inner.coordinator_snapshot().completed_collection_epoch,
             0
         );
-        heap.with_mutator(|_| {});
+        heap.mutate(|_| {});
         assert_eq!(
             heap.inner.coordinator_snapshot().phase,
             AdmissionPhase::Ordinary
@@ -5373,21 +5254,21 @@ mod tests {
     fn prepared_entry_is_inert_until_admission_activates_it() {
         let heap = Heap::new();
 
-        heap.with_mutator_admission_hook(
+        heap.mutate_admission_hook(
             || {
                 let coordinator = heap.inner.coordinator_snapshot();
                 assert_eq!(coordinator.phase, AdmissionPhase::Ordinary);
                 assert_eq!(coordinator.active_outer_mutators, 1);
-                assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 0);
+                assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 0);
             },
             |_| {
                 assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 1);
-                assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 1);
+                assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 1);
             },
         );
 
         assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 0);
-        assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 0);
+        assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 0);
     }
 
     #[test]
@@ -5395,7 +5276,7 @@ mod tests {
         let heap = Heap::new();
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            heap.with_mutator_admission_hook(
+            heap.mutate_admission_hook(
                 || panic!("injected post-admission panic"),
                 |_| unreachable!(),
             );
@@ -5403,8 +5284,8 @@ mod tests {
 
         assert!(panic.is_err());
         assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 0);
-        assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 0);
-        heap.with_mutator(|_| {});
+        assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 0);
+        heap.mutate(|_| {});
     }
 
     #[test]
@@ -5417,7 +5298,7 @@ mod tests {
             let heap = heap.clone();
             let published = Arc::clone(&published);
             move || {
-                heap.with_mutator(|_| {
+                heap.mutate(|_| {
                     published.store(73, Ordering::Relaxed);
                     active_tx.send(()).unwrap();
                     release_rx.recv().unwrap();
@@ -5455,7 +5336,7 @@ mod tests {
         let active = std::thread::spawn({
             let heap = heap.clone();
             move || {
-                heap.with_mutator(|_| {
+                heap.mutate(|_| {
                     active_tx.send(()).unwrap();
                     release_active_rx.recv().unwrap();
                 });
@@ -5467,7 +5348,7 @@ mod tests {
         let (entered_tx, entered_rx) = mpsc::channel();
         let entrant = std::thread::spawn({
             let heap = heap.clone();
-            move || heap.with_mutator(|_| entered_tx.send(()).unwrap())
+            move || heap.mutate(|_| entered_tx.send(()).unwrap())
         });
         entered_rx.recv().unwrap();
         entrant.join().expect("blocked entrant panicked");
@@ -5484,7 +5365,7 @@ mod tests {
             0
         );
 
-        heap.with_mutator(|_| {});
+        heap.mutate(|_| {});
         assert_eq!(
             heap.inner.coordinator_snapshot().phase,
             AdmissionPhase::Ordinary
@@ -5509,7 +5390,7 @@ mod tests {
             heap.inner.coordinator_snapshot().phase,
             AdmissionPhase::Ordinary
         );
-        heap.with_mutator(|_| {});
+        heap.mutate(|_| {});
     }
 
     #[test]
@@ -5522,7 +5403,7 @@ mod tests {
         assert!(requested.collection_requested);
         assert_eq!(requested.completed_collection_epoch, 0);
 
-        heap.with_mutator(|_| {
+        heap.mutate(|_| {
             assert_eq!(
                 heap.inner.coordinator_snapshot().completed_collection_epoch,
                 1
@@ -5648,7 +5529,7 @@ mod tests {
             1
         );
         assert!(completed.collection_requested);
-        heap.with_mutator(|_| {});
+        heap.mutate(|_| {});
         assert_eq!(
             heap.inner.coordinator_snapshot().completed_collection_epoch,
             2
@@ -5675,7 +5556,7 @@ mod tests {
         });
 
         arrived.wait();
-        let root = heap.with_mutator(|mutator| {
+        let root = heap.mutate(|mutator| {
             let value = mutator.allocator::<u64>().unwrap().alloc(42);
             let root = mutator.root_checked(value);
             for _ in 0..FIXED_SURVIVOR_RUN_HEADROOM {
@@ -5692,7 +5573,7 @@ mod tests {
         let completed = heap.inner.coordinator_snapshot();
         assert_eq!(completed.completed_collection_epoch, 1);
         assert!(completed.collection_requested);
-        heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 42));
+        heap.mutate(|mutator| assert_eq!(*root.get(mutator), 42));
         assert_eq!(
             heap.inner.coordinator_snapshot().completed_collection_epoch,
             2
@@ -5700,11 +5581,11 @@ mod tests {
     }
 
     #[test]
-    fn recursive_request_survives_outer_exit_until_the_next_entry() {
+    fn a_request_under_a_mutator_survives_its_exit_until_the_next_entry() {
         let heap = Heap::new();
 
-        heap.with_mutator(|_| {
-            heap.with_mutator(|_| heap.request_collection());
+        heap.mutate(|_| {
+            heap.request_collection();
             let pending = heap.inner.coordinator_snapshot();
             assert!(pending.collection_requested);
             assert_eq!(pending.completed_collection_epoch, 0);
@@ -5716,7 +5597,7 @@ mod tests {
         assert_eq!(pending.completed_collection_epoch, 0);
         assert_eq!(pending.active_outer_mutators, 0);
 
-        heap.with_mutator(|_| {
+        heap.mutate(|_| {
             assert_eq!(
                 heap.inner.coordinator_snapshot().completed_collection_epoch,
                 1
@@ -5729,20 +5610,20 @@ mod tests {
         let heap = Heap::new();
         heap.request_collection();
 
-        heap.with_mutator_admission_hook(
+        heap.mutate_admission_hook(
             || {
                 let coordinator = heap.inner.coordinator_snapshot();
                 assert_eq!(coordinator.phase, AdmissionPhase::Ordinary);
                 assert_eq!(coordinator.completed_collection_epoch, 1);
                 assert_eq!(coordinator.active_outer_mutators, 1);
                 assert!(!coordinator.collection_requested);
-                assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 0);
+                assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 0);
             },
             |_| {
                 let coordinator = heap.inner.coordinator_snapshot();
                 assert_eq!(coordinator.completed_collection_epoch, 1);
                 assert_eq!(coordinator.active_outer_mutators, 1);
-                assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 1);
+                assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 1);
             },
         );
 
@@ -5752,17 +5633,17 @@ mod tests {
     #[test]
     fn entry_elected_collection_clears_its_inactive_cursor_cache() {
         let heap = Heap::new();
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let allocator = mutator.allocator::<FirstType>().unwrap();
             let _ = allocator.alloc(FirstType { _value: 1 });
         });
         assert_eq!(cache_snapshot(&heap.inner).unwrap().cursor_count, 1);
 
         heap.request_collection();
-        heap.with_mutator_admission_hook(
+        heap.mutate_admission_hook(
             || {
                 let cache = cache_snapshot(&heap.inner).unwrap();
-                assert_eq!(cache.recursive_depth, 0);
+                assert_eq!(cache.entry_depth, 0);
                 assert_eq!(cache.cursor_count, 0);
             },
             |mutator| {
@@ -5786,7 +5667,7 @@ mod tests {
                 let start = Arc::clone(&start);
                 std::thread::spawn(move || {
                     start.wait();
-                    heap.with_mutator(|_| {})
+                    heap.mutate(|_| {})
                 })
             })
             .collect::<Vec<_>>();
@@ -5810,7 +5691,7 @@ mod tests {
         let entrant = std::thread::spawn({
             let heap = heap.clone();
             move || {
-                heap.with_mutator(|_| {
+                heap.mutate(|_| {
                     entered_tx.send(()).unwrap();
                     release_rx.recv().unwrap();
                 });
@@ -5830,7 +5711,7 @@ mod tests {
         assert_eq!(pending.completed_collection_epoch, 1);
         assert!(pending.collection_requested);
 
-        heap.with_mutator(|_| {});
+        heap.mutate(|_| {});
         assert_eq!(
             heap.inner.coordinator_snapshot().completed_collection_epoch,
             2
@@ -5842,7 +5723,7 @@ mod tests {
         let heap = Heap::new();
         let other = Heap::new();
 
-        heap.with_mutator(|_| {
+        heap.mutate(|_| {
             assert_eq!(
                 heap.collect_full(),
                 Err(super::CollectionError::ActiveMutator)
@@ -5853,7 +5734,7 @@ mod tests {
             assert_eq!(coordinator.active_outer_mutators, 1);
         });
 
-        other.with_mutator(|_| {
+        other.mutate(|_| {
             assert_eq!(
                 heap.collect_full(),
                 Err(super::CollectionError::ActiveMutator)
@@ -5872,7 +5753,7 @@ mod tests {
         let active = std::thread::spawn({
             let heap = heap.clone();
             move || {
-                heap.with_mutator(|_| {
+                heap.mutate(|_| {
                     active_tx.send(()).unwrap();
                     release_rx.recv().unwrap();
                 });
@@ -5889,7 +5770,7 @@ mod tests {
         let (entered_tx, entered_rx) = mpsc::channel();
         let entrant = std::thread::spawn({
             let heap = heap.clone();
-            move || heap.with_mutator(|_| entered_tx.send(()).unwrap())
+            move || heap.mutate(|_| entered_tx.send(()).unwrap())
         });
         entered_rx.recv().unwrap();
         entrant.join().unwrap();
@@ -5908,7 +5789,7 @@ mod tests {
             metadata_for::<u64>().requested_slot_size(),
         )
         .unwrap();
-        let root = heap.with_mutator(|mutator| {
+        let root = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             let mut last = None;
             for value in 0..=geometry.slot_count {
@@ -5925,7 +5806,7 @@ mod tests {
             let heap = heap.clone();
             let root = root.clone();
             move || {
-                heap.with_mutator(|mutator| {
+                heap.mutate(|mutator| {
                     assert_eq!(*root.get(mutator), geometry.slot_count as u64);
                     active_tx.send(()).unwrap();
                     release_rx.recv().unwrap();
@@ -5953,7 +5834,7 @@ mod tests {
             "inactive TLS retains its old epoch until the next outer entry"
         );
 
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             assert_eq!(*root.get(mutator), geometry.slot_count as u64);
             let cache = cache_snapshot(&heap.inner).unwrap();
             assert_ne!(cache.captured_epoch, prior_epoch);
@@ -5963,7 +5844,7 @@ mod tests {
     }
 
     #[test]
-    fn c7_external_blocking_after_recursive_unwind_holds_no_gc_obligation() {
+    fn c7_external_blocking_after_an_unwind_holds_no_gc_obligation() {
         let heap = Heap::new();
         let (parked_tx, parked_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -5971,17 +5852,15 @@ mod tests {
             let heap = heap.clone();
             move || {
                 let panic = catch_unwind(AssertUnwindSafe(|| {
-                    heap.with_mutator(|_| {
-                        heap.with_mutator(|mutator| {
-                            let _ = mutator.allocator::<u64>().unwrap().alloc(7);
-                            panic!("injected recursive worker unwind");
-                        });
+                    heap.mutate(|mutator| {
+                        let _ = mutator.allocator::<u64>().unwrap().alloc(7);
+                        panic!("injected worker unwind");
                     });
                 }))
-                .expect_err("the injected unwind should escape both regions");
+                .expect_err("the injected unwind should escape the mutator");
                 assert_eq!(
                     panic.downcast_ref::<&str>(),
-                    Some(&"injected recursive worker unwind")
+                    Some(&"injected worker unwind")
                 );
                 assert!(!thread_has_any_active_mutator());
                 parked_tx.send(()).unwrap();
@@ -6014,14 +5893,14 @@ mod tests {
                 let start = Arc::clone(&start);
                 std::thread::spawn(move || {
                     start.wait();
-                    heap.with_mutator(|mutator| {
+                    heap.mutate(|mutator| {
                         let allocator = mutator.allocator::<u64>().unwrap();
                         for offset in 0..VALUES_PER_WORKER {
                             let value = worker_index * VALUES_PER_WORKER + offset;
                             let _ = allocator.alloc(value as u64);
                         }
                     });
-                    second.with_mutator(|second_mutator| {
+                    second.mutate(|second_mutator| {
                         let _ = second_mutator
                             .allocator::<u64>()
                             .unwrap()
@@ -6042,7 +5921,7 @@ mod tests {
         let free_before_reuse = heap.inner.data.lock().unwrap().free_runs.clone();
         assert!(!free_before_reuse.is_empty());
 
-        let reused = heap.with_mutator(|mutator| {
+        let reused = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             (0..WORKERS)
                 .map(|value| allocator.alloc(value as u64))
@@ -6061,7 +5940,7 @@ mod tests {
     #[test]
     fn synchronous_requesters_coalesce_on_one_idle_collection() {
         let heap = Heap::new();
-        let root = heap.with_mutator(|mutator| {
+        let root = heap.mutate(|mutator| {
             let value = mutator.allocator::<u64>().unwrap().alloc(42);
             mutator.root_checked(value)
         });
@@ -6070,7 +5949,7 @@ mod tests {
         let active = std::thread::spawn({
             let heap = heap.clone();
             move || {
-                heap.with_mutator(|_| {
+                heap.mutate(|_| {
                     active_tx.send(()).unwrap();
                     release_rx.recv().unwrap();
                 })
@@ -6108,7 +5987,7 @@ mod tests {
         assert_eq!(metrics.synchronous_collection_joins(), 1);
         assert_eq!(metrics.collection_attempts(), 1);
         assert_eq!(metrics.successful_collections(), 1);
-        heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 42));
+        heap.mutate(|mutator| assert_eq!(*root.get(mutator), 42));
     }
 
     #[test]
@@ -6199,7 +6078,7 @@ mod tests {
         let active = std::thread::spawn({
             let heap = heap.clone();
             move || {
-                heap.with_mutator(|_| {
+                heap.mutate(|_| {
                     active_tx.send(()).unwrap();
                     release_rx.recv().unwrap();
                 })
@@ -6223,7 +6102,7 @@ mod tests {
         let heap = Heap::new();
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            heap.with_mutator(|_| {
+            heap.mutate(|_| {
                 heap.request_collection();
                 panic!("injected unwind");
             });
@@ -6233,7 +6112,7 @@ mod tests {
         let pending = heap.inner.coordinator_snapshot();
         assert!(pending.collection_requested);
         assert_eq!(pending.completed_collection_epoch, 0);
-        heap.with_mutator(|_| {});
+        heap.mutate(|_| {});
         assert_eq!(
             heap.inner.coordinator_snapshot().completed_collection_epoch,
             1
@@ -6243,7 +6122,7 @@ mod tests {
     #[test]
     fn collector_marks_cross_word_boundaries_and_duplicate_marks_are_inert() {
         let heap = Heap::new();
-        let values = heap.with_mutator(|mutator| {
+        let values = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u32>().unwrap();
             (0..65_u32)
                 .map(|value| allocator.alloc(value))
@@ -6335,7 +6214,7 @@ mod tests {
         assert!(!slot_is_marked(&one, one_slot));
 
         let heap = Heap::new();
-        let values = heap.with_mutator(|mutator| {
+        let values = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<WideSlot>().unwrap();
             (0..3_u64)
                 .map(|value| allocator.alloc(WideSlot { value }))
@@ -6551,14 +6430,13 @@ mod tests {
     fn failed_mark_attempts_leave_scratch_until_a_clean_retry_overwrites_it() {
         for partial_count in [0_usize, 1, 3] {
             let heap = Heap::new();
-            let values = heap.with_mutator(|mutator| {
+            let values = heap.mutate(|mutator| {
                 let allocator = mutator.allocator::<WideSlot>().unwrap();
                 (0..3_u64)
                     .map(|value| allocator.alloc(WideSlot { value }))
                     .collect::<Vec<_>>()
             });
-            let root =
-                heap.with_mutator(|mutator| mutator.root_checked(values[0].duplicate_in(mutator)));
+            let root = heap.mutate(|mutator| mutator.root_checked(values[0].duplicate_in(mutator)));
             let slots = values
                 .iter()
                 .map(|value| collector_slot(&heap, value))
@@ -6656,7 +6534,7 @@ mod tests {
                 heap.inner.coordinator_snapshot().completed_collection_epoch,
                 1
             );
-            heap.with_mutator(|mutator| assert_eq!(root.get(mutator).value, 0));
+            heap.mutate(|mutator| assert_eq!(root.get(mutator).value, 0));
         }
     }
 
@@ -6671,7 +6549,7 @@ mod tests {
             let leaf_traces = (0..EDGE_COUNT)
                 .map(|_| Arc::new(AtomicUsize::new(0)))
                 .collect::<Vec<_>>();
-            let (root, slots) = heap.with_mutator(|mutator| {
+            let (root, slots) = heap.mutate(|mutator| {
                 let allocator = mutator.allocator::<PanickingTraceNode>().unwrap();
                 let leaves = leaf_traces
                     .iter()
@@ -6732,7 +6610,7 @@ mod tests {
                     .iter()
                     .all(|traces| traces.load(Ordering::Relaxed) == 1)
             );
-            heap.with_mutator(|mutator| assert_eq!(root.get(mutator).edges.len(), EDGE_COUNT));
+            heap.mutate(|mutator| assert_eq!(root.get(mutator).edges.len(), EDGE_COUNT));
         }
     }
 
@@ -6746,7 +6624,7 @@ mod tests {
             let leaf_traces = (0..EDGE_COUNT)
                 .map(|_| Arc::new(AtomicUsize::new(0)))
                 .collect::<Vec<_>>();
-            let (root, slots) = heap.with_mutator(|mutator| {
+            let (root, slots) = heap.mutate(|mutator| {
                 let allocator = mutator.allocator::<GraphNode>().unwrap();
                 let leaves = leaf_traces
                     .iter()
@@ -6809,7 +6687,7 @@ mod tests {
                     .copied()
                     .all(|slot| slot_is_marked(&heap, slot))
             );
-            heap.with_mutator(|mutator| {
+            heap.mutate(|mutator| {
                 assert_eq!(root.get(mutator).edges.lock().unwrap().len(), EDGE_COUNT)
             });
         }
@@ -6820,7 +6698,7 @@ mod tests {
         let owner = Heap::new();
         let foreign = Heap::new();
         let foreign_traces = Arc::new(AtomicUsize::new(0));
-        let (foreign_value, foreign_root) = foreign.with_mutator(|mutator| {
+        let (foreign_value, foreign_root) = foreign.mutate(|mutator| {
             let value = mutator
                 .allocator::<GraphNode>()
                 .unwrap()
@@ -6838,13 +6716,12 @@ mod tests {
         assert_eq!(foreign_traces.load(Ordering::Relaxed), 0);
         assert_eq!(foreign.collect_full().unwrap().epoch(), 1);
         assert_eq!(foreign_traces.load(Ordering::Relaxed), 1);
-        foreign.with_mutator(|mutator| {
-            assert!(foreign_root.get(mutator).edges.lock().unwrap().is_empty())
-        });
+        foreign
+            .mutate(|mutator| assert!(foreign_root.get(mutator).edges.lock().unwrap().is_empty()));
 
         drop(holder);
         assert_eq!(owner.collect_full().unwrap().epoch(), 1);
-        owner.with_mutator(|mutator| {
+        owner.mutate(|mutator| {
             let value = mutator.allocator::<u64>().unwrap().alloc(42);
             let root = mutator.root_checked(value);
             assert_eq!(*root.get(mutator), 42);
@@ -6897,7 +6774,7 @@ mod tests {
         assert_eq!(non_slot_owner.collect_full().unwrap().epoch(), 1);
 
         for heap in [&stale_owner, &non_slot_owner] {
-            heap.with_mutator(|mutator| {
+            heap.mutate(|mutator| {
                 let _ = mutator.allocator::<u64>().unwrap().alloc(1);
             });
         }
@@ -6938,7 +6815,7 @@ mod tests {
         );
         drop(holder);
         assert_eq!(heap.collect_full().unwrap().epoch(), 1);
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let _ = mutator
                 .allocator::<GraphNode>()
                 .unwrap()
@@ -6952,7 +6829,7 @@ mod tests {
         let counters = (0..3)
             .map(|_| Arc::new(AtomicUsize::new(0)))
             .collect::<Vec<_>>();
-        let (first_root, second_root, root_alias) = heap.with_mutator(|mutator| {
+        let (first_root, second_root, root_alias) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<GraphNode>().unwrap();
             let nodes = counters
                 .iter()
@@ -6990,7 +6867,7 @@ mod tests {
             heap.inner.coordinator_snapshot().latest_collection_report,
             Some(second)
         );
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             assert!(std::ptr::eq(
                 first_root.get(mutator),
                 root_alias.get(mutator)
@@ -7002,7 +6879,7 @@ mod tests {
     fn c7_collection_report_covers_phase_work_and_timings() {
         let heap = Heap::new();
         let drops = Arc::new(AtomicUsize::new(0));
-        let live = heap.with_mutator(|mutator| {
+        let live = heap.mutate(|mutator| {
             let plain = mutator.allocator::<u64>().unwrap();
             let live = plain.alloc(1);
             for value in 2..=5 {
@@ -7030,7 +6907,7 @@ mod tests {
         assert_eq!(drops.load(Ordering::Relaxed), 1);
         assert_eq!(heap.metrics().eagerly_swept_words(), 1);
         assert_eq!(heap.metrics().eagerly_swept_slots(), 4);
-        heap.with_mutator(|mutator| assert_eq!(*live.get(mutator), 1));
+        heap.mutate(|mutator| assert_eq!(*live.get(mutator), 1));
     }
 
     #[test]
@@ -7039,20 +6916,19 @@ mod tests {
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 for _ in 0..3 {
-                    heap.with_mutator(|_| {});
+                    heap.mutate(|_| {});
                 }
                 // A join may return before thread-local destructors run, so
                 // release this thread's cache before the thread finishes.
                 assert_eq!(Heap::release_current_thread_caches(), 1);
             });
         });
-        heap.with_mutator(|_| {});
+        heap.mutate(|_| {});
         let _ = Heap::release_current_thread_caches();
-        heap.with_mutator(|_| heap.with_mutator(|_| {}));
+        heap.mutate(|_| {});
 
         let metrics = heap.metrics();
         assert_eq!(metrics.outer_mutator_entries(), 5);
-        assert_eq!(metrics.recursive_mutator_entries(), 1);
         let registry = heap.inner.region_counters.lock().unwrap();
         assert_eq!(
             registry.live.len(),
@@ -7092,14 +6968,12 @@ mod tests {
     #[test]
     fn c7_allocation_metrics_batch_hot_path_observations_per_region() {
         let heap = Heap::new();
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             for value in 0..70_u64 {
                 let _ = allocator.alloc(value);
             }
-            heap.with_mutator(|recursive| {
-                let _ = recursive.allocator::<u64>().unwrap().alloc(70);
-            });
+            let _ = mutator.allocator::<u64>().unwrap().alloc(70);
         });
 
         let metrics = heap.metrics();
@@ -7109,7 +6983,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(metrics.outer_mutator_entries(), 1);
-        assert_eq!(metrics.recursive_mutator_entries(), 1);
         assert_eq!(metrics.class_cache_misses(), 2);
         assert_eq!(metrics.class_cache_hits(), 69);
         assert_eq!(metrics.arena_chunks(), 1);
@@ -7142,11 +7015,11 @@ mod tests {
         let heap = Heap::new();
         heap.request_collection();
         heap.request_collection();
-        heap.with_mutator(|_| {});
+        heap.mutate(|_| {});
 
         let armed = Arc::new(AtomicBool::new(true));
         let traces = Arc::new(AtomicUsize::new(0));
-        let root = heap.with_mutator(|mutator| {
+        let root = heap.mutate(|mutator| {
             let value =
                 mutator
                     .allocator::<PanickingTraceNode>()
@@ -7192,7 +7065,7 @@ mod tests {
             metrics.successful_collections() + metrics.failed_collections()
         );
         assert_eq!(*events.lock().unwrap(), vec![0]);
-        heap.with_mutator(|mutator| assert_eq!(root.get(mutator).edges.len(), 0));
+        heap.mutate(|mutator| assert_eq!(root.get(mutator).edges.len(), 0));
     }
 
     #[test]
@@ -7225,7 +7098,7 @@ mod tests {
             let counters = (0..NODE_COUNT)
                 .map(|_| Arc::new(AtomicUsize::new(0)))
                 .collect::<Vec<_>>();
-            let (nodes, roots) = heap.with_mutator(|mutator| {
+            let (nodes, roots) = heap.mutate(|mutator| {
                 let allocator = mutator.allocator::<GraphNode>().unwrap();
                 let nodes = counters
                     .iter()
@@ -7276,7 +7149,7 @@ mod tests {
         let geometry = RunGeometry::derive(metadata.layout(), metadata.requested_slot_size())
             .expect("u64 must have supported run geometry");
         let heap = Heap::new();
-        let values = heap.with_mutator(|mutator| {
+        let values = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             (0..geometry.slot_count)
                 .map(|value| allocator.alloc(value as u64))
@@ -7302,7 +7175,7 @@ mod tests {
             }
         };
 
-        let all_roots = heap.with_mutator(|mutator| {
+        let all_roots = heap.mutate(|mutator| {
             values[..geometry.slot_count]
                 .iter()
                 .map(|value| mutator.root_checked(value.duplicate_in(mutator)))
@@ -7347,7 +7220,7 @@ mod tests {
 
         let armed = Arc::new(AtomicBool::new(true));
         let traces = Arc::new(AtomicUsize::new(0));
-        let root = heap.with_mutator(|mutator| {
+        let root = heap.mutate(|mutator| {
             let value =
                 mutator
                     .allocator::<PanickingTraceNode>()
@@ -7382,28 +7255,27 @@ mod tests {
         assert_eq!(second.marked_slots(), 1);
         assert_eq!(second.conservatively_retained_slots(), 0);
         assert_eq!(traces.load(Ordering::Relaxed), 2);
-        heap.with_mutator(|mutator| assert!(root.get(mutator).edges.is_empty()));
+        heap.mutate(|mutator| assert!(root.get(mutator).edges.is_empty()));
     }
 
     #[test]
     fn root_seeding_counts_entries_but_enqueues_each_allocation_once() {
         let heap = Heap::new();
         let traces = Arc::new(AtomicUsize::new(0));
-        let (value, first_root, second_root, root_alias, dead_root) =
-            heap.with_mutator(|mutator| {
-                let allocator = mutator.allocator::<GraphNode>().unwrap();
-                let value = allocator.alloc(graph_node(Arc::clone(&traces)));
-                let dead = allocator.alloc(graph_node(Arc::new(AtomicUsize::new(0))));
-                let first_root = mutator.root_checked(value.duplicate_in(mutator));
-                let root_alias = first_root.clone();
-                (
-                    value.duplicate_in(mutator),
-                    first_root,
-                    mutator.root_checked(value),
-                    root_alias,
-                    mutator.root_checked(dead),
-                )
-            });
+        let (value, first_root, second_root, root_alias, dead_root) = heap.mutate(|mutator| {
+            let allocator = mutator.allocator::<GraphNode>().unwrap();
+            let value = allocator.alloc(graph_node(Arc::clone(&traces)));
+            let dead = allocator.alloc(graph_node(Arc::new(AtomicUsize::new(0))));
+            let first_root = mutator.root_checked(value.duplicate_in(mutator));
+            let root_alias = first_root.clone();
+            (
+                value.duplicate_in(mutator),
+                first_root,
+                mutator.root_checked(value),
+                root_alias,
+                mutator.root_checked(dead),
+            )
+        });
         drop(dead_root);
 
         let exclusive = heap.inner.enter_synthetic_exclusive();
@@ -7435,7 +7307,7 @@ mod tests {
 
         assert_eq!(traces.load(Ordering::Relaxed), 1);
         assert!(slot_is_marked(&heap, collector_slot(&heap, &value)));
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             assert!(std::ptr::eq(
                 first_root.get(mutator),
                 second_root.get(mutator)
@@ -7453,7 +7325,7 @@ mod tests {
         let counters = (0..5)
             .map(|_| Arc::new(AtomicUsize::new(0)))
             .collect::<Vec<_>>();
-        let (nodes, root) = heap.with_mutator(|mutator| {
+        let (nodes, root) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<GraphNode>().unwrap();
             let nodes = counters
                 .iter()
@@ -7487,7 +7359,7 @@ mod tests {
                 .all(|(index, _)| slot_is_marked(&heap, slots[index]))
         );
         assert!(!slot_is_marked(&heap, slots[4]));
-        heap.with_mutator(|mutator| assert_eq!(root.get(mutator).edges.lock().unwrap().len(), 3));
+        heap.mutate(|mutator| assert_eq!(root.get(mutator).edges.lock().unwrap().len(), 3));
     }
 
     #[test]
@@ -7499,7 +7371,7 @@ mod tests {
 
         let heap = Heap::new();
         let traces = Arc::new(AtomicUsize::new(0));
-        let (last, root) = heap.with_mutator(|mutator| {
+        let (last, root) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<GraphNode>().unwrap();
             let nodes = (0..DEPTH)
                 .map(|_| allocator.alloc(graph_node(Arc::clone(&traces))))
@@ -7517,9 +7389,7 @@ mod tests {
 
         assert_eq!(traces.load(Ordering::Relaxed), DEPTH);
         assert!(slot_is_marked(&heap, collector_slot(&heap, &last)));
-        heap.with_mutator(|mutator| {
-            assert_eq!(root.get(mutator).traces.load(Ordering::Relaxed), DEPTH)
-        });
+        heap.mutate(|mutator| assert_eq!(root.get(mutator).traces.load(Ordering::Relaxed), DEPTH));
     }
 
     #[test]
@@ -7532,7 +7402,7 @@ mod tests {
 
         let heap = Heap::new();
         let traces = Arc::new(AtomicUsize::new(0));
-        let (shared_tail, root) = heap.with_mutator(|mutator| {
+        let (shared_tail, root) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<GraphNode>().unwrap();
             let tail = (0..TAIL_DEPTH)
                 .map(|_| allocator.alloc(graph_node(Arc::clone(&traces))))
@@ -7562,9 +7432,7 @@ mod tests {
 
         assert_eq!(traces.load(Ordering::Relaxed), 1 + WIDTH + TAIL_DEPTH);
         assert!(slot_is_marked(&heap, collector_slot(&heap, &shared_tail)));
-        heap.with_mutator(|mutator| {
-            assert_eq!(root.get(mutator).edges.lock().unwrap().len(), WIDTH)
-        });
+        heap.mutate(|mutator| assert_eq!(root.get(mutator).edges.lock().unwrap().len(), WIDTH));
     }
 
     #[test]
@@ -7577,7 +7445,7 @@ mod tests {
 
         let heap = Heap::new();
         let traces = Arc::new(AtomicUsize::new(0));
-        let (tail, root) = heap.with_mutator(|mutator| {
+        let (tail, root) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<GraphNode>().unwrap();
             let tail = allocator.alloc(graph_node(Arc::clone(&traces)));
             let mut head = tail.duplicate_in(mutator);
@@ -7593,7 +7461,7 @@ mod tests {
         assert_eq!(report.marked_slots(), NODE_COUNT);
         assert_eq!(traces.load(Ordering::Relaxed), NODE_COUNT);
         assert!(slot_is_marked(&heap, collector_slot(&heap, &tail)));
-        heap.with_mutator(|mutator| assert_eq!(root.get(mutator).edges.lock().unwrap().len(), 1));
+        heap.mutate(|mutator| assert_eq!(root.get(mutator).edges.lock().unwrap().len(), 1));
     }
 
     #[test]
@@ -7606,7 +7474,7 @@ mod tests {
 
         let heap = Heap::new();
         let traces = Arc::new(AtomicUsize::new(0));
-        let (last, root) = heap.with_mutator(|mutator| {
+        let (last, root) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<GraphNode>().unwrap();
             let edges = (0..EDGE_COUNT)
                 .map(|_| allocator.alloc(graph_node(Arc::clone(&traces))))
@@ -7626,7 +7494,7 @@ mod tests {
             "flat {EDGE_COUNT}-edge worklist peak: len={}, capacity={}",
             report.peak_object_worklist_len, report.peak_object_worklist_capacity
         );
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             assert_eq!(root.get(mutator).edges.lock().unwrap().len(), EDGE_COUNT)
         });
     }
@@ -7637,7 +7505,7 @@ mod tests {
         let class = internal_class::<FirstType>(&heap);
         assert_eq!(heap.collection_policy(), CollectionPolicy::Automatic);
 
-        heap.with_mutator(|_| {
+        heap.mutate(|_| {
             for _ in 0..FIXED_SURVIVOR_RUN_HEADROOM {
                 heap.inner.prepare_run(&class).unwrap();
             }
@@ -7657,7 +7525,7 @@ mod tests {
             assert_eq!(coordinator.completed_collection_epoch, 0);
         }
 
-        heap.with_mutator(|_| {});
+        heap.mutate(|_| {});
         let pressure = heap.inner.allocation_pressure();
         assert!(!pressure.collection_requested);
         assert_eq!(pressure.assigned_runs, 0);
@@ -7666,7 +7534,7 @@ mod tests {
         assert!(!coordinator.collection_requested);
         assert_eq!(coordinator.completed_collection_epoch, 1);
 
-        heap.with_mutator(|_| {
+        heap.mutate(|_| {
             heap.inner.prepare_run(&class).unwrap();
         });
         let pressure = heap.inner.allocation_pressure();
@@ -7674,7 +7542,7 @@ mod tests {
         assert_eq!(pressure.high_water_mark, FIXED_SURVIVOR_RUN_HEADROOM);
         assert!(!pressure.collection_requested);
         assert!(!heap.inner.coordinator_snapshot().collection_requested);
-        heap.with_mutator(|_| {});
+        heap.mutate(|_| {});
         assert_eq!(
             heap.inner.coordinator_snapshot().completed_collection_epoch,
             1,
@@ -7688,7 +7556,7 @@ mod tests {
         let class = internal_class::<FirstType>(&heap);
         assert_eq!(heap.collection_policy(), CollectionPolicy::NoAuto);
 
-        heap.with_mutator(|_| {
+        heap.mutate(|_| {
             for _ in 0..FIXED_SURVIVOR_RUN_HEADROOM {
                 heap.inner.prepare_run(&class).unwrap();
             }
@@ -7704,7 +7572,7 @@ mod tests {
         assert_eq!(pressured.pending_finalizers(), 0);
 
         for _ in 0..3 {
-            heap.with_mutator(|_| {});
+            heap.mutate(|_| {});
         }
         assert_eq!(
             heap.inner.coordinator_snapshot().completed_collection_epoch,
@@ -7727,7 +7595,7 @@ mod tests {
         let heap = Heap::new_with_policy(CollectionPolicy::NoAuto);
 
         heap.request_collection();
-        heap.with_mutator(|_| {});
+        heap.mutate(|_| {});
         assert!(heap.statistics().collection_requested());
         assert_eq!(
             heap.inner.coordinator_snapshot().completed_collection_epoch,
@@ -7743,7 +7611,7 @@ mod tests {
         let heap = Heap::new();
         let value = allocate(&heap, 42_u64);
         let slot = collector_slot(&heap, &value);
-        let root = heap.with_mutator(|mutator| mutator.root_checked(value));
+        let root = heap.mutate(|mutator| mutator.root_checked(value));
         let post_mark_seen = AtomicBool::new(false);
 
         heap.request_collection();
@@ -7780,7 +7648,7 @@ mod tests {
         assert_eq!(report.root_entries(), 1);
         assert_eq!(report.traced_objects(), 1);
         assert_eq!(report.marked_slots(), 1);
-        heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 42));
+        heap.mutate(|mutator| assert_eq!(*root.get(mutator), 42));
     }
 
     #[test]
@@ -7790,7 +7658,7 @@ mod tests {
         let plain_dead_a = allocate(&heap, 20_u64);
         let plain_dead_b = allocate(&heap, 30_u64);
         let plain_root =
-            heap.with_mutator(|mutator| mutator.root_checked(plain_live.duplicate_in(mutator)));
+            heap.mutate(|mutator| mutator.root_checked(plain_live.duplicate_in(mutator)));
         let plain_live_slot = collector_slot(&heap, &plain_live);
         let plain_dead_slots = [
             collector_slot(&heap, &plain_dead_a),
@@ -7801,7 +7669,7 @@ mod tests {
         let dropping_live = allocate(&heap, DropCounter(Arc::clone(&drops)));
         let dropping_dead = allocate(&heap, DropCounter(Arc::clone(&drops)));
         let dropping_root =
-            heap.with_mutator(|mutator| mutator.root_checked(dropping_live.duplicate_in(mutator)));
+            heap.mutate(|mutator| mutator.root_checked(dropping_live.duplicate_in(mutator)));
         let dropping_live_slot = collector_slot(&heap, &dropping_live);
         let dropping_dead_slot = collector_slot(&heap, &dropping_dead);
 
@@ -7884,7 +7752,7 @@ mod tests {
                 .allocated,
             "successful finalization must retire the drop-bearing allocation"
         );
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             assert_eq!(*plain_root.get(mutator), 10);
             let _ = dropping_root.get(mutator);
         });
@@ -7898,7 +7766,7 @@ mod tests {
             .expect("boundary fixture must have supported geometry");
         assert!(geometry.slot_count > u64::BITS as usize);
         let allocation_count = geometry.slot_count + 3;
-        let values = heap.with_mutator(|mutator| {
+        let values = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<BitmapBoundarySlot>().unwrap();
             (0..allocation_count)
                 .map(|value| {
@@ -7919,7 +7787,7 @@ mod tests {
             geometry.slot_count - 1,
             geometry.slot_count,
         ];
-        let roots = heap.with_mutator(|mutator| {
+        let roots = heap.mutate(|mutator| {
             rooted_indices
                 .iter()
                 .map(|&index| mutator.root_checked(values[index].duplicate_in(mutator)))
@@ -7980,7 +7848,7 @@ mod tests {
             );
         }
 
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             for root in &roots {
                 let _ = root.get(mutator);
             }
@@ -7990,12 +7858,11 @@ mod tests {
     #[test]
     fn finalizer_panic_after_partial_no_drop_sweep_preserves_reclaimed_state() {
         let heap = Heap::new();
-        let (live, dead) = heap.with_mutator(|mutator| {
+        let (live, dead) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             (allocator.alloc(10), allocator.alloc(20))
         });
-        let live_root =
-            heap.with_mutator(|mutator| mutator.root_checked(live.duplicate_in(mutator)));
+        let live_root = heap.mutate(|mutator| mutator.root_checked(live.duplicate_in(mutator)));
         let live_slot = collector_slot(&heap, &live);
         let dead_slot = collector_slot(&heap, &dead);
         assert_eq!(live_slot.owner.location, dead_slot.owner.location);
@@ -8044,17 +7911,17 @@ mod tests {
                 .allocated,
             "retry must not restore the swept allocation"
         );
-        heap.with_mutator(|mutator| assert_eq!(*live_root.get(mutator), 10));
+        heap.mutate(|mutator| assert_eq!(*live_root.get(mutator), 10));
     }
 
     #[test]
     fn post_collection_claim_reuses_a_swept_slot_without_lazy_sweep() {
         let heap = Heap::new();
-        let (live, dead) = heap.with_mutator(|mutator| {
+        let (live, dead) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             (allocator.alloc(10), allocator.alloc(20))
         });
-        let root = heap.with_mutator(|mutator| mutator.root_checked(live.duplicate_in(mutator)));
+        let root = heap.mutate(|mutator| mutator.root_checked(live.duplicate_in(mutator)));
         let live_slot = collector_slot(&heap, &live);
         let dead_slot = collector_slot(&heap, &dead);
         assert_eq!(live_slot.owner.location, dead_slot.owner.location);
@@ -8081,20 +7948,20 @@ mod tests {
             heap.inner.allocation_cursor_claim_count(),
             claims_before + 1
         );
-        heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 10));
+        heap.mutate(|mutator| assert_eq!(*root.get(mutator), 10));
     }
 
     #[test]
     fn partial_drop_runs_release_completed_words_for_reuse() {
         let heap = Heap::new();
         let drops = Arc::new(AtomicUsize::new(0));
-        let values = heap.with_mutator(|mutator| {
+        let values = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<DropCounter>().unwrap();
             (0..66)
                 .map(|_| allocator.alloc(DropCounter(Arc::clone(&drops))))
                 .collect::<Vec<_>>()
         });
-        let roots = heap.with_mutator(|mutator| {
+        let roots = heap.mutate(|mutator| {
             [0_usize, u64::BITS as usize]
                 .into_iter()
                 .map(|index| mutator.root_checked(values[index].duplicate_in(mutator)))
@@ -8132,7 +7999,7 @@ mod tests {
         let replacement_slot = collector_slot(&heap, &replacement);
         assert_eq!(replacement_slot.owner.location, first_slot.owner.location);
         assert_eq!(replacement_slot.owner.slot_index, 1);
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             for root in &roots {
                 let _ = root.get(mutator);
             }
@@ -8144,7 +8011,7 @@ mod tests {
         let heap = Heap::new();
         let drops = Arc::new(AtomicUsize::new(0));
         let (published_tx, published_rx) = mpsc::channel();
-        let (values, live_root) = heap.with_mutator(|mutator| {
+        let (values, live_root) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<IncrementalReleaseDrop>().unwrap();
             let values = (0..=2 * u64::BITS as usize)
                 .map(|index| {
@@ -8186,7 +8053,7 @@ mod tests {
                 .is_empty()
         );
 
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let _ = live_root.get(mutator);
             let _ = replacement_root.get(mutator);
         });
@@ -8202,7 +8069,7 @@ mod tests {
         let drops = Arc::new(AtomicUsize::new(0));
         let released_before = Arc::new(Barrier::new(2));
         let continue_finalization = Arc::new(Barrier::new(2));
-        let (values, live_root) = heap.with_mutator(|mutator| {
+        let (values, live_root) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<ConcurrentReleaseDrop>().unwrap();
             let values = (0..=2 * u64::BITS as usize)
                 .map(|index| {
@@ -8246,7 +8113,7 @@ mod tests {
         assert_eq!(running.pending_finalizers(), 2 * u64::BITS as usize);
         assert_eq!(running.finalizer_activity(), heap.activity());
 
-        let (replacement_root, replacement_owner) = heap.with_mutator(|mutator| {
+        let (replacement_root, replacement_owner) = heap.mutate(|mutator| {
             assert!(
                 catch_unwind(AssertUnwindSafe(|| {
                     mutator.root_checked(values[0].duplicate_in(mutator))
@@ -8309,7 +8176,7 @@ mod tests {
         let drops = Arc::new(AtomicUsize::new(0));
         let destructor_arrived = Arc::new(Barrier::new(2));
         let continue_finalization = Arc::new(Barrier::new(2));
-        let (values, live_root) = heap.with_mutator(|mutator| {
+        let (values, live_root) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<ConcurrentReleaseDrop>().unwrap();
             let values = (0..=2 * u64::BITS as usize)
                 .map(|index| {
@@ -8356,7 +8223,7 @@ mod tests {
             let destructor_arrived = Arc::clone(&destructor_arrived);
             let continue_finalization = Arc::clone(&continue_finalization);
             move || {
-                heap.with_mutator(|mutator| {
+                heap.mutate(|mutator| {
                     let allocator = mutator.allocator::<ConcurrentReleaseDrop>().unwrap();
                     allocator_ready_tx.send(()).unwrap();
                     allocate_rx.recv().unwrap();
@@ -8389,7 +8256,7 @@ mod tests {
         let replacement_owner = collector_slot(&heap, &replacement).owner;
         assert_eq!(replacement_owner.location, first_owner.location);
         assert_eq!(replacement_owner.slot_index, first_owner.slot_index);
-        let replacement_root = heap.with_mutator(|mutator| mutator.root_checked(replacement));
+        let replacement_root = heap.mutate(|mutator| mutator.root_checked(replacement));
 
         drop(live_root);
         drop(replacement_root);
@@ -8465,7 +8332,7 @@ mod tests {
     fn successful_finalization_releases_partial_and_detached_batch_ownership() {
         let heap = Heap::new();
         let drops = Arc::new(AtomicUsize::new(0));
-        let (live, partial_dead, whole_dead, live_root) = heap.with_mutator(|mutator| {
+        let (live, partial_dead, whole_dead, live_root) = heap.mutate(|mutator| {
             let partials = mutator.allocator::<DropCounter>().unwrap();
             let live = partials.alloc(DropCounter(Arc::clone(&drops)));
             let partial_dead = partials.alloc(DropCounter(Arc::clone(&drops)));
@@ -8508,7 +8375,7 @@ mod tests {
             assert!(data.free_runs.contains(&whole_dead_slot.owner.location));
         }
 
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             assert!(
                 catch_unwind(AssertUnwindSafe(|| {
                     mutator.root_checked(partial_dead.duplicate_in(mutator))
@@ -8558,7 +8425,7 @@ mod tests {
     fn later_dead_slots_finalize_after_the_prior_batch_was_released() {
         let heap = Heap::new();
         let drops = Arc::new(AtomicUsize::new(0));
-        let (values, first_root, later_root) = heap.with_mutator(|mutator| {
+        let (values, first_root, later_root) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<DropCounter>().unwrap();
             let values = (0..3)
                 .map(|_| allocator.alloc(DropCounter(Arc::clone(&drops))))
@@ -8598,7 +8465,7 @@ mod tests {
             assert_eq!(data.finalization_batch.pending_slot_count(), 0);
         }
 
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             assert!(
                 catch_unwind(AssertUnwindSafe(|| {
                     mutator.root_checked(values[2].duplicate_in(mutator))
@@ -8653,7 +8520,7 @@ mod tests {
         let rejected = std::thread::spawn({
             let heap = heap.clone();
             move || {
-                heap.with_mutator(|mutator| {
+                heap.mutate(|mutator| {
                     catch_unwind(AssertUnwindSafe(|| mutator.root_checked(dead))).is_err()
                 })
             }
@@ -8671,7 +8538,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_destructor_runs_outside_locks_with_the_recursive_finalizer_mutator() {
+    fn managed_destructor_runs_outside_locks_while_another_thread_allocates() {
         let heap = Heap::new();
         let drops = Arc::new(AtomicUsize::new(0));
         let published = Arc::new(Mutex::new(None));
@@ -8709,7 +8576,7 @@ mod tests {
             .unwrap()
             .take()
             .expect("managed Drop must publish its fresh allocation");
-        heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 73));
+        heap.mutate(|mutator| assert_eq!(*root.get(mutator), 73));
         drop(root);
         drop(heap);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
@@ -8720,7 +8587,7 @@ mod tests {
         let heap = Heap::new();
         let drops = Arc::new(AtomicUsize::new(0));
         let published = Arc::new(Mutex::new(None));
-        let (live, dead, live_root) = heap.with_mutator(|mutator| {
+        let (live, dead, live_root) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<AllocatingDrop>().unwrap();
             let live = allocator.alloc(AllocatingDrop {
                 heap: heap.clone(),
@@ -8772,7 +8639,7 @@ mod tests {
             .unwrap()
             .take()
             .expect("finalizer did not publish its fresh allocation");
-        heap.with_mutator(|mutator| assert_eq!(*published_root.get(mutator), 73));
+        heap.mutate(|mutator| assert_eq!(*published_root.get(mutator), 73));
 
         drop(published_root);
         drop(live_root);
@@ -8785,7 +8652,7 @@ mod tests {
         let heap = Heap::new();
         let drops = Arc::new(AtomicUsize::new(0));
         let published = Arc::new(Mutex::new(None));
-        let (live, dead, live_root) = heap.with_mutator(|mutator| {
+        let (live, dead, live_root) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<AllocatingDrop>().unwrap();
             let live = allocator.alloc(AllocatingDrop {
                 heap: heap.clone(),
@@ -8839,7 +8706,7 @@ mod tests {
             .unwrap()
             .take()
             .expect("panicking finalizer lost its published allocation");
-        heap.with_mutator(|mutator| assert_eq!(*published_root.get(mutator), 73));
+        heap.mutate(|mutator| assert_eq!(*published_root.get(mutator), 73));
 
         drop(published_root);
         drop(live_root);
@@ -8940,7 +8807,7 @@ mod tests {
                 .pending_slot_count(),
             0
         );
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             assert!(catch_unwind(AssertUnwindSafe(|| mutator.root_checked(panicking))).is_err());
             assert!(catch_unwind(AssertUnwindSafe(|| mutator.root_checked(deferred))).is_err());
         });
@@ -8953,7 +8820,7 @@ mod tests {
     fn managed_destructor_panic_keeps_an_attached_word_reserved_until_retry() {
         let heap = Heap::new();
         let events = Arc::new(Mutex::new(Vec::new()));
-        let (panicking, deferred, live_root) = heap.with_mutator(|mutator| {
+        let (panicking, deferred, live_root) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<SelectivePanickingDrop>().unwrap();
             let panicking = allocator.alloc(SelectivePanickingDrop {
                 id: 0,
@@ -9042,7 +8909,7 @@ mod tests {
     fn retry_merges_new_same_run_and_same_word_finalizers_without_duplication() {
         let heap = Heap::new();
         let events = Arc::new(Mutex::new(Vec::new()));
-        let (values, mut roots) = heap.with_mutator(|mutator| {
+        let (values, mut roots) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<SelectivePanickingDrop>().unwrap();
             let values = (0..=u64::BITS as usize)
                 .map(|id| {
@@ -9153,7 +9020,7 @@ mod tests {
     fn repeated_destructor_panics_make_one_terminal_step_per_collection() {
         let heap = Heap::new();
         let events = Arc::new(Mutex::new(Vec::new()));
-        let values = heap.with_mutator(|mutator| {
+        let values = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<SelectivePanickingDrop>().unwrap();
             (0..3)
                 .map(|id| {
@@ -9210,7 +9077,7 @@ mod tests {
     fn multiple_whole_finalization_detachments_recycle_without_dispatch_order() {
         let heap = Heap::new();
         let drops = Arc::new(AtomicUsize::new(0));
-        let values = heap.with_mutator(|mutator| {
+        let values = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<WideDropCounter>().unwrap();
             (0..3)
                 .map(|_| allocator.alloc(WideDropCounter(Arc::clone(&drops))))
@@ -9221,8 +9088,7 @@ mod tests {
             .map(|value| collector_slot(&heap, value).owner.location)
             .collect::<Vec<_>>();
         let class_id = collector_slot(&heap, &values[1]).owner.class_id;
-        let root =
-            heap.with_mutator(|mutator| mutator.root_checked(values[1].duplicate_in(mutator)));
+        let root = heap.mutate(|mutator| mutator.root_checked(values[1].duplicate_in(mutator)));
 
         heap.collect_full().unwrap();
         assert_eq!(drops.load(Ordering::Relaxed), 2);
@@ -9253,7 +9119,7 @@ mod tests {
         let heap = Heap::new();
         let live = allocate(&heap, 10_u64);
         let _dead = allocate(&heap, 20_u64);
-        let root = heap.with_mutator(|mutator| mutator.root_checked(live));
+        let root = heap.mutate(|mutator| mutator.root_checked(live));
         let captured = Mutex::new(None);
 
         heap.request_collection();
@@ -9284,7 +9150,7 @@ mod tests {
         assert_eq!(classification_state_snapshot(&heap, &data), expected);
         drop(data);
 
-        heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 10));
+        heap.mutate(|mutator| assert_eq!(*root.get(mutator), 10));
         assert_eq!(
             heap.inner.coordinator_snapshot().completed_collection_epoch,
             1
@@ -9297,7 +9163,7 @@ mod tests {
         let heap = Heap::new();
         let live = allocate(&heap, 10_u64);
         let _dead = allocate(&heap, 20_u64);
-        let root = heap.with_mutator(|mutator| mutator.root_checked(live));
+        let root = heap.mutate(|mutator| mutator.root_checked(live));
         let _dropping = allocate(
             &heap,
             PoisonedHeapDrop {
@@ -9313,7 +9179,7 @@ mod tests {
             "injected panic after destructive topology mutation"
         );
 
-        let entry = catch_unwind(AssertUnwindSafe(|| heap.with_mutator(|_| {})));
+        let entry = catch_unwind(AssertUnwindSafe(|| heap.mutate(|_| {})));
         assert!(
             entry.is_err(),
             "an irreversible collection panic must not reopen mutator admission"
@@ -9381,7 +9247,7 @@ mod tests {
             "the run-local guard must publish poison before finalizer admission is released"
         );
 
-        let entry = catch_unwind(AssertUnwindSafe(|| heap.with_mutator(|_| {})));
+        let entry = catch_unwind(AssertUnwindSafe(|| heap.mutate(|_| {})));
         assert_eq!(
             panic_string(entry.unwrap_err().as_ref()),
             "managed heap is permanently poisoned"
@@ -9446,7 +9312,7 @@ mod tests {
 
         let mutator_waiter = std::thread::spawn({
             let heap = heap.clone();
-            move || catch_unwind(AssertUnwindSafe(|| heap.with_mutator(|_| {})))
+            move || catch_unwind(AssertUnwindSafe(|| heap.mutate(|_| {})))
         });
         let collection_waiter = std::thread::spawn({
             let heap = heap.clone();
@@ -9482,10 +9348,10 @@ mod tests {
     fn successful_post_sweep_publishes_final_leases_frontiers_and_epoch() {
         let heap = Heap::new();
         let plain = allocate(&heap, 10_u64);
-        let plain_root = heap.with_mutator(|mutator| mutator.root_checked(plain));
+        let plain_root = heap.mutate(|mutator| mutator.root_checked(plain));
         let drops = Arc::new(AtomicUsize::new(0));
         let dropping = allocate(&heap, DropCounter(Arc::clone(&drops)));
-        let dropping_root = heap.with_mutator(|mutator| mutator.root_checked(dropping));
+        let dropping_root = heap.mutate(|mutator| mutator.root_checked(dropping));
 
         let before = Mutex::new(None);
         let after = Mutex::new(None);
@@ -9561,7 +9427,7 @@ mod tests {
             );
         }
         assert_eq!(drops.load(Ordering::Relaxed), 0);
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             assert_eq!(*plain_root.get(mutator), 10);
             let _ = dropping_root.get(mutator);
         });
@@ -9576,7 +9442,7 @@ mod tests {
         let worker = std::thread::spawn({
             let heap = heap.clone();
             move || {
-                let first = heap.with_mutator(|mutator| {
+                let first = heap.mutate(|mutator| {
                     let value = mutator.allocator::<u64>().unwrap().alloc(10);
                     let root = mutator.root_checked(value.duplicate_in(mutator));
                     let location = collector_slot(&heap, &value).owner.location;
@@ -9586,7 +9452,7 @@ mod tests {
                 first_tx.send((first, first_cache)).unwrap();
                 resume_rx.recv().unwrap();
 
-                let second_location = heap.with_mutator(|mutator| {
+                let second_location = heap.mutate(|mutator| {
                     let value = mutator.allocator::<u64>().unwrap().alloc(20);
                     collector_slot(&heap, &value).owner.location
                 });
@@ -9620,14 +9486,14 @@ mod tests {
         let data = heap.inner.data.lock().unwrap();
         assert_eq!(data.arena.allocated_slot_pointers(first_location).len(), 2);
         drop(data);
-        heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 10));
+        heap.mutate(|mutator| assert_eq!(*root.get(mutator), 10));
     }
 
     #[test]
     fn wholly_dead_no_drop_runs_reset_and_reuse_across_allocation_classes() {
         let heap = Heap::new();
         let wide_class = internal_class::<WideSlot>(&heap);
-        let (wide_values, wide_roots) = heap.with_mutator(|mutator| {
+        let (wide_values, wide_roots) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<WideSlot>().unwrap();
             let values = (0..5_u64)
                 .map(|value| allocator.alloc(WideSlot { value }))
@@ -9651,12 +9517,12 @@ mod tests {
             5
         );
 
-        let (plain_live, _plain_dead) = heap.with_mutator(|mutator| {
+        let (plain_live, _plain_dead) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             (allocator.alloc(10), allocator.alloc(20))
         });
         let plain_slot = collector_slot(&heap, &plain_live);
-        let plain_root = heap.with_mutator(|mutator| mutator.root_checked(plain_live));
+        let plain_root = heap.mutate(|mutator| mutator.root_checked(plain_live));
 
         let drops = Arc::new(AtomicUsize::new(0));
         let dropping_dead = allocate(&heap, DropCounter(Arc::clone(&drops)));
@@ -9752,7 +9618,7 @@ mod tests {
                 "new class did not receive the retyped run"
             );
         }
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             assert_eq!(wide_roots[0].get(mutator).value, 0);
             assert_eq!(wide_roots[1].get(mutator).value, 2);
             assert_eq!(wide_roots[2].get(mutator).value, 4);
@@ -9763,7 +9629,7 @@ mod tests {
     #[test]
     fn completed_sweep_publishes_survivor_assigned_run_baseline() {
         let heap = Heap::new();
-        let (values, roots) = heap.with_mutator(|mutator| {
+        let (values, roots) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<WideSlot>().unwrap();
             let values = (0..4_u64)
                 .map(|value| allocator.alloc(WideSlot { value }))
@@ -9795,7 +9661,7 @@ mod tests {
         assert_eq!(data.free_runs, vec![dead_location]);
         assert_eq!(data.arena.run_capacity(), crate::arena::RUNS_PER_CHUNK);
         drop(data);
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             assert_eq!(roots[0].get(mutator).value, 0);
             assert_eq!(roots[1].get(mutator).value, 2);
             assert_eq!(roots[2].get(mutator).value, 3);
@@ -9836,7 +9702,7 @@ mod tests {
     #[test]
     fn finalizer_panic_retains_the_completed_sweep_pressure_baseline() {
         let heap = Heap::new();
-        let (live, dead, root) = heap.with_mutator(|mutator| {
+        let (live, dead, root) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<WideSlot>().unwrap();
             let live = allocator.alloc(WideSlot { value: 10 });
             let dead = allocator.alloc(WideSlot { value: 20 });
@@ -9867,7 +9733,7 @@ mod tests {
             survivor_run_high_water_mark(1, SURVIVOR_GROWTH_NUMERATOR, SURVIVOR_GROWTH_DENOMINATOR,)
         );
         assert!(pressure.collection_requested);
-        heap.with_mutator(|mutator| assert_eq!(root.get(mutator).value, 10));
+        heap.mutate(|mutator| assert_eq!(root.get(mutator).value, 10));
     }
 
     #[test]
@@ -10033,7 +9899,7 @@ mod tests {
             initial_lease_epoch,
             "post-mark planning panic precedes allocator invalidation"
         );
-        heap.with_mutator(|_| {});
+        heap.mutate(|_| {});
         assert_eq!(
             heap.inner.coordinator_snapshot().completed_collection_epoch,
             1
@@ -10045,7 +9911,7 @@ mod tests {
     }
 
     #[test]
-    fn finalizer_handoff_installs_one_recursive_current_mutator_without_a_gap() {
+    fn finalizer_handoff_installs_one_current_mutator_without_a_gap() {
         let heap = Heap::new();
         heap.request_collection();
         let epoch = heap.inner.elect_idle_collection_for_test();
@@ -10058,7 +9924,7 @@ mod tests {
                 let coordinator = heap.inner.coordinator_snapshot();
                 assert_eq!(coordinator.phase, AdmissionPhase::Finalizing);
                 assert_eq!(coordinator.active_outer_mutators, 1);
-                assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 1);
+                assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 1);
                 assert!(
                     heap.inner
                         .data
@@ -10071,11 +9937,8 @@ mod tests {
                 );
 
                 let class = finalizer_mutator.allocator::<SecondType>().unwrap();
-                heap.with_mutator(|_recursive| {
-                    assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 1);
-                    assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 2);
-                    let _ = class.alloc(SecondType { _value: 19 });
-                });
+                let _ = class.alloc(SecondType { _value: 19 });
+                assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 1);
             },
         );
 
@@ -10084,7 +9947,7 @@ mod tests {
         assert_eq!(completed.phase, AdmissionPhase::Ordinary);
         assert_eq!(completed.active_outer_mutators, 0);
         assert_eq!(completed.completed_collection_epoch, 1);
-        assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 0);
+        assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 0);
     }
 
     #[test]
@@ -10115,7 +9978,7 @@ mod tests {
         let (entered_tx, entered_rx) = mpsc::channel();
         let worker = std::thread::spawn({
             let heap = heap.clone();
-            move || heap.with_mutator(|_| entered_tx.send(()).unwrap())
+            move || heap.mutate(|_| entered_tx.send(()).unwrap())
         });
         entered_rx.recv().unwrap();
         worker.join().unwrap();
@@ -10162,7 +10025,7 @@ mod tests {
         let (entered_tx, entered_rx) = mpsc::channel();
         let entrant = std::thread::spawn({
             let heap = heap.clone();
-            move || heap.with_mutator(|_| entered_tx.send(()).unwrap())
+            move || heap.mutate(|_| entered_tx.send(()).unwrap())
         });
         entered_rx.recv().unwrap();
         entrant.join().unwrap();
@@ -10233,14 +10096,14 @@ mod tests {
         assert_eq!(restored.active_collection, None);
         assert_eq!(restored.latest_collection_report, None);
         assert!(restored.collection_requested);
-        assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 0);
+        assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 0);
         assert_eq!(
             heap.inner.current_allocation_lease_epoch().get(),
             initial_lease_epoch.get() + 1,
             "published allocator invalidation is not rolled back by finalizer panic"
         );
 
-        heap.with_mutator(|_| {});
+        heap.mutate(|_| {});
         assert_eq!(
             heap.inner.coordinator_snapshot().completed_collection_epoch,
             1
@@ -10271,17 +10134,16 @@ mod tests {
     #[test]
     fn unsupported_layouts_publish_no_class_or_dense_id() {
         let heap = Heap::new();
-        assert!(heap.with_mutator(|mutator| matches!(
+        assert!(heap.mutate(|mutator| matches!(
             mutator.allocator::<()>(),
             Err(UnsupportedLayout::ZeroSized)
         )));
-        assert!(heap.with_mutator(|mutator| matches!(
+        assert!(heap.mutate(|mutator| matches!(
             mutator.allocator::<OverflowingSlot>(),
             Err(UnsupportedLayout::ArithmeticOverflow)
         )));
 
-        let first_valid_id =
-            heap.with_mutator(|mutator| mutator.allocator::<FirstType>().unwrap().id());
+        let first_valid_id = heap.mutate(|mutator| mutator.allocator::<FirstType>().unwrap().id());
         assert_eq!(first_valid_id.get(), 1);
         assert_eq!(heap.inner.data.lock().unwrap().classes.len(), 1);
     }
@@ -10295,7 +10157,7 @@ mod tests {
                 .unwrap();
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            heap.with_mutator(|_| {
+            heap.mutate(|_| {
                 let _ = heap
                     .inner
                     .discover_class_with::<SecondType>(metadata, geometry, || {
@@ -10306,7 +10168,7 @@ mod tests {
         assert!(panic.is_err());
         assert!(heap.inner.data.lock().unwrap().classes.is_empty());
 
-        let class_id = heap.with_mutator(|mutator| mutator.allocator::<SecondType>().unwrap().id());
+        let class_id = heap.mutate(|mutator| mutator.allocator::<SecondType>().unwrap().id());
         assert_eq!(class_id.get(), 1);
     }
 
@@ -10395,14 +10257,14 @@ mod tests {
         let heap = Heap::new();
         let value = allocate(&heap, 42_u64);
         assert_eq!(heap.root_registrations_for_verification(), 0);
-        let first = heap.with_mutator(|mutator| mutator.root_checked(value.duplicate_in(mutator)));
+        let first = heap.mutate(|mutator| mutator.root_checked(value.duplicate_in(mutator)));
         assert_eq!(heap.root_registrations_for_verification(), 1);
         let first_clone = first.clone();
         assert_eq!(heap.root_registrations_for_verification(), 1);
 
         assert_eq!(heap.inner.data.lock().unwrap().root_pool.live_count(), 1);
 
-        let second = heap.with_mutator(|mutator| mutator.root_checked(value.duplicate_in(mutator)));
+        let second = heap.mutate(|mutator| mutator.root_checked(value.duplicate_in(mutator)));
         assert_eq!(heap.root_registrations_for_verification(), 2);
         assert_eq!(heap.inner.data.lock().unwrap().root_pool.live_count(), 2);
 
@@ -10413,7 +10275,7 @@ mod tests {
     fn c7_root_handoff_collection_and_heap_lifetime_are_independent() {
         let heap = Heap::new();
         let weak = Arc::downgrade(&heap.inner);
-        let (root, bare) = heap.with_mutator(|mutator| {
+        let (root, bare) = heap.mutate(|mutator| {
             let value = mutator.allocator::<u64>().unwrap().alloc(73);
             (mutator.root_checked(value.duplicate_in(mutator)), value)
         });
@@ -10429,7 +10291,7 @@ mod tests {
             let alias = root.clone();
             received_tx.send(()).unwrap();
             collected_rx.recv().unwrap();
-            worker_heap.with_mutator(|mutator| {
+            worker_heap.mutate(|mutator| {
                 assert_eq!(*root.get(mutator), 73);
                 assert_eq!(*alias.get(mutator), 73);
                 assert!(bare.same_allocation_in(&root.as_gc(mutator).edge(), mutator));
@@ -10465,7 +10327,7 @@ mod tests {
         const EARLY_READERS: usize = 3;
 
         let heap = Heap::new();
-        let root = heap.with_mutator(|mutator| {
+        let root = heap.mutate(|mutator| {
             let value = mutator.allocator::<u64>().unwrap().alloc(91);
             mutator.root_checked(value)
         });
@@ -10481,7 +10343,7 @@ mod tests {
                 let root = root.clone();
                 let entered_tx = entered_tx.clone();
                 move || {
-                    heap.with_mutator(|mutator| {
+                    heap.mutate(|mutator| {
                         assert_eq!(*root.get(mutator), 91);
                         entered_tx.send(reader_index).unwrap();
                         release_rx.recv().unwrap();
@@ -10504,7 +10366,7 @@ mod tests {
             let root = root.clone();
             let entered_tx = entered_tx.clone();
             move || {
-                heap.with_mutator(|mutator| {
+                heap.mutate(|mutator| {
                     assert_eq!(*root.get(mutator), 91);
                     entered_tx.send(EARLY_READERS).unwrap();
                     late_release_rx.recv().unwrap();
@@ -10537,7 +10399,7 @@ mod tests {
         let report = report_rx.recv().unwrap();
         assert_eq!(report.epoch(), 1);
         assert_eq!(report.root_entries(), 1);
-        heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 91));
+        heap.mutate(|mutator| assert_eq!(*root.get(mutator), 91));
     }
 
     #[test]
@@ -10546,7 +10408,7 @@ mod tests {
         const ROUNDS: u64 = 8;
 
         let heap = Heap::new();
-        let root = heap.with_mutator(|mutator| {
+        let root = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<GraphNode>().unwrap();
             let leaf = allocator.alloc(graph_node(Arc::new(AtomicUsize::new(0))));
             let branch = allocator.alloc(graph_node_with_edge(Arc::new(AtomicUsize::new(0)), leaf));
@@ -10563,7 +10425,7 @@ mod tests {
                     let start = Arc::clone(&start);
                     std::thread::spawn(move || {
                         start.wait();
-                        heap.with_mutator(|mutator| {
+                        heap.mutate(|mutator| {
                             let edges = root.get(mutator).edges.lock().unwrap();
                             assert!(!edges.is_empty());
                         });
@@ -10585,7 +10447,7 @@ mod tests {
     #[test]
     fn exclusive_root_walk_visits_live_slots_in_order_and_skips_dropped_ones() {
         let heap = Heap::new();
-        let values = heap.with_mutator(|mutator| {
+        let values = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             [
                 allocator.alloc(11_u64),
@@ -10593,7 +10455,7 @@ mod tests {
                 allocator.alloc(33_u64),
             ]
         });
-        let [first, middle, last] = heap.with_mutator(|mutator| {
+        let [first, middle, last] = heap.mutate(|mutator| {
             values
                 .each_ref()
                 .map(|value| mutator.root_checked(value.duplicate_in(mutator)))
@@ -10622,22 +10484,19 @@ mod tests {
     #[test]
     fn collection_returns_dropped_root_slots_for_reuse_in_address_order() {
         let heap = Heap::new();
-        let values = heap.with_mutator(|mutator| {
+        let values = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             [allocator.alloc(41_u64), allocator.alloc(42_u64)]
         });
-        let live =
-            heap.with_mutator(|mutator| mutator.root_checked(values[0].duplicate_in(mutator)));
-        let dead =
-            heap.with_mutator(|mutator| mutator.root_checked(values[1].duplicate_in(mutator)));
+        let live = heap.mutate(|mutator| mutator.root_checked(values[0].duplicate_in(mutator)));
+        let dead = heap.mutate(|mutator| mutator.root_checked(values[1].duplicate_in(mutator)));
         let dead_slot = dead.slot_address_for_test();
         assert_eq!(dead_slot, live.slot_address_for_test() + 16);
         drop(dead);
         assert_eq!(heap.inner.data.lock().unwrap().root_pool.live_count(), 1);
 
         // Before a collection, a dropped slot is not reused.
-        let before =
-            heap.with_mutator(|mutator| mutator.root_checked(values[1].duplicate_in(mutator)));
+        let before = heap.mutate(|mutator| mutator.root_checked(values[1].duplicate_in(mutator)));
         assert_ne!(before.slot_address_for_test(), dead_slot);
         drop(before);
 
@@ -10645,11 +10504,10 @@ mod tests {
 
         // The collection discarded the thread's free list and rebuilt its
         // chunk's, lowest address first, so the lowest dropped slot is next.
-        let after =
-            heap.with_mutator(|mutator| mutator.root_checked(values[0].duplicate_in(mutator)));
+        let after = heap.mutate(|mutator| mutator.root_checked(values[0].duplicate_in(mutator)));
         assert_eq!(after.slot_address_for_test(), dead_slot);
         assert_eq!(heap.inner.data.lock().unwrap().root_pool.live_count(), 2);
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             assert_eq!(*live.get(mutator), 41);
             assert_eq!(*after.get(mutator), 41);
         });
@@ -10831,7 +10689,7 @@ mod tests {
     fn last_public_drop_during_the_root_walk_is_passive_and_conservatively_retained() {
         let drops = Arc::new(AtomicUsize::new(0));
         let heap = Heap::new();
-        let (dropping_value, plain_value) = heap.with_mutator(|mutator| {
+        let (dropping_value, plain_value) = heap.mutate(|mutator| {
             let dropping_allocator = mutator.allocator::<DropCounter>().unwrap();
             let plain_allocator = mutator.allocator::<u64>().unwrap();
             (
@@ -10840,9 +10698,9 @@ mod tests {
             )
         });
         let dropping_root =
-            heap.with_mutator(|mutator| mutator.root_checked(dropping_value.duplicate_in(mutator)));
+            heap.mutate(|mutator| mutator.root_checked(dropping_value.duplicate_in(mutator)));
         let plain_root =
-            heap.with_mutator(|mutator| mutator.root_checked(plain_value.duplicate_in(mutator)));
+            heap.mutate(|mutator| mutator.root_checked(plain_value.duplicate_in(mutator)));
         let dropping_address = dropping_value.erase().as_ptr().as_ptr() as usize;
         let plain_address = plain_value.erase().as_ptr().as_ptr() as usize;
         let exclusive = heap.inner.enter_synthetic_exclusive();
@@ -10890,14 +10748,13 @@ mod tests {
     fn dropped_roots_cannot_race_root_publication_during_exclusive_collection() {
         let heap = Heap::new();
         let value = allocate(&heap, 42_u64);
-        let expired =
-            heap.with_mutator(|mutator| mutator.root_checked(value.duplicate_in(mutator)));
+        let expired = heap.mutate(|mutator| mutator.root_checked(value.duplicate_in(mutator)));
         drop(expired);
         assert_eq!(heap.inner.data.lock().unwrap().root_pool.live_count(), 0);
         let exclusive = heap.inner.enter_synthetic_exclusive();
         let worker = std::thread::spawn({
             let heap = heap.clone();
-            move || heap.with_mutator(|mutator| mutator.root_checked(value))
+            move || heap.mutate(|mutator| mutator.root_checked(value))
         });
 
         heap.inner.wait_for_blocked_outer_mutators(1);
@@ -10907,7 +10764,7 @@ mod tests {
         drop(exclusive);
         let root = worker.join().expect("root publisher panicked");
         assert_eq!(heap.inner.data.lock().unwrap().root_pool.live_count(), 1);
-        heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 42));
+        heap.mutate(|mutator| assert_eq!(*root.get(mutator), 42));
     }
 
     #[test]
@@ -10917,7 +10774,7 @@ mod tests {
         let value = allocate(&owner, 42_u64);
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            let _ = observer.with_mutator(|mutator| mutator.root_checked(value));
+            let _ = observer.mutate(|mutator| mutator.root_checked(value));
         }));
 
         assert!(panic.is_err());
@@ -11014,7 +10871,7 @@ mod tests {
         let last_index = crate::arena::RUNS_PER_CHUNK;
         #[cfg(not(miri))]
         let last_index = 2 * crate::arena::RUNS_PER_CHUNK;
-        let values = heap.with_mutator(|mutator| {
+        let values = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<WideSlot>().unwrap();
             let mut roots = Vec::new();
             let values = (0..=last_index)
@@ -11077,7 +10934,7 @@ mod tests {
             );
         }
 
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             for (index, value) in values.iter().enumerate() {
                 // SAFETY: every pointer remains allocated in `heap` with exact
                 // `WideSlot` representation until terminal teardown.
@@ -11139,7 +10996,7 @@ mod tests {
 
         let drops = Arc::new(AtomicUsize::new(0));
         let heap = Heap::new();
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let allocator = mutator.allocator::<DropCounter>().unwrap();
             for _ in 0..ALLOCATIONS {
                 let _ = allocator.alloc(DropCounter(Arc::clone(&drops)));
@@ -11241,7 +11098,7 @@ mod tests {
         let heap = Heap::new();
         let weak = Arc::downgrade(&heap.inner);
         let events = Arc::new(Mutex::new(Vec::new()));
-        let (panicking, deferred, live, live_root) = heap.with_mutator(|mutator| {
+        let (panicking, deferred, live, live_root) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<SelectivePanickingDrop>().unwrap();
             let panicking = allocator.alloc(SelectivePanickingDrop {
                 id: 0,
@@ -11318,7 +11175,7 @@ mod tests {
         // ordinary value in a second run. The finalization dispatch map does
         // not promise order, so every value shares one panic-once token: the
         // first attempted identity retires regardless of which run is chosen.
-        let (values, live_root) = heap.with_mutator(|mutator| {
+        let (values, live_root) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<TerminalPanickingDrop>().unwrap();
             let values = (0..slot_count + 3)
                 .map(|_| allocator.alloc(TerminalPanickingDrop { _not_zero_sized: 0 }))
@@ -11399,7 +11256,7 @@ mod tests {
         TERMINAL_DESTRUCTOR_PANIC_ONCE.store(true, Ordering::Relaxed);
         let heap = Heap::new();
         let weak = Arc::downgrade(&heap.inner);
-        let root = heap.with_mutator(|mutator| {
+        let root = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<TerminalPanickingDrop>().unwrap();
             let first = allocator.alloc(TerminalPanickingDrop { _not_zero_sized: 0 });
             for _ in 1..3 {
@@ -11428,7 +11285,7 @@ mod tests {
         let heap = Heap::new();
         let weak = Arc::downgrade(&heap.inner);
 
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             // This deliberately leaks the allocator's inert 24-byte frontier
             // cell. The sanitizer and Miri harnesses run this fixture
@@ -11445,7 +11302,7 @@ mod tests {
     fn cached_allocation_reuses_one_word_without_shared_slow_path() {
         let heap = Heap::new();
 
-        let first = heap.with_mutator(|mutator| {
+        let first = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             (0..32_u64)
                 .map(|value| allocator.alloc(value))
@@ -11454,7 +11311,7 @@ mod tests {
         assert_eq!(heap.inner.allocation_cursor_claim_count(), 1);
         assert_eq!(heap.inner.allocation_cursor_slow_path_count(), 1);
 
-        let second = heap.with_mutator(|mutator| {
+        let second = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             (32..64_u64)
                 .map(|value| allocator.alloc(value))
@@ -11482,7 +11339,7 @@ mod tests {
             }
         );
 
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             for (expected, value) in first.iter().chain(&second).chain([&next]).enumerate() {
                 // SAFETY: every pointer belongs to `heap`, remains allocated,
                 // and has the `u64` representation requested by `class`.
@@ -11504,7 +11361,7 @@ mod tests {
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    heap.with_mutator(|mutator| {
+                    heap.mutate(|mutator| {
                         let allocator = mutator.allocator::<u64>().unwrap();
                         (0..VALUES_PER_THREAD)
                             .map(|offset| {
@@ -11537,7 +11394,7 @@ mod tests {
         let frontier = internal_class::<u64>(&heap).frontier(&heap.inner);
         assert_eq!(frontier, Some(RunLocation { chunk: 0, run: 0 }));
 
-        let observed = heap.with_mutator(|mutator| {
+        let observed = heap.mutate(|mutator| {
             values
                 .iter()
                 .map(|value| {
@@ -11672,7 +11529,7 @@ mod tests {
         assert_eq!(heap.inner.allocation_cursor_claim_count(), 1);
 
         let colliding = AllocationClassId::new(class.id().get() + 64).unwrap();
-        heap.with_mutator(|_| insert_cursor(&heap.inner, test_cursor(colliding)));
+        heap.mutate(|_| insert_cursor(&heap.inner, test_cursor(colliding)));
         let second = allocate(&heap, 2_u64);
         assert_eq!(heap.inner.allocation_cursor_claim_count(), 2);
 
@@ -11803,7 +11660,7 @@ mod tests {
         let drops = Arc::new(AtomicUsize::new(0));
         let heap = Heap::new();
 
-        let (first, retried) = heap.with_mutator(|mutator| {
+        let (first, retried) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<DropCounter>().unwrap();
             let first = allocator.alloc(DropCounter(Arc::clone(&drops)));
             let panic = catch_unwind(AssertUnwindSafe(|| {
@@ -11842,7 +11699,7 @@ mod tests {
         let worker = std::thread::spawn({
             let heap = heap.clone();
             move || {
-                heap.with_mutator(|mutator| {
+                heap.mutate(|mutator| {
                     let allocator = mutator.allocator::<u64>().unwrap();
                     let value = allocator.alloc(91_u64);
                     ready_tx.send(()).unwrap();
@@ -11879,129 +11736,35 @@ mod tests {
     }
 
     #[test]
-    fn a_held_region_admits_once_and_makes_inner_entries_recursive() {
-        let heap = Heap::new();
-        heap.with_held_region(|| {
-            assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 1);
-            assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 1);
-            heap.with_mutator(|mutator| {
-                let _ = mutator.allocator::<u64>().unwrap().alloc(1);
-                assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 2);
-                assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 1);
-            });
-            assert!(matches!(
-                heap.collect_full(),
-                Err(CollectionError::ActiveMutator)
-            ));
-            // Inside another entry, a nested held region adds nothing.
-            heap.with_held_region(|| {
-                assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 1);
-            });
-        });
-        assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 0);
-        assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 0);
-        let metrics = heap.metrics();
-        assert_eq!(metrics.outer_mutator_entries(), 1);
-        assert_eq!(metrics.recursive_mutator_entries(), 1);
-    }
-
-    #[test]
-    fn releasing_a_held_region_lets_a_waiting_collection_finish() {
-        let heap = Heap::new();
-        let (held_tx, held_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel();
-        let (released_tx, released_rx) = mpsc::channel();
-        let (finish_tx, finish_rx) = mpsc::channel();
-        let holder = std::thread::spawn({
-            let heap = heap.clone();
-            move || {
-                heap.with_held_region(|| {
-                    held_tx.send(()).unwrap();
-                    release_rx.recv().unwrap();
-                    // A mutator inside the region keeps it.
-                    heap.with_mutator(|_| assert!(!Heap::release_held_region()));
-                    assert!(Heap::release_held_region());
-                    assert!(!Heap::release_held_region());
-                    released_tx.send(()).unwrap();
-                    finish_rx.recv().unwrap();
-                    // Later entries in the region's scope enter one by one.
-                    heap.with_mutator(|_| {
-                        assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 1);
-                    });
-                });
-            }
-        });
-        held_rx.recv().unwrap();
-        let collector = std::thread::spawn({
-            let heap = heap.clone();
-            move || heap.collect_full().unwrap()
-        });
-        heap.inner.wait_for_collection_waiters(1);
-        assert_eq!(
-            heap.inner.coordinator_snapshot().completed_collection_epoch,
-            0
-        );
-
-        release_tx.send(()).unwrap();
-        released_rx.recv().unwrap();
-        assert_eq!(collector.join().unwrap().epoch(), 1);
-        finish_tx.send(()).unwrap();
-        holder.join().unwrap();
-        assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 0);
-    }
-
-    #[test]
-    fn a_panic_inside_a_held_region_ends_it() {
-        let heap = Heap::new();
-        let panic = catch_unwind(AssertUnwindSafe(|| {
-            heap.with_held_region(|| {
-                heap.with_mutator(|_| panic!("injected held-region unwind"));
-            });
-        }));
-        assert!(panic.is_err());
-        assert_eq!(heap.inner.coordinator_snapshot().active_outer_mutators, 0);
-        assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 0);
-        assert!(!thread_has_any_active_mutator());
-        assert_eq!(heap.collect_full().unwrap().epoch(), 1);
-    }
-
-    #[test]
-    fn mutator_entries_track_same_heap_recursion_and_one_heap_per_thread() {
+    fn mutator_entries_keep_one_heap_per_thread() {
         let first = Heap::new();
         let second = Heap::new();
         let class = internal_class::<FirstType>(&first);
 
-        first.with_mutator(|_| {
-            assert_eq!(cache_snapshot(&first.inner).unwrap().recursive_depth, 1);
+        first.mutate(|_| {
+            assert_eq!(cache_snapshot(&first.inner).unwrap().entry_depth, 1);
             assert_eq!(first.inner.coordinator_snapshot().active_outer_mutators, 1);
             insert_cursor(&first.inner, test_cursor(class.id()));
-
-            first.with_mutator(|_| {
-                let snapshot = cache_snapshot(&first.inner).unwrap();
-                assert_eq!(snapshot.recursive_depth, 2);
-                assert_eq!(snapshot.cursor_count, 1);
-                assert_eq!(first.inner.coordinator_snapshot().active_outer_mutators, 1);
-            });
-            assert_eq!(cache_snapshot(&first.inner).unwrap().recursive_depth, 1);
+            assert_eq!(cache_snapshot(&first.inner).unwrap().cursor_count, 1);
 
             // A second heap's entry panics before it prepares or admits
             // anything.
-            let nested = catch_unwind(AssertUnwindSafe(|| second.with_mutator(|_| {})));
+            let nested = catch_unwind(AssertUnwindSafe(|| second.mutate(|_| {})));
             assert!(nested.is_err());
-            assert_eq!(cache_snapshot(&first.inner).unwrap().recursive_depth, 1);
+            assert_eq!(cache_snapshot(&first.inner).unwrap().entry_depth, 1);
             assert!(cache_snapshot(&second.inner).is_none());
             assert_eq!(second.inner.coordinator_snapshot().active_outer_mutators, 0);
         });
 
-        second.with_mutator(|_| {
-            assert_eq!(cache_snapshot(&second.inner).unwrap().recursive_depth, 1);
+        second.mutate(|_| {
+            assert_eq!(cache_snapshot(&second.inner).unwrap().entry_depth, 1);
             assert_eq!(second.inner.coordinator_snapshot().active_outer_mutators, 1);
         });
-        assert_eq!(cache_snapshot(&second.inner).unwrap().recursive_depth, 0);
+        assert_eq!(cache_snapshot(&second.inner).unwrap().entry_depth, 0);
 
         // The first heap's inactive cache outlives the switch to the second.
         let retained = cache_snapshot(&first.inner).unwrap();
-        assert_eq!(retained.recursive_depth, 0);
+        assert_eq!(retained.entry_depth, 0);
         assert_eq!(retained.cursor_count, 1);
         assert_eq!(first.inner.coordinator_snapshot().active_outer_mutators, 0);
     }
@@ -12010,7 +11773,7 @@ mod tests {
     fn outer_entry_invalidates_the_whole_cache_after_epoch_change() {
         let heap = Heap::new();
         let class = internal_class::<FirstType>(&heap);
-        heap.with_mutator(|_| insert_cursor(&heap.inner, test_cursor(class.id())));
+        heap.mutate(|_| insert_cursor(&heap.inner, test_cursor(class.id())));
 
         let prior = cache_snapshot(&heap.inner).unwrap();
         assert_eq!(prior.captured_epoch, AllocationLeaseEpoch::INITIAL);
@@ -12019,7 +11782,7 @@ mod tests {
         assert_ne!(advanced, prior.captured_epoch);
         assert_eq!(cache_snapshot(&heap.inner).unwrap().cursor_count, 1);
 
-        heap.with_mutator(|_| {
+        heap.mutate(|_| {
             let current = cache_snapshot(&heap.inner).unwrap();
             assert_eq!(current.captured_epoch, advanced);
             assert_eq!(current.cursor_count, 0);
@@ -12032,7 +11795,7 @@ mod tests {
         let first = AllocationClassId::new(1).unwrap();
         let colliding = AllocationClassId::new(65).unwrap();
 
-        heap.with_mutator(|_| {
+        heap.mutate(|_| {
             insert_cursor(&heap.inner, test_cursor(first));
             assert_eq!(cursor(&heap.inner, first), Some(test_cursor(first)));
             insert_cursor(&heap.inner, test_cursor(colliding));
@@ -12048,7 +11811,7 @@ mod tests {
         let heap = Heap::new();
         let address = Arc::as_ptr(&heap.inner) as usize;
         let weak = Arc::downgrade(&heap.inner);
-        heap.with_mutator(|_| {});
+        heap.mutate(|_| {});
         assert!(registry_contains(address));
 
         drop(heap);
@@ -12056,7 +11819,7 @@ mod tests {
         assert!(registry_contains(address));
 
         let other = Heap::new();
-        other.with_mutator(|_| {});
+        other.mutate(|_| {});
         assert!(registry_contains(address));
         assert_eq!(Heap::release_current_thread_caches(), 2);
         assert!(!registry_contains(address));
@@ -12068,13 +11831,13 @@ mod tests {
         let _ = Heap::release_current_thread_caches();
         let first = Heap::new();
         let second = Heap::new();
-        first.with_mutator(|_| {});
+        first.mutate(|_| {});
 
-        second.with_mutator(|_| {
+        second.mutate(|_| {
             let panic = catch_unwind(AssertUnwindSafe(Heap::release_current_thread_caches));
             assert!(panic.is_err());
             assert!(cache_snapshot(&first.inner).is_some());
-            assert_eq!(cache_snapshot(&second.inner).unwrap().recursive_depth, 1);
+            assert_eq!(cache_snapshot(&second.inner).unwrap().entry_depth, 1);
         });
 
         assert_eq!(Heap::release_current_thread_caches(), 2);
@@ -12111,10 +11874,10 @@ mod tests {
     fn unwinding_user_code_balances_recursive_mutator_depth() {
         let heap = Heap::new();
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            heap.with_mutator(|_| panic!("injected mutator-region unwind"));
+            heap.mutate(|_| panic!("injected mutator-region unwind"));
         }));
         assert!(panic.is_err());
-        assert_eq!(cache_snapshot(&heap.inner).unwrap().recursive_depth, 0);
+        assert_eq!(cache_snapshot(&heap.inner).unwrap().entry_depth, 0);
     }
 
     #[cfg(feature = "deterministic-test-hooks")]

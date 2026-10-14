@@ -1,7 +1,7 @@
 # Explicit Heap Holds — 2026-10-09
 
-Status: in progress; `gc-hold-api` landed on 2026-10-13. The maintainer
-adopted the 2026-10-10
+Status: in progress; `gc-hold-api` landed on 2026-10-13, and the steps
+through `gc-hold-pass-access` by 2026-10-14. The maintainer adopted the 2026-10-10
 design review on 2026-10-12 (see "Decisions, 2026-10-12") and suggested
 pulling this plan forward, ahead of the leftovers of
 `perf-reflection-step-cost`. Since the plan was written, a per-thread
@@ -771,6 +771,22 @@ closes, as `ManagedPromisePublication` requires. The source audit
 openers behind the `with_runtime_value_mutator` gateway, counts mutators
 and poll and step contexts as carrying access, exempts a suspension's
 closure, and found no nesting.
+
+Slice 4 landed 2026-10-14, completing the step: glam-gc's only entry is
+`Heap::mutate`, outermost on its thread. `Heap::with_mutator`, held regions
+and their admission type went, the thread record's depth is 0 or 1, and
+the recursive-entry metrics went with it on both sides. `Heap::
+thread_holds_mutator` replaces the depth query behind Glam's
+`assert_outside_mutator`. Its 299 `with_mutator` calls became `mutate`;
+six tests that exercised only held regions or recursive entries retired,
+and others that nested an entry for convenience now enter once. A
+consequence: a managed destructor runs on a thread that holds no mutator
+and may not enter the heap on that thread, since entering would nest the
+finalizer's own; the tests whose destructors allocated now allocate from a
+helper thread, which also shows another thread allocating while finalizers
+run. Profiling against slice 0 of `gc-hold-outer-boundaries`
+(`f10b1cc7`): 0.86% fewer instructions over the workloads, from 0.0% to
+2.4% per workload, with unchanged outer-region counts.
 
 ### Mutator entry cost (`gc-hold-entry-cost`)
 

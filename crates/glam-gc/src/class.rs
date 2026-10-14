@@ -610,7 +610,7 @@ mod tests {
     #[test]
     fn erased_trace_dispatch_uses_the_canonical_representation() {
         let heap = Heap::new();
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let leaves = mutator.allocator::<Leaf>().unwrap();
             let holders = mutator.allocator::<Holder>().unwrap();
             let edge = leaves.alloc(Leaf { _value: 1 });

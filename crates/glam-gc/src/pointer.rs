@@ -19,7 +19,7 @@ use crate::{MutatorAccess, Trace, trace::ErasedGc};
 /// use glam_gc::Heap;
 ///
 /// let heap = Heap::new();
-/// let escaped = heap.with_mutator(|mutator| {
+/// let escaped = heap.mutate(|mutator| {
 ///     let allocator = mutator.allocator::<u64>().unwrap();
 ///     let value = allocator.alloc(42_u64);
 ///     // SAFETY: deliberately attempting to return this reference demonstrates
@@ -35,7 +35,7 @@ use crate::{MutatorAccess, Trace, trace::ErasedGc};
 /// use glam_gc::Heap;
 ///
 /// let heap = Heap::new();
-/// let value = heap.with_mutator(|mutator| {
+/// let value = heap.mutate(|mutator| {
 ///     mutator.allocator::<u64>().unwrap().alloc(42_u64)
 /// });
 /// let _ = *value;
@@ -49,7 +49,7 @@ use crate::{MutatorAccess, Trace, trace::ErasedGc};
 /// use glam_gc::Heap;
 ///
 /// let heap = Heap::new();
-/// let value = heap.with_mutator(|mutator| {
+/// let value = heap.mutate(|mutator| {
 ///     mutator.allocator::<u64>().unwrap().alloc(42_u64)
 /// });
 /// let _ = HashSet::from([value]);
@@ -345,7 +345,7 @@ mod tests {
     #[test]
     fn pointer_identity_is_all_gc_equality_observes() {
         let heap = Heap::new();
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             let first = allocator.alloc(42_u64);
             let alias = first.duplicate_in(mutator);
@@ -359,7 +359,7 @@ mod tests {
     #[test]
     fn pointer_duplication_and_identity_register_no_roots() {
         let heap = Heap::new();
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             let first = allocator.alloc(42_u64);
             let alias = first.duplicate_in(mutator);
@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn pointer_duplication_and_identity_allocate_no_managed_slots() {
         let heap = Heap::new();
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             let first = allocator.alloc(42_u64);
             let equal_value = allocator.alloc(42_u64);
@@ -397,7 +397,7 @@ mod tests {
     #[test]
     fn explicit_identity_distinguishes_equal_payload_allocations() {
         let heap = Heap::new();
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             let first = allocator.alloc(42_u64);
             let alias = first.duplicate_in(mutator);
@@ -411,7 +411,7 @@ mod tests {
     #[test]
     fn explicit_duplicate_can_transfer_into_a_registered_root() {
         let heap = Heap::new();
-        let (value, root) = heap.with_mutator(|mutator| {
+        let (value, root) = heap.mutate(|mutator| {
             let value = mutator.allocator::<u64>().unwrap().alloc(42_u64);
             let rooted = mutator.root_checked(value.duplicate_in(mutator));
             (value, rooted)
@@ -421,7 +421,7 @@ mod tests {
         let report = heap.collect_full().unwrap();
         assert_eq!(report.root_entries(), 1);
         assert_eq!(report.marked_slots(), 1);
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             assert!(value.same_allocation_in(&root.as_gc(mutator).edge(), mutator));
             assert_eq!(*root.get(mutator), 42);
         });
@@ -441,7 +441,7 @@ mod tests {
     #[test]
     fn explicit_duplicate_can_install_below_a_traced_owner() {
         let heap = Heap::new();
-        let (target, owner) = heap.with_mutator(|mutator| {
+        let (target, owner) = heap.mutate(|mutator| {
             let target = mutator.allocator::<u64>().unwrap().alloc(73_u64);
             let owner = mutator.allocator::<Holder>().unwrap().alloc(Holder {
                 edge: target.duplicate_in(mutator),
@@ -453,7 +453,7 @@ mod tests {
         let report = heap.collect_full().unwrap();
         assert_eq!(report.root_entries(), 1);
         assert_eq!(report.marked_slots(), 2);
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let installed = &owner.get(mutator).edge;
             assert!(target.same_allocation_in(installed, mutator));
             // SAFETY: the rooted holder traces `installed`, and the matching
@@ -467,18 +467,18 @@ mod tests {
     fn explicit_operations_reject_a_wrong_heap() {
         let owner = Heap::new();
         let observer = Heap::new();
-        let value = owner.with_mutator(|mutator| {
+        let value = owner.mutate(|mutator| {
             let value = mutator.allocator::<u64>().unwrap().alloc(42_u64);
             (value.duplicate_in(mutator), mutator.root_checked(value))
         });
 
         let duplicate_panic = catch_unwind(AssertUnwindSafe(|| {
-            let _ = observer.with_mutator(|mutator| value.0.duplicate_in(mutator));
+            let _ = observer.mutate(|mutator| value.0.duplicate_in(mutator));
         }));
         assert!(duplicate_panic.is_err());
 
         let identity_panic = catch_unwind(AssertUnwindSafe(|| {
-            observer.with_mutator(|mutator| value.0.same_allocation_in(&value.0, mutator));
+            observer.mutate(|mutator| value.0.same_allocation_in(&value.0, mutator));
         }));
         assert!(identity_panic.is_err());
 
@@ -487,7 +487,7 @@ mod tests {
         // representation before copying the address.
         let reinterpreted = unsafe { Gc::<u32>::from_raw(value.0.erase().as_ptr().cast()) };
         let representation_panic = catch_unwind(AssertUnwindSafe(|| {
-            let _ = owner.with_mutator(|mutator| reinterpreted.duplicate_in(mutator));
+            let _ = owner.mutate(|mutator| reinterpreted.duplicate_in(mutator));
         }));
         assert!(representation_panic.is_err());
     }
@@ -496,13 +496,13 @@ mod tests {
     #[test]
     fn wrong_representation_fails_before_dereference() {
         let heap = Heap::new();
-        let value = heap.with_mutator(|mutator| mutator.allocator::<u64>().unwrap().alloc(42_u64));
+        let value = heap.mutate(|mutator| mutator.allocator::<u64>().unwrap().alloc(42_u64));
         let reinterpreted = Gc::<u32> {
             pointer: value.pointer.cast(),
         };
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            heap.with_mutator(|mutator| {
+            heap.mutate(|mutator| {
                 // SAFETY: this deliberately violates the representation
                 // precondition to verify the debug check before dereference.
                 let _ = unsafe { reinterpreted.get_unchecked(mutator) };

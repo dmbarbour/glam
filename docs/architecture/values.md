@@ -14,8 +14,8 @@ owns one heap, no managed edge crosses heaps, and roots are explicit.
 | Term | Meaning |
 | --- | --- |
 | value domain | `RuntimeValueDomain`: one runtime's heap, IDs, cache, external owners and weak coordinator route. |
-| mutator | A thread's admission to one heap. A heap cannot collect while any mutator is active. Same-heap re-entry reuses the outer admission. |
-| access region | One `with_runtime_value_access` call: a mutator plus the factory view that opened it, carried as `RuntimeValueAccess<'scope>`. Callback-free and thread-bound. |
+| mutator | A thread's admission to one heap, taken at a boundary (`Heap::mutate`). A heap cannot collect while any mutator is active. No entry nests: code under a mutator borrows its access. |
+| access region | A borrow of a mutator's access with the factory view of its runtime, carried as `RuntimeValueAccess<'scope>`, from a boundary (`with_boundary_access`), a driver's mutator or a quantum's poll context. Callback-free and thread-bound. |
 | regional | Valid only inside a region: bare `Gc<T>`, raw `core::Value`, `Managed*Access` views, evaluator `Regional*` state. It outlives the region only beneath a traced owner. |
 | durable / publish | Durable means rooted or beneath a traced owner. Publishing makes a fresh allocation durable before its region ends. |
 | publication nursery | `EvaluatorStepContext`'s temporary family roots, dropped by `finish` after the step publishes. Only test constructors use it; production publishes within one region. |
@@ -79,8 +79,10 @@ holder drops, the domain retires and its roots become inert.
 
 ## Access Regions and Publication
 
-- `with_runtime_value_access` is the only production heap admission; a latch
-  confines `Heap::with_mutator` to `core/managed.rs`. Its higher-ranked
+- `CoreValueFactory::with_runtime_value_mutator` is the only production
+  heap admission (`Heap::mutate`), and a source audit confines it there;
+  boundaries (`with_boundary_access`, drivers) go through it, and nothing
+  opens one under another (`no-recursive-heap-entries`). Its higher-ranked
   callback keeps the carrier, allocators and borrows from escaping.
 - Inside, code allocates, roots, borrows, duplicates or compares edges, and
   changes a published owner's edges via `with_managed_edge_transition`.

@@ -163,14 +163,14 @@ mod tests {
     #[test]
     fn checked_root_can_be_cloned_and_read_in_later_regions() {
         let heap = Heap::new();
-        let (value, root) = heap.with_mutator(|mutator| {
+        let (value, root) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             let value = allocator.alloc(42_u64);
             (value.duplicate_in(mutator), mutator.root_checked(value))
         });
         let alias = root.clone();
 
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             assert!(
                 root.as_gc(mutator)
                     .edge()
@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn root_projection_preserves_identity_without_registering_another_root() {
         let heap = Heap::new();
-        let (first, first_root, second, second_root) = heap.with_mutator(|mutator| {
+        let (first, first_root, second, second_root) = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             let first = allocator.alloc(11);
             let second = allocator.alloc(11);
@@ -205,7 +205,7 @@ mod tests {
         let first_alias = first_root.clone();
         assert_eq!(heap.root_registrations_for_verification(), 2);
 
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let projected = first_root.as_gc(mutator).edge();
             assert!(projected.same_allocation_in(&first, mutator));
             assert!(
@@ -254,17 +254,16 @@ mod tests {
     #[test]
     fn checked_root_can_cross_threads_with_its_live_heap() {
         let heap = Heap::new();
-        let root = heap.with_mutator(|mutator| {
+        let root = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             let value = allocator.alloc(73_u64);
             mutator.root_checked(value)
         });
         let worker_heap = heap.clone();
 
-        let observed =
-            std::thread::spawn(move || worker_heap.with_mutator(|mutator| *root.get(mutator)))
-                .join()
-                .expect("root worker panicked");
+        let observed = std::thread::spawn(move || worker_heap.mutate(|mutator| *root.get(mutator)))
+            .join()
+            .expect("root worker panicked");
 
         assert_eq!(observed, 73);
     }
@@ -272,7 +271,7 @@ mod tests {
     #[test]
     fn root_validation_observes_a_word_while_its_owner_advances_it() {
         let heap = Heap::new();
-        let value = heap.with_mutator(|mutator| mutator.allocator::<u64>().unwrap().alloc(1_u64));
+        let value = heap.mutate(|mutator| mutator.allocator::<u64>().unwrap().alloc(1_u64));
         let start = Arc::new(std::sync::Barrier::new(2));
         let finish = Arc::new(std::sync::Barrier::new(2));
         let worker = std::thread::spawn({
@@ -280,7 +279,7 @@ mod tests {
             let start = Arc::clone(&start);
             let finish = Arc::clone(&finish);
             move || {
-                heap.with_mutator(|mutator| {
+                heap.mutate(|mutator| {
                     start.wait();
                     for _ in 0..1_024 {
                         drop(mutator.root_checked(value.duplicate_in(mutator)));
@@ -290,7 +289,7 @@ mod tests {
             }
         });
 
-        heap.with_mutator(|mutator| {
+        heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             start.wait();
             for next in 2..=64 {
@@ -305,10 +304,10 @@ mod tests {
     fn foreign_heap_root_construction_is_rejected_in_all_builds() {
         let owner = Heap::new();
         let observer = Heap::new();
-        let value = owner.with_mutator(|mutator| mutator.allocator::<u64>().unwrap().alloc(42_u64));
+        let value = owner.mutate(|mutator| mutator.allocator::<u64>().unwrap().alloc(42_u64));
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            let _ = observer.with_mutator(|mutator| mutator.root_checked(value));
+            let _ = observer.mutate(|mutator| mutator.root_checked(value));
         }));
 
         assert!(panic.is_err());
@@ -317,14 +316,14 @@ mod tests {
     #[test]
     fn representation_mismatch_is_rejected_before_root_construction() {
         let heap = Heap::new();
-        let value = heap.with_mutator(|mutator| mutator.allocator::<u64>().unwrap().alloc(42_u64));
+        let value = heap.mutate(|mutator| mutator.allocator::<u64>().unwrap().alloc(42_u64));
         // SAFETY: this deliberately violates the typed-pointer construction
         // contract so the safe root boundary can prove it rejects the
         // representation mismatch before dereference.
         let reinterpreted = unsafe { Gc::<u32>::from_raw(value.erase().as_ptr().cast()) };
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            let _ = heap.with_mutator(|mutator| mutator.root_checked(reinterpreted));
+            let _ = heap.mutate(|mutator| mutator.root_checked(reinterpreted));
         }));
 
         assert!(panic.is_err());
@@ -334,14 +333,14 @@ mod tests {
     fn root_access_rejects_a_different_heap_in_all_builds() {
         let owner = Heap::new();
         let observer = Heap::new();
-        let root = owner.with_mutator(|mutator| {
+        let root = owner.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             let value = allocator.alloc(42_u64);
             mutator.root_checked(value)
         });
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            let _ = observer.with_mutator(|mutator| root.as_gc(mutator).edge());
+            let _ = observer.mutate(|mutator| root.as_gc(mutator).edge());
         }));
 
         assert!(panic.is_err());
@@ -352,7 +351,7 @@ mod tests {
         let owner = Heap::new();
         let owner_alias = owner.clone();
         let observer = Heap::new();
-        let root = owner.with_mutator(|mutator| {
+        let root = owner.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             mutator.root_checked(allocator.alloc(42_u64))
         });
@@ -375,7 +374,7 @@ mod tests {
         const ITERATIONS: usize = 1_024;
 
         let heap = Heap::new();
-        let root = heap.with_mutator(|mutator| {
+        let root = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
             mutator.root_checked(allocator.alloc(73_u64))
         });
@@ -407,7 +406,7 @@ mod tests {
     fn escaped_root_does_not_retain_its_heap_or_payload() {
         let drops = Arc::new(AtomicUsize::new(0));
         let heap = Heap::new();
-        let root = heap.with_mutator(|mutator| {
+        let root = heap.mutate(|mutator| {
             let allocator = mutator.allocator::<DropProbe>().unwrap();
             let value = allocator.alloc(DropProbe(Arc::clone(&drops)));
             mutator.root_checked(value)
