@@ -239,12 +239,12 @@ mod tests {
             .test_with(&values, |net| net.active_pairs().next())
             .expect("the operator/data fixture should begin active");
         let reduction = values
-            .with_runtime_value_access(|access| runtime.access(&access).reduce_pair_for_test(pair))
+            .with_boundary_access(|access| runtime.access(&access).reduce_pair_for_test(pair))
             .expect("the ready operator pair should be claimed");
         let ReductionKind::OperatorCall { operator, data } = reduction.kind else {
             panic!("the fixture should claim an operator call")
         };
-        values.with_runtime_value_access(|value_access| {
+        values.with_boundary_access(|value_access| {
             runtime.access(&value_access).fail_claimed_operator_call(
                 OperatorCall {
                     pair,

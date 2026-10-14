@@ -73,7 +73,7 @@ fn root_value(context: &EvalContext, value: Value) -> RuntimeValueRoot {
 }
 
 fn rooted_promise(values: &CoreValueFactory) -> (PromisedValue, ManagedPromiseRoot) {
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         let root = access
             .construct_rooted_managed_promise()
             .expect("the rooted reflection promise fixture should fit one managed run");
@@ -2054,7 +2054,7 @@ fn reset_stack_decoder_preserves_strict_frames_and_serialized_root() {
     let decoded = drive_reset_stack_decoder(&mut decoder, &context)
         .expect("strict reset stack should decode");
     assert_eq!(decoded.serialized.runtime_id(), serialized.runtime_id());
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         access.assert_same_representation_for_test(
             &decoded.serialized.clone_core_with(&access),
             &serialized.clone_core_with(&access),
@@ -2741,7 +2741,7 @@ fn fixpoint_restart_retains_its_selection_while_the_entry_stack_is_blocked() {
         .expect("restart fixture should define its function");
     let values = assembler.core_values();
     let (stack, _stack_root) = rooted_promise(&values);
-    let (effect, state) = values.with_runtime_value_access(|access| (access.unit(), access.unit()));
+    let (effect, state) = values.with_boundary_access(|access| (access.unit(), access.unit()));
     let mut entry = Branch::<TestEffects>::new(&values, effect, state);
     entry.state = values.construct_runtime_value_root(|access| {
         Value::Dict(Dict::new_sync().insert(
@@ -2750,7 +2750,7 @@ fn fixpoint_restart_retains_its_selection_while_the_entry_stack_is_blocked() {
         ))
     });
     let root = Arc::new(FixRoot {
-        function: values.construct_runtime_value_root(|_| function.clone_core_for_test()),
+        function: values.construct_runtime_value_root(|access| function.clone_core_in(access)),
         entry,
         scope_depth: 0,
     });
@@ -2894,7 +2894,7 @@ fn delivery_selects_reset_or_delimiter_only_after_stack_decoding() {
                 .len(),
             1
         );
-        let frame = values.with_runtime_value_access(|access| {
+        let frame = values.with_boundary_access(|access| {
             serialized_reset_frame(
                 Value::binary_from_text("prompt"),
                 continuation.clone_core_with(&access),
@@ -3435,14 +3435,14 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
     let values = Values::from_core_factory(core.clone());
     let domain = EffectTokenDomain::new(&values);
     let branch = || {
-        let (effect, state) =
-            core.with_runtime_value_access(|access| (access.unit(), access.unit()));
+        let (effect, state) = core.with_boundary_access(|access| (access.unit(), access.unit()));
         Branch::<TestEffects>::new(&core, effect, state)
     };
 
     let (value, retained) = retained_machine_value(&values, &domain);
+    let delivered = branch();
     let work =
-        core.with_runtime_value_access(|access| MachineWork::deliver(&access, value, branch(), 0));
+        core.with_boundary_access(|access| MachineWork::deliver(&access, value, delivered, 0));
     domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_some());
     drop(work);
@@ -3451,8 +3451,9 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
 
     let (function, retained_function) = retained_machine_value(&values, &domain);
     let (argument, retained_argument) = retained_machine_value(&values, &domain);
-    let work = core.with_runtime_value_access(|access| {
-        MachineWork::apply(&access, function, vec![argument], branch(), 0)
+    let applied = branch();
+    let work = core.with_boundary_access(|access| {
+        MachineWork::apply(&access, function, vec![argument], applied, 0)
     });
     domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained_function.upgrade().is_some());
@@ -3538,7 +3539,7 @@ fn fixpoint_frames_retain_the_shared_function_root_until_retirement() {
         function: RuntimeValueRoot::new(&core, function),
         entry: {
             let (effect, state) =
-                core.with_runtime_value_access(|access| (access.unit(), access.unit()));
+                core.with_boundary_access(|access| (access.unit(), access.unit()));
             Branch::<TestEffects>::new(&core, effect, state)
         },
         scope_depth: 0,
@@ -5149,7 +5150,7 @@ fn evaluation_session_pumps_a_type_erased_effect_task() {
         .schedule_task(|task_context| {
             let effect = task_context
                 .values()
-                .construct_runtime_value_root(|_| effect.clone_core_for_test());
+                .construct_runtime_value_root(|access| effect.clone_core_in(access));
             launcher
                 .build(
                     task_context,
@@ -5191,7 +5192,7 @@ fn reflection_task_launcher_returns_arbitrary_effect_result_when_requested() {
         .schedule_task(|task_context| {
             let effect = task_context
                 .values()
-                .construct_runtime_value_root(|_| effect.clone_core_for_test());
+                .construct_runtime_value_root(|access| effect.clone_core_in(access));
             launcher
                 .build(
                     task_context,
@@ -5224,7 +5225,7 @@ fn reflection_task_launcher_requires_unit_when_requested() {
         .schedule_task(|task_context| {
             let effect = task_context
                 .values()
-                .construct_runtime_value_root(|_| effect.clone_core_for_test());
+                .construct_runtime_value_root(|access| effect.clone_core_in(access));
             launcher
                 .build(
                     task_context,
@@ -5845,7 +5846,7 @@ fn dictionary_items_are_available_to_reflection_in_key_order() {
     };
     let items = eval::list_to_value_items(&assembler.eval_context(), &items).unwrap();
     assert_eq!(items.len(), 2);
-    let keys = assembler.core_values().with_runtime_value_access(|access| {
+    let keys = assembler.core_values().with_boundary_access(|access| {
         items
             .into_iter()
             .map(|item| {
@@ -6853,7 +6854,7 @@ fn task_observers_accept_handles_from_another_same_runtime_session() {
     else {
         panic!("a same-runtime observer should read the pre-pump task status")
     };
-    assembler.core_values().with_runtime_value_access(|access| {
+    assembler.core_values().with_boundary_access(|access| {
         launched
             .with_core(&access, |launched| {
                 access.assert_same_representation_for_test(
@@ -6898,7 +6899,7 @@ fn task_observers_accept_handles_from_another_same_runtime_session() {
         .unwrap_or_else(|error| panic!("task observation {name} should evaluate: {error}"))
     };
     let blocked_status = field("blocked_status");
-    assembler.core_values().with_runtime_value_access(|access| {
+    assembler.core_values().with_boundary_access(|access| {
         access.assert_same_representation_for_test(
             &blocked_status,
             &access.key_value(&keys::BLOCKED),
@@ -6927,7 +6928,7 @@ fn task_observers_accept_handles_from_another_same_runtime_session() {
     assert!(failed_status.get(&*keys::ERR).is_some());
     assert!(matches!(field("failed_error"), Value::Dict(_)));
     let canceled_status = field("canceled_status");
-    assembler.core_values().with_runtime_value_access(|access| {
+    assembler.core_values().with_boundary_access(|access| {
         access.assert_same_representation_for_test(
             &canceled_status,
             &access.key_value(&keys::CANCELED),
@@ -6952,7 +6953,7 @@ fn task_observers_accept_handles_from_another_same_runtime_session() {
     else {
         panic!("a retained same-runtime handle should remain observable after owner closure")
     };
-    assembler.core_values().with_runtime_value_access(|access| {
+    assembler.core_values().with_boundary_access(|access| {
         abandoned
             .with_core(&access, |abandoned| {
                 assert!(
@@ -7519,7 +7520,7 @@ fn task_halt_conversions_preserve_evaluation_and_public_error_structure() {
                 Value::Number(Number::from(7)),
             ),
     );
-    let failure = assembler.core_values().with_runtime_value_access(|access| {
+    let failure = assembler.core_values().with_boundary_access(|access| {
         Arc::new(
             EvaluationFailure::emission_in(&access, emission)
                 .with_context_in(&access, access.duplicate_value(&frame)),
@@ -7608,7 +7609,7 @@ fn effect_dispatch_preserves_structured_failure_and_adds_stage_context() {
     let contexts = task_halt_contexts(&assembler, &halt);
     let expected = assembler
         .core_values()
-        .with_runtime_value_access(|access| effect_dispatch_context(&access, "function"));
+        .with_boundary_access(|access| effect_dispatch_context(&access, "function"));
     assert!(
         assembler
             .core_values()
@@ -7646,7 +7647,7 @@ fn effect_dispatch_preserves_application_and_request_stage_contexts() {
         );
         let expected = assembler
             .core_values()
-            .with_runtime_value_access(|access| effect_dispatch_context(&access, stage));
+            .with_boundary_access(|access| effect_dispatch_context(&access, stage));
         assert!(
             assembler.core_values().same_representation_for_test(
                 &task_halt_contexts(&assembler, &halt).first(),
@@ -8658,7 +8659,7 @@ fn task_failure_propagates_one_structured_failure_to_owned_promises() {
             .insert(detail, Value::Number(Number::integer(7))),
     );
     let frame = crate::diagnostic::evaluation_context_frame("producer_test");
-    let failure = context.values().with_runtime_value_access(|access| {
+    let failure = context.values().with_boundary_access(|access| {
         Arc::new(
             EvaluationFailure::emission_in(&access, access.duplicate_value(&emission))
                 .with_context_in(&access, access.duplicate_value(&frame)),

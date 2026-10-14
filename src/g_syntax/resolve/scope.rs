@@ -405,7 +405,7 @@ mod resolver_context_tests {
         };
         let jit_requests = |body| {
             let net = ResolvedNetLowerer::lower_template(&values, vec![outer], body);
-            values.with_runtime_value_access(|access| {
+            values.with_boundary_access(|access| {
                 net.nodes()
                     .iter()
                     .filter_map(|node| match node {
@@ -652,10 +652,10 @@ impl NameScope<Value> {
         visible_definitions: Value,
     ) -> Self {
         compiler_values::prepare(context.values());
-        context.values().with_runtime_value_access(|access| {
+        context.values().with_boundary_access(|access| {
             let reflection = ReflectionBoundary {
                 demand: compiler_values::reflection_boundary_value(
-                    context.values(),
+                    &access,
                     context.namespace_name(&access, ""),
                     context.final_defs(&access),
                 ),
@@ -723,6 +723,6 @@ impl NameScope<Value> {
     ) -> NameScope<ResolvedRoot> {
         context
             .values()
-            .with_runtime_value_access(|access| self.resolved_in(&access))
+            .with_boundary_access(|access| self.resolved_in(&access))
     }
 }

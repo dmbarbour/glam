@@ -1,3 +1,4 @@
+use crate::core::TestAccess as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -104,7 +105,7 @@ fn pump_to_ready(context: &EvalContext, wait: &crate::evaluation::EvaluationWait
 }
 
 fn assert_object_checkpoint(context: &EvalContext, machine: &LazyTaskMachine) {
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         let checkpoint = machine
             .lazy
             .access(&access)
@@ -128,12 +129,12 @@ fn resume_after_object_route_loss(
     collect_between_handoffs(context);
     let lazy = context
         .values()
-        .with_runtime_value_access(|access| LazyValue::from_root(retained, &access));
+        .with_boundary_access(|access| LazyValue::from_root(retained, &access));
     lazy_machine(context, lazy)
 }
 
 fn assert_list_effect_checkpoint(context: &EvalContext, machine: &LazyTaskMachine) {
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         let checkpoint = machine
             .lazy
             .access(&access)
@@ -154,7 +155,7 @@ fn resume_after_list_effect_route_loss(
     collect_between_handoffs(context);
     let lazy = context
         .values()
-        .with_runtime_value_access(|access| LazyValue::from_root(retained, &access));
+        .with_boundary_access(|access| LazyValue::from_root(retained, &access));
     lazy_machine(context, lazy)
 }
 
@@ -162,12 +163,12 @@ fn retained_list_effect_machine(
     context: &EvalContext,
     recipe: ListEffectComputation,
 ) -> (ManagedLazyRoot, LazyTaskMachine) {
-    let retained = context.values().with_runtime_value_access(|access| {
+    let retained = context.values().with_boundary_access(|access| {
         LazyValue::list_effect_computation_in(&access, recipe).root_in(&access)
     });
     let lazy = context
         .values()
-        .with_runtime_value_access(|access| LazyValue::from_root(&retained, &access));
+        .with_boundary_access(|access| LazyValue::from_root(&retained, &access));
     let machine = lazy_machine(context, lazy);
     (retained, machine)
 }
@@ -175,7 +176,7 @@ fn retained_list_effect_machine(
 #[test]
 fn list_effect_checkpoint_admission_retains_a_source_owned_deferred_chunk() {
     let context = isolated_context();
-    let retained = context.values().with_runtime_value_access(|access| {
+    let retained = context.values().with_boundary_access(|access| {
         let deferred = LazyValue::error_in(&access, "source-owned deferred list chunk");
         LazyValue::list_effect_computation_in(
             &access,
@@ -189,7 +190,7 @@ fn list_effect_checkpoint_admission_retains_a_source_owned_deferred_chunk() {
     collect_between_handoffs(&context);
     let lazy = context
         .values()
-        .with_runtime_value_access(|access| LazyValue::from_root(&retained, &access));
+        .with_boundary_access(|access| LazyValue::from_root(&retained, &access));
     let mut machine = lazy_machine(&context, lazy);
 
     assert!(matches!(
@@ -292,18 +293,18 @@ fn list_effect_value(function: Value) -> Value {
     Value::Dict(Dict::new_sync().insert((*crate::core::keys::EFF).clone(), function))
 }
 
-fn builder_effect_value(context: &EvalContext, operation: Value) -> Value {
+fn builder_effect_value(values: &impl crate::core::TestAccess, operation: Value) -> Value {
     let handler = crate::eval::test_support::closed_function_value_in(
-        context.values(),
+        values,
         1,
         crate::eval::test_support::TestExpr::Value(operation),
     );
     list_effect_value(handler)
 }
 
-fn construction_results_effect(context: &EvalContext, results: List) -> Value {
+fn construction_results_effect(values: &impl crate::core::TestAccess, results: List) -> Value {
     let handler = crate::eval::test_support::closed_function_value_in(
-        context.values(),
+        values,
         2,
         crate::eval::test_support::TestExpr::Value(Value::List(results)),
     );
@@ -321,10 +322,10 @@ fn assert_construction_promise_dependency(
     assert_eq!(dependency.id(), promise.id(context.values()));
 }
 
-fn builder_return_first_port_continuation(context: &EvalContext) -> Value {
+fn builder_return_first_port_continuation(values: &impl crate::core::TestAccess) -> Value {
     use crate::eval::test_support::TestExpr;
 
-    context.values().with_runtime_value_access(|access| {
+    values.test_access(|access| {
         let first = TestExpr::Apply(
             Arc::new(TestExpr::Value(Value::Builtin(Builtin::ListHead))),
             Arc::new(TestExpr::Local(0)),
@@ -345,7 +346,7 @@ fn builder_return_first_port_continuation(context: &EvalContext) -> Value {
             )),
             Arc::new(call),
         );
-        crate::eval::test_support::closed_function_value_in(context.values(), 1, effect)
+        crate::eval::test_support::closed_function_value_in(access, 1, effect)
     })
 }
 
@@ -401,7 +402,7 @@ fn fix_function_returning_its_future_twice(context: &EvalContext) -> Value {
     };
     let eff_key = context
         .values()
-        .with_runtime_value_access(|access| access.key_value(&crate::core::keys::EFF));
+        .with_boundary_access(|access| access.key_value(&crate::core::keys::EFF));
     let effect = crate::eval::test_support::TestExpr::Apply(
         Arc::new(crate::eval::test_support::TestExpr::Apply(
             Arc::new(crate::eval::test_support::TestExpr::Value(Value::Builtin(
@@ -423,7 +424,7 @@ fn retained_application_machine(
         LazyValue::from_application(context.values(), function, arguments).root(context.values());
     let lazy = context
         .values()
-        .with_runtime_value_access(|access| LazyValue::from_root(&retained, &access));
+        .with_boundary_access(|access| LazyValue::from_root(&retained, &access));
     (retained, lazy_machine(context, lazy))
 }
 
@@ -481,7 +482,7 @@ fn function_fixpoint_checkpoint_survives_promise_and_route_loss() {
 
     let value = context
         .values()
-        .with_runtime_value_access(|access| Value::Lazy(LazyValue::from_root(&retained, &access)));
+        .with_boundary_access(|access| Value::Lazy(LazyValue::from_root(&retained, &access)));
     let blocked = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
         .expect_err_without_debug("the result promise is unresolved");
     assert!(blocked.blocked_on().is_some());
@@ -533,7 +534,7 @@ fn immediate_builtin_result_is_installed_before_route_loss() {
     let context = isolated_context();
     let left = Value::List(List::from_values(vec![number(3)]));
     let right = Value::List(List::from_values(vec![number(5)]));
-    let lazy = context.values().with_runtime_value_access(|access| {
+    let lazy = context.values().with_boundary_access(|access| {
         LazyValue::from_builtin_in(
             &access,
             BuiltinCall {
@@ -562,7 +563,7 @@ fn immediate_builtin_result_is_installed_before_route_loss() {
 }
 
 fn builtin_lazy(context: &EvalContext, builtin: Builtin, arguments: [Value; 2]) -> LazyValue {
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         LazyValue::from_builtin_in(
             &access,
             BuiltinCall {
@@ -665,11 +666,11 @@ fn thunk_to(
     target: &Arc<std::sync::OnceLock<crate::runtime::RuntimeValueRoot>>,
 ) -> LazyValue {
     let target = Arc::clone(target);
-    LazyValue::semantic_thunk(context.values(), move |_| {
-        Ok(target
+    LazyValue::semantic_thunk(context.values(), move |context| {
+        let target = target
             .get()
-            .expect("the fixture publishes its target before forcing")
-            .clone_core_for_test())
+            .expect("the fixture publishes its target before forcing");
+        Ok(context.test_access(|access| target.clone_core_with(access)))
     })
 }
 
@@ -698,7 +699,7 @@ fn a_cycle_of_tail_forwards_fails_both_lazies_with_one_dependency_cycle() {
     let wait = lazy_root_wait(&context, &x_root).expect("the route should be admitted");
     pump_to_ready(&context, &wait);
 
-    let failures = context.values().with_runtime_value_access(|access| {
+    let failures = context.values().with_boundary_access(|access| {
         [&x_root, &y_root].map(|root| {
             match root
                 .access(&access)
@@ -756,7 +757,7 @@ fn a_lazy_left_forwarding_in_a_tail_chain_caches_its_value_when_observed() {
     let (head_root, middle_root) = forwarded_chain_middle(&context);
 
     let (head_cached, middle_cached, middle_forwards) =
-        context.values().with_runtime_value_access(|access| {
+        context.values().with_boundary_access(|access| {
             let middle = middle_root.access(&access).expect("the middle stays live");
             (
                 head_root
@@ -775,16 +776,16 @@ fn a_lazy_left_forwarding_in_a_tail_chain_caches_its_value_when_observed() {
 
     let wait = lazy_root_wait(&context, &middle_root).expect("the middle route should be admitted");
     pump_to_ready(&context, &wait);
-    let cached = context.values().with_runtime_value_access(|access| {
+    let cached = context.values().with_boundary_access(|access| {
         middle_root
             .access(&access)
             .and_then(|lazy| lazy.cached())
             .is_some_and(|result| result.is_ok())
     });
     assert!(cached, "observing the middle should cache it");
-    let middle = context.values().with_runtime_value_access(|access| {
-        Value::Lazy(LazyValue::from_root(&middle_root, &access))
-    });
+    let middle = context
+        .values()
+        .with_boundary_access(|access| Value::Lazy(LazyValue::from_root(&middle_root, &access)));
     assert_same_value(
         &context,
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &middle)
@@ -827,7 +828,7 @@ fn a_machine_whose_lazy_was_forwarded_meanwhile_follows_the_forward() {
                 machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(8))
             }) {
                 EvaluationMachinePoll::Yielded if machine.inline_completed => {
-                    break context.values().with_runtime_value_access(|access| {
+                    break context.values().with_boundary_access(|access| {
                         let cached = machine
                             .lazy
                             .access(&access)
@@ -859,8 +860,9 @@ fn a_panic_in_an_inline_forced_lazy_is_recorded_in_it_and_ends_the_claims() {
     });
     let inner_root = inner.root(context.values());
     let focus = crate::runtime::RuntimeValueRoot::new(context.values(), Value::Lazy(inner));
-    let outer =
-        LazyValue::semantic_thunk(context.values(), move |_| Ok(focus.clone_core_for_test()));
+    let outer = LazyValue::semantic_thunk(context.values(), move |context| {
+        Ok(context.test_access(|access| focus.clone_core_with(access)))
+    });
     let outer_root = outer.root(context.values());
     let wait = lazy_root_wait(&context, &outer_root).expect("the outer route should be admitted");
 
@@ -870,7 +872,7 @@ fn a_panic_in_an_inline_forced_lazy_is_recorded_in_it_and_ends_the_claims() {
         context.poll_wait(&wait),
         crate::evaluation::EvaluationWaitPoll::Panicked(_)
     ));
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         for (label, root) in [("inner", &inner_root), ("outer", &outer_root)] {
             assert!(
                 root.access(&access)
@@ -913,7 +915,9 @@ fn an_uncached_failure_in_an_inline_forced_lazy_ends_the_route_uncached() {
     let sum = builtin_lazy(&live, Builtin::Add, [Value::Lazy(routed), number(1)]);
     let sum_root = sum.root(live.values());
     let focus = crate::runtime::RuntimeValueRoot::new(live.values(), Value::Lazy(sum));
-    let outer = LazyValue::semantic_thunk(live.values(), move |_| Ok(focus.clone_core_for_test()));
+    let outer = LazyValue::semantic_thunk(live.values(), move |context| {
+        Ok(context.test_access(|access| focus.clone_core_with(access)))
+    });
     let outer_root = outer.root(live.values());
     // The route runs in the closing demand, as a route runs in the runtime's
     // background demand; closing it refuses every later admission.
@@ -934,7 +938,7 @@ fn an_uncached_failure_in_an_inline_forced_lazy_ends_the_route_uncached() {
         panic!("a refused admission in the inline lazy should end the route's poll")
     };
     assert!(failure.to_string().contains("closed"), "{failure}");
-    live.values().with_runtime_value_access(|access| {
+    live.values().with_boundary_access(|access| {
         for (label, root) in [("inline", &sum_root), ("outer", &outer_root)] {
             let lazy = root.access(&access).expect("the fixture lazies stay live");
             assert!(
@@ -964,12 +968,9 @@ fn semantic_thunk_result_survives_route_loss_without_callback_replay() {
     let calls = Arc::new(AtomicUsize::new(0));
     let counted = Arc::clone(&calls);
     let captured = result.duplicate_for_test(context.values());
-    let captured_values = context.values().clone();
-    let lazy = LazyValue::semantic_thunk(context.values(), move |_| {
+    let lazy = LazyValue::semantic_thunk(context.values(), move |context| {
         counted.fetch_add(1, Ordering::SeqCst);
-        Ok(Value::Promised(
-            captured.duplicate_for_test(&captured_values),
-        ))
+        Ok(Value::Promised(captured.duplicate_for_test(context)))
     });
     let retained = lazy.root(context.values());
     let machine = lazy_machine(&context, lazy);
@@ -1046,7 +1047,7 @@ fn resume_after_lazy_route_loss(
     collect_between_handoffs(context);
     let lazy = context
         .values()
-        .with_runtime_value_access(|access| LazyValue::from_root(retained, &access));
+        .with_boundary_access(|access| LazyValue::from_root(retained, &access));
     lazy_machine(context, lazy)
 }
 
@@ -1055,7 +1056,7 @@ fn assert_lazy_checkpoint_kind(
     machine: &LazyTaskMachine,
     expected: ManagedLazyCheckpointKindTag,
 ) {
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         let checkpoint = machine
             .lazy
             .access(&access)
@@ -1272,10 +1273,13 @@ fn drive_failure_after_route_loss(
 fn counted_success(context: &EvalContext, count: &Arc<AtomicUsize>, value: Value) -> Value {
     let value = crate::runtime::RuntimeValueRoot::new(context.values(), value);
     let observed = Arc::clone(count);
-    Value::Lazy(LazyValue::semantic_thunk(context.values(), move |_| {
-        observed.fetch_add(1, Ordering::SeqCst);
-        Ok(value.clone_core_for_test())
-    }))
+    Value::Lazy(LazyValue::semantic_thunk(
+        context.values(),
+        move |context| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(context.test_access(|access| value.clone_core_with(access)))
+        },
+    ))
 }
 
 fn counted_failure(
@@ -1296,7 +1300,7 @@ fn assert_transparent_failure(
     expected_message: &str,
 ) {
     assert!(failure.to_string().contains(expected_message), "{failure}");
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         assert!(
             failure.contexts_in(&access).is_empty(),
             "private builder operands must propagate failures without operation-local contexts"
@@ -1382,7 +1386,7 @@ fn host_call_yields_on_both_sides_and_consumes_its_result_once() {
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(matches!(machine.work, LazyTaskWork::HostCallCheckpoint));
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         let checkpoint = machine
             .lazy
             .access(&access)
@@ -1455,7 +1459,7 @@ fn interrupted_host_call_is_never_replayed_after_route_loss() {
     collect_between_handoffs(&context);
     let retained = context
         .values()
-        .with_runtime_value_access(|access| LazyValue::from_root(&retained, &access));
+        .with_boundary_access(|access| LazyValue::from_root(&retained, &access));
     let mut resumed = lazy_machine(&context, retained);
     // An interrupted invocation is a fault, never a semantic failure. The
     // later route refuses to replay it by re-raising; a scheduled poll's
@@ -1501,7 +1505,7 @@ fn completed_host_call_checkpoint_survives_route_loss_and_collection() {
 
     let retained = context
         .values()
-        .with_runtime_value_access(|access| LazyValue::from_root(&retained, &access));
+        .with_boundary_access(|access| LazyValue::from_root(&retained, &access));
     let mut resumed = lazy_machine(&context, retained);
     let value = loop {
         match crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
@@ -1530,7 +1534,7 @@ fn net_whnf_checkpoint_survives_route_loss_and_collection() {
     let value = builder.data(
         context
             .values()
-            .with_runtime_value_access(|access| access.unit()),
+            .with_boundary_access(|access| access.unit()),
     );
     builder.wire(application, function);
     builder.wire(argument, value);
@@ -1563,7 +1567,7 @@ fn net_whnf_checkpoint_survives_route_loss_and_collection() {
         }
         unreachable!("bounded block loop must block or panic")
     };
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         let checkpoint = machine
             .lazy
             .access(&access)
@@ -1590,7 +1594,7 @@ fn net_whnf_checkpoint_survives_route_loss_and_collection() {
 
     let unit = context
         .values()
-        .with_runtime_value_access(|access| access.unit());
+        .with_boundary_access(|access| access.unit());
     let callable = crate::eval::test_support::closed_function_value_in(
         context.values(),
         1,
@@ -1602,7 +1606,7 @@ fn net_whnf_checkpoint_survives_route_loss_and_collection() {
 
     let retained = context
         .values()
-        .with_runtime_value_access(|access| LazyValue::from_root(&retained, &access));
+        .with_boundary_access(|access| LazyValue::from_root(&retained, &access));
     let mut resumed = lazy_machine(&context, retained);
     let value = 'resume: {
         for attempt in 0..64 {
@@ -1631,8 +1635,8 @@ fn net_whnf_checkpoint_survives_route_loss_and_collection() {
         }
         unreachable!("bounded resume loop must complete or panic")
     };
-    context.values().with_runtime_value_access(|access| {
-        value.assert_same_representation_for_test(context.values(), &access.unit());
+    context.values().with_boundary_access(|access| {
+        value.assert_same_representation_for_test(&access, &access.unit());
     });
 }
 
@@ -1806,11 +1810,13 @@ fn object_checkpoint_does_not_replay_mixin_stages_after_route_loss() {
     );
 
     let observed_defs = Arc::clone(&defs_demands);
-    let definitions_values = context.values().clone();
-    let definitions = Value::Lazy(LazyValue::semantic_thunk(context.values(), move |_| {
-        observed_defs.fetch_add(1, Ordering::SeqCst);
-        Ok(base_function.duplicate_for_test(&definitions_values))
-    }));
+    let definitions = Value::Lazy(LazyValue::semantic_thunk(
+        context.values(),
+        move |context| {
+            observed_defs.fetch_add(1, Ordering::SeqCst);
+            Ok(base_function.duplicate_for_test(context))
+        },
+    ));
     let spec = Value::Dict(
         Dict::new_sync()
             .insert(
@@ -1890,22 +1896,26 @@ fn list_effect_run_checkpoint_does_not_replay_effect_or_handler_demand() {
         handler.duplicate_for_test(context.values()),
     );
     let observed_handler = Arc::clone(&handler_demands);
-    let handler_values = context.values().clone();
-    let counted_handler = Value::Lazy(LazyValue::semantic_thunk(context.values(), move |_| {
-        observed_handler.fetch_add(1, Ordering::SeqCst);
-        Ok(handler.duplicate_for_test(&handler_values))
-    }));
+    let counted_handler = Value::Lazy(LazyValue::semantic_thunk(
+        context.values(),
+        move |context| {
+            observed_handler.fetch_add(1, Ordering::SeqCst);
+            Ok(handler.duplicate_for_test(context))
+        },
+    ));
     let effect = list_effect_value(counted_handler);
     let _effect_owner = crate::runtime::RuntimeValueRoot::new(
         context.values(),
         effect.duplicate_for_test(context.values()),
     );
     let observed_effect = Arc::clone(&effect_demands);
-    let effect_values = context.values().clone();
-    let counted_effect = Value::Lazy(LazyValue::semantic_thunk(context.values(), move |_| {
-        observed_effect.fetch_add(1, Ordering::SeqCst);
-        Ok(effect.duplicate_for_test(&effect_values))
-    }));
+    let counted_effect = Value::Lazy(LazyValue::semantic_thunk(
+        context.values(),
+        move |context| {
+            observed_effect.fetch_add(1, Ordering::SeqCst);
+            Ok(effect.duplicate_for_test(context))
+        },
+    ));
     let (retained, machine) = retained_list_effect_machine(
         &context,
         ListEffectComputation::Run {
@@ -1922,9 +1932,7 @@ fn list_effect_run_checkpoint_does_not_replay_effect_or_handler_demand() {
     assert_eq!(effect_demands.load(Ordering::SeqCst), 1);
     assert_eq!(handler_demands.load(Ordering::SeqCst), 1);
 
-    let cached = context.values().with_runtime_value_access(|access| {
-        lazy_machine(&context, LazyValue::from_root(&retained, &access))
-    });
+    let cached = LazyTaskMachine::new((*context).clone(), retained.clone());
     assert_same_value(
         &context,
         &drive_list_effect_after_route_loss(&context, &retained, cached),
@@ -2071,10 +2079,9 @@ fn list_effect_fix_checkpoint_constructs_and_assigns_one_promise() {
         effect.duplicate_for_test(context.values()),
     );
     let observed_operation = Arc::clone(&operation_demands);
-    let operation_values = context.values().clone();
-    let operation = LazyValue::semantic_thunk(context.values(), move |_| {
+    let operation = LazyValue::semantic_thunk(context.values(), move |context| {
         observed_operation.fetch_add(1, Ordering::SeqCst);
-        Ok(effect.duplicate_for_test(&operation_values))
+        Ok(effect.duplicate_for_test(context))
     });
     let function = crate::eval::test_support::closed_function_value_in(
         context.values(),
@@ -2086,11 +2093,13 @@ fn list_effect_fix_checkpoint_constructs_and_assigns_one_promise() {
         function.duplicate_for_test(context.values()),
     );
     let observed_function = Arc::clone(&function_demands);
-    let function_values = context.values().clone();
-    let counted_function = Value::Lazy(LazyValue::semantic_thunk(context.values(), move |_| {
-        observed_function.fetch_add(1, Ordering::SeqCst);
-        Ok(function.duplicate_for_test(&function_values))
-    }));
+    let counted_function = Value::Lazy(LazyValue::semantic_thunk(
+        context.values(),
+        move |context| {
+            observed_function.fetch_add(1, Ordering::SeqCst);
+            Ok(function.duplicate_for_test(context))
+        },
+    ));
     let (retained, machine) = retained_list_effect_machine(
         &context,
         ListEffectComputation::FixFunction {
@@ -2114,9 +2123,7 @@ fn list_effect_fix_checkpoint_constructs_and_assigns_one_promise() {
     assert_eq!(lifecycle_after.0 - lifecycle_before.0, 1);
     assert_eq!(lifecycle_after.1 - lifecycle_before.1, 1);
 
-    let cached = context.values().with_runtime_value_access(|access| {
-        lazy_machine(&context, LazyValue::from_root(&retained, &access))
-    });
+    let cached = LazyTaskMachine::new((*context).clone(), retained.clone());
     let fixed = drive_list_effect_after_route_loss(&context, &retained, cached);
     let first = Value::builtin_call(context.values(), Builtin::ListAt, vec![number(0), fixed]);
     assert_same_value(
@@ -2213,11 +2220,11 @@ fn builder_checkpoint_survives_path_and_state_dependencies_without_replay() {
     let path_owner = path_promise.root(context.values());
     let state_promise = PromisedValue::new(context.values());
     let state_owner = state_promise.root(context.values());
-    let path_value = context.values().with_runtime_value_access(|access| {
+    let path_value = context.values().with_boundary_access(|access| {
         Value::List(List::from_values(vec![visible.to_value_in(&access)]))
     });
     let path_root = crate::runtime::RuntimeValueRoot::new(context.values(), path_value);
-    let state = context.values().with_runtime_value_access(|access| {
+    let state = context.values().with_boundary_access(|access| {
         crate::eval::builtins::initial_state_for_test(
             &access,
             Value::Dict(Dict::new_sync().insert(visible, number(73))),
@@ -2225,7 +2232,7 @@ fn builder_checkpoint_survives_path_and_state_dependencies_without_replay() {
     });
     let state_root = crate::runtime::RuntimeValueRoot::new(context.values(), state);
 
-    let (path, state) = context.values().with_runtime_value_access(|access| {
+    let (path, state) = context.values().with_boundary_access(|access| {
         (
             Value::Promised(PromisedValue::from_root(&path_owner, &access)),
             Value::Promised(PromisedValue::from_root(&state_owner, &access)),
@@ -2273,7 +2280,7 @@ fn builder_checkpoint_survives_path_and_state_dependencies_without_replay() {
     let (outcome, tail) =
         list_front(&context, results).expect("builder get must return one outcome");
     assert!(list_front(&context, tail).is_none());
-    let [value, _state] = context.values().with_runtime_value_access(|access| {
+    let [value, _state] = context.values().with_boundary_access(|access| {
         crate::eval::builtins::decode_outcome_for_test(&access, &outcome)
             .expect("builder get must retain the strict outcome schema")
     });
@@ -2293,14 +2300,14 @@ fn builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencie
     let right_owner = right_promise.root(context.values());
     let state_promise = PromisedValue::new(context.values());
     let state_owner = state_promise.root(context.values());
-    let (state, [left, right]) = context.values().with_runtime_value_access(|access| {
+    let (state, [left, right]) = context.values().with_boundary_access(|access| {
         crate::eval::builtins::construction_state_and_ports_for_test(&access)
     });
     let left_root = crate::runtime::RuntimeValueRoot::new(context.values(), left);
     let right_root = crate::runtime::RuntimeValueRoot::new(context.values(), right);
     let state_root = crate::runtime::RuntimeValueRoot::new(context.values(), state);
 
-    let call = context.values().with_runtime_value_access(|access| {
+    let call = context.values().with_boundary_access(|access| {
         Value::builtin_call_in(
             &access,
             Builtin::InteractionNetBuilderWire,
@@ -2343,14 +2350,14 @@ fn builder_wire_checkpoint_preserves_left_to_right_operand_and_state_dependencie
     let (outcome, tail) =
         list_front(&context, results).expect("builder wire must return one outcome");
     assert!(list_front(&context, tail).is_none());
-    let [unit, state] = context.values().with_runtime_value_access(|access| {
+    let [unit, state] = context.values().with_boundary_access(|access| {
         crate::eval::builtins::decode_outcome_for_test(&access, &outcome)
             .expect("builder wire must retain the strict outcome schema")
     });
-    context.values().with_runtime_value_access(|access| {
-        assert_same_value(&context, &unit, &access.unit());
+    context.values().with_boundary_access(|access| {
+        access.assert_same_representation_for_test(&unit, &access.unit());
     });
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         assert_eq!(
             crate::eval::builtins::construction_journal_lengths_for_test(&access, &state)
                 .expect("builder wire state must retain strict journals"),
@@ -2370,12 +2377,12 @@ fn builder_copy_checkpoint_preserves_count_then_state_dependencies_without_repla
     let count_owner = count_promise.root(context.values());
     let state_promise = PromisedValue::new(context.values());
     let state_owner = state_promise.root(context.values());
-    let state = context.values().with_runtime_value_access(|access| {
+    let state = context.values().with_boundary_access(|access| {
         crate::eval::builtins::initial_state_for_test(&access, Value::Dict(Dict::new_sync()))
     });
     let count_root = crate::runtime::RuntimeValueRoot::new(context.values(), number(2));
     let state_root = crate::runtime::RuntimeValueRoot::new(context.values(), state);
-    let call = context.values().with_runtime_value_access(|access| {
+    let call = context.values().with_boundary_access(|access| {
         Value::builtin_call_in(
             &access,
             Builtin::InteractionNetBuilderCopy,
@@ -2416,7 +2423,7 @@ fn builder_copy_checkpoint_preserves_count_then_state_dependencies_without_repla
     let (outcome, tail) =
         list_front(&context, results).expect("builder copy must return one outcome");
     assert!(list_front(&context, tail).is_none());
-    let [ports, state] = context.values().with_runtime_value_access(|access| {
+    let [ports, state] = context.values().with_boundary_access(|access| {
         crate::eval::builtins::decode_outcome_for_test(&access, &outcome)
             .expect("builder copy must retain the strict outcome schema")
     });
@@ -2430,7 +2437,7 @@ fn builder_copy_checkpoint_preserves_count_then_state_dependencies_without_repla
         list_front(&context, remaining_ports).is_none(),
         "builder copy must return exactly input plus two output ports"
     );
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         assert_eq!(
             crate::eval::builtins::construction_journal_lengths_for_test(&access, &state)
                 .expect("builder copy state must retain strict journals"),
@@ -2450,7 +2457,7 @@ fn builder_operand_failures_are_ordered_transparent_and_do_not_observe_later_ope
     {
         let count_demands = Arc::new(AtomicUsize::new(0));
         let state_demands = Arc::new(AtomicUsize::new(0));
-        let state = context.values().with_runtime_value_access(|access| {
+        let state = context.values().with_boundary_access(|access| {
             crate::eval::builtins::initial_state_for_test(&access, Value::Dict(Dict::new_sync()))
         });
         let call = Value::builtin_call(
@@ -2471,7 +2478,7 @@ fn builder_operand_failures_are_ordered_transparent_and_do_not_observe_later_ope
         let left_demands = Arc::new(AtomicUsize::new(0));
         let right_demands = Arc::new(AtomicUsize::new(0));
         let state_demands = Arc::new(AtomicUsize::new(0));
-        let (state, [left, right]) = context.values().with_runtime_value_access(|access| {
+        let (state, [left, right]) = context.values().with_boundary_access(|access| {
             crate::eval::builtins::construction_state_and_ports_for_test(&access)
         });
         let counts = [&left_demands, &right_demands, &state_demands];
@@ -2517,7 +2524,7 @@ fn builder_control_key_failures_are_transparent_and_precede_later_operands() {
         let key_demands = Arc::new(AtomicUsize::new(0));
         let operation_demands = Arc::new(AtomicUsize::new(0));
         let state_demands = Arc::new(AtomicUsize::new(0));
-        let state = context.values().with_runtime_value_access(|access| {
+        let state = context.values().with_boundary_access(|access| {
             crate::eval::builtins::initial_state_for_test(&access, Value::Dict(Dict::new_sync()))
         });
         let call = Value::builtin_call(
@@ -2530,7 +2537,7 @@ fn builder_control_key_failures_are_transparent_and_precede_later_operands() {
                     &operation_demands,
                     context
                         .values()
-                        .with_runtime_value_access(|access| access.unit()),
+                        .with_boundary_access(|access| access.unit()),
                 ),
                 counted_success(&context, &state_demands, state),
             ],
@@ -2552,14 +2559,14 @@ fn builder_checkpoint_observes_a_lazy_reset_key_once_across_route_loss() {
         observed_key_demands.fetch_add(1, Ordering::SeqCst);
         Ok(Value::binary_from_text("route-loss prompt"))
     }));
-    let state = context.values().with_runtime_value_access(|access| {
+    let state = context.values().with_boundary_access(|access| {
         crate::eval::builtins::initial_state_for_test(&access, Value::Dict(Dict::new_sync()))
     });
     let operation = Value::PartialBuiltin(BuiltinCall {
         builtin: Builtin::InteractionNetBuilderReturn,
         arguments: Arc::from([number(74)]),
     });
-    let operation = builder_effect_value(&context, operation);
+    let operation = builder_effect_value(context.values(), operation);
     let call = Value::builtin_call(
         context.values(),
         Builtin::InteractionNetBuilderReset,
@@ -2571,7 +2578,7 @@ fn builder_checkpoint_observes_a_lazy_reset_key_once_across_route_loss() {
     let (outcome, tail) =
         list_front(&context, results).expect("builder reset must return one outcome");
     assert!(list_front(&context, tail).is_none());
-    let [value, _state] = context.values().with_runtime_value_access(|access| {
+    let [value, _state] = context.values().with_boundary_access(|access| {
         crate::eval::builtins::decode_outcome_for_test(&access, &outcome)
             .expect("builder reset must retain the strict outcome schema")
     });
@@ -2586,12 +2593,12 @@ fn builder_checkpoint_observes_a_lazy_reset_key_once_across_route_loss() {
 #[test]
 fn later_builder_fix_alternative_survives_route_loss_without_replay() {
     let context = isolated_context();
-    let state = context.values().with_runtime_value_access(|access| {
+    let state = context.values().with_boundary_access(|access| {
         crate::eval::builtins::initial_state_for_test(&access, Value::Dict(Dict::new_sync()))
     });
     let function_demands = Arc::new(AtomicUsize::new(0));
     let continuation_demands = Arc::new(AtomicUsize::new(0));
-    let (operation, state) = context.values().with_runtime_value_access(|access| {
+    let (operation, state) = context.values().with_boundary_access(|access| {
         let returned = |value| {
             Value::PartialBuiltin(BuiltinCall {
                 builtin: Builtin::InteractionNetBuilderReturn,
@@ -2601,20 +2608,20 @@ fn later_builder_fix_alternative_survives_route_loss_without_replay() {
         let choices = Value::PartialBuiltin(BuiltinCall {
             builtin: Builtin::InteractionNetBuilderAlt,
             arguments: Arc::from([
-                builder_effect_value(&context, returned(81)),
-                builder_effect_value(&context, returned(82)),
+                builder_effect_value(&access, returned(81)),
+                builder_effect_value(&access, returned(82)),
             ]),
         });
         let function = crate::eval::test_support::closed_function_value_in(
-            context.values(),
+            &access,
             1,
-            crate::eval::test_support::TestExpr::Value(builder_effect_value(&context, choices)),
+            crate::eval::test_support::TestExpr::Value(builder_effect_value(&access, choices)),
         );
-        let function = crate::runtime::RuntimeValueRoot::new(context.values(), function);
+        let function = crate::runtime::RuntimeValueRoot::new(&access, function);
         let observed_function = Arc::clone(&function_demands);
-        let function = Value::Lazy(LazyValue::semantic_thunk(context.values(), move |_| {
+        let function = Value::Lazy(LazyValue::semantic_thunk(&access, move |context| {
             observed_function.fetch_add(1, Ordering::SeqCst);
-            Ok(function.clone_core_for_test())
+            Ok(context.test_access(|access| function.clone_core_with(access)))
         }));
         let fixed = Value::PartialBuiltin(BuiltinCall {
             builtin: Builtin::InteractionNetBuilderFix,
@@ -2622,7 +2629,7 @@ fn later_builder_fix_alternative_survives_route_loss_without_replay() {
         });
 
         let continuation = crate::eval::test_support::closed_function_value_in(
-            context.values(),
+            &access,
             1,
             crate::eval::test_support::TestExpr::Apply(
                 Arc::new(crate::eval::test_support::TestExpr::Value(
@@ -2646,15 +2653,15 @@ fn later_builder_fix_alternative_survives_route_loss_without_replay() {
                 )),
             ),
         );
-        let continuation = crate::runtime::RuntimeValueRoot::new(context.values(), continuation);
+        let continuation = crate::runtime::RuntimeValueRoot::new(&access, continuation);
         let observed_continuation = Arc::clone(&continuation_demands);
-        let continuation = Value::Lazy(LazyValue::semantic_thunk(context.values(), move |_| {
+        let continuation = Value::Lazy(LazyValue::semantic_thunk(&access, move |context| {
             observed_continuation.fetch_add(1, Ordering::SeqCst);
-            Ok(continuation.clone_core_for_test())
+            Ok(context.test_access(|access| continuation.clone_core_with(access)))
         }));
         let operation = Value::PartialBuiltin(BuiltinCall {
             builtin: Builtin::InteractionNetBuilderSeq,
-            arguments: Arc::from([builder_effect_value(&context, fixed), continuation]),
+            arguments: Arc::from([builder_effect_value(&access, fixed), continuation]),
         });
         (operation, access.duplicate_value(&state))
     });
@@ -2671,7 +2678,7 @@ fn later_builder_fix_alternative_survives_route_loss_without_replay() {
     );
     let mut route_losses = 0;
     let outcome = drive_after_route_loss(&context, &retained, machine, &mut route_losses);
-    let [value, _state] = context.values().with_runtime_value_access(|access| {
+    let [value, _state] = context.values().with_boundary_access(|access| {
         crate::eval::builtins::decode_outcome_for_test(&access, &outcome)
             .expect("the selected builder fix alternative must use the outcome schema")
     });
@@ -2694,13 +2701,13 @@ fn public_pure_construction_survives_route_loss_without_repeating_effect_or_cont
     let context = isolated_context();
     let effect_demands = Arc::new(AtomicUsize::new(0));
     let continuation_demands = Arc::new(AtomicUsize::new(0));
-    let effect = context.values().with_runtime_value_access(|access| {
-        let continuation = builder_return_first_port_continuation(&context);
-        let continuation = crate::runtime::RuntimeValueRoot::new(context.values(), continuation);
+    let effect = context.values().with_boundary_access(|access| {
+        let continuation = builder_return_first_port_continuation(&access);
+        let continuation = crate::runtime::RuntimeValueRoot::new(&access, continuation);
         let observed_continuation = Arc::clone(&continuation_demands);
-        let continuation = Value::Lazy(LazyValue::semantic_thunk(context.values(), move |_| {
+        let continuation = Value::Lazy(LazyValue::semantic_thunk(&access, move |context| {
             observed_continuation.fetch_add(1, Ordering::SeqCst);
-            Ok(continuation.clone_core_for_test())
+            Ok(context.test_access(|access| continuation.clone_core_with(access)))
         }));
         let data = Value::PartialBuiltin(BuiltinCall {
             builtin: Builtin::InteractionNetBuilderData,
@@ -2708,14 +2715,14 @@ fn public_pure_construction_survives_route_loss_without_repeating_effect_or_cont
         });
         let sequence = Value::PartialBuiltin(BuiltinCall {
             builtin: Builtin::InteractionNetBuilderSeq,
-            arguments: Arc::from([builder_effect_value(&context, data), continuation]),
+            arguments: Arc::from([builder_effect_value(&access, data), continuation]),
         });
-        let effect = builder_effect_value(&context, sequence);
-        let effect = crate::runtime::RuntimeValueRoot::new(context.values(), effect);
+        let effect = builder_effect_value(&access, sequence);
+        let effect = crate::runtime::RuntimeValueRoot::new(&access, effect);
         let observed_effect = Arc::clone(&effect_demands);
-        let effect = Value::Lazy(LazyValue::semantic_thunk(context.values(), move |_| {
+        let effect = Value::Lazy(LazyValue::semantic_thunk(&access, move |context| {
             observed_effect.fetch_add(1, Ordering::SeqCst);
-            Ok(effect.clone_core_for_test())
+            Ok(context.test_access(|access| effect.clone_core_with(access)))
         }));
         Value::builtin_call_in(&access, Builtin::InteractionNet, vec![effect])
     });
@@ -2730,14 +2737,14 @@ fn public_pure_construction_survives_route_loss_without_repeating_effect_or_cont
     collect_between_handoffs(&context);
     let repeated = context
         .values()
-        .with_runtime_value_access(|access| Value::Lazy(LazyValue::from_root(&retained, &access)));
+        .with_boundary_access(|access| Value::Lazy(LazyValue::from_root(&retained, &access)));
     let Value::Net(second_net) =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &repeated)
             .expect("a second demand should observe the completed construction")
     else {
         panic!("memoized construction must remain a net")
     };
-    assert!(context.values().with_runtime_value_access(|access| {
+    assert!(context.values().with_boundary_access(|access| {
         first_net
             .runtime()
             .same_net_in(second_net.runtime(), &access)
@@ -2808,7 +2815,7 @@ fn public_pure_construction_retains_exposed_port_demand_across_route_loss() {
         builtin: Builtin::InteractionNetBuilderReturn,
         arguments: Arc::from([port]),
     });
-    let effect = builder_effect_value(&context, operation);
+    let effect = builder_effect_value(context.values(), operation);
     let call = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);
     let (retained, machine) = retained_lazy_machine(&context, call);
     let mut route_losses = 0;
@@ -2851,7 +2858,7 @@ fn public_construction_waits_for_first_result_before_ready_right_branch() {
         )),
         List::from_thunk(right.into()),
     );
-    let effect = construction_results_effect(&context, results);
+    let effect = construction_results_effect(context.values(), results);
     let call = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);
     let (retained, machine) = retained_lazy_machine(&context, call);
     let mut route_losses = 0;
@@ -2899,7 +2906,7 @@ fn public_construction_retains_first_result_while_second_promise_blocks() {
             second.duplicate_for_test(context.values()),
         )),
     );
-    let effect = construction_results_effect(&context, results);
+    let effect = construction_results_effect(context.values(), results);
     let call = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);
     let (retained, machine) = retained_lazy_machine(&context, call);
     let mut route_losses = 0;
@@ -2932,7 +2939,7 @@ fn public_construction_exposed_port_promise_retains_one_context_after_route_loss
     let context = isolated_context();
     let exposed = PromisedValue::new(context.values());
     let exposed_owner = exposed.root(context.values());
-    let effect = context.values().with_runtime_value_access(|access| {
+    let effect = context.values().with_boundary_access(|access| {
         let return_port = Value::PartialBuiltin(BuiltinCall {
             builtin: Builtin::InteractionNetBuilderReturn,
             arguments: Arc::from([Value::Promised(PromisedValue::from_root(
@@ -2940,7 +2947,7 @@ fn public_construction_exposed_port_promise_retains_one_context_after_route_loss
                 &access,
             ))]),
         });
-        builder_effect_value(&context, return_port)
+        builder_effect_value(&access, return_port)
     });
     let call = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);
     let (retained, machine) = retained_lazy_machine(&context, call);
@@ -2977,7 +2984,7 @@ fn public_construction_builder_operand_promise_resumes_same_program() {
     let context = isolated_context();
     let count = PromisedValue::new(context.values());
     let count_owner = count.root(context.values());
-    let effect = context.values().with_runtime_value_access(|access| {
+    let effect = context.values().with_boundary_access(|access| {
         let copy = Value::PartialBuiltin(BuiltinCall {
             builtin: Builtin::InteractionNetBuilderCopy,
             arguments: Arc::from([Value::Promised(PromisedValue::from_root(
@@ -2988,11 +2995,11 @@ fn public_construction_builder_operand_promise_resumes_same_program() {
         let sequence = Value::PartialBuiltin(BuiltinCall {
             builtin: Builtin::InteractionNetBuilderSeq,
             arguments: Arc::from([
-                builder_effect_value(&context, copy),
-                builder_return_first_port_continuation(&context),
+                builder_effect_value(&access, copy),
+                builder_return_first_port_continuation(&access),
             ]),
         });
-        builder_effect_value(&context, sequence)
+        builder_effect_value(&access, sequence)
     });
     let call = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);
     let (retained, machine) = retained_lazy_machine(&context, call);
@@ -3025,7 +3032,7 @@ fn public_construction_checkpoint_cycle_is_reclaimed_after_roots_drop() {
     let values = context.values();
     let count = PromisedValue::new(values);
     let count_owner = count.root(values);
-    let effect = values.with_runtime_value_access(|access| {
+    let effect = values.with_boundary_access(|access| {
         let copy = Value::PartialBuiltin(BuiltinCall {
             builtin: Builtin::InteractionNetBuilderCopy,
             arguments: Arc::from([Value::Promised(PromisedValue::from_root(
@@ -3036,11 +3043,11 @@ fn public_construction_checkpoint_cycle_is_reclaimed_after_roots_drop() {
         let sequence = Value::PartialBuiltin(BuiltinCall {
             builtin: Builtin::InteractionNetBuilderSeq,
             arguments: Arc::from([
-                builder_effect_value(&context, copy),
-                builder_return_first_port_continuation(&context),
+                builder_effect_value(&access, copy),
+                builder_return_first_port_continuation(&access),
             ]),
         });
-        builder_effect_value(&context, sequence)
+        builder_effect_value(&access, sequence)
     });
     let call = Value::builtin_call(values, Builtin::InteractionNet, vec![effect]);
     let (retained, mut machine) = retained_lazy_machine(&context, call);
@@ -3051,8 +3058,8 @@ fn public_construction_checkpoint_cycle_is_reclaimed_after_roots_drop() {
     ));
     assert_lazy_checkpoint_kind(&context, &machine, ManagedLazyCheckpointKindTag::Builtin);
 
-    let backedge = values
-        .with_runtime_value_access(|access| Value::Lazy(LazyValue::from_root(&retained, &access)));
+    let backedge =
+        values.with_boundary_access(|access| Value::Lazy(LazyValue::from_root(&retained, &access)));
     crate::core::set_test_promise(values, &count, backedge)
         .expect_without_debug("the count promise should accept a backedge to its construction");
     let live = values
@@ -3121,7 +3128,7 @@ fn host_call_follows_a_lazy_result_without_reinvocation() {
     let calls = Arc::new(AtomicUsize::new(0));
     let result_forces = Arc::new(AtomicUsize::new(0));
     let observed_forces = Arc::clone(&result_forces);
-    let result_root = context.values().with_runtime_value_access(|access| {
+    let result_root = context.values().with_boundary_access(|access| {
         let result = Value::Lazy(LazyValue::semantic_thunk_in(&access, move |_| {
             observed_forces.fetch_add(1, Ordering::SeqCst);
             Ok(number(44))
@@ -3130,14 +3137,14 @@ fn host_call_follows_a_lazy_result_without_reinvocation() {
     });
     let result = context
         .values()
-        .with_runtime_value_access(|access| result_root.clone_core_with(&access));
+        .with_boundary_access(|access| result_root.clone_core_with(&access));
     assert_same_value(
         &context,
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &result).unwrap(),
         &number(44),
     );
     let observed_calls = Arc::clone(&calls);
-    let lazy_root = context.values().with_runtime_value_access(|access| {
+    let lazy_root = context.values().with_boundary_access(|access| {
         let result = result_root.clone_core_with(&access);
         let lazy = LazyValue::external_host_call_in(
             &access,
@@ -3159,7 +3166,7 @@ fn host_call_follows_a_lazy_result_without_reinvocation() {
     });
     let lazy = context
         .values()
-        .with_runtime_value_access(|access| LazyValue::from_root(&lazy_root, &access));
+        .with_boundary_access(|access| LazyValue::from_root(&lazy_root, &access));
     let mut machine = lazy_machine(&context, lazy);
     let value = loop {
         match crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {

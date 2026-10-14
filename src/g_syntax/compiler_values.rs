@@ -312,7 +312,7 @@ pub(in crate::g_syntax) fn builtin_module(
 
 #[cfg(test)]
 pub(in crate::g_syntax) fn builtin_list_module(values: &CoreValueFactory) -> Dict {
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         with_values(values, |compiler| {
             value_dict(&project_value(&access, &compiler.list.value))
         })
@@ -441,14 +441,12 @@ pub(in crate::g_syntax) fn reflection_boundary_root(
 
 #[cfg(test)]
 pub(in crate::g_syntax) fn reflection_boundary_value(
-    values: &CoreValueFactory,
+    access: &RuntimeValueAccess<'_>,
     name: Value,
     final_defs: Value,
 ) -> Value {
-    values.with_runtime_value_access(|access| {
-        let root = reflection_boundary_root(&access, name, final_defs);
-        project_value(&access, &root)
-    })
+    let root = reflection_boundary_root(access, name, final_defs);
+    project_value(access, &root)
 }
 
 /// The first of a pure match's `results`, or an error if there are none.
@@ -510,8 +508,11 @@ pub(in crate::g_syntax) fn effect_value(access: &RuntimeValueAccess<'_>, name: &
 }
 
 #[cfg(test)]
-pub(in crate::g_syntax) fn effect_test_value(values: &CoreValueFactory, name: &str) -> Value {
-    values.with_runtime_value_access(|access| effect_value(&access, name))
+pub(in crate::g_syntax) fn effect_test_value(
+    values: &impl crate::core::TestAccess,
+    name: &str,
+) -> Value {
+    values.test_access(|access| effect_value(access, name))
 }
 
 pub(in crate::g_syntax) fn effect_path_value(
@@ -1194,17 +1195,17 @@ mod tests {
     }
 
     fn project_test_value(values: &CoreValueFactory, root: &RuntimeValueRoot) -> Value {
-        values.with_runtime_value_access(|access| project_value(&access, root))
+        values.with_boundary_access(|access| project_value(&access, root))
     }
 
     fn effect_test_value(values: &CoreValueFactory, name: &str) -> Value {
         prepare(values);
-        values.with_runtime_value_access(|access| effect_value(&access, name))
+        values.with_boundary_access(|access| effect_value(&access, name))
     }
 
     fn builtin_test_module(values: &CoreValueFactory, name: &str) -> Option<BuiltinModule> {
         prepare(values);
-        values.with_runtime_value_access(|access| builtin_module(&access, name))
+        values.with_boundary_access(|access| builtin_module(&access, name))
     }
 
     fn evaluate_test_expression(
@@ -1233,7 +1234,7 @@ mod tests {
         language: Value,
     ) -> RuntimeValueRoot {
         prepare(values);
-        values.with_runtime_value_access(|access| macro_environment(&access, base, language))
+        values.with_boundary_access(|access| macro_environment(&access, base, language))
     }
 
     #[test]

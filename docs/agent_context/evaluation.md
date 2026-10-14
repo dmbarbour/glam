@@ -555,6 +555,14 @@ control-flow overview.
   fixtures can hold unrooted compatibility values. Any test that forces GC
   must use `private_test_value_factory()` or another private runtime. A
   test-only assertion at the collection gateway latches this rule.
+- Tests hold the heap as runtime code does (`tests-follow-the-runtime`): a
+  test's outermost access is a boundary, polls run in quanta
+  (`EvalContext::evaluate_test_step`, `with_test_value_access`,
+  `EvaluationPollContext::quantum_for_context`), and code under a mutator
+  passes the access it holds. Test helpers take `&impl TestAccess`: a value
+  factory takes a boundary, while an access, an evaluator step or a
+  lazy source's thunk context lends its own, so a thunk passes its
+  `context` instead of entering the heap again.
 - Representative sample outputs must be identical in every collection mode.
   Collection counts and timing are profiling data, not semantics.
 - Test-only exact roots are real fixture ownership. A fixture that observes a

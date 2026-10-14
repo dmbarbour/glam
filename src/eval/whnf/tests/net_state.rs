@@ -11,7 +11,7 @@ fn isolated_values() -> CoreValueFactory {
     CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new())
 }
 
-fn sentinel(values: &CoreValueFactory) -> Value {
+fn sentinel(values: &impl crate::core::TestAccess) -> Value {
     Value::Lazy(LazyValue::semantic_thunk(values, |_| {
         Ok(Value::Number(0.into()))
     }))
@@ -213,7 +213,7 @@ fn net_state_trace_retains_every_value_position_through_collection() {
         crate::evaluation::EvalContext::with_test_value_access(&context, |access| {
             let mut next = 0;
             let mut make = || {
-                let value = sentinel(&values);
+                let value = sentinel(&access);
                 next += 1;
                 value
             };
@@ -241,7 +241,7 @@ fn net_state_trace_retains_every_value_position_through_collection() {
             assert_eq!(expected_lazy_ids.len(), next);
 
             let source_owner = expected_lazy_ids[1];
-            let promise = PromisedValue::new(&values);
+            let promise = PromisedValue::new(&access);
             let promise_id = access.promise(&promise).id();
             let followed = [
                 DeferredValueId::Lazy(expected_lazy_ids[0]),

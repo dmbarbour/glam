@@ -9,7 +9,7 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_scope(
     scope: &NameScope,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         syntax_expr_to_resolved_in_semantic_scope(
             &access,
             expr,

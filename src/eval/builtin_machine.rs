@@ -1238,11 +1238,10 @@ mod tests {
         // below then checks that ownership without this root.
         let front_root = front.root(context.values());
         let deferred_front = front.duplicate_for_test(context.values());
-        let deferred_values = context.values().clone();
-        let results = Value::semantic_thunk(context.values(), move |_| {
+        let results = Value::semantic_thunk(context.values(), move |context| {
             observed.fetch_add(1, Ordering::Relaxed);
             Ok(Value::List(crate::core::List::from_thunk(
-                ListThunk::Promised(deferred_front.duplicate_for_test(&deferred_values)),
+                ListThunk::Promised(deferred_front.duplicate_for_test(context)),
             )))
         });
         let selection = Value::builtin_call(context.values(), Builtin::IfResult, vec![results]);

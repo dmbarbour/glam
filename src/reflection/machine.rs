@@ -3778,7 +3778,7 @@ struct Branch<S: TaskSpecialization> {
 impl<S: TaskSpecialization> Branch<S> {
     #[cfg(test)]
     fn new(values: &CoreValueFactory, effect: Value, state: Value) -> Self {
-        let (effect, state) = values.with_runtime_value_access(|access| {
+        let (effect, state) = values.with_boundary_access(|access| {
             (
                 access.root_runtime_value(effect),
                 access.root_runtime_value(state),
@@ -4679,7 +4679,7 @@ enum BranchOutcome<S: TaskSpecialization> {
 impl<S: TaskSpecialization> BranchOutcome<S> {
     #[cfg(test)]
     fn complete(values: &CoreValueFactory, value: Value, branch: Branch<S>) -> Self {
-        let value = values.with_runtime_value_access(|access| branch.root_value(&access, value));
+        let value = values.with_boundary_access(|access| branch.root_value(&access, value));
         Self::Complete(value, branch)
     }
 

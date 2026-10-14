@@ -1773,7 +1773,7 @@ mod tests {
         let baseline = values.collect_managed_for_test().unwrap_or_else(|failure| {
             panic!("the {fixture} fixture should start collectible: {failure}")
         });
-        let root = values.with_runtime_value_access(|access| {
+        let root = values.with_boundary_access(|access| {
             let root = access
                 .construct_rooted_managed_promise()
                 .expect("the managed promise cell should fit a run");
@@ -1809,7 +1809,7 @@ mod tests {
         let baseline = values.collect_managed_for_test().unwrap_or_else(|failure| {
             panic!("the {fixture} fixture should start collectible: {failure}")
         });
-        let root = values.with_runtime_value_access(|access| {
+        let root = values.with_boundary_access(|access| {
             let root = access
                 .construct_rooted_managed_promise()
                 .expect("the managed promise cell should fit a run");
@@ -1845,7 +1845,7 @@ mod tests {
         let baseline = values.collect_managed_for_test().unwrap_or_else(|failure| {
             panic!("the {fixture} fixture should start collectible: {failure}")
         });
-        let root = values.with_runtime_value_access(|access| {
+        let root = values.with_boundary_access(|access| {
             let lazy_edge = access
                 .allocate_managed_lazy(LazySource::Error)
                 .expect("the managed lazy cell should fit a run");
@@ -2062,12 +2062,12 @@ mod tests {
     #[test]
     fn bounded_lazy_gateway_preserves_terminal_publication_protocol() {
         let values = new_values();
-        let root = values.with_runtime_value_access(|access| {
+        let root = values.with_boundary_access(|access| {
             access
                 .construct_rooted_managed_lazy(LazySource::Error)
                 .expect("the managed lazy cell should fit a run")
         });
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             let winner = EvaluatedValue::from_whnf_in(&access, Value::Number(42.into())).unwrap();
             let loser = EvaluatedValue::from_whnf_in(&access, Value::Number(73.into())).unwrap();
             let lazy = root
@@ -2084,7 +2084,7 @@ mod tests {
         });
 
         let unrelated = new_values();
-        unrelated.with_runtime_value_access(|access| {
+        unrelated.with_boundary_access(|access| {
             assert!(root.access(&access).is_none());
         });
     }
@@ -2092,7 +2092,7 @@ mod tests {
     #[test]
     fn bounded_promise_gateway_preserves_one_terminal_winner() {
         let values = new_values();
-        let root = values.with_runtime_value_access(|access| {
+        let root = values.with_boundary_access(|access| {
             access
                 .construct_rooted_managed_promise()
                 .expect("the managed promise cell should fit a run")
@@ -2101,7 +2101,7 @@ mod tests {
         let loser = Value::Number(12.into());
 
         assert!(!root.is_terminal());
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             let promise = root
                 .access(&access)
                 .expect("the matching value domain should authorize its promise cell");
@@ -2123,7 +2123,7 @@ mod tests {
         assert!(root.is_terminal());
 
         let unrelated = new_values();
-        unrelated.with_runtime_value_access(|access| {
+        unrelated.with_boundary_access(|access| {
             assert!(root.access(&access).is_none());
         });
     }
@@ -2139,7 +2139,7 @@ mod tests {
         });
         let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
 
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             let root = access
                 .construct_rooted_managed_lazy(LazySource::Access {
                     path: Arc::from([]),
@@ -2170,7 +2170,7 @@ mod tests {
         let values = new_values();
         let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
 
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             let source = access
                 .construct_managed_promise()
                 .expect("the source promise should fit a run");
@@ -2206,7 +2206,7 @@ mod tests {
         let coordinator =
             EvaluationWorkCoordinator::new_for_test(values.clone(), admission.clone());
 
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             let target_root = access
                 .construct_rooted_managed_promise()
                 .expect("the managed promise cell should fit a run");
@@ -2273,7 +2273,7 @@ mod tests {
             _second_target_root,
             first_assignment,
             second_assignment,
-        ) = values.with_runtime_value_access(|access| {
+        ) = values.with_boundary_access(|access| {
             let promise_root = access
                 .construct_rooted_managed_promise()
                 .expect("the managed promise cell should fit a run");
@@ -2303,7 +2303,7 @@ mod tests {
         let winner_root = promise_root.clone();
         let winner_assignment_for_thread = first_assignment.duplicate_for_test(&values);
         let winner = std::thread::spawn(move || {
-            let published = winner_values.with_runtime_value_access(|access| {
+            let published = winner_values.with_boundary_access(|access| {
                 winner_root
                     .access(&access)
                     .expect("the winner promise should remain live")
@@ -2317,7 +2317,7 @@ mod tests {
         let loser_root = promise_root.clone();
         let loser = std::thread::spawn(move || {
             winner_observed.recv().unwrap();
-            loser_values.with_runtime_value_access(|access| {
+            loser_values.with_boundary_access(|access| {
                 loser_root
                     .access(&access)
                     .expect("the loser promise should remain live")
@@ -2327,7 +2327,7 @@ mod tests {
 
         assert!(winner.join().expect("winner thread panicked").is_ok());
         assert!(loser.join().expect("loser thread panicked").is_err());
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             access.assert_same_representation_for_test(
                 &promise_root.access(&access).unwrap().assignment(),
                 &Some(Ok(first_assignment)),
@@ -2345,13 +2345,13 @@ mod tests {
     #[test]
     fn bounded_core_net_gateway_preserves_cell_mutation_publication() {
         let values = new_values();
-        let root = values.with_runtime_value_access(|access| {
+        let root = values.with_boundary_access(|access| {
             access
                 .construct_rooted_managed_core_net(prepared_runtime(&access, 5))
                 .expect("the managed core net should fit one collector slot")
         });
 
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             let net = root
                 .access(&access)
                 .expect("the matching value domain should authorize its core net");
@@ -2368,7 +2368,7 @@ mod tests {
         });
 
         let unrelated = new_values();
-        unrelated.with_runtime_value_access(|access| {
+        unrelated.with_boundary_access(|access| {
             assert!(root.access(&access).is_none());
         });
     }
@@ -2376,7 +2376,7 @@ mod tests {
     #[test]
     fn core_net_reduction_enters_the_same_managed_transition_gateway() {
         let values = new_values();
-        let (lazy_root, net_root) = values.with_runtime_value_access(|access| {
+        let (lazy_root, net_root) = values.with_boundary_access(|access| {
             let lazy_root = access
                 .construct_rooted_managed_lazy(LazySource::Error)
                 .expect("the managed lazy should fit one collector slot");
@@ -2398,7 +2398,7 @@ mod tests {
         });
         let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
 
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             let net = net_root
                 .access(&access)
                 .expect("the rooted core net should remain accessible");
@@ -2463,7 +2463,7 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("the recursive-cell heap should start collectible");
-        let (lazy, promise, net) = values.with_runtime_value_access(|access| {
+        let (lazy, promise, net) = values.with_boundary_access(|access| {
             (
                 access
                     .construct_rooted_managed_lazy(LazySource::Error)
@@ -2477,7 +2477,7 @@ mod tests {
             )
         });
 
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             assert!(lazy.access(&access).is_some());
             let data = net.access(&access).unwrap().with(|runtime| {
                 runtime
@@ -2488,7 +2488,7 @@ mod tests {
         });
 
         let unrelated = new_values();
-        unrelated.with_runtime_value_access(|access| {
+        unrelated.with_boundary_access(|access| {
             assert!(lazy.access(&access).is_none());
             assert!(promise.access(&access).is_none());
             assert!(net.access(&access).is_none());
@@ -2511,7 +2511,7 @@ mod tests {
     #[test]
     fn semantic_edges_and_durable_roots_share_one_managed_identity() {
         let values = new_values();
-        let (lazy, promise, net) = values.with_runtime_value_access(|access| {
+        let (lazy, promise, net) = values.with_boundary_access(|access| {
             let lazy_edge = access
                 .allocate_managed_lazy(LazySource::Error)
                 .expect("the managed lazy cell should fit a run");
@@ -2536,7 +2536,7 @@ mod tests {
             )
         });
 
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             let lazy_alias = lazy.edge(&access);
             let promise_alias = promise.edge(&access);
             let net_alias = net.edge(&access);
@@ -2560,7 +2560,7 @@ mod tests {
         });
 
         let unrelated = new_values();
-        unrelated.with_runtime_value_access(|access| {
+        unrelated.with_boundary_access(|access| {
             assert!(lazy.access(&access).is_none());
             assert!(promise.access(&access).is_none());
             assert!(net.access(&access).is_none());
@@ -2681,7 +2681,7 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("the poisoned-producer fixture should start collectible");
-        let root = values.with_runtime_value_access(|access| {
+        let root = values.with_boundary_access(|access| {
             let edge = access
                 .allocate_managed_lazy(LazySource::Error)
                 .expect("the managed lazy cell should fit a run");
@@ -2719,7 +2719,7 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("the managed-lazy cycle fixture should start collectible");
-        let root = values.with_runtime_value_access(|access| {
+        let root = values.with_boundary_access(|access| {
             let edge = access
                 .allocate_managed_lazy(LazySource::Error)
                 .expect("the managed lazy cell should fit a run");
@@ -2773,7 +2773,7 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("the managed-lazy forward fixture should start collectible");
-        let root = values.with_runtime_value_access(|access| {
+        let root = values.with_boundary_access(|access| {
             let target = access
                 .allocate_managed_lazy(LazySource::Error)
                 .expect("the managed lazy cell should fit a run");
@@ -2825,7 +2825,7 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("the managed-promise cycle fixture should start collectible");
-        let root = values.with_runtime_value_access(|access| {
+        let root = values.with_boundary_access(|access| {
             let root = access
                 .construct_rooted_managed_promise()
                 .expect("the managed promise cell should fit a run");
@@ -2859,7 +2859,7 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("the managed-net cycle fixture should start collectible");
-        let root = values.with_runtime_value_access(|access| {
+        let root = values.with_boundary_access(|access| {
             let allocator = access
                 .allocator::<ManagedCoreNetCell>()
                 .expect("the managed core-net cell should fit a run");
@@ -2938,7 +2938,7 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("the lazy-net cycle fixture should start collectible");
-        let root = values.with_runtime_value_access(|access| {
+        let root = values.with_boundary_access(|access| {
             let lazy_edge = access
                 .allocate_managed_lazy(LazySource::Error)
                 .expect("the managed lazy cell should fit a run");
@@ -2981,7 +2981,7 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("the promise-net cycle fixture should start collectible");
-        let root = values.with_runtime_value_access(|access| {
+        let root = values.with_boundary_access(|access| {
             let promise_edge = access
                 .allocate_managed_promise()
                 .expect("the managed promise cell should fit a run");
@@ -3025,7 +3025,7 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("the three-family cycle fixture should start collectible");
-        let root = values.with_runtime_value_access(|access| {
+        let root = values.with_boundary_access(|access| {
             let lazy_edge = access
                 .allocate_managed_lazy(LazySource::Error)
                 .expect("the managed lazy cell should fit a run");
@@ -3137,7 +3137,7 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("the function-stage cycle fixture should start collectible");
-        let root = values.with_runtime_value_access(|access| {
+        let root = values.with_boundary_access(|access| {
             let promise_edge = access
                 .allocate_managed_promise()
                 .expect("the managed promise cell should fit a run");
@@ -3201,7 +3201,7 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("the stuck-reason cycle fixture should start collectible");
-        let root = values.with_runtime_value_access(|access| {
+        let root = values.with_boundary_access(|access| {
             let mut builder = NetBuilder::<CoreSpecialization>::new();
             let [function, argument, result] = builder.bind();
             let callable = builder.data(Value::Number(0.into()));
@@ -3232,7 +3232,7 @@ mod tests {
             let net = crate::core_net::CoreRuntimeNet::from_managed_edge(edge);
             let halt = EvaluationHalt::from_value(
                 &access,
-                Value::Net(NetValue::new(net.duplicate_for_test(&values))),
+                Value::Net(NetValue::new(net.duplicate_for_test(&access))),
             );
             net.access(&access).fail_claimed_call(call, halt);
             root
@@ -3260,7 +3260,7 @@ mod tests {
             let baseline = values.collect_managed_for_test().unwrap_or_else(|failure| {
                 panic!("the {state} operator-work fixture should start collectible: {failure}")
             });
-            let root = values.with_runtime_value_access(|access| {
+            let root = values.with_boundary_access(|access| {
                 let promise_root = access
                     .construct_rooted_managed_promise()
                     .expect("the managed promise cell should fit a run");
@@ -3288,7 +3288,7 @@ mod tests {
                         .access(&access)
                         .expect("the rooted promise should be accessible")
                         .publish(Ok(Value::Net(NetValue::new(
-                            net.duplicate_for_test(&values),
+                            net.duplicate_for_test(&access),
                         ))))
                         .is_ok()
                 );
@@ -3331,7 +3331,7 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("the remote-cursor cycle fixture should start collectible");
-        let root = values.with_runtime_value_access(|access| {
+        let root = values.with_boundary_access(|access| {
             let promise_edge = access
                 .allocate_managed_promise()
                 .expect("the managed promise cell should fit a run");

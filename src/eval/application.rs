@@ -19,7 +19,7 @@ pub(crate) fn apply_values(
     if arguments.is_empty() {
         return Ok(function);
     }
-    Ok(context.values().with_runtime_value_access(|access| {
+    Ok(context.values().with_boundary_access(|access| {
         Value::Lazy(LazyValue::from_application_in(
             &access,
             function,

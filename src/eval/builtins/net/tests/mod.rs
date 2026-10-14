@@ -1,5 +1,6 @@
 //! Semantic-netlist conformance fixtures.
 
+use crate::core::TestAccess as _;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -22,7 +23,7 @@ fn with_access<R>(
 ) -> R {
     context
         .values()
-        .with_runtime_value_access(|access| body(&access))
+        .with_boundary_access(|access| body(&access))
 }
 
 #[track_caller]
@@ -159,7 +160,7 @@ fn compact_replay_assigns_logical_ports_in_constructor_source_order() {
         else {
             panic!("compact replay must produce a net")
         };
-        net.runtime().test_with(context.values(), |runtime| {
+        net.runtime().test_with(access, |runtime| {
             let exposed_neighbor = runtime
                 .interface_neighbor(runtime.exposed())
                 .expect("the replayed net must wire its exposed interface");
@@ -436,7 +437,7 @@ fn public_construction_data_backedge_is_lazy_and_reclaimed_after_roots_drop() {
     else {
         panic!("construction with a lazy backedge must produce a net")
     };
-    let payload = values.with_runtime_value_access(|access| {
+    let payload = values.with_boundary_access(|access| {
         net.runtime().access(&access).with(|runtime| {
             runtime
                 .interface_data(runtime.exposed())
@@ -490,7 +491,7 @@ fn partial_builder(
 
 fn builder_effect(access: &RuntimeValueAccess<'_>, operation: Value) -> Value {
     let handler = crate::eval::test_support::closed_function_value_in(
-        access.values(),
+        access,
         1,
         crate::eval::test_support::TestExpr::Value(operation),
     );
@@ -499,7 +500,7 @@ fn builder_effect(access: &RuntimeValueAccess<'_>, operation: Value) -> Value {
 
 fn effect_returning_results(access: &RuntimeValueAccess<'_>, results: List) -> Value {
     let handler = crate::eval::test_support::closed_function_value_in(
-        access.values(),
+        access,
         2,
         crate::eval::test_support::TestExpr::Value(Value::List(results)),
     );
@@ -593,7 +594,7 @@ fn public_construction_selects_only_the_first_two_results() {
     let tail_demands = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_tail = Arc::clone(&tail_demands);
     let effect = with_access(&context, |access| {
-        let tail = LazyValue::semantic_thunk(access.values(), move |_| {
+        let tail = LazyValue::semantic_thunk(access, move |_| {
             observed_tail.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Err(crate::core::EvaluationHalt::new(
                 "third result was demanded",
@@ -625,10 +626,10 @@ fn public_construction_does_not_demand_its_effect_until_observed() {
     let observed_effect = Arc::clone(&effect_demands);
     let effect = with_access(&context, |access| {
         let empty = effect_returning_results(access, List::empty());
-        let empty = crate::runtime::RuntimeValueRoot::new(access.values(), empty);
-        Value::Lazy(LazyValue::semantic_thunk(access.values(), move |_| {
+        let empty = crate::runtime::RuntimeValueRoot::new(access, empty);
+        Value::Lazy(LazyValue::semantic_thunk(access, move |context| {
             observed_effect.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(empty.clone_core_for_test())
+            Ok(context.test_access(|access| empty.clone_core_with(access)))
         }))
     });
     let construction = Value::builtin_call(context.values(), Builtin::InteractionNet, vec![effect]);
@@ -654,7 +655,7 @@ fn public_construction_does_not_demand_its_effect_until_observed() {
 
 fn constant_builder_continuation(access: &RuntimeValueAccess<'_>, builder: Value) -> Value {
     crate::eval::test_support::closed_function_value_in(
-        access.values(),
+        access,
         1,
         crate::eval::test_support::TestExpr::Value(builder),
     )
@@ -758,7 +759,7 @@ fn apply_expr(
 
 fn invoke_continuation_with(access: &RuntimeValueAccess<'_>, value: Value) -> Value {
     crate::eval::test_support::closed_function_value_in(
-        access.values(),
+        access,
         1,
         apply_expr(
             crate::eval::test_support::TestExpr::Local(0),
@@ -787,7 +788,7 @@ fn return_continuation(access: &RuntimeValueAccess<'_>) -> Value {
         ),
         handler,
     );
-    crate::eval::test_support::closed_function_value_in(access.values(), 1, effect)
+    crate::eval::test_support::closed_function_value_in(access, 1, effect)
 }
 
 fn return_first_port_continuation(access: &RuntimeValueAccess<'_>) -> Value {
@@ -811,7 +812,7 @@ fn return_first_port_continuation(access: &RuntimeValueAccess<'_>) -> Value {
         ),
         handler,
     );
-    crate::eval::test_support::closed_function_value_in(access.values(), 1, effect)
+    crate::eval::test_support::closed_function_value_in(access, 1, effect)
 }
 
 #[test]
@@ -1133,7 +1134,7 @@ fn hidden_builder_construction_rejects_invalid_counts_tokens_and_port_exhaustion
             partial_builder(
                 access,
                 Builtin::InteractionNetBuilderWire,
-                vec![left, duplicate(&context, &valid_port)],
+                vec![left, access.duplicate_value(&valid_port)],
             )
         });
         let error = builder_result_at(&context, wire, duplicate(&context, &initial), 0)
@@ -1269,8 +1270,8 @@ fn hidden_builder_alternatives_roll_back_both_journals_and_fix_preserves_them() 
             access,
             Builtin::InteractionNetBuilderWire,
             vec![
-                duplicate(&context, &ports[0]),
-                duplicate(&context, &ports[1]),
+                access.duplicate_value(&ports[0]),
+                access.duplicate_value(&ports[1]),
             ],
         )
     });
@@ -1388,16 +1389,16 @@ fn hidden_builder_get_resumes_lazy_paths_and_intermediates_and_rejects_invalid_o
     let source_path = with_access(&context, |access| {
         path(access, [outer.clone(), inner.clone()])
     });
-    let path_values = context.values().clone();
-    let lazy_path = Value::Lazy(LazyValue::semantic_thunk(context.values(), move |_| {
-        Ok(source_path.duplicate_for_test(&path_values))
-    }));
+    let lazy_path = Value::Lazy(LazyValue::semantic_thunk(
+        context.values(),
+        move |context| Ok(source_path.duplicate_for_test(context)),
+    ));
     let inner_dict =
         Value::Dict(Dict::new_sync().insert(inner.clone(), Value::binary_from_text("ready")));
-    let inner_values = context.values().clone();
-    let lazy_inner = Value::Lazy(LazyValue::semantic_thunk(context.values(), move |_| {
-        Ok(inner_dict.duplicate_for_test(&inner_values))
-    }));
+    let lazy_inner = Value::Lazy(LazyValue::semantic_thunk(
+        context.values(),
+        move |context| Ok(inner_dict.duplicate_for_test(context)),
+    ));
     let (state, get, get_missing) = with_access(&context, |access| {
         let Value::Dict(user_state) = super::builder::initial_user_state(access) else {
             unreachable!()
@@ -1550,17 +1551,17 @@ fn hidden_builder_reset_shift_resumes_lazy_keys_and_captured_cut() {
     let prompt = Value::binary_from_text("lazy prompt");
     let reset_key = {
         let prompt = duplicate_value(&context, &prompt);
-        let values = context.values().clone();
-        Value::Lazy(LazyValue::semantic_thunk(context.values(), move |_| {
-            Ok(prompt.duplicate_for_test(&values))
-        }))
+        Value::Lazy(LazyValue::semantic_thunk(
+            context.values(),
+            move |context| Ok(prompt.duplicate_for_test(context)),
+        ))
     };
     let shift_key = {
         let prompt = duplicate_value(&context, &prompt);
-        let values = context.values().clone();
-        Value::Lazy(LazyValue::semantic_thunk(context.values(), move |_| {
-            Ok(prompt.duplicate_for_test(&values))
-        }))
+        Value::Lazy(LazyValue::semantic_thunk(
+            context.values(),
+            move |context| Ok(prompt.duplicate_for_test(context)),
+        ))
     };
     let (state, capture) = with_access(&context, |access| {
         let state = encode_builder_state(

@@ -259,7 +259,10 @@ mod tests {
         Value::Number(value.into())
     }
 
-    fn edges(values: &CoreValueFactory, value: &impl CompatibilityValueEdges) -> Vec<Value> {
+    fn edges(
+        values: &impl crate::core::TestAccess,
+        value: &impl CompatibilityValueEdges,
+    ) -> Vec<Value> {
         let mut edges = Vec::new();
         value.visit_compatibility_value_edges(&mut |value| {
             edges.push(value.duplicate_for_test(values));
@@ -268,15 +271,17 @@ mod tests {
     }
 
     fn assert_edges(
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
         value: &impl CompatibilityValueEdges,
         expected: &[Value],
     ) {
         let actual = edges(values, value);
         assert_eq!(actual.len(), expected.len());
-        for (actual, expected) in actual.iter().zip(expected) {
-            values.assert_same_representation_for_test(actual, expected);
-        }
+        values.test_access(|access| {
+            for (actual, expected) in actual.iter().zip(expected) {
+                access.assert_same_representation_for_test(actual, expected);
+            }
+        });
     }
 
     fn fixture_function(values: &CoreValueFactory) -> FunctionValue {
@@ -394,13 +399,13 @@ mod tests {
             &FixpointComputation::ObjectInstance(first.duplicate_for_test(&values)),
             &[first.duplicate_for_test(&values)],
         );
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             let Value::Metadata(metadata) =
                 access.metadata_carrier(access.duplicate_value(&second))
             else {
                 unreachable!("metadata construction must produce a carrier")
             };
-            assert_edges(&values, &metadata, &[second.duplicate_for_test(&values)]);
+            assert_edges(&access, &metadata, &[second.duplicate_for_test(&access)]);
         });
 
         let reflection_value = Value::reflection_gate(
@@ -440,7 +445,7 @@ mod tests {
             crate::core::fail_test_promise(
                 &values,
                 &failed_promise,
-                Arc::new(values.with_runtime_value_access(|access| {
+                Arc::new(values.with_boundary_access(|access| {
                     EvaluationFailure::emission_in(
                         &access,
                         access.duplicate_value(&failure_emission),
@@ -473,7 +478,7 @@ mod tests {
         );
 
         let complete = LazyValue::semantic_computation(&values, [second], return_first_capture);
-        let evaluated = values.with_runtime_value_access(|access| {
+        let evaluated = values.with_boundary_access(|access| {
             EvaluatedValue::from_whnf_in(&access, access.duplicate_value(&first))
                 .expect("a number is already in weak-head normal form")
         });
@@ -483,7 +488,7 @@ mod tests {
         };
         values.assert_same_representation_for_test(
             &cached,
-            &values.with_runtime_value_access(|access| {
+            &values.with_boundary_access(|access| {
                 EvaluatedValue::from_whnf_in(&access, access.duplicate_value(&first)).unwrap()
             }),
         );
@@ -504,7 +509,7 @@ mod tests {
             ]
             .into_boxed_slice(),
         });
-        let failure = values.with_runtime_value_access(|access| {
+        let failure = values.with_boundary_access(|access| {
             let first = access.duplicate_value(&shared);
             let second = access.duplicate_value(&shared);
             EvaluationFailure::dependency_cycle(cycle.clone())

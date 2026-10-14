@@ -9,11 +9,11 @@ use super::*;
 use crate::test_support::ResultTestExt as _;
 
 fn unit(values: &crate::core::CoreValueFactory) -> crate::core::Value {
-    values.with_runtime_value_access(|access| access.unit())
+    values.with_boundary_access(|access| access.unit())
 }
 
 fn rooted_unit(values: &crate::core::CoreValueFactory) -> RuntimeValueRoot {
-    values.with_runtime_value_access(|access| access.root_runtime_value(access.unit()))
+    values.with_boundary_access(|access| access.root_runtime_value(access.unit()))
 }
 
 /// Real external ownership beside the machine-facing demand record.
@@ -121,7 +121,7 @@ fn reflection_promise_terminal_mapper_covers_every_terminal_disposition() {
     let killed_root = crate::runtime::RuntimeFailureRoot::new(&values, killed.clone());
     let unresolved = Arc::new(EvaluationFailure::message("unresolved task promise"));
 
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         let returned = TaskPromiseTerminalMapper::ReflectionReturnValue.assignment(
             &access,
             &EvaluationWaitTerminal::Complete(completed.clone()),

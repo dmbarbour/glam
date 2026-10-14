@@ -194,17 +194,15 @@ mod tests {
             .collect_managed_for_test()
             .expect("canonical roots should collect before the formatter fixture");
         let _ = root(&values);
-        let first = values.with_runtime_value_access(|access| value(&access));
-        let second = values.with_runtime_value_access(|access| value(&access));
+        let first = values.with_boundary_access(|access| value(&access));
+        let second = values.with_boundary_access(|access| value(&access));
         assert!(matches!(first, Value::Function(_)));
         values.assert_same_representation_for_test(&first, &second);
         let live = values
             .collect_managed_for_test()
             .expect("the cached formatter root should survive collection");
         assert_eq!(live.root_entries(), baseline.root_entries() + 1);
-        assert!(
-            values.with_runtime_value_access(|access| matches!(value(&access), Value::Function(_)))
-        );
+        assert!(values.with_boundary_access(|access| matches!(value(&access), Value::Function(_))));
     }
 
     #[test]

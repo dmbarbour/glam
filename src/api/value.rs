@@ -842,7 +842,7 @@ impl Value {
                 self.runtime_id().get()
             ))
         })?;
-        Ok(values.with_runtime_value_access(|access| self.0.clone_core_with(&access)))
+        Ok(values.with_boundary_access(|access| self.0.clone_core_with(&access)))
     }
 
     pub(crate) fn value_observer(&self) -> RuntimeValueObserver {
@@ -860,6 +860,11 @@ impl Value {
     #[cfg(test)]
     pub(crate) fn clone_core_for_test(&self) -> CoreValue {
         self.0.clone_core_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clone_core_in(&self, values: &impl crate::core::TestAccess) -> CoreValue {
+        self.0.clone_core_in(values)
     }
 }
 

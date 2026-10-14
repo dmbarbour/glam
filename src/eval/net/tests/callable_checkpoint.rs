@@ -79,10 +79,9 @@ fn callable_checkpoint_covers_lazy_and_mixed_dependency_chains_once() {
     let outer_runs = Arc::new(AtomicUsize::new(0));
     let observed_outer = Arc::clone(&outer_runs);
     let outer_inner = Value::Lazy(inner);
-    let outer_values = context.values().clone();
-    let outer = LazyValue::semantic_thunk(context.values(), move |_| {
+    let outer = LazyValue::semantic_thunk(context.values(), move |context| {
         observed_outer.fetch_add(1, Ordering::SeqCst);
-        Ok(outer_inner.duplicate_for_test(&outer_values))
+        Ok(outer_inner.duplicate_for_test(context))
     });
     let outer_id = outer.id(context.values());
     let (runtime, call) = claimed_core_call_in(context.values(), Value::Lazy(outer));
@@ -126,10 +125,9 @@ fn callable_checkpoint_covers_lazy_and_mixed_dependency_chains_once() {
     let mixed_runs = Arc::new(AtomicUsize::new(0));
     let observed_mixed = Arc::clone(&mixed_runs);
     let promised = Value::Promised(promise.duplicate_for_test(context.values()));
-    let mixed_values = context.values().clone();
-    let mixed = LazyValue::semantic_thunk(context.values(), move |_| {
+    let mixed = LazyValue::semantic_thunk(context.values(), move |context| {
         observed_mixed.fetch_add(1, Ordering::SeqCst);
-        Ok(promised.duplicate_for_test(&mixed_values))
+        Ok(promised.duplicate_for_test(context))
     });
     let mixed_id = mixed.id(context.values());
     let (runtime, call) = claimed_core_call_in(context.values(), Value::Lazy(mixed));
@@ -172,7 +170,7 @@ fn callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures() {
     let first = PromisedValue::new(context.values());
     let terminal_value = context
         .values()
-        .with_runtime_value_access(|access| Value::Promised(terminal.duplicate_in(&access)));
+        .with_boundary_access(|access| Value::Promised(terminal.duplicate_in(&access)));
     crate::core::set_test_promise(context.values(), &first, terminal_value)
         .expect_without_debug("first promise delegates to terminal promise");
     let first_id = first.id(context.values());
@@ -204,7 +202,7 @@ fn callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures() {
     let cycle_id = cycle.id(context.values());
     let cycle_value = context
         .values()
-        .with_runtime_value_access(|access| Value::Promised(cycle.duplicate_in(&access)));
+        .with_boundary_access(|access| Value::Promised(cycle.duplicate_in(&access)));
     crate::core::set_test_promise(context.values(), &cycle, cycle_value)
         .expect_without_debug("promise accepts its own semantic identity");
     let (runtime, call) = claimed_core_call_in(context.values(), Value::Promised(cycle));
@@ -253,11 +251,10 @@ fn callable_checkpoint_covers_promise_spills_cycles_and_terminal_failures() {
         "assigned promise failure",
     )
     .expect_without_debug("promise accepts its failure");
-    let failed_values = context.values().clone();
     let leading =
-        LazyValue::semantic_thunk(context.values(), move |_| {
+        LazyValue::semantic_thunk(context.values(), move |context| {
             Ok(Value::Promised(
-                failed_promise.duplicate_for_test(&failed_values),
+                failed_promise.duplicate_for_test(context),
             ))
         });
     let (runtime, call) = claimed_core_call_in(context.values(), Value::Lazy(leading));
@@ -315,7 +312,7 @@ fn block_task_promise(
     net.wire(Port::principal(bind), data);
     net.wire(Port::auxiliary(bind, 1), Port::principal(erase));
     let template = net.finish(Port::auxiliary(bind, 2));
-    let (root, runtime, call) = observer.values().with_runtime_value_access(|access| {
+    let (root, runtime, call) = observer.values().with_boundary_access(|access| {
         let runtime = access
             .construct_managed_core_net(template.instantiate_with(&access))
             .expect("managed task-promise net must fit one collector run");
@@ -414,7 +411,7 @@ fn callable_checkpoint_admits_each_lazy_source_family_once() {
         context.values(),
         context
             .values()
-            .with_runtime_value_access(|access| access.unit()),
+            .with_boundary_access(|access| access.unit()),
     ) {
         Value::Lazy(lazy) => lazy,
         _ => unreachable!("reflection task results are lazy"),
@@ -491,7 +488,7 @@ fn cached_lazy_failure_is_already_evaluated_by_construction() {
     crate::core::cache_test_lazy(
         context.values(),
         &lazy,
-        Ok(context.values().with_runtime_value_access(|access| {
+        Ok(context.values().with_boundary_access(|access| {
             EvaluatedValue::from_whnf_in(&access, Value::Builtin(Builtin::Add)).unwrap()
         })),
     )
@@ -553,13 +550,13 @@ fn rooted_claimed_core_call_in(
 ) -> (crate::core::ManagedCoreNetRoot, CoreRuntimeNet, Call) {
     let mut net = NetBuilder::<CoreSpecialization>::new();
     let bind = net.push(crate::interaction_net::Node::Bind);
-    let data = net.data(values.with_runtime_value_access(|access| access.unit()));
+    let data = net.data(values.with_boundary_access(|access| access.unit()));
     let erase = net.push(crate::interaction_net::Node::Erase);
     net.wire(Port::principal(bind), data);
     net.wire(Port::auxiliary(bind, 1), Port::principal(erase));
     let template = net.finish(Port::auxiliary(bind, 2));
 
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         let root = access
             .construct_rooted_managed_core_net(template.instantiate_with(&access))
             .expect("managed core-call fixture must fit one collector run");
@@ -621,7 +618,7 @@ fn claimed_applied_core_call_in(
     let mut net = NetBuilder::<CoreSpecialization>::new();
     let [application, argument, result] = net.bind();
     let callable = net.data(callable);
-    let argument_value = net.data(values.with_runtime_value_access(|access| access.unit()));
+    let argument_value = net.data(values.with_boundary_access(|access| access.unit()));
     net.wire(application, callable);
     net.wire(argument, argument_value);
     let runtime = values.instantiate_core_net(&net.finish(result));
@@ -859,7 +856,7 @@ fn cursor_deferral_and_collection_retain_only_the_source_checkpoint() {
         .collect_managed_for_test()
         .expect("collection while a blocked checkpoint cursor is deferred must succeed");
 
-    let unit = values.with_runtime_value_access(|access| access.unit());
+    let unit = values.with_boundary_access(|access| access.unit());
     let result = crate::eval::test_support::closed_function_value_in(
         &values,
         1,
@@ -930,7 +927,7 @@ fn callable_checkpoint_usage_distinguishes_production_from_frame_fixture() {
     let first = PromisedValue::new(context.values());
     let terminal_value = context
         .values()
-        .with_runtime_value_access(|access| Value::Promised(terminal.duplicate_in(&access)));
+        .with_boundary_access(|access| Value::Promised(terminal.duplicate_in(&access)));
     crate::core::set_test_promise(context.values(), &first, terminal_value)
         .expect_without_debug("first promise delegates to the terminal promise");
     let (runtime, call) = claimed_core_call_in(context.values(), Value::Promised(first));
@@ -957,7 +954,7 @@ fn callable_checkpoint_usage_distinguishes_production_from_frame_fixture() {
 
     let argument = context
         .values()
-        .with_runtime_value_access(|access| access.unit());
+        .with_boundary_access(|access| access.unit());
     let (_runtime_root, runtime, call, _) = install_checkpoint(&context, |access| {
         crate::eval::whnf::NetWhnfState::application_checkpoint_for_test(
             access,

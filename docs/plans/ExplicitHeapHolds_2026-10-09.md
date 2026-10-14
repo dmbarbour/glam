@@ -746,6 +746,16 @@ temporary owners an evaluator step registers for fresh results
 (`construct_lazy` and kin) may be redundant; worth measuring under
 `gc-hold-transient-roots`.
 
+Slice 2 landed 2026-10-14: every legacy access in test code (499 sites,
+each confirmed test-only by a build that hid them outside tests) became a
+boundary, and `with_managed_values` takes `Heap::mutate`. Tests that then
+nested a boundary pass the access they hold instead: test helpers take
+`&impl TestAccess`, which a value factory implements with a boundary and an
+access, evaluator step or thunk context implements with a borrow; test
+machines borrow their poll context's access. One test of nested entries
+became a reborrow. 46 legacy accesses remain, all in production code, for
+slice 3.
+
 ### Mutator entry cost (`gc-hold-entry-cost`)
 
 Added by the maintainer on 2026-10-14: make taking, ending, suspending and

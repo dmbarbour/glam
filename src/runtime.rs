@@ -869,8 +869,8 @@ impl RuntimeValueRoot {
     /// Test-fixture convenience which keeps production construction on the
     /// access-qualified publication surface.
     #[cfg(test)]
-    pub(crate) fn new(values: &CoreValueFactory, value: Value) -> Self {
-        values.with_runtime_value_access(|access| access.root_runtime_value(value))
+    pub(crate) fn new(values: &impl crate::core::TestAccess, value: Value) -> Self {
+        values.test_access(|access| access.root_runtime_value(value))
     }
 
     fn new_from_access(
@@ -910,6 +910,13 @@ impl RuntimeValueRoot {
         self.value.with_value(access, operation)
     }
 
+    /// Clones this root's value through `values`, which may be the access
+    /// the caller holds.
+    #[cfg(test)]
+    pub(crate) fn clone_core_in(&self, values: &impl crate::core::TestAccess) -> Value {
+        values.test_access(|access| self.clone_core_with(access))
+    }
+
     #[cfg(test)]
     pub(crate) fn clone_core_for_test(&self) -> Value {
         let values = self
@@ -917,7 +924,7 @@ impl RuntimeValueRoot {
             .observer()
             .upgrade()
             .expect("test root observation requires its live value domain");
-        values.with_runtime_value_access(|access| self.clone_core_with(&access))
+        values.with_boundary_access(|access| self.clone_core_with(&access))
     }
 
     /// Compares this retained value without projecting an unrooted shell
@@ -925,11 +932,11 @@ impl RuntimeValueRoot {
     #[cfg(test)]
     pub(crate) fn same_representation_for_test(
         &self,
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
         expected: &Value,
     ) -> bool {
-        values.with_runtime_value_access(|access| {
-            self.with_core(&access, |actual| {
+        values.test_access(|access| {
+            self.with_core(access, |actual| {
                 access.same_representation(actual, expected)
             })
             .expect("test root and value authority must share one value domain")
@@ -940,7 +947,7 @@ impl RuntimeValueRoot {
     #[track_caller]
     pub(crate) fn assert_same_representation_for_test(
         &self,
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
         expected: &Value,
     ) {
         assert!(
@@ -1417,7 +1424,7 @@ mod tests {
     fn runtime_failure_root_preserves_identity_and_direct_value_occurrences() {
         let values = test_value_factory();
         let repeated = Value::binary_from_text("failure root sentinel");
-        let failure = Arc::new(values.with_runtime_value_access(|access| {
+        let failure = Arc::new(values.with_boundary_access(|access| {
             EvaluationFailure::emission_in(&access, access.duplicate_value(&repeated))
                 .with_context_in(&access, access.duplicate_value(&repeated))
                 .with_context_in(&access, access.duplicate_value(&repeated))
@@ -1465,7 +1472,7 @@ mod tests {
             forced_by_thunk.store(true, Ordering::Release);
             panic!("failure-root construction must not evaluate a direct value")
         }));
-        let failure = Arc::new(values.with_runtime_value_access(|access| {
+        let failure = Arc::new(values.with_boundary_access(|access| {
             EvaluationFailure::emission_in(&access, access.duplicate_value(&lazy))
         }));
 
@@ -1485,7 +1492,7 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("the failure-root fixture should start collectible");
-        let (promise_root, failure) = values.with_runtime_value_access(|access| {
+        let (promise_root, failure) = values.with_boundary_access(|access| {
             let promise_root = access
                 .construct_rooted_managed_promise()
                 .expect("the managed promise cell should fit a run");

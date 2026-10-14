@@ -224,7 +224,7 @@ impl CoreValueFactory {
     /// Instantiates a core net in this factory's exact value domain.
     #[cfg(test)]
     pub(crate) fn instantiate_core_net(&self, template: &CoreInteractionNet) -> CoreRuntimeNet {
-        self.with_runtime_value_access(|access| {
+        self.with_boundary_access(|access| {
             access
                 .construct_managed_core_net(template.instantiate_with(&access))
                 .expect("managed core-net representation must fit one collector run")
@@ -236,7 +236,7 @@ impl CoreValueFactory {
         &self,
         runtime: RuntimeNet<CoreSpecialization>,
     ) -> CoreRuntimeNet {
-        self.with_runtime_value_access(|access| {
+        self.with_boundary_access(|access| {
             access
                 .construct_managed_core_net(runtime)
                 .expect("managed core-net test representation must fit one collector run")
@@ -291,22 +291,22 @@ impl CoreRuntimeNet {
     #[cfg(test)]
     pub(crate) fn with_test_access<R>(
         &self,
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
         operation: impl FnOnce(CoreRuntimeNetAccess<'_, '_>) -> R,
     ) -> R {
-        values.with_runtime_value_access(|access| operation(self.access(&access)))
+        values.test_access(|access| operation(self.access(access)))
     }
 
     /// Test-only spelling for an intentional second non-rooting edge.
     #[cfg(test)]
-    pub(crate) fn duplicate_for_test(&self, values: &CoreValueFactory) -> Self {
-        values.with_runtime_value_access(|access| self.duplicate_in(&access))
+    pub(crate) fn duplicate_for_test(&self, values: &impl crate::core::TestAccess) -> Self {
+        values.test_access(|access| self.duplicate_in(access))
     }
 
     #[cfg(test)]
     pub(crate) fn test_with<R>(
         &self,
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
         inspect: impl FnOnce(&RuntimeNet<CoreSpecialization>) -> R,
     ) -> R {
         self.with_test_access(values, |access| access.with(inspect))
@@ -315,7 +315,7 @@ impl CoreRuntimeNet {
     #[cfg(test)]
     pub(crate) fn test_with_revisions<R>(
         &self,
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
         inspect: impl FnOnce(&RuntimeNet<CoreSpecialization>) -> R,
     ) -> (R, RuntimeNetRevisions) {
         self.with_test_access(values, |access| access.with_revisions(inspect))
@@ -324,7 +324,7 @@ impl CoreRuntimeNet {
     #[cfg(test)]
     pub(crate) fn test_with_mut<R>(
         &self,
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
         update: impl FnOnce(&mut RuntimeNet<CoreSpecialization>) -> R,
     ) -> R {
         self.with_test_access(values, |access| access.with_mut(update))
@@ -333,7 +333,7 @@ impl CoreRuntimeNet {
     #[cfg(test)]
     pub(crate) fn test_reduce_pair(
         &self,
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
         pair: ActivePairKey,
     ) -> Option<Reduction> {
         self.with_test_access(values, |access| access.reduce_pair_for_test(pair))
@@ -342,7 +342,7 @@ impl CoreRuntimeNet {
     #[cfg(test)]
     pub(crate) fn test_poll_interface_demand(
         &self,
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
         interface: Port,
     ) -> InterfaceDemand {
         self.with_test_access(values, |access| {
@@ -353,7 +353,7 @@ impl CoreRuntimeNet {
     #[cfg(test)]
     pub(crate) fn test_step_cursor(
         &self,
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
         cursor: NodeId,
     ) -> CoreCursorStep {
         self.with_test_access(values, |access| access.step_cursor(cursor))
@@ -362,7 +362,7 @@ impl CoreRuntimeNet {
     #[cfg(test)]
     pub(crate) fn test_advance_claimed_cursor(
         &self,
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
         cursor: NodeId,
     ) -> Option<CursorProgress> {
         self.with_test_access(values, |access| access.test_advance_claimed_cursor(cursor))
@@ -371,7 +371,7 @@ impl CoreRuntimeNet {
     #[cfg(test)]
     pub(crate) fn test_prepare_copy_source(
         &self,
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
     ) -> TestPreparedCopySource {
         self.with_test_access(values, |access| TestPreparedCopySource {
             root: access.owner.root_in(access.values),
@@ -461,7 +461,7 @@ impl CoreRuntimeNet {
     #[cfg(test)]
     pub(crate) fn test_claim_pairless_cursor_obligation(
         &self,
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
         cursor: NodeId,
     ) -> bool {
         self.with_test_access(values, |access| {
@@ -1306,8 +1306,7 @@ impl TestPreparedCopySource {
         self,
         target: &CoreValueFactory,
     ) -> (PreparedCopySource<CoreSpecialization>, ManagedCoreNetRoot) {
-        let prepared =
-            target.with_runtime_value_access(|access| self.in_access(&access).into_inner());
+        let prepared = target.with_boundary_access(|access| self.in_access(&access).into_inner());
         (prepared, self.root)
     }
 }
@@ -1716,7 +1715,7 @@ mod tests {
     );
 
     fn closed_unit_template(values: &CoreValueFactory) -> CoreInteractionNet {
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
             let data = builder.data(access.unit());
             builder.finish(data)
@@ -1725,7 +1724,7 @@ mod tests {
 
     #[cfg(feature = "glam-prof")]
     fn two_bind_join_template(values: &CoreValueFactory) -> CoreInteractionNet {
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             let mut builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
             for _ in 0..2 {
                 let left = builder.bind();
@@ -1828,7 +1827,7 @@ mod tests {
             let discard = builder.copy(0).input;
             builder.wire(output, discard);
         }
-        let exposed = builder.data(values.with_runtime_value_access(|access| access.unit()));
+        let exposed = builder.data(values.with_boundary_access(|access| access.unit()));
         // The duplication pair is independent work beside the exposed value.
         values.instantiate_core_net(&builder.disconnected_for_test().finish(exposed))
     }
@@ -2069,8 +2068,8 @@ mod tests {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
         let source = values.instantiate_core_net(&closed_unit_template(&values));
         let prepared = source.test_prepare_copy_source(&values);
-        let copy_unit = values.with_runtime_value_access(|access| access.unit());
-        let operator_unit = values.with_runtime_value_access(|access| access.unit());
+        let copy_unit = values.with_boundary_access(|access| access.unit());
+        let operator_unit = values.with_boundary_access(|access| access.unit());
         let (copy_runtime, copy_call) = claimed_call(&values, copy_unit);
         let (operator_runtime, operator_call) = claimed_call(&values, operator_unit);
 
@@ -2109,7 +2108,7 @@ mod tests {
         assert_eq!(values.interaction_net_profile_snapshot().reductions.call, 1);
 
         let operator =
-            values.with_runtime_value_access(|access| CoreOperator::Applicable(access.unit()));
+            values.with_boundary_access(|access| CoreOperator::Applicable(access.unit()));
         operator_runtime.with_test_access(&values, |runtime| {
             runtime.resume_claimed_call_with_operator(operator_call, operator);
         });
@@ -2120,7 +2119,7 @@ mod tests {
     #[test]
     fn profiling_counts_operator_calls_only_when_completion_commits() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
-        let (operator, data) = values.with_runtime_value_access(|access| {
+        let (operator, data) = values.with_boundary_access(|access| {
             (CoreOperator::Applicable(access.unit()), access.unit())
         });
         let (runtime, call) = claimed_operator_call(&values, operator, data);
@@ -2157,7 +2156,7 @@ mod tests {
         else {
             panic!("released operator pair must be claimable again")
         };
-        let yielded = values.with_runtime_value_access(|access| OperatorYield::Data(access.unit()));
+        let yielded = values.with_boundary_access(|access| OperatorYield::Data(access.unit()));
         runtime.with_test_access(&values, |runtime| {
             runtime.complete_claimed_operator_call(
                 crate::interaction_net::OperatorCall {
@@ -2192,11 +2191,9 @@ mod tests {
         let (failed, failed_call) = claimed_call(&values, Value::Number(1.into()));
         let completion_probe =
             values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
+        let third_copy = third.duplicate_for_test(&values);
         operator.with_test_access(&values, |runtime| {
-            runtime.complete_claimed_operator_call(
-                call,
-                OperatorYield::Data(third.duplicate_for_test(&values)),
-            );
+            runtime.complete_claimed_operator_call(call, OperatorYield::Data(third_copy));
         });
         let records = completion_probe.records();
         assert_eq!(records.len(), 1);
@@ -2313,8 +2310,7 @@ mod tests {
         let mut target_builder = crate::interaction_net::NetBuilder::<CoreSpecialization>::new();
         let [function, argument, result] = target_builder.bind();
         let [continuation, continuation_argument, exposed] = target_builder.bind();
-        let callable =
-            target_builder.data(values.with_runtime_value_access(|access| access.unit()));
+        let callable = target_builder.data(values.with_boundary_access(|access| access.unit()));
         let supplied = target_builder.data(Value::Number(1.into()));
         let continued = target_builder.data(Value::Number(2.into()));
         target_builder.wire(function, callable);
@@ -2420,7 +2416,7 @@ mod tests {
             code: code.clone(),
             supplied: Arc::from([]),
         });
-        let argument = builder.data(values.with_runtime_value_access(|access| access.unit()));
+        let argument = builder.data(values.with_boundary_access(|access| access.unit()));
         builder.wire(input, argument);
         let runtime = values.instantiate_core_net(&builder.finish(result));
         drop(code);
@@ -2439,7 +2435,7 @@ mod tests {
                     .map(|value| access.values().duplicate_value(value))
             })
         });
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             access.assert_same_representation_for_test(&retained_data, &Some(access.unit()));
         });
         drop(retained_code);
@@ -2465,7 +2461,7 @@ mod tests {
         let owner = public_values.wrap(Value::Net(crate::core::NetValue::new(
             source.duplicate_for_test(&values),
         )));
-        let _observation = values.with_runtime_value_access(|access| CoreFrontierObservation {
+        let _observation = values.with_boundary_access(|access| CoreFrontierObservation {
             source: source.duplicate_in(&access),
             observed_topology: 0,
             endpoint: DemandEndpoint::Cursor(exposed.node()),
@@ -2489,7 +2485,7 @@ mod tests {
     #[should_panic(expected = "a live cursor claim cannot cross the core-net facade")]
     fn core_cursor_step_rejects_a_live_claim() {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             let _ = CoreCursorStep::from_generic(
                 CursorStep::<CoreSpecialization>::Progressed(CursorProgress::Claimed),
                 &access,
@@ -2525,7 +2521,7 @@ mod tests {
         let template = closed_unit_template(&first);
         let net = first.instantiate_core_net(&template);
 
-        first.with_runtime_value_access(|access| {
+        first.with_boundary_access(|access| {
             let net = net.access(&access);
             let data = net.with(|runtime| {
                 runtime
@@ -2544,7 +2540,7 @@ mod tests {
         let template = closed_unit_template(&owner);
         let net = owner.instantiate_core_net(&template);
 
-        foreign.with_runtime_value_access(|access| {
+        foreign.with_boundary_access(|access| {
             let _ = net.access(&access);
         });
     }
@@ -2556,13 +2552,13 @@ mod tests {
         let net = values.instantiate_core_net(&template);
         let alias = net.duplicate_for_test(&values);
 
-        values.with_runtime_value_access(|values| {
+        values.with_boundary_access(|values| {
             let access = net.access(&values);
             let exposed = access.with(RuntimeNet::exposed);
             assert!(access.with(|runtime| runtime.interface_data(exposed).is_some()));
         });
 
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             assert!(net.same_net_in(&alias, &access));
         });
     }
@@ -2574,7 +2570,7 @@ mod tests {
         let net = values.instantiate_core_net(&template);
         let initial = net.test_with_revisions(&values, |_| ()).1;
 
-        values.with_runtime_value_access(|values| {
+        values.with_boundary_access(|values| {
             let access = net.access(&values);
             access
                 .with_normalization_batch(|batch| {
@@ -2612,7 +2608,7 @@ mod tests {
         let net = values.instantiate_core_net(&template);
 
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            values.with_runtime_value_access(|values| {
+            values.with_boundary_access(|values| {
                 let access = net.access(&values);
                 let _: Result<(), CoreNetContention> = access.with_normalization_batch(|_| {
                     panic!("forced scoped normalization unwind");
@@ -2632,7 +2628,7 @@ mod tests {
 
         // The batch guard unwinds through a net the panic just poisoned.
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            values.with_runtime_value_access(|values| {
+            values.with_boundary_access(|values| {
                 let access = net.access(&values);
                 let _: Result<(), CoreNetContention> = access.with_normalization_batch(|_| {
                     access.with_mut(|_| panic!("forced panic under the net lock"));
@@ -2661,10 +2657,10 @@ mod tests {
         let (leader_ready_tx, leader_ready_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let leader_values = values.clone();
-        let net_root = values.with_runtime_value_access(|access| net.root_in(&access));
+        let net_root = values.with_boundary_access(|access| net.root_in(&access));
         let leader_root = net_root.clone();
         let leader = std::thread::spawn(move || {
-            leader_values.with_runtime_value_access(|values| {
+            leader_values.with_boundary_access(|values| {
                 let leader_net = CoreRuntimeNet::from_root(&leader_root, &values);
                 let access = leader_net.access(&values);
                 access
@@ -2688,7 +2684,7 @@ mod tests {
                 let net_root = net_root.clone();
                 let registered_tx = registered_tx.clone();
                 std::thread::spawn(move || {
-                    let contention = values.with_runtime_value_access(|values| {
+                    let contention = values.with_boundary_access(|values| {
                         let net = CoreRuntimeNet::from_root(&net_root, &values);
                         let access = net.access(&values);
                         access
@@ -2775,7 +2771,7 @@ mod tests {
         let values = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
         let template = closed_unit_template(&values);
         let net = values.instantiate_core_net(&template);
-        let contention = values.with_runtime_value_access(|values| {
+        let contention = values.with_boundary_access(|values| {
             let access = net.access(&values);
             access
                 .with_normalization_batch(|batch| {

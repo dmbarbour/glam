@@ -315,7 +315,7 @@ mod tests {
             crate::runtime::allocate_evaluation_runtime_id(),
             crate::runtime::RuntimeIds::new(),
         );
-        values.with_runtime_value_access(|_| {});
+        values.with_boundary_access(|_| {});
 
         let (_coordinator, executor) =
             super::super::test_execution_resources(0).expect("test executor should build");

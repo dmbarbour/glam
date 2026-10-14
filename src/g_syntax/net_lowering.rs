@@ -3,8 +3,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-#[cfg(test)]
-use crate::core::CoreValueFactory;
 use crate::core::{FunctionCode, FunctionValue, NetValue, RuntimeValueAccess, Value};
 use crate::core_net::{CoreDataKey, CoreOperator, CoreSpecialization};
 use crate::interaction_net::{NetBuilder, Port};
@@ -15,8 +13,11 @@ use super::resolved::{BindingId, ResolvedExpr, ResolvedPathPart, finger_join};
 /// a shared interaction-net computation. No syntax-shaped value survives this
 /// boundary.
 #[cfg(test)]
-pub(super) fn lower_resolved_expr(values: &CoreValueFactory, expr: ResolvedExpr<Value>) -> Value {
-    values.with_runtime_value_access(|access| lower_resolved_expr_in(&access, expr))
+pub(super) fn lower_resolved_expr(
+    values: &impl crate::core::TestAccess,
+    expr: ResolvedExpr<Value>,
+) -> Value {
+    values.test_access(|access| lower_resolved_expr_in(access, expr))
 }
 
 pub(super) fn lower_resolved_expr_in(
@@ -48,13 +49,11 @@ pub(super) struct ResolvedNetLowerer<'access, 'scope> {
 impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
     #[cfg(test)]
     pub(super) fn lower_code(
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
         parameters: Vec<BindingId>,
         body: ResolvedExpr<Value>,
     ) -> (FunctionCode, Vec<BindingId>) {
-        values.with_runtime_value_access(|access| {
-            ResolvedNetLowerer::lower_code_in(&access, parameters, body)
-        })
+        values.test_access(|access| ResolvedNetLowerer::lower_code_in(access, parameters, body))
     }
 
     /// Lowers `body` as code over `parameters`, returning the code and its
@@ -88,13 +87,11 @@ impl<'access, 'scope> ResolvedNetLowerer<'access, 'scope> {
 
     #[cfg(test)]
     pub(super) fn lower_template(
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
         inputs: Vec<BindingId>,
         body: ResolvedExpr<Value>,
     ) -> crate::core_net::CoreInteractionNet {
-        values.with_runtime_value_access(|access| {
-            ResolvedNetLowerer::lower_template_in(&access, inputs, body)
-        })
+        values.test_access(|access| ResolvedNetLowerer::lower_template_in(access, inputs, body))
     }
 
     #[cfg(test)]

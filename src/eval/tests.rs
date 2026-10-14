@@ -1,3 +1,4 @@
+use crate::core::TestAccess as _;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -46,17 +47,17 @@ fn retryable_halt_wait(error: &EvaluationHalt) -> Option<EvaluationWaitToken> {
 }
 
 fn unit_value() -> Value {
-    crate::core::test_value_factory().with_runtime_value_access(|access| access.unit())
+    crate::core::test_value_factory().with_boundary_access(|access| access.unit())
 }
 
 fn initial_metadata() -> Value {
-    crate::core::test_value_factory().with_runtime_value_access(|access| access.initial_metadata())
+    crate::core::test_value_factory().with_boundary_access(|access| access.initial_metadata())
 }
 
 fn metadata_carrier(context: &EvalContext, metadata: Value) -> Value {
     context
         .values()
-        .with_runtime_value_access(|access| access.metadata_carrier(metadata))
+        .with_boundary_access(|access| access.metadata_carrier(metadata))
 }
 
 fn closed_net(build: impl FnOnce(&mut NetBuilder<CoreSpecialization>) -> Port) -> NetValue {
@@ -92,7 +93,7 @@ fn cached_value_in(values: &CoreValueFactory, lazy: &LazyValue) -> Value {
         .cached(values)
         .expect("lazy value should be cached")
         .expect_without_debug("lazy value should succeed");
-    values.with_runtime_value_access(|access| value.into_value_in(&access))
+    values.with_boundary_access(|access| value.into_value_in(&access))
 }
 
 fn list_return_effect(value: Value) -> Value {
@@ -109,8 +110,7 @@ fn list_return_effect(value: Value) -> Value {
 }
 
 fn test_effect_value(function: Value) -> Value {
-    crate::core::test_value_factory()
-        .with_runtime_value_access(|access| effect_value(&access, function))
+    crate::core::test_value_factory().with_boundary_access(|access| effect_value(&access, function))
 }
 
 fn wrapper_returning_function_computation(context: &EvalContext) -> LazyValue {
@@ -304,7 +304,7 @@ fn wrapper_application_budget_probe_yields_without_publishing_a_cache() {
     assert!(demand.poll().is_none());
     assert_eq!(context.client_demand_count_for_test(), 1);
     assert!(computation_lazy.source_snapshot(context.values()).is_none());
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         // The computation may have reached a lazy in tail position and
         // forwarded to it (`lazy-tail-forwarding`); the bounded net work
         // then lives in that lazy's checkpoint.
@@ -412,11 +412,11 @@ fn object_with_defs_resumes_a_promised_spec_without_replaying_its_object() {
     let observed = Arc::clone(&object_demands);
     let values = observer.values().clone();
     let object_spec = spec.duplicate_for_test(&values);
-    let object = Value::semantic_thunk(observer.values(), move |_| {
+    let object = Value::semantic_thunk(observer.values(), move |context| {
         observed.fetch_add(1, Ordering::SeqCst);
         Ok(Value::Dict(Dict::new_sync().insert(
             (*keys::SPEC).clone(),
-            Value::Promised(object_spec.duplicate_for_test(&values)),
+            Value::Promised(object_spec.duplicate_for_test(context)),
         )))
     });
     let extension = closed_function_value_in(
@@ -490,7 +490,7 @@ fn composed_object_defs_resume_the_extension_without_replaying_prior_defs() {
     let prior = Value::semantic_thunk(observer.values(), move |context| {
         observed.fetch_add(1, Ordering::SeqCst);
         Ok(closed_function_value_in(
-            context.context().values(),
+            context,
             2,
             TestExpr::Value(Value::Dict(
                 Dict::new_sync().insert(Key::binary_from_text("prior"), n(19)),
@@ -579,14 +579,14 @@ fn object_override_resumes_a_nested_prior_without_replaying_completed_prefix() {
     let observed_base = Arc::clone(&base_demands);
     let values = observer.values().clone();
     let nested_prior_value = nested_prior.duplicate_for_test(&values);
-    let base = Value::semantic_thunk(observer.values(), move |_| {
+    let base = Value::semantic_thunk(observer.values(), move |context| {
         observed_base.fetch_add(1, Ordering::SeqCst);
         Ok(Value::Dict(
             Dict::new_sync()
                 .insert(Key::binary_from_text("a_early"), n(19))
                 .insert(
                     Key::binary_from_text("z_nested"),
-                    Value::Promised(nested_prior_value.duplicate_for_test(&values)),
+                    Value::Promised(nested_prior_value.duplicate_for_test(context)),
                 ),
         ))
     });
@@ -765,13 +765,13 @@ fn object_from_dict_resumes_a_promised_spec_without_replaying_its_dictionary() {
     let observed = Arc::clone(&dictionary_demands);
     let values = observer.values().clone();
     let promised_spec = spec.duplicate_for_test(&values);
-    let dictionary = Value::semantic_thunk(observer.values(), move |_| {
+    let dictionary = Value::semantic_thunk(observer.values(), move |context| {
         observed.fetch_add(1, Ordering::SeqCst);
         Ok(Value::Dict(
             Dict::new_sync()
                 .insert(
                     (*keys::SPEC).clone(),
-                    Value::Promised(promised_spec.duplicate_for_test(&values)),
+                    Value::Promised(promised_spec.duplicate_for_test(context)),
                 )
                 .insert(Key::binary_from_text("answer"), n(42)),
         ))
@@ -963,9 +963,9 @@ fn terminal_lazy_evaluation_releases_successful_and_failed_sources() {
     let context = test_context();
     let success_dropped = Arc::new(AtomicBool::new(false));
     let success_signal = DropSignal(success_dropped.clone());
-    let success = LazyValue::semantic_thunk(&crate::core::test_value_factory(), move |_| {
+    let success = LazyValue::semantic_thunk(&crate::core::test_value_factory(), move |context| {
         let _keep_signal_captured = &success_signal;
-        Ok(unit_value())
+        Ok(context.test_access(|access| access.unit()))
     });
 
     context.values().assert_same_representation_for_test(
@@ -1001,7 +1001,7 @@ fn terminal_lazy_evaluation_releases_successful_and_failed_sources() {
 #[test]
 fn evaluation_context_frames_use_an_atom_operation_and_optional_named_arguments() {
     let values = crate::core::test_value_factory();
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         access.assert_same_representation_for_test(
             &evaluation_context_frame("list_index"),
             &Value::Dict(Dict::new_sync().insert(
@@ -1018,7 +1018,7 @@ fn evaluation_context_frames_use_an_atom_operation_and_optional_named_arguments(
         Key::atom_from_text("path"),
         Value::binary_from_text("conf.env"),
     );
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         access.assert_same_representation_for_test(
             &evaluation_context_frame_with_args("path_lookup", args.clone()),
             &Value::Dict(
@@ -1051,7 +1051,7 @@ fn immediate_diagnostic_shell_operations_share_one_root_neutral_access_region() 
     let before = values.managed_root_registrations_for_test();
     let detail = Key::binary_from_text("detail");
 
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         let frame = evaluation_context_frame_in(&access, "regional_diagnostic");
         let failure = EvaluationFailure::emission_in(
             &access,
@@ -1061,19 +1061,13 @@ fn immediate_diagnostic_shell_operations_share_one_root_neutral_access_region() 
         let Value::Dict(diagnostic) = failure_diagnostic_value_in(&access, &failure) else {
             panic!("a dictionary emission should remain a diagnostic dictionary")
         };
-        access
-            .values()
-            .assert_same_representation_for_test(&diagnostic.get(&detail), &Some(&n(7)));
+        access.assert_same_representation_for_test(&diagnostic.get(&detail), &Some(&n(7)));
 
         let Value::Dict(split) = split_result_value(&access, n(1), n(2)) else {
             panic!("a split result should be a dictionary")
         };
-        access
-            .values()
-            .assert_same_representation_for_test(&split.get(&*keys::LEFT), &Some(&n(1)));
-        access
-            .values()
-            .assert_same_representation_for_test(&split.get(&*keys::RIGHT), &Some(&n(2)));
+        access.assert_same_representation_for_test(&split.get(&*keys::LEFT), &Some(&n(1)));
+        access.assert_same_representation_for_test(&split.get(&*keys::RIGHT), &Some(&n(2)));
         assert!(is_undefined_dict_value(
             &access,
             &Value::Dict(Dict::new_sync())
@@ -1166,10 +1160,9 @@ fn net_arity_does_not_demand_the_net_before_its_arity() {
     let net_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&net_demands);
     let net = closed_net(|builder| builder.data(n(42)));
-    let values = context.values().clone();
-    let net = Value::semantic_thunk(context.values(), move |_| {
+    let net = Value::semantic_thunk(context.values(), move |context| {
         observed.fetch_add(1, Ordering::SeqCst);
-        Ok(Value::Net(net.duplicate_for_test(&values)))
+        Ok(Value::Net(net.duplicate_for_test(context)))
     });
     let application = apply_values(
         &context,
@@ -1421,7 +1414,7 @@ fn zero_arity_apply_operator_is_data_identity() {
     let context = test_context();
     let operator = context
         .values()
-        .with_runtime_value_access(|access| apply_arity_operator(&access, 0, Arc::from([])));
+        .with_boundary_access(|access| apply_arity_operator(&access, 0, Arc::from([])));
 
     let result = crate::evaluation::EvalContext::evaluate_test_step(&context, |evaluator| {
         evaluator.with_value_access(|access| apply_core_operator(&access, &operator, &data))
@@ -1446,7 +1439,7 @@ fn compiled_function_values_reuse_one_shared_interaction_net() {
     ) else {
         panic!("closed functions should evaluate to shared function stages");
     };
-    crate::core::test_value_factory().with_runtime_value_access(|access| {
+    crate::core::test_value_factory().with_boundary_access(|access| {
         assert!(
             first
                 .stage()
@@ -1472,7 +1465,7 @@ fn curried_function_partial_application_retains_a_shared_stage() {
     let Value::Function(cloned_stage) = cloned_stage else {
         unreachable!()
     };
-    crate::core::test_value_factory().with_runtime_value_access(|access| {
+    crate::core::test_value_factory().with_boundary_access(|access| {
         assert!(
             first_stage
                 .stage()
@@ -1680,13 +1673,10 @@ fn deferred_computation_caches_one_structured_failure() {
     let counted_attempts = attempts.clone();
     let lazy = LazyValue::semantic_thunk(&crate::core::test_value_factory(), move |context| {
         counted_attempts.fetch_add(1, Ordering::SeqCst);
-        Err(context
-            .context()
-            .values()
-            .with_runtime_value_access(|access| {
-                EvaluationHalt::from_value(&access, access.duplicate_value(&thunk_emission))
-                    .with_context(&access, access.duplicate_value(&thunk_frame))
-            }))
+        Err(context.test_access(|access| {
+            EvaluationHalt::from_value(access, access.duplicate_value(&thunk_emission))
+                .with_context(access, access.duplicate_value(&thunk_frame))
+        }))
     });
     let value = Value::Lazy(lazy.duplicate_for_test(context.values()));
 
@@ -1853,10 +1843,10 @@ fn list_effect_fix_defers_function_demand_and_resumes_without_replay() {
     let observed = Arc::clone(&demands);
     let values = session.values().clone();
     let promised_function = function_promise.duplicate_for_test(&values);
-    let function = Value::semantic_thunk(session.values(), move |_| {
+    let function = Value::semantic_thunk(session.values(), move |context| {
         observed.fetch_add(1, Ordering::SeqCst);
         Ok(Value::Promised(
-            promised_function.duplicate_for_test(&values),
+            promised_function.duplicate_for_test(context),
         ))
     });
 
@@ -1962,10 +1952,7 @@ fn deferred_computation_preserves_context_annotation_frames() {
                 &access,
                 Builtin::Anno,
                 vec![access.values().duplicate_value(&annotation)],
-                Value::error(
-                    &crate::core::test_value_factory(),
-                    "annotated deferred failure",
-                ),
+                Value::error(&access, "annotated deferred failure"),
             )
         })
     });
@@ -2005,7 +1992,7 @@ fn computed_lazy_waits_on_an_empty_promise_without_caching_its_error() {
         &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value).unwrap(),
         &n(42),
     );
-    let expected = context.values().with_runtime_value_access(|access| {
+    let expected = context.values().with_boundary_access(|access| {
         Some(Ok(EvaluatedValue::from_whnf_in(&access, n(42)).unwrap()))
     });
     context
@@ -2118,7 +2105,7 @@ fn promised_assignment_follows_a_lazy_without_resolving_the_raw_assignment() {
             .values()
             .same_representation_for_test(&assigned, &target)
     );
-    let expected = context.values().with_runtime_value_access(|access| {
+    let expected = context.values().with_boundary_access(|access| {
         Some(Ok(EvaluatedValue::from_whnf_in(&access, n(42)).unwrap()))
     });
     context
@@ -2149,7 +2136,7 @@ fn promised_failure_preserves_structured_diagnostic_and_identity() {
             .insert(detail.clone(), n(7)),
     );
     let frame = evaluation_context_frame("promise_test");
-    let failure = Arc::new(session.values().with_runtime_value_access(|access| {
+    let failure = Arc::new(session.values().with_boundary_access(|access| {
         EvaluationFailure::emission_in(&access, access.duplicate_value(&emission))
             .with_context_in(&access, access.duplicate_value(&frame))
     }));
@@ -2288,7 +2275,7 @@ fn task_owned_fixpoint_rejects_recursive_demand_and_blocks_other_tasks() {
     let EvaluationWaitPoll::Complete(completed) = session.poll_wait(&wait) else {
         panic!("the retired promise wait must preserve late terminal observation")
     };
-    session.values().with_runtime_value_access(|access| {
+    session.values().with_boundary_access(|access| {
         completed
             .with_core(&access, |actual| {
                 access.assert_same_representation_for_test(actual, &n(42));
@@ -2689,15 +2676,14 @@ fn forcing_a_lazy_value_reaches_outer_whnf_without_forcing_lazy_fields() {
     let values = context.values().clone();
     let expected_field = field.duplicate_for_test(&values);
     let field = field.duplicate_for_test(&values);
-    let forwarded = Value::semantic_thunk(&crate::core::test_value_factory(), move |_| {
+    let forwarded = Value::semantic_thunk(&crate::core::test_value_factory(), move |context| {
         Ok(Value::Dict(Dict::new_sync().insert(
             Key::atom_from_text("field"),
-            field.duplicate_for_test(&values),
+            field.duplicate_for_test(context),
         )))
     });
-    let values = context.values().clone();
-    let root = Value::semantic_thunk(&crate::core::test_value_factory(), move |_| {
-        Ok(forwarded.duplicate_for_test(&values))
+    let root = Value::semantic_thunk(&crate::core::test_value_factory(), move |context| {
+        Ok(forwarded.duplicate_for_test(context))
     });
 
     let forced = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &root)
@@ -2717,8 +2703,7 @@ fn guarded_lazy_self_reference_reaches_dictionary_whnf() {
     let context = test_context();
     let self_reference = Arc::new(std::sync::OnceLock::<LazyValue>::new());
     let captured = self_reference.clone();
-    let values = context.values().clone();
-    let lazy = LazyValue::semantic_thunk(&crate::core::test_value_factory(), move |_| {
+    let lazy = LazyValue::semantic_thunk(&crate::core::test_value_factory(), move |context| {
         Ok(Value::Dict(
             Dict::new_sync().insert(
                 Key::atom_from_text("tail"),
@@ -2726,7 +2711,7 @@ fn guarded_lazy_self_reference_reaches_dictionary_whnf() {
                     captured
                         .get()
                         .expect("guarded self reference should be installed")
-                        .duplicate_for_test(&values),
+                        .duplicate_for_test(context),
                 ),
             ),
         ))
@@ -2757,9 +2742,8 @@ fn lazy_aliases_share_and_cache_their_final_whnf() {
         unreachable!()
     };
     let target_lazy = target_lazy.duplicate_for_test(context.values());
-    let values = context.values().clone();
-    let root = LazyValue::semantic_thunk(&crate::core::test_value_factory(), move |_| {
-        Ok(target.duplicate_for_test(&values))
+    let root = LazyValue::semantic_thunk(&crate::core::test_value_factory(), move |context| {
+        Ok(target.duplicate_for_test(context))
     });
     let value = Value::Lazy(root.duplicate_for_test(context.values()));
 
@@ -2797,7 +2781,7 @@ fn lazy_aliases_share_and_cache_their_final_whnf() {
 fn demanded_forwarding_chain_caches_its_ends_and_members_on_observation() {
     let context = test_context();
     let values = crate::core::test_value_factory();
-    let (leaf, middle, root, root_owner) = values.with_runtime_value_access(|access| {
+    let (leaf, middle, root, root_owner) = values.with_boundary_access(|access| {
         let identity = closed_function_value_with_access(&access, 1, TestExpr::Local(0));
         let leaf = LazyValue::semantic_thunk_in(&access, |_| Ok(n(42)));
         let middle = LazyValue::from_application_in(
@@ -2815,7 +2799,7 @@ fn demanded_forwarding_chain_caches_its_ends_and_members_on_observation() {
     });
 
     let completed = context.evaluate_root_whnf(root_owner).unwrap();
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         completed
             .with_core(&access, |actual| {
                 access.assert_same_representation_for_test(actual, &n(42));
@@ -2862,7 +2846,7 @@ fn lazy_whnf_checkpoint_survives_yield_and_dependency_until_terminal_cache() {
     );
     assert!(lazy.source_snapshot(context.values()).is_none());
     assert!(lazy.cached(context.values()).is_none());
-    assert!(context.values().with_runtime_value_access(|access| {
+    assert!(context.values().with_boundary_access(|access| {
         root.access(&access)
             .expect("lazy root and access should share one runtime")
             .checkpoint_snapshot()
@@ -2893,7 +2877,7 @@ fn lazy_whnf_checkpoint_survives_yield_and_dependency_until_terminal_cache() {
     context
         .values()
         .assert_same_representation_for_test(&cached_value_in(context.values(), &lazy), &n(42));
-    assert!(context.values().with_runtime_value_access(|access| {
+    assert!(context.values().with_boundary_access(|access| {
         root.access(&access)
             .expect("lazy root and access should share one runtime")
             .checkpoint_snapshot()
@@ -3532,7 +3516,7 @@ fn lazy_list_chunks_error_when_they_do_not_evaluate_to_lists() {
         .expect("append should preserve lazy chunk");
     let value_root = context
         .values()
-        .with_runtime_value_access(|access| access.root_runtime_value(value));
+        .with_boundary_access(|access| access.root_runtime_value(value));
     let value = value_root.clone_core_for_test();
     let Value::List(list) = value else {
         panic!("append should produce a list");
@@ -3551,7 +3535,7 @@ fn lazy_list_chunks_error_when_they_do_not_evaluate_to_lists() {
 fn promised_list_chunks_remain_assignable_after_early_observation() {
     let context = test_context();
     let promise = PromisedValue::new(context.values());
-    let list = context.values().with_runtime_value_access(|access| {
+    let list = context.values().with_boundary_access(|access| {
         append_sequence(&access, Value::Promised(promise.duplicate_in(&access)))
             .expect("a promise remains a valid deferred list tail")
     });
@@ -3734,7 +3718,7 @@ fn compiled_function_calls_give_what_their_nets_would() {
         let Value::Function(function) = function.clone_core_for_test() else {
             unreachable!("the fixture is a function");
         };
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             function
                 .stage()
                 .runtime()
@@ -3784,7 +3768,7 @@ fn normalize_annotation_compiles_a_function_before_its_first_call() {
         let Value::Function(function) = function else {
             panic!("the annotation should give the function");
         };
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             function
                 .stage()
                 .runtime()
@@ -3848,7 +3832,7 @@ fn copies_and_code_state(
     function: &FunctionValue,
     code: &CoreRuntimeNet,
 ) -> (usize, bool) {
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         (
             function
                 .stage()
@@ -3877,7 +3861,7 @@ fn annotated_in(context: &EvalContext, name: &str, target: Value) -> Value {
 
 /// Whether `function`'s net is compiled.
 fn stage_compiled(values: &CoreValueFactory, function: &FunctionValue) -> bool {
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         function
             .stage()
             .runtime()
@@ -3897,13 +3881,13 @@ fn compile_annotations_follow_a_closures_copy_into_its_code() {
     let context = isolated_test_context();
     let values = context.values();
     // `\x -> c + x` over its capture `c`.
-    let code = values.with_runtime_value_access(|access| addition_code(&access));
+    let code = values.with_boundary_access(|access| addition_code(&access));
     let _code_owner = values.root_core_net(&code);
     let adder = eval_closed_expr_in(
         &context,
         &TestExpr::Function {
             code: Arc::new(FunctionCode::new(
-                values.with_runtime_value_access(|access| code.duplicate_in(&access)),
+                values.with_boundary_access(|access| code.duplicate_in(&access)),
                 1,
                 1,
             )),
@@ -3951,13 +3935,13 @@ fn compile_annotations_follow_a_closures_copy_into_its_code() {
 fn advanced_copies_are_not_made_whole() {
     let context = isolated_test_context();
     let values = context.values();
-    let code = values.with_runtime_value_access(|access| addition_code(&access));
+    let code = values.with_boundary_access(|access| addition_code(&access));
     let _code_owner = values.root_core_net(&code);
     let adder = eval_closed_expr_in(
         &context,
         &TestExpr::Function {
             code: Arc::new(FunctionCode::new(
-                values.with_runtime_value_access(|access| code.duplicate_in(&access)),
+                values.with_boundary_access(|access| code.duplicate_in(&access)),
                 1,
                 1,
             )),
@@ -3971,7 +3955,7 @@ fn advanced_copies_are_not_made_whole() {
     };
     // The cursor meets the bind passing the capture, and copies the code's
     // first node.
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         let stage = closure.stage().runtime().access(&access);
         let pair = stage
             .with(crate::interaction_net::RuntimeNet::next_ready_pair)
@@ -4011,11 +3995,11 @@ fn advanced_copies_are_not_made_whole() {
 fn compile_annotations_specialize_a_partial_application() {
     let context = isolated_test_context();
     let values = context.values();
-    let code = values.with_runtime_value_access(|access| addition_code(&access));
+    let code = values.with_boundary_access(|access| addition_code(&access));
     let _code_owner = values.root_core_net(&code);
     let add = TestExpr::Function {
         code: Arc::new(FunctionCode::new(
-            values.with_runtime_value_access(|access| code.duplicate_in(&access)),
+            values.with_boundary_access(|access| code.duplicate_in(&access)),
             2,
             0,
         )),
@@ -4067,13 +4051,13 @@ fn compile_annotations_specialize_a_partial_application() {
 fn jit_annotations_compile_a_function_at_its_first_application() {
     let context = isolated_test_context();
     let values = context.values();
-    let code = values.with_runtime_value_access(|access| addition_code(&access));
+    let code = values.with_boundary_access(|access| addition_code(&access));
     let _code_owner = values.root_core_net(&code);
     let add = eval_closed_expr_in(
         &context,
         &TestExpr::Function {
             code: Arc::new(FunctionCode::new(
-                values.with_runtime_value_access(|access| code.duplicate_in(&access)),
+                values.with_boundary_access(|access| code.duplicate_in(&access)),
                 2,
                 0,
             )),
@@ -4115,7 +4099,7 @@ fn jit_annotations_compile_a_function_at_its_first_application() {
         "the partial application copies the normalized net whole"
     );
     assert!(
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             partial.stage().runtime().access(&access).requests_jit()
         }),
         "the partial application asks for `anno 'jit` too"
@@ -4140,14 +4124,14 @@ fn jit_annotations_compile_a_function_at_its_first_application() {
 fn closures_of_jit_code_are_jit() {
     let context = isolated_test_context();
     let values = context.values();
-    let code = values.with_runtime_value_access(|access| addition_code(&access));
+    let code = values.with_boundary_access(|access| addition_code(&access));
     let _code_owner = values.root_core_net(&code);
-    values.with_runtime_value_access(|access| code.access(&access).request_jit());
+    values.with_boundary_access(|access| code.access(&access).request_jit());
     let adder = eval_closed_expr_in(
         &context,
         &TestExpr::Function {
             code: Arc::new(FunctionCode::new(
-                values.with_runtime_value_access(|access| code.duplicate_in(&access)),
+                values.with_boundary_access(|access| code.duplicate_in(&access)),
                 1,
                 1,
             )),
@@ -4159,7 +4143,7 @@ fn closures_of_jit_code_are_jit() {
     let Value::Function(closure) = adder.duplicate_for_test(values) else {
         panic!("capturing should make a closure");
     };
-    assert!(values.with_runtime_value_access(|access| {
+    assert!(values.with_boundary_access(|access| {
         closure.stage().runtime().access(&access).requests_jit()
     }));
     assert_eq!(
@@ -4199,10 +4183,9 @@ fn compile_annotations_leave_calls_of_data_to_demand() {
     let observed = Arc::clone(&forced);
     let identity = closed_function_value_in(values, 1, TestExpr::Local(0));
     let _identity_owner = RuntimeValueRoot::new(values, identity.duplicate_for_test(values));
-    let callee_values = values.clone();
-    let callee = Value::Lazy(LazyValue::semantic_thunk(values, move |_| {
+    let callee = Value::Lazy(LazyValue::semantic_thunk(values, move |context| {
         observed.fetch_add(1, Ordering::SeqCst);
-        Ok(identity.duplicate_for_test(&callee_values))
+        Ok(identity.duplicate_for_test(context))
     }));
     // `\x -> callee x`, the call a bare bind facing the callee.
     let net = closed_net_in(values, |builder| {
@@ -4251,8 +4234,8 @@ fn ordinary_observers_do_not_unseal_metadata_carriers() {
     // independently evaluated fixtures. Keep that carrier rooted while a
     // parallel test may explicitly collect the shared test value domain.
     let values = crate::core::test_value_factory();
-    let carrier_root = values
-        .with_runtime_value_access(|access| access.root_runtime_value(access.initial_metadata()));
+    let carrier_root =
+        values.with_boundary_access(|access| access.root_runtime_value(access.initial_metadata()));
     let carrier = carrier_root.clone_core_for_test();
 
     for builtin in [Builtin::Equal, Builtin::NotEqual, Builtin::Greater] {
@@ -4910,11 +4893,11 @@ fn compiler_pattern_dictionary_take_resumes_without_replaying_a_completed_prefix
     let values = observer.values().clone();
     let promised_leaf = leaf.duplicate_for_test(&values);
     let captured_leaf = promised_leaf.duplicate_for_test(&values);
-    let child = Value::semantic_thunk(observer.values(), move |_| {
+    let child = Value::semantic_thunk(observer.values(), move |context| {
         observed.fetch_add(1, Ordering::SeqCst);
         Ok(Value::Dict(Dict::new_sync().insert(
             bar.clone(),
-            Value::Promised(captured_leaf.duplicate_for_test(&values)),
+            Value::Promised(captured_leaf.duplicate_for_test(context)),
         )))
     });
     let path = Value::List(List::from_values(vec![
@@ -5857,8 +5840,8 @@ fn effect_map_finishes_its_list_front_before_observing_the_api() {
         .expect("the owner should allocate a promised map tail");
     let method_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&method_demands);
-    let return_method = observer.values().with_runtime_value_access(|access| {
-        let return_method = closed_function_value_in(observer.values(), 1, TestExpr::Local(0));
+    let return_method = observer.values().with_boundary_access(|access| {
+        let return_method = closed_function_value_in(&access, 1, TestExpr::Local(0));
         access.root_runtime_value(return_method)
     });
     let return_method = Value::semantic_thunk(observer.values(), move |context| {
@@ -6075,7 +6058,7 @@ fn missing_access_can_evaluate_to_an_undefined_key() {
 fn raw_value_to_key_rejects_lazy_values() {
     let values = crate::core::test_value_factory();
     let value = fixture_computation(TestExpr::Value(n(1)));
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         assert_eq!(access.key_from_value(&value), None);
     });
 }
@@ -7134,9 +7117,9 @@ fn metadata_annotation_initializes_the_canonical_sealed_carrier() {
     };
     let target_forces = Arc::new(AtomicUsize::new(0));
     let counted_target_forces = target_forces.clone();
-    let unit = Value::semantic_thunk(&crate::core::test_value_factory(), move |_| {
+    let unit = Value::semantic_thunk(&crate::core::test_value_factory(), move |context| {
         counted_target_forces.fetch_add(1, Ordering::SeqCst);
-        Ok(unit_value())
+        Ok(context.test_access(|access| access.unit()))
     });
 
     let first = apply_values(
@@ -7168,7 +7151,7 @@ fn metadata_annotation_initializes_the_canonical_sealed_carrier() {
         .assert_same_representation_for_test(&first, &second);
     let first_metadata = context
         .values()
-        .with_runtime_value_access(|access| first.associated_metadata(&access));
+        .with_boundary_access(|access| first.associated_metadata(&access));
     context
         .values()
         .assert_same_representation_for_test(&first_metadata, &Some(Value::Dict(Dict::new_sync())));
@@ -7298,7 +7281,7 @@ fn run_metadata_transform(
     })?;
     let result = context
         .values()
-        .with_runtime_value_access(|access| result.clone_core_with(&access));
+        .with_boundary_access(|access| result.clone_core_with(&access));
     let Value::List(result) = result else {
         panic!("metadata update should return a list");
     };
@@ -7329,7 +7312,7 @@ fn metadata_reorder_function_in(
 fn evaluated_metadata(context: &EvalContext, carrier: &Value) -> Result<Value, EvaluationHalt> {
     let metadata = context
         .values()
-        .with_runtime_value_access(|access| carrier.associated_metadata(&access))
+        .with_boundary_access(|access| carrier.associated_metadata(&access))
         .expect("metadata update output must remain sealed");
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(context, &metadata)
 }
@@ -7566,10 +7549,9 @@ fn metadata_update_validates_inputs_strictly_but_not_hidden_metadata() {
         Ok(n(11))
     });
     let carrier = metadata_carrier(&context, hidden);
-    let values = context.values().clone();
-    let lazy_carrier = Value::semantic_thunk(&crate::core::test_value_factory(), move |_| {
+    let lazy_carrier = Value::semantic_thunk(&crate::core::test_value_factory(), move |context| {
         counted_carrier_forces.fetch_add(1, Ordering::SeqCst);
-        Ok(carrier.duplicate_for_test(&values))
+        Ok(carrier.duplicate_for_test(context))
     });
 
     let result = run_metadata_update(
@@ -7757,7 +7739,7 @@ fn metadata_reflection_update_blocks_and_resumes_on_its_shared_task() {
 
     let metadata = context
         .values()
-        .with_runtime_value_access(|access| outputs[0].associated_metadata(&access))
+        .with_boundary_access(|access| outputs[0].associated_metadata(&access))
         .expect("metadata update output must remain sealed");
     let mut demand = ResumableTestValueDemand::new(&context, &metadata);
     let blocked = demand
@@ -7775,7 +7757,7 @@ fn metadata_reflection_update_blocks_and_resumes_on_its_shared_task() {
 #[test]
 fn metadata_reflection_update_propagates_task_failure_and_cancellation() {
     let failed_context = annotation_test_context();
-    let failure = Arc::new(failed_context.values().with_runtime_value_access(|access| {
+    let failure = Arc::new(failed_context.values().with_boundary_access(|access| {
         EvaluationFailure::message("metadata reflection task failed")
             .with_context_in(&access, evaluation_context_frame("metadata_producer"))
     }));
@@ -8224,7 +8206,7 @@ fn dropped_reflection_completion_activation_permit_terminalizes_managed_promise(
     let background = context
         .for_runtime_background()
         .expect("the test runtime should retain its background demand");
-    let (promise, completion, effect) = context.values().with_runtime_value_access(|access| {
+    let (promise, completion, effect) = context.values().with_boundary_access(|access| {
         let completion = access
             .construct_rooted_managed_promise()
             .expect("the managed completion promise must fit its reviewed slot");
@@ -8400,7 +8382,7 @@ fn reflection_completion_activation_and_first_session_close_have_both_orders() {
             .for_runtime_background()
             .expect("the autonomous task should use the runtime background demand");
         let (promise, completion, effect, retained) =
-            owner.values().with_runtime_value_access(|access| {
+            owner.values().with_boundary_access(|access| {
                 let completion = access
                     .construct_rooted_managed_promise()
                     .expect("the completion promise should fit its managed slot");
@@ -8486,7 +8468,7 @@ fn unobserved_reflection_failure_remains_reportable_until_promise_propagation() 
     let background = owner
         .for_runtime_background()
         .expect("the runtime should retain its background demand");
-    let (promise, completion, effect) = owner.values().with_runtime_value_access(|access| {
+    let (promise, completion, effect) = owner.values().with_boundary_access(|access| {
         let completion = access
             .construct_rooted_managed_promise()
             .expect("the completion promise must fit its reviewed slot");
@@ -8534,7 +8516,7 @@ fn unobserved_reflection_failure_remains_reportable_until_promise_propagation() 
 fn reflection_task_result_preserves_failure_and_transfers_reporting_responsibility() {
     let context = annotation_test_context();
     let producer_frame = evaluation_context_frame("reflection_result_producer");
-    let failure = Arc::new(context.values().with_runtime_value_access(|access| {
+    let failure = Arc::new(context.values().with_boundary_access(|access| {
         EvaluationFailure::message("reflection result failed")
             .with_context_in(&access, access.duplicate_value(&producer_frame))
     }));
@@ -8713,7 +8695,7 @@ fn assert_structured_reflection_gate_failure(stage: GateFailureStage) {
             .insert(detail.clone(), n(7)),
     );
     let producer_frame = evaluation_context_frame("gate_producer");
-    let failure = Arc::new(context.values().with_runtime_value_access(|access| {
+    let failure = Arc::new(context.values().with_boundary_access(|access| {
         EvaluationFailure::emission_in(&access, access.duplicate_value(&emission))
             .with_context_in(&access, access.duplicate_value(&producer_frame))
     }));
@@ -8890,12 +8872,12 @@ fn reflection_gate_blocks_and_resumes_the_exact_net_operator_call() {
     let applied = closed_net(|builder| {
         let operator = context
             .values()
-            .with_runtime_value_access(|access| applicable_operator(&access, gate));
+            .with_boundary_access(|access| applicable_operator(&access, gate));
         let [input, result] = builder.operator(operator);
         let argument = builder.data(
             context
                 .values()
-                .with_runtime_value_access(|access| key.to_value_in(&access)),
+                .with_boundary_access(|access| key.to_value_in(&access)),
         );
         builder.wire(input, argument);
         result
@@ -8975,7 +8957,7 @@ fn evaluate_strategy(
     let value = context.evaluate_builtin_whnf(builtin, |_| vec![first, target])?;
     Ok(context
         .values()
-        .with_runtime_value_access(|access| value.clone_core_with(&access)))
+        .with_boundary_access(|access| value.clone_core_with(&access)))
 }
 
 #[test]
@@ -9126,12 +9108,11 @@ fn worker_spark_demands_metadata_behind_a_lazy_carrier_shell() {
         context.values(),
         carrier.duplicate_for_test(context.values()),
     );
-    let values = context.values().clone();
-    let lazy_carrier = Value::semantic_thunk(context.values(), move |_| {
+    let lazy_carrier = Value::semantic_thunk(context.values(), move |context| {
         shell_sender
             .send(())
             .expect("carrier receiver should remain open");
-        Ok(carrier.duplicate_for_test(&values))
+        Ok(carrier.duplicate_for_test(context))
     });
 
     let result = evaluate_strategy(&context, Builtin::Spark, lazy_carrier, n(42))

@@ -163,6 +163,38 @@ pub(crate) fn assert_outside_mutator() {
     debug_assert!(!released, "Glam opens no held regions");
 }
 
+/// Anything a test can borrow runtime-value access from: a value factory
+/// takes a boundary of its own, while code under a mutator (an access, an
+/// evaluator step) lends the access it holds. Test helpers take one, so a
+/// lazy source's thunk passes its step instead of entering the heap again.
+#[cfg(test)]
+pub(crate) trait TestAccess {
+    fn test_access<R>(
+        &self,
+        operation: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> R,
+    ) -> R;
+}
+
+#[cfg(test)]
+impl TestAccess for CoreValueFactory {
+    fn test_access<R>(
+        &self,
+        operation: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> R,
+    ) -> R {
+        self.with_boundary_access(|access| operation(&access))
+    }
+}
+
+#[cfg(test)]
+impl TestAccess for RuntimeValueAccess<'_> {
+    fn test_access<R>(
+        &self,
+        operation: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> R,
+    ) -> R {
+        operation(self)
+    }
+}
+
 /// Reports whether this thread currently owns a bounded value-access region.
 ///
 /// This is a test-only structural probe. Unlike forcing a collection, it
@@ -626,7 +658,7 @@ impl CoreValueFactory {
     ) -> R {
         self.domain
             .heap
-            .with_mutator(|mutator| operation(CoreValueAllocationScope { mutator }))
+            .mutate(|mutator| operation(CoreValueAllocationScope { mutator }))
     }
 
     /// Opens one factory-qualified managed-access region.
@@ -1123,7 +1155,7 @@ impl RuntimeValueAccess<'_> {
 #[cfg(test)]
 impl CoreValueFactory {
     pub(crate) fn rooted_error_lazy_for_test(&self) -> (ManagedLazyRoot, LazyValue) {
-        self.with_runtime_value_access(|access| {
+        self.with_boundary_access(|access| {
             let root = access
                 .construct_rooted_managed_lazy(LazySource::Error)
                 .expect("test lazy should fit one managed slot");
@@ -1483,7 +1515,7 @@ mod tests {
     fn runtime_value_access_routes_borrowed_edge_sets_to_the_collector_gateway() {
         let values = values();
         let probe = values.install_edge_transition_probe_for_test(EdgeTransitionObservation::Both);
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             let leaves = access
                 .allocator::<PassiveManagedFixture>()
                 .expect("transition leaves should fit one collector slot");
@@ -1546,7 +1578,7 @@ mod tests {
     fn runtime_value_access_rejects_an_owner_from_another_heap_before_mutation() {
         let first = values();
         let second = values();
-        let (root, owner) = first.with_runtime_value_access(|access| {
+        let (root, owner) = first.with_boundary_access(|access| {
             let owner = access
                 .allocator::<TransitionFixture>()
                 .expect("transition owner should fit one collector slot")
@@ -1559,7 +1591,7 @@ mod tests {
         let changed = AtomicUsize::new(0);
 
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            second.with_runtime_value_access(|access| {
+            second.with_boundary_access(|access| {
                 // SAFETY: this deliberately violates the exact-owner
                 // precondition to prove rejection before the closure runs.
                 unsafe {

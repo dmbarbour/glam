@@ -481,14 +481,12 @@ mod tests {
     ) -> ResolvedExpr<Value> {
         compiler_values::prepare(values);
         let arguments = arguments.into_iter().collect::<Vec<_>>();
-        values.with_runtime_value_access(|access| {
-            super::effect_call_resolved(&access, name, arguments)
-        })
+        values.with_boundary_access(|access| super::effect_call_resolved(&access, name, arguments))
     }
 
     fn lower_effect_expr_resolved(values: &CoreValueFactory, name: &str) -> ResolvedExpr<Value> {
         compiler_values::prepare(values);
-        values.with_runtime_value_access(|access| super::lower_effect_expr_resolved(&access, name))
+        values.with_boundary_access(|access| super::lower_effect_expr_resolved(&access, name))
     }
 
     fn lower_guard_choices_resolved(
@@ -497,7 +495,7 @@ mod tests {
         scope: &NameScope<ResolvedRoot>,
         locals: &mut ResolverContext,
     ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-        context.values().with_runtime_value_access(|access| {
+        context.values().with_boundary_access(|access| {
             super::lower_guard_choices_resolved(&access, alternatives, context, scope, locals)
         })
     }
@@ -508,7 +506,7 @@ mod tests {
         scope: &NameScope<ResolvedRoot>,
         locals: &mut ResolverContext,
     ) -> Result<ResolvedChoice, Diagnostic> {
-        context.values().with_runtime_value_access(|access| {
+        context.values().with_boundary_access(|access| {
             super::resolve_guard_choice(&access, alternatives, context, scope, locals)
         })
     }
@@ -520,7 +518,7 @@ mod tests {
         scope: &NameScope<ResolvedRoot>,
         locals: &mut ResolverContext,
     ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-        context.values().with_runtime_value_access(|access| {
+        context.values().with_boundary_access(|access| {
             super::lower_if_expr_resolved(&access, if_expr, line, context, scope, locals)
         })
     }
@@ -531,7 +529,7 @@ mod tests {
         scope: &NameScope<ResolvedRoot>,
         locals: &mut ResolverContext,
     ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-        context.values().with_runtime_value_access(|access| {
+        context.values().with_boundary_access(|access| {
             super::lower_match_expr_resolved(&access, match_expr, context, scope, locals)
         })
     }
@@ -542,7 +540,7 @@ mod tests {
         scope: &NameScope<ResolvedRoot>,
         locals: &mut ResolverContext,
     ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-        context.values().with_runtime_value_access(|access| {
+        context.values().with_boundary_access(|access| {
             super::lower_match_when_expr_resolved(&access, match_when, context, scope, locals)
         })
     }

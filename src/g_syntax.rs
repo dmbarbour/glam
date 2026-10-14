@@ -87,7 +87,7 @@ pub(crate) fn fail_effect_root(values: &CoreValueFactory) -> RuntimeValueRoot {
 #[cfg(test)]
 pub(crate) fn initialize_cached_compiler_values(values: &CoreValueFactory) {
     compiler_values::prepare(values);
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         let _ = compiler_values::builtin_module(&access, "std")
             .expect("the cached g compiler must provide `std`");
     });

@@ -135,6 +135,26 @@ impl<'scope> EvaluationValueAccess<'scope> {
     }
 }
 
+#[cfg(test)]
+impl crate::core::TestAccess for EvaluatorStepContext<'_> {
+    fn test_access<R>(
+        &self,
+        operation: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> R,
+    ) -> R {
+        self.with_value_access(|access| operation(access.values()))
+    }
+}
+
+#[cfg(test)]
+impl crate::core::TestAccess for EvaluationValueAccess<'_> {
+    fn test_access<R>(
+        &self,
+        operation: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> R,
+    ) -> R {
+        operation(self.values())
+    }
+}
+
 impl EvaluatorStepContext<'_> {
     pub(crate) fn context(&self) -> &EvalContext {
         self.context
@@ -723,7 +743,7 @@ mod tests {
             CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
         let context = EvalContext::isolated(owner);
 
-        other_runtime.with_runtime_value_access(|values| {
+        other_runtime.with_boundary_access(|values| {
             assert!(matches!(
                 EvaluationValueAccess::try_new(&context, values),
                 Err(ValueAccessDomainMismatch)
@@ -738,18 +758,18 @@ mod tests {
         let first_scoped = first.scoped();
         let second = value_factory();
 
-        first_scoped.with_runtime_value_access(|first_access| {
+        first_scoped.with_boundary_access(|first_access| {
             assert!(std::ptr::eq(first_access.values(), &first_scoped));
             assert!(first_access.belongs_to(&first));
             assert!(!first_access.belongs_to(&second));
             // A thread holds one runtime's value access at a time.
             let nested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                second.with_runtime_value_access(|_| {});
+                second.with_boundary_access(|_| {});
             }));
             assert!(nested.is_err());
             assert!(first_access.belongs_to(&first));
         });
-        second.with_runtime_value_access(|second_access| {
+        second.with_boundary_access(|second_access| {
             assert!(second_access.belongs_to(&second));
             assert!(!second_access.belongs_to(&first));
         });

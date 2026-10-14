@@ -27,7 +27,7 @@ fn same_value_representation(left: &Value, right: &Value) -> bool {
 
 fn diagnostic_kind_name(value: &Value) -> &'static str {
     crate::compiler::test_value_factory()
-        .with_runtime_value_access(|access| access.diagnostic_kind_name(value))
+        .with_boundary_access(|access| access.diagnostic_kind_name(value))
 }
 
 #[track_caller]
@@ -38,7 +38,7 @@ fn assert_same_value_representation(left: &Value, right: &Value) {
 fn context_final_defs(context: &CompileContext) -> Value {
     context
         .values()
-        .with_runtime_value_access(|access| context.final_defs(&access))
+        .with_boundary_access(|access| context.final_defs(&access))
 }
 
 fn core_global_access(context: &CompileContext, path: Vec<Key>) -> Value {
@@ -57,7 +57,7 @@ fn evaluated_module_value(context: &CompileContext, lowered: &LoweredSource) -> 
     };
     let definitions = context
         .values()
-        .with_runtime_value_access(|access| lowered.definitions(&access));
+        .with_boundary_access(|access| lowered.definitions(&access));
     crate::core::set_test_promise(
         context.values(),
         &final_defs,
@@ -316,7 +316,7 @@ fn reflection_test_module(
         .fold(Dict::new_sync(), |dict, (name, namespace)| {
             dict.insert(
                 Key::atom_from_text(name),
-                context.values().with_runtime_value_access(|access| {
+                context.values().with_boundary_access(|access| {
                     let name = ResolvedExpr::Provided(context.namespace_name(&access, namespace));
                     lower_resolved_expr_in(
                         &access,
@@ -333,7 +333,7 @@ fn reflection_test_module(
     };
     let lowered_definitions = context
         .values()
-        .with_runtime_value_access(|access| lowered.definitions(&access));
+        .with_boundary_access(|access| lowered.definitions(&access));
     crate::core::set_test_promise(
         context.values(),
         &final_defs,
@@ -400,7 +400,7 @@ fn latent_source_meta_refl_cycle_reclaims_with_its_module() {
         };
         let lowered_definitions = context
             .values()
-            .with_runtime_value_access(|access| lowered.definitions(&access));
+            .with_boundary_access(|access| lowered.definitions(&access));
         crate::core::set_test_promise(
             context.values(),
             &final_defs,
@@ -2317,7 +2317,7 @@ fn braced_do_evaluates_like_layout_do_and_supports_empty_blocks() {
             "{path}"
         );
     }
-    let unit = crate::core::test_value_factory().with_runtime_value_access(|access| access.unit());
+    let unit = crate::core::test_value_factory().with_boundary_access(|access| access.unit());
     for path in ["empty", "commented"] {
         assert!(
             same_value_representation(
@@ -6456,9 +6456,11 @@ fn interaction_net_construction_is_memoized_and_preserves_initial_active_pairs()
     let (Value::Net(first), Value::Net(second)) = (first, second) else {
         panic!("interaction_net should produce a net")
     };
-    assert!(context.values().with_runtime_value_access(|access| {
-        first.runtime().same_net_in(second.runtime(), &access)
-    }));
+    assert!(
+        context.values().with_boundary_access(|access| {
+            first.runtime().same_net_in(second.runtime(), &access)
+        })
+    );
     assert_eq!(
         first
             .runtime()
@@ -6873,7 +6875,7 @@ fn compile_source_emits_relative_diagnostics_through_context() {
     assert_eq!(emitted[0].0, Severity::Error);
     let message = context
         .values()
-        .with_runtime_value_access(|access| emitted[0].1.clone_core_with(&access));
+        .with_boundary_access(|access| emitted[0].1.clone_core_with(&access));
     let Value::Dict(message) = &message else {
         panic!("diagnostic message must be a dictionary");
     };

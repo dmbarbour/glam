@@ -1961,7 +1961,7 @@ mod tests {
         let values = Values::from_core_factory(core);
         let encoded = task_status_public_value(&values, EvaluationTaskStatus::Abandoned);
 
-        values.core().with_runtime_value_access(|access| {
+        values.core().with_boundary_access(|access| {
             access.assert_same_representation_for_test(
                 &encoded.clone_core_with(&access).unwrap(),
                 &access.key_value(&keys::ABANDONED),
@@ -1978,7 +1978,7 @@ mod tests {
         let core = crate::core::test_value_factory();
         let values = Values::from_core_factory(core.clone());
         let exited = task_status_public_value(&values, EvaluationTaskStatus::Exited);
-        values.core().with_runtime_value_access(|access| {
+        values.core().with_boundary_access(|access| {
             access.assert_same_representation_for_test(
                 &exited.clone_core_with(&access).unwrap(),
                 &access.key_value(&keys::EXITED),
@@ -2002,7 +2002,7 @@ mod tests {
         else {
             panic!("a killed status decodes as killed")
         };
-        values.core().with_runtime_value_access(|access| {
+        values.core().with_boundary_access(|access| {
             let CoreValue::Dict(diagnostic) = diagnostic.clone_core_with(&access).unwrap() else {
                 panic!("a kill diagnostic is a dictionary")
             };
@@ -2027,7 +2027,7 @@ mod tests {
                 crate::core::EvaluationPanicOrigin::ReflectionTask(1),
             )),
         );
-        values.core().with_runtime_value_access(|access| {
+        values.core().with_boundary_access(|access| {
             access.assert_same_representation_for_test(
                 &panicked.clone_core_with(&access).unwrap(),
                 &access.key_value(&keys::PANICKED),
@@ -2094,7 +2094,7 @@ mod tests {
         };
         let updates = updates.lock().expect("test query updates were poisoned");
         assert_eq!(updates.len(), 1);
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             access.assert_same_representation_for_test(
                 &updates[0].clone_core_with(&access).unwrap(),
                 &access.key_value(&keys::BLOCKED),
@@ -2111,7 +2111,7 @@ mod tests {
             .schedule_task(|task_context| {
                 let unit = task_context
                     .values()
-                    .with_runtime_value_access(|access| access.unit());
+                    .with_boundary_access(|access| access.unit());
                 Ok(Box::new(CompleteTask(unit)))
             })
             .expect("terminal task-handle fixture should schedule");
@@ -2177,7 +2177,7 @@ mod tests {
             .schedule_task(|task_context| {
                 let unit = task_context
                     .values()
-                    .with_runtime_value_access(|access| access.unit());
+                    .with_boundary_access(|access| access.unit());
                 Ok(Box::new(CompleteTask(unit)))
             })
             .expect("task-handle backedge fixture should schedule");
@@ -2233,7 +2233,7 @@ mod tests {
             .schedule_task(|task_context| {
                 let unit = task_context
                     .values()
-                    .with_runtime_value_access(|access| access.unit());
+                    .with_boundary_access(|access| access.unit());
                 Ok(Box::new(CompleteTask(unit)))
             })
             .expect("foreign-runtime task-handle fixture should schedule");

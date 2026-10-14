@@ -58,7 +58,7 @@ fn builtin_application_batches_only_to_saturation() {
     else {
         panic!("a saturated builtin must delegate to its memoized lazy call")
     };
-    let source = context.values().with_runtime_value_access(|access| {
+    let source = context.values().with_boundary_access(|access| {
         lazy.access(&access)
             .expect("the lazy must belong to this runtime")
             .source_snapshot()
@@ -76,7 +76,7 @@ fn builtin_application_batches_only_to_saturation() {
 #[test]
 fn partial_builtin_resumes_without_replaying_supplied_arguments() {
     let context = context();
-    let partial = context.values().with_runtime_value_access(|access| {
+    let partial = context.values().with_boundary_access(|access| {
         Value::builtin_call_in(&access, Builtin::Add, vec![Value::Number(7.into())])
     });
     let mut computation = application(&context, partial, &[Value::Number(11.into())]);
@@ -89,7 +89,7 @@ fn partial_builtin_resumes_without_replaying_supplied_arguments() {
     else {
         panic!("completing a partial builtin must expose one saturated call")
     };
-    let source = context.values().with_runtime_value_access(|access| {
+    let source = context.values().with_boundary_access(|access| {
         lazy.access(&access)
             .expect("the lazy must belong to this runtime")
             .source_snapshot()
@@ -298,7 +298,7 @@ fn saturated_result_is_demanded_before_any_extra_argument_is_applied() {
     else {
         panic!("the saturated prefix must be demanded before the extra argument")
     };
-    let cached = context.values().with_runtime_value_access(|access| {
+    let cached = context.values().with_boundary_access(|access| {
         lazy.cache(
             &access,
             Ok(

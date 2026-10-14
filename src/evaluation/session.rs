@@ -1522,7 +1522,7 @@ impl EvalContext {
     {
         let root = self
             .values()
-            .with_runtime_value_access(|access| lazy.root_in(&access));
+            .with_boundary_access(|access| lazy.root_in(&access));
         let machine_root = root.clone();
         self.deferred_root_task(DeferredProducer::Lazy(root), |context| {
             build(context, machine_root)
@@ -1549,7 +1549,7 @@ impl EvalContext {
     {
         let root = self
             .values()
-            .with_runtime_value_access(|access| promise.root_in(&access));
+            .with_boundary_access(|access| promise.root_in(&access));
         self.promise_root_task(&root, build)
     }
 
@@ -2279,9 +2279,7 @@ impl EvalContext {
 
     #[cfg(test)]
     pub(crate) fn complete_wait(&self, wait: &EvaluationWaitToken) {
-        let unit = self
-            .values()
-            .with_runtime_value_access(|access| access.unit());
+        let unit = self.values().with_boundary_access(|access| access.unit());
         self.complete_wait_with_value(wait, unit);
     }
 

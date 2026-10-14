@@ -200,7 +200,7 @@ impl CompileContext {
     #[cfg(test)]
     pub(crate) fn prior_defs(&self) -> Value {
         self.values
-            .with_runtime_value_access(|access| self.prior_defs.clone_core_with(&access))
+            .with_boundary_access(|access| self.prior_defs.clone_core_with(&access))
     }
 
     pub(crate) fn final_defs(&self, access: &crate::core::RuntimeValueAccess<'_>) -> Value {
@@ -294,7 +294,7 @@ impl CompileContext {
         prior_defs: Value,
         final_defs: Value,
     ) -> Value {
-        self.values.with_runtime_value_access(|access| {
+        self.values.with_boundary_access(|access| {
             self.import_module_in(&access, request, relative_namespace, prior_defs, final_defs)
         })
     }
@@ -375,7 +375,7 @@ impl CompileContext {
     #[cfg(test)]
     pub(crate) fn import_binary(&self, request: &str) -> Value {
         self.values
-            .with_runtime_value_access(|access| self.import_binary_in(&access, request))
+            .with_boundary_access(|access| self.import_binary_in(&access, request))
     }
 
     pub(crate) fn import_binary_in(
@@ -815,9 +815,9 @@ mod tests {
     fn abstract_global_path_qualifies_without_exposing_the_namespace() {
         let context = CompileContext::from_module_path(["root", "module"]);
 
-        let path = context.values().with_runtime_value_access(|access| {
-            context.abstract_global_path(&access, "nested.Name")
-        });
+        let path = context
+            .values()
+            .with_boundary_access(|access| context.abstract_global_path(&access, "nested.Name"));
         context.values().assert_same_representation_for_test(
             &path,
             &Value::Atom(Atom::from_key(&Key::abstract_global_path([
@@ -841,7 +841,7 @@ mod tests {
         let context = CompileContext::default();
         let unit = context
             .values()
-            .with_runtime_value_access(|access| context.unit_value(&access));
+            .with_boundary_access(|access| context.unit_value(&access));
         let forged = Value::Atom(Atom::from_key(&Key::List(Arc::from([
             Key::binary_from_text("builtin"),
             Key::binary_from_text("unit"),

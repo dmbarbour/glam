@@ -123,12 +123,11 @@ pub(super) fn closed_function_value(arity: usize, body: TestExpr) -> Value {
 }
 
 pub(super) fn closed_function_value_in(
-    values: &CoreValueFactory,
+    values: &impl crate::core::TestAccess,
     arity: usize,
     body: TestExpr,
 ) -> Value {
-    values
-        .with_runtime_value_access(|access| closed_function_value_with_access(&access, arity, body))
+    values.test_access(|access| closed_function_value_with_access(access, arity, body))
 }
 
 pub(super) fn closed_function_value_with_access(
@@ -156,7 +155,7 @@ pub(super) fn lower_test_function_code_in(
     arity: usize,
     body: impl std::borrow::Borrow<TestExpr>,
 ) -> FunctionCode {
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         lower_test_function_code_with_access(&access, arity, std::borrow::Borrow::borrow(&body))
     })
 }

@@ -4,7 +4,7 @@ use crate::api::{
     Assembler, CompilationExecution, Diagnostic, DiagnosticEvent, DiagnosticSubscriber,
     TestValueFacade, Value as PublicValue,
 };
-use crate::core::{CoreValueFactory, Dict, Key, LazyValue, List, Value};
+use crate::core::{Dict, Key, LazyValue, List, Value};
 use crate::diagnostic::Severity;
 use crate::eval;
 use crate::runtime::RuntimeValueRoot;
@@ -116,7 +116,11 @@ fn environment_root(execution: &CompilationExecution, environment: Value) -> Run
     RuntimeValueRoot::new(execution.macro_context().values(), environment)
 }
 
-fn request_effect(values: &CoreValueFactory, path: &[&str], arguments: Vec<Value>) -> Value {
+fn request_effect(
+    values: &impl crate::core::TestAccess,
+    path: &[&str],
+    arguments: Vec<Value>,
+) -> Value {
     eval::constant_effect(
         values,
         Value::Dict(Dict::new_sync().insert(
@@ -126,7 +130,7 @@ fn request_effect(values: &CoreValueFactory, path: &[&str], arguments: Vec<Value
     )
 }
 
-fn return_effect(values: &CoreValueFactory, value: Value) -> Value {
+fn return_effect(values: &impl crate::core::TestAccess, value: Value) -> Value {
     request_effect(
         values,
         &["reflection_runtime", "v0", "request", "r"],
@@ -264,13 +268,13 @@ fn unstarted_reflection_gate_runs_inside_the_macro_session() {
     let values = assembler.core_values();
     let macro_effect =
         PublicValue::from_runtime_root(values.construct_runtime_value_root(|access| {
-            let reflection = return_effect(&values, access.unit());
+            let reflection = return_effect(access, access.unit());
             let gate = Value::Lazy(LazyValue::from_reflection_gate_in(
                 access,
                 reflection,
                 access.unit(),
             ));
-            return_effect(&values, gate)
+            return_effect(access, gate)
         }));
 
     run(&execution, &macro_effect, Value::Dict(Dict::new_sync()))
@@ -296,7 +300,7 @@ fn unstarted_reflection_result_uses_runtime_default_profile_from_macro_demand() 
         .evaluate_root_whnf(result)
         .expect("a macro-started reflection result should complete");
 
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         access.assert_same_representation_for_test(
             &result.clone_core_with(&access),
             &Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(
@@ -341,7 +345,7 @@ fn assembler_claimed_reflection_gate_is_unavailable_to_macro_session() {
     assert!(error.blocked_on().is_some());
     let macro_effect =
         PublicValue::from_runtime_root(values.construct_runtime_value_root(|access| {
-            return_effect(&values, gate.clone_core_with(access))
+            return_effect(access, gate.clone_core_with(access))
         }));
 
     let error = run(&execution, &macro_effect, Value::Dict(Dict::new_sync()))

@@ -632,12 +632,12 @@ mod tests {
 
     fn trace_origin_value(trace: &CompilationTrace) -> Value {
         let values = crate::compiler::test_value_factory();
-        values.with_runtime_value_access(|access| trace.origin_value(&access))
+        values.with_boundary_access(|access| trace.origin_value(&access))
     }
 
     fn digest_value(digest: ContentDigest) -> Value {
         let values = crate::compiler::test_value_factory();
-        values.with_runtime_value_access(|access| digest.value(&access))
+        values.with_boundary_access(|access| digest.value(&access))
     }
 
     fn assert_optional_value(

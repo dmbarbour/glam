@@ -21,12 +21,9 @@ fn lazy_source_result_is_installed_once_before_following_a_promise() {
     let evaluations = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&evaluations);
     let returned = promise.duplicate_for_test(context.values());
-    let returned_values = context.values().clone();
-    let lazy = LazyValue::semantic_thunk(context.values(), move |_| {
+    let lazy = LazyValue::semantic_thunk(context.values(), move |context| {
         observed.fetch_add(1, Ordering::SeqCst);
-        Ok(Value::Promised(
-            returned.duplicate_for_test(&returned_values),
-        ))
+        Ok(Value::Promised(returned.duplicate_for_test(context)))
     });
     let (lazy, mut machine) = lazy_machine(&context, lazy);
     context
@@ -70,7 +67,7 @@ fn lazy_source_result_is_installed_once_before_following_a_promise() {
     let cached = lazy
         .cached(context.values())
         .expect("the lazy task must publish one terminal cache");
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         access.assert_same_representation_for_test(
             &cached
                 .expect_without_debug("the retained promise should succeed")

@@ -132,7 +132,7 @@ mod tests {
 
     fn edges(values: &CoreValueFactory, value: &impl CompatibilityValueEdges) -> Vec<Value> {
         let mut edges = Vec::new();
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             value.visit_compatibility_value_edges(&mut |value| {
                 edges.push(access.duplicate_value(value));
             });

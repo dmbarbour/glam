@@ -487,6 +487,6 @@ pub(crate) fn constant_effect_in(
 }
 
 #[cfg(test)]
-pub(crate) fn constant_effect(values: &CoreValueFactory, request: Value) -> Value {
-    values.with_runtime_value_access(|access| constant_effect_in(&access, request))
+pub(crate) fn constant_effect(values: &impl crate::core::TestAccess, request: Value) -> Value {
+    values.test_access(|access| constant_effect_in(access, request))
 }

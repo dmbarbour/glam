@@ -396,7 +396,7 @@ fn region_audit_distinguishes_access_authority_from_region_callbacks() {
         }
         #[cfg(test)]
         fn test_only(access: &RuntimeValueAccess<'_>) {
-            values.with_runtime_value_access(|_| ());
+            values.with_boundary_access(|_| ());
         }
         ",
     )

@@ -28,7 +28,7 @@ mod managed;
 mod runtime_cache;
 #[cfg(test)]
 pub(crate) use managed::{
-    ClosedCompatibilityValue, max_runtime_value_access_depth_for_test,
+    ClosedCompatibilityValue, TestAccess, max_runtime_value_access_depth_for_test,
     reset_runtime_value_access_depth_for_test, thread_has_runtime_value_access_for_test,
 };
 pub(crate) use managed::{
@@ -696,7 +696,7 @@ pub(crate) fn private_test_value_factory() -> CoreValueFactory {
 #[cfg(test)]
 impl CoreValueFactory {
     pub(crate) fn root_core_net(&self, net: &CoreRuntimeNet) -> ManagedCoreNetRoot {
-        self.with_runtime_value_access(|access| net.root_in(&access))
+        self.with_boundary_access(|access| net.root_in(&access))
     }
 }
 
@@ -705,13 +705,13 @@ impl CoreValueFactory {
 /// as part of the producer or resolver record instead.
 #[cfg(test)]
 pub(crate) fn publish_test_promise(
-    values: &CoreValueFactory,
+    values: &impl TestAccess,
     promise: &PromisedValue,
     assignment: PromiseAssignment,
 ) -> Result<(), PromiseAssignment> {
-    let published = values.with_runtime_value_access(|access| {
-        let root = promise.root_in(&access);
-        root.publish(&access, assignment)
+    let published = values.test_access(|access| {
+        let root = promise.root_in(access);
+        root.publish(access, assignment)
     })?;
     published.notify();
     Ok(())
@@ -719,7 +719,7 @@ pub(crate) fn publish_test_promise(
 
 #[cfg(test)]
 pub(crate) fn set_test_promise(
-    values: &CoreValueFactory,
+    values: &impl TestAccess,
     promise: &PromisedValue,
     value: Value,
 ) -> Result<(), Value> {
@@ -756,13 +756,13 @@ pub(crate) fn fail_test_promise_message(
 
 #[cfg(test)]
 pub(crate) fn cache_test_lazy(
-    values: &CoreValueFactory,
+    values: &impl crate::core::TestAccess,
     lazy: &LazyValue,
     result: LazyResult,
 ) -> LazyResult {
-    values.with_runtime_value_access(|access| {
-        let root = lazy.root_in(&access);
-        root.cache(&access, result)
+    values.test_access(|access| {
+        let root = lazy.root_in(access);
+        root.cache(access, result)
     })
 }
 
@@ -791,8 +791,8 @@ impl LazyValue {
     /// Test-only convenience for an explicitly value-domain-qualified edge
     /// duplicate. This deliberately does not restore `Clone`.
     #[cfg(test)]
-    pub(crate) fn duplicate_for_test(&self, values: &CoreValueFactory) -> Self {
-        values.with_runtime_value_access(|access| self.duplicate_in(&access))
+    pub(crate) fn duplicate_for_test(&self, values: &impl TestAccess) -> Self {
+        values.test_access(|access| self.duplicate_in(access))
     }
 
     fn with_source_in(access: &RuntimeValueAccess<'_>, source: LazySource) -> Self {
@@ -810,10 +810,10 @@ impl LazyValue {
 
     #[cfg(test)]
     pub(crate) fn computed_fixpoint(
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
         computation: FixpointComputation,
     ) -> Self {
-        values.with_runtime_value_access(|access| Self::computed_fixpoint_in(&access, computation))
+        values.test_access(|access| Self::computed_fixpoint_in(access, computation))
     }
 
     #[cfg(test)]
@@ -829,13 +829,13 @@ impl LazyValue {
 
     #[cfg(test)]
     pub(crate) fn semantic_thunk(
-        values: &CoreValueFactory,
+        values: &impl TestAccess,
         thunk: impl Fn(&EvaluatorStepContext<'_>) -> Result<Value, EvaluationHalt>
         + Send
         + Sync
         + 'static,
     ) -> Self {
-        values.with_runtime_value_access(|access| Self::semantic_thunk_in(&access, thunk))
+        values.test_access(|access| Self::semantic_thunk_in(access, thunk))
     }
 
     /// Defers callback-free test work with every recursive value capture
@@ -845,13 +845,11 @@ impl LazyValue {
     /// managed lazy representation traces `captures` exactly.
     #[cfg(test)]
     pub(crate) fn semantic_computation(
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
         captures: impl Into<Arc<[Value]>>,
         operation: SemanticOperation,
     ) -> Self {
-        values.with_runtime_value_access(|access| {
-            Self::semantic_computation_in(&access, captures, operation)
-        })
+        values.test_access(|access| Self::semantic_computation_in(access, captures, operation))
     }
 
     #[cfg(test)]
@@ -881,7 +879,7 @@ impl LazyValue {
 
     #[cfg(test)]
     pub(crate) fn external_host_call(
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
         record: HostCallRecord,
         captures: impl Into<Arc<[Value]>>,
         producer: impl Fn(HostCallRootBundle) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>>
@@ -889,9 +887,7 @@ impl LazyValue {
         + Sync
         + 'static,
     ) -> Self {
-        values.with_runtime_value_access(|access| {
-            Self::external_host_call_in(&access, record, captures, producer)
-        })
+        values.test_access(|access| Self::external_host_call_in(access, record, captures, producer))
     }
 
     pub(crate) fn external_host_call_in(
@@ -967,8 +963,11 @@ impl LazyValue {
     }
 
     #[cfg(test)]
-    pub(crate) fn error(values: &CoreValueFactory, message: impl Into<Arc<str>>) -> Self {
-        values.with_runtime_value_access(|access| Self::error_in(&access, message))
+    pub(crate) fn error(
+        values: &impl crate::core::TestAccess,
+        message: impl Into<Arc<str>>,
+    ) -> Self {
+        values.test_access(|access| Self::error_in(access, message))
     }
 
     pub(crate) fn error_in(access: &RuntimeValueAccess<'_>, message: impl Into<Arc<str>>) -> Self {
@@ -992,8 +991,8 @@ impl LazyValue {
     }
 
     #[cfg(test)]
-    pub(crate) fn root(&self, values: &CoreValueFactory) -> managed::ManagedLazyRoot {
-        values.with_runtime_value_access(|access| self.root_in(&access))
+    pub(crate) fn root(&self, values: &impl crate::core::TestAccess) -> managed::ManagedLazyRoot {
+        values.test_access(|access| self.root_in(access))
     }
 
     pub(crate) fn root_in(&self, access: &RuntimeValueAccess<'_>) -> managed::ManagedLazyRoot {
@@ -1001,18 +1000,21 @@ impl LazyValue {
     }
 
     #[cfg(test)]
-    pub(crate) fn id(&self, values: &CoreValueFactory) -> LazyId {
-        values.with_runtime_value_access(|access| self.access(&access).id())
+    pub(crate) fn id(&self, values: &impl crate::core::TestAccess) -> LazyId {
+        values.test_access(|access| self.access(access).id())
     }
 
     #[cfg(test)]
-    pub(crate) fn source_snapshot(&self, values: &CoreValueFactory) -> Option<LazySource> {
-        values.with_runtime_value_access(|access| self.access(&access).source_snapshot())
+    pub(crate) fn source_snapshot(
+        &self,
+        values: &impl crate::core::TestAccess,
+    ) -> Option<LazySource> {
+        values.test_access(|access| self.access(access).source_snapshot())
     }
 
     #[cfg(test)]
-    pub(crate) fn cached(&self, values: &CoreValueFactory) -> Option<LazyResult> {
-        values.with_runtime_value_access(|access| self.access(&access).cached())
+    pub(crate) fn cached(&self, values: &impl crate::core::TestAccess) -> Option<LazyResult> {
+        values.test_access(|access| self.access(access).cached())
     }
 }
 
@@ -1040,13 +1042,13 @@ impl PromisedValue {
     /// Test-only convenience for an explicitly value-domain-qualified edge
     /// duplicate. This deliberately does not restore `Clone`.
     #[cfg(test)]
-    pub(crate) fn duplicate_for_test(&self, values: &CoreValueFactory) -> Self {
-        values.with_runtime_value_access(|access| self.duplicate_in(&access))
+    pub(crate) fn duplicate_for_test(&self, values: &impl TestAccess) -> Self {
+        values.test_access(|access| self.duplicate_in(access))
     }
 
     #[cfg(test)]
-    pub(crate) fn new(values: &CoreValueFactory) -> Self {
-        values.with_runtime_value_access(|access| {
+    pub(crate) fn new(values: &impl crate::core::TestAccess) -> Self {
+        values.test_access(|access| {
             access
                 .construct_managed_promise()
                 .expect("managed promise representation must fit one collector run")
@@ -1085,8 +1087,11 @@ impl PromisedValue {
     }
 
     #[cfg(test)]
-    pub(crate) fn root(&self, values: &CoreValueFactory) -> managed::ManagedPromiseRoot {
-        values.with_runtime_value_access(|access| self.root_in(&access))
+    pub(crate) fn root(
+        &self,
+        values: &impl crate::core::TestAccess,
+    ) -> managed::ManagedPromiseRoot {
+        values.test_access(|access| self.root_in(access))
     }
 
     pub(crate) fn root_in(&self, access: &RuntimeValueAccess<'_>) -> managed::ManagedPromiseRoot {
@@ -1094,26 +1099,29 @@ impl PromisedValue {
     }
 
     #[cfg(test)]
-    pub(crate) fn id(&self, values: &CoreValueFactory) -> PromiseId {
-        values.with_runtime_value_access(|access| self.access(&access).id())
+    pub(crate) fn id(&self, values: &impl crate::core::TestAccess) -> PromiseId {
+        values.test_access(|access| self.access(access).id())
     }
 
     #[cfg(test)]
-    pub(crate) fn task(&self, values: &CoreValueFactory) -> Option<Arc<PromiseProducerObligation>> {
-        values.with_runtime_value_access(|access| self.access(&access).producer())
+    pub(crate) fn task(
+        &self,
+        values: &impl crate::core::TestAccess,
+    ) -> Option<Arc<PromiseProducerObligation>> {
+        values.test_access(|access| self.access(access).producer())
     }
 
     #[cfg(test)]
     pub(crate) fn assignment(
         &self,
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
     ) -> Option<Result<Value, Arc<EvaluationFailure>>> {
-        values.with_runtime_value_access(|access| self.access(&access).assignment())
+        values.test_access(|access| self.access(access).assignment())
     }
 
     #[cfg(test)]
-    pub(crate) fn exact_subscription_count(&self, values: &CoreValueFactory) -> usize {
-        values.with_runtime_value_access(|access| self.access(&access).exact_subscription_count())
+    pub(crate) fn exact_subscription_count(&self, values: &impl crate::core::TestAccess) -> usize {
+        values.test_access(|access| self.access(access).exact_subscription_count())
     }
 }
 
@@ -1310,8 +1318,8 @@ impl NetValue {
     /// Test-only convenience for an explicitly value-domain-qualified edge
     /// duplicate. This deliberately does not restore `Clone`.
     #[cfg(test)]
-    pub(crate) fn duplicate_for_test(&self, values: &CoreValueFactory) -> Self {
-        values.with_runtime_value_access(|access| self.duplicate_in(&access))
+    pub(crate) fn duplicate_for_test(&self, values: &impl TestAccess) -> Self {
+        values.test_access(|access| self.duplicate_in(access))
     }
 
     /// Compares exact managed-net identity inside matching value access.
@@ -1861,11 +1869,11 @@ impl LazyValue {
 
     #[cfg(test)]
     pub(crate) fn from_access(
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
         path: Arc<[CoreDataKey]>,
         arguments: Arc<[Value]>,
     ) -> Self {
-        values.with_runtime_value_access(|access| Self::from_access_in(&access, path, arguments))
+        values.test_access(|access| Self::from_access_in(access, path, arguments))
     }
 
     pub(crate) fn from_application_in(
@@ -1888,13 +1896,11 @@ impl LazyValue {
 
     #[cfg(test)]
     pub(crate) fn from_application(
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
         function: Value,
         arguments: Arc<[Value]>,
     ) -> Self {
-        values.with_runtime_value_access(|access| {
-            Self::from_application_in(&access, function, arguments)
-        })
+        values.test_access(|access| Self::from_application_in(access, function, arguments))
     }
 
     pub(crate) fn from_builtin_in(access: &RuntimeValueAccess<'_>, call: BuiltinCall) -> Self {
@@ -1936,8 +1942,11 @@ impl LazyValue {
     }
 
     #[cfg(test)]
-    pub(crate) fn from_net_computation(values: &CoreValueFactory, net: NetValue) -> Self {
-        values.with_runtime_value_access(|access| Self::from_net_computation_in(&access, net))
+    pub(crate) fn from_net_computation(
+        values: &impl crate::core::TestAccess,
+        net: NetValue,
+    ) -> Self {
+        values.test_access(|access| Self::from_net_computation_in(access, net))
     }
 
     pub(crate) fn from_reflection_gate_in(
@@ -1955,13 +1964,11 @@ impl LazyValue {
 
     #[cfg(test)]
     pub(crate) fn from_reflection_gate(
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
         effect: Value,
         target: Value,
     ) -> Self {
-        values.with_runtime_value_access(|access| {
-            Self::from_reflection_gate_in(&access, effect, target)
-        })
+        values.test_access(|access| Self::from_reflection_gate_in(access, effect, target))
     }
 }
 
@@ -2282,7 +2289,7 @@ impl Value {
     }
 
     #[cfg(test)]
-    pub(crate) fn error(values: &CoreValueFactory, message: impl Into<Arc<str>>) -> Self {
+    pub(crate) fn error(values: &impl TestAccess, message: impl Into<Arc<str>>) -> Self {
         Self::Lazy(LazyValue::error(values, message))
     }
 
@@ -2292,8 +2299,11 @@ impl Value {
     }
 
     #[cfg(test)]
-    pub(crate) fn reflection_task_result(values: &CoreValueFactory, effect: Value) -> Self {
-        values.with_runtime_value_access(|access| Self::reflection_task_result_in(&access, effect))
+    pub(crate) fn reflection_task_result(
+        values: &impl crate::core::TestAccess,
+        effect: Value,
+    ) -> Self {
+        values.test_access(|access| Self::reflection_task_result_in(access, effect))
     }
 
     pub(crate) fn reflection_task_result_in(
@@ -2320,12 +2330,11 @@ impl Value {
     /// evaluating a saturated call.
     #[cfg(test)]
     pub(crate) fn builtin_call(
-        values: &CoreValueFactory,
+        values: &impl crate::core::TestAccess,
         builtin: Builtin,
         arguments: Vec<Value>,
     ) -> Self {
-        values
-            .with_runtime_value_access(|access| Self::builtin_call_in(&access, builtin, arguments))
+        values.test_access(|access| Self::builtin_call_in(access, builtin, arguments))
     }
 
     pub(crate) fn builtin_call_in(
@@ -3039,7 +3048,7 @@ impl CoreValueFactory {
         L: SameRepresentationForTest<R> + ?Sized,
         R: ?Sized,
     {
-        self.with_runtime_value_access(|access| access.same_representation_for_test(left, right))
+        self.with_boundary_access(|access| access.same_representation_for_test(left, right))
     }
 
     #[track_caller]
@@ -3088,14 +3097,17 @@ impl Value {
     /// Test-only convenience for an explicitly value-domain-qualified shell
     /// duplicate. This deliberately does not restore `Clone`.
     #[cfg(test)]
-    pub(crate) fn duplicate_for_test(&self, values: &CoreValueFactory) -> Self {
-        values.with_runtime_value_access(|access| access.duplicate_value(self))
+    pub(crate) fn duplicate_for_test(&self, values: &impl TestAccess) -> Self {
+        values.test_access(|access| access.duplicate_value(self))
     }
 
     /// Test-only owned diagnostic text produced under the named value domain.
     #[cfg(test)]
-    pub(crate) fn diagnostic_debug_for_test(&self, values: &CoreValueFactory) -> String {
-        values.with_runtime_value_access(|access| format!("{:?}", access.diagnostic_debug(self)))
+    pub(crate) fn diagnostic_debug_for_test(
+        &self,
+        values: &impl crate::core::TestAccess,
+    ) -> String {
+        values.test_access(|access| format!("{:?}", access.diagnostic_debug(self)))
     }
 
     #[cfg(test)]
@@ -3181,7 +3193,7 @@ mod tests {
     }
 
     fn metadata_carrier(values: &CoreValueFactory, metadata: Value) -> Value {
-        values.with_runtime_value_access(|access| access.metadata_carrier(metadata))
+        values.with_boundary_access(|access| access.metadata_carrier(metadata))
     }
 
     struct DropSignal(Arc<AtomicBool>);
@@ -3313,7 +3325,7 @@ mod tests {
 
         assert_eq!(max_runtime_value_access_depth_for_test(), 1);
         reset_runtime_value_access_depth_for_test();
-        factory.with_runtime_value_access(|access| {
+        factory.with_boundary_access(|access| {
             access.assert_same_representation_for_test(left.as_slice(), &right);
             assert_eq!(
                 max_runtime_value_access_depth_for_test(),
@@ -3336,22 +3348,22 @@ mod tests {
         let roots = [&core.initial_metadata];
 
         assert!(roots.iter().all(|root| root.runtime_id() == runtime));
-        factory.with_runtime_value_access(|access| {
+        factory.with_boundary_access(|access| {
             access.assert_same_representation_for_test(
                 &access.initial_metadata(),
-                &core.initial_metadata.clone_core_for_test(),
+                &core.initial_metadata.clone_core_with(&access),
             );
         });
 
         let scoped = factory.scoped();
-        factory.with_runtime_value_access(|access| {
+        factory.with_boundary_access(|access| {
             access.assert_same_representation_for_test(
                 &access.initial_metadata(),
-                &core.initial_metadata.clone_core_for_test(),
+                &core.initial_metadata.clone_core_with(&access),
             );
         });
-        let scoped_unit = scoped.with_runtime_value_access(|access| access.unit());
-        factory.with_runtime_value_access(|access| {
+        let scoped_unit = scoped.with_boundary_access(|access| access.unit());
+        factory.with_boundary_access(|access| {
             access.assert_same_representation_for_test(&scoped_unit, &access.unit());
         });
 
@@ -3360,7 +3372,7 @@ mod tests {
             .expect("the canonical bundle should survive collection");
         assert_eq!(live.root_entries(), roots.len());
         assert_eq!(live.marked_slots(), roots.len());
-        factory.with_runtime_value_access(|access| {
+        factory.with_boundary_access(|access| {
             access.assert_same_representation_for_test(
                 &access.unit(),
                 &access.key_value(&keys::UNIT),
@@ -3392,7 +3404,7 @@ mod tests {
         );
         let scoped = factory.scoped();
         let domain = Arc::downgrade(factory.value_domain());
-        let metadata = factory.with_runtime_value_access(|access| {
+        let metadata = factory.with_boundary_access(|access| {
             factory
                 .core_values()
                 .initial_metadata
@@ -3629,8 +3641,7 @@ mod tests {
 
         let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             target.cached(|| RootedCachedProbe {
-                root: other
-                    .with_runtime_value_access(|access| access.root_runtime_value(access.unit())),
+                root: other.with_boundary_access(|access| access.root_runtime_value(access.unit())),
                 _dropped: DropSignal(dropped.clone()),
             })
         }));
@@ -3705,7 +3716,7 @@ mod tests {
             .source_snapshot(&values)
             .expect("an unresolved lazy should expose a source snapshot");
 
-        let result = values.with_runtime_value_access(|access| {
+        let result = values.with_boundary_access(|access| {
             EvaluatedValue::from_whnf_in(&access, access.unit()).expect("unit is already evaluated")
         });
         assert!(cache_test_lazy(&values, &observer, Ok(result)).is_ok());
@@ -3835,7 +3846,7 @@ mod tests {
         let data = builder.data(Value::Number(7.into()));
         let template = builder.finish(data);
 
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             let lazy = Value::Lazy(LazyValue::error_in(&access, "duplicate lazy"));
             let promise = Value::Promised(
                 access
@@ -3974,7 +3985,7 @@ mod tests {
         let values = values();
         let demanded = Arc::new(AtomicBool::new(false));
 
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             let demand_signal = Arc::clone(&demanded);
             let lazy = LazyValue::semantic_thunk_in(&access, move |_| {
                 demand_signal.store(true, Ordering::Release);
@@ -4022,7 +4033,7 @@ mod tests {
         let data = builder.data(Value::Number(7.into()));
         let template = builder.finish(data);
 
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             let demand_signal = Arc::clone(&demanded);
             let lazy = Value::Lazy(LazyValue::semantic_thunk_in(&access, move |_| {
                 demand_signal.store(true, Ordering::Release);
@@ -4116,7 +4127,7 @@ mod tests {
         let data = builder.data(Value::Number(7.into()));
         let template = builder.finish(data);
 
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             let demand_signal = Arc::clone(&demanded);
             let lazy = Value::Lazy(LazyValue::semantic_thunk_in(&access, move |_| {
                 demand_signal.store(true, Ordering::Release);
@@ -4206,9 +4217,8 @@ mod tests {
     #[test]
     fn metadata_carriers_hide_unit_and_associated_metadata() {
         let values = values();
-        let (first, second) = values.with_runtime_value_access(|access| {
-            (access.initial_metadata(), access.initial_metadata())
-        });
+        let (first, second) = values
+            .with_boundary_access(|access| (access.initial_metadata(), access.initial_metadata()));
         let Value::Metadata(first_carrier) = &first else {
             panic!("initial metadata value should be a sealed carrier");
         };
@@ -4220,7 +4230,7 @@ mod tests {
             Arc::ptr_eq(&first_carrier.metadata, &second_carrier.metadata),
             "initial metadata carriers should share one allocation"
         );
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             assert!(!access.same_representation(&first, &access.unit()));
             let associated = first
                 .associated_metadata(&access)
@@ -4239,7 +4249,7 @@ mod tests {
     #[test]
     fn metadata_carriers_transport_through_ordinary_containers() {
         let values = values();
-        let carrier = values.with_runtime_value_access(|access| access.initial_metadata());
+        let carrier = values.with_boundary_access(|access| access.initial_metadata());
         let list = Value::List(List::from_values(vec![carrier.duplicate_for_test(&values)]));
         let dict = Value::Dict(Dict::new_sync().insert(
             Key::atom_from_text("trace"),
@@ -4313,9 +4323,9 @@ mod tests {
             Key::atom_from_text("field"),
             field.duplicate_for_test(&values),
         ));
-        let sealed = values.with_runtime_value_access(|access| access.initial_metadata());
+        let sealed = values.with_boundary_access(|access| access.initial_metadata());
 
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             let evaluated =
                 EvaluatedValue::from_whnf_in(&access, access.duplicate_value(&container))
                     .expect("a container with a lazy field is in outer WHNF");
@@ -4397,7 +4407,7 @@ mod tests {
             )),
         ));
 
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             assert_eq!(
                 access.key_from_value(&value),
                 Some(Key::Dict(Arc::from([(
@@ -4420,7 +4430,7 @@ mod tests {
             Dict::new_sync().insert(Key::atom_from_text("key"), Value::Dict(Dict::new_sync())),
         );
 
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             assert_eq!(
                 access.key_from_value(&empty),
                 Some(Key::Dict(Arc::from([])))
@@ -4435,7 +4445,7 @@ mod tests {
     #[test]
     fn keys_reject_deferred_values() {
         let values = values();
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             let lazy = Value::Lazy(
                 access
                     .construct_managed_lazy(LazySource::Error)

@@ -1206,7 +1206,7 @@ mod root_inventory_tests {
         let public_values = Values::from_core_factory(values.clone());
         let emission = Value::Number(Number::integer(41));
         let context = public_values.integer(42);
-        let halt = TaskHalt::failure(values.with_runtime_value_access(|access| {
+        let halt = TaskHalt::failure(values.with_boundary_access(|access| {
             EvaluationHalt::from_value(&access, emission).into_permanent_failure()
         }));
         assert!(
@@ -1225,7 +1225,7 @@ mod root_inventory_tests {
     #[test]
     fn structured_api_error_preserves_its_runtime_root() {
         let values = crate::core::test_value_factory();
-        let halt = values.with_runtime_value_access(|access| {
+        let halt = values.with_boundary_access(|access| {
             EvaluationHalt::from_value(&access, Value::Number(Number::integer(42)))
         });
         let error = ApiError::from_eval(&values, halt);

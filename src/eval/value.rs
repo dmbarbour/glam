@@ -67,7 +67,7 @@ pub(crate) fn failure_diagnostic_value_in(
 #[cfg(test)]
 pub(crate) fn failure_diagnostic_value(failure: &EvaluationFailure) -> Value {
     let values = crate::core::test_value_factory();
-    values.with_runtime_value_access(|access| failure_diagnostic_value_in(&access, failure))
+    values.with_boundary_access(|access| failure_diagnostic_value_in(&access, failure))
 }
 
 #[cfg(test)]
@@ -2229,7 +2229,7 @@ mod ownership_tests {
     #[test]
     fn promise_follower_yields_from_its_retained_whnf_checkpoint() {
         let context = EvalContext::standalone();
-        let (promise, promise_root) = context.values().with_runtime_value_access(|access| {
+        let (promise, promise_root) = context.values().with_boundary_access(|access| {
             let root = access
                 .construct_rooted_managed_promise()
                 .expect("the resumable promise should fit its reviewed managed slot");
@@ -2386,7 +2386,7 @@ mod ownership_tests {
         let result = crate::core::cache_test_lazy(
             context.values(),
             &source,
-            Ok(context.values().with_runtime_value_access(|access| {
+            Ok(context.values().with_boundary_access(|access| {
                 EvaluatedValue::from_whnf_in(&access, Value::Number(97.into()))
                     .expect("a number is already in WHNF")
             })),
@@ -2404,10 +2404,12 @@ mod ownership_tests {
             ) else {
                 panic!("the stale net route must observe the winning terminal cache")
             };
-            context.values().assert_same_representation_for_test(
-                &value.clone_core_for_test(),
-                &Value::Number(97.into()),
-            );
+            evaluator.with_value_access(|access| {
+                access.values().assert_same_representation_for_test(
+                    &value.clone_core_with(access.values()),
+                    &Value::Number(97.into()),
+                );
+            });
         });
     }
 }

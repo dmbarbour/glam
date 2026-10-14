@@ -26,13 +26,13 @@ fn set_promise(context: &EvalContext, promise: &PromisedValue, value: Value) -> 
 fn unit(context: &EvalContext) -> Value {
     context
         .values()
-        .with_runtime_value_access(|access| access.unit())
+        .with_boundary_access(|access| access.unit())
 }
 
 fn rooted_unit(context: &EvalContext) -> RuntimeValueRoot {
     context
         .values()
-        .with_runtime_value_access(|access| access.root_runtime_value(access.unit()))
+        .with_boundary_access(|access| access.root_runtime_value(access.unit()))
 }
 
 fn fail_promise(
@@ -52,7 +52,7 @@ fn fail_promise_message(
 }
 
 fn structured_failure(context: &EvalContext, message: &str) -> Arc<EvaluationFailure> {
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         Arc::new(EvaluationFailure::emission_in(
             &access,
             Value::binary_from_text(message),
@@ -272,10 +272,9 @@ fn counted_client_lazy(
 ) -> (RuntimeValueRoot, Arc<std::sync::atomic::AtomicUsize>) {
     let evaluations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed = evaluations.clone();
-    let values = context.values().clone();
-    let (_lazy, root) = rooted_semantic_lazy_value(context.values(), move |_| {
+    let (_lazy, root) = rooted_semantic_lazy_value(context.values(), move |context| {
         observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(value.duplicate_for_test(&values))
+        Ok(value.duplicate_for_test(context))
     });
     (root, evaluations)
 }
@@ -325,14 +324,14 @@ fn lazy_task_follow_retains_a_fresh_deferred_result_across_polls() {
 fn promise_follow_reprojects_its_rooted_assignment_across_polls() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
-    let promise_root = context.values().with_runtime_value_access(|access| {
+    let promise_root = context.values().with_boundary_access(|access| {
         access
             .construct_rooted_managed_promise()
             .expect("the managed promise should fit its allocation class")
     });
     let promise = context
         .values()
-        .with_runtime_value_access(|access| PromisedValue::from_root(&promise_root, &access));
+        .with_boundary_access(|access| PromisedValue::from_root(&promise_root, &access));
     let assignment = context.values().construct_runtime_value_root(|access| {
         Value::Lazy(LazyValue::semantic_thunk_in(access, |_| {
             Ok(Value::Number(42.into()))
@@ -948,7 +947,7 @@ fn blocked_client_checkpoint_survives_collection_until_promise_assignment() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
-    let (promise, root) = context.values().with_runtime_value_access(|access| {
+    let (promise, root) = context.values().with_boundary_access(|access| {
         let value = Value::Promised(
             access
                 .construct_managed_promise()
@@ -1159,7 +1158,7 @@ fn client_failure_root_survives_work_and_owner_session_retirement() {
         Value::Number(37.into()),
     ));
     let frame = crate::diagnostic::evaluation_context_frame("client_demand_retention");
-    let failure = Arc::new(context.values().with_runtime_value_access(|access| {
+    let failure = Arc::new(context.values().with_boundary_access(|access| {
         EvaluationFailure::emission_in(&access, emission).with_context_in(&access, frame)
     }));
     let (promise, _promise_root) = rooted_promise(context.values());
@@ -1330,7 +1329,6 @@ fn synchronous_client_demand_does_not_wait_for_unrelated_worker_progress() {
             move |_| {
                 Ok(Box::new(AssignPromiseAfterRelease {
                     promise: promise_root,
-                    values: promise_values,
                     value: expected,
                     started: Some(started),
                     release: worker_release,
@@ -1522,14 +1520,12 @@ fn synchronous_client_demand_waits_for_worker_owned_task_promise() {
                 let expected = expected.duplicate_for_test(owner.values());
                 move |task_context| {
                     let promise = PromisedValue::fixpoint(&task_context)?;
-                    let values = task_context.values().clone();
                     let root = promise.root(task_context.values());
                     promise_sender
                         .send(promise)
                         .expect("promise observer must remain live");
                     Ok(Box::new(AssignPromiseAfterRelease {
                         promise: root,
-                        values,
                         value: expected,
                         started: Some(started_sender),
                         release: release_receiver,
@@ -1621,7 +1617,7 @@ fn generic_client_demand_resumes_composed_access_and_binary_annotation() {
     let coordinator = context.coordinator().expect("coordinator should be live");
     let (intermediate, _intermediate_root, _) = rooted_promise_value(context.values());
     let (byte, _byte_root, _) = rooted_promise_value(context.values());
-    let binary = context.values().with_runtime_value_access(|access| {
+    let binary = context.values().with_boundary_access(|access| {
         let root = Value::Dict(crate::core::Dict::new_sync().insert(
             crate::core::Key::atom_from_text("outer"),
             Value::Promised(intermediate.duplicate_in(&access)),
@@ -1736,7 +1732,7 @@ fn escaped_context_retains_demand_resources_without_retaining_owner_or_coordinat
     drop(coordinator);
     assert!(context.coordinator().is_none());
     let actual = unit(&context);
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         access.assert_same_representation_for_test(&actual, &access.unit());
     });
 
@@ -2602,7 +2598,7 @@ impl EvaluationTaskMachine for AwaitCell {
 }
 
 fn rooted_inert_lazy(values: &CoreValueFactory) -> (LazyValue, ManagedLazyRoot) {
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         let lazy = LazyValue::semantic_thunk_in(&access, |_| {
             panic!("scheduler cycle fixtures must use their installed test machine")
         });
@@ -2625,7 +2621,7 @@ fn rooted_semantic_lazy_value(
     values: &CoreValueFactory,
     thunk: impl Fn(&EvaluatorStepContext<'_>) -> Result<Value, EvaluationHalt> + Send + Sync + 'static,
 ) -> (LazyValue, RuntimeValueRoot) {
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         let lazy = LazyValue::semantic_thunk_in(&access, thunk);
         let _lazy_root = lazy.root_in(&access);
         let value = access.root_runtime_value(Value::Lazy(lazy.duplicate_in(&access)));
@@ -2636,7 +2632,7 @@ fn rooted_semantic_lazy_value(
 fn rooted_promise_value(
     values: &CoreValueFactory,
 ) -> (PromisedValue, ManagedPromiseRoot, RuntimeValueRoot) {
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         let promise_root = access
             .construct_rooted_managed_promise()
             .expect("the rooted promise fixture should fit one managed run");
@@ -2647,7 +2643,7 @@ fn rooted_promise_value(
 }
 
 fn rooted_promise(values: &CoreValueFactory) -> (PromisedValue, ManagedPromiseRoot) {
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         let root = access
             .construct_rooted_managed_promise()
             .expect("the rooted promise fixture should fit one managed run");
@@ -2657,11 +2653,11 @@ fn rooted_promise(values: &CoreValueFactory) -> (PromisedValue, ManagedPromiseRo
 }
 
 fn root_promise(values: &CoreValueFactory, promise: &PromisedValue) -> ManagedPromiseRoot {
-    values.with_runtime_value_access(|access| promise.root_in(&access))
+    values.with_boundary_access(|access| promise.root_in(&access))
 }
 
 fn root_promise_value(values: &CoreValueFactory, promise: &ManagedPromiseRoot) -> RuntimeValueRoot {
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         access.root_runtime_value(Value::Promised(PromisedValue::from_root(promise, &access)))
     })
 }
@@ -3074,7 +3070,6 @@ impl EvaluationTaskMachine for CompleteAfterRelease {
 
 struct AssignPromiseAfterRelease {
     promise: crate::core::ManagedPromiseRoot,
-    values: CoreValueFactory,
     value: Value,
     started: Option<mpsc::Sender<()>>,
     release: mpsc::Receiver<()>,
@@ -3083,7 +3078,7 @@ struct AssignPromiseAfterRelease {
 impl EvaluationTaskMachine for AssignPromiseAfterRelease {
     fn poll(
         &mut self,
-        _context: &mut crate::evaluation::EvaluationPollContext,
+        context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         if let Some(started) = self.started.take() {
@@ -3093,19 +3088,19 @@ impl EvaluationTaskMachine for AssignPromiseAfterRelease {
         }
         // Waiting on the test is host work: it suspends the poll's mutator,
         // so a collection the test runs meanwhile need not wait for it.
-        _context.suspend(|| {
+        context.suspend(|| {
             self.release
                 .recv_timeout(Duration::from_secs(2))
                 .expect("test should release the promise producer")
         });
-        let published = self.values.with_runtime_value_access(|access| {
+        let published = context.with_runtime_access(|access| {
             self.promise
                 .publish(&access, Ok(access.duplicate_value(&self.value)))
         });
         let published =
             published.expect_without_debug("worker should resolve the host promise once");
         published.notify();
-        EvaluationMachinePoll::Complete(_context.root_unit())
+        EvaluationMachinePoll::Complete(context.root_unit())
     }
 }
 
@@ -3172,23 +3167,21 @@ impl EvaluationTaskMachine for CancellableAfterRelease {
 
 struct AssignPromiseThenYield {
     promise: Option<crate::core::ManagedPromiseRoot>,
-    values: CoreValueFactory,
     assigned: Option<mpsc::Sender<()>>,
 }
 
 impl EvaluationTaskMachine for AssignPromiseThenYield {
     fn poll(
         &mut self,
-        _context: &mut crate::evaluation::EvaluationPollContext,
+        context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         let promise = self
             .promise
             .take()
             .expect("assignment fixture should publish exactly once");
-        let published = self
-            .values
-            .with_runtime_value_access(|access| promise.publish(&access, Ok(access.unit())));
+        let published =
+            context.with_runtime_access(|access| promise.publish(&access, Ok(access.unit())));
         let published =
             published.expect_without_debug("the owning machine should assign its promise once");
         published.notify();
@@ -3275,7 +3268,6 @@ impl Drop for CompleteAndCheckReflectionDrop {
 
 struct CacheLazyFailure {
     lazy: crate::core::ManagedLazyRoot,
-    values: CoreValueFactory,
     failure: Arc<EvaluationFailure>,
 }
 
@@ -3285,7 +3277,7 @@ impl EvaluationTaskMachine for CacheLazyFailure {
         context: &mut crate::evaluation::EvaluationPollContext,
         _step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
-        let result = self.values.with_runtime_value_access(|access| {
+        let result = context.with_runtime_access(|access| {
             self.lazy
                 .cache(&access, Err(self.failure.clone()))
                 .map(|value| access.root_runtime_value(value.into_value_in(&access)))
@@ -4147,7 +4139,7 @@ fn redundant_deferred_registration_observes_the_canonical_lazy_cache() {
         let failure = failure.clone();
         std::thread::spawn(move || {
             context
-                .lazy_task(&lazy, move |context, root| {
+                .lazy_task(&lazy, move |_context, root| {
                     build_started_sender
                         .send(())
                         .expect("test build observer should remain open");
@@ -4156,7 +4148,6 @@ fn redundant_deferred_registration_observes_the_canonical_lazy_cache() {
                         .expect("test should release the redundant registration");
                     Box::new(CacheLazyFailure {
                         lazy: root,
-                        values: context.values().clone(),
                         failure,
                     })
                 })
@@ -4170,10 +4161,9 @@ fn redundant_deferred_registration_observes_the_canonical_lazy_cache() {
     let canonical_wait = context
         .lazy_task(&lazy, {
             let failure = failure.clone();
-            move |context, root| {
+            move |_context, root| {
                 Box::new(CacheLazyFailure {
                     lazy: root,
-                    values: context.values().clone(),
                     failure,
                 })
             }
@@ -4537,7 +4527,7 @@ fn patient_claimed_task_wait_releases_mutator() {
     let (release_sender, release_receiver) = mpsc::channel();
     let release_receiver = Mutex::new(release_receiver);
     let producer_values = context.values().clone();
-    let (_lazy, lazy_root) = context.values().with_runtime_value_access(|access| {
+    let (_lazy, lazy_root) = context.values().with_boundary_access(|access| {
         let lazy = LazyValue::host_call_in(&access, move |_| {
             started_sender
                 .send(())
@@ -4548,7 +4538,7 @@ fn patient_claimed_task_wait_releases_mutator() {
                 .recv_timeout(Duration::from_secs(2))
                 .expect("test should release the patient producer");
             Ok(producer_values
-                .with_runtime_value_access(|access| access.root_runtime_value(access.unit())))
+                .with_boundary_access(|access| access.root_runtime_value(access.unit())))
         });
         let root = access.root_runtime_value(Value::Lazy(lazy.duplicate_in(&access)));
         (lazy, root)
@@ -4647,7 +4637,7 @@ fn patient_deferred_demand_retries_when_disturbance_races_no_progress() {
                     error: None,
                 })
             } else {
-                let published = self.context.values().with_runtime_value_access(|access| {
+                let published = context.with_runtime_access(|access| {
                     let value = crate::core::EvaluatedValue::from_whnf_in(&access, access.unit())
                         .expect("unit is already in WHNF");
                     self.lazy
@@ -4841,9 +4831,9 @@ fn sole_route_lease(
     let followed = promise
         .as_ref()
         .map(|promise| promise.duplicate_for_test(&values));
-    let (lazy, lazy_value) = rooted_semantic_lazy_value(context.values(), move |_| {
+    let (lazy, lazy_value) = rooted_semantic_lazy_value(context.values(), move |context| {
         Ok(match &followed {
-            Some(promise) => Value::Promised(promise.duplicate_for_test(&values)),
+            Some(promise) => Value::Promised(promise.duplicate_for_test(context)),
             None => Value::Number(5.into()),
         })
     });
@@ -5234,9 +5224,9 @@ fn abandoned_lazy_claim_can_be_reclaimed_without_poisoning_the_lazy() {
             let forced = forced.clone();
             let values = owner.values().clone();
             let expected = expected.duplicate_for_test(&values);
-            move |_| {
+            move |context| {
                 forced.store(true, Ordering::Release);
-                Ok(expected.duplicate_for_test(&values))
+                Ok(expected.duplicate_for_test(context))
             }
         });
         let wait = owner
@@ -5276,9 +5266,9 @@ fn abandoned_whnf_producer_resumes_from_the_lazy_owned_checkpoint() {
         let followed = promise.duplicate_for_test(&values);
         let (lazy, lazy_value) = rooted_semantic_lazy_value(owner.values(), {
             let forced = forced.clone();
-            move |_| {
+            move |context| {
                 forced.fetch_add(1, Ordering::AcqRel);
-                Ok(Value::Promised(followed.duplicate_for_test(&values)))
+                Ok(Value::Promised(followed.duplicate_for_test(context)))
             }
         });
         let root = lazy.root(owner.values());
@@ -5301,7 +5291,7 @@ fn abandoned_whnf_producer_resumes_from_the_lazy_owned_checkpoint() {
         );
         assert_eq!(forced.load(Ordering::Acquire), 1);
         assert!(lazy.source_snapshot(owner.values()).is_none());
-        assert!(owner.values().with_runtime_value_access(|access| {
+        assert!(owner.values().with_boundary_access(|access| {
             root.access(&access)
                 .expect("lazy root and access should share one runtime")
                 .checkpoint_snapshot()
@@ -5347,9 +5337,9 @@ fn closing_first_observer_preserves_another_sessions_lazy_route_demand() {
     let observed = source_polls.clone();
     let values = owner.values().clone();
     let followed = promise.duplicate_for_test(&values);
-    let (lazy, _lazy_value) = rooted_semantic_lazy_value(owner.values(), move |_| {
+    let (lazy, _lazy_value) = rooted_semantic_lazy_value(owner.values(), move |context| {
         observed.fetch_add(1, Ordering::AcqRel);
-        Ok(Value::Promised(followed.duplicate_for_test(&values)))
+        Ok(Value::Promised(followed.duplicate_for_test(context)))
     });
     let root = lazy.root(owner.values());
     let first = crate::eval::lazy_root_wait(&owner, &root).expect("first demand should admit");
@@ -5395,9 +5385,9 @@ fn last_lazy_route_demand_retires_without_losing_its_checkpoint() {
     let observed = source_polls.clone();
     let values = context.values().clone();
     let followed = promise.duplicate_for_test(&values);
-    let (lazy, lazy_value) = rooted_semantic_lazy_value(context.values(), move |_| {
+    let (lazy, lazy_value) = rooted_semantic_lazy_value(context.values(), move |context| {
         observed.fetch_add(1, Ordering::AcqRel);
-        Ok(Value::Promised(followed.duplicate_for_test(&values)))
+        Ok(Value::Promised(followed.duplicate_for_test(context)))
     });
     let root = lazy.root(context.values());
     drop(lazy_value);
@@ -5428,7 +5418,7 @@ fn last_lazy_route_demand_retires_without_losing_its_checkpoint() {
         .collect_managed_for_test()
         .expect("the lazy checkpoint must survive collection without an active route");
     assert_eq!(route_gone.root_entries(), baseline.root_entries() + 2);
-    assert!(context.values().with_runtime_value_access(|access| {
+    assert!(context.values().with_boundary_access(|access| {
         root.access(&access)
             .expect("lazy root and access should share one runtime")
             .checkpoint_snapshot()
@@ -5512,9 +5502,9 @@ fn client_and_spark_share_a_lazy_checkpoint_after_client_route_loss() {
     let observed = source_polls.clone();
     let values = context.values().clone();
     let followed = promise.duplicate_for_test(&values);
-    let (lazy, value) = rooted_semantic_lazy_value(context.values(), move |_| {
+    let (lazy, value) = rooted_semantic_lazy_value(context.values(), move |context| {
         observed.fetch_add(1, Ordering::AcqRel);
-        Ok(Value::Promised(followed.duplicate_for_test(&values)))
+        Ok(Value::Promised(followed.duplicate_for_test(context)))
     });
     let root = lazy.root(context.values());
     let client = context
@@ -5582,9 +5572,9 @@ fn client_and_background_reflection_share_lazy_progress_after_first_session_clos
     let observed = source_polls.clone();
     let values = owner.values().clone();
     let followed = promise.duplicate_for_test(&values);
-    let (lazy, value) = rooted_semantic_lazy_value(owner.values(), move |_| {
+    let (lazy, value) = rooted_semantic_lazy_value(owner.values(), move |context| {
         observed.fetch_add(1, Ordering::AcqRel);
-        Ok(Value::Promised(followed.duplicate_for_test(&values)))
+        Ok(Value::Promised(followed.duplicate_for_test(context)))
     });
     let root = lazy.root(owner.values());
     let client = owner
@@ -5791,7 +5781,7 @@ fn owner_session_drop_exactly_wakes_a_task_promise_follower() {
         let (promise, _owner_task, _owner_context) = owner
             .task_owned_promise()
             .expect("task-owned promise should register");
-        let (lazy, lazy_root) = observer.values().with_runtime_value_access(|access| {
+        let (lazy, lazy_root) = observer.values().with_boundary_access(|access| {
             let lazy = LazyValue::from_access_in(
                 &access,
                 Arc::from([]),
@@ -5832,7 +5822,7 @@ fn task_cancellation_exactly_wakes_its_promise_follower() {
     let (promise, owner_task, _owner_context) = owner
         .task_owned_promise()
         .expect("task-owned promise should register");
-    let (lazy, _lazy_root) = observer.values().with_runtime_value_access(|access| {
+    let (lazy, _lazy_root) = observer.values().with_boundary_access(|access| {
         let lazy = LazyValue::from_access_in(
             &access,
             Arc::from([]),
@@ -5937,9 +5927,8 @@ fn assigned_task_promise_is_removed_before_later_task_terminalization() {
                 promise: Some(
                     task_context
                         .values()
-                        .with_runtime_value_access(|access| promise.root_in(&access)),
+                        .with_boundary_access(|access| promise.root_in(&access)),
                 ),
-                values: task_context.values().clone(),
                 assigned: Some(assigned_sender),
             }))
         })
@@ -6029,7 +6018,7 @@ fn long_lived_session_retains_only_unacknowledged_terminal_failures() {
             &Value::Lazy(lazy),
         )
         .expect("successful lazy should evaluate");
-        context.values().with_runtime_value_access(|access| {
+        context.values().with_boundary_access(|access| {
             access.assert_same_representation_for_test(&actual, &access.unit());
         });
 
@@ -6486,7 +6475,7 @@ fn task_owned_promise_lazy_cycle_fails_in_both_publication_orders() {
             .expect("promise fixture lock was poisoned")
             .take()
             .expect("task construction should publish its promise");
-        let (_lazy, lazy_root) = context.values().with_runtime_value_access(|access| {
+        let (_lazy, lazy_root) = context.values().with_boundary_access(|access| {
             let lazy = LazyValue::from_access_in(
                 &access,
                 Arc::from([]),
@@ -7376,9 +7365,10 @@ fn runtime_failure_ledger_preserves_owner_buckets_and_persistent_snapshots() {
         crate::core::Key::atom_from_text("owner"),
         Value::Number(1.into()),
     ));
-    let first_failure = Arc::new(first_context.values().with_runtime_value_access(|access| {
-        EvaluationFailure::emission_in(&access, first_emission)
-    }));
+    let first_failure =
+        Arc::new(first_context.values().with_boundary_access(|access| {
+            EvaluationFailure::emission_in(&access, first_emission)
+        }));
     let first_task = first_context
         .schedule_task({
             let first_failure = first_failure.clone();
@@ -8071,7 +8061,7 @@ fn settled_deadlock_report_retains_one_failure_root_after_origin_retirement() {
         Value::Number(41.into()),
     ));
     let frame = crate::diagnostic::evaluation_context_frame("readiness_retention");
-    let failure = Arc::new(context.values().with_runtime_value_access(|access| {
+    let failure = Arc::new(context.values().with_boundary_access(|access| {
         EvaluationFailure::emission_in(&access, emission).with_context_in(&access, frame)
     }));
     let weak_failure = Arc::downgrade(&failure);
@@ -8588,7 +8578,7 @@ fn forced_deadlock_settlement_preserves_exits_and_kills_other_participants() {
         Some(Value::Dict(_))
     ));
     assert_eq!(parent_failure.to_string(), "evaluation failed");
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         let Some(Value::Dict(diagnostic)) = parent_failure.as_failure().emission_value_in(&access)
         else {
             panic!("the killed terminal should retain a structured diagnostic")
@@ -8636,7 +8626,7 @@ fn forced_kill_abandons_a_deferred_lazy_claim_without_poisoning_the_lazy() {
     let (lazy, _lazy_root) = rooted_semantic_lazy_value(context.values(), {
         let values = context.values().clone();
         let expected = expected.duplicate_for_test(&values);
-        move |_| Ok(expected.duplicate_for_test(&values))
+        move |context| Ok(expected.duplicate_for_test(context))
     });
     let wait = context
         .lazy_task(&lazy, |_, _| Box::new(AlwaysBlocked))
@@ -9156,7 +9146,7 @@ fn spark_root_survives_queued_claimed_and_blocked_ownership() {
 
     let metadata = context
         .values()
-        .with_runtime_value_access(|access| access.initial_metadata());
+        .with_boundary_access(|access| access.initial_metadata());
     context.spark(metadata);
     let queued = context
         .values()
@@ -9236,7 +9226,7 @@ fn pending_reflection_activation_roots_retire_with_their_reservations() {
     let background = context
         .for_runtime_background()
         .expect("the runtime should retain its background reflection demand");
-    let (completion, effect) = context.values().with_runtime_value_access(|access| {
+    let (completion, effect) = context.values().with_boundary_access(|access| {
         let completion = access
             .construct_rooted_managed_promise()
             .expect("the reflection completion promise should fit its reviewed slot");
@@ -9647,8 +9637,8 @@ fn spark_abandonment_wakes_useful_work_for_another_pump_pass() {
     let (promise, _promise_owner, _promise_value) = rooted_promise_value(context.values());
     let values = context.values().clone();
     let followed = promise.duplicate_for_test(&values);
-    let (lazy, _lazy_value) = rooted_semantic_lazy_value(context.values(), move |_| {
-        Ok(Value::Promised(followed.duplicate_for_test(&values)))
+    let (lazy, _lazy_value) = rooted_semantic_lazy_value(context.values(), move |context| {
+        Ok(Value::Promised(followed.duplicate_for_test(context)))
     });
     let promise_root = promise.root(context.values());
     let wait = context

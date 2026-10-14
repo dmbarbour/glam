@@ -201,7 +201,7 @@ mod tests {
         let owner_drops = Arc::new(AtomicUsize::new(0));
         let marker_visits = Arc::new(AtomicUsize::new(0));
         let identity_visits = Arc::new(AtomicUsize::new(0));
-        let root = values.with_runtime_value_access(|access| {
+        let root = values.with_boundary_access(|access| {
             let leaf_allocator = access
                 .allocator::<SyntheticManagedLeaf>()
                 .expect("the synthetic leaf should fit a managed slot");

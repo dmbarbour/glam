@@ -586,7 +586,7 @@ fn deep_aliases_preserve_one_structured_failure_on_the_small_stack() {
             Key::atom_from_text("eval"),
             Value::binary_from_text("small_stack"),
         ));
-        let failure = context.values().with_runtime_value_access(|access| {
+        let failure = context.values().with_boundary_access(|access| {
             Arc::new(
                 EvaluationFailure::emission_in(&access, access.duplicate_value(&emission))
                     .with_context_in(&access, access.duplicate_value(&frame)),
@@ -754,7 +754,7 @@ fn spark_checkpoint_resumes_on_another_small_stack_poller() {
                     result.expect_without_debug("the spark application chain should not fail");
                 break context
                     .values()
-                    .with_runtime_value_access(|access| result.into_value_in(&access));
+                    .with_boundary_access(|access| result.into_value_in(&access));
             }
             assert!(
                 context.poll_one_executor_work_for_test(),

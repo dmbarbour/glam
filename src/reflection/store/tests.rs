@@ -7,7 +7,7 @@ fn same_representation(store: &ReflectionStore, left: &PublicValue, right: &Publ
     let right = values.clone_core(right).unwrap();
     store
         .values
-        .with_runtime_value_access(|access| access.same_representation(&left, &right))
+        .with_boundary_access(|access| access.same_representation(&left, &right))
 }
 
 fn path(parts: &[&str]) -> Vec<Key> {
@@ -351,7 +351,7 @@ fn query_state_is_transactional_and_retired_after_the_last_handle() {
     let root = store.roots.get(&store.runtime_volume).unwrap();
     let retired =
         crate::api::Value::from_runtime_root(store.values.construct_runtime_value_root(|access| {
-            lazy_core_value_path(access, root.clone_core_for_test(), &query_path(id))
+            lazy_core_value_path(access, root.clone_core_in(access), &query_path(id))
         }));
     let retired = assembler.evaluate(&retired).unwrap();
     assert!(

@@ -122,8 +122,7 @@ fn assert_unclaimed_lazy(assembler: &Assembler, value: &Value) {
     let values = assembler.core_values();
     let core = value.clone_core_for_test();
     let CoreValue::Lazy(lazy) = &core else {
-        let received =
-            values.with_runtime_value_access(|access| access.diagnostic_kind_name(&core));
+        let received = values.with_boundary_access(|access| access.diagnostic_kind_name(&core));
         panic!("expected a lazy value, received {}", received);
     };
     assert!(
@@ -140,8 +139,7 @@ fn assert_unobserved_promise(assembler: &Assembler, value: &Value) {
     let values = assembler.core_values();
     let core = value.clone_core_for_test();
     let CoreValue::Promised(promise) = &core else {
-        let received =
-            values.with_runtime_value_access(|access| access.diagnostic_kind_name(&core));
+        let received = values.with_boundary_access(|access| access.diagnostic_kind_name(&core));
         panic!("expected a promised value, received {}", received);
     };
     assert!(
@@ -249,20 +247,18 @@ fn runtimes_own_independent_local_identity_domains_and_value_factories() {
     assert_eq!(assembler.values().runtime_id(), first.id());
 
     let first_values = first.values().core;
-    let first_thunk_values = first_values.clone();
-    let first_lazy = first_values.with_runtime_value_access(|access| {
+    let first_lazy = first_values.with_boundary_access(|access| {
         let first_unit = access.unit();
-        let lazy = LazyValue::semantic_thunk_in(&access, move |_| {
-            Ok(first_unit.duplicate_for_test(&first_thunk_values))
+        let lazy = LazyValue::semantic_thunk_in(&access, move |context| {
+            Ok(first_unit.duplicate_for_test(context))
         });
         lazy.root_in(&access)
     });
     let second_values = second.values().core;
-    let second_thunk_values = second_values.clone();
-    let second_lazy = second_values.with_runtime_value_access(|access| {
+    let second_lazy = second_values.with_boundary_access(|access| {
         let second_unit = access.unit();
-        let lazy = LazyValue::semantic_thunk_in(&access, move |_| {
-            Ok(second_unit.duplicate_for_test(&second_thunk_values))
+        let lazy = LazyValue::semantic_thunk_in(&access, move |context| {
+            Ok(second_unit.duplicate_for_test(context))
         });
         lazy.root_in(&access)
     });
@@ -699,11 +695,10 @@ fn access_and_annotation_construction_do_not_demand_inputs() {
     let demanded = Arc::new(AtomicBool::new(false));
     let demanded_by_thunk = demanded.clone();
     let core_values = assembler.core_values();
-    let unit = core_values.with_runtime_value_access(|access| access.unit());
-    let thunk_values = core_values.clone();
-    let lazy = public_semantic_thunk(&core_values, move |_| {
+    let unit = core_values.with_boundary_access(|access| access.unit());
+    let lazy = public_semantic_thunk(&core_values, move |context| {
         demanded_by_thunk.store(true, Ordering::SeqCst);
-        Ok(unit.duplicate_for_test(&thunk_values))
+        Ok(unit.duplicate_for_test(context))
     });
     let (promise, resolver) = assembler.promise("no-demand facade fixture");
 
@@ -2085,7 +2080,7 @@ fn opaque_compilation_origin_round_trips_only_through_its_reflection_cap() {
 
     let expected = assembler
         .core_values()
-        .with_runtime_value_access(|access| trace.origin_value(&access));
+        .with_boundary_access(|access| trace.origin_value(&access));
     assert!(same_representation(
         &assembler,
         &projected,
@@ -2096,7 +2091,7 @@ fn opaque_compilation_origin_round_trips_only_through_its_reflection_cap() {
 #[test]
 fn public_values_describe_metadata_carriers_only_as_sealed() {
     let assembler = Assembler::new();
-    let carrier = assembler.core_values().with_runtime_value_access(|access| {
+    let carrier = assembler.core_values().with_boundary_access(|access| {
         access.metadata_carrier(CoreValue::binary_from_text("private trace"))
     });
     let value = public_value(&assembler.core_values(), carrier);
@@ -2915,7 +2910,7 @@ fn evaluation_context_retains_runtime_cache_and_profile_without_a_cycle() {
     let context = assembler.eval_context();
     let unit = context
         .values()
-        .with_runtime_value_access(|access| access.unit());
+        .with_boundary_access(|access| access.unit());
 
     drop(assembler);
     drop(runtime);
@@ -2923,7 +2918,7 @@ fn evaluation_context_retains_runtime_cache_and_profile_without_a_cycle() {
     assert!(resources.upgrade().is_some());
     assert!(profile.upgrade().is_some());
     assert!(value_domain.upgrade().is_some());
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         access.assert_same_representation_for_test(&access.unit(), &unit);
     });
 
@@ -2941,7 +2936,7 @@ fn compiler_cache_does_not_form_a_value_domain_cycle() {
 
     crate::g_syntax::initialize_cached_compiler_values(values);
     let formatter = crate::g_syntax::default_diagnostic_formatter_root(values);
-    assert!(values.with_runtime_value_access(|access| matches!(
+    assert!(values.with_boundary_access(|access| matches!(
         formatter.clone_core_with(&access),
         CoreValue::Function(_)
     )));
@@ -2981,7 +2976,7 @@ fn closed_runtime_cache_builders_do_not_register_scheduler_demand() {
     crate::g_syntax::initialize_cached_compiler_values(values);
     let formatter = crate::g_syntax::default_diagnostic_formatter_root(values);
 
-    assert!(values.with_runtime_value_access(|access| matches!(
+    assert!(values.with_boundary_access(|access| matches!(
         formatter.clone_core_with(&access),
         CoreValue::Function(_)
     )));

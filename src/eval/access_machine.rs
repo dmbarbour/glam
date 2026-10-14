@@ -1277,12 +1277,10 @@ mod tests {
     fn shared_key_list_converter_survives_deferred_collection_with_one_root() {
         let context = context();
         let chunk = PromisedValue::new(context.values());
-        let input = context.values().construct_runtime_value_root(|_| {
+        let input = context.values().construct_runtime_value_root(|access| {
             Value::List(List::concat(
                 List::from_values(vec![Value::Number(1.into())]),
-                List::from_thunk(ListThunk::Promised(
-                    chunk.duplicate_for_test(context.values()),
-                )),
+                List::from_thunk(ListThunk::Promised(chunk.duplicate_for_test(access))),
             ))
         });
         let registrations = context.values().managed_root_registrations_for_test();

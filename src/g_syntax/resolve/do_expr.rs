@@ -460,7 +460,7 @@ mod tests {
 
     fn count_embedded_value(expr: &ResolvedExpr<Value>, target: &Value) -> usize {
         crate::compiler::test_value_factory()
-            .with_runtime_value_access(|access| count_embedded_value_in(expr, target, &access))
+            .with_boundary_access(|access| count_embedded_value_in(expr, target, &access))
     }
 
     fn count_embedded_value_in(
@@ -671,7 +671,7 @@ mod tests {
         }));
 
         let unit =
-            crate::compiler::test_value_factory().with_runtime_value_access(|access| access.unit());
+            crate::compiler::test_value_factory().with_boundary_access(|access| access.unit());
         assert!(matches!(
             resolved,
             ResolvedExpr::ApplyLambda {

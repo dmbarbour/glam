@@ -208,14 +208,14 @@ mod tests {
     }
 
     fn project(value: &PreparedRuntimeValueRoot, values: &CoreValueFactory) -> Option<Value> {
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             value.with_value(&access, |value| access.duplicate_value(value))
         })
     }
 
     fn prepare(values: &CoreValueFactory, value: Value) -> PreparedRuntimeValueRoot {
         let observer = values.runtime_value_observer();
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             PreparedRuntimeValueRoot::prepare_with_access(observer, &access, value)
         })
     }
@@ -269,12 +269,12 @@ mod tests {
         let baseline = values
             .collect_managed_for_test()
             .expect("canonical roots should collect before the node fixture");
-        let root = values.with_runtime_value_access(|access| {
+        let root = values.with_boundary_access(|access| {
             access
                 .root_managed_value(Value::Number(42.into()))
                 .expect("the production value node should fit a managed run")
         });
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             assert!(
                 matches!(&access.get(&root).value, Value::Number(number) if number == &42.into())
             );
@@ -335,7 +335,7 @@ mod tests {
             .collect_managed_for_test()
             .expect("canonical roots should collect before the variant fixture");
         let variants = closed_compatibility_variants(&values, &active_drops);
-        let roots = values.with_runtime_value_access(|access| {
+        let roots = values.with_boundary_access(|access| {
             variants
                 .into_iter()
                 .map(|value| {
@@ -346,7 +346,7 @@ mod tests {
                 .collect::<Vec<_>>()
         });
 
-        values.with_runtime_value_access(|access| {
+        values.with_boundary_access(|access| {
             assert_eq!(
                 roots
                     .iter()
@@ -483,10 +483,10 @@ mod tests {
         let values = values();
         let root = prepare(&values, Value::Dict(crate::core::Dict::new_sync()));
 
-        values.with_runtime_value_access(|outer| {
+        values.with_boundary_access(|outer| {
             root.with_value(&outer, |before| {
                 let before = std::ptr::from_ref(before);
-                let nested = values.with_runtime_value_access(|inner| {
+                let nested = outer.with_reborrow(|inner| {
                     root.with_value(&inner, |value| {
                         assert_eq!(std::ptr::from_ref(value), before);
                         matches!(value, Value::Dict(dict) if dict.is_empty())

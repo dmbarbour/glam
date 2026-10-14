@@ -107,7 +107,7 @@ fn exact_one_unit_polls_retain_one_checkpoint_without_root_or_allocation_churn()
         context.pump_wait(&wait, 1),
         EvaluationPumpOutcome::BudgetExhausted
     );
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         assert!(
             lazy_root
                 .access(&access)
