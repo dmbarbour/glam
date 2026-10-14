@@ -73,9 +73,8 @@ control-flow overview.
   adjacent operations share one. Nested synchronous drivers do not run
   inside quanta; a test source that depends on an input reads it with
   `promise_or_block_for_test` or runs as a host call. `CountedCondvar`
-  waits, launchers and pressure servicing still call the held-region
-  release point, which panics under an owned mutator, so they run
-  suspended. A forced collection inside a quantum reports an active
+  waits, launchers and pressure servicing assert that the thread holds no
+  mutator (`assert_outside_mutator`), so they run suspended. A forced collection inside a quantum reports an active
   mutator; probe for open value access with
   `thread_has_runtime_value_access_for_test` instead.
 - `glam-gc` also has owned mutators (`Heap::mutate`, `Mutator::suspend`,

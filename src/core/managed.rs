@@ -153,11 +153,14 @@ impl Drop for RuntimeValueAccessDepthGuard {
     }
 }
 
-/// Ends the calling thread's held region, if any, before it waits on another
-/// thread or calls out to a host. A waiting collection then need not wait for
-/// the rest of the quantum. Inside a value access it does nothing.
-pub(crate) fn release_held_region() {
-    let _ = glam_gc::Heap::release_held_region();
+/// Asserts, before the thread waits on another thread or calls out to a
+/// host, that it holds no owned mutator: such work runs with its mutator
+/// suspended or after it ends (`driver-mutator`). Glam opens no held
+/// regions, so this releases none; under a legacy access it does nothing
+/// until `gc-hold-tests` retires those.
+pub(crate) fn assert_outside_mutator() {
+    let released = glam_gc::Heap::release_held_region();
+    debug_assert!(!released, "Glam opens no held regions");
 }
 
 /// Reports whether this thread currently owns a bounded value-access region.

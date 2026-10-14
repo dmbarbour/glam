@@ -597,6 +597,14 @@ Slices, in order (2026-10-13):
    calls, terminal publication, a reflection-machine helper), which needs a
    mutator of its own once access requires one.
 
+   Waits and nesting (2026-10-14): the release point is now an assertion,
+   `assert_outside_mutator`, in `CountedCondvar` waits, launchers and
+   pressure servicing; Glam opens no held regions, which a debug assertion
+   checks. `Diagnostic::with_source_location` builds its diagnostic in the
+   access it holds (`Diagnostic::from_parts_in`), and cycle poisoning roots
+   each member's failure through its own access, which is now a boundary of
+   its own since it runs at a suspended quantum boundary.
+
 ### Tests and enforcement (`gc-hold-tests`)
 
 Convert the test helpers, then remove the shim, so access without a

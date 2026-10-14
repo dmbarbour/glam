@@ -290,9 +290,9 @@ impl RuntimeMutationAdmission {
         if self.is_poisoned() || !self.gc_pressure_requested(values) {
             return;
         }
-        // A nested driver inside a held region collects only once the region
-        // ends.
-        crate::core::release_held_region();
+        // Collection waits for every mutator, so the caller holds none: a
+        // quantum boundary services pressure with its mutator suspended.
+        crate::core::assert_outside_mutator();
         let lease = self.begin_gc_activity();
         let _ = collect_under_lease(lease, values, || {});
     }
@@ -1252,9 +1252,9 @@ mod tests {
         glam_gc::Heap::new_with_policy(glam_gc::CollectionPolicy::NoAuto).maintenance_snapshot()
     }
 
-    /// A driver ends its quantum's held region at the boundary and joins a
+    /// A driver suspends its mutator at a quantum boundary and joins a
     /// collection another thread waits for before it starts its next
-    /// quantum, so held regions cannot starve that collection
+    /// quantum, so busy drivers cannot starve that collection
     /// (`gc-bounded-collection-wait`).
     #[test]
     fn a_quantum_boundary_joins_a_waiting_collection() {

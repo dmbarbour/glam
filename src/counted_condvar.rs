@@ -37,10 +37,10 @@ impl CountedCondvar {
     /// while the caller still holds the mutex and falls after the wait has
     /// reacquired it, so it covers every moment the thread may sleep.
     ///
-    /// A waiting thread first ends its held region: what it waits for may be
-    /// another thread that is itself waiting for a collection.
+    /// A waiting thread holds no mutator: what it waits for may be another
+    /// thread that is itself waiting for a collection.
     fn counted<R>(&self, wait: impl FnOnce(&Condvar) -> R) -> R {
-        crate::core::release_held_region();
+        crate::core::assert_outside_mutator();
         self.waiters.fetch_add(1, Ordering::SeqCst);
         let woken = wait(&self.condvar);
         self.waiters.fetch_sub(1, Ordering::SeqCst);

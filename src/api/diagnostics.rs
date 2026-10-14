@@ -82,8 +82,8 @@ impl Diagnostic {
                 (*crate::core::keys::SOURCE).clone(),
                 identity.value(access.runtime_access()),
             ));
-            Ok(Self::from_parts(
-                values,
+            Ok(Self::from_parts_in(
+                &access,
                 Some(source.clone()),
                 self.severity,
                 access.wrap(crate::diagnostic::text_message_in(
@@ -364,21 +364,32 @@ impl Diagnostic {
         emission: Value,
         origin: Option<Value>,
     ) -> Self {
+        values
+            .with_access(|access| Self::from_parts_in(&access, source, severity, emission, origin))
+    }
+
+    /// As [`Self::from_parts`], within an open access to its values.
+    pub(crate) fn from_parts_in(
+        access: &super::value::ScopedValues<'_>,
+        source: Option<Arc<str>>,
+        severity: Severity,
+        emission: Value,
+        origin: Option<Value>,
+    ) -> Self {
+        let runtime = access.runtime_access().values().runtime_id();
         emission
-            .require_runtime(values.runtime)
+            .require_runtime(runtime)
             .expect("diagnostic emission must belong to its Values domain");
         if let Some(origin) = &origin {
             origin
-                .require_runtime(values.runtime)
+                .require_runtime(runtime)
                 .expect("diagnostic origin must belong to its Values domain");
         }
-        let (line, text) = values.with_access(|access| {
-            access
-                .with_core(&emission, |emission| {
-                    crate::diagnostic::conventional_summary(access.runtime_access(), emission)
-                })
-                .unwrap_or((None, None))
-        });
+        let (line, text) = access
+            .with_core(&emission, |emission| {
+                crate::diagnostic::conventional_summary(access.runtime_access(), emission)
+            })
+            .unwrap_or((None, None));
         Self {
             emission,
             origin,

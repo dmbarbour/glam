@@ -1851,7 +1851,7 @@ impl EvalContext {
                 // A launcher may be client code, so a collection must not
                 // wait for it. Its panic interrupts this task's activation,
                 // not the intact work activating it.
-                crate::core::release_held_region();
+                crate::core::assert_outside_mutator();
                 let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     launcher.build(
                         Self::for_task(self.session.clone(), handle.id(), task_profile.clone()),

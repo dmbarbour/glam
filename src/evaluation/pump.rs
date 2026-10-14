@@ -1046,14 +1046,13 @@ fn poison_lazy_cycle(
     // Make the shared failure authoritative in every lazy before any
     // producer wait wakes. The already-batched `Terminalizing` transition
     // prevents another worker from reclaiming a cycle member meanwhile.
-    let mut terminals = values.with_runtime_value_access(|access| {
+    let mut terminals = values.with_boundary_access(|access| {
         members
             .iter()
             .map(|member| {
+                debug_assert_eq!(member.wait.runtime_id(), values.runtime_id());
                 let terminal = match member.lazy.cache(&access, Err(failure.clone())) {
-                    Err(error) => EvaluationWaitTerminal::Failed(
-                        RuntimeFailureRoot::from_observer(member.wait.value_observer(), error),
-                    ),
+                    Err(error) => EvaluationWaitTerminal::Failed(access.root_runtime_failure(error)),
                     Ok(value) => {
                         debug_assert!(
                             false,
