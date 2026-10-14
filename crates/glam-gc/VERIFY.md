@@ -1253,3 +1253,8 @@ Glam's tail-call forwarding borrows its quantum's access instead of opening
 a legacy recursive entry, and release builds use one codegen unit:
 `scripts/check.sh full` passed at `225775e3` (Miri 235 passed), with both
 sanitizers.
+
+Glam's boundaries no longer nest and `Heap::mutate_recursive` is gone, with
+its test; Glam also drops a lazy route's last lease only after its runtime
+locks (`ec18f579`): `scripts/check.sh full` passed at `f10b1cc7` (Miri 234
+passed), with both sanitizers.
