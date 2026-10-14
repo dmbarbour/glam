@@ -15,7 +15,7 @@ use super::logical::{DeclarationMacroWork, EMBEDDED_MARKER, OriginalMacroInvocat
 use crate::api::CompilationExecution;
 use crate::api::Value as PublicValue;
 use crate::compiler::CompileContext;
-use crate::core::{Atom, Dict, Key, List, RuntimeValueAccess, Value};
+use crate::core::{Atom, Dict, Key, List, RuntimeValueAccess, RuntimeValueMutator, Value};
 use crate::number::Number;
 use crate::runtime::RuntimeValueRoot;
 
@@ -151,8 +151,13 @@ impl<'source> StagedSourceParser<'source> {
         }
     }
 
+    /// Parses the next source declaration under the compile entry's
+    /// `mutator`. A declaration that invokes macros expands with the mutator
+    /// suspended: expansion forces prior definitions, runs macro effects and
+    /// delivers their diagnostics to subscribers (`driver-mutator`).
     pub(in crate::g_syntax) fn next_expanded_declarations(
         &mut self,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
         context: &CompileContext,
         prior_definitions: &RuntimeValueRoot,
         language: Option<&super::super::LanguageDecl>,
@@ -163,7 +168,7 @@ impl<'source> StagedSourceParser<'source> {
         }
         let declaration = lexical.declarations().get(self.next_declaration)?.clone();
         self.next_declaration += 1;
-        let mut work = match DeclarationMacroWork::from_original(lexical, &declaration) {
+        let work = match DeclarationMacroWork::from_original(lexical, &declaration) {
             Ok(Some(work)) => work,
             Ok(None) => {
                 let declaration =
@@ -180,19 +185,33 @@ impl<'source> StagedSourceParser<'source> {
                 return Some(Vec::new());
             }
         };
+        Some(mutator.suspend(|| {
+            self.expand_macro_declaration(context, prior_definitions, language, &declaration, work)
+        }))
+    }
+
+    /// Expands one macro-bearing declaration, outside every heap admission.
+    fn expand_macro_declaration(
+        &mut self,
+        context: &CompileContext,
+        prior_definitions: &RuntimeValueRoot,
+        language: Option<&super::super::LanguageDecl>,
+        declaration: &DeclarationSection,
+        mut work: DeclarationMacroWork,
+    ) -> Vec<Declaration> {
         let Some(language) = language else {
             self.diagnostics.push(Diagnostic::error(
                 declaration.line(),
                 "source macros require a preceding `language` declaration",
             ));
-            return Some(Vec::new());
+            return Vec::new();
         };
         let Some(execution) = context.compilation_execution() else {
             self.diagnostics.push(Diagnostic::error(
                 declaration.line(),
                 "source macro expansion requires a compilation execution context",
             ));
-            return Some(Vec::new());
+            return Vec::new();
         };
         let base_environment = match macro_lookup(
             execution,
@@ -216,7 +235,7 @@ impl<'source> StagedSourceParser<'source> {
                 self.diagnostics.push(
                     Diagnostic::error(declaration.line(), message).with_emission_root(emission),
                 );
-                return Some(Vec::new());
+                return Vec::new();
             }
         };
         let environment = context.values().with_runtime_value_access(|access| {
@@ -231,7 +250,7 @@ impl<'source> StagedSourceParser<'source> {
                 Ok(invocation) => invocation,
                 Err(mut diagnostics) => {
                     self.diagnostics.append(&mut diagnostics);
-                    return Some(Vec::new());
+                    return Vec::new();
                 }
             };
             let keys = original
@@ -260,7 +279,7 @@ impl<'source> StagedSourceParser<'source> {
                         &[],
                         std::slice::from_ref(&original),
                     ));
-                    return Some(Vec::new());
+                    return Vec::new();
                 }
                 Err(error) => {
                     self.diagnostics.push(caused_macro_compiler_diagnostic(
@@ -275,7 +294,7 @@ impl<'source> StagedSourceParser<'source> {
                         std::slice::from_ref(&original),
                         error.cause.as_deref(),
                     ));
-                    return Some(Vec::new());
+                    return Vec::new();
                 }
             };
             let run = match super::super::macro_expansion::run_macro_effect(
@@ -316,7 +335,7 @@ impl<'source> StagedSourceParser<'source> {
                         std::slice::from_ref(&original),
                         failure.cause(),
                     ));
-                    return Some(Vec::new());
+                    return Vec::new();
                 }
             };
             if let Err(diagnostics) =
@@ -337,7 +356,7 @@ impl<'source> StagedSourceParser<'source> {
                             std::slice::from_ref(&original),
                         )
                     }));
-                return Some(Vec::new());
+                return Vec::new();
             }
             macro_diagnostics.push((original.start, original.clone(), run.diagnostics().to_vec()));
         }
@@ -396,7 +415,7 @@ impl<'source> StagedSourceParser<'source> {
                 );
             }
         }
-        Some(declarations)
+        declarations
     }
 
     pub(in crate::g_syntax) fn finish(mut self, declarations: &[Declaration]) -> Vec<Diagnostic> {

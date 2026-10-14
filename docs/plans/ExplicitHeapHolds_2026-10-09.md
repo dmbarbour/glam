@@ -565,6 +565,23 @@ Slices, in order (2026-10-13):
    makes a step about 5% cheaper (410 K to 390 K), a build setting for the
    maintainer. The macro runner's isolated search (`IsolatedEffectSearch::poll`,
    public) still takes a mutator per poll; it moves with the compile entry.
+   The `full` gate's aggressive-GC stage then failed two session drain
+   tests: their probes, acting as another worker, released work under the
+   drain's mutator, and releasing services collection pressure, which that
+   mode always requests. The probes now run suspended (`1cacdd99`).
+
+   Compile entry (`gc-hold-compile-entry`, 2026-10-14): each source lowers
+   under one mutator (`lower_source`); parsing and lowering enter the heap
+   under it. A declaration that invokes macros expands under one suspension
+   of it, since expansion forces prior definitions, runs macro effects and
+   delivers diagnostics to subscribers; inside, the macro machinery still
+   takes mutators of its own (lookups, the isolated search, its pumps). The
+   lowerer is built first, since building the compiler-values cache
+   evaluates, and the compile's diagnostics reach subscribers after the
+   mutator ends. A nested compile, from an import's host call, runs in that
+   call's suspension and takes its own. Instructions -0.2% to 0.0% on the
+   compile-heavy workloads in either build. Lending the compile's mutator to
+   the macro machinery, instead of suspending around it, is left for later.
 
 ### Tests and enforcement (`gc-hold-tests`)
 

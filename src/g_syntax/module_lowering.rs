@@ -13,49 +13,59 @@ pub(in crate::g_syntax) use imports::*;
 use journal::{JournalOp, PendingJournal};
 pub(in crate::g_syntax) use objects::*;
 
+/// Lowers one source under one mutator, the compile entry's
+/// (`driver-mutator`): parsing and lowering enter the heap under it, and
+/// macro expansion, which evaluates and calls client code, runs with it
+/// suspended. The lowerer is built first, since building the compiler-values
+/// cache evaluates.
 pub(in crate::g_syntax) fn lower_source(source: &[u8], context: &CompileContext) -> LoweredSource {
     let mut parser = parser::StagedSourceParser::new(source);
     let mut lowerer = ModuleLowerer::new(context);
-    let mut language = None;
-    loop {
-        #[cfg(feature = "glam-prof")]
-        let next =
-            context
-                .values()
-                .evaluation_profile()
-                .time(crate::profiling::Phase::Parse, || {
-                    parser.next_expanded_declarations(
-                        context,
-                        lowerer.definitions_root(),
-                        language.as_ref(),
-                    )
-                });
-        #[cfg(not(feature = "glam-prof"))]
-        let next = parser.next_expanded_declarations(
-            context,
-            lowerer.definitions_root(),
-            language.as_ref(),
-        );
-        let Some(declarations) = next else {
-            break;
-        };
-        for declaration in declarations {
-            if let DeclarationKind::Language(declared) = &declaration.kind {
-                language = Some(declared.clone());
+    context
+        .values()
+        .with_recursive_runtime_value_mutator(|mut mutator| {
+            let mut language = None;
+            loop {
+                #[cfg(feature = "glam-prof")]
+                let next = context.values().evaluation_profile().time(
+                    crate::profiling::Phase::Parse,
+                    || {
+                        parser.next_expanded_declarations(
+                            &mut mutator,
+                            context,
+                            lowerer.definitions_root(),
+                            language.as_ref(),
+                        )
+                    },
+                );
+                #[cfg(not(feature = "glam-prof"))]
+                let next = parser.next_expanded_declarations(
+                    &mut mutator,
+                    context,
+                    lowerer.definitions_root(),
+                    language.as_ref(),
+                );
+                let Some(declarations) = next else {
+                    break;
+                };
+                for declaration in declarations {
+                    if let DeclarationKind::Language(declared) = &declaration.kind {
+                        language = Some(declared.clone());
+                    }
+                    #[cfg(feature = "glam-prof")]
+                    context
+                        .values()
+                        .evaluation_profile()
+                        .time(crate::profiling::Phase::Lower, || {
+                            lowerer.lower_declaration(declaration)
+                        });
+                    #[cfg(not(feature = "glam-prof"))]
+                    lowerer.lower_declaration(declaration);
+                }
             }
-            #[cfg(feature = "glam-prof")]
-            context
-                .values()
-                .evaluation_profile()
-                .time(crate::profiling::Phase::Lower, || {
-                    lowerer.lower_declaration(declaration)
-                });
-            #[cfg(not(feature = "glam-prof"))]
-            lowerer.lower_declaration(declaration);
-        }
-    }
-    let diagnostics = parser.finish(lowerer.parsed_declarations());
-    lowerer.finish(diagnostics)
+            let diagnostics = parser.finish(lowerer.parsed_declarations());
+            lowerer.finish(diagnostics)
+        })
 }
 
 pub(in crate::g_syntax) struct ModuleLowerer<'context> {

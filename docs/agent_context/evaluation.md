@@ -47,7 +47,9 @@ control-flow overview.
   (`quantum-mutator`, `coarse-grained-mutator`, `driver-mutator`). The
   worker loop (for a busy run), `drive_client_demand`, session drains, the
   runtime's background pump, `pump_wait_on_route` and direct effect runs
-  take one mutator and pass it down as `&mut RuntimeValueMutator`. Each poll
+  take one mutator and pass it down as `&mut RuntimeValueMutator`. So does
+  each source's compile (`lower_source`), which suspends it to expand a
+  macro-bearing declaration. Each poll
   runs as a quantum under it (`EvaluationPollContext::quantum_under` or
   `quantum_for_context_under`), whose context lends value access; machine
   polls receive it as `&mut EvaluationPollContext`. A quantum boundary is
