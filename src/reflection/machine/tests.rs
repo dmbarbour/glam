@@ -3123,7 +3123,7 @@ fn retry_wake_and_terminalization_discard_blocked_control_work() {
     assert!(matches!(retried.execution.work, MachineWork::Drive { .. }));
 
     let mut terminal = blocked_reset_task(&values);
-    terminal.finish(TaskTerminal::Cancelled);
+    terminal.cancel();
     assert!(terminal.execution.controlling.is_none());
     assert!(matches!(terminal.terminal, Some(TaskTerminal::Cancelled)));
 }
@@ -3608,12 +3608,14 @@ fn terminal_failure_poll_preserves_its_root_until_the_poll_is_retired() {
         Arc::new(TestHost::with_values(assembler.core_values())),
     )
     .expect("terminal-root fixture should construct");
-    // A poll roots its failure through its own access before finishing.
-    let error = assembler.core_values().with_boundary_access(|access| {
-        TaskHalt::failure(Arc::new(EvaluationFailure::emission_in(&access, emission)))
-            .root_in(&access)
+    let wakes = assembler.core_values().with_boundary_access(|access| {
+        let error = TaskHalt::failure(Arc::new(EvaluationFailure::emission_in(&access, emission)));
+        assert!(error.failure_root().is_none());
+        task.finish(&access, TaskTerminal::Failed(error))
     });
-    task.finish(TaskTerminal::Failed(error));
+    for wake in wakes {
+        wake.notify();
+    }
     let poll = task
         .terminal
         .as_ref()

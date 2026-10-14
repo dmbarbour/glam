@@ -1008,7 +1008,8 @@ fn record_lazy_panic(
         .value_observer()
         .upgrade()
         .expect("a claimed lazy route must retain a live value domain");
-    values.with_runtime_value_access(|access| {
+    // Release runs outside the driver's mutator.
+    values.with_boundary_access(|access| {
         if lazy.enter_panicked(&access, &report) {
             return EvaluationWaitTerminal::Panicked(report);
         }
@@ -1016,9 +1017,9 @@ fn record_lazy_panic(
             Some(Ok(value)) => EvaluationWaitTerminal::Complete(
                 access.root_runtime_value(value.into_value_in(&access)),
             ),
-            Some(Err(failure)) => EvaluationWaitTerminal::Failed(
-                crate::runtime::RuntimeFailureRoot::new(&values, failure),
-            ),
+            Some(Err(failure)) => {
+                EvaluationWaitTerminal::Failed(access.root_runtime_failure(failure))
+            }
             None => EvaluationWaitTerminal::Panicked(report),
         }
     })

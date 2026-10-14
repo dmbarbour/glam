@@ -1173,7 +1173,7 @@ fn contextual_demand_value<S: TaskSpecialization>(
         context
             .eval_context()
             .values()
-            .with_runtime_value_access(|access| {
+            .with_boundary_access(|access| {
                 error.with_core_context_in(
                     &access,
                     crate::diagnostic::evaluation_context_frame_in(&access, operation),
@@ -1586,7 +1586,7 @@ fn with_task_join_context(
     error: TaskHalt,
     task: EvaluationTaskId,
 ) -> TaskHalt {
-    context.values().with_runtime_value_access(|access| {
+    context.values().with_boundary_access(|access| {
         error.with_core_context_in(&access, task_join_context(&access, task))
     })
 }

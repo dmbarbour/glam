@@ -508,7 +508,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
                     .map_err(|error| {
                         let failure = error.into_failure();
                         match &failure_context {
-                            Some(context) => values.core().with_runtime_value_access(|access| {
+                            Some(context) => values.core().with_boundary_access(|access| {
                                 Arc::new(
                                     failure
                                         .with_context_in(&access, context.clone_core_with(&access)),
@@ -597,11 +597,10 @@ fn combine_composed_result(
             let child_failure = children
                 .permanent_failure()
                 .expect("composed child reporting produces a permanent failure");
-            let context = values.with_runtime_value_access(|access| {
-                eval::failure_diagnostic_value_in(&access, child_failure)
-            });
-            Err(values
-                .with_runtime_value_access(|access| parent.with_core_context_in(&access, context)))
+            Err(values.with_boundary_access(|access| {
+                let context = eval::failure_diagnostic_value_in(&access, child_failure);
+                parent.with_core_context_in(&access, context)
+            }))
         }
     }
 }

@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use super::*;
+use crate::core::RuntimeValueMutator;
 use crate::runtime::RuntimeValueRoot;
 
 mod definitions;
@@ -56,14 +57,14 @@ pub(in crate::g_syntax) fn lower_source(source: &[u8], context: &CompileContext)
                     .values()
                     .evaluation_profile()
                     .time(crate::profiling::Phase::Lower, || {
-                        lowerer.lower_declaration(declaration)
+                        lowerer.lower_declaration(&mutator, declaration)
                     });
                 #[cfg(not(feature = "glam-prof"))]
-                lowerer.lower_declaration(declaration);
+                lowerer.lower_declaration(&mutator, declaration);
             }
         }
         let diagnostics = parser.finish(lowerer.parsed_declarations());
-        lowerer.finish(diagnostics)
+        lowerer.finish(&mutator, diagnostics)
     })
 }
 
@@ -103,25 +104,28 @@ impl<'context> ModuleLowerer<'context> {
         }
     }
 
-    pub(in crate::g_syntax) fn lower_declaration(&mut self, declaration: Declaration) {
+    pub(in crate::g_syntax) fn lower_declaration(
+        &mut self,
+        mutator: &RuntimeValueMutator<'_, '_>,
+        declaration: Declaration,
+    ) {
         let line = declaration.line;
-        self.record_journal(&declaration.kind, line);
+        self.record_journal(mutator, &declaration.kind, line);
         let result = match &declaration.kind {
             DeclarationKind::Import(_) | DeclarationKind::Unique(_) => {
-                let (result, definitions) =
-                    self.context.values().with_runtime_value_access(|access| {
-                        let mut definitions = self.definitions.clone_core_with(&access);
-                        let result = match &declaration.kind {
-                            DeclarationKind::Import(import) => {
-                                lower_import(import, line, self.context, &access, &mut definitions)
-                            }
-                            DeclarationKind::Unique(names) => {
-                                lower_unique(names, line, self.context, &access, &mut definitions)
-                            }
-                            _ => unreachable!("access-bound declarations were matched above"),
-                        };
-                        (result, access.root_runtime_value(definitions))
-                    });
+                let (result, definitions) = mutator.with_access(|access| {
+                    let mut definitions = self.definitions.clone_core_with(&access);
+                    let result = match &declaration.kind {
+                        DeclarationKind::Import(import) => {
+                            lower_import(import, line, self.context, &access, &mut definitions)
+                        }
+                        DeclarationKind::Unique(names) => {
+                            lower_unique(names, line, self.context, &access, &mut definitions)
+                        }
+                        _ => unreachable!("access-bound declarations were matched above"),
+                    };
+                    (result, access.root_runtime_value(definitions))
+                });
                 self.definitions = definitions;
                 result
             }
@@ -130,7 +134,7 @@ impl<'context> ModuleLowerer<'context> {
             | DeclarationKind::Extend(_)) => {
                 let nested = match kind {
                     DeclarationKind::Definition(definition) => {
-                        self.nested_reflection(&definition.target)
+                        self.nested_reflection(mutator, &definition.target)
                     }
                     DeclarationKind::Object(object) => {
                         self.declared_objects.insert(object.target.clone());
@@ -146,7 +150,7 @@ impl<'context> ModuleLowerer<'context> {
                     Some(path) => &self.nested_reflection[path],
                     None => &self.module_reflection,
                 };
-                let result = self.context.values().with_runtime_value_access(|access| {
+                let result = mutator.with_access(|access| {
                     let definitions = self.definitions.clone_core_with(&access);
                     let scope = NameScope::module_with_reflection(
                         &access,
@@ -184,7 +188,7 @@ impl<'context> ModuleLowerer<'context> {
                 }
             }
             DeclarationKind::Language(_) => {
-                self.install_reflection();
+                self.install_reflection(mutator);
                 Ok(())
             }
             DeclarationKind::Declare(_) | DeclarationKind::Assume(_) | DeclarationKind::Unknown => {
@@ -201,8 +205,8 @@ impl<'context> ModuleLowerer<'context> {
     /// scanner, unless the module has one, just after the language
     /// declaration, where a language's version or extensions may later
     /// choose otherwise. The reflection boundary's task runs it.
-    fn install_reflection(&mut self) {
-        let definitions = self.context.values().with_runtime_value_access(|access| {
+    fn install_reflection(&mut self, mutator: &RuntimeValueMutator<'_, '_>) {
+        let definitions = mutator.with_access(|access| {
             let definitions = self.definitions.clone_core_with(&access);
             let scanner = compiler_values::reflection_scanner_resolved(
                 &access,
@@ -240,7 +244,11 @@ impl<'context> ModuleLowerer<'context> {
     /// the namespace's journal, or only a declared object's, as objects are
     /// self-contained. A target within `refl`, `meta` or `spec` carries no
     /// boundary at all.
-    fn nested_reflection(&mut self, target: &[SyntaxKeyExpr]) -> Option<String> {
+    fn nested_reflection(
+        &mut self,
+        mutator: &RuntimeValueMutator<'_, '_>,
+        target: &[SyntaxKeyExpr],
+    ) -> Option<String> {
         let names = target
             .iter()
             .map(|key| match key {
@@ -264,7 +272,7 @@ impl<'context> ModuleLowerer<'context> {
             None => namespace.join("."),
         };
         if !self.nested_reflection.contains_key(&path) {
-            let boundary = self.context.values().with_runtime_value_access(|access| {
+            let boundary = mutator.with_access(|access| {
                 let final_defs = || ResolvedExpr::Provided(self.context.final_defs(&access));
                 let boundary = match &object {
                     Some(object) => {
@@ -320,17 +328,22 @@ impl<'context> ModuleLowerer<'context> {
 
     /// Records what `kind` defines in the journal, writing the stretch
     /// recorded so far before an import.
-    fn record_journal(&mut self, kind: &DeclarationKind, line: usize) {
+    fn record_journal(
+        &mut self,
+        mutator: &RuntimeValueMutator<'_, '_>,
+        kind: &DeclarationKind,
+        line: usize,
+    ) {
         let static_path = |path: &str| path.split('.').map(str::to_owned).collect::<Vec<_>>();
         let (op, target) = match kind {
             DeclarationKind::Import(import) => {
-                self.flush_journal();
+                self.flush_journal(mutator);
                 match &import.placement {
                     ImportPlacement::As(target) => (JournalOp::Introduce, static_path(target)),
                     ImportPlacement::At(target) => (JournalOp::Update, static_path(target)),
                     ImportPlacement::Inline => {
                         if let ImportReference::Builtin(name) = &import.reference {
-                            self.record_builtin_import(name, line);
+                            self.record_builtin_import(mutator, name, line);
                         }
                         return;
                     }
@@ -384,8 +397,13 @@ impl<'context> ModuleLowerer<'context> {
     }
 
     /// An inline built-in import updates each name it merges.
-    fn record_builtin_import(&mut self, name: &str, line: usize) {
-        let keys = self.context.values().with_runtime_value_access(|access| {
+    fn record_builtin_import(
+        &mut self,
+        mutator: &RuntimeValueMutator<'_, '_>,
+        name: &str,
+        line: usize,
+    ) {
+        let keys = mutator.with_access(|access| {
             match compiler_values::builtin_module(&access, name).map(|module| module.value) {
                 Some(Value::Dict(dict)) => dict.iter().map(|(key, _)| key.clone()).collect(),
                 _ => Vec::new(),
@@ -396,8 +414,8 @@ impl<'context> ModuleLowerer<'context> {
         }
     }
 
-    fn flush_journal(&mut self) {
-        let definitions = self.context.values().with_runtime_value_access(|access| {
+    fn flush_journal(&mut self, mutator: &RuntimeValueMutator<'_, '_>) {
+        let definitions = mutator.with_access(|access| {
             let definitions = self.definitions.clone_core_with(&access);
             let definitions = self.journal.flush_in(&access, self.context, definitions);
             access.root_runtime_value(definitions)
@@ -415,9 +433,10 @@ impl<'context> ModuleLowerer<'context> {
 
     pub(in crate::g_syntax) fn finish(
         mut self,
+        mutator: &RuntimeValueMutator<'_, '_>,
         mut source_diagnostics: Vec<Diagnostic>,
     ) -> LoweredSource {
-        self.flush_journal();
+        self.flush_journal(mutator);
         source_diagnostics.extend(check_file_global_local_shadowing(&self.parsed_declarations));
         source_diagnostics.extend(self.diagnostics);
         let definitions_root = self.definitions;
@@ -438,10 +457,12 @@ pub(in crate::g_syntax) fn lower_parsed_source(
         diagnostics,
     } = parsed;
     let mut lowerer = ModuleLowerer::new(context);
-    for declaration in declarations {
-        lowerer.lower_declaration(declaration);
-    }
-    lowerer.finish(diagnostics)
+    context.values().with_runtime_value_mutator(|mutator| {
+        for declaration in declarations {
+            lowerer.lower_declaration(&mutator, declaration);
+        }
+        lowerer.finish(&mutator, diagnostics)
+    })
 }
 
 fn resolve_module_definition(

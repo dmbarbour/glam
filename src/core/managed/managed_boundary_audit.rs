@@ -607,7 +607,7 @@ pub(super) fn closed_compatibility_variants(
     let opaque_probe = Arc::new(ExternalDropProbe(Arc::clone(active_drops)));
 
     vec![
-        values.with_runtime_value_access(|access| access.unit()),
+        values.with_boundary_access(|access| access.unit()),
         Value::Number(1.into()),
         Value::Binary(Bytes::from_static(b"closed")),
         Value::List(List::from_values(vec![Value::Number(2.into())])),
@@ -633,7 +633,7 @@ pub(super) fn closed_compatibility_variants(
             },
         ),
         Value::Promised(PromisedValue::new(values)),
-        values.with_runtime_value_access(|access| access.initial_metadata()),
+        values.with_boundary_access(|access| access.initial_metadata()),
         Value::Opaque(OpaqueValue::new(values, opaque_probe)),
     ]
 }
@@ -787,7 +787,7 @@ fn production_reflection_result_edges_do_not_need_an_external_root() {
         .expect("the reflection-edge fixture should start collectible");
     {
         let promise = PromisedValue::new(&values);
-        let reflected = values.with_runtime_value_access(|access| {
+        let reflected = values.with_boundary_access(|access| {
             Value::reflection_task_result_in(
                 &access,
                 Value::Promised(promise.duplicate_in(&access)),
@@ -823,7 +823,7 @@ fn production_reflection_gate_target_backedge_reclaims_without_an_external_root(
         .expect("the reflection-target fixture should start collectible");
     {
         let promise = PromisedValue::new(&values);
-        let reflected = values.with_runtime_value_access(|access| {
+        let reflected = values.with_boundary_access(|access| {
             Value::Lazy(LazyValue::from_reflection_gate_in(
                 &access,
                 access.unit(),

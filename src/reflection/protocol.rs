@@ -707,7 +707,7 @@ impl From<ApiError> for TaskHalt {
                 let values = observer
                     .upgrade()
                     .expect("a structured API error retains a live diagnostic value");
-                let failure = values.with_runtime_value_access(|access| {
+                let failure = values.with_boundary_access(|access| {
                     let emission = diagnostic
                         .emission()
                         .clone_core_with(&access)

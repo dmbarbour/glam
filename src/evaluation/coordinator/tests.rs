@@ -243,8 +243,10 @@ fn promise_dependency_projects_only_a_task_owned_producer_wait() {
     let session = TestDemand::new(&coordinator);
     let context = session.context().for_effect_task();
     let resolver_owned = PromisedValue::new(context.values());
-    let task_owned =
-        PromisedValue::fixpoint(&context).expect("the local task should own its promise");
+    let task_owned = context
+        .values()
+        .with_boundary_access(|access| PromisedValue::fixpoint(&access, &context))
+        .expect("the local task should own its promise");
 
     assert!(
         WorkDependency::Promise(resolver_owned.root(context.values()))
@@ -1558,7 +1560,9 @@ fn foreground_route_follows_only_task_owned_promise_producers() {
         .schedule_task({
             let published = published.clone();
             move |task_context| {
-                let promise = PromisedValue::fixpoint(&task_context)?;
+                let promise = task_context.values().with_boundary_access(|access| {
+                    PromisedValue::fixpoint(&access, &task_context)
+                })?;
                 *published
                     .lock()
                     .expect("published promise fixture was poisoned") = Some(promise);

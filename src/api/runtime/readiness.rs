@@ -809,7 +809,7 @@ pub(super) fn runtime_killed_failure(
     values: &CoreValueFactory,
     reason: RuntimeKillReason,
 ) -> RuntimeFailureRoot {
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         let reason = match reason {
             RuntimeKillReason::Deadlock => access.key_value(&Key::atom_from_text("deadlock")),
         };

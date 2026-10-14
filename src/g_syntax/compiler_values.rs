@@ -143,7 +143,7 @@ pub(in crate::g_syntax) fn require_defined_root(values: &CoreValueFactory) -> Ru
 
 pub(in crate::g_syntax) fn fail_effect_root(values: &CoreValueFactory) -> RuntimeValueRoot {
     let compiler = cache(values);
-    values.with_runtime_value_access(|access| {
+    values.with_boundary_access(|access| {
         access.root_runtime_value(effect_path_value_with_cache(
             &access,
             compiler.as_ref(),

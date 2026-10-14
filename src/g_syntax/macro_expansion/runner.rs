@@ -323,7 +323,7 @@ pub(in crate::g_syntax) fn render_macro_case(
                 execution
                     .macro_context()
                     .values()
-                    .with_runtime_value_access(|access| {
+                    .with_boundary_access(|access| {
                         value
                             .with_core(&access, |value| match value {
                                 Value::Binary(bytes) => String::from_utf8(bytes.to_vec()).ok(),
@@ -355,7 +355,7 @@ fn select_field_root(
     execution
         .macro_context()
         .values()
-        .with_runtime_value_access(|access| {
+        .with_boundary_access(|access| {
             value
                 .with_core(&access, |value| {
                     let Value::Dict(dict) = value else {

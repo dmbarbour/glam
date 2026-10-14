@@ -1055,18 +1055,16 @@ impl PromisedValue {
         })
     }
 
-    pub(crate) fn fixpoint(context: &EvalContext) -> Result<Self, Arc<str>> {
-        let (promise, root) = context.values().with_runtime_value_access(|access| {
-            let root = access
-                .construct_rooted_managed_promise()
-                .expect("managed promise representation must fit one collector run");
-            let promise = Self::from_root(&root, &access);
-            (promise, root)
-        });
+    pub(crate) fn fixpoint(
+        access: &RuntimeValueAccess<'_>,
+        context: &EvalContext,
+    ) -> Result<Self, Arc<str>> {
+        let root = access
+            .construct_rooted_managed_promise()
+            .expect("managed promise representation must fit one collector run");
+        let promise = Self::from_root(&root, access);
         let producer = context.register_promise(root.clone())?;
-        context
-            .values()
-            .with_runtime_value_access(|access| root.install_producer(&access, &producer))
+        root.install_producer(access, &producer)
             .map_err(|_| Arc::<str>::from("promise producer was installed twice"))?;
         Ok(promise)
     }

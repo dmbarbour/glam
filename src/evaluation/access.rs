@@ -511,6 +511,12 @@ impl EvaluationPollContext<'_, '_> {
         result
     }
 
+    /// Re-admits this quantum's mutator after a suspension unwound into a
+    /// panic the caller caught; see `glam_gc::Mutator::readmit`.
+    pub(crate) fn readmit(&mut self) {
+        self.mutator.readmit();
+    }
+
     /// Borrows this quantum's runtime access for `operation`.
     pub(crate) fn with_runtime_access<R>(
         &self,

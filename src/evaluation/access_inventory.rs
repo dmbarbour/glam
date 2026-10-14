@@ -1,10 +1,12 @@
-//! Audit: managed value-access regions are bounded and never nested.
+//! Audit: heap boundaries are bounded and never nested.
 //!
-//! The core value domain owns the collector's raw mutator. Production code
-//! reaches it only through one higher-ranked gateway, so access authority
-//! cannot outlive the callback. A region is never opened while another is
-//! open: neither lexically inside a gateway callback, nor in a function that
-//! already receives access authority.
+//! The core value domain owns the collector's mutator. Production code takes
+//! it only through one higher-ranked gateway, so access authority cannot
+//! outlive the callback. A boundary is never opened while another is open:
+//! neither lexically inside a boundary's callback, nor in a function that
+//! already receives access authority, which it passes on instead
+//! (`no-recursive-heap-entries`). At run time a nested boundary panics; this
+//! audit also covers paths no test reaches.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,23 +20,30 @@ use syn::{
 };
 
 /// The value domain's raw collector entry.
-const RAW_MUTATOR_ENTRY: &str = "with_mutator";
+const RAW_MUTATOR_ENTRY: &str = "mutate";
 
 /// The only production item that may call the raw collector entry.
 const RAW_MUTATOR_GATEWAY: &str =
-    "crate::core::managed::CoreValueFactory::with_runtime_value_access";
+    "crate::core::managed::CoreValueFactory::with_runtime_value_mutator";
 
-/// Calls that open a managed value-access region for their callback.
+/// Calls that open a heap boundary for their callback.
 const REGION_OPENERS: &[&str] = &[
     "construct_runtime_value_root",
     "try_construct_runtime_value_root",
+    "mutate",
+    "with_boundary_access",
     "with_managed_values",
-    "with_mutator",
-    "with_runtime_value_access",
+    "with_runtime_value_mutator",
 ];
 
 /// Parameter and receiver types that carry access authority already.
-const ACCESS_CARRIERS: &[&str] = &["EvaluationValueAccess", "RuntimeValueAccess"];
+const ACCESS_CARRIERS: &[&str] = &[
+    "EvaluationPollContext",
+    "EvaluationValueAccess",
+    "EvaluatorStepContext",
+    "RuntimeValueAccess",
+    "RuntimeValueMutator",
+];
 
 #[derive(Debug, Eq, PartialEq)]
 struct RegionOpening {
@@ -47,6 +56,9 @@ struct RegionOpening {
 struct RegionVisitor {
     scope: Vec<String>,
     carrier_scopes: Vec<bool>,
+    /// Whether the enclosing impl's self type carries access, which its
+    /// methods with a receiver inherit.
+    impl_carries: Vec<bool>,
     nesting: usize,
     openings: Vec<RegionOpening>,
 }
@@ -56,6 +68,7 @@ impl RegionVisitor {
         Self {
             scope: vec![module.to_owned()],
             carrier_scopes: vec![false],
+            impl_carries: vec![false],
             nesting: 0,
             openings: Vec::new(),
         }
@@ -96,12 +109,11 @@ impl<'ast> Visit<'ast> for RegionVisitor {
                 .map_or_else(|| "impl".to_owned(), |part| part.ident.to_string()),
             other => other.to_token_stream().to_string(),
         };
-        self.within(
-            name,
-            &node.attrs,
-            carries_access(&node.self_ty),
-            |visitor| visit::visit_item_impl(visitor, node),
-        );
+        self.impl_carries.push(carries_access(&node.self_ty));
+        self.within(name, &node.attrs, false, |visitor| {
+            visit::visit_item_impl(visitor, node);
+        });
+        self.impl_carries.pop();
     }
 
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
@@ -114,16 +126,31 @@ impl<'ast> Visit<'ast> for RegionVisitor {
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
+        let receiver = node.sig.receiver().is_some();
+        let inherited = receiver && self.impl_carries.last().copied().unwrap_or(false);
         self.within(
             node.sig.ident.to_string(),
             &node.attrs,
-            signature_carries_access(&node.sig),
+            inherited || signature_carries_access(&node.sig),
             |visitor| visit::visit_impl_item_fn(visitor, node),
         );
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
         let method = node.method.to_string();
+        if method == "suspend" {
+            // A suspension's closure runs with the mutator released, outside
+            // every region, where a boundary is its own.
+            self.visit_expr(&node.receiver);
+            let nesting = std::mem::take(&mut self.nesting);
+            self.carrier_scopes.push(false);
+            for argument in &node.args {
+                self.visit_expr(argument);
+            }
+            self.carrier_scopes.pop();
+            self.nesting = nesting;
+            return;
+        }
         if !REGION_OPENERS.contains(&method.as_str()) {
             visit::visit_expr_method_call(self, node);
             return;
@@ -378,25 +405,32 @@ fn region_audit_distinguishes_access_authority_from_region_callbacks() {
     let syntax = syn::parse_file(
         r"
         fn runtime_input(access: &RuntimeValueAccess<'_>) {
-            values.with_runtime_value_access(|_| ());
+            values.with_boundary_access(|_| ());
         }
         fn evaluation_input(access: Option<&EvaluationValueAccess<'_>>) {
             values.construct_runtime_value_root(|_| unit);
         }
         fn region_callback(operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>)) {
-            values.with_runtime_value_access(|_| ());
+            values.with_boundary_access(|_| ());
         }
         fn nested() {
-            values.with_runtime_value_access(|_| {
+            values.with_boundary_access(|_| {
                 values.with_managed_values(|_| ());
             });
         }
         impl RuntimeValueAccess<'_> {
-            fn reopen(&self) { self.values().with_runtime_value_access(|_| ()); }
+            fn reopen(&self) { self.values().with_boundary_access(|_| ()); }
         }
         #[cfg(test)]
         fn test_only(access: &RuntimeValueAccess<'_>) {
             values.with_boundary_access(|_| ());
+        }
+        fn suspended(mutator: &mut RuntimeValueMutator<'_, '_>) {
+            mutator.suspend(|| values.with_boundary_access(|_| ()));
+        }
+        impl EvaluationPollContext<'_, '_> {
+            fn quantum() { values.with_runtime_value_mutator(|_| ()); }
+            fn reenter(&self) { values.with_runtime_value_mutator(|_| ()); }
         }
         ",
     )
@@ -413,10 +447,11 @@ fn region_audit_distinguishes_access_authority_from_region_callbacks() {
     assert_eq!(
         reentries,
         [
-            "fixture::runtime_input: with_runtime_value_access",
+            "fixture::runtime_input: with_boundary_access",
             "fixture::evaluation_input: construct_runtime_value_root",
             "fixture::nested: with_managed_values",
-            "fixture::RuntimeValueAccess::reopen: with_runtime_value_access",
+            "fixture::RuntimeValueAccess::reopen: with_boundary_access",
+            "fixture::EvaluationPollContext::reenter: with_runtime_value_mutator",
         ]
     );
 }

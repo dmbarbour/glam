@@ -8216,12 +8216,15 @@ fn dropped_reflection_completion_activation_permit_terminalizes_managed_promise(
     });
 
     let reservation = background
-        .reserve_reflection_completion_activation(
-            effect,
-            None,
-            completion,
-            ReflectionTaskResultPolicy::ReturnValue,
-        )
+        .evaluate_test_step(|step| {
+            background.reserve_reflection_completion_activation(
+                step,
+                effect,
+                None,
+                completion,
+                ReflectionTaskResultPolicy::ReturnValue,
+            )
+        })
         .expect("the autonomous reflection task should reserve");
     drop(reservation);
 
@@ -8393,12 +8396,15 @@ fn reflection_completion_activation_and_first_session_close_have_both_orders() {
                 (promise, completion, effect, retained)
             });
         let reservation = background
-            .reserve_reflection_completion_activation(
-                effect,
-                None,
-                completion,
-                ReflectionTaskResultPolicy::ReturnValue,
-            )
+            .evaluate_test_step(|step| {
+                background.reserve_reflection_completion_activation(
+                    step,
+                    effect,
+                    None,
+                    completion,
+                    ReflectionTaskResultPolicy::ReturnValue,
+                )
+            })
             .expect("the task and its completion promise should reserve together");
         assert_eq!(background.task_registry_counts().reflection_active, 1);
         let mut owner = Some(owner);
@@ -8477,12 +8483,15 @@ fn unobserved_reflection_failure_remains_reportable_until_promise_propagation() 
         (promise, completion, effect)
     });
     background
-        .reserve_reflection_completion_activation(
-            effect,
-            None,
-            completion,
-            ReflectionTaskResultPolicy::ReturnValue,
-        )
+        .evaluate_test_step(|step| {
+            background.reserve_reflection_completion_activation(
+                step,
+                effect,
+                None,
+                completion,
+                ReflectionTaskResultPolicy::ReturnValue,
+            )
+        })
         .expect("the autonomous reflection task should reserve")
         .activate();
 

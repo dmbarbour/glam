@@ -756,6 +756,22 @@ machines borrow their poll context's access. One test of nested entries
 became a reborrow. 46 legacy accesses remain, all in production code, for
 slice 3.
 
+Slice 3 landed 2026-10-14: `with_runtime_value_access` is gone. Code under
+a mutator borrows from it: the module lowerer from `lower_source`'s
+mutator, the reflection machine's steps, the lazy route (re-admitting
+first after a caught panic) and specialization completion from their poll
+context, and the completion reservation from its evaluator step. Code that
+runs outermost takes a boundary: request handlers, release paths
+(`record_lazy_panic`), runtime settlement, lifecycle runs, the macro
+runner, `From<ApiError> for TaskHalt` and task cancellation from teardown.
+The reflection machine's `finish` takes its caller's access and returns
+the local promises' publications, which callers notify once the access
+closes, as `ManagedPromisePublication` requires. The source audit
+(`evaluation::access_inventory`) now treats the boundaries as region
+openers behind the `with_runtime_value_mutator` gateway, counts mutators
+and poll and step contexts as carrying access, exempts a suspension's
+closure, and found no nesting.
+
 ### Mutator entry cost (`gc-hold-entry-cost`)
 
 Added by the maintainer on 2026-10-14: make taking, ending, suspending and

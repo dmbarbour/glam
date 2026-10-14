@@ -650,7 +650,7 @@ impl CoreValueFactory {
     /// This test-only bridge exposes the collector's narrower allocation
     /// scope for direct admission and reclamation fixtures. Production work
     /// derives domain-qualified authority through
-    /// [`Self::with_runtime_value_access`].
+    /// [`Self::with_boundary_access`] or a mutator it is lent.
     #[cfg(test)]
     pub(crate) fn with_managed_values<R>(
         &self,
@@ -659,25 +659,6 @@ impl CoreValueFactory {
         self.domain
             .heap
             .mutate(|mutator| operation(CoreValueAllocationScope { mutator }))
-    }
-
-    /// Opens one factory-qualified managed-access region.
-    ///
-    /// The higher-ranked callback prevents the access carrier, its mutator,
-    /// allocators, and managed borrows from escaping. Scheduler poll contexts
-    /// use this entry to derive evaluator-specific authority.
-    pub(crate) fn with_runtime_value_access<R>(
-        &self,
-        operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,
-    ) -> R {
-        self.domain.heap.with_mutator(|mutator| {
-            #[cfg(test)]
-            let _access_depth = RuntimeValueAccessDepthGuard::enter();
-            operation(RuntimeValueAccess {
-                values: self,
-                scope: CoreValueAllocationScope { mutator },
-            })
-        })
     }
 
     /// Runs `operation` as a boundary of its own, with access lent by the

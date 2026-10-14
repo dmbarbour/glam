@@ -720,25 +720,29 @@ impl LocalPromiseOwner {
         obligation.map(|obligation| obligation.root)
     }
 
-    pub(crate) fn fail_all(&self, failure: Arc<EvaluationFailure>) {
+    /// Fails every local promise through `access`, returning the
+    /// publications for the caller to notify once its access closes.
+    #[must_use = "promise completion wakes must be delivered after managed access closes"]
+    pub(crate) fn fail_all(
+        &self,
+        access: &RuntimeValueAccess<'_>,
+        failure: Arc<EvaluationFailure>,
+    ) -> Vec<crate::core::ManagedPromisePublication> {
         let obligations = self
             .obligations
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        for obligation in obligations {
-            let values = obligation
-                .wait
-                .value_observer()
-                .upgrade()
-                .expect("a registered local promise must retain its live value domain");
-            let published = values.with_runtime_value_access(|access| {
-                obligation.root.publish(&access, Err(failure.clone()))
-            });
-            if let Ok(publication) = published {
-                publication.notify();
-            }
-        }
+        obligations
+            .into_iter()
+            .filter_map(|obligation| {
+                debug_assert_eq!(
+                    obligation.wait.value_observer().runtime_id(),
+                    access.runtime_id()
+                );
+                obligation.root.publish(access, Err(failure.clone())).ok()
+            })
+            .collect()
     }
 }
 

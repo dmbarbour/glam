@@ -29,7 +29,7 @@ use crate::evaluation::{
 };
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
-use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
+use crate::runtime::RuntimeValueRoot;
 
 #[cfg(test)]
 use super::protocol::HostSnapshot;
@@ -596,7 +596,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                                     )
                                     .root_in(&access)
                                 });
-                                mutator.suspend(|| self.finish(TaskTerminal::Failed(error.clone())));
+                                self.finish_under(&mutator, TaskTerminal::Failed(error.clone()));
                                 return Err(error);
                             }
                             EvaluationPumpOutcome::NoProgress => {}
@@ -605,11 +605,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     let generation = blocked.observed_generation.ok_or_else(|| {
                         TaskHalt::new("blocked reflection task has no wake condition")
                     })?;
-                    mutator.suspend(|| {
-                        if !self.host.wait_for_change(generation) {
-                            self.finish(TaskTerminal::Cancelled);
-                        }
-                    });
+                    if !mutator.suspend(|| self.host.wait_for_change(generation)) {
+                        self.finish_under(&mutator, TaskTerminal::Cancelled);
+                    }
                 }
                 EffectTaskPoll::Complete(value) => return Ok(TaskOutcome::Complete(value)),
                 EffectTaskPoll::Failed(error) => return Err(error),
@@ -667,7 +665,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             {
                 let error =
                     context.with_runtime_access(|access| TaskHalt::new(error).root_in(&access));
-                self.finish(TaskTerminal::Failed(error.clone()));
+                self.finish_in(context, TaskTerminal::Failed(error.clone()));
                 return EffectTaskPoll::Failed(error);
             }
             let Some(WorkDependency::Wait(wait)) = &blocked.dependency else {
@@ -689,7 +687,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     }) {
                         let error = context
                             .with_runtime_access(|access| TaskHalt::new(error).root_in(&access));
-                        self.finish(TaskTerminal::Failed(error.clone()));
+                        self.finish_in(context, TaskTerminal::Failed(error.clone()));
                         return EffectTaskPoll::Failed(error);
                     }
                     return poll;
@@ -809,7 +807,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             return EffectTaskPoll::Exit(poll);
                         }
                         MachineStep::Terminal(terminal) => {
-                            self.finish(rooted_terminal(context, terminal));
+                            self.finish_in(context, terminal);
                             return self.terminal.as_ref().expect("terminal set above").poll();
                         }
                     },
@@ -927,7 +925,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     }
                 }
                 Ok(MachineStep::Terminal(terminal)) => {
-                    self.finish(rooted_terminal(context, terminal));
+                    self.finish_in(context, terminal);
                     return self.terminal.as_ref().expect("terminal set above").poll();
                 }
                 Ok(MachineStep::Exit(intent)) => {
@@ -983,7 +981,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 .install_blocked(context, blocked)
                 .unwrap_or(EffectTaskPoll::Yielded);
         }
-        self.finish(TaskTerminal::Failed(error));
+        self.finish_in(context, TaskTerminal::Failed(error));
         self.terminal.as_ref().expect("terminal set above").poll()
     }
 
@@ -1136,6 +1134,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     return SpecializationStep::Failed(specializing, error);
                 }
                 SpecializationStep::Complete(Box::new(self.complete_specialization_request(
+                    context,
                     result,
                     specializing.branch,
                     specializing.scope_depth,
@@ -1622,7 +1621,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             );
                         }
                     };
-                    let handle = match PromisedValue::fixpoint(&self.eval_context) {
+                    let handle = match context.with_runtime_access(|access| {
+                        PromisedValue::fixpoint(&access, &self.eval_context)
+                    }) {
                         Ok(handle) => handle,
                         Err(error) => {
                             return ControlStep::Failed(
@@ -1631,19 +1632,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             );
                         }
                     };
-                    let marker = self
-                        .eval_context
-                        .values()
-                        .with_runtime_value_access(|access| {
-                            branch
-                                .root_value(&access, Value::Promised(handle.duplicate_in(&access)))
-                        });
+                    let marker = context.with_runtime_access(|access| {
+                        branch.root_value(&access, Value::Promised(handle.duplicate_in(&access)))
+                    });
                     let outer_control = std::mem::take(&mut branch.control);
                     branch.state = state;
-                    let handle = self
-                        .eval_context
-                        .values()
-                        .with_runtime_value_access(|access| handle.root_in(&access));
+                    let handle = context.with_runtime_access(|access| handle.root_in(&access));
                     branch.active_fixes.push(ActiveFix {
                         root: root.clone(),
                         choices,
@@ -1946,17 +1940,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     }
                     if path.is_empty() {
                         pathing.branch.state = base;
-                        return StatePathStep::Complete(
-                            self.eval_context
-                                .values()
-                                .with_runtime_value_access(|access| {
-                                    MachineWork::deliver_unit(
-                                        &access,
-                                        pathing.branch,
-                                        pathing.scope_depth,
-                                    )
-                                }),
-                        );
+                        return StatePathStep::Complete(context.with_runtime_access(|access| {
+                            MachineWork::deliver_unit(&access, pathing.branch, pathing.scope_depth)
+                        }));
                     }
                     let update = context.evaluate(&self.eval_context, |evaluator| {
                         evaluator.with_value_access(|access| {
@@ -1989,17 +1975,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 match poll_whnf_computation(computation, context, &self.eval_context, step_budget) {
                     WhnfOwnerPoll::Ready(state) => {
                         pathing.branch.state = state;
-                        StatePathStep::Complete(
-                            self.eval_context
-                                .values()
-                                .with_runtime_value_access(|access| {
-                                    MachineWork::deliver_unit(
-                                        &access,
-                                        pathing.branch,
-                                        pathing.scope_depth,
-                                    )
-                                }),
-                        )
+                        StatePathStep::Complete(context.with_runtime_access(|access| {
+                            MachineWork::deliver_unit(&access, pathing.branch, pathing.scope_depth)
+                        }))
                     }
                     WhnfOwnerPoll::Pending(dependency) => {
                         StatePathStep::Blocked(pathing, dependency)
@@ -2038,12 +2016,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 } else {
                     context.suspend(|| self.host.snapshot().store().root().clone())
                 };
-                let value = self
-                    .eval_context
-                    .values()
-                    .with_runtime_value_access(|access| {
-                        lazy_value_path_root(&access, &heap.clone().into_runtime_root(), &path)
-                    });
+                let value = context.with_runtime_access(|access| {
+                    lazy_value_path_root(&access, &heap.clone().into_runtime_root(), &path)
+                });
                 return StatePathStep::Complete(MachineWork::deliver_root(
                     value,
                     branch,
@@ -2116,12 +2091,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     context.suspend(|| self.host.snapshot().store().volume(volume).cloned())
                 };
                 let value = match root {
-                    Some(root) => self
-                        .eval_context
-                        .values()
-                        .with_runtime_value_access(|access| {
-                            lazy_value_path_root(&access, &root.clone().into_runtime_root(), &path)
-                        }),
+                    Some(root) => context.with_runtime_access(|access| {
+                        lazy_value_path_root(&access, &root.clone().into_runtime_root(), &path)
+                    }),
                     None => context.with_runtime_access(|access| {
                         access.root_runtime_value(Value::Lazy(LazyValue::error_in(
                             &access,
@@ -2193,11 +2165,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
         StatePathStep::Complete(match result {
             CommitResult::Committed => {
                 branch.retry = None;
-                self.eval_context
-                    .values()
-                    .with_runtime_value_access(|access| {
-                        MachineWork::deliver_unit(&access, branch, scope_depth)
-                    })
+                context.with_runtime_access(|access| {
+                    MachineWork::deliver_unit(&access, branch, scope_depth)
+                })
             }
             CommitResult::Conflict => MachineWork::Drive {
                 branch,
@@ -2643,6 +2613,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
     fn complete_specialization_request(
         &self,
+        context: &EvaluationPollContext,
         result: RequestResult,
         mut branch: Branch<S>,
         scope_depth: usize,
@@ -2662,13 +2633,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     scope_depth,
                 ),
                 _ => MachineWork::Drive {
-                    branch: branch.with_effect_root(
-                        self.eval_context
-                            .values()
-                            .with_runtime_value_access(|access| {
-                                alternative_returns_root(&access, &self.tags, &values)
-                            }),
-                    ),
+                    branch: branch.with_effect_root(context.with_runtime_access(|access| {
+                        alternative_returns_root(&access, &self.tags, &values)
+                    })),
                     scope_depth,
                 },
             },
@@ -2682,13 +2649,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     scope_depth,
                 }
             }
-            RequestResult::ReturnUnit => {
-                self.eval_context
-                    .values()
-                    .with_runtime_value_access(|access| {
-                        MachineWork::deliver_unit(&access, branch, scope_depth)
-                    })
-            }
+            RequestResult::ReturnUnit => context.with_runtime_access(|access| {
+                MachineWork::deliver_unit(&access, branch, scope_depth)
+            }),
             RequestResult::Fail => MachineWork::Outcome {
                 outcome: branch.into_failure(),
                 scope_depth,
@@ -3307,13 +3270,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
             Some(ValidationResult::MissingVolume(volume)) => {
                 let error = context
                     .with_runtime_access(|access| missing_volume_error(volume).root_in(&access));
-                self.finish(TaskTerminal::Failed(error));
+                self.finish_in(context, TaskTerminal::Failed(error));
                 BlockedRetryPoll::Terminal(
                     self.terminal.as_ref().expect("terminal set above").poll(),
                 )
             }
             Some(ValidationResult::Closed) => {
-                self.finish(TaskTerminal::Cancelled);
+                self.finish_in(context, TaskTerminal::Cancelled);
                 BlockedRetryPoll::Terminal(
                     self.terminal.as_ref().expect("terminal set above").poll(),
                 )
@@ -3417,11 +3380,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
             Some(ValidationResult::MissingVolume(volume)) => {
                 let error = context
                     .with_runtime_access(|access| missing_volume_error(volume).root_in(&access));
-                self.finish(TaskTerminal::Failed(error));
+                self.finish_in(context, TaskTerminal::Failed(error));
                 return Some(self.terminal.as_ref().expect("terminal set above").poll());
             }
             Some(ValidationResult::Closed) => {
-                self.finish(TaskTerminal::Cancelled);
+                self.finish_in(context, TaskTerminal::Cancelled);
                 return Some(self.terminal.as_ref().expect("terminal set above").poll());
             }
             None => {
@@ -3556,14 +3519,44 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.execution.work = work;
     }
 
-    pub(super) fn finish(&mut self, terminal: TaskTerminal) {
+    /// Cancels this task from teardown, outside any mutator.
+    pub(super) fn cancel(&mut self) {
+        let values = self.eval_context.values().clone();
+        let wakes =
+            values.with_boundary_access(|access| self.finish(&access, TaskTerminal::Cancelled));
+        notify_publications(wakes);
+    }
+
+    /// Finishes this task through its quantum's access.
+    fn finish_in(&mut self, context: &EvaluationPollContext, terminal: TaskTerminal) {
+        let wakes = context.with_runtime_access(|access| self.finish(&access, terminal));
+        notify_publications(wakes);
+    }
+
+    /// Finishes this task through its driver's mutator.
+    fn finish_under(
+        &mut self,
+        mutator: &crate::core::RuntimeValueMutator<'_, '_>,
+        terminal: TaskTerminal,
+    ) {
+        let wakes = mutator.with_access(|access| self.finish(&access, terminal));
+        notify_publications(wakes);
+    }
+
+    /// Records `terminal`, rooting a failure through `access`, and fails the
+    /// task's local promises. Returns their publications, which the caller
+    /// notifies once `access` closes.
+    #[must_use = "promise completion wakes must be delivered after managed access closes"]
+    pub(super) fn finish(
+        &mut self,
+        access: &RuntimeValueAccess<'_>,
+        terminal: TaskTerminal,
+    ) -> Vec<crate::core::ManagedPromisePublication> {
         if self.terminal.is_some() {
-            return;
+            return Vec::new();
         }
         let terminal = match terminal {
-            TaskTerminal::Failed(error) => {
-                TaskTerminal::Failed(error.root_for_values(self.eval_context.values()))
-            }
+            TaskTerminal::Failed(error) => TaskTerminal::Failed(error.root_in(access)),
             terminal => terminal,
         };
         let unfinished_failure = match &terminal {
@@ -3575,7 +3568,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
             )),
             TaskTerminal::Failed(error) => error.clone().into_failure(),
         };
-        self.eval_context.fail_local_promises(unfinished_failure);
+        let wakes = self
+            .eval_context
+            .fail_local_promises(access, unfinished_failure);
         self.execution.decoding = None;
         self.execution.demanding = None;
         self.execution.pathing = None;
@@ -3584,17 +3579,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.blocked = None;
         self.exit = None;
         self.terminal = Some(terminal);
+        wakes
     }
 }
 
-/// Roots a failed terminal through the poll's access, so `finish` takes no
-/// access of its own under the poll's mutator.
-fn rooted_terminal(context: &EvaluationPollContext, terminal: TaskTerminal) -> TaskTerminal {
-    match terminal {
-        TaskTerminal::Failed(error) => {
-            TaskTerminal::Failed(context.with_runtime_access(|access| error.root_in(&access)))
-        }
-        terminal => terminal,
+fn notify_publications(publications: Vec<crate::core::ManagedPromisePublication>) {
+    for publication in publications {
+        publication.notify();
     }
 }
 
@@ -3637,7 +3628,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for ValueEffectTask<S> {
     }
 
     fn cancel(&mut self) {
-        self.0.finish(TaskTerminal::Cancelled);
+        self.0.cancel();
     }
 }
 
@@ -3664,7 +3655,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for ContextualValueEffectTask<
     }
 
     fn cancel(&mut self) {
-        self.task.finish(TaskTerminal::Cancelled);
+        self.task.cancel();
     }
 }
 
@@ -3682,12 +3673,16 @@ fn poll_value_effect_task<S: TaskSpecialization>(
                 .as_ref()
                 .and_then(|dependency| task.eval_context.recursive_promise_dependency(dependency))
             {
-                let error = TaskHalt::new(error);
-                task.finish(TaskTerminal::Failed(error.clone()));
-                EvaluationMachinePoll::Failed(RuntimeFailureRoot::new(
-                    task.eval_context.values(),
-                    error.into_failure(),
-                ))
+                let (poll, wakes) = context.with_runtime_access(|access| {
+                    let error = TaskHalt::new(error).root_in(&access);
+                    let wakes = task.finish(&access, TaskTerminal::Failed(error.clone()));
+                    let poll = EvaluationMachinePoll::Failed(
+                        access.root_runtime_failure(error.into_failure()),
+                    );
+                    (poll, wakes)
+                });
+                notify_publications(wakes);
+                poll
             } else {
                 EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                     dependency: blocked.dependency,
@@ -3760,7 +3755,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
     }
 
     fn cancel(&mut self) {
-        self.0.finish(TaskTerminal::Cancelled);
+        self.0.cancel();
     }
 }
 

@@ -1519,7 +1519,9 @@ fn synchronous_client_demand_waits_for_worker_owned_task_promise() {
             .schedule_task({
                 let expected = expected.duplicate_for_test(owner.values());
                 move |task_context| {
-                    let promise = PromisedValue::fixpoint(&task_context)?;
+                    let promise = task_context.values().with_boundary_access(|access| {
+                        PromisedValue::fixpoint(&access, &task_context)
+                    })?;
                     let root = promise.root(task_context.values());
                     promise_sender
                         .send(promise)
@@ -1737,7 +1739,9 @@ fn escaped_context_retains_demand_resources_without_retaining_owner_or_coordinat
     });
 
     let closed_context = context.clone().for_effect_task();
-    let error = PromisedValue::fixpoint(&closed_context)
+    let error = closed_context
+        .values()
+        .with_boundary_access(|access| PromisedValue::fixpoint(&access, &closed_context))
         .expect_err_without_debug("closed demand state must reject new promise admission");
     assert!(error.contains("closed"));
 
@@ -5712,7 +5716,9 @@ fn promise_settlement_releases_task_and_local_owner_roots() {
 
     let local_owner = fixture.context();
     let local = EvalContext::clone(&local_owner).for_effect_task();
-    let local_promise = PromisedValue::fixpoint(&local)
+    let local_promise = local
+        .values()
+        .with_boundary_access(|access| PromisedValue::fixpoint(&access, &local))
         .expect("the direct effect runner should register its promise");
     let local_live = local
         .values()
@@ -5919,7 +5925,9 @@ fn assigned_task_promise_is_removed_before_later_task_terminalization() {
     let (assigned_sender, assigned_receiver) = mpsc::channel();
     let task = context
         .schedule_task(move |task_context| {
-            let promise = PromisedValue::fixpoint(&task_context)?;
+            let promise = task_context
+                .values()
+                .with_boundary_access(|access| PromisedValue::fixpoint(&access, &task_context))?;
             promise_sender
                 .send(promise.duplicate_for_test(task_context.values()))
                 .expect("test should receive its task-owned promise");
@@ -6461,7 +6469,9 @@ fn task_owned_promise_lazy_cycle_fails_in_both_publication_orders() {
                 let route_slot = route_slot.clone();
                 let produced = produced.clone();
                 move |task_context| {
-                    let promise = PromisedValue::fixpoint(&task_context)?;
+                    let promise = task_context.values().with_boundary_access(|access| {
+                        PromisedValue::fixpoint(&access, &task_context)
+                    })?;
                     *produced.lock().expect("promise fixture lock was poisoned") = Some(promise);
                     Ok(Box::new(AwaitCell {
                         context: task_context,
@@ -7015,7 +7025,9 @@ fn running_cancellation_waits_for_release_then_wins_over_the_poll_result() {
         .schedule_task({
             let cancelled = cancelled.clone();
             move |task_context| {
-                let promise = PromisedValue::fixpoint(&task_context)?;
+                let promise = task_context.values().with_boundary_access(|access| {
+                    PromisedValue::fixpoint(&access, &task_context)
+                })?;
                 promise_sender
                     .send(promise)
                     .expect("running cancellation test must receive its promise");
@@ -7107,7 +7119,9 @@ fn executor_shutdown_preserves_worker_owned_cancellation_and_task_promise() {
         .schedule_task({
             let cancelled = cancelled.clone();
             move |task_context| {
-                let promise = PromisedValue::fixpoint(&task_context)?;
+                let promise = task_context.values().with_boundary_access(|access| {
+                    PromisedValue::fixpoint(&access, &task_context)
+                })?;
                 promise_sender
                     .send(promise)
                     .expect("shutdown test must receive its task-owned promise");
@@ -8708,7 +8722,9 @@ fn forced_kill_publishes_task_status_and_fails_owned_promises() {
     let output = promise_output.clone();
     let task = context
         .schedule_task(move |task_context| {
-            let promise = PromisedValue::fixpoint(&task_context)?;
+            let promise = task_context
+                .values()
+                .with_boundary_access(|access| PromisedValue::fixpoint(&access, &task_context))?;
             *output.lock().expect("promise output was poisoned") = Some(promise);
             Ok(Box::new(BlockedWithDropCheck {
                 coordinator: weak_coordinator,
@@ -8829,7 +8845,9 @@ fn exit_settlement_fails_owned_promises_and_drops_reusable_machine_after_unlock(
     let weak_coordinator = Arc::downgrade(&coordinator);
     let task = context
         .schedule_task(move |task_context| {
-            let promise = PromisedValue::fixpoint(&task_context)?;
+            let promise = task_context
+                .values()
+                .with_boundary_access(|access| PromisedValue::fixpoint(&access, &task_context))?;
             *output.lock().expect("promise output was poisoned") = Some(promise);
             Ok(Box::new(ExitWithDropCheck {
                 coordinator: weak_coordinator,
@@ -9235,12 +9253,15 @@ fn pending_reflection_activation_roots_retire_with_their_reservations() {
         (completion, effect)
     });
     let activation = background
-        .reserve_reflection_completion_activation(
-            effect,
-            None,
-            completion,
-            ReflectionTaskResultPolicy::ReturnValue,
-        )
+        .evaluate_test_step(|step| {
+            background.reserve_reflection_completion_activation(
+                step,
+                effect,
+                None,
+                completion,
+                ReflectionTaskResultPolicy::ReturnValue,
+            )
+        })
         .expect("a sealed session profile should permit activation reservation");
     let activation_live = context
         .values()

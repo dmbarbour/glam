@@ -507,7 +507,9 @@ pub(crate) fn poll_lazy_route(
                 Err(payload) => {
                     let report =
                         crate::core::EvaluationPanic::from_payload(payload.as_ref(), origin);
-                    context.values().with_runtime_value_access(|access| {
+                    // The panic may have unwound out of a suspension.
+                    poll_context.readmit();
+                    poll_context.with_runtime_access(|access| {
                         top.lazy.enter_panicked(&access, &report);
                     });
                     drop(claims);
@@ -572,7 +574,7 @@ pub(crate) fn poll_lazy_route(
             }
             EvaluationMachinePoll::Failed(failure) => {
                 let finished = stack.pop().expect("an inline lazy sits above the base");
-                let cached = context.values().with_runtime_value_access(|access| {
+                let cached = poll_context.with_runtime_access(|access| {
                     finished
                         .lazy
                         .access(&access)
@@ -1770,6 +1772,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                                     }
                                 };
                                 match background.reserve_reflection_completion_activation(
+                                    context,
                                     effect,
                                     target,
                                     completion.clone(),

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::machine::{EffectTask, EffectTaskPoll, TaskTerminal};
+use super::machine::{EffectTask, EffectTaskPoll};
 use super::protocol::{
     CommitResult, HostSnapshot, TaskCommit, TaskEnvironment, TaskHalt, TaskHost,
     TaskSpecialization, TaskValidation, ValidationResult,
@@ -341,7 +341,7 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
     }
 
     pub fn cancel(&mut self) {
-        self.task.finish(TaskTerminal::Cancelled);
+        self.task.cancel();
     }
 }
 

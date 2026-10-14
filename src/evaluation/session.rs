@@ -812,10 +812,18 @@ impl EvalContext {
         self
     }
 
-    pub(crate) fn fail_local_promises(&self, failure: Arc<EvaluationFailure>) {
-        if let Some(owner) = &self.local_promise_owner {
-            owner.fail_all(failure);
-        }
+    /// Fails this context's local promises through `access`, returning the
+    /// publications to notify once the access closes.
+    #[must_use = "promise completion wakes must be delivered after managed access closes"]
+    pub(crate) fn fail_local_promises(
+        &self,
+        access: &crate::core::RuntimeValueAccess<'_>,
+        failure: Arc<EvaluationFailure>,
+    ) -> Vec<crate::core::ManagedPromisePublication> {
+        self.local_promise_owner
+            .as_ref()
+            .map(|owner| owner.fail_all(access, failure))
+            .unwrap_or_default()
     }
 
     #[cfg(test)]
@@ -1645,7 +1653,11 @@ impl EvalContext {
         let owner_output = owner_context.clone();
         let task = self.schedule_task(move |context| {
             let owned = (0..count)
-                .map(|_| PromisedValue::fixpoint(&context))
+                .map(|_| {
+                    context
+                        .values()
+                        .with_boundary_access(|access| PromisedValue::fixpoint(&access, &context))
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             *output.lock().expect("test promise output was poisoned") = Some(owned);
             *owner_output
@@ -1990,8 +2002,11 @@ impl EvalContext {
     /// The caller must publish the promised value into its managed graph and
     /// only then defer activation. Dropping the returned permit before that
     /// point terminalizes both the task and its registered promise.
+    /// Reserves a reflection task to complete `completion`, installing it
+    /// as the promise's producer through `step`'s access.
     pub(crate) fn reserve_reflection_completion_activation(
         &self,
+        step: &super::EvaluatorStepContext<'_>,
         effect: RuntimeValueRoot,
         target: Option<RuntimeValueRoot>,
         completion: ManagedPromiseRoot,
@@ -2052,9 +2067,8 @@ impl EvalContext {
                 return Err(error);
             }
         };
-        let installed = self
-            .values()
-            .with_runtime_value_access(|access| completion.install_producer(&access, &producer));
+        let installed = step
+            .with_value_access(|access| completion.install_producer(access.values(), &producer));
         if installed.is_err() {
             self.cancel_pending_reflection_completion(&handle);
             return Err(Arc::from(
