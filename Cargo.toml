@@ -58,6 +58,10 @@ opt-level = 3
 
 [profile.release]
 opt-level = 3
+# One unit: inlining no longer shifts with how the crate is partitioned,
+# which moved instruction counts by about 1% between unrelated edits, and a
+# reflection step is about 5% cheaper.
+codegen-units = 1
 
 [profile.release-small]
 inherits = "release"

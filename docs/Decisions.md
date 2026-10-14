@@ -180,6 +180,25 @@ maps the short names used here to file names.
   `agent_context/evaluation.md` "Verification Discipline".
 - **Recorded in:** fast checks plan, `test-fast-tier`.
 
+### Release builds use one codegen unit
+`release-one-codegen-unit` · 2026-10-14 · maintainer · accepted
+- **Context:** with the default 16 codegen units, how the `glam` crate was
+  partitioned decided which hot helpers were inlined, so unrelated edits
+  moved instruction counts by about 1%, and some heap-hold steps needed
+  `#[inline]` hints to recover regressions that were only partitioning.
+- **Decision:** `[profile.release]` sets `codegen-units = 1`.
+- **Consequences:** across the profiling workloads, instructions fall 2.3%
+  (most workloads 2% to 5%) and CPU time 3.9%. `parse_ifs_16` rises 1.4%,
+  and `chain_where` rises with size (+5.8% at 800), in the top-level token
+  scan of `contextual_keywords`, a quarter of that workload. A release
+  build of `glam` takes about 35% less CPU time but about twice as long,
+  since the crate compiles on one thread; `check.sh` builds no release
+  binary, so only profiling pays. Instruction baselines from before this
+  change are not comparable with later ones.
+- **Rule lives in:** `Cargo.toml` `[profile.release]`.
+- **Recorded in:** explicit heap holds plan, `gc-hold-boundaries` fourth
+  slice.
+
 ### Retired plans and reviews are deleted, not archived
 `retired-history-is-deleted` · 2026-10-05 · maintainer · accepted
 - **Context:** retirable history docs add search noise, and several state

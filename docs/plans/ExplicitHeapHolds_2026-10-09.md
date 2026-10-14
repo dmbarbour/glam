@@ -562,8 +562,10 @@ Slices, in order (2026-10-13):
    5,000 waits. `#[inline]` on `lazy_root` and `poll_lazy_checkpoint`
    recovered `countdown` and `sum`. With one codegen unit on both sides:
    -0.3% to -1.8% (`.r ()` step 390.1 K to 389.1 K). One codegen unit alone
-   makes a step about 5% cheaper (410 K to 390 K), a build setting for the
-   maintainer. The macro runner's isolated search (`IsolatedEffectSearch::poll`,
+   makes a step about 5% cheaper (410 K to 390 K); the maintainer adopted
+   it on 2026-10-14 (`release-one-codegen-unit`): -2.3% instructions across
+   the profiling workloads, with `chain_where` and `parse_ifs_16` the
+   exceptions. The macro runner's isolated search (`IsolatedEffectSearch::poll`,
    public) still takes a mutator per poll; it moves with the compile entry.
    The `full` gate's aggressive-GC stage then failed two session drain
    tests: their probes, acting as another worker, released work under the
