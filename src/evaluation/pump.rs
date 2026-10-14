@@ -464,8 +464,10 @@ impl EvaluationDemandState {
                         if let Some(claimed) = self.claim_ready_task(&coordinator) {
                             break claimed;
                         }
+                        // A probe acts as another worker would, releasing
+                        // work, so it runs with the drain's mutator suspended.
                         #[cfg(test)]
-                        self.probe_drain(super::SessionDrainPoint::ClaimMissed);
+                        mutator.suspend(|| self.probe_drain(super::SessionDrainPoint::ClaimMissed));
                         if self.task_is_running(&coordinator) {
                             let changed = mutator.suspend(|| {
                                 coordinator.wait_for_change_for(
@@ -489,7 +491,9 @@ impl EvaluationDemandState {
                             continue;
                         }
                         #[cfg(test)]
-                        self.probe_drain(super::SessionDrainPoint::BeforeQuiescence);
+                        mutator.suspend(|| {
+                            self.probe_drain(super::SessionDrainPoint::BeforeQuiescence);
+                        });
                         // Any change since the claim attempt, such as a worker
                         // requeueing or claiming a task between the checks above,
                         // means the session may not be quiescent: look again.
