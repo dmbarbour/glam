@@ -1242,3 +1242,12 @@ about 10,000 transient roots beside 600 live ones keep the pool within about
 twice the live roots, with no collection. `scripts/check.sh full` passed at
 `c7d1a70e`, including Miri (236 passed) and both sanitizers.
 
+
+Re-admission after a caught unwind (`Mutator::readmit`, for Glam's
+`driver-mutator`): a test shows that once a suspension's unwind is caught,
+`readmit` restores access to the rooted value, and the mutator then
+suspends across a collection that keeps its record. `scripts/check.sh full`
+passed at `8d326eaa` (Miri 234 passed), and at `fdc9c60a` and `450f5a83`
+(Miri 235 passed), with both sanitizers each time. At `64b811e2` its
+aggressive-GC stage failed two Glam session drain tests whose probes
+released work under the drain's mutator; `1cacdd99` fixed them.
