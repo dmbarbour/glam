@@ -99,6 +99,7 @@ impl<'scope> EvaluationValueAccess<'scope> {
         lazy.access(&self.values)
     }
 
+    #[inline]
     pub(crate) fn lazy_root<'access>(
         &'access self,
         lazy: &'access ManagedLazyRoot,
@@ -290,8 +291,15 @@ impl EvaluatorStepContext<'_> {
     }
 }
 
-/// Work a quantum runs once its heap admission ends.
-type DeferredWork = Vec<Box<dyn FnOnce()>>;
+/// Work a quantum runs once its heap admission ends, in order.
+pub(in crate::evaluation) type DeferredWork = Vec<Box<dyn FnOnce()>>;
+
+/// Runs the work a quantum deferred, once its mutator is suspended or ended.
+pub(in crate::evaluation) fn run_deferred(deferred: DeferredWork) {
+    for work in deferred {
+        work();
+    }
+}
 
 /// The part of a poll's authority that outlives its mutator: its demand
 /// route, and the work it defers until its heap admission ends.
@@ -385,6 +393,18 @@ impl EvaluationPollContext<'static, 'static> {
     }
 }
 
+impl<'lend, 'mu> EvaluationPollContext<'lend, 'mu> {
+    /// This quantum's mutator, when it holds one for `runtime`.
+    pub(in crate::evaluation) fn mutator_for(
+        &mut self,
+        runtime: crate::runtime::EvaluationRuntimeId,
+    ) -> Option<&mut RuntimeValueMutator<'lend, 'mu>> {
+        self.mutator
+            .as_mut()
+            .filter(|mutator| mutator.runtime_id() == runtime)
+    }
+}
+
 impl EvaluationPollContext<'_, '_> {
     /// Runs one quantum of `demand`'s work holding the thread's mutator,
     /// which `operation`'s context lends to its value accesses. The
@@ -400,41 +420,23 @@ impl EvaluationPollContext<'_, '_> {
         operation: impl FnOnce(&mut EvaluationPollContext<'_, '_>) -> R,
     ) -> R {
         let values = demand.values.clone();
-        let (result, deferred) = values.with_recursive_runtime_value_mutator(|mutator| {
-            let mut context = EvaluationPollContext {
-                shared: PollShared::new(demand, true),
-                mutator: Some(mutator),
-                _thread_bound: PhantomData,
-            };
-            let result = operation(&mut context);
-            let deferred = context.shared.after_admission.take().unwrap_or_default();
-            (result, deferred)
+        let (result, deferred) = values.with_recursive_runtime_value_mutator(|mut mutator| {
+            Self::quantum_under(&mut mutator, demand, operation)
         });
-        for work in deferred {
-            work();
-        }
+        run_deferred(deferred);
         result
     }
 
-    /// Runs a quantum of `demand`'s work that this quantum pumps, sharing
-    /// this quantum's mutator, so the pumped poll's value accesses borrow it
-    /// too and the pump enters no heap region. Work the pumped poll defers
-    /// runs once it ends, under one suspension of this quantum. Outside a
-    /// quantum, or for another runtime, the pumped poll runs a quantum of its
-    /// own.
-    pub(in crate::evaluation) fn nested_quantum<R>(
-        &mut self,
+    /// Runs one quantum of `demand`'s work under a driver's `mutator`, which
+    /// the quantum's context borrows (`driver-mutator`). Returns the result
+    /// with the work the poll deferred, which the driver runs at the quantum
+    /// boundary with the mutator suspended ([`run_deferred`]).
+    pub(in crate::evaluation) fn quantum_under<R>(
+        mutator: &mut RuntimeValueMutator<'_, '_>,
         demand: Arc<EvaluationDemandState>,
         operation: impl FnOnce(&mut EvaluationPollContext<'_, '_>) -> R,
-    ) -> R {
-        let runtime = demand.values.runtime_id();
-        let Some(mutator) = self
-            .mutator
-            .as_mut()
-            .filter(|mutator| mutator.runtime_id() == runtime)
-        else {
-            return self.suspend(|| EvaluationPollContext::quantum(demand, operation));
-        };
+    ) -> (R, DeferredWork) {
+        debug_assert_eq!(mutator.runtime_id(), demand.values.runtime_id());
         let mut context = EvaluationPollContext {
             shared: PollShared::new(demand, true),
             mutator: Some(mutator.reborrow()),
@@ -442,13 +444,20 @@ impl EvaluationPollContext<'_, '_> {
         };
         let result = operation(&mut context);
         let deferred = context.shared.after_admission.take().unwrap_or_default();
-        drop(context);
+        (result, deferred)
+    }
+
+    /// Runs one quantum, as [`Self::quantum_for_context`] does, under a
+    /// driver's `mutator`. Work the poll deferred runs under one suspension
+    /// once the poll ends.
+    pub(crate) fn quantum_for_context_under<R>(
+        mutator: &mut RuntimeValueMutator<'_, '_>,
+        context: &EvalContext,
+        operation: impl FnOnce(&mut EvaluationPollContext<'_, '_>) -> R,
+    ) -> R {
+        let (result, deferred) = Self::quantum_under(mutator, context.session.clone(), operation);
         if !deferred.is_empty() {
-            self.suspend(|| {
-                for work in deferred {
-                    work();
-                }
-            });
+            mutator.suspend(|| run_deferred(deferred));
         }
         result
     }

@@ -540,6 +540,32 @@ Slices, in order (2026-10-13):
    above their locks, with `release_held_region` an assertion; the nesting
    sites; then the work that runs suspended.
 
+   Drivers (`gc-hold-drivers`, 2026-10-14): the worker loop holds a mutator
+   across a busy run and ends it to wait; `drive_client_demand`, session
+   drains, `pump_wait_on_route`, the runtime's `pump_background` and direct
+   effect runs (`EffectTask::run`) hold one across their loops. Claimed task,
+   client-demand and spark polls borrow it
+   (`EvaluationPollContext::quantum_under`), and the pump takes it as a
+   parameter, which retired `nested_quantum`. Each quantum boundary is one
+   suspension covering the deferred work, the release and the disposal;
+   waits suspend before taking their locks. `glam-gc` gained
+   `Mutator::readmit`: a host call panicking inside a quantum's suspension
+   left the driver's mutator without admission, which the quantum's own
+   mutator had hidden. A domain-lifetime test caught an idle worker keeping
+   its value domain alive across its wait. Heap entries are unchanged in
+   number, a resumption replacing each quantum's entry. Instructions in the
+   default release build (16 codegen units): -0.7% to +1.9% across the
+   profiling workloads, median +0.4%; the increases are inlining shifts
+   from codegen-unit partitioning (`drive_net_batch` and the operator-call
+   helpers no longer inlined into `with_net_whnf_transition_in`), plus about
+   0.5% on `chain_w4`, whose idle client thread now suspends around about
+   5,000 waits. `#[inline]` on `lazy_root` and `poll_lazy_checkpoint`
+   recovered `countdown` and `sum`. With one codegen unit on both sides:
+   -0.3% to -1.8% (`.r ()` step 390.1 K to 389.1 K). One codegen unit alone
+   makes a step about 5% cheaper (410 K to 390 K), a build setting for the
+   maintainer. The macro runner's isolated search (`IsolatedEffectSearch::poll`,
+   public) still takes a mutator per poll; it moves with the compile entry.
+
 ### Tests and enforcement (`gc-hold-tests`)
 
 Convert the test helpers, then remove the shim, so access without a

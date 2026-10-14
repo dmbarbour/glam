@@ -1194,7 +1194,8 @@ over a minute. The Loom suite runs in about three seconds.
   caches while a mutator is suspended;
 - failures: a suspended closure that unwinds and a re-admission into a
   poisoned heap each leave the mutator without access, and the thread
-  without an active entry;
+  without an active entry; once the unwind is caught, `readmit` restores
+  access, and the mutator then suspends across a collection as before;
 - in debug builds, a view whose lifetime `unsafe` code extended across a
   suspension fails its admission-generation check on use.
 

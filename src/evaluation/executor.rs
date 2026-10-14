@@ -178,49 +178,64 @@ fn run_evaluation_worker(inner: &EvaluationExecutorInner) {
         let Some(coordinator) = inner.coordinator.upgrade() else {
             return;
         };
-        if coordinator.runtime_poison_marked() {
+        let Some(values) = coordinator.value_observer().upgrade() else {
+            return;
+        };
+        // A busy run holds the thread's mutator: its polls borrow it and each
+        // quantum boundary suspends it. An idle worker leaves the heap, and
+        // lets go of its value domain, before it waits (`driver-mutator`).
+        let idle = values.with_recursive_runtime_value_mutator(|mut mutator| {
+            loop {
+                if inner.stopping.load(Ordering::Acquire) || coordinator.runtime_poison_marked() {
+                    return None;
+                }
+                let observed_generation = coordinator.work_generation();
+                let work = coordinator.select_worker();
+                if released_from_wait {
+                    coordinator.record_waiter_outcome(
+                        CoordinatorWaiterClass::Worker,
+                        if matches!(work, CoordinatorSelection::None) {
+                            CoordinatorWaiterOutcome::Unrelated
+                        } else {
+                            CoordinatorWaiterOutcome::Productive
+                        },
+                    );
+                    released_from_wait = false;
+                }
+
+                match work {
+                    CoordinatorSelection::Task(work) => {
+                        if inner.stopping.load(Ordering::Acquire) {
+                            mutator.suspend(|| coordinator.requeue_unpolled_task(work));
+                            return None;
+                        }
+                        coordinator.poll_claimed_task(&mut mutator, work);
+                    }
+                    CoordinatorSelection::Spark(claimed) => {
+                        if inner.stopping.load(Ordering::Acquire) {
+                            mutator.suspend(|| {
+                                coordinator.release_spark(claimed, SparkWorkPoll::Complete);
+                            });
+                            return None;
+                        }
+                        coordinator.poll_claimed_spark(&mut mutator, claimed);
+                    }
+                    CoordinatorSelection::None => return Some(observed_generation),
+                }
+            }
+        });
+        drop(values);
+        let Some(observed_generation) = idle else {
+            return;
+        };
+        if inner.stopping.load(Ordering::Acquire) {
             return;
         }
-        let observed_generation = coordinator.work_generation();
-        let work = coordinator.select_worker();
-        if released_from_wait {
-            coordinator.record_waiter_outcome(
-                CoordinatorWaiterClass::Worker,
-                if matches!(work, CoordinatorSelection::None) {
-                    CoordinatorWaiterOutcome::Unrelated
-                } else {
-                    CoordinatorWaiterOutcome::Productive
-                },
-            );
-            released_from_wait = false;
-        }
-
-        match work {
-            CoordinatorSelection::Task(work) => {
-                if inner.stopping.load(Ordering::Acquire) {
-                    coordinator.requeue_unpolled_task(work);
-                    return;
-                }
-                coordinator.poll_claimed_task(work);
-            }
-            CoordinatorSelection::Spark(claimed) => {
-                if inner.stopping.load(Ordering::Acquire) {
-                    coordinator.release_spark(claimed, SparkWorkPoll::Complete);
-                    return;
-                }
-                coordinator.poll_claimed_spark(claimed);
-            }
-            CoordinatorSelection::None => {
-                if inner.stopping.load(Ordering::Acquire) {
-                    return;
-                }
-                released_from_wait = coordinator.wait_for_change_for(
-                    observed_generation,
-                    None,
-                    CoordinatorWaiterClass::Worker,
-                );
-            }
-        }
+        released_from_wait = coordinator.wait_for_change_for(
+            observed_generation,
+            None,
+            CoordinatorWaiterClass::Worker,
+        );
     }
 }
 

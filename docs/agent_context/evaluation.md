@@ -43,36 +43,46 @@ control-flow overview.
   (`gc-one-heap-per-thread`). Close one runtime's access before entering
   another's. The rule keeps a collection waiting on one heap from depending
   on a thread blocked entering a different heap.
-- Every poll holds the thread's mutator for one quantum
-  (`quantum-mutator`, `coarse-grained-mutator`): task, client-demand and
-  spark polls, and direct effect runs, take an `EvaluationPollContext` from
-  `EvaluationPollContext::quantum` (or `quantum_for_context`), whose value
-  accesses borrow that mutator; machine polls receive it as
-  `&mut EvaluationPollContext`. Nothing under the mutator may wait on
-  another thread or call out to a host: a release point there panics,
-  including the unbudgeted pump entry point. Either wrap such work in
+- Drivers hold the thread's mutator and their polls borrow it
+  (`quantum-mutator`, `coarse-grained-mutator`, `driver-mutator`). The
+  worker loop (for a busy run), `drive_client_demand`, session drains, the
+  runtime's background pump, `pump_wait_on_route` and direct effect runs
+  take one mutator and pass it down as `&mut RuntimeValueMutator`. Each poll
+  runs as a quantum under it (`EvaluationPollContext::quantum_under` or
+  `quantum_for_context_under`), whose context lends value access; machine
+  polls receive it as `&mut EvaluationPollContext`. A quantum boundary is
+  one suspension of the driver's mutator: the poll's deferred work, the
+  release (which may settle, call client code, evaluate a diagnostic
+  through a nested driver, or collect) and the released machine's disposal.
+  Waits suspend the mutator before taking their locks; an idle worker ends
+  its hold instead. A panic inside one of a poll's suspensions leaves the
+  mutator without admission, so a driver that catches a poll's panic calls
+  `readmit`. `quantum` and `quantum_for_context` remain for polls that no
+  driver holds a mutator for yet (`IsolatedEffectSearch::poll`).
+  Nothing under a mutator may wait on another thread or call out to a host:
+  a release point there panics. Either wrap such work in
   `EvaluationPollContext::suspend` when its result is needed at once (host
-  calls, reflection host callbacks, specialization requests, releasing
-  pumped work), or defer it with `EvaluatorStepContext::after_admission`
-  (the poll then ends its quantum, and the work runs once the mutator ends,
-  before the claim is released: reflection launchers, the net contention
-  wait). The budgeted pump (`pump_wait_on_route_within`) shares the
-  pumping quantum's mutator with the work it polls. A suspension costs
-  about two heap entries; let adjacent operations share one.
-  Nested synchronous drivers do not run inside quanta; a test source that
-  depends on an input reads it with `promise_or_block_for_test` or runs as
-  a host call. Outside quanta, `CountedCondvar` waits, synchronous drivers
-  (`drive_client_demand`) and pressure servicing still release a held
-  region first, which is a no-op without one. A forced collection inside a
-  quantum reports an active mutator; probe for open value access with
+  calls, reflection host callbacks, specialization requests), or defer it
+  with `EvaluatorStepContext::after_admission` (the poll then ends its
+  quantum, and the work runs at the quantum boundary, before the claim is
+  released: reflection launchers, the net contention wait). The budgeted
+  pump (`pump_wait_on_route_within`) lends the pumping quantum's mutator to
+  the work it polls. A suspension costs about two heap entries; let
+  adjacent operations share one. Nested synchronous drivers do not run
+  inside quanta; a test source that depends on an input reads it with
+  `promise_or_block_for_test` or runs as a host call. `CountedCondvar`
+  waits, launchers and pressure servicing still call the held-region
+  release point, which panics under an owned mutator, so they run
+  suspended. A forced collection inside a quantum reports an active
+  mutator; probe for open value access with
   `thread_has_runtime_value_access_for_test` instead.
 - `glam-gc` also has owned mutators (`Heap::mutate`, `Mutator::suspend`,
   `GcRef`), which Glam adopts from `gc-hold-boundaries` on. `mutate` must
   be the thread's outer entry (`mutate_recursive` is the migration aid),
   and a held-region release point reached under an owned mutator panics:
   convert such a point to a suspension or defer it past admission.
-- Every driver services collection pressure at each quantum boundary, after
-  the poll's held region ends. A waiting `collect_full` sets the heap's
+- Every driver services collection pressure at each quantum boundary, with
+  its mutator suspended. A waiting `collect_full` sets the heap's
   request, which every pressure input honors, so drivers join it there
   instead of starting another quantum; that bounds a collection's wait to
   the quanta in flight (`gc-bounded-collection-wait`). A new driver loop

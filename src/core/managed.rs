@@ -471,6 +471,12 @@ impl<'mu> RuntimeValueMutator<'_, 'mu> {
         self.mutator.suspend(operation)
     }
 
+    /// Re-admits this mutator after a suspension unwound into a caught panic;
+    /// see `glam_gc::Mutator::readmit`. Does nothing while it is admitted.
+    pub(crate) fn readmit(&mut self) {
+        self.mutator.readmit();
+    }
+
     /// Lends this mutator on, for as long as the reborrow lasts.
     pub(crate) fn reborrow(&mut self) -> RuntimeValueMutator<'_, 'mu> {
         RuntimeValueMutator {

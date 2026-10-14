@@ -211,7 +211,7 @@ fn reflection_budget_yields_requeue_fifo_without_subscriptions() {
             context
                 .coordinator()
                 .expect("coordinator should remain live")
-                .poll_runtime_work_bounded(1),
+                .poll_runtime_work_bounded_for_test(1),
             Some(1)
         );
         assert_eq!(
@@ -238,7 +238,7 @@ fn reflection_budget_yields_requeue_fifo_without_subscriptions() {
             context
                 .coordinator()
                 .expect("coordinator should remain live")
-                .poll_runtime_work_bounded(1),
+                .poll_runtime_work_bounded_for_test(1),
             Some(1)
         );
     }
@@ -276,7 +276,7 @@ fn client_budget_yields_requeue_fifo_without_subscriptions() {
             coordinator.client_demand_snapshot(clients[1 - expected].work()),
             Some(ClientDemandSnapshot::Queued)
         ));
-        coordinator.poll_claimed_client_demand(claimed);
+        coordinator.poll_claimed_client_demand_for_test(claimed);
         assert!(matches!(
             coordinator.client_demand_snapshot(clients[expected].work()),
             Some(ClientDemandSnapshot::Queued)
@@ -309,7 +309,7 @@ fn spark_budget_yield_requeues_the_same_record_without_a_dependency() {
     };
     let work = first.id_for_test();
     assert!(!first.has_prior_dependency_for_test());
-    coordinator.poll_claimed_spark(first);
+    coordinator.poll_claimed_spark_for_test(first);
     assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
     assert!(coordinator.work_dependency_by_id(work).is_none());
 
@@ -344,7 +344,7 @@ fn background_selection_excludes_foreground_clients_even_when_both_are_ready() {
         })
         .expect("the background task should schedule");
 
-    assert_eq!(coordinator.poll_runtime_work_bounded(1), Some(1));
+    assert_eq!(coordinator.poll_runtime_work_bounded_for_test(1), Some(1));
     assert!(matches!(
         context.poll_reflection_task(&task),
         EvaluationWaitPoll::Complete(_)
@@ -358,7 +358,7 @@ fn background_selection_excludes_foreground_clients_even_when_both_are_ready() {
     let claimed = coordinator
         .claim_client_demand(client.work())
         .expect("only the foreground owner should claim its client");
-    coordinator.poll_claimed_client_demand(claimed);
+    coordinator.poll_claimed_client_demand_for_test(claimed);
     assert!(matches!(
         client.poll(),
         Some(ClientDemandResult::Complete(_))

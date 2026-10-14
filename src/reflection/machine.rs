@@ -534,9 +534,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
         )))
     }
 
+    /// Runs this task to its outcome. The run drives the task as a scheduler
+    /// driver does: it holds the thread's mutator across its polls and pumps,
+    /// and suspends it to wait or to settle (`driver-mutator`).
     pub(super) fn run(&mut self) -> Result<TaskOutcome, TaskHalt> {
-        loop {
-            match self.poll(256) {
+        let values = self.eval_context.values().clone();
+        values.with_recursive_runtime_value_mutator(|mut mutator| loop {
+            match self.poll_under(&mut mutator, 256) {
                 EffectTaskPoll::Yielded => {}
                 EffectTaskPoll::Blocked(blocked) => {
                     if let Some(dependency) = blocked.dependency {
@@ -559,7 +563,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
                                 ));
                             }
                         };
-                        match self.eval_context.pump_wait_on_route(
+                        match self.eval_context.pump_wait_on_route_under(
+                            &mut mutator,
                             &wait,
                             4_096,
                             &mut self.exact_demand_route,
@@ -567,28 +572,30 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             EvaluationPumpOutcome::TargetReady
                             | EvaluationPumpOutcome::BudgetExhausted => continue,
                             EvaluationPumpOutcome::Busy => {
-                                self.eval_context.wait_for_claimed_task_on_route(
-                                    &wait,
-                                    &mut self.exact_demand_route,
-                                );
+                                mutator.suspend(|| {
+                                    self.eval_context.wait_for_claimed_task_on_route(
+                                        &wait,
+                                        &mut self.exact_demand_route,
+                                    );
+                                });
                                 continue;
                             }
                             EvaluationPumpOutcome::NoProgress
                                 if blocked.observed_generation.is_none() =>
                             {
-                                if self
-                                    .eval_context
-                                    .wait_for_observed_dependency_progress_on_route(
-                                        &wait,
-                                        &mut self.exact_demand_route,
-                                    )
-                                {
+                                if mutator.suspend(|| {
+                                    self.eval_context
+                                        .wait_for_observed_dependency_progress_on_route(
+                                            &wait,
+                                            &mut self.exact_demand_route,
+                                        )
+                                }) {
                                     continue;
                                 }
                                 let error = TaskHalt::new(
                                     "synchronous reflection task has no runnable producer for its dependency",
                                 );
-                                self.finish(TaskTerminal::Failed(error.clone()));
+                                mutator.suspend(|| self.finish(TaskTerminal::Failed(error.clone())));
                                 return Err(error);
                             }
                             EvaluationPumpOutcome::NoProgress => {}
@@ -597,9 +604,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     let generation = blocked.observed_generation.ok_or_else(|| {
                         TaskHalt::new("blocked reflection task has no wake condition")
                     })?;
-                    if !self.host.wait_for_change(generation) {
-                        self.finish(TaskTerminal::Cancelled);
-                    }
+                    mutator.suspend(|| {
+                        if !self.host.wait_for_change(generation) {
+                            self.finish(TaskTerminal::Cancelled);
+                        }
+                    });
                 }
                 EffectTaskPoll::Complete(value) => return Ok(TaskOutcome::Complete(value)),
                 EffectTaskPoll::Failed(error) => return Err(error),
@@ -608,7 +617,20 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     unreachable!("direct effect-run profiles do not expose runtime exit")
                 }
             }
-        }
+        })
+    }
+
+    /// Polls as [`Self::poll`] does, under a driver's `mutator`.
+    fn poll_under(
+        &mut self,
+        mutator: &mut crate::core::RuntimeValueMutator<'_, '_>,
+        steps: usize,
+    ) -> EffectTaskPoll {
+        let mut budget = crate::evaluation::EvaluationStepBudget::new(steps.max(1));
+        let eval_context = self.eval_context.clone();
+        EvaluationPollContext::quantum_for_context_under(mutator, &eval_context, |context| {
+            self.poll_pumping(context, &mut budget)
+        })
     }
 
     /// Polls this task within one total budget of `steps`, including the work

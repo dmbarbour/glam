@@ -270,6 +270,32 @@ fn an_unwinding_suspension_leaves_the_mutator_without_access() {
     assert_eq!(Heap::release_current_thread_caches(), 1);
 }
 
+#[test]
+fn a_mutator_readmits_once_its_unwind_is_caught() {
+    let heap = Heap::new();
+    heap.mutate(|mutator| {
+        let root = mutator.root(mutator.allocator::<u64>().unwrap().alloc_view(7_u64));
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            mutator.suspend(|| panic!("suspended work failed"));
+        }))
+        .expect_err("the suspended work's panic should propagate");
+        assert_eq!(panic_message(panic), "suspended work failed");
+
+        mutator.readmit();
+        assert_eq!(*root.get(mutator), 7);
+        // The re-admitted mutator suspends like any other, and its record
+        // survives a collection meanwhile.
+        let report = mutator.suspend(|| heap.collect_full().unwrap());
+        assert_eq!(report.root_entries(), 1);
+        assert_eq!(*root.get(mutator), 7);
+        // An admitted mutator ignores the request.
+        mutator.readmit();
+        let _ = mutator.allocator::<u64>().unwrap().alloc(8_u64);
+    });
+    assert!(cache_snapshot(&heap.inner).is_some_and(|snapshot| snapshot.recursive_depth == 0));
+    assert_eq!(Heap::release_current_thread_caches(), 1);
+}
+
 static POISON_DROPS: AtomicUsize = AtomicUsize::new(0);
 
 struct CountedDrop(&'static AtomicUsize);

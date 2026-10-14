@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::core::{EvaluationPanic, EvaluationPanicOrigin};
 
+use super::access::{DeferredWork, run_deferred};
 use super::coordinator::{
     self, CausalChildSelection, ClaimedDeferredWork, ClaimedLazyRoute, ClaimedReflectionWork,
     ClaimedTaskWork, ClientDemandOperation, CoordinatorWaiterClass, CoordinatorWaiterOutcome,
@@ -20,6 +21,7 @@ use super::session::{
     EvaluationUnfinishedTask,
 };
 use super::{EvaluationDemandState, EvaluationPollContext, evaluation_failure};
+use crate::core::RuntimeValueMutator;
 use crate::core::{EvaluationFailure, LazyCycle};
 use crate::runtime::RuntimeFailureRoot;
 
@@ -153,6 +155,13 @@ struct ReportedDependency {
     live_cross_session: bool,
 }
 
+/// A claimed poll before its quantum boundary: the poll, and the work it
+/// deferred until the driver's mutator is suspended.
+struct PolledTask {
+    poll: EvaluationMachinePoll,
+    deferred: DeferredWork,
+}
+
 struct ClaimedTask {
     coordinator: Arc<EvaluationWorkCoordinator>,
     kind: ClaimedTaskKind,
@@ -175,52 +184,99 @@ impl ClaimedTask {
         Self { coordinator, kind }
     }
 
-    /// Polls the claimed machine behind the scheduler's panic boundary.
+    /// Polls the claimed machine under the driver's `mutator`, behind the
+    /// scheduler's panic boundary. The quantum boundary that follows runs
+    /// with the mutator suspended: [`Self::finish_polled`], then
+    /// [`Self::release`].
     ///
     /// A panic during the poll ends this work as `Panicked` instead of
     /// stranding its claim. Work blocked on a panicked dependency also ends
     /// as `Panicked` without polling, because polling would reinstall the
     /// panicked work.
-    fn poll(&mut self, step_budget: &mut super::EvaluationStepBudget) -> EvaluationMachinePoll {
-        self.poll_within(None, step_budget)
-    }
-
-    /// Polls as [`Self::poll`] does, within `parent`'s quantum when a
-    /// quantum pumps this work, sharing its mutator.
-    fn poll_within(
+    fn poll_under(
         &mut self,
-        parent: Option<&mut EvaluationPollContext>,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
         step_budget: &mut super::EvaluationStepBudget,
-    ) -> EvaluationMachinePoll {
+    ) -> PolledTask {
         if let Some(report) = self.kind.prior_dependency_panic() {
-            return EvaluationMachinePoll::Panicked {
-                report,
-                torn: false,
+            return PolledTask {
+                poll: EvaluationMachinePoll::Panicked {
+                    report,
+                    torn: false,
+                },
+                deferred: Vec::new(),
             };
         }
         let demand = self.kind.demand().demand();
         let kind = &mut self.kind;
-        // The boundary also catches a panic in work the poll deferred until
-        // its mutator ended, such as a host call. A reflection task suspends
-        // its mutator around its host callbacks and the work it pumps.
+        // A reflection task suspends the mutator around its host callbacks
+        // and the work it pumps.
         let polled = catch_unwind(AssertUnwindSafe(|| {
-            let poll = |context: &mut EvaluationPollContext| match kind {
+            EvaluationPollContext::quantum_under(mutator, demand, |context| match kind {
                 ClaimedTaskKind::Reflection(task) => task.poll(context, step_budget),
                 ClaimedTaskKind::Deferred(task) => task.poll(context, step_budget),
                 ClaimedTaskKind::LazyRoute(route) => route.poll(context, step_budget),
-            };
-            match parent {
-                Some(parent) => parent.nested_quantum(demand, poll),
-                None => EvaluationPollContext::quantum(demand, poll),
-            }
+            })
         }));
+        // A panic inside one of the poll's suspensions left the mutator
+        // without admission.
+        mutator.readmit();
         match polled {
-            Ok(poll) => halt_blocked_on_panic(poll),
+            Ok((poll, deferred)) => PolledTask { poll, deferred },
+            Err(payload) => PolledTask {
+                poll: EvaluationMachinePoll::Panicked {
+                    report: EvaluationPanic::from_payload(
+                        payload.as_ref(),
+                        self.kind.panic_origin(),
+                    ),
+                    torn: true,
+                },
+                deferred: Vec::new(),
+            },
+        }
+    }
+
+    /// Runs the work the poll deferred, such as a host call, behind the
+    /// poll's panic boundary, and returns the poll to release. Runs at the
+    /// quantum boundary, with the driver's mutator suspended.
+    fn finish_polled(&self, polled: PolledTask) -> EvaluationMachinePoll {
+        let PolledTask { poll, deferred } = polled;
+        match catch_unwind(AssertUnwindSafe(|| run_deferred(deferred))) {
+            Ok(()) => halt_blocked_on_panic(poll),
             Err(payload) => EvaluationMachinePoll::Panicked {
                 report: EvaluationPanic::from_payload(payload.as_ref(), self.kind.panic_origin()),
                 torn: true,
             },
         }
+    }
+
+    /// Polls under `mutator`, then crosses the quantum boundary. Returns
+    /// whether the poll yielded.
+    fn poll_and_release(
+        mut self,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
+        step_budget: &mut super::EvaluationStepBudget,
+    ) -> bool {
+        let polled = self.poll_under(mutator, step_budget);
+        self.cross_boundary(mutator, polled)
+    }
+
+    /// The quantum boundary, with `mutator` suspended: the work the poll
+    /// deferred, the release, and the released machine's disposal, which may
+    /// run client code. Returns whether the poll yielded.
+    fn cross_boundary(self, mutator: &mut RuntimeValueMutator<'_, '_>, polled: PolledTask) -> bool {
+        mutator.suspend(|| {
+            let poll = self.finish_polled(polled);
+            let yielded = matches!(
+                poll,
+                EvaluationMachinePoll::Yielded | EvaluationMachinePoll::ScheduleSpark(_)
+            );
+            let (_, _, released, _) = self.release(poll);
+            if let Some(machine) = released {
+                machine.finish();
+            }
+            yielded
+        })
     }
 
     fn release(
@@ -392,55 +448,64 @@ impl EvaluationDemandState {
         let Some(coordinator) = self.coordinator() else {
             return self.closed_run_report();
         };
-        loop {
-            let mut claimed = loop {
-                if self.is_closed() {
-                    return self.closed_run_report();
+        // The drain holds the thread's mutator; its polls borrow it, and its
+        // waits and quantum boundaries suspend it (`driver-mutator`).
+        let quiescent = self
+            .values
+            .with_recursive_runtime_value_mutator(|mut mutator| {
+                loop {
+                    let claimed = loop {
+                        if self.is_closed() {
+                            return false;
+                        }
+                        // Read before claiming, so a task a worker requeues after
+                        // a failed claim changes the generation compared below.
+                        let generation = coordinator.work_generation();
+                        if let Some(claimed) = self.claim_ready_task(&coordinator) {
+                            break claimed;
+                        }
+                        #[cfg(test)]
+                        self.probe_drain(super::SessionDrainPoint::ClaimMissed);
+                        if self.task_is_running(&coordinator) {
+                            let changed = mutator.suspend(|| {
+                                coordinator.wait_for_change_for(
+                                    generation,
+                                    None,
+                                    CoordinatorWaiterClass::SessionDrain,
+                                )
+                            });
+                            if changed {
+                                coordinator.record_waiter_outcome(
+                                    CoordinatorWaiterClass::SessionDrain,
+                                    if coordinator.session_has_ready_task(self.id) {
+                                        CoordinatorWaiterOutcome::Productive
+                                    } else if !self.task_is_running(&coordinator) {
+                                        CoordinatorWaiterOutcome::Relevant
+                                    } else {
+                                        CoordinatorWaiterOutcome::Unrelated
+                                    },
+                                );
+                            }
+                            continue;
+                        }
+                        #[cfg(test)]
+                        self.probe_drain(super::SessionDrainPoint::BeforeQuiescence);
+                        // Any change since the claim attempt, such as a worker
+                        // requeueing or claiming a task between the checks above,
+                        // means the session may not be quiescent: look again.
+                        if coordinator.work_generation() != generation {
+                            continue;
+                        }
+                        return true;
+                    };
+                    let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
+                    claimed.poll_and_release(&mut mutator, &mut budget);
                 }
-                // Read before claiming, so a task a worker requeues after a
-                // failed claim changes the generation compared below.
-                let generation = coordinator.work_generation();
-                if let Some(claimed) = self.claim_ready_task(&coordinator) {
-                    break claimed;
-                }
-                #[cfg(test)]
-                self.probe_drain(super::SessionDrainPoint::ClaimMissed);
-                if self.task_is_running(&coordinator) {
-                    if coordinator.wait_for_change_for(
-                        generation,
-                        None,
-                        CoordinatorWaiterClass::SessionDrain,
-                    ) {
-                        coordinator.record_waiter_outcome(
-                            CoordinatorWaiterClass::SessionDrain,
-                            if coordinator.session_has_ready_task(self.id) {
-                                CoordinatorWaiterOutcome::Productive
-                            } else if !self.task_is_running(&coordinator) {
-                                CoordinatorWaiterOutcome::Relevant
-                            } else {
-                                CoordinatorWaiterOutcome::Unrelated
-                            },
-                        );
-                    }
-                    continue;
-                }
-                #[cfg(test)]
-                self.probe_drain(super::SessionDrainPoint::BeforeQuiescence);
-                // Any change since the claim attempt, such as a worker
-                // requeueing or claiming a task between the checks above,
-                // means the session may not be quiescent: look again.
-                if coordinator.work_generation() != generation {
-                    continue;
-                }
-                return self.session_run_report(&coordinator);
-            };
-
-            let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
-            let poll = claimed.poll(&mut budget);
-            let (_, _, released, _) = claimed.release(poll);
-            if let Some(machine) = released {
-                machine.finish();
-            }
+            });
+        if quiescent {
+            self.session_run_report(&coordinator)
+        } else {
+            self.closed_run_report()
         }
     }
 
@@ -559,26 +624,32 @@ pub(super) fn pump_demand(
     reservation_allowance: usize,
 ) -> EvaluationPumpOutcome {
     let mut reservation_allowance = reservation_allowance;
-    pump_demand_on_route(
-        coordinator,
-        context,
-        target,
-        &mut reservation_allowance,
-        &mut ExactDemandRoute::default(),
-        None,
-    )
+    context
+        .values()
+        .with_recursive_runtime_value_mutator(|mut mutator| {
+            pump_demand_on_route(
+                &mut mutator,
+                coordinator,
+                context,
+                target,
+                &mut reservation_allowance,
+                &mut ExactDemandRoute::default(),
+            )
+        })
 }
 
-/// Pumps work toward `target`, drawing whole poll quanta from
-/// `reservation_allowance`. On return the allowance holds what remains, so
-/// the caller can charge the reserved steps to its own budget.
+/// Pumps work toward `target` under `mutator`, drawing whole poll quanta
+/// from `reservation_allowance`. On return the allowance holds what remains,
+/// so the caller can charge the reserved steps to its own budget. The pumped
+/// polls borrow the mutator, which is the driver's or the pumping quantum's,
+/// and each quantum boundary suspends it.
 pub(super) fn pump_demand_on_route(
+    mutator: &mut RuntimeValueMutator<'_, '_>,
     coordinator: &Arc<EvaluationWorkCoordinator>,
     context: &EvalContext,
     target: &EvaluationWaitToken,
     reservation_allowance: &mut usize,
     route: &mut ExactDemandRoute,
-    mut parent: Option<&mut EvaluationPollContext>,
 ) -> EvaluationPumpOutcome {
     if target.terminal_poll().is_some() {
         return EvaluationPumpOutcome::TargetReady;
@@ -633,15 +704,16 @@ pub(super) fn pump_demand_on_route(
         let quantum = (*reservation_allowance).min(TASK_POLL_QUANTUM);
         *reservation_allowance -= quantum;
         let mut budget = super::EvaluationStepBudget::new(quantum);
-        let poll = claimed.poll_within(parent.as_deref_mut(), &mut budget);
+        let polled = claimed.poll_under(mutator, &mut budget);
         debug_assert_eq!(budget.spent() + budget.remaining(), budget.granted());
-        let yielded = matches!(
-            poll,
-            EvaluationMachinePoll::Yielded | EvaluationMachinePoll::ScheduleSpark(_)
-        );
-        // Releasing may publish terminal status, which can evaluate a
-        // diagnostic, and may collect: within a quantum, it runs suspended.
-        let release = || {
+        // The quantum boundary runs suspended: releasing may publish terminal
+        // status, which can evaluate a diagnostic, and may collect.
+        let yielded = mutator.suspend(|| {
+            let poll = claimed.finish_polled(polled);
+            let yielded = matches!(
+                poll,
+                EvaluationMachinePoll::Yielded | EvaluationMachinePoll::ScheduleSpark(_)
+            );
             let (_, _, released, route_release) = claimed.release(poll);
             if exact_claim {
                 if let Some(release) = route_release {
@@ -658,11 +730,8 @@ pub(super) fn pump_demand_on_route(
             if let Some(machine) = released {
                 machine.finish();
             }
-        };
-        match parent.as_deref_mut() {
-            Some(quantum) => quantum.suspend(release),
-            None => release(),
-        }
+            yielded
+        });
         if yielded && !exact_claim {
             // Causal launch provenance is not an exact zipper edge. Preserve
             // its immediate continuation within this bounded call only; a
@@ -1023,20 +1092,27 @@ fn poison_lazy_cycle(
 impl EvaluationWorkCoordinator {
     #[cfg(test)]
     pub(crate) fn poll_runtime_work(self: &Arc<Self>) -> bool {
-        self.poll_runtime_work_bounded(TASK_POLL_QUANTUM).is_some()
+        self.with_driver_mutator_for_test(|mutator| {
+            self.poll_runtime_work_bounded(mutator, TASK_POLL_QUANTUM)
+        })
+        .is_some()
     }
 
     /// Polls at most one runtime-visible background machine with a bounded
-    /// allowance. A zero allowance performs no selection, so merely probing
-    /// the bounded public pump cannot perturb queue order.
-    pub(crate) fn poll_runtime_work_bounded(self: &Arc<Self>, step_budget: usize) -> Option<usize> {
+    /// allowance, under a driver's `mutator`. A zero allowance performs no
+    /// selection, so merely probing the bounded public pump cannot perturb
+    /// queue order.
+    pub(crate) fn poll_runtime_work_bounded(
+        self: &Arc<Self>,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
+        step_budget: usize,
+    ) -> Option<usize> {
         if step_budget == 0 {
             return None;
         }
         match self.select_runtime_pump() {
             coordinator::CoordinatorSelection::Task(work) => {
-                let (_, spent) = self.poll_claimed_task_bounded(work, step_budget);
-                Some(spent)
+                Some(self.poll_claimed_task_bounded(mutator, work, step_budget).1)
             }
             coordinator::CoordinatorSelection::Spark(_) => {
                 unreachable!("the runtime pump must not claim best-effort spark work")
@@ -1045,12 +1121,20 @@ impl EvaluationWorkCoordinator {
         }
     }
 
-    pub(super) fn poll_claimed_task(self: &Arc<Self>, work: ClaimedTaskWork) -> bool {
-        self.poll_claimed_task_bounded(work, TASK_POLL_QUANTUM).0
+    /// Polls claimed task work under a driver's `mutator`, crossing its
+    /// quantum boundary with the mutator suspended.
+    pub(super) fn poll_claimed_task(
+        self: &Arc<Self>,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
+        work: ClaimedTaskWork,
+    ) -> bool {
+        self.poll_claimed_task_bounded(mutator, work, TASK_POLL_QUANTUM)
+            .0
     }
 
     fn poll_claimed_task_bounded(
         self: &Arc<Self>,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
         work: ClaimedTaskWork,
         step_budget: usize,
     ) -> (bool, usize) {
@@ -1058,16 +1142,9 @@ impl EvaluationWorkCoordinator {
         let mut claimed = ClaimedTask::new(self.clone(), work);
         let mut budget = super::EvaluationStepBudget::new(step_budget.min(TASK_POLL_QUANTUM));
         let before = budget.remaining();
-        let poll = claimed.poll(&mut budget);
+        let polled = claimed.poll_under(mutator, &mut budget);
         budget.charge_if_unchanged(before);
-        let yielded = matches!(
-            poll,
-            EvaluationMachinePoll::Yielded | EvaluationMachinePoll::ScheduleSpark(_)
-        );
-        let (_, _, released, _) = claimed.release(poll);
-        if let Some(machine) = released {
-            machine.finish();
-        }
+        let yielded = claimed.cross_boundary(mutator, polled);
         (yielded, budget.spent())
     }
 
@@ -1077,31 +1154,64 @@ impl EvaluationWorkCoordinator {
         work: ClaimedTaskWork,
         probe: impl FnOnce(&EvaluationMachinePoll),
     ) {
-        let mut claimed = ClaimedTask::new(self.clone(), work);
-        let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
-        let poll = claimed.poll(&mut budget);
-        probe(&poll);
-        let (_, _, released, _) = claimed.release(poll);
-        if let Some(machine) = released {
-            machine.finish();
-        }
+        let values = self
+            .value_observer()
+            .upgrade()
+            .expect("claimed work must retain its value domain");
+        values.with_recursive_runtime_value_mutator(|mut mutator| {
+            let mut claimed = ClaimedTask::new(self.clone(), work);
+            let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
+            let polled = claimed.poll_under(&mut mutator, &mut budget);
+            mutator.suspend(|| {
+                let poll = claimed.finish_polled(polled);
+                probe(&poll);
+                let (_, _, released, _) = claimed.release(poll);
+                if let Some(machine) = released {
+                    machine.finish();
+                }
+            });
+        });
     }
 
-    /// Polls a claimed client demand behind the scheduler's panic boundary,
-    /// as [`ClaimedTask::poll`] does for task work.
+    /// Polls a claimed client demand under a driver's `mutator`, behind the
+    /// scheduler's panic boundary, as [`ClaimedTask::poll_under`] does for
+    /// task work, and crosses its quantum boundary with the mutator
+    /// suspended.
     pub(super) fn poll_claimed_client_demand(
         self: &Arc<Self>,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
         mut claimed: coordinator::ClaimedClientDemand,
     ) {
         if let Some(report) = claimed.prior_dependency_panic() {
-            self.release_client_demand(claimed, coordinator::ClientDemandPoll::Panicked(report));
+            mutator.suspend(|| {
+                self.release_client_demand(
+                    claimed,
+                    coordinator::ClientDemandPoll::Panicked(report),
+                );
+            });
             return;
         }
         let demand = claimed.demand.demand();
         let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
         let polled = catch_unwind(AssertUnwindSafe(|| {
-            EvaluationPollContext::quantum(demand, |context| claimed.poll(context, &mut budget))
+            EvaluationPollContext::quantum_under(mutator, demand, |context| {
+                claimed.poll(context, &mut budget)
+            })
         }));
+        mutator.readmit();
+        mutator.suspend(|| self.release_polled_client_demand(claimed, polled));
+    }
+
+    /// The quantum boundary of a client demand poll: its deferred work, under
+    /// the poll's panic boundary, then collection pressure and the release.
+    fn release_polled_client_demand(
+        self: &Arc<Self>,
+        claimed: coordinator::ClaimedClientDemand,
+        polled: std::thread::Result<(coordinator::ClientDemandPoll, DeferredWork)>,
+    ) {
+        let polled = polled.and_then(|(poll, deferred)| {
+            catch_unwind(AssertUnwindSafe(|| run_deferred(deferred))).map(|()| poll)
+        });
         let poll = match polled {
             Ok(coordinator::ClientDemandPoll::Blocked(dependency)) => {
                 match dependency.panic_report() {
@@ -1120,7 +1230,13 @@ impl EvaluationWorkCoordinator {
         self.release_client_demand(claimed, poll);
     }
 
-    pub(super) fn poll_claimed_spark(self: &Arc<Self>, claimed: coordinator::ClaimedSparkWork) {
+    /// Polls claimed spark work under a driver's `mutator`, crossing its
+    /// quantum boundary with the mutator suspended.
+    pub(super) fn poll_claimed_spark(
+        self: &Arc<Self>,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
+        claimed: coordinator::ClaimedSparkWork,
+    ) {
         let mut claimed = claimed;
         claimed.assert_runtime(self.runtime_id());
         let demand = claimed.demand().demand();
@@ -1130,17 +1246,36 @@ impl EvaluationWorkCoordinator {
         // blocks on panicked work, it simply retires: the value's real demand
         // reports any panic to its own waiters.
         if claimed.prior_dependency_panicked() {
-            drop(context);
-            self.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
+            mutator.suspend(|| {
+                drop(context);
+                self.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
+            });
             return;
         }
         let result = catch_unwind(AssertUnwindSafe(|| {
-            EvaluationPollContext::quantum(demand, |poll_context| {
+            EvaluationPollContext::quantum_under(mutator, demand, |poll_context| {
                 poll_context.evaluate(&context, |evaluator| {
                     claimed.poll(poll_context, evaluator, &context, &mut budget)
                 })
             })
         }));
+        mutator.readmit();
+        mutator.suspend(|| {
+            let result = result.and_then(|(poll, deferred)| {
+                catch_unwind(AssertUnwindSafe(|| run_deferred(deferred))).map(|()| poll)
+            });
+            self.release_polled_spark(claimed, context, result);
+        });
+    }
+
+    /// The quantum boundary of a spark poll: collection pressure and the
+    /// release, after its evaluator context is gone.
+    fn release_polled_spark(
+        self: &Arc<Self>,
+        claimed: coordinator::ClaimedSparkWork,
+        context: EvalContext,
+        result: std::thread::Result<crate::eval::strategy_machine::StrategyDemandPoll>,
+    ) {
         let poll = match result {
             Ok(
                 crate::eval::strategy_machine::StrategyDemandPoll::Ready
@@ -1162,6 +1297,49 @@ impl EvaluationWorkCoordinator {
         // The quantum boundary, while the spark is still claimed.
         self.service_collection_pressure();
         self.release_spark(claimed, poll);
+    }
+}
+
+#[cfg(test)]
+impl EvaluationWorkCoordinator {
+    /// Runs `operation` as a driver would, under a mutator of its own.
+    fn with_driver_mutator_for_test<R>(
+        &self,
+        operation: impl FnOnce(&mut RuntimeValueMutator<'_, '_>) -> R,
+    ) -> R {
+        self.value_observer()
+            .upgrade()
+            .expect("test work must retain its value domain")
+            .with_recursive_runtime_value_mutator(|mut mutator| operation(&mut mutator))
+    }
+
+    pub(super) fn poll_runtime_work_bounded_for_test(
+        self: &Arc<Self>,
+        step_budget: usize,
+    ) -> Option<usize> {
+        self.with_driver_mutator_for_test(|mutator| {
+            self.poll_runtime_work_bounded(mutator, step_budget)
+        })
+    }
+
+    pub(super) fn poll_claimed_task_for_test(self: &Arc<Self>, work: ClaimedTaskWork) -> bool {
+        self.with_driver_mutator_for_test(|mutator| self.poll_claimed_task(mutator, work))
+    }
+
+    pub(super) fn poll_claimed_client_demand_for_test(
+        self: &Arc<Self>,
+        claimed: coordinator::ClaimedClientDemand,
+    ) {
+        self.with_driver_mutator_for_test(|mutator| {
+            self.poll_claimed_client_demand(mutator, claimed);
+        });
+    }
+
+    pub(super) fn poll_claimed_spark_for_test(
+        self: &Arc<Self>,
+        claimed: coordinator::ClaimedSparkWork,
+    ) {
+        self.with_driver_mutator_for_test(|mutator| self.poll_claimed_spark(mutator, claimed));
     }
 }
 

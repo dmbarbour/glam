@@ -321,7 +321,10 @@ and every unsafe function, implementation, and block are checked into
   (E0502, latched by a compile-fail example). After a suspension that did not
   re-admit, the mutator holds no entry and its dereference panics in every
   build, so a caller that catches the unwind cannot reach the heap through
-  it.
+  it until `Mutator::readmit`, which refuses while the thread unwinds, takes
+  a fresh outer entry (it may wait for or elect a collection) and rebuilds
+  the access from it. No view survives: views borrow the mutator, which
+  `readmit` takes mutably.
 - `GcRef<'m, T>` is a one-pointer view that borrows `&'m MutatorAccess`.
   It is `Copy`, registers no root, and is neither `Send` nor `Sync`. The
   borrow is its liveness proof: no mark or sweep runs while the mutator is
@@ -533,7 +536,8 @@ the separate liveness and exactly-once obligations at each call site.
   is an ordinary outer admission: it may wait for or elect a collection,
   then the outer entry's epoch check clears cursors that a collection made
   stale. If the closure or re-admission unwinds, the suspension is
-  withdrawn from the record and the mutator keeps no entry. Re-admission
+  withdrawn from the record and the mutator keeps no entry until a caller
+  that caught the unwind calls `Mutator::readmit`. Re-admission
   may wait, so a suspension belongs where the thread holds no lock a
   finalizer might need.
 - A held region (`Heap::with_held_region`) is an outer entry without a

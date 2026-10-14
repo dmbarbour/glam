@@ -4017,7 +4017,7 @@ fn running_deferred_machine_does_not_serialize_same_session_client_admission() {
         .claim_client_demand(client.work())
         .expect("independent same-session client work should be claimable concurrently");
     assert_eq!(client_claim.id, client.work());
-    coordinator.poll_claimed_client_demand(client_claim);
+    coordinator.poll_claimed_client_demand_for_test(client_claim);
     let Some(ClientDemandResult::Complete(value)) = client.poll() else {
         panic!("the independent client demand should complete")
     };
@@ -4091,7 +4091,7 @@ fn retired_deferred_machine_does_not_delay_same_session_client_admission() {
         .claim_client_demand(client.work())
         .expect("retired work must not delay client admission");
     assert_eq!(claimed.id, client.work());
-    coordinator.poll_claimed_client_demand(claimed);
+    coordinator.poll_claimed_client_demand_for_test(claimed);
     let Some(ClientDemandResult::Complete(value)) = client.poll() else {
         panic!("the admitted client demand should complete")
     };
@@ -4131,7 +4131,7 @@ fn worker_and_runtime_pump_selectors_reject_foreground_client_demand() {
     let claimed = coordinator
         .claim_client_demand(client.work())
         .expect("the exact foreground driver must retain claim authority");
-    coordinator.poll_claimed_client_demand(claimed);
+    coordinator.poll_claimed_client_demand_for_test(claimed);
     let Some(ClientDemandResult::Complete(value)) = client.poll() else {
         panic!("the foreground client demand should complete")
     };

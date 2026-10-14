@@ -115,6 +115,33 @@ impl<'mu> Mutator<'mu> {
     }
 }
 
+impl Mutator<'_> {
+    /// Re-admits this mutator after a suspension whose `operation` unwound,
+    /// once the caller has caught the unwind. A driver that lends its
+    /// mutator to work behind a panic boundary keeps driving this way. Does
+    /// nothing while the mutator holds its admission.
+    ///
+    /// # Panics
+    ///
+    /// Panics while the thread is unwinding, since re-admission may wait for
+    /// a collection; if the thread has another entry for any heap; or if the
+    /// heap is permanently poisoned, leaving the mutator without access.
+    pub fn readmit(&mut self) {
+        if self.entry.is_some() {
+            return;
+        }
+        assert!(
+            !std::thread::panicking(),
+            "a mutator re-admits only once its unwind is caught"
+        );
+        debug_assert!(!self.recursive, "a recursive mutator never suspends");
+        let heap = self.access.heap();
+        let entry = heap.admit_owned_entry();
+        self.access = MutatorAccess::new(heap, entry.cache());
+        self.entry = Some(entry);
+    }
+}
+
 impl<'mu> Deref for Mutator<'mu> {
     type Target = MutatorAccess<'mu>;
 

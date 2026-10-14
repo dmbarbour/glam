@@ -2078,10 +2078,14 @@ maps the short names used here to file names.
 - **Consequences:** a collection still waits for at most one quantum, and
   memory is unchanged. Drivers, the pump entry points and the coordinator's
   claimed polls take the mutator as a parameter. Quanta may grow later; 64
-  steps is fine-grained, small only while steps are costly.
-- **Rule lives in:** the explicit heap holds plan until drivers convert,
-  then `docs/architecture/evaluation.md` and `agent_context/evaluation.md`
-  "Values and Forcing".
+  steps is fine-grained, small only while steps are costly. Release between
+  quanta runs client code and, for failed statuses, nested drivers, so each
+  quantum boundary is one suspension until `gc-hold-suspension-review`. A
+  driver that catches a poll's panic re-admits its mutator
+  (`Mutator::readmit`), since the panic may have unwound out of one of the
+  poll's suspensions.
+- **Rule lives in:** `docs/architecture/evaluation.md`;
+  `agent_context/evaluation.md` "Values and Forcing".
 - **Recorded in:** explicit heap holds plan, `gc-hold-boundaries`.
 
 ### Root slots are reclaimed apart from heap collections

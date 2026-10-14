@@ -244,19 +244,24 @@ still match its exact subscription epoch and dependency key, so completing the
 claimed tip can expose only its immediate parent. Causal `.task.new`
 descendants are a separate helping route and never become zipper frames.
 
-Each poll quantum (a deferred, lazy-route or reflection task poll, a client
-demand, or a spark) holds the thread's mutator
-(`EvaluationPollContext::quantum`), which its poll context lends: the many
-short value accesses inside it borrow the mutator rather than enter the heap.
-The mutator ends before the quantum boundary services collection pressure.
-Work that waits on another thread or calls out to a host either suspends it
+A driver (a worker's busy run, a client demand, a session drain, the
+runtime's background pump, a pump, or a direct effect run) holds the
+thread's mutator, and each poll quantum it runs (a deferred, lazy-route or
+reflection task poll, a client demand, or a spark) borrows it
+(`EvaluationPollContext::quantum_under`). The poll context lends it in turn:
+the many short value accesses inside a quantum borrow the mutator rather than
+enter the heap. Each quantum boundary suspends the driver's mutator once, for
+the poll's deferred work, its release (settlement, client callbacks, any
+nested driver evaluating a diagnostic) and collection pressure; waits
+suspend it too (`driver-mutator`). Within a quantum, work that waits on
+another thread or calls out to a host either suspends the mutator
 (`suspend`: host calls, whose result the same quantum then consumes,
-reflection host callbacks, specialization requests, and releasing pumped
-work) or runs after it (`after_admission`: reflection launches and the net
-contention wait, after which the quantum ends). Pumped work shares the
-pumping quantum's mutator. A suspension costs about two heap entries, so
-adjacent operations share one; the evaluation budget alone bounds how long a
-quantum holds its mutator.
+reflection host callbacks, and specialization requests) or runs at the
+boundary (`after_admission`: reflection launches and the net contention
+wait, after which the quantum ends). Pumped work borrows the pumping
+quantum's mutator, and its boundary suspends it. A suspension costs about
+two heap entries, so adjacent operations share one; the evaluation budget
+bounds how long a quantum runs between boundaries.
 
 Ordinary worker quantums preserve their thread's inactive per-heap allocation
 cursors for reuse. Worker-thread termination is the stronger collector

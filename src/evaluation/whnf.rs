@@ -60,6 +60,7 @@ pub(crate) enum LazyCheckpointPoll {
 /// completed checkpoint's value is cached in the same region. A lazy boundary
 /// is returned to the route, which decides between forcing it inline and
 /// admitting its route.
+#[inline]
 pub(crate) fn poll_lazy_checkpoint(
     lazy: &ManagedLazyRoot,
     poll_context: &EvaluationPollContext,

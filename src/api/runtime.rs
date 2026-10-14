@@ -1158,16 +1158,30 @@ impl EvaluationRuntime {
     /// already entered by a machine is one indivisible transition and cannot
     /// be preempted at the budget boundary.
     pub fn pump_background(&self, step_budget: usize) -> BackgroundPumpReport {
-        let mut spent_steps = 0;
-        while spent_steps < step_budget {
-            let remaining = step_budget - spent_steps;
-            let Some(spent) = self.state.work.poll_runtime_work_bounded(remaining) else {
-                break;
-            };
-            debug_assert_ne!(spent, 0);
-            debug_assert!(spent <= remaining);
-            spent_steps += spent;
-        }
+        // The pump holds the thread's mutator across its polls, suspending
+        // it at each quantum boundary (`driver-mutator`).
+        let spent_steps = self
+            .state
+            .shared_resources
+            .values
+            .core()
+            .with_recursive_runtime_value_mutator(|mut mutator| {
+                let mut spent_steps = 0;
+                while spent_steps < step_budget {
+                    let remaining = step_budget - spent_steps;
+                    let Some(spent) = self
+                        .state
+                        .work
+                        .poll_runtime_work_bounded(&mut mutator, remaining)
+                    else {
+                        break;
+                    };
+                    debug_assert_ne!(spent, 0);
+                    debug_assert!(spent <= remaining);
+                    spent_steps += spent;
+                }
+                spent_steps
+            });
         let snapshot = self.state.work.runtime_pump_snapshot();
         let state = if snapshot.background_ready {
             BackgroundPumpState::Runnable

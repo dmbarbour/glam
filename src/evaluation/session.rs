@@ -12,7 +12,7 @@ use std::sync::{Arc, OnceLock, PoisonError};
 
 use crate::core::{
     Builtin, CoreValueFactory, EvaluationFailure, ManagedLazyRoot, ManagedPromiseRoot,
-    RuntimeValueAccess, Value,
+    RuntimeValueAccess, RuntimeValueMutator, Value,
 };
 #[cfg(test)]
 use crate::core::{LazyValue, PromisedValue};
@@ -859,10 +859,10 @@ impl EvalContext {
     pub(crate) fn poll_one_runtime_work_for_test(&self) -> bool {
         self.coordinator().is_some_and(|coordinator| {
             if let Some(claimed) = coordinator.claim_ready_client_demand_for_test() {
-                coordinator.poll_claimed_client_demand(claimed);
+                coordinator.poll_claimed_client_demand_for_test(claimed);
                 true
             } else if let Some(claimed) = coordinator.claim_ready_task_for_test() {
-                coordinator.poll_claimed_task(claimed);
+                coordinator.poll_claimed_task_for_test(claimed);
                 true
             } else {
                 coordinator.poll_runtime_work()
@@ -875,11 +875,11 @@ impl EvalContext {
         self.coordinator()
             .is_some_and(|coordinator| match coordinator.select_worker() {
                 super::coordinator::CoordinatorSelection::Task(work) => {
-                    coordinator.poll_claimed_task(work);
+                    coordinator.poll_claimed_task_for_test(work);
                     true
                 }
                 super::coordinator::CoordinatorSelection::Spark(work) => {
-                    coordinator.poll_claimed_spark(work);
+                    coordinator.poll_claimed_spark_for_test(work);
                     true
                 }
                 super::coordinator::CoordinatorSelection::None => false,
@@ -1032,84 +1032,118 @@ impl EvalContext {
         &self,
         mut handle: ClientDemandHandle,
     ) -> Result<ClientDemandResult, crate::core::EvaluationHalt> {
-        // A synchronous driver nested in a poll waits and collects like any
-        // other, so it gives up the poll's held region; its own polls hold
-        // their own.
-        crate::core::release_held_region();
         let coordinator = self
             .coordinator_for_admission()
             .map_err(|error| crate::core::EvaluationHalt::new(error.as_ref()))?;
         let mut exact_demand_route = ExactDemandRoute::default();
 
-        loop {
-            if let Some(result) = handle.poll() {
-                return terminal_client_demand_result(result);
-            }
-            if let Some(claimed) = coordinator.claim_client_demand(handle.work) {
-                coordinator.poll_claimed_client_demand(claimed);
-                continue;
-            }
-
-            let generation = coordinator.work_generation();
-            let Some(snapshot) = coordinator.client_demand_snapshot(handle.work) else {
-                // Retirement removes the coordinator record before publishing
-                // its sink. Waiting on the cell closes that intentionally
-                // tiny handoff without racing a completion notification.
-                return terminal_client_demand_result(handle.wait());
-            };
-            match snapshot {
-                ClientDemandSnapshot::Queued => continue,
-                ClientDemandSnapshot::Running => {
-                    self.wait_for_client_progress(&coordinator, &handle, generation);
-                }
-                ClientDemandSnapshot::Blocked {
-                    dependency,
-                    subscription_epoch,
-                } => {
-                    let producer_wait = dependency.producer_wait();
-                    if let Some(wait) = producer_wait.as_ref() {
-                        match self.pump_wait_on_route(wait, 4_096, &mut exact_demand_route) {
-                            EvaluationPumpOutcome::TargetReady
-                            | EvaluationPumpOutcome::BudgetExhausted => {
-                                continue;
-                            }
-                            EvaluationPumpOutcome::Busy => {
-                                self.wait_for_claimed_task_on_route(wait, &mut exact_demand_route);
-                                continue;
-                            }
-                            EvaluationPumpOutcome::NoProgress
-                                if self.retry_observed_client_no_progress
-                                    && self.retry_after_no_progress_on_route(
-                                        wait,
-                                        &mut exact_demand_route,
-                                    ) =>
-                            {
-                                continue;
-                            }
-                            EvaluationPumpOutcome::NoProgress => {}
-                        }
-                    } else {
-                        match coordinator.claim_causal_child_work(None, self.causal_task_ids()) {
-                            CausalChildSelection::Claimed(work) => {
-                                coordinator.poll_claimed_task(work);
-                                continue;
-                            }
-                            CausalChildSelection::Busy => {
-                                self.wait_for_client_progress(&coordinator, &handle, generation);
-                                continue;
-                            }
-                            CausalChildSelection::None => {}
-                        }
+        // The driver holds the thread's mutator: its polls and pumps borrow
+        // it, and its waits and quantum boundaries suspend it
+        // (`driver-mutator`).
+        let driven = self
+            .values()
+            .with_recursive_runtime_value_mutator(|mut mutator| {
+                loop {
+                    if let Some(result) = handle.poll() {
+                        return Ok(result);
+                    }
+                    if let Some(claimed) = coordinator.claim_client_demand(handle.work) {
+                        coordinator.poll_claimed_client_demand(&mut mutator, claimed);
+                        continue;
                     }
 
-                    let Some(dependency) = handle
-                        .abandon_if_stably_blocked(subscription_epoch, self.causal_task_ids())
-                    else {
-                        continue;
+                    let generation = coordinator.work_generation();
+                    let Some(snapshot) = coordinator.client_demand_snapshot(handle.work) else {
+                        // Retirement removes the coordinator record before
+                        // publishing its sink. Waiting on the cell closes that
+                        // intentionally tiny handoff without racing a completion
+                        // notification.
+                        return Ok(mutator.suspend(|| handle.wait()));
                     };
-                    return Err(client_demand_halt(dependency));
+                    match snapshot {
+                        ClientDemandSnapshot::Queued => continue,
+                        ClientDemandSnapshot::Running => {
+                            mutator.suspend(|| {
+                                self.wait_for_client_progress(&coordinator, &handle, generation);
+                            });
+                        }
+                        ClientDemandSnapshot::Blocked {
+                            dependency,
+                            subscription_epoch,
+                        } => {
+                            let producer_wait = dependency.producer_wait();
+                            if let Some(wait) = producer_wait.as_ref() {
+                                match self.pump_wait_on_route_under(
+                                    &mut mutator,
+                                    wait,
+                                    4_096,
+                                    &mut exact_demand_route,
+                                ) {
+                                    EvaluationPumpOutcome::TargetReady
+                                    | EvaluationPumpOutcome::BudgetExhausted => {
+                                        continue;
+                                    }
+                                    EvaluationPumpOutcome::Busy => {
+                                        mutator.suspend(|| {
+                                            self.wait_for_claimed_task_on_route(
+                                                wait,
+                                                &mut exact_demand_route,
+                                            );
+                                        });
+                                        continue;
+                                    }
+                                    EvaluationPumpOutcome::NoProgress
+                                        if self.retry_observed_client_no_progress
+                                            && mutator.suspend(|| {
+                                                self.retry_after_no_progress_on_route(
+                                                    wait,
+                                                    &mut exact_demand_route,
+                                                )
+                                            }) =>
+                                    {
+                                        continue;
+                                    }
+                                    EvaluationPumpOutcome::NoProgress => {}
+                                }
+                            } else {
+                                match coordinator
+                                    .claim_causal_child_work(None, self.causal_task_ids())
+                                {
+                                    CausalChildSelection::Claimed(work) => {
+                                        coordinator.poll_claimed_task(&mut mutator, work);
+                                        continue;
+                                    }
+                                    CausalChildSelection::Busy => {
+                                        mutator.suspend(|| {
+                                            self.wait_for_client_progress(
+                                                &coordinator,
+                                                &handle,
+                                                generation,
+                                            );
+                                        });
+                                        continue;
+                                    }
+                                    CausalChildSelection::None => {}
+                                }
+                            }
+
+                            // Abandoning settles the demand, so it runs suspended.
+                            let abandoned = mutator.suspend(|| {
+                                handle.abandon_if_stably_blocked(
+                                    subscription_epoch,
+                                    self.causal_task_ids(),
+                                )
+                            });
+                            if let Some(dependency) = abandoned {
+                                return Err(dependency);
+                            }
+                        }
+                    }
                 }
-            }
+            });
+        match driven {
+            Ok(result) => terminal_client_demand_result(result),
+            Err(dependency) => Err(client_demand_halt(dependency)),
         }
     }
 
@@ -1167,38 +1201,47 @@ impl EvalContext {
             .map_err(|error| crate::core::EvaluationHalt::new(error.as_ref()))?;
         let mut exact_demand_route = ExactDemandRoute::default();
 
-        loop {
-            if let Some(result) = handle.poll() {
-                return terminal_client_demand_result(result).map(Some);
-            }
-            if let Some(claimed) = coordinator.claim_client_demand(handle.work) {
-                coordinator.poll_claimed_client_demand(claimed);
-                continue;
-            }
+        self.values()
+            .with_recursive_runtime_value_mutator(|mut mutator| {
+                loop {
+                    if let Some(result) = handle.poll() {
+                        return terminal_client_demand_result(result).map(Some);
+                    }
+                    if let Some(claimed) = coordinator.claim_client_demand(handle.work) {
+                        coordinator.poll_claimed_client_demand(&mut mutator, claimed);
+                        continue;
+                    }
 
-            let Some(snapshot) = coordinator.client_demand_snapshot(handle.work) else {
-                return terminal_client_demand_result(handle.wait()).map(Some);
-            };
-            let dependency = match snapshot {
-                ClientDemandSnapshot::Queued => continue,
-                ClientDemandSnapshot::Running => return Ok(None),
-                ClientDemandSnapshot::Blocked { dependency, .. } => dependency,
-            };
-            if let Some(wait) = dependency.producer_wait() {
-                if matches!(
-                    self.pump_wait_on_route(&wait, 4_096, &mut exact_demand_route),
-                    EvaluationPumpOutcome::TargetReady
-                ) {
-                    continue;
+                    let Some(snapshot) = coordinator.client_demand_snapshot(handle.work) else {
+                        return terminal_client_demand_result(mutator.suspend(|| handle.wait()))
+                            .map(Some);
+                    };
+                    let dependency = match snapshot {
+                        ClientDemandSnapshot::Queued => continue,
+                        ClientDemandSnapshot::Running => return Ok(None),
+                        ClientDemandSnapshot::Blocked { dependency, .. } => dependency,
+                    };
+                    if let Some(wait) = dependency.producer_wait() {
+                        if matches!(
+                            self.pump_wait_on_route_under(
+                                &mut mutator,
+                                &wait,
+                                4_096,
+                                &mut exact_demand_route
+                            ),
+                            EvaluationPumpOutcome::TargetReady
+                        ) {
+                            continue;
+                        }
+                    } else if let CausalChildSelection::Claimed(work) =
+                        coordinator.claim_causal_child_work(None, self.causal_task_ids())
+                    {
+                        coordinator.poll_claimed_task(&mut mutator, work);
+                        continue;
+                    }
+                    return Err(client_demand_halt(dependency));
                 }
-            } else if let CausalChildSelection::Claimed(work) =
-                coordinator.claim_causal_child_work(None, self.causal_task_ids())
-            {
-                coordinator.poll_claimed_task(work);
-                continue;
-            }
-            return Err(client_demand_halt(dependency));
-        }
+            })
     }
 
     #[cfg(test)]
@@ -2145,9 +2188,21 @@ impl EvalContext {
         reservation_allowance: usize,
         route: &mut ExactDemandRoute,
     ) -> EvaluationPumpOutcome {
-        // Pumped work takes its own mutator and may wait, so a pump runs
-        // outside any: under an owned mutator this release point panics.
-        crate::core::release_held_region();
+        self.values()
+            .with_recursive_runtime_value_mutator(|mut mutator| {
+                self.pump_wait_on_route_under(&mut mutator, wait, reservation_allowance, route)
+            })
+    }
+
+    /// Pumps as [`Self::pump_wait_on_route`] does, under a driver's mutator,
+    /// which the pumped polls borrow and each quantum boundary suspends.
+    pub(crate) fn pump_wait_on_route_under(
+        &self,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
+        wait: &EvaluationWaitToken,
+        reservation_allowance: usize,
+        route: &mut ExactDemandRoute,
+    ) -> EvaluationPumpOutcome {
         let Some(coordinator) = self.coordinator() else {
             return if wait.terminal_poll().is_some() {
                 EvaluationPumpOutcome::TargetReady
@@ -2157,18 +2212,19 @@ impl EvalContext {
         };
         let mut reservation_allowance = reservation_allowance;
         pump_demand_on_route(
+            mutator,
             &coordinator,
             self,
             wait,
             &mut reservation_allowance,
             route,
-            None,
         )
     }
 
     /// Pumps toward `wait` within `budget`, charging it for every poll
-    /// quantum the pump reserves. The pumped polls share `quantum`'s mutator
-    /// (`EvaluationPollContext::nested_quantum`); the pump itself never
+    /// quantum the pump reserves. The pumped polls borrow `quantum`'s
+    /// mutator, and their boundaries suspend it; for another runtime, the
+    /// pump runs suspended under a mutator of its own. The pump itself never
     /// waits.
     pub(crate) fn pump_wait_on_route_within(
         &self,
@@ -2186,14 +2242,16 @@ impl EvalContext {
         };
         let granted = budget.remaining();
         let mut allowance = granted;
-        let outcome = pump_demand_on_route(
-            &coordinator,
-            self,
-            wait,
-            &mut allowance,
-            route,
-            Some(quantum),
-        );
+        let mut pump = |mutator: &mut RuntimeValueMutator<'_, '_>| {
+            pump_demand_on_route(mutator, &coordinator, self, wait, &mut allowance, route)
+        };
+        let outcome = match quantum.mutator_for(self.values().runtime_id()) {
+            Some(mutator) => pump(mutator),
+            None => quantum.suspend(|| {
+                self.values()
+                    .with_recursive_runtime_value_mutator(|mut mutator| pump(&mut mutator))
+            }),
+        };
         budget.consume(granted - allowance);
         outcome
     }

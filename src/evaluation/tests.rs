@@ -247,16 +247,16 @@ impl SameRuntimeFixture {
 
 fn poll_one_runtime_work(coordinator: &Arc<EvaluationWorkCoordinator>) -> bool {
     if let Some(claimed) = coordinator.claim_ready_client_demand_for_test() {
-        coordinator.poll_claimed_client_demand(claimed);
+        coordinator.poll_claimed_client_demand_for_test(claimed);
         return true;
     }
     if let Some(claimed) = coordinator.claim_ready_task_for_test() {
-        coordinator.poll_claimed_task(claimed);
+        coordinator.poll_claimed_task_for_test(claimed);
         return true;
     }
     match coordinator.select_worker() {
         coordinator::CoordinatorSelection::Task(work) => {
-            coordinator.poll_claimed_task(work);
+            coordinator.poll_claimed_task_for_test(work);
             true
         }
         coordinator::CoordinatorSelection::Spark(_) => {
@@ -616,7 +616,7 @@ fn lazy_producer_completion_before_client_subscription_requeues_exactly_once() {
         let claimed = coordinator
             .claim_work(work)
             .expect("the foreground owner may claim its exact producer");
-        coordinator.poll_claimed_task(claimed);
+        coordinator.poll_claimed_task_for_test(claimed);
     }
     assert!(matches!(
         context.poll_wait(&wait),
@@ -677,7 +677,7 @@ fn client_subscription_before_lazy_producer_receives_one_exact_wake() {
         let claimed = coordinator
             .claim_work(work)
             .expect("the foreground owner may claim its exact producer");
-        coordinator.poll_claimed_task(claimed);
+        coordinator.poll_claimed_task_for_test(claimed);
     }
     assert_eq!(evaluations.load(std::sync::atomic::Ordering::Relaxed), 1);
     assert_eq!(wait.exact_subscription_count(), 0);
@@ -744,7 +744,7 @@ fn blocked_client_cannot_abandon_after_its_producer_is_claimed() {
         "rejected abandonment must preserve the exact subscription"
     );
 
-    coordinator.poll_claimed_task(work);
+    coordinator.poll_claimed_task_for_test(work);
     assert_eq!(evaluations.load(std::sync::atomic::Ordering::Relaxed), 1);
     assert!(poll_one_runtime_work(&coordinator));
     let Some(ClientDemandResult::Complete(value)) = handle.poll() else {
@@ -799,7 +799,7 @@ fn blocked_client_cannot_abandon_a_dormant_causal_tail() {
     let work = coordinator
         .claim_work(producer)
         .expect("the dormant exact producer should remain locally claimable");
-    coordinator.poll_claimed_task(work);
+    coordinator.poll_claimed_task_for_test(work);
     assert_eq!(evaluations.load(std::sync::atomic::Ordering::Relaxed), 1);
     assert!(poll_one_runtime_work(&coordinator));
     let Some(ClientDemandResult::Complete(value)) = handle.poll() else {
@@ -847,7 +847,7 @@ fn blocked_client_follows_a_blocked_chain_to_dormant_causal_progress() {
     let head_work = coordinator
         .claim_task(head_task)
         .expect("head producer should be claimable");
-    coordinator.poll_claimed_task(head_work);
+    coordinator.poll_claimed_task_for_test(head_work);
     assert!(
         coordinator.park_deferred_wait_for_test(&tail_wait),
         "the forced ordering must park the dependency-chain tail"
@@ -1452,7 +1452,7 @@ fn synchronous_client_demand_waits_for_claimed_exact_lazy_producer() {
         let claim = coordinator
             .claim_client_demand(handle.work())
             .expect("unblocked foreground demand must remain claimable");
-        coordinator.poll_claimed_client_demand(claim);
+        coordinator.poll_claimed_client_demand_for_test(claim);
     }
     let (dependency, subscription_epoch) = blocked.expect("client must publish its exact wait");
     let producer = coordinator
@@ -1481,7 +1481,7 @@ fn synchronous_client_demand_waits_for_claimed_exact_lazy_producer() {
         .recv_timeout(Duration::from_secs(2))
         .expect("the foreground must lock and enter its claimed-producer wait");
     assert!(result_receiver.try_recv().is_err());
-    coordinator.poll_claimed_task(claimed);
+    coordinator.poll_claimed_task_for_test(claimed);
     let result = result_receiver
         .recv_timeout(Duration::from_secs(2))
         .expect("exact producer completion must wake the foreground")
@@ -3795,7 +3795,7 @@ fn claimed_cross_session_child_keeps_parent_wait_busy_until_release() {
         .recv_timeout(Duration::from_secs(2))
         .expect("causal busy wait must register before child release");
     assert!(resumed_receiver.try_recv().is_err());
-    coordinator.poll_claimed_task(claimed);
+    coordinator.poll_claimed_task_for_test(claimed);
     child_observer
         .recv_timeout(Duration::from_secs(2))
         .expect("the claimed child must run exactly once");
@@ -4567,7 +4567,7 @@ fn patient_claimed_task_wait_releases_mutator() {
         let claim = coordinator
             .claim_client_demand(handle.work())
             .expect("unblocked patient demand must remain claimable");
-        coordinator.poll_claimed_client_demand(claim);
+        coordinator.poll_claimed_client_demand_for_test(claim);
     }
     let (dependency, subscription_epoch) =
         blocked.expect("patient demand must publish its exact lazy wait");
@@ -4585,7 +4585,8 @@ fn patient_claimed_task_wait_releases_mutator() {
     );
 
     let producer_coordinator = Arc::clone(&coordinator);
-    let producer = std::thread::spawn(move || producer_coordinator.poll_claimed_task(claimed));
+    let producer =
+        std::thread::spawn(move || producer_coordinator.poll_claimed_task_for_test(claimed));
     started_receiver
         .recv_timeout(Duration::from_secs(2))
         .expect("producer thread should enter the host callback");
@@ -5341,7 +5342,7 @@ fn claimed_lazy_route_survives_last_demand_and_accepts_new_subscriber() {
     let second = crate::eval::lazy_root_wait(&context, &root)
         .expect("new subscriber should attach to the claimed route");
     assert_eq!(coordinator.work_for_wait(&second), Some(work_id));
-    coordinator.poll_claimed_task(claim);
+    coordinator.poll_claimed_task_for_test(claim);
     assert!(matches!(
         context.poll_wait(&second),
         EvaluationWaitPoll::Complete(_)
@@ -5402,7 +5403,7 @@ fn client_and_spark_share_a_lazy_checkpoint_after_client_route_loss() {
 
     context.spark_root(value);
     let claimed = claim_next_spark(&coordinator);
-    coordinator.poll_claimed_spark(claimed);
+    coordinator.poll_claimed_spark_for_test(claimed);
     assert_eq!(coordinator.spark_work_counts(), (0, 0, 1));
     assert_eq!(source_polls.load(Ordering::Acquire), 1);
 
@@ -5453,7 +5454,7 @@ fn client_and_background_reflection_share_lazy_progress_after_first_session_clos
     let claimed = coordinator
         .claim_ready_client_demand_for_test()
         .expect("the client should be claimable before its background observer");
-    coordinator.poll_claimed_client_demand(claimed);
+    coordinator.poll_claimed_client_demand_for_test(claimed);
     assert!(client.poll().is_none());
 
     let route = crate::eval::lazy_root_wait(&background, &root)
@@ -9428,7 +9429,7 @@ fn bounded_background_pump_reports_contested_causal_work_without_waiting() {
         EvaluationWaitPoll::Pending(_)
     ));
 
-    coordinator.poll_claimed_task(claimed);
+    coordinator.poll_claimed_task_for_test(claimed);
     assert_eq!(
         fixture.runtime.pump_background(8).state,
         crate::api::BackgroundPumpState::Stable
@@ -9456,7 +9457,7 @@ fn bounded_background_pump_excludes_foreground_clients_and_sparks() {
     let claimed = coordinator
         .claim_client_demand(client.work())
         .expect("foreground owner should retain its exact claim");
-    coordinator.poll_claimed_client_demand(claimed);
+    coordinator.poll_claimed_client_demand_for_test(claimed);
     assert!(matches!(
         client.poll(),
         Some(ClientDemandResult::Complete(_))
@@ -9491,7 +9492,7 @@ fn queued_foreground_lazy_route_is_not_background_pump_work() {
     let claimed = coordinator
         .claim_work(work)
         .expect("the foreground owner may claim its exact producer");
-    coordinator.poll_claimed_task(claimed);
+    coordinator.poll_claimed_task_for_test(claimed);
     assert!(matches!(
         context.poll_wait(&wait),
         EvaluationWaitPoll::Complete(_)
@@ -9994,7 +9995,7 @@ fn all_poll_routes_use_scheduler_context() {
     let coordinator::CoordinatorSelection::Spark(claimed) = coordinator.select_worker() else {
         panic!("assigned promise spark should be ready")
     };
-    coordinator.poll_claimed_spark(claimed);
+    coordinator.poll_claimed_spark_for_test(claimed);
     assert!(context.poll_context_count() > spark_before);
     coordinator.executor_stopped();
 }
