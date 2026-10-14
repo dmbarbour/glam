@@ -345,11 +345,15 @@ impl Values {
         &self.core
     }
 
+    /// Runs one public value operation under a mutator of its own, the
+    /// operation's boundary (`driver-mutator`); inside another entry for the
+    /// runtime it nests. Callers collect any client iterator first, so no
+    /// client code runs under the mutator.
     pub(crate) fn with_access<R>(
         &self,
         operation: impl for<'scope> FnOnce(ScopedValues<'scope>) -> R,
     ) -> R {
-        self.core.with_runtime_value_access(|access| {
+        self.core.with_boundary_access(|access| {
             debug_assert!(access.belongs_to(&self.core));
             operation(ScopedValues {
                 owner: self,
@@ -452,6 +456,7 @@ impl Values {
     }
 
     pub fn list(&self, values: impl IntoIterator<Item = Value>) -> Result<Value, Error> {
+        let values = values.into_iter().collect::<Vec<_>>();
         self.with_access(|access| {
             let values = values
                 .into_iter()
@@ -466,6 +471,7 @@ impl Values {
         I: IntoIterator<Item = (S, Value)>,
         S: AsRef<str>,
     {
+        let entries = entries.into_iter().collect::<Vec<_>>();
         self.with_access(|values| {
             let mut dict = Dict::new_sync();
             for (name, value) in entries {
@@ -479,6 +485,7 @@ impl Values {
         &self,
         entries: impl IntoIterator<Item = (Value, Value)>,
     ) -> Result<Value, Error> {
+        let entries = entries.into_iter().collect::<Vec<_>>();
         self.with_access(|values| {
             let mut dict = Dict::new_sync();
             for (key, value) in entries {
@@ -525,6 +532,7 @@ impl Values {
         function: &Value,
         arguments: impl IntoIterator<Item = Value>,
     ) -> Result<Value, Error> {
+        let arguments = arguments.into_iter().collect::<Vec<_>>();
         self.with_access(|values| values.apply(function, arguments))
     }
 
@@ -535,6 +543,7 @@ impl Values {
         root: &Value,
         keys: impl IntoIterator<Item = Value>,
     ) -> Result<Value, Error> {
+        let keys = keys.into_iter().collect::<Vec<_>>();
         self.with_access(|values| {
             values.require(root)?;
             keys.into_iter()
@@ -551,6 +560,7 @@ impl Values {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
+        let names = names.into_iter().collect::<Vec<_>>();
         self.with_access(|values| {
             values.require(root)?;
             names.into_iter().try_fold(root.clone(), |value, name| {
@@ -709,11 +719,8 @@ impl Values {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.with_access(|values| {
-            values.wrap(CoreValue::Atom(crate::core::Atom::from_key(
-                &Key::abstract_global_path(parts),
-            )))
-        })
+        let key = Key::abstract_global_path(parts);
+        self.with_access(|values| values.wrap(CoreValue::Atom(crate::core::Atom::from_key(&key))))
     }
 }
 
@@ -1088,7 +1095,7 @@ impl PromiseResolver {
         }
         let (promise, values) = self.take_for_completion()?;
         let label = self.label.clone();
-        let published = values.with_runtime_value_access(|access| {
+        let published = values.with_boundary_access(|access| {
             promise.publish(&access, Ok(value.0.clone_core_with(&access)))
         });
         let published = match published {
@@ -1114,7 +1121,7 @@ impl PromiseResolver {
         }
         let (promise, values) = resolver.take_for_completion()?;
         let label = resolver.label.clone();
-        let published = values.with_runtime_value_access(|access| {
+        let published = values.with_boundary_access(|access| {
             promise.publish(
                 &access,
                 Err(Arc::new(EvaluationFailure::emission_in(
@@ -1145,7 +1152,7 @@ impl PromiseResolver {
         let (promise, values) = self.take_for_completion()?;
         let label = self.label.clone();
         let published =
-            values.with_runtime_value_access(|access| promise.publish(&access, Err(failure)));
+            values.with_boundary_access(|access| promise.publish(&access, Err(failure)));
         let published = match published {
             Ok(publication) => {
                 publication.notify();
@@ -1178,7 +1185,7 @@ impl Drop for PromiseResolver {
             "promise resolver for `{}` was dropped before completion",
             self.label
         );
-        let published = values.with_runtime_value_access(|access| {
+        let published = values.with_boundary_access(|access| {
             promise.publish(&access, Err(Arc::new(EvaluationFailure::message(message))))
         });
         if let Ok(publication) = published {

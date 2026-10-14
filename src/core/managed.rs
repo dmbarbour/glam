@@ -645,6 +645,17 @@ impl CoreValueFactory {
         })
     }
 
+    /// Runs `operation` as a boundary of its own: with access lent by a
+    /// mutator it takes for this runtime, or nested inside another entry for
+    /// it (`driver-mutator`). Public operations use it; no client code may
+    /// run inside.
+    pub(crate) fn with_boundary_access<R>(
+        &self,
+        operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,
+    ) -> R {
+        self.with_recursive_runtime_value_mutator(|mutator| mutator.with_access(operation))
+    }
+
     /// Lends this thread's mutator for this runtime's heap to `operation`,
     /// which borrows value access from it instead of entering the heap.
     /// Inside another access it is a recursive entry that cannot suspend

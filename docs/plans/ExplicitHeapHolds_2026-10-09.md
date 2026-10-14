@@ -583,6 +583,20 @@ Slices, in order (2026-10-13):
    compile-heavy workloads in either build. Lending the compile's mutator to
    the macro machinery, instead of suspending around it, is left for later.
 
+   Public API (`gc-hold-public-api`, 2026-10-14): `Values::with_access`, the
+   wrapper behind most `Values` methods, and the promise resolver's
+   completions and `seal_module` take access from a mutator of their own
+   (`CoreValueFactory::with_boundary_access`), nesting inside another entry.
+   The methods that took a caller's iterator (`list`, `record`,
+   `dictionary`, `apply`, `access_path`, `access_names`,
+   `abstract_global_path`) collect it first, so no client code runs under
+   the mutator. Probed again, the public-API integration tests reach 25
+   sites outside any mutator, down from 89: core construction helpers, the
+   diagnostic helpers that evaluate (`failure_diagnostic_root_with` and its
+   kin), and work that runs inside a suspension (macro expansion, host
+   calls, terminal publication, a reflection-machine helper), which needs a
+   mutator of its own once access requires one.
+
 ### Tests and enforcement (`gc-hold-tests`)
 
 Convert the test helpers, then remove the shim, so access without a

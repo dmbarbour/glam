@@ -1587,7 +1587,7 @@ impl Assembler {
         context: &CompileContext,
         definitions: &RuntimeValueRoot,
     ) -> Result<RuntimeValueRoot, Error> {
-        let published = self.core_values().with_runtime_value_access(|access| {
+        let published = self.core_values().with_boundary_access(|access| {
             let CoreValue::Promised(final_defs) = context.final_defs(&access) else {
                 panic!("CompileContext.final_defs must be a promised value");
             };
