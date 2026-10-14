@@ -1257,3 +1257,18 @@ Glam's boundaries no longer nest and `Heap::mutate_recursive` is gone, with
 its test; Glam also drops a lazy route's last lease only after its runtime
 locks (`ec18f579`): `scripts/check.sh full` passed at `f10b1cc7` (Miri 234
 passed), with both sanitizers.
+
+Glam's poll fixtures run in quanta, and the mutator-less poll context is
+gone (`gc-hold-pass-access`, first slice): `scripts/check.sh full` passed at
+`a8c22e0a` (Miri 234 passed), with both sanitizers.
+
+`Heap::mutate` is glam-gc's only entry: `Heap::with_mutator`, held regions
+and recursive entries are gone, six tests that exercised only them retired,
+and managed destructors that allocate do so from a helper thread
+(`gc-hold-pass-access`, fourth slice): `scripts/check.sh full` passed at
+`d6ae5c54` (Miri 229 passed), with both sanitizers.
+
+An entry checks the thread's active-entry slot, takes admission, and only
+then finds and activates its thread record (`gc-hold-entry-cost`):
+`scripts/check.sh full` passed at `352a2d4d` (Miri 229 passed), with both
+sanitizers.
