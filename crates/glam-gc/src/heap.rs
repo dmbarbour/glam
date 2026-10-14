@@ -4,7 +4,7 @@ use std::ops::Range;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::{
@@ -14,12 +14,12 @@ use crate::{
     class::{
         AllocationClass, AllocationClassEntry, MetadataIdentity, ObjectMetadata, metadata_for,
     },
-    root::RootCell,
+    root_pool::{HeapId, RootPool},
     run::{AllocationClassId, RunGeometry},
     thread_cache::{
         AllocationCursor, AllocationLeaseEpoch, PreparedThreadHeapEntry, SuspendedThreadHeapEntry,
-        ThreadHeapEntry, ThreadRegionCounters, ThreadRegionMetrics, remove_inactive_thread_cache,
-        thread_has_any_active_mutator,
+        ThreadCacheHandle, ThreadHeapEntry, ThreadRegionCounters, ThreadRegionMetrics,
+        remove_inactive_thread_cache, thread_has_any_active_mutator,
     },
     trace::ErasedGc,
 };
@@ -809,7 +809,7 @@ impl Heap {
         self.inner.allocated_slots_for_verification()
     }
 
-    /// Returns the cumulative number of distinct root cells registered by
+    /// Returns the cumulative number of distinct roots registered by
     /// this heap for deterministic ownership-boundary verification.
     ///
     /// Cloning a root does not change this count. Retiring one does not reduce
@@ -818,7 +818,15 @@ impl Heap {
     #[cfg(any(test, feature = "deterministic-test-hooks"))]
     #[doc(hidden)]
     pub fn root_registrations_for_verification(&self) -> u64 {
-        self.inner.root_registrations.load(Ordering::Relaxed)
+        // Counted per thread and published when a region ends; include the
+        // calling thread's region in progress.
+        self.inner.region_metrics().root_registrations
+            + crate::thread_cache::unpublished_root_registrations(&self.inner)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inner_for_test(&self) -> &Arc<HeapInner> {
+        &self.inner
     }
 
     /// Returns the latest completed collection epoch for deterministic
@@ -893,7 +901,8 @@ pub(crate) struct HeapInner {
     finalizing_phase_probe: Mutex<Option<Arc<FinalizingPhaseProbeState>>>,
     #[cfg(feature = "deterministic-test-hooks")]
     synchronous_collection_wait_probe: Mutex<Option<Arc<SynchronousCollectionWaitProbeState>>>,
-    root_registrations: AtomicU64,
+    /// This heap's identity, which its root chunks record.
+    id: HeapId,
     #[cfg(test)]
     allocation_cursor_claims: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -968,7 +977,7 @@ impl HeapInner {
             finalizing_phase_probe: Mutex::new(None),
             #[cfg(feature = "deterministic-test-hooks")]
             synchronous_collection_wait_probe: Mutex::new(None),
-            root_registrations: AtomicU64::new(0),
+            id: HeapId::fresh(),
             #[cfg(test)]
             allocation_cursor_claims: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -1003,7 +1012,7 @@ struct ManagedData {
     finalized_word_release_hook: Option<FinalizedWordReleaseHook>,
     free_runs: Vec<RunLocation>,
     allocation_pressure: AllocationPressure,
-    roots: Vec<Weak<RootCell>>,
+    root_pool: RootPool,
     virgin_run_activations: u64,
     recycled_run_activations: u64,
     cold_class_discoveries: u64,
@@ -2610,11 +2619,11 @@ impl MarkAttempt {
         let ManagedData {
             arena,
             classes,
-            roots,
+            root_pool,
             ..
         } = data;
         let mut lookup_error = None;
-        retain_registered_roots(roots, |value| {
+        root_pool.visit_live(|value| {
             self.root_count = self
                 .root_count
                 .checked_add(1)
@@ -2923,7 +2932,7 @@ impl HeapInner {
                 .load(Ordering::Relaxed),
             outer_mutator_entries: region_metrics.outer_entries,
             recursive_mutator_entries: region_metrics.recursive_entries,
-            root_registrations: self.root_registrations.load(Ordering::Relaxed),
+            root_registrations: region_metrics.root_registrations,
             class_cache_hits: region_metrics.class_cache_hits,
             class_cache_misses: region_metrics.class_cache_misses,
             arena_chunks: data.arena.run_capacity() / crate::arena::RUNS_PER_CHUNK,
@@ -3145,13 +3154,13 @@ impl HeapInner {
             mark_attempt.retain_pending_finalizers(&mut data);
             mark_work(&mut mark_attempt, &mut data);
         }
-        let root_registry_len = self
+        let live_roots = self
             .data
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .roots
-            .len();
-        mark_attempt.reserve_root_capacity(root_registry_len);
+            .root_pool
+            .live_count();
+        mark_attempt.reserve_root_capacity(live_roots);
         {
             let mut data = self
                 .data
@@ -3214,6 +3223,9 @@ impl HeapInner {
             // last so later outer entries discard every stale cursor before
             // using these selectors.
             data.publish_swept_allocator_view();
+            // No mutator creates roots until the epoch below discards the
+            // free lists threads took.
+            data.root_pool.rebuild_free_lists();
             self.publish_allocation_lease_epoch(current_epoch, next_epoch);
             SweepSummary {
                 reclaimed_slots: post_mark.dead_set.no_drop_dead_slots,
@@ -4037,40 +4049,51 @@ impl HeapInner {
     /// supplies: from the thread's class cache when it has one.
     pub(crate) fn register_root<T: Trace>(
         self: &Arc<Self>,
+        cache: &ThreadCacheHandle,
         value: crate::Gc<T>,
         expected: &'static ObjectMetadata,
     ) -> Root<T> {
         debug_assert!(std::ptr::eq(expected, metadata_for::<T>()));
         let value = value.erase();
-        let (root, registration) = Root::<T>::candidate(self, value);
-        let mut state = self.data.lock().expect("heap state should not be poisoned");
+        let state = self.data.lock().expect("heap state should not be poisoned");
         if let Err(error) = validate_rootable_in_state(&state, value, expected) {
             drop(state);
             error.raise();
         }
-        self.publish_root(&mut state, registration);
-        root
+        drop(state);
+        self.register_proven_root(cache, value)
     }
 
     /// Registers a root for a value its caller proved live, allocated and of
     /// type `T` in this heap, without revalidating it.
-    pub(crate) fn register_proven_root<T: Trace>(self: &Arc<Self>, value: ErasedGc) -> Root<T> {
-        let (root, registration) = Root::<T>::candidate(self, value);
-        let mut state = self.data.lock().expect("heap state should not be poisoned");
-        self.publish_root(&mut state, registration);
-        root
+    ///
+    /// The slot comes from the thread's free list, refilled under the data
+    /// mutex once it runs out.
+    pub(crate) fn register_proven_root<T: Trace>(
+        self: &Arc<Self>,
+        cache: &ThreadCacheHandle,
+        value: ErasedGc,
+    ) -> Root<T> {
+        let slot = cache.take_root_slot().unwrap_or_else(|| {
+            let head = self
+                .data
+                .lock()
+                .expect("heap state should not be poisoned")
+                .root_pool
+                .take_free_list(self.id);
+            cache.install_root_free_list(head);
+            cache
+                .take_root_slot()
+                .expect("a fresh root free list holds a slot")
+        });
+        // SAFETY: the thread's free list owns `slot` exclusively, its chunk
+        // belongs to this heap, the thread's mutator holds this heap's
+        // admission, and the caller proved `value` a live `T` in this heap.
+        unsafe { Root::occupy(slot, value) }
     }
 
-    fn publish_root(&self, state: &mut ManagedData, registration: Weak<RootCell>) {
-        state
-            .roots
-            .try_reserve(1)
-            .expect("root registry capacity exhausted");
-        state.roots.push(registration);
-        self.root_registrations
-            .fetch_add(1, Ordering::Relaxed)
-            .checked_add(1)
-            .expect("root registration count exhausted");
+    pub(crate) fn id(&self) -> HeapId {
+        self.id
     }
 
     #[cfg(test)]
@@ -4088,30 +4111,13 @@ impl HeapInner {
             assert_eq!(coordinator.active_outer_mutators(), 0);
         }
 
-        let mut data = self
+        let data = self
             .data
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        retain_registered_roots(&mut data.roots, visit)
+        data.root_pool.visit_live(visit)
     }
-}
-
-fn retain_registered_roots(
-    roots: &mut Vec<Weak<RootCell>>,
-    mut visit: impl FnMut(ErasedGc),
-) -> usize {
-    let mut visited = 0;
-    roots.retain(|registration| {
-        let Some(cell) = registration.upgrade() else {
-            return false;
-        };
-        visit(cell.value());
-        drop(cell);
-        visited += 1;
-        true
-    });
-    visited
 }
 
 enum RootValidationError {
@@ -5713,7 +5719,7 @@ mod tests {
             }
             root
         });
-        assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 1);
+        assert_eq!(heap.inner.data.lock().unwrap().root_pool.live_count(), 1);
         assert!(heap.inner.allocation_pressure().collection_requested);
         release.wait();
         assert!(collector.join().unwrap());
@@ -6634,7 +6640,7 @@ mod tests {
 
             {
                 let data = heap.inner.data.lock().unwrap();
-                assert_eq!(data.roots.len(), 1);
+                assert_eq!(data.root_pool.live_count(), 1);
                 for (index, slot) in slots.iter().copied().enumerate() {
                     assert_eq!(
                         data.collector_slot_is_marked(slot),
@@ -7437,16 +7443,16 @@ mod tests {
         drop(dead_root);
 
         let exclusive = heap.inner.enter_synthetic_exclusive();
-        let root_registry_len = heap.inner.data.lock().unwrap().roots.len();
-        assert_eq!(root_registry_len, 3);
+        let live_roots = heap.inner.data.lock().unwrap().root_pool.live_count();
+        assert_eq!(live_roots, 2);
         let mut attempt = super::MarkAttempt::default();
-        attempt.reserve_root_capacity(root_registry_len);
+        attempt.reserve_root_capacity(live_roots);
         {
             let mut data = heap.inner.data.lock().unwrap();
             data.clear_mark_bitmaps();
             attempt.seed_registered_roots(&mut data).unwrap();
 
-            assert_eq!(data.roots.len(), 2);
+            assert_eq!(data.root_pool.live_count(), 2);
             assert_eq!(attempt.root_count, 2);
             assert_eq!(attempt.marked_slot_count, 1);
             assert_eq!(attempt.worklist.len(), 1);
@@ -8576,7 +8582,7 @@ mod tests {
             assert!(data.finalization_batch.runs.is_empty());
             assert_eq!(data.finalization_batch.pending_slot_count(), 0);
             assert_eq!(data.finalization_batch.detached_run_count(), 0);
-            assert_eq!(data.roots.len(), 1);
+            assert_eq!(data.root_pool.live_count(), 1);
         }
 
         drop(live_root);
@@ -10421,7 +10427,7 @@ mod tests {
     }
 
     #[test]
-    fn root_registry_publishes_once_per_cell_and_not_per_clone() {
+    fn root_registration_counts_once_per_slot_and_not_per_clone() {
         let heap = Heap::new();
         let value = allocate(&heap, 42_u64);
         assert_eq!(heap.root_registrations_for_verification(), 0);
@@ -10430,11 +10436,11 @@ mod tests {
         let first_clone = first.clone();
         assert_eq!(heap.root_registrations_for_verification(), 1);
 
-        assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 1);
+        assert_eq!(heap.inner.data.lock().unwrap().root_pool.live_count(), 1);
 
         let second = heap.with_mutator(|mutator| mutator.root_checked(value.duplicate_in(mutator)));
         assert_eq!(heap.root_registrations_for_verification(), 2);
-        assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 2);
+        assert_eq!(heap.inner.data.lock().unwrap().root_pool.live_count(), 2);
 
         drop((first, first_clone, second));
     }
@@ -10613,7 +10619,7 @@ mod tests {
     }
 
     #[test]
-    fn exclusive_root_walk_visits_live_cells_in_order_and_prunes_dead_cells() {
+    fn exclusive_root_walk_visits_live_slots_in_order_and_skips_dropped_ones() {
         let heap = Heap::new();
         let values = heap.with_mutator(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
@@ -10641,16 +10647,16 @@ mod tests {
             visited,
             [&values[0], &values[2]].map(|value| value.erase().as_ptr().as_ptr() as usize)
         );
-        assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 2);
+        assert_eq!(heap.inner.data.lock().unwrap().root_pool.live_count(), 2);
 
         drop((first, last));
         assert_eq!(heap.inner.visit_registered_roots(|_| {}), 0);
-        assert!(heap.inner.data.lock().unwrap().roots.is_empty());
+        assert_eq!(heap.inner.data.lock().unwrap().root_pool.live_count(), 0);
         drop(exclusive);
     }
 
     #[test]
-    fn elected_collection_walks_and_prunes_the_root_registry() {
+    fn collection_returns_dropped_root_slots_for_reuse_in_address_order() {
         let heap = Heap::new();
         let values = heap.with_mutator(|mutator| {
             let allocator = mutator.allocator::<u64>().unwrap();
@@ -10660,17 +10666,134 @@ mod tests {
             heap.with_mutator(|mutator| mutator.root_checked(values[0].duplicate_in(mutator)));
         let dead =
             heap.with_mutator(|mutator| mutator.root_checked(values[1].duplicate_in(mutator)));
+        let dead_slot = dead.slot_address_for_test();
+        assert_eq!(dead_slot, live.slot_address_for_test() + 16);
         drop(dead);
-        assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 2);
+        assert_eq!(heap.inner.data.lock().unwrap().root_pool.live_count(), 1);
+
+        // Before a collection, a dropped slot is not reused.
+        let before =
+            heap.with_mutator(|mutator| mutator.root_checked(values[1].duplicate_in(mutator)));
+        assert_ne!(before.slot_address_for_test(), dead_slot);
+        drop(before);
 
         assert_eq!(heap.collect_full().unwrap().epoch(), 1);
 
-        assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 1);
-        heap.with_mutator(|mutator| assert_eq!(*live.get(mutator), 41));
+        // The collection discarded the thread's free list and rebuilt its
+        // chunk's, lowest address first, so the lowest dropped slot is next.
+        let after =
+            heap.with_mutator(|mutator| mutator.root_checked(values[0].duplicate_in(mutator)));
+        assert_eq!(after.slot_address_for_test(), dead_slot);
+        assert_eq!(heap.inner.data.lock().unwrap().root_pool.live_count(), 2);
+        heap.with_mutator(|mutator| {
+            assert_eq!(*live.get(mutator), 41);
+            assert_eq!(*after.get(mutator), 41);
+        });
     }
 
     #[test]
-    fn last_public_drop_after_upgrade_is_passive_and_conservatively_retained() {
+    fn a_root_dropped_after_seeding_keeps_its_value_once_and_frees_its_slot() {
+        let heap = Heap::new();
+        let (keep, dropped) = heap.mutate(|mutator| {
+            let allocator = mutator.allocator::<u64>().unwrap();
+            (
+                mutator.root(allocator.alloc_view(1)),
+                mutator.root(allocator.alloc_view(2)),
+            )
+        });
+        let dropped_slot = dropped.slot_address_for_test();
+
+        heap.request_collection();
+        let epoch = heap.inner.elect_idle_collection_for_test();
+        assert!(
+            heap.inner
+                .run_synthetic_collection(
+                    epoch,
+                    false,
+                    move |_, data| {
+                        // The collector seeded both roots before this drop.
+                        drop(dropped);
+                        assert_eq!(data.root_pool.live_count(), 1);
+                    },
+                    |_| {},
+                )
+                .is_none()
+        );
+        assert_eq!(heap.allocated_slots_for_verification(), 2);
+
+        // The same collection returned the slot, which the next root reuses.
+        let reused = heap.mutate(|mutator| mutator.root(keep.as_gc(mutator)));
+        assert_eq!(reused.slot_address_for_test(), dropped_slot);
+        let report = heap.collect_full().unwrap();
+        assert_eq!(report.root_entries(), 2);
+        assert_eq!(report.marked_slots(), 1);
+        assert_eq!(heap.allocated_slots_for_verification(), 1);
+    }
+
+    #[test]
+    fn concurrent_threads_never_share_a_root_slot_across_collections() {
+        const THREADS: usize = 4;
+        const ROOTS: usize = 600;
+
+        let heap = Heap::new();
+        let value =
+            heap.mutate(|mutator| mutator.root(mutator.allocator::<u64>().unwrap().alloc_view(7)));
+        for _ in 0..3 {
+            let start = Arc::new(std::sync::Barrier::new(THREADS));
+            let workers = (0..THREADS)
+                .map(|_| {
+                    let heap = heap.clone();
+                    let value = value.clone();
+                    let start = Arc::clone(&start);
+                    std::thread::spawn(move || {
+                        start.wait();
+                        heap.mutate(|mutator| {
+                            (0..ROOTS)
+                                .map(|_| mutator.root(value.as_gc(mutator)))
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                })
+                .collect::<Vec<_>>();
+            let roots = workers
+                .into_iter()
+                .flat_map(|worker| worker.join().expect("root worker panicked"))
+                .collect::<Vec<_>>();
+            let slots = roots
+                .iter()
+                .map(crate::Root::slot_address_for_test)
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(slots.len(), THREADS * ROOTS);
+            assert!(!slots.contains(&value.slot_address_for_test()));
+            assert_eq!(
+                heap.inner.data.lock().unwrap().root_pool.live_count(),
+                THREADS * ROOTS + 1
+            );
+            // Keep every other root, so the next round reuses the gaps.
+            let kept = roots.into_iter().step_by(2).collect::<Vec<_>>();
+            heap.collect_full().unwrap();
+            assert_eq!(
+                heap.inner.data.lock().unwrap().root_pool.live_count(),
+                kept.len() + 1
+            );
+            drop(kept);
+        }
+        heap.mutate(|mutator| assert_eq!(*value.get(mutator), 7));
+    }
+
+    #[test]
+    fn a_heap_dropped_without_roots_frees_its_chunks() {
+        let heap = Heap::new();
+        let id = heap.inner.id();
+        let root =
+            heap.mutate(|mutator| mutator.root(mutator.allocator::<u64>().unwrap().alloc_view(3)));
+        drop(root);
+        drop(heap);
+        assert_eq!(crate::root_pool::orphaned_chunks_of(id), 0);
+    }
+
+    #[test]
+    fn last_public_drop_during_the_root_walk_is_passive_and_conservatively_retained() {
         let drops = Arc::new(AtomicUsize::new(0));
         let heap = Heap::new();
         let (dropping_value, plain_value) = heap.with_mutator(|mutator| {
@@ -10687,7 +10810,6 @@ mod tests {
             heap.with_mutator(|mutator| mutator.root_checked(plain_value.duplicate_in(mutator)));
         let dropping_address = dropping_value.erase().as_ptr().as_ptr() as usize;
         let plain_address = plain_value.erase().as_ptr().as_ptr() as usize;
-        let dropping_registration = heap.inner.data.lock().unwrap().roots[0].clone();
         let exclusive = heap.inner.enter_synthetic_exclusive();
         let (upgraded_tx, upgraded_rx) = mpsc::channel();
         let (dropped_tx, dropped_rx) = mpsc::channel();
@@ -10706,10 +10828,6 @@ mod tests {
                 dropped_rx.recv().unwrap();
             } else {
                 assert_eq!(address, plain_address);
-                assert!(
-                    dropping_registration.upgrade().is_none(),
-                    "the prior temporary upgrade must be released before the next entry"
-                );
             }
         });
         dropper.join().expect("root dropper panicked");
@@ -10717,7 +10835,7 @@ mod tests {
         assert_eq!(count, 2);
         assert_eq!(visited, vec![dropping_address, plain_address]);
         assert_eq!(drops.load(Ordering::Relaxed), 0);
-        assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 2);
+        assert_eq!(heap.inner.data.lock().unwrap().root_pool.live_count(), 1);
 
         let mut retained = Vec::new();
         assert_eq!(
@@ -10726,7 +10844,6 @@ mod tests {
             1
         );
         assert_eq!(retained, vec![plain_address]);
-        assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 1);
 
         drop(exclusive);
         drop(plain_root);
@@ -10735,13 +10852,13 @@ mod tests {
     }
 
     #[test]
-    fn failed_upgrade_cannot_race_root_publication_during_exclusive_collection() {
+    fn dropped_roots_cannot_race_root_publication_during_exclusive_collection() {
         let heap = Heap::new();
         let value = allocate(&heap, 42_u64);
         let expired =
             heap.with_mutator(|mutator| mutator.root_checked(value.duplicate_in(mutator)));
         drop(expired);
-        assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 1);
+        assert_eq!(heap.inner.data.lock().unwrap().root_pool.live_count(), 0);
         let exclusive = heap.inner.enter_synthetic_exclusive();
         let worker = std::thread::spawn({
             let heap = heap.clone();
@@ -10750,16 +10867,16 @@ mod tests {
 
         heap.inner.wait_for_blocked_outer_mutators(1);
         assert_eq!(heap.inner.visit_registered_roots(|_| {}), 0);
-        assert!(heap.inner.data.lock().unwrap().roots.is_empty());
+        assert_eq!(heap.inner.data.lock().unwrap().root_pool.live_count(), 0);
 
         drop(exclusive);
         let root = worker.join().expect("root publisher panicked");
-        assert_eq!(heap.inner.data.lock().unwrap().roots.len(), 1);
+        assert_eq!(heap.inner.data.lock().unwrap().root_pool.live_count(), 1);
         heap.with_mutator(|mutator| assert_eq!(*root.get(mutator), 42));
     }
 
     #[test]
-    fn failed_root_validation_publishes_no_registry_entry() {
+    fn failed_root_validation_takes_no_root_slot() {
         let owner = Heap::new();
         let observer = Heap::new();
         let value = allocate(&owner, 42_u64);
@@ -10769,7 +10886,11 @@ mod tests {
         }));
 
         assert!(panic.is_err());
-        assert!(observer.inner.data.lock().unwrap().roots.is_empty());
+        assert_eq!(
+            observer.inner.data.lock().unwrap().root_pool.live_count(),
+            0
+        );
+        assert_eq!(observer.root_registrations_for_verification(), 0);
     }
 
     #[test]

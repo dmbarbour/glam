@@ -1218,3 +1218,17 @@ intended errors (E0502, an escaping view, `!Send`). `scripts/check.sh full`
 passed at `e2e6e2a2`, including Miri (232 passed) and both sanitizers; it
 also passed at `35ebeeb9`.
 
+Pooled roots (`pooled-roots`): tests show that a collection returns a
+dropped root's slot, which is not reused before it and is reused lowest
+address first after it, once the thread's earlier free list is discarded;
+that a root dropped after the collector seeded it (forced from the
+post-mark hook) keeps its value for that collection and frees its slot in
+the same one; that four threads creating 600 roots each, over three rounds
+of collections that keep every other root, never share a slot; that a root
+dropped while the collector walks the slots is passive and conservatively
+retained; that registration counts once per root, not per clone, and not for
+a root that failed validation; and that a heap dropped without roots frees
+its chunks, while an escaped root's chunk stays orphaned until a sweep after
+its last reference drops. Miri with strict provenance passes the 32 root
+tests, including the concurrent ones.
+

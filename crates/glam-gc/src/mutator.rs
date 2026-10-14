@@ -225,7 +225,7 @@ impl<'heap> MutatorAccess<'heap> {
         let pointer = value.pointer();
         self.debug_assert_access(pointer);
         self.heap
-            .register_proven_root(ErasedGc::new(pointer.cast()))
+            .register_proven_root(&self.cache, ErasedGc::new(pointer.cast()))
     }
 
     /// Constructs and publishes an external root for a bare managed pointer,
@@ -241,7 +241,7 @@ impl<'heap> MutatorAccess<'heap> {
             .cache
             .cached_metadata::<T>()
             .unwrap_or_else(metadata_for::<T>);
-        self.heap.register_root(value, expected)
+        self.heap.register_root(&self.cache, value, expected)
     }
 
     pub(crate) fn debug_assert_access<T: Trace>(&self, pointer: NonNull<T>) {

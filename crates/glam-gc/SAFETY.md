@@ -44,7 +44,9 @@ weak registry entry before returning its public root, then adds stable
 exclusive traversal and in-place pruning without a strong-root snapshot. C4C
 wires that walk into every elected collection and forces the final-public-drop
 ordering on both sides of each temporary weak upgrade. The walk still performs
-no marking or reclamation. C4D replaces the reusable public class handle with
+no marking or reclamation. (Pooled roots, `pooled-roots`, later replaced the
+`Arc` cell and weak registry with counted slots in heap-owned chunks; see
+"`root::Root<T>` construction and access".) C4D replaces the reusable public class handle with
 a mutator-scoped `Allocator<'_, T>`, moves durable class/run topology entirely
 under heap ownership, and removes allocation capabilities as heap owners.
 C5A.0 splits mutator/collector coordination from managed heap data and makes
@@ -120,7 +122,7 @@ finalized-word release versus concurrent allocation, and verifies mixed
 detached/attached terminal topology.
 
 The current collector is therefore a non-moving, stop-the-world full
-collector. A bare `Gc<T>` is not liveness evidence. Registered live root cells,
+collector. A bare `Gc<T>` is not liveness evidence. Live root slots,
 edges traced from them, and durable pending-finalizer records preserve exact
 allocations across collection; eager sweep or finalization may reclaim every
 other allocation. A matching mutator excludes collection while client code
@@ -1416,46 +1418,68 @@ the atomic allocation bit with Acquire ordering. Rejected input is reported
 only after releasing the mutex, so a caller contract violation does not
 poison an otherwise valid heap.
 
-Both publish one `Weak<RootCell>` into locked managed data before returning
-the first public root. Clones share the existing cell and neither clone nor
-drop touches the registry.
+Both then occupy a free slot of the heap's root pool (`pooled-roots`): the
+thread takes the next slot from its private free list, which it refills by
+taking one chunk's whole list under the data mutex when it runs out, writes
+the value into the slot's word and sets its count to one. Checked validation
+holds the data mutex, because it reads the arena chunk index and class
+topology; occupying a slot needs no lock, because the thread's list is its
+own. The calling mutator's admission keeps an exclusive collection from
+intervening, so the value stays live until the slot publishes it.
 
-The `Arc<RootCell>` and its weak registration candidate are constructed before
-the managed-data mutex is acquired. Holding one critical section across validation and
-the vector push is a one-lock implementation choice, not the semantic barrier:
-the calling `Mutator` already prevents an exclusive collection or reclamation
-from intervening. Checked validation nevertheless needs the mutex to read the
-arena chunk index and class topology; only its final allocation-bit load is
-independently atomic.
-
-`Root<T>` contains one `Arc<RootCell>` plus a zero-sized typed marker. The
-non-generic cell contains a `Weak<HeapInner>` and one `ErasedGc`. The weak
-control block remains allocated while the root exists, so comparing its address
-with the live mutator's `Arc` cannot mistake a reused heap allocation for the
-original heap. The cell never upgrades that weak reference merely to read a
-value, and a root does not retain or re-enter its value domain.
+`Root<T>` is one pointer to its slot plus a zero-sized typed marker. A slot is
+an atomic reference count and one word: the rooted value while the count is
+nonzero, the next free slot while it is free. Clones increment the count with
+Relaxed ordering and drops decrement it with Release, as `Arc` does; a clone
+past `isize::MAX` references aborts. Neither touches a lock, the heap, or the
+managed value, and a drop invokes no user code. The word changes only while
+the slot is free, so every reader holding a root sees the value written when
+it was occupied: the root's transfer, or the collector's exclusive authority,
+orders that write before the read.
 
 `Root::as_gc` rejects a nonmatching mutator in every build before
-constructing the typed view. The view borrows the matching access, so it
-cannot outlive the admitted region; `GcRef::edge` detaches a non-rooting
-edge that retains neither the heap nor a later liveness proof. `Root::get`
-reads through that single view boundary. The root's construction
-established the representation, allocation, and heap invariants, from a view
-or by validation; registry
-publication makes every still-live root cell a collection seed, and the live
-matching mutator prevents reclamation for the view's lifetime, even if the
-root is dropped meanwhile. Dropping
-`RootCell` releases only its weak heap reference and pointer bits; it never
-dereferences or destroys the managed payload and invokes no user code.
+constructing the typed view, comparing the heap identity in the slot's chunk
+header with the mutator's heap. Identities come from a process-wide counter
+and are never reused, so a dead heap's roots match no live heap. The view
+borrows the matching access, so it cannot outlive the admitted region;
+`GcRef::edge` detaches a non-rooting edge that retains neither the heap nor a
+later liveness proof. `Root::get` reads through that single view boundary.
+The root's construction established the representation, allocation, and heap
+invariants, from a view or by validation; a live slot is a collection seed,
+and the live matching mutator prevents reclamation for the view's lifetime,
+even if the root is dropped meanwhile.
 
-Exclusive root traversal holds the managed-data mutex after the
-coordinator has stopped every mutator. No new root cell can therefore be
-validated or published during the walk. `Vec::retain` upgrades each weak entry
-for exactly one visit, drops that temporary strong reference before advancing,
-and compacts failed upgrades in place while preserving registration order. A
-successful upgrade conservatively keeps its seed live for that collection even
-if the final public root is dropped concurrently; a failed upgrade cannot later
-become live because no strong cell reference remains.
+Exclusive root traversal holds the managed-data mutex after the coordinator
+has stopped every mutator, so no slot is occupied during the walk. It visits
+every slot whose count, loaded with Acquire, is nonzero, in chunk and address
+order. A root dropped concurrently may still be visited, which conservatively
+keeps its value for that collection; a count never rises from zero, because
+only a live root can be cloned. Past its point of no return, just before it
+publishes the next allocation lease epoch, a collection rebuilds every chunk's
+free list from its zero-count slots, lowest address first. Every outer mutator
+entry compares the epoch and discards a thread's private free list taken
+earlier, so no slot is ever on two lists in use, and a failed collection, which
+never publishes the epoch, rebuilds nothing.
+
+### `root_pool` chunks and slots
+
+Chunks are boxed, 4 KiB in size and alignment: a header holding the heap's
+identity, then 255 slots. Slot pointers are derived from the chunk pointer with
+raw projections, so each keeps the provenance of the whole chunk, and masking a
+slot's address finds its header within the same allocation. A free list's links
+are those slot pointers, stored in the word, so they keep that provenance too.
+The pool's vectors of chunks and list heads are reached only under the
+heap's data mutex.
+
+A chunk outlives its heap while any of its slots is referenced. Dropping the
+heap frees each chunk whose counts, loaded with Acquire, are all zero, and
+moves the rest to a process-wide orphan list under its own mutex. Each later
+heap drop sweeps that list the same way. Freeing is sound once every count is
+zero: the Acquire loads pair with each final Release decrement, which is a
+root's last access to its slot, and no count rises from zero, so nothing can
+reach the chunk again. A thread record outliving its heap may still hold a
+free list into a freed chunk; it is never read, because entering that heap is
+impossible.
 
 ### `mutation::MutatorAccess` edge-transition gateways
 

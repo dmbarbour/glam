@@ -14,6 +14,7 @@ use crate::{
     arena::{RunAddress, RunLocation},
     class::{AllocationClass, AllocationClassShared, ObjectMetadata},
     heap::{HeapInner, HeldAdmission, MutatorAdmission},
+    root_pool::RootSlot,
     run::{AllocationClassId, RunGeometry},
 };
 
@@ -199,6 +200,9 @@ struct ThreadHeapState {
     suspended: usize,
     captured_epoch: AllocationLeaseEpoch,
     cursors: ClassCursorCache,
+    /// Free root slots this thread took from its heap's pool, valid only in
+    /// `captured_epoch`: a collection rebuilds every free list.
+    root_free: Option<NonNull<RootSlot>>,
     region_metrics: ThreadRegionMetrics,
     counters: Arc<ThreadRegionCounters>,
 }
@@ -209,6 +213,7 @@ pub(crate) struct ThreadRegionMetrics {
     pub(crate) recursive_entries: u64,
     pub(crate) class_cache_hits: u64,
     pub(crate) class_cache_misses: u64,
+    pub(crate) root_registrations: u64,
 }
 
 impl ThreadRegionMetrics {
@@ -222,6 +227,7 @@ impl ThreadRegionMetrics {
         add(&mut self.recursive_entries, other.recursive_entries);
         add(&mut self.class_cache_hits, other.class_cache_hits);
         add(&mut self.class_cache_misses, other.class_cache_misses);
+        add(&mut self.root_registrations, other.root_registrations);
     }
 }
 
@@ -238,6 +244,7 @@ pub(crate) struct ThreadRegionCounters {
     recursive_entries: AtomicU64,
     class_cache_hits: AtomicU64,
     class_cache_misses: AtomicU64,
+    root_registrations: AtomicU64,
 }
 
 impl ThreadRegionCounters {
@@ -253,6 +260,8 @@ impl ThreadRegionCounters {
             .store(total.class_cache_hits, Ordering::Relaxed);
         self.class_cache_misses
             .store(total.class_cache_misses, Ordering::Relaxed);
+        self.root_registrations
+            .store(total.root_registrations, Ordering::Relaxed);
     }
 
     pub(crate) fn snapshot(&self) -> ThreadRegionMetrics {
@@ -261,6 +270,7 @@ impl ThreadRegionCounters {
             recursive_entries: self.recursive_entries.load(Ordering::Relaxed),
             class_cache_hits: self.class_cache_hits.load(Ordering::Relaxed),
             class_cache_misses: self.class_cache_misses.load(Ordering::Relaxed),
+            root_registrations: self.root_registrations.load(Ordering::Relaxed),
         }
     }
 }
@@ -276,6 +286,7 @@ impl ThreadHeapState {
             suspended: 0,
             captured_epoch,
             cursors: ClassCursorCache::default(),
+            root_free: None,
             region_metrics: ThreadRegionMetrics::default(),
             counters: heap.register_region_counters(),
         }
@@ -287,6 +298,7 @@ impl ThreadHeapState {
             // Stale records are inert. Forget them wholesale without reading a
             // run or attempting to return leases which collection rebuilt.
             self.cursors.clear();
+            self.root_free = None;
             self.captured_epoch = current_epoch;
         }
     }
@@ -453,6 +465,28 @@ impl ThreadCacheHandle {
                 shared: Arc::clone(class.shared()),
             },
         );
+    }
+
+    /// Takes a free root slot from this thread's list, counting one root
+    /// registration.
+    pub(crate) fn take_root_slot(&self) -> Option<NonNull<RootSlot>> {
+        let mut state = self.state.borrow_mut();
+        assert_ne!(state.recursive_depth, 0, "mutator cache is not active");
+        let slot = state.root_free?;
+        // SAFETY: the thread's list holds free slots of its heap's live
+        // chunks, taken in the current lease epoch, and only this thread
+        // uses it.
+        state.root_free = unsafe { RootSlot::next_free(slot) };
+        state.region_metrics.root_registrations += 1;
+        Some(slot)
+    }
+
+    /// Installs a free list this thread took from its heap's root pool.
+    pub(crate) fn install_root_free_list(&self, head: NonNull<RootSlot>) {
+        let mut state = self.state.borrow_mut();
+        assert_ne!(state.recursive_depth, 0, "mutator cache is not active");
+        assert!(state.root_free.is_none(), "root free list is still in use");
+        state.root_free = Some(head);
     }
 
     pub(crate) fn install(&self, cursor: AllocationCursor) {
@@ -731,6 +765,24 @@ pub(crate) fn release_current_thread_caches() -> usize {
         registry.clear();
         CURRENT_HEAP.set(None);
         released
+    })
+}
+
+/// Root registrations the calling thread made in its active region of
+/// `heap`, which its counters publish only when the region ends.
+#[cfg(any(test, feature = "deterministic-test-hooks"))]
+pub(crate) fn unpublished_root_registrations(heap: &Arc<HeapInner>) -> u64 {
+    let key = HeapCacheKey::new(heap);
+    CURRENT_HEAP.with_borrow(|current| match current {
+        Some((current_key, state)) if *current_key == key => {
+            let state = state.borrow();
+            if state.recursive_depth == 0 {
+                0
+            } else {
+                state.region_metrics.root_registrations
+            }
+        }
+        _ => 0,
     })
 }
 

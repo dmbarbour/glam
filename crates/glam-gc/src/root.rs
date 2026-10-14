@@ -1,41 +1,46 @@
 use std::fmt;
 use std::marker::PhantomData;
-use std::sync::{Arc, Weak};
+use std::ptr::NonNull;
 
+use crate::root_pool::RootSlot;
 use crate::{Gc, GcRef, MutatorAccess, Trace, heap::HeapInner, trace::ErasedGc};
 
 /// A shareable liveness claim for one managed allocation in a live heap.
 ///
-/// A root keeps its root cell alive but refers only weakly to the heap. It does
-/// not extend the containing value domain's lifetime and cannot enter that
-/// heap on its own. Access always requires a live matching [`MutatorAccess`].
+/// A root is a reference to a slot in its heap's root pool. It does not keep
+/// the heap alive, extend the containing value domain's lifetime, or enter
+/// that heap on its own; a root may outlive its heap, and then can only be
+/// cloned and dropped. Access always requires a live matching
+/// [`MutatorAccess`].
 #[must_use = "dropping the last root permits its managed value to be collected"]
 pub struct Root<T: Trace> {
-    cell: Arc<RootCell>,
+    slot: NonNull<RootSlot>,
     marker: PhantomData<fn() -> Gc<T>>,
 }
 
-const _: () = assert!(std::mem::size_of::<Root<u64>>() == std::mem::size_of::<Arc<()>>());
+const _: () = assert!(std::mem::size_of::<Root<u64>>() == std::mem::size_of::<usize>());
 
-pub(crate) struct RootCell {
-    heap: Weak<HeapInner>,
-    value: ErasedGc,
-}
+// SAFETY: a root shares its slot only through the slot's atomic count, and the
+// slot's word does not change while any root references it. Reaching the
+// rooted value requires a non-`Send` mutator for its live heap.
+unsafe impl<T: Trace> Send for Root<T> {}
+
+// SAFETY: as above; `&Root` grants no more than cloning and comparing.
+unsafe impl<T: Trace> Sync for Root<T> {}
 
 impl<T: Trace> Root<T> {
-    pub(crate) fn candidate(heap: &Arc<HeapInner>, value: ErasedGc) -> (Self, Weak<RootCell>) {
-        let cell = Arc::new(RootCell {
-            heap: Arc::downgrade(heap),
-            value,
-        });
-        let registration = Arc::downgrade(&cell);
-        (
-            Self {
-                cell,
-                marker: PhantomData,
-            },
-            registration,
-        )
+    /// Roots `value` in a free slot.
+    ///
+    /// # Safety
+    ///
+    /// As [`RootSlot::occupy`], and `value` must be a live, allocated `T`.
+    pub(crate) unsafe fn occupy(slot: NonNull<RootSlot>, value: ErasedGc) -> Self {
+        // SAFETY: the caller's contract.
+        unsafe { RootSlot::occupy(slot, value) };
+        Self {
+            slot,
+            marker: PhantomData,
+        }
     }
 
     /// Views the rooted value while `mutator` stays borrowed.
@@ -55,11 +60,10 @@ impl<T: Trace> Root<T> {
             "root does not belong to this heap"
         );
 
-        // SAFETY: the private constructor runs the all-build allocation,
-        // canonical-metadata, and heap-provenance validation before sealing
-        // this erased pointer behind `Root<T>`, and the root keeps it live
-        // until the view borrows the matching admitted mutator.
-        unsafe { GcRef::new(self.cell.value.as_ptr().cast::<T>(), mutator) }
+        // SAFETY: the root's construction proved its value a live, allocated
+        // `T` in this heap, from a view or by validation; the registered slot
+        // keeps it live until the view borrows the matching admitted mutator.
+        unsafe { GcRef::new(self.value().as_ptr().cast::<T>(), mutator) }
     }
 
     /// Borrows the rooted value under its live heap's mutator authority.
@@ -71,43 +75,53 @@ impl<T: Trace> Root<T> {
         self.as_gc(mutator).get()
     }
 
-    /// Returns whether two handles share the same registered root cell.
+    /// Returns whether two handles share the same root slot.
     ///
     /// This compares root-handle identity only. It neither compares the
     /// managed values nor enters or retains their heap.
     #[must_use]
     pub fn ptr_eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.cell, &other.cell)
+        self.slot == other.slot
     }
 
-    pub(crate) fn belongs_to(&self, heap: &Arc<HeapInner>) -> bool {
-        // `Weak` retains its allocation's control block, so a dead heap's
-        // address cannot be recycled while this root can still be compared.
-        std::ptr::eq(self.cell.heap.as_ptr(), Arc::as_ptr(heap))
+    pub(crate) fn belongs_to(&self, heap: &HeapInner) -> bool {
+        // SAFETY: this root references its slot. Heap identities are never
+        // reused, so a dead heap's roots match no live heap.
+        unsafe { RootSlot::heap(self.slot) == heap.id() }
     }
-}
 
-impl RootCell {
+    #[cfg(test)]
+    pub(crate) fn slot_address_for_test(&self) -> usize {
+        self.slot.as_ptr().addr()
+    }
+
     pub(crate) fn value(&self) -> ErasedGc {
-        self.value
+        // SAFETY: this root references its slot.
+        unsafe { RootSlot::value(self.slot) }
     }
 }
 
 impl<T: Trace> Clone for Root<T> {
     fn clone(&self) -> Self {
+        // SAFETY: this root references its slot.
+        unsafe { RootSlot::retain(self.slot) };
         Self {
-            cell: Arc::clone(&self.cell),
+            slot: self.slot,
             marker: PhantomData,
         }
     }
 }
 
+impl<T: Trace> Drop for Root<T> {
+    fn drop(&mut self) {
+        // SAFETY: this root references its slot and gives up that reference.
+        unsafe { RootSlot::release(self.slot) };
+    }
+}
+
 impl<T: Trace> fmt::Debug for Root<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_tuple("Root")
-            .field(&self.cell.value)
-            .finish()
+        formatter.debug_tuple("Root").field(&self.value()).finish()
     }
 }
 
@@ -347,10 +361,11 @@ mod tests {
         assert!(owner_alias.owns(&root));
         assert!(!observer.owns(&root));
 
+        let weak = Arc::downgrade(owner.inner_for_test());
         drop(owner);
         drop(owner_alias);
 
-        assert!(root.cell.heap.upgrade().is_none());
+        assert!(weak.upgrade().is_none());
         assert!(!observer.owns(&root));
     }
 
@@ -398,12 +413,20 @@ mod tests {
             mutator.root_checked(value)
         });
 
+        let weak = Arc::downgrade(heap.inner_for_test());
+        let id = heap.inner_for_test().id();
         drop(heap);
 
         assert_eq!(drops.load(Ordering::Relaxed), 1);
-        assert!(root.cell.heap.upgrade().is_none());
+        assert!(weak.upgrade().is_none());
+        // The root's chunk outlives its heap until no root references it.
+        assert_eq!(crate::root_pool::orphaned_chunks_of(id), 1);
         drop(root.clone());
+        crate::root_pool::sweep_orphaned_chunks_for_test();
+        assert_eq!(crate::root_pool::orphaned_chunks_of(id), 1);
         drop(root);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
+        crate::root_pool::sweep_orphaned_chunks_for_test();
+        assert_eq!(crate::root_pool::orphaned_chunks_of(id), 0);
     }
 }

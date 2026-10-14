@@ -43,6 +43,8 @@ mod mutator;
 mod pointer;
 #[expect(unsafe_code, reason = "reviewed root access boundary")]
 mod root;
+#[expect(unsafe_code, reason = "reviewed root slot pool")]
+mod root_pool;
 mod run;
 #[expect(unsafe_code, reason = "reviewed worker-local allocation")]
 mod thread_cache;

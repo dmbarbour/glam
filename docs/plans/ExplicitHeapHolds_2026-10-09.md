@@ -613,6 +613,25 @@ Slices, in order:
    counts. Pruning dead registry entries when the registry grows would
    still bound its memory to the live roots, an independent idea.
 
+   Shelved (maintainer, 2026-10-14) in favour of making roots as cheap as
+   possible first: a local root must beat the cheapest durable root, not
+   today's.
+
+3. `gc-hold-pooled-roots` (landed): roots are counted slots in heap-owned
+   chunks (`pooled-roots`). Before it, a root cost about 527 instructions:
+   61% malloc and free of its `Arc` cell, 13% the locked registry push, 8%
+   reference counts, 6% the collector's registry walk. After it, about 82,
+   20 of them zeroing new chunks. Per `.r ()` step 434.4 K to 406.1 K
+   instructions (-6.5%); across the profiling workloads -6.1% to +0.6%
+   against `gc-hold-root-evidence` (`sum` -6%, `countdown` and
+   `append_walk` -4 to -5%, `chain` and `hello_elf` -2%), and -14.5% to
+   -0.2% against `f25c0621`. The two increases, `list_literal_4000` +0.6%
+   and `dict_lookup_2000` +0.3%, are -1.2% each in whole-process counts.
+   Ideas: hand out a fresh chunk's slots by bumping an index instead of
+   linking them all, and allocate chunks zeroed, which avoids the 20; reuse a
+   slot dropped on its own admitted thread before the next collection.
+   Measure again before reconsidering local roots.
+
 ### Suspension review (`gc-hold-suspension-review`)
 
 Suspend only around operations with a long or unbounded wait on the world

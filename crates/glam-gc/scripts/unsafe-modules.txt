@@ -6,6 +6,7 @@ crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed canonical met
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed mutation boundary")]
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed pointer boundary")]
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed root access boundary")]
+crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed root slot pool")]
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed trace boundary")]
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed trace, sweep, and drop dispatch")]
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed worker-local allocation")]

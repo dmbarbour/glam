@@ -2036,6 +2036,39 @@ maps the short names used here to file names.
   `agent_context/evaluation.md` "Values and Forcing".
 - **Recorded in:** explicit heap holds plan, `gc-hold-lend-mutator`.
 
+### Roots are counted slots in heap-owned pools
+`pooled-roots` · 2026-10-14 · maintainer · accepted
+- **Context:** after `root-evidence`, a root still cost about 527
+  instructions to create and drop: 61% malloc and free of its `Arc` cell,
+  whose frees waited for a collection, 13% the registry push under the
+  heap's data mutex, 8% reference counts, one of them a weak count on the
+  heap that every thread shares, and 6% the collector's registry walk.
+  Carrying values without roots (`gc-hold-local-roots`) would have avoided
+  this only for roots that die within their admission (maintainer: make
+  roots as cheap as possible first).
+- **Decision:** a root is a pointer to a slot, an atomic count and one word,
+  in a heap-owned chunk of 255 slots aligned to its 4 KiB size. Clone and
+  drop touch only the count. A thread takes one chunk's whole free list into
+  its cache and creates roots from it without a lock or shared atomic.
+  Nobody creates roots during a collection (maintainer), so each collection
+  rebuilds every chunk's free list from its zero-count slots, lowest address
+  first, just before publishing the next allocation lease epoch, which
+  discards the lists threads took. A free slot's word links the list. A
+  heap dropped with live roots orphans their chunks to a process-wide list
+  that later heap drops sweep, so a root adds no atomic for outliving its
+  heap (maintainer); its chunk header holds a never-reused heap identity.
+  Registration counts move to per-thread region metrics. Built in-crate for
+  control over layout and reclamation (maintainer). Local roots are
+  shelved.
+- **Consequences:** a root costs about 82 instructions, 20 of them zeroing
+  new chunks. A dropped slot waits for a collection to be reused, and a
+  chunk with an escaped root outlives its heap until a later heap drop
+  finds it unreferenced, or until exit. Concurrent marking would need the
+  rebuild to stay in a phase that excludes root creation.
+- **Rule lives in:** `crates/glam-gc/SAFETY.md` "`root::Root<T>`
+  construction and access" and "`root_pool` chunks and slots".
+- **Recorded in:** explicit heap holds plan, `gc-hold-pooled-roots`.
+
 ### Each root construction states its liveness evidence
 `root-evidence` · 2026-10-13 · maintainer · accepted
 - **Context:** every root construction validated heap ownership,
