@@ -14,7 +14,7 @@ use crate::{
     arena::{RunAddress, RunLocation},
     class::{AllocationClass, AllocationClassShared, ObjectMetadata},
     heap::{HeapInner, HeldAdmission, MutatorAdmission},
-    root_pool::RootSlot,
+    root_pool::{HeapId, RootSlot},
     run::{AllocationClassId, RunGeometry},
 };
 
@@ -184,6 +184,7 @@ struct CachedClass {
 
 struct ThreadHeapState {
     heap: Weak<HeapInner>,
+    heap_id: HeapId,
     recursive_depth: usize,
     /// Classes by managed type, so acquiring an allocator for a known type
     /// takes neither the process-wide metadata registry nor the heap's data
@@ -203,6 +204,9 @@ struct ThreadHeapState {
     /// Free root slots this thread took from its heap's pool, valid only in
     /// `captured_epoch`: a collection rebuilds every free list.
     root_free: Option<NonNull<RootSlot>>,
+    /// The pool chunk `root_free` came from, which this thread leases; an
+    /// epoch change discards it with the list.
+    root_lease: Option<usize>,
     region_metrics: ThreadRegionMetrics,
     counters: Arc<ThreadRegionCounters>,
 }
@@ -279,6 +283,7 @@ impl ThreadHeapState {
     fn new(heap: &Arc<HeapInner>, captured_epoch: AllocationLeaseEpoch) -> Self {
         Self {
             heap: Arc::downgrade(heap),
+            heap_id: heap.id(),
             recursive_depth: 0,
             classes: TrustedHashMap::default(),
             held: None,
@@ -287,9 +292,33 @@ impl ThreadHeapState {
             captured_epoch,
             cursors: ClassCursorCache::default(),
             root_free: None,
+            root_lease: None,
             region_metrics: ThreadRegionMetrics::default(),
             counters: heap.register_region_counters(),
         }
+    }
+
+    /// Moves this record's free root slots into the thread's active list.
+    fn activate_roots(&mut self) {
+        debug_assert!(
+            ACTIVE_ROOTS.get().heap.is_none(),
+            "another admission's root list is still active"
+        );
+        ACTIVE_ROOTS.set(ActiveRoots {
+            heap: Some(self.heap_id),
+            head: self.root_free.take(),
+            lease: self.root_lease.take(),
+            registrations: 0,
+        });
+    }
+
+    /// Moves the thread's active free root slots back into this record.
+    fn deactivate_roots(&mut self) {
+        let active = ACTIVE_ROOTS.replace(ActiveRoots::NONE);
+        debug_assert_eq!(active.heap, Some(self.heap_id));
+        self.root_free = active.head;
+        self.root_lease = active.lease;
+        self.region_metrics.root_registrations += active.registrations;
     }
 
     fn begin_outer_entry(&mut self, current_epoch: AllocationLeaseEpoch) {
@@ -299,6 +328,7 @@ impl ThreadHeapState {
             // run or attempting to return leases which collection rebuilt.
             self.cursors.clear();
             self.root_free = None;
+            self.root_lease = None;
             self.captured_epoch = current_epoch;
         }
     }
@@ -314,6 +344,34 @@ impl HeapCacheKey {
 }
 
 type SharedThreadHeapState = Rc<RefCell<ThreadHeapState>>;
+
+/// The free root slots of the heap this thread holds admission to, moved
+/// out of its record for the admission so that taking a slot touches no
+/// `RefCell`.
+#[derive(Clone, Copy)]
+struct ActiveRoots {
+    heap: Option<HeapId>,
+    head: Option<NonNull<RootSlot>>,
+    /// The pool chunk `head`'s list came from, which this thread leases.
+    lease: Option<usize>,
+    registrations: u64,
+}
+
+impl ActiveRoots {
+    const NONE: Self = Self {
+        heap: None,
+        head: None,
+        lease: None,
+        registrations: 0,
+    };
+}
+
+thread_local! {
+    /// Set only while the thread holds an outer entry; a thread holds
+    /// admission to one heap at a time.
+    static ACTIVE_ROOTS: std::cell::Cell<ActiveRoots> =
+        const { std::cell::Cell::new(ActiveRoots::NONE) };
+}
 
 #[cfg(debug_assertions)]
 thread_local! {
@@ -469,24 +527,45 @@ impl ThreadCacheHandle {
 
     /// Takes a free root slot from this thread's list, counting one root
     /// registration.
+    #[inline]
     pub(crate) fn take_root_slot(&self) -> Option<NonNull<RootSlot>> {
-        let mut state = self.state.borrow_mut();
-        assert_ne!(state.recursive_depth, 0, "mutator cache is not active");
-        let slot = state.root_free?;
-        // SAFETY: the thread's list holds free slots of its heap's live
-        // chunks, taken in the current lease epoch, and only this thread
-        // uses it.
-        state.root_free = unsafe { RootSlot::next_free(slot) };
-        state.region_metrics.root_registrations += 1;
-        Some(slot)
+        ACTIVE_ROOTS.with(|active| {
+            let mut roots = active.get();
+            debug_assert_eq!(
+                roots.heap,
+                Some(self.state.borrow().heap_id),
+                "mutator cache is not active"
+            );
+            let slot = roots.head?;
+            // SAFETY: the thread's list holds free slots of its heap's live
+            // chunks, taken in the current lease epoch, and only this thread
+            // uses it.
+            roots.head = unsafe { RootSlot::next_free(slot) };
+            roots.registrations += 1;
+            active.set(roots);
+            Some(slot)
+        })
     }
 
     /// Installs a free list this thread took from its heap's root pool.
-    pub(crate) fn install_root_free_list(&self, head: NonNull<RootSlot>) {
-        let mut state = self.state.borrow_mut();
-        assert_ne!(state.recursive_depth, 0, "mutator cache is not active");
-        assert!(state.root_free.is_none(), "root free list is still in use");
-        state.root_free = Some(head);
+    pub(crate) fn install_root_free_list(&self, head: NonNull<RootSlot>, lease: usize) {
+        ACTIVE_ROOTS.with(|active| {
+            let mut roots = active.get();
+            assert_eq!(
+                roots.heap,
+                Some(self.state.borrow().heap_id),
+                "mutator cache is not active"
+            );
+            assert!(roots.head.is_none(), "root free list is still in use");
+            roots.head = Some(head);
+            roots.lease = Some(lease);
+            active.set(roots);
+        });
+    }
+
+    /// The pool chunk this thread's exhausted free list came from.
+    pub(crate) fn root_lease(&self) -> Option<usize> {
+        ACTIVE_ROOTS.get().lease
     }
 
     pub(crate) fn install(&self, cursor: AllocationCursor) {
@@ -543,6 +622,7 @@ impl PreparedThreadHeapEntry {
                     outer_entries: 1,
                     ..ThreadRegionMetrics::default()
                 };
+                state.activate_roots();
             } else {
                 debug_assert_eq!(
                     state.captured_epoch, epoch,
@@ -587,6 +667,7 @@ impl PreparedThreadHeapEntry {
             ..ThreadRegionMetrics::default()
         };
         state.recursive_depth = 1;
+        state.activate_roots();
         state.held = Some(admission);
     }
 }
@@ -613,6 +694,7 @@ pub(crate) fn take_held_region() -> Option<HeldAdmission> {
             return None;
         }
         state.recursive_depth = 0;
+        state.deactivate_roots();
         end_admission_generation();
         let metrics = std::mem::take(&mut state.region_metrics);
         state.counters.publish(metrics);
@@ -700,6 +782,7 @@ impl<'heap> ThreadHeapEntry<'heap> {
         );
         if prior_depth == 1 {
             state.owned = false;
+            state.deactivate_roots();
             let metrics = std::mem::take(&mut state.region_metrics);
             state.counters.publish(metrics);
             end_admission_generation();
@@ -772,18 +855,12 @@ pub(crate) fn release_current_thread_caches() -> usize {
 /// `heap`, which its counters publish only when the region ends.
 #[cfg(any(test, feature = "deterministic-test-hooks"))]
 pub(crate) fn unpublished_root_registrations(heap: &Arc<HeapInner>) -> u64 {
-    let key = HeapCacheKey::new(heap);
-    CURRENT_HEAP.with_borrow(|current| match current {
-        Some((current_key, state)) if *current_key == key => {
-            let state = state.borrow();
-            if state.recursive_depth == 0 {
-                0
-            } else {
-                state.region_metrics.root_registrations
-            }
-        }
-        _ => 0,
-    })
+    let roots = ACTIVE_ROOTS.get();
+    if roots.heap == Some(heap.id()) {
+        roots.registrations
+    } else {
+        0
+    }
 }
 
 pub(crate) fn thread_has_any_active_mutator() -> bool {

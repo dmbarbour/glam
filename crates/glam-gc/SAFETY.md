@@ -1421,7 +1421,11 @@ poison an otherwise valid heap.
 Both then occupy a free slot of the heap's root pool (`pooled-roots`): the
 thread takes the next slot from its private free list, which it refills by
 taking one chunk's whole list under the data mutex when it runs out, writes
-the value into the slot's word and sets its count to one. Checked validation
+the value into the slot's word and sets its count to one. The thread leases
+that chunk until it takes its next list. While the thread holds an outer
+entry, its list and lease live in a thread-local `Cell`, moved there from
+its cache record on entry and back on exit, so taking a slot borrows no
+`RefCell`. Checked validation
 holds the data mutex, because it reads the arena chunk index and class
 topology; occupying a slot needs no lock, because the thread's list is its
 own. The calling mutator's admission keeps an exclusive collection from
@@ -1456,10 +1460,23 @@ order. A root dropped concurrently may still be visited, which conservatively
 keeps its value for that collection; a count never rises from zero, because
 only a live root can be cloned. Past its point of no return, just before it
 publishes the next allocation lease epoch, a collection rebuilds every chunk's
-free list from its zero-count slots, lowest address first. Every outer mutator
-entry compares the epoch and discards a thread's private free list taken
-earlier, so no slot is ever on two lists in use, and a failed collection, which
-never publishes the epoch, rebuilds nothing.
+free list from its zero-count slots, lowest address first, and ends every
+lease. Every outer mutator entry compares the epoch and discards a thread's
+private free list and lease taken earlier, so no slot is ever on two lists in
+use, and a failed collection, which never publishes the epoch, rebuilds
+nothing.
+
+Between collections, when no chunk has a free list, the pool rebuilds the
+lists of its unleased chunks under the data mutex, while other mutators may
+run (`root-chunk-reclamation`). That is sound because no slot of an unleased
+chunk is on any list in use: the leasing thread's list holds the only slots
+taken from a chunk, and a lease is returned only when its list is exhausted,
+never from an earlier epoch. A zero-count slot there is therefore on no list,
+no root references it, and no clone can raise its count, so nothing else
+reads or writes its word while the rebuild links it. A root dropped during
+the rebuild may be missed, and is reclaimed by a later one. A thread record
+dropped while it holds a lease leaves that chunk leased until the next
+collection.
 
 ### `root_pool` chunks and slots
 
@@ -1468,8 +1485,8 @@ identity, then 255 slots. Slot pointers are derived from the chunk pointer with
 raw projections, so each keeps the provenance of the whole chunk, and masking a
 slot's address finds its header within the same allocation. A free list's links
 are those slot pointers, stored in the word, so they keep that provenance too.
-The pool's vectors of chunks and list heads are reached only under the
-heap's data mutex.
+The pool's vectors of chunks, list heads, free counts and leases are reached
+only under the heap's data mutex.
 
 A chunk outlives its heap while any of its slots is referenced. Dropping the
 heap frees each chunk whose counts, loaded with Acquire, are all zero, and

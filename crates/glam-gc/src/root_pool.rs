@@ -7,12 +7,19 @@
 //! count, and creating one takes a slot from the creating thread's private
 //! free list without a lock or a shared atomic.
 //!
-//! Nobody creates roots during a collection, so each collection rebuilds
-//! every chunk's free list from its zero-count slots, just before it publishes
-//! the next allocation lease epoch, which discards the free lists threads
-//! took earlier. A count never rises from zero: only a live root can be
-//! cloned. A heap dropped while roots remain orphans their chunks to a
-//! process-wide list, which later heap drops sweep.
+//! A thread takes one chunk's whole free list and leases the chunk until it
+//! takes another. When no chunk has a free list, the pool rebuilds the lists
+//! of its unleased chunks from their zero-count slots, which is safe while
+//! mutators run: no list holds those slots and no root references them, and
+//! a count never rises from zero, since only a live root can be cloned. It
+//! rescans only once it has handed out as many slots as the last scan found
+//! live, and otherwise allocates a chunk, so scanning costs about two slot
+//! visits per slot handed out and the pool stays near twice the live roots. Nobody creates roots during a collection,
+//! so each collection also rebuilds every chunk's list and ends every lease,
+//! just before it publishes the next allocation lease epoch, which discards
+//! the lists and leases threads took earlier. A heap dropped while roots
+//! remain orphans their chunks to a process-wide list, which later heap drops
+//! sweep.
 
 use std::cell::UnsafeCell;
 use std::num::NonZeroU64;
@@ -126,8 +133,8 @@ impl RootSlot {
     pub(crate) unsafe fn release(slot: NonNull<Self>) {
         // SAFETY: the caller's reference keeps the chunk allocated until this
         // decrement. Release orders the caller's reads of the word before a
-        // collection or sweep that observes the count at zero with Acquire
-        // and reuses or frees the slot.
+        // rebuild or sweep that observes the count at zero with Acquire and
+        // reuses or frees the slot.
         let prior = unsafe { slot.as_ref() }
             .references
             .fetch_sub(1, Ordering::Release);
@@ -229,11 +236,22 @@ impl RootChunk {
 #[derive(Default)]
 pub(crate) struct RootPool {
     chunks: Vec<NonNull<RootChunk>>,
-    /// Each chunk's free list as the last collection rebuilt it, or null once
-    /// a thread took it.
+    /// Each chunk's free list as the last rebuild left it, or null once a
+    /// thread took it.
     free_heads: Vec<*mut RootSlot>,
     /// Indices of chunks whose free list is not empty, lowest last.
     with_free: Vec<usize>,
+    /// Whether a thread's private free list holds slots of each chunk. A
+    /// thread returns its lease when it takes its next list; a thread record
+    /// dropped meanwhile leaves the chunk leased until the next collection.
+    leased: Vec<bool>,
+    /// How many free slots each chunk's list held when built.
+    free_counts: Vec<usize>,
+    /// Live roots found by the last scan of drained chunks.
+    live_at_last_scan: usize,
+    /// Free slots handed to threads since that scan, from rebuilt lists and
+    /// new chunks alike.
+    handed_out_since_scan: usize,
 }
 
 // SAFETY: the pool owns its chunks, and the heap's data mutex serializes every
@@ -241,19 +259,95 @@ pub(crate) struct RootPool {
 unsafe impl Send for RootPool {}
 
 impl RootPool {
-    /// Takes a whole free list for one thread's cache: the lowest chunk's
-    /// that has one, or a new chunk's.
-    pub(crate) fn take_free_list(&mut self, heap: HeapId) -> NonNull<RootSlot> {
-        while let Some(index) = self.with_free.pop() {
-            let head = std::mem::replace(&mut self.free_heads[index], std::ptr::null_mut());
-            if let Some(head) = NonNull::new(head) {
-                return head;
+    /// Takes a whole free list for one thread's cache, returning the lease
+    /// of the chunk its previous list came from: the lowest unleased chunk's
+    /// list; else, once it has handed out as many slots since the last scan
+    /// as that scan found live, the lists of drained chunks rebuilt now;
+    /// else a new chunk's.
+    pub(crate) fn take_free_list(
+        &mut self,
+        heap: HeapId,
+        returned: Option<usize>,
+    ) -> (NonNull<RootSlot>, usize) {
+        if let Some(index) = returned {
+            self.leased[index] = false;
+        }
+        if let Some(taken) = self.take_listed() {
+            return taken;
+        }
+        if self.handed_out_since_scan >= self.live_at_last_scan.max(SLOTS_PER_CHUNK) {
+            self.rebuild_unleased();
+            if let Some(taken) = self.take_listed() {
+                return taken;
             }
         }
         let (chunk, head) = RootChunk::allocate(heap);
         self.chunks.push(chunk);
         self.free_heads.push(std::ptr::null_mut());
-        head
+        self.free_counts.push(0);
+        self.leased.push(true);
+        self.handed_out_since_scan += SLOTS_PER_CHUNK;
+        (head, self.chunks.len() - 1)
+    }
+
+    fn take_listed(&mut self) -> Option<(NonNull<RootSlot>, usize)> {
+        while let Some(index) = self.with_free.pop() {
+            if self.leased[index] {
+                continue;
+            }
+            let head = std::mem::replace(&mut self.free_heads[index], std::ptr::null_mut());
+            if let Some(head) = NonNull::new(head) {
+                self.leased[index] = true;
+                self.handed_out_since_scan += std::mem::take(&mut self.free_counts[index]);
+                return Some((head, index));
+            }
+        }
+        None
+    }
+
+    /// Rebuilds the free list of every unleased chunk. Safe while mutators
+    /// run: no slot of an unleased chunk is on any thread's list, so its
+    /// zero-count slots are on no list and no root references them. A lease
+    /// a thread returns is always current, since an epoch change discards a
+    /// thread's lease with its list.
+    fn rebuild_unleased(&mut self) {
+        let mut live = 0;
+        self.with_free.clear();
+        for index in (0..self.chunks.len()).rev() {
+            if self.leased[index] {
+                live += SLOTS_PER_CHUNK;
+                continue;
+            }
+            let (head, chunk_live) = Self::rebuild_chunk(self.chunks[index]);
+            live += chunk_live;
+            self.free_heads[index] = head;
+            self.free_counts[index] = SLOTS_PER_CHUNK - chunk_live;
+            if !head.is_null() {
+                self.with_free.push(index);
+            }
+        }
+        self.live_at_last_scan = live;
+        self.handed_out_since_scan = 0;
+    }
+
+    fn rebuild_chunk(chunk: NonNull<RootChunk>) -> (*mut RootSlot, usize) {
+        let mut head: *mut RootSlot = std::ptr::null_mut();
+        let mut live = 0;
+        for slot_index in (0..SLOTS_PER_CHUNK).rev() {
+            let slot = RootChunk::slot(chunk, slot_index);
+            // SAFETY: the pool's chunks are allocated. A zero count stays
+            // zero, and the caller ensures no list holds the slot, so nothing
+            // else touches its word.
+            unsafe {
+                if slot.as_ref().references.load(Ordering::Acquire) == 0 {
+                    *slot.as_ref().word.get() = head.cast();
+                    head = slot.as_ptr();
+                } else {
+                    live += 1;
+                }
+            }
+        }
+        (head, live)
     }
 
     /// Visits each live root's value and returns how many it visited.
@@ -266,7 +360,7 @@ impl RootPool {
         self.for_each_slot(|slot, references| {
             if references != 0 {
                 // SAFETY: the slot was live at the Acquire load, and its word
-                // is written only while free, which needs a collection.
+                // is written only while it is free.
                 visit(unsafe { RootSlot::value(slot) });
                 visited += 1;
             }
@@ -289,26 +383,12 @@ impl RootPool {
     /// no return, and publish the next allocation lease epoch before any
     /// mutator is admitted, so that no thread uses a list it took before.
     pub(crate) fn rebuild_free_lists(&mut self) {
-        self.with_free.clear();
-        for (index, &chunk) in self.chunks.iter().enumerate().rev() {
-            let mut head: *mut RootSlot = std::ptr::null_mut();
-            for slot_index in (0..SLOTS_PER_CHUNK).rev() {
-                let slot = RootChunk::slot(chunk, slot_index);
-                // SAFETY: the pool's chunks are allocated. A zero count stays
-                // zero: no root references the slot, and none is created
-                // during the collection, so nothing else touches its word.
-                unsafe {
-                    if slot.as_ref().references.load(Ordering::Acquire) == 0 {
-                        *slot.as_ref().word.get() = head.cast();
-                        head = slot.as_ptr();
-                    }
-                }
-            }
-            self.free_heads[index] = head;
-            if !head.is_null() {
-                self.with_free.push(index);
-            }
-        }
+        self.leased.fill(false);
+        self.rebuild_unleased();
+    }
+
+    pub(crate) fn chunk_count(&self) -> usize {
+        self.chunks.len()
     }
 
     fn for_each_slot(&self, mut each: impl FnMut(NonNull<RootSlot>, usize)) {

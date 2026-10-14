@@ -651,10 +651,20 @@ Slices, in order:
      the pool rebuilds the lists of unleased chunks, which is safe while
      mutators run, but only after allocating as many new slots as were live
      at the last scan, else it allocates a chunk. 406 K, level elsewhere;
-     11, 13, 18, 17 chunks, about twice the live roots, independent of how
-     often the heap collects.
+     11, 13, 18, 17 chunks, with the pacing flaw described below.
    CPU time scattered by 10% between runs of the same code, too noisy to
    rank these; peak memory was the same within 0.3 MiB.
+
+   Adopted (maintainer, 2026-10-14): V2, which builds on V0b
+   (`root-chunk-reclamation`). Its tests found a pacing flaw in the
+   experiment: it counted only new chunks as allocation since the last
+   scan, so slots reused from a scan never triggered the next one and the
+   pool grew by the live roots after every productive scan. Counting every
+   slot handed out fixed it: 2, 2, 2 and 3 chunks at the end of the four
+   runs, with instruction counts level with V0. With so few chunks
+   allocated, initializing a fresh chunk costs at most about 15 K
+   instructions a run, so bump allocation within new chunks is not worth
+   adding (the maintainer doubted it would be).
 
 ### Suspension review (`gc-hold-suspension-review`)
 

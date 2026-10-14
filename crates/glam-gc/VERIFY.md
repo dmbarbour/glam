@@ -1233,3 +1233,10 @@ its last reference drops. Miri with strict provenance passes the 32 root
 tests, including the concurrent ones. `scripts/check.sh full` passed at
 `40eb2895`, including Miri (234 passed) and both sanitizers.
 
+Reclamation apart from collections (`root-chunk-reclamation`): tests show
+that a worker draining four lists of transient roots, without a collection,
+reuses one rebuilt chunk and never takes a slot from the chunk another
+thread leases, whose list still serves that thread afterwards; and that
+about 10,000 transient roots beside 600 live ones keep the pool within about
+twice the live roots, with no collection.
+

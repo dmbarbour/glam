@@ -2036,6 +2036,31 @@ maps the short names used here to file names.
   `agent_context/evaluation.md` "Values and Forcing".
 - **Recorded in:** explicit heap holds plan, `gc-hold-lend-mutator`.
 
+### Root slots are reclaimed apart from heap collections
+`root-chunk-reclamation` · 2026-10-14 · maintainer · accepted
+- **Context:** under `pooled-roots`, dropped slots returned only at a heap
+  collection, so a runtime heap that rarely collects grew its root pool with
+  every transient root: 59 to 98 chunks at the end of the profiling runs.
+  The maintainer asked to compare freeing on release against reclaiming in
+  bulk, and to reclaim root chunks apart from heap collections.
+- **Decision:** a thread leases the chunk whose free list it took until it
+  takes the next. When no chunk has a free list, the pool rebuilds the lists
+  of its unleased chunks from their zero-count slots, while mutators run,
+  once it has handed out as many slots since the last scan as that scan
+  found live; otherwise it allocates a chunk. Collections still rebuild
+  every list and end every lease. The admitted thread's list lives in a
+  thread-local `Cell`. Rejected: freeing a slot on its root's final drop,
+  which saved 4 instructions per root in a loop benchmark and cost 1% per
+  reflection step, since every drop reads its chunk header.
+- **Consequences:** the pool stays near twice the live roots (2 to 3
+  chunks at the end of the profiling runs), and instruction counts match
+  `pooled-roots`. Scanning costs about two slot visits per slot handed out.
+  A thread record dropped while it holds a lease leaves the chunk leased
+  until the next collection.
+- **Rule lives in:** `crates/glam-gc/SAFETY.md` "`root::Root<T>`
+  construction and access".
+- **Recorded in:** explicit heap holds plan, `gc-hold-pooled-roots`.
+
 ### Roots are counted slots in heap-owned pools
 `pooled-roots` · 2026-10-14 · maintainer · accepted
 - **Context:** after `root-evidence`, a root still cost about 527
@@ -2061,8 +2086,8 @@ maps the short names used here to file names.
   control over layout and reclamation (maintainer). Local roots are
   shelved.
 - **Consequences:** a root costs about 82 instructions, 20 of them zeroing
-  new chunks. A dropped slot waits for a collection to be reused, and a
-  chunk with an escaped root outlives its heap until a later heap drop
+  new chunks. A dropped slot waits for a collection to be reused (until
+  `root-chunk-reclamation`), and a chunk with an escaped root outlives its heap until a later heap drop
   finds it unreferenced, or until exit. Concurrent marking would need the
   rebuild to stay in a phase that excludes root creation.
 - **Rule lives in:** `crates/glam-gc/SAFETY.md` "`root::Root<T>`

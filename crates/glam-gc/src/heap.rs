@@ -287,6 +287,7 @@ pub struct HeapMetrics {
     outer_mutator_entries: u64,
     recursive_mutator_entries: u64,
     root_registrations: u64,
+    root_chunks: usize,
     class_cache_hits: u64,
     class_cache_misses: u64,
     arena_chunks: usize,
@@ -331,6 +332,7 @@ metric_accessors! {
     (outer_mutator_entries, outer_mutator_entries, u64, "Returns completed outer mutator regions."),
     (recursive_mutator_entries, recursive_mutator_entries, u64, "Returns completed recursive same-heap entries."),
     (root_registrations, root_registrations, u64, "Returns external roots registered over the heap's life."),
+    (root_chunks, root_chunks, usize, "Returns chunks in the heap's root slot pool."),
     (class_cache_hits, class_cache_hits, u64, "Returns allocations served by an existing worker-local cursor."),
     (class_cache_misses, class_cache_misses, u64, "Returns allocations requiring cursor refill."),
     (arena_chunks, arena_chunks, usize, "Returns committed arena chunks."),
@@ -2933,6 +2935,7 @@ impl HeapInner {
             outer_mutator_entries: region_metrics.outer_entries,
             recursive_mutator_entries: region_metrics.recursive_entries,
             root_registrations: region_metrics.root_registrations,
+            root_chunks: data.root_pool.chunk_count(),
             class_cache_hits: region_metrics.class_cache_hits,
             class_cache_misses: region_metrics.class_cache_misses,
             arena_chunks: data.arena.run_capacity() / crate::arena::RUNS_PER_CHUNK,
@@ -4080,8 +4083,8 @@ impl HeapInner {
                 .lock()
                 .expect("heap state should not be poisoned")
                 .root_pool
-                .take_free_list(self.id);
-            cache.install_root_free_list(head);
+                .take_free_list(self.id, cache.root_lease());
+            cache.install_root_free_list(head.0, head.1);
             cache
                 .take_root_slot()
                 .expect("a fresh root free list holds a slot")
@@ -10779,6 +10782,77 @@ mod tests {
             drop(kept);
         }
         heap.mutate(|mutator| assert_eq!(*value.get(mutator), 7));
+    }
+
+    #[test]
+    fn a_rebuild_between_collections_skips_a_chunk_another_thread_leases() {
+        let heap = Heap::new();
+        // This thread leases the first chunk, whose other slots its list
+        // keeps after the mutator ends.
+        let first =
+            heap.mutate(|mutator| mutator.root(mutator.allocator::<u64>().unwrap().alloc_view(1)));
+        let first_chunk = first.slot_address_for_test() & !4095;
+
+        let worker = std::thread::spawn({
+            let heap = heap.clone();
+            let first = first.clone();
+            move || {
+                heap.mutate(|mutator| {
+                    // Enough transient roots to drain several lists, so the
+                    // pool rebuilds its unleased chunks more than once.
+                    let mut chunks = std::collections::BTreeSet::new();
+                    for _ in 0..4 * 255 {
+                        let root = mutator.root(first.as_gc(mutator));
+                        chunks.insert(root.slot_address_for_test() & !4095);
+                    }
+                    chunks
+                })
+            }
+        });
+        let worker_chunks = worker.join().expect("root worker panicked");
+        assert!(!worker_chunks.contains(&first_chunk));
+        // The worker reused one rebuilt chunk instead of growing the pool.
+        assert_eq!(worker_chunks.len(), 1);
+        assert_eq!(heap.metrics().root_chunks(), 2);
+
+        // This thread's list still holds the first chunk's other slots.
+        let second = heap.mutate(|mutator| mutator.root(first.as_gc(mutator)));
+        assert_eq!(second.slot_address_for_test() & !4095, first_chunk);
+        assert_eq!(heap.metrics().successful_collections(), 0);
+    }
+
+    #[test]
+    fn transient_roots_reuse_slots_without_a_collection_and_live_ones_grow_the_pool() {
+        const LIVE: usize = 600;
+
+        let heap = Heap::new();
+        let value =
+            heap.mutate(|mutator| mutator.root(mutator.allocator::<u64>().unwrap().alloc_view(7)));
+        let live = heap.mutate(|mutator| {
+            (0..LIVE)
+                .map(|_| mutator.root(value.as_gc(mutator)))
+                .collect::<Vec<_>>()
+        });
+        let after_live = heap.metrics().root_chunks();
+        assert_eq!(after_live, (LIVE + 1).div_ceil(255));
+
+        for _ in 0..40 {
+            heap.mutate(|mutator| {
+                for _ in 0..255 {
+                    drop(mutator.root(value.as_gc(mutator)));
+                }
+            });
+        }
+        // About 10,000 transient roots: a scan runs once the pool has
+        // allocated as many new slots as were live, then reuses what it
+        // finds, so the pool stays near twice the live roots.
+        let chunks = heap.metrics().root_chunks();
+        assert!(
+            chunks <= 2 * after_live + 1,
+            "{chunks} chunks for {after_live} live"
+        );
+        assert_eq!(heap.metrics().successful_collections(), 0);
+        heap.mutate(|mutator| assert!(live.iter().all(|root| *root.get(mutator) == 7)));
     }
 
     #[test]
