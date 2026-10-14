@@ -664,7 +664,8 @@ Slices, in order:
    runs, with instruction counts level with V0. With so few chunks
    allocated, initializing a fresh chunk costs at most about 15 K
    instructions a run, so bump allocation within new chunks is not worth
-   adding (the maintainer doubted it would be).
+   adding (the maintainer doubted it would be). Landed as `c7d1a70e`:
+   across the profiling workloads -0.6% to 0.0% against `40eb2895`.
 
 ### Suspension review (`gc-hold-suspension-review`)
 
