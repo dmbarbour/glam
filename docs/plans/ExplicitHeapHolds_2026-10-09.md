@@ -632,6 +632,30 @@ Slices, in order:
    slot dropped on its own admitted thread before the next collection.
    Measure again before reconsidering local roots.
 
+   Variants compared 2026-10-14 (maintainer's list), on experiment commits
+   off `40eb2895`. Per `.r ()` step, with about 0.5% noise between runs;
+   chunks at exit for `chain_r200`, `countdown_800`, `sum_800`, `chain_800`:
+   - V0, landed: slots return only at a heap collection, which builds fresh
+     free lists from zero-count slots, with no sentinel; the epoch discards
+     threads' earlier lists. 406 to 408 K; 62, 59, 92, 98 chunks.
+   - V0b: the admitted thread's free list in a thread-local `Cell` instead
+     of its `RefCell` record. 404.5 to 408 K; a root costs about 66
+     instructions instead of 82 in the loop benchmark.
+   - V1b, V0b plus freeing on release: a root's final drop on a thread
+     admitted to its heap pushes its slot onto that thread's list. 411.8 K
+     (+1%), and -0.3% to +0.8% elsewhere; 62 instructions in the loop
+     benchmark, which reuses every slot. The chunk-header read on every drop
+     and the check on final drops cost about what reuse saves.
+   - V2, V0b plus reclamation apart from heap collections: a chunk is leased
+     while a thread's list holds its slots; when no chunk has a free list,
+     the pool rebuilds the lists of unleased chunks, which is safe while
+     mutators run, but only after allocating as many new slots as were live
+     at the last scan, else it allocates a chunk. 406 K, level elsewhere;
+     11, 13, 18, 17 chunks, about twice the live roots, independent of how
+     often the heap collects.
+   CPU time scattered by 10% between runs of the same code, too noisy to
+   rank these; peak memory was the same within 0.3 MiB.
+
 ### Suspension review (`gc-hold-suspension-review`)
 
 Suspend only around operations with a long or unbounded wait on the world

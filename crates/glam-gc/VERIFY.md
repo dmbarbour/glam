@@ -1230,5 +1230,6 @@ retained; that registration counts once per root, not per clone, and not for
 a root that failed validation; and that a heap dropped without roots frees
 its chunks, while an escaped root's chunk stays orphaned until a sweep after
 its last reference drops. Miri with strict provenance passes the 32 root
-tests, including the concurrent ones.
+tests, including the concurrent ones. `scripts/check.sh full` passed at
+`40eb2895`, including Miri (234 passed) and both sanitizers.
 
