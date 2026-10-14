@@ -618,6 +618,13 @@ Slices, in order (2026-10-13):
    production functions they call directly, which `gc-hold-tests` gives
    boundaries. Instructions level (`.r ()` step 413.0 K).
 
+   Tail-call forwarding (2026-10-14): retargeting a forwarder below a tail
+   call (`forwards_past`) opened a legacy access instead of borrowing the
+   quantum's mutator, once per tail call: 2,127 of `countdown_200`'s 2,162
+   recursive entries. It now borrows. Every profiling workload makes 17 to
+   23 recursive entries a run, except `chain` and `defs_unused`, which make
+   about one per definition. Instructions -0.8% to 0.0% (one codegen unit).
+
 ### Tests and enforcement (`gc-hold-tests`)
 
 Convert the test helpers, then remove the shim, so access without a

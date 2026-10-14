@@ -415,16 +415,17 @@ impl Drop for InlineClaims<'_> {
 /// Shortens `below`'s forward from `replaced` to `child`, which `replaced`
 /// now forwards to, if `below` is a forwarder pointing at `replaced`.
 fn forwards_past(
+    poll_context: &crate::evaluation::EvaluationPollContext,
     context: &EvalContext,
     below: &LazyTaskMachine,
     replaced: &LazyTaskMachine,
     child: &ManagedLazyRoot,
 ) -> bool {
     matches!(below.work, LazyTaskWork::Forward)
-        && context.values().with_runtime_value_access(|access| {
+        && poll_context.with_value_access(context, |access| {
             below
                 .lazy
-                .access(&access)
+                .access(access.values())
                 .is_some_and(|lazy| lazy.retarget_forward(&replaced.lazy, child))
         })
 }
@@ -532,7 +533,7 @@ pub(crate) fn poll_lazy_route(
             // top leaves the stack, so tail calls do not deepen it.
             if top_forwards
                 && let [.., below, replaced] = stack.as_slice()
-                && forwards_past(&context, below, replaced, &child)
+                && forwards_past(poll_context, &context, below, replaced, &child)
             {
                 let replaced = stack.pop().expect("the replaced forwarder is the top");
                 claims.release(&replaced.lazy);
