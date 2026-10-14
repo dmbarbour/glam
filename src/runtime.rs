@@ -123,7 +123,8 @@ impl RuntimeMutationAdmission {
             assert!(
                 !held.contains(&gate),
                 "this thread already holds the runtime mutation gate, and taking it again \
-                 deadlocks behind a queued settlement"
+                 deadlocks behind a queued settlement; taken again at:\n{}",
+                std::backtrace::Backtrace::force_capture()
             );
         });
     }
