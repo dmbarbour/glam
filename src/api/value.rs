@@ -883,6 +883,20 @@ impl ValueKind {
 }
 
 impl EvaluatedValue {
+    /// As [`Self::from_whnf`], for a caller that holds `access`.
+    pub(crate) fn from_whnf_in(access: &RuntimeValueAccess<'_>, value: Value) -> Self {
+        debug_assert!(!matches!(
+            value
+                .clone_core_with(access)
+                .expect("the WHNF witness must belong to its access's runtime"),
+            CoreValue::Lazy(_) | CoreValue::Promised(_)
+        ));
+        Self {
+            value,
+            observer: access.values().runtime_value_observer(),
+        }
+    }
+
     pub(crate) fn from_whnf(values: &Values, value: Value) -> Self {
         debug_assert!(!matches!(
             values

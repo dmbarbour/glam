@@ -549,29 +549,7 @@ impl Heap {
     /// Inside a suspension, another mutator may be taken. Panics if this
     /// heap is permanently poisoned.
     pub fn mutate<R>(&self, operation: impl for<'mu> FnOnce(&mut Mutator<'mu>) -> R) -> R {
-        let mut mutator = Mutator::new(&self.inner, self.inner.admit_owned_entry(), false);
-        operation(&mut mutator)
-    }
-
-    /// Like [`Heap::mutate`], but inside another entry for this heap the
-    /// mutator is a recursive entry, which takes no admission and cannot
-    /// suspend.
-    ///
-    /// This is a migration aid, for boundaries already converted to a
-    /// mutator but still reached inside unconverted accesses. Once every
-    /// caller of a boundary takes its own mutator, the boundary uses
-    /// [`Heap::mutate`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if this thread holds another heap's mutator, or if this heap is
-    /// permanently poisoned.
-    pub fn mutate_recursive<R>(
-        &self,
-        operation: impl for<'mu> FnOnce(&mut Mutator<'mu>) -> R,
-    ) -> R {
-        let (entry, recursive) = self.inner.admit_recursive_or_owned_entry();
-        let mut mutator = Mutator::new(&self.inner, entry, recursive);
+        let mut mutator = Mutator::new(&self.inner, self.inner.admit_owned_entry());
         operation(&mut mutator)
     }
 
@@ -2690,23 +2668,6 @@ impl HeapInner {
     pub(crate) fn admit_owned_entry(self: &Arc<Self>) -> ThreadHeapEntry<'_> {
         let (prepared, admission) = self.admit_owned(self.prepare_entry());
         prepared.activate_owned(self.current_allocation_lease_epoch(), admission)
-    }
-
-    /// Admits an owned mutator's entry, or a recursive one inside another
-    /// entry for this heap. Returns whether it is recursive.
-    pub(crate) fn admit_recursive_or_owned_entry(self: &Arc<Self>) -> (ThreadHeapEntry<'_>, bool) {
-        let prepared = self.prepare_entry();
-        if !prepared.is_outer() {
-            return (
-                prepared.activate(self.current_allocation_lease_epoch(), None),
-                true,
-            );
-        }
-        let (prepared, admission) = self.admit_owned(prepared);
-        (
-            prepared.activate_owned(self.current_allocation_lease_epoch(), admission),
-            false,
-        )
     }
 
     /// Re-admits a suspended owned mutator into its own thread record.

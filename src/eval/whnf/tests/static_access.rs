@@ -1,4 +1,4 @@
-use crate::core::{Dict, Key, PromisedValue, Value};
+use crate::core::{CoreValueFactory, Dict, Key, PromisedValue, Value};
 use crate::evaluation::{EvalContext, EvaluationPollContext, OwnedEvalContext};
 use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 use crate::test_support::ResultTestExt as _;

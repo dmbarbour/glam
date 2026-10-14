@@ -1165,7 +1165,7 @@ impl EvaluationRuntime {
             .shared_resources
             .values
             .core()
-            .with_recursive_runtime_value_mutator(|mut mutator| {
+            .with_runtime_value_mutator(|mut mutator| {
                 let mut spent_steps = 0;
                 while spent_steps < step_budget {
                     let remaining = step_budget - spent_steps;

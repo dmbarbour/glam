@@ -11,8 +11,8 @@ use std::sync::Arc;
 #[cfg(test)]
 use crate::core::RuntimeValueAccess;
 use crate::core::{
-    CoreValueFactory, DeferredValueId, EvaluationFailure, FunctionValue, LazyId, LazyValue,
-    ManagedLazyRoot, ManagedPromiseRoot, PromisedValue, Value,
+    DeferredValueId, EvaluationFailure, FunctionValue, LazyId, LazyValue, ManagedLazyRoot,
+    ManagedPromiseRoot, PromisedValue, Value,
 };
 use crate::evaluation::{EvaluationStepBudget, EvaluationValueAccess};
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
@@ -42,6 +42,8 @@ pub(crate) struct WhnfComputation {
 enum DurableWhnfCheckpoint {
     /// A rooted focus awaiting the first poll that promotes it.
     Seed { focus: RuntimeValueRoot },
+    /// A promise to follow, whose focus the first poll builds.
+    PromiseSeed { promise: ManagedPromiseRoot },
     ManagedDemand {
         state: ManagedWhnfRoot,
         observation: WhnfPollObservation,
@@ -616,7 +618,7 @@ impl WhnfComputation {
             DurableWhnfCheckpoint::ManagedDemand { observation, .. } => {
                 observation.application_frame_pending
             }
-            DurableWhnfCheckpoint::Seed { .. } => false,
+            DurableWhnfCheckpoint::Seed { .. } | DurableWhnfCheckpoint::PromiseSeed { .. } => false,
         }
     }
 
@@ -656,38 +658,32 @@ impl WhnfComputation {
         }
     }
 
-    pub(crate) fn from_promise_root(
-        values: &CoreValueFactory,
-        promise: &ManagedPromiseRoot,
-    ) -> Self {
-        let focus = values.construct_runtime_value_root(|access| {
-            Value::Promised(PromisedValue::from_root(promise, access))
-        });
-        Self::from_root(focus)
+    pub(crate) fn from_promise_root(promise: &ManagedPromiseRoot) -> Self {
+        Self {
+            checkpoint: DurableWhnfCheckpoint::PromiseSeed {
+                promise: promise.clone(),
+            },
+        }
     }
 
     pub(crate) fn runtime_id(&self) -> crate::runtime::EvaluationRuntimeId {
         match &self.checkpoint {
             DurableWhnfCheckpoint::Seed { focus, .. } => focus.runtime_id(),
+            DurableWhnfCheckpoint::PromiseSeed { promise } => promise.runtime_id(),
             DurableWhnfCheckpoint::ManagedDemand { state, .. } => state.runtime_id(),
         }
     }
 
     fn promote_seed_in(&mut self, access: &EvaluationValueAccess<'_>) {
-        let work = match &self.checkpoint {
-            DurableWhnfCheckpoint::Seed { focus } => Some(RegionalWhnfWork::from_parts(
-                access,
-                access.clone_root(focus),
-                Vec::new(),
-                BTreeSet::new(),
-                None,
-                None,
-            )),
-            DurableWhnfCheckpoint::ManagedDemand { .. } => None,
+        let focus = match &self.checkpoint {
+            DurableWhnfCheckpoint::Seed { focus } => access.clone_root(focus),
+            DurableWhnfCheckpoint::PromiseSeed { promise } => {
+                Value::Promised(PromisedValue::from_root(promise, access.values()))
+            }
+            DurableWhnfCheckpoint::ManagedDemand { .. } => return,
         };
-        let Some(work) = work else {
-            return;
-        };
+        let work =
+            RegionalWhnfWork::from_parts(access, focus, Vec::new(), BTreeSet::new(), None, None);
         let state = ManagedWhnfRoot::from_regional_in(access, work)
             .expect("canonical WHNF state must fit its reviewed managed slot");
         let prior = std::mem::replace(

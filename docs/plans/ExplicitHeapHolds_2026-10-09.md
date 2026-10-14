@@ -682,6 +682,20 @@ route's last demand lease under the mutation gate, and a retirement that
 dropped one under the coordinator lock (`route-leases-drop-outside-locks`,
 `ec18f579`).
 
+Landed 2026-10-14. The poll context lends its quantum's access
+(`EvaluationPollContext::with_runtime_access`) to its root helpers and to
+the reflection machine's continuation capture, specialization input,
+isolated-search result and store edits; the store journal gained `_in`
+forms of its writes, and `TaskHalt` a `root_in`, so a poll roots a
+failure before `finish` or a block takes it. `interpret_poll` takes a
+closure that roots a failure through its caller's access. A promise
+follower's `WhnfComputation` keeps the promise root and builds its focus
+in its first poll's access, which also saves a root per follower.
+Re-probed, the workspace tests nested 11 boundaries, then none; Glam's
+mutator entry became `with_runtime_value_mutator` on `Heap::mutate`, and
+glam-gc lost `mutate_recursive` with its test. Instructions -0.35% to
++0.1%; recursive entries fell to 9 to 15 a run outside one per definition.
+
 ### Tests and enforcement (`gc-hold-tests`)
 
 Tests hold the heap as runtime code does: a test takes a mutator at its top

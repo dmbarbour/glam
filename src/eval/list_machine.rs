@@ -127,7 +127,7 @@ impl ListFrontMachine {
             };
             root.poll_in(&access, step_budget)
         });
-        interpret_durable_list_front(result, durable_context)
+        interpret_durable_list_front(result, poll_context, durable_context)
     }
 
     fn promote_in(&mut self, access: &EvaluationValueAccess<'_>) {
@@ -453,13 +453,16 @@ impl ManagedListFrontRoot {
 
 fn interpret_durable_list_front(
     result: DurableListFrontPoll,
+    poll_context: &EvaluationPollContext,
     context: &EvalContext,
 ) -> ListFrontPoll {
     match result {
         DurableListFrontPoll::Ready(value) => ListFrontPoll::Ready(value),
         DurableListFrontPoll::Boundary(request) => {
             let RegionalBoundaryRequest::Deferred(deferred) = request;
-            match interpret_whnf_poll(WhnfPoll::Deferred(deferred), context) {
+            match interpret_whnf_poll(WhnfPoll::Deferred(deferred), context, |failure| {
+                poll_context.root_failure(failure)
+            }) {
                 WhnfOwnerPoll::Pending(dependency) => ListFrontPoll::Pending(dependency),
                 WhnfOwnerPoll::Yielded => ListFrontPoll::Yielded,
                 WhnfOwnerPoll::Failed(failure) => ListFrontPoll::Failed(failure),

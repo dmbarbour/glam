@@ -184,7 +184,7 @@ fn run_evaluation_worker(inner: &EvaluationExecutorInner) {
         // A busy run holds the thread's mutator: its polls borrow it and each
         // quantum boundary suspends it. An idle worker leaves the heap, and
         // lets go of its value domain, before it waits (`driver-mutator`).
-        let idle = values.with_recursive_runtime_value_mutator(|mut mutator| {
+        let idle = values.with_runtime_value_mutator(|mut mutator| {
             loop {
                 if inner.stopping.load(Ordering::Acquire) || coordinator.runtime_poison_marked() {
                     return None;

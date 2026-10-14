@@ -648,31 +648,38 @@ impl CoreValueFactory {
         })
     }
 
-    /// Runs `operation` as a boundary of its own: with access lent by a
-    /// mutator it takes for this runtime, or nested inside another entry for
-    /// it (`driver-mutator`). Public operations use it; no client code may
-    /// run inside.
+    /// Runs `operation` as a boundary of its own, with access lent by the
+    /// thread's mutator for this runtime (`no-recursive-heap-entries`).
+    /// Public operations use it; no client code may run inside.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this thread already has a heap entry: a caller that holds
+    /// access passes it instead.
     pub(crate) fn with_boundary_access<R>(
         &self,
         operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,
     ) -> R {
-        self.with_recursive_runtime_value_mutator(|mutator| mutator.with_access(operation))
+        self.with_runtime_value_mutator(|mutator| mutator.with_access(operation))
     }
 
-    /// Lends this thread's mutator for this runtime's heap to `operation`,
-    /// which borrows value access from it instead of entering the heap.
-    /// Inside another access it is a recursive entry that cannot suspend
-    /// (`glam_gc::Heap::mutate_recursive`, a migration aid until every
-    /// holder is its thread's outer entry).
+    /// Takes this thread's mutator for this runtime's heap and lends it to
+    /// `operation`, which borrows value access from it instead of entering
+    /// the heap. A driver or a public boundary takes it, outside every
+    /// other heap entry or inside a suspension.
     ///
     /// Nothing under the mutator may wait on another thread or call out to
-    /// a host: a release point there panics. Such work suspends the mutator
-    /// or runs after it (`EvaluationPollContext::after_admission`).
-    pub(crate) fn with_recursive_runtime_value_mutator<R>(
+    /// a host: such work suspends the mutator or runs after it
+    /// (`EvaluationPollContext::after_admission`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if this thread already has a heap entry.
+    pub(crate) fn with_runtime_value_mutator<R>(
         &self,
         operation: impl for<'lend, 'mu> FnOnce(RuntimeValueMutator<'lend, 'mu>) -> R,
     ) -> R {
-        self.domain.heap.mutate_recursive(|mutator| {
+        self.domain.heap.mutate(|mutator| {
             operation(RuntimeValueMutator {
                 values: self,
                 mutator,

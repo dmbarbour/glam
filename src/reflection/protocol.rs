@@ -523,6 +523,21 @@ impl TaskHalt {
         Self(TaskHaltKind::Failure(TaskFailure::Rooted(failure)))
     }
 
+    /// Roots an edge-free failure through `access`, as
+    /// [`Self::root_for_values`] does for a caller that holds no access.
+    pub(super) fn root_in(self, access: &RuntimeValueAccess<'_>) -> Self {
+        match self.0 {
+            TaskHaltKind::Failure(TaskFailure::EdgeFree(failure)) => {
+                Self::rooted_failure(access.root_runtime_failure(failure))
+            }
+            TaskHaltKind::Failure(failure @ TaskFailure::Rooted(_)) => {
+                debug_assert_eq!(failure.runtime_id(), Some(access.runtime_id()));
+                Self(TaskHaltKind::Failure(failure))
+            }
+            TaskHaltKind::Panicked(report) => Self::panicked(report),
+        }
+    }
+
     pub(super) fn root_for_values(self, values: &CoreValueFactory) -> Self {
         match self.0 {
             TaskHaltKind::Failure(TaskFailure::EdgeFree(failure)) => {
@@ -579,7 +594,8 @@ impl TaskHalt {
                 let failure = Arc::new(failure.into_failure().with_context_in(access, context));
                 match observer {
                     Some(observer) => {
-                        Self::rooted_failure(RuntimeFailureRoot::from_observer(&observer, failure))
+                        debug_assert_eq!(observer.runtime_id(), access.runtime_id());
+                        Self::rooted_failure(access.root_runtime_failure(failure))
                     }
                     None => Self::failure(failure),
                 }
@@ -607,12 +623,12 @@ impl TaskHalt {
                     .get()
             ));
         }
-        values.core().with_runtime_value_access(|access| {
+        values.core().with_boundary_access(|access| {
             self.with_core_context_in(
                 &access,
                 context.into_runtime_root().clone_core_with(&access),
             )
-            .root_for_values(values.core())
+            .root_in(&access)
         })
     }
 

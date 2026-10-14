@@ -1963,7 +1963,7 @@ mod tests {
 
         values.core().with_runtime_value_access(|access| {
             access.assert_same_representation_for_test(
-                &values.clone_core(&encoded).unwrap(),
+                &encoded.clone_core_with(&access).unwrap(),
                 &access.key_value(&keys::ABANDONED),
             );
         });
@@ -1980,7 +1980,7 @@ mod tests {
         let exited = task_status_public_value(&values, EvaluationTaskStatus::Exited);
         values.core().with_runtime_value_access(|access| {
             access.assert_same_representation_for_test(
-                &values.clone_core(&exited).unwrap(),
+                &exited.clone_core_with(&access).unwrap(),
                 &access.key_value(&keys::EXITED),
             );
         });
@@ -2003,7 +2003,7 @@ mod tests {
             panic!("a killed status decodes as killed")
         };
         values.core().with_runtime_value_access(|access| {
-            let CoreValue::Dict(diagnostic) = values.clone_core(&diagnostic).unwrap() else {
+            let CoreValue::Dict(diagnostic) = diagnostic.clone_core_with(&access).unwrap() else {
                 panic!("a kill diagnostic is a dictionary")
             };
             let Some(CoreValue::Dict(message)) = diagnostic.get(&*keys::MSG) else {
@@ -2029,7 +2029,7 @@ mod tests {
         );
         values.core().with_runtime_value_access(|access| {
             access.assert_same_representation_for_test(
-                &values.clone_core(&panicked).unwrap(),
+                &panicked.clone_core_with(&access).unwrap(),
                 &access.key_value(&keys::PANICKED),
             );
         });
@@ -2096,7 +2096,7 @@ mod tests {
         assert_eq!(updates.len(), 1);
         values.with_runtime_value_access(|access| {
             access.assert_same_representation_for_test(
-                &public_values.clone_core(&updates[0]).unwrap(),
+                &updates[0].clone_core_with(&access).unwrap(),
                 &access.key_value(&keys::BLOCKED),
             );
         });

@@ -386,7 +386,7 @@ impl KeyConversionMachine {
             };
             root.poll_key_in(&access, step_budget)
         });
-        interpret_durable_conversion(result, durable_context)
+        interpret_durable_conversion(result, poll_context, durable_context)
     }
 
     fn promote_in(&mut self, access: &EvaluationValueAccess<'_>) {
@@ -436,7 +436,7 @@ impl KeyListMachine {
             };
             root.poll_list_in(&access, step_budget)
         });
-        interpret_durable_conversion(result, durable_context)
+        interpret_durable_conversion(result, poll_context, durable_context)
     }
 
     fn promote_in(&mut self, access: &EvaluationValueAccess<'_>) {
@@ -986,13 +986,16 @@ fn poll_regional_whnf(
 
 fn interpret_durable_conversion<T>(
     result: DurableConversionPoll<T>,
+    poll_context: &EvaluationPollContext,
     context: &EvalContext,
 ) -> ConversionPoll<T> {
     match result {
         DurableConversionPoll::Ready(value) => ConversionPoll::Ready(value),
         DurableConversionPoll::Boundary(request) => {
             let RegionalBoundaryRequest::Deferred(deferred) = request;
-            match interpret_whnf_poll(WhnfPoll::Deferred(deferred), context) {
+            match interpret_whnf_poll(WhnfPoll::Deferred(deferred), context, |failure| {
+                poll_context.root_failure(failure)
+            }) {
                 WhnfOwnerPoll::Pending(dependency) => ConversionPoll::Pending(dependency),
                 WhnfOwnerPoll::Yielded => ConversionPoll::Yielded,
                 WhnfOwnerPoll::Failed(failure) => ConversionPoll::Failed(failure),

@@ -980,6 +980,7 @@ impl LazyTaskMachine {
                     Err(request) => match interpret_whnf_poll(
                         super::whnf::WhnfPoll::Deferred(request),
                         context.context(),
+                        |failure| context.root_failure(failure),
                     ) {
                         WhnfOwnerPoll::Pending(dependency) => {
                             EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
@@ -1034,6 +1035,7 @@ impl LazyTaskMachine {
                     Err(request) => interpret_whnf_poll(
                         super::whnf::WhnfPoll::Deferred(request),
                         durable_context,
+                        |failure| context.root_failure(failure),
                     ),
                 }
             }
@@ -1207,7 +1209,9 @@ impl LazyTaskMachine {
                     Err(deferred) => deferred,
                 };
                 let poll = super::whnf::WhnfPoll::Deferred(deferred);
-                match interpret_whnf_poll(poll, context.context()) {
+                match interpret_whnf_poll(poll, context.context(), |failure| {
+                    context.root_failure(failure)
+                }) {
                     WhnfOwnerPoll::Pending(dependency) => {
                         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                             dependency: Some(dependency),
@@ -1291,7 +1295,9 @@ impl LazyTaskMachine {
                     Err(deferred) => deferred,
                 };
                 let poll = super::whnf::WhnfPoll::Deferred(deferred);
-                match interpret_whnf_poll(poll, context.context()) {
+                match interpret_whnf_poll(poll, context.context(), |failure| {
+                    context.root_failure(failure)
+                }) {
                     WhnfOwnerPoll::Pending(dependency) => {
                         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                             dependency: Some(dependency),
@@ -1397,7 +1403,9 @@ impl LazyTaskMachine {
                     Err(deferred) => deferred,
                 };
                 let poll = super::whnf::WhnfPoll::Deferred(deferred);
-                match interpret_whnf_poll(poll, context.context()) {
+                match interpret_whnf_poll(poll, context.context(), |failure| {
+                    context.root_failure(failure)
+                }) {
                     WhnfOwnerPoll::Pending(dependency) => {
                         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                             dependency: Some(dependency),
@@ -1485,7 +1493,9 @@ impl LazyTaskMachine {
                     Err(deferred) => deferred,
                 };
                 let poll = super::whnf::WhnfPoll::Deferred(deferred);
-                match interpret_whnf_poll(poll, context.context()) {
+                match interpret_whnf_poll(poll, context.context(), |failure| {
+                    context.root_failure(failure)
+                }) {
                     WhnfOwnerPoll::Pending(dependency) => {
                         EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                             dependency: Some(dependency),
@@ -2011,10 +2021,7 @@ pub(super) fn promise_wait(
 ) -> Result<crate::evaluation::EvaluationWaitToken, Arc<str>> {
     context.promise_task(promise, |task_context, promise| {
         Box::new(PromiseFollower {
-            computation: crate::eval::whnf::WhnfComputation::from_promise_root(
-                task_context.values(),
-                &promise,
-            ),
+            computation: crate::eval::whnf::WhnfComputation::from_promise_root(&promise),
             context: task_context,
         })
     })
@@ -2026,10 +2033,7 @@ pub(crate) fn promise_root_wait(
 ) -> Result<crate::evaluation::EvaluationWaitToken, Arc<str>> {
     context.promise_root_task(promise, |task_context, promise| {
         Box::new(PromiseFollower {
-            computation: super::whnf::WhnfComputation::from_promise_root(
-                task_context.values(),
-                &promise,
-            ),
+            computation: super::whnf::WhnfComputation::from_promise_root(&promise),
             context: task_context,
         })
     })
@@ -2237,10 +2241,7 @@ mod ownership_tests {
         });
         let mut follower = PromiseFollower {
             context: (*context).clone(),
-            computation: crate::eval::whnf::WhnfComputation::from_promise_root(
-                context.values(),
-                &promise_root,
-            ),
+            computation: crate::eval::whnf::WhnfComputation::from_promise_root(&promise_root),
         };
         let mut poll_context = crate::evaluation::EvaluationPollContext::for_context(&context);
 

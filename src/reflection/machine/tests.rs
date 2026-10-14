@@ -2835,13 +2835,18 @@ fn delivery_selects_reset_or_delimiter_only_after_stack_decoding() {
             Arc::new(TestHost::with_values(values.clone())),
         )
         .expect("delivery control fixture should construct");
-        let continuation = task
-            .capture_continuation(CapturedContinuation {
-                sequence: Vec::new(),
-                delimiters: Vec::new(),
-                reset_frames: Vec::new(),
-            })
-            .expect("fixture continuation should allocate");
+        let eval_context = task.eval_context.clone();
+        let continuation = EvaluationPollContext::quantum_for_context(&eval_context, |context| {
+            task.capture_continuation(
+                context,
+                CapturedContinuation {
+                    sequence: Vec::new(),
+                    delimiters: Vec::new(),
+                    reset_frames: Vec::new(),
+                },
+            )
+        })
+        .expect("fixture continuation should allocate");
         let mut branch = task
             .execution
             .work
@@ -3604,11 +3609,12 @@ fn terminal_failure_poll_preserves_its_root_until_the_poll_is_retired() {
         Arc::new(TestHost::with_values(assembler.core_values())),
     )
     .expect("terminal-root fixture should construct");
-    assembler.core_values().with_runtime_value_access(|access| {
-        let error = TaskHalt::failure(Arc::new(EvaluationFailure::emission_in(&access, emission)));
-        assert!(error.failure_root().is_none());
-        task.finish(TaskTerminal::Failed(error));
+    // A poll roots its failure through its own access before finishing.
+    let error = assembler.core_values().with_boundary_access(|access| {
+        TaskHalt::failure(Arc::new(EvaluationFailure::emission_in(&access, emission)))
+            .root_in(&access)
     });
+    task.finish(TaskTerminal::Failed(error));
     let poll = task
         .terminal
         .as_ref()
@@ -3640,18 +3646,20 @@ fn blocked_failure_poll_preserves_its_root_after_the_block_is_retired() {
     let values = Values::from_core_factory(core.clone());
     let domain = EffectTokenDomain::new(&values);
     let (emission, retained) = retained_machine_value(&values, &domain);
-    let blocked = core.with_runtime_value_access(|access| {
-        let error = TaskHalt::failure(Arc::new(EvaluationFailure::emission_in(&access, emission)));
-        BlockedExecution::<TestEffects>::evaluation_error(
-            error,
-            RetryWake {
-                observed_generation: 1,
-                validation: None,
-                action: WakeAction::RestartSearch,
-            },
-            &core,
-        )
+    // A poll roots its failure through its own access before blocking.
+    let error = core.with_boundary_access(|access| {
+        TaskHalt::failure(Arc::new(EvaluationFailure::emission_in(&access, emission)))
+            .root_in(&access)
     });
+    let blocked = BlockedExecution::<TestEffects>::evaluation_error(
+        error,
+        RetryWake {
+            observed_generation: 1,
+            validation: None,
+            action: WakeAction::RestartSearch,
+        },
+        &core,
+    );
     let projected = blocked
         .error()
         .expect("blocked evaluation error should publish its retained root");

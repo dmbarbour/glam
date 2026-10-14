@@ -826,11 +826,10 @@ mod root_inventory_tests {
             let emission = public_values
                 .clone_core(&domain.issue(payload))
                 .expect("the lifecycle fixture value should belong to its runtime");
-            let failure = values.with_runtime_value_access(|access| {
-                RuntimeFailureRoot::new(
-                    &values,
-                    Arc::new(EvaluationFailure::emission_in(&access, emission)),
-                )
+            let failure = values.with_boundary_access(|access| {
+                access.root_runtime_failure(Arc::new(EvaluationFailure::emission_in(
+                    &access, emission,
+                )))
             });
             let status = if failed {
                 EvaluationTaskStatus::Failed(failure.clone())

@@ -195,7 +195,7 @@ impl EvaluatorStepContext<'_> {
 
     /// Compatibility failure publication for one bounded evaluator result.
     pub(crate) fn root_failure(&self, failure: Arc<EvaluationFailure>) -> RuntimeFailureRoot {
-        RuntimeFailureRoot::new(self.context.values(), failure)
+        self.with_value_access(|access| access.values().root_runtime_failure(failure))
     }
 
     /// Constructs a lazy with a temporary exact owner which survives every
@@ -420,7 +420,7 @@ impl EvaluationPollContext<'_, '_> {
         operation: impl FnOnce(&mut EvaluationPollContext<'_, '_>) -> R,
     ) -> R {
         let values = demand.values.clone();
-        let (result, deferred) = values.with_recursive_runtime_value_mutator(|mut mutator| {
+        let (result, deferred) = values.with_runtime_value_mutator(|mut mutator| {
             Self::quantum_under(&mut mutator, demand, operation)
         });
         run_deferred(deferred);
@@ -558,35 +558,37 @@ impl EvaluationPollContext<'_, '_> {
         result
     }
 
-    /// Test-fixture convenience for publishing a compatibility result without
-    /// pretending the poll context carries managed access.
+    /// Borrows this quantum's runtime access for `operation`. A fixture's
+    /// context without a mutator takes a boundary of its own.
+    pub(crate) fn with_runtime_access<R>(
+        &self,
+        operation: impl for<'scope> FnOnce(RuntimeValueAccess<'scope>) -> R,
+    ) -> R {
+        match &self.mutator {
+            Some(mutator) => mutator.with_access(operation),
+            None => self.shared.demand.values.with_boundary_access(operation),
+        }
+    }
+
+    /// Test-fixture convenience for publishing a compatibility result.
     #[cfg(test)]
     pub(crate) fn root_value(&self, value: Value) -> RuntimeValueRoot {
-        self.shared
-            .demand
-            .values
-            .construct_runtime_value_root(|_| value)
+        self.with_runtime_access(|access| access.root_runtime_value(value))
     }
 
     #[cfg(test)]
     pub(crate) fn root_unit(&self) -> RuntimeValueRoot {
-        self.shared
-            .demand
-            .values
-            .construct_runtime_value_root(|access| access.unit())
+        self.with_runtime_access(|access| access.root_runtime_value(access.unit()))
     }
 
     #[cfg(test)]
     pub(crate) fn duplicate_and_root_value(&self, value: &Value) -> RuntimeValueRoot {
-        self.shared
-            .demand
-            .values
-            .construct_runtime_value_root(|access| access.duplicate_value(value))
+        self.with_runtime_access(|access| access.root_runtime_value(access.duplicate_value(value)))
     }
 
     /// Roots a machine failure before it crosses the poll boundary.
     pub(crate) fn root_failure(&self, failure: Arc<EvaluationFailure>) -> RuntimeFailureRoot {
-        RuntimeFailureRoot::new(&self.shared.demand.values, failure)
+        self.with_runtime_access(|access| access.root_runtime_failure(failure))
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::core::{Builtin, Dict, Key, LazySource, PromisedValue, Value};
+use crate::core::{Builtin, CoreValueFactory, Dict, Key, LazySource, PromisedValue, Value};
 use crate::eval::test_support::{TestExpr, closed_function_value_in};
 use crate::evaluation::{EvalContext, EvaluationPollContext, OwnedEvalContext};
 use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};

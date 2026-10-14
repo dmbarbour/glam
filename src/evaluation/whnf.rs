@@ -33,7 +33,7 @@ pub(crate) fn poll_computation(
         !thread_has_runtime_value_access_for_test(),
         "WHNF orchestration must begin only after managed access closes"
     );
-    interpret_poll(poll, context)
+    interpret_poll(poll, context, |failure| poll_context.root_failure(failure))
 }
 
 /// How a lazy route's own WHNF checkpoint wants to proceed.
@@ -88,44 +88,49 @@ pub(crate) fn poll_lazy_checkpoint(
         Err((WhnfPoll::Deferred(WhnfDeferredRequest::Lazy(lazy)), tail)) => {
             LazyCheckpointPoll::Inline { lazy, tail }
         }
-        Err((poll, _)) => LazyCheckpointPoll::Owner(interpret_poll(poll, context)),
+        Err((poll, _)) => LazyCheckpointPoll::Owner(interpret_poll(poll, context, |failure| {
+            poll_context.root_failure(failure)
+        })),
     })
 }
 
-pub(crate) fn interpret_poll(poll: WhnfPoll, context: &EvalContext) -> WhnfOwnerPoll {
+/// Interprets a WHNF poll's orchestration request. `root_failure` roots a
+/// failure through the caller's access, since the caller holds the mutator.
+pub(crate) fn interpret_poll(
+    poll: WhnfPoll,
+    context: &EvalContext,
+    root_failure: impl FnOnce(std::sync::Arc<EvaluationFailure>) -> RuntimeFailureRoot,
+) -> WhnfOwnerPoll {
     match poll {
         WhnfPoll::Ready(value) => WhnfOwnerPoll::Ready(value),
         WhnfPoll::Deferred(WhnfDeferredRequest::Lazy(lazy)) => {
             match crate::eval::lazy_root_wait(context, &lazy) {
                 Ok(wait) => WhnfOwnerPoll::Pending(WorkDependency::Wait(wait)),
-                Err(error) => WhnfOwnerPoll::Failed(RuntimeFailureRoot::new(
-                    context.values(),
-                    std::sync::Arc::new(EvaluationFailure::message(error.as_ref())),
-                )),
+                Err(error) => WhnfOwnerPoll::Failed(root_failure(std::sync::Arc::new(
+                    EvaluationFailure::message(error.as_ref()),
+                ))),
             }
         }
         WhnfPoll::Deferred(WhnfDeferredRequest::Promise(promise)) => {
             if let Some(producer) = promise.producer()
                 && context.observes_as_task(producer.owner())
             {
-                return WhnfOwnerPoll::Failed(RuntimeFailureRoot::new(
-                    context.values(),
-                    std::sync::Arc::new(EvaluationFailure::message(format!(
+                return WhnfOwnerPoll::Failed(root_failure(std::sync::Arc::new(
+                    EvaluationFailure::message(format!(
                         "reflection promise {} recursively observed itself in task {}",
                         promise.id().get(),
                         producer.owner().get()
-                    ))),
-                ));
+                    )),
+                )));
             }
             WhnfOwnerPoll::Pending(WorkDependency::Promise(promise))
         }
         WhnfPoll::Deferred(WhnfDeferredRequest::PromiseFollow(promise)) => {
             match crate::eval::promise_root_wait(context, &promise) {
                 Ok(wait) => WhnfOwnerPoll::Pending(WorkDependency::Wait(wait)),
-                Err(error) => WhnfOwnerPoll::Failed(RuntimeFailureRoot::new(
-                    context.values(),
-                    std::sync::Arc::new(EvaluationFailure::message(error.as_ref())),
-                )),
+                Err(error) => WhnfOwnerPoll::Failed(root_failure(std::sync::Arc::new(
+                    EvaluationFailure::message(error.as_ref()),
+                ))),
             }
         }
         WhnfPoll::Yielded => WhnfOwnerPoll::Yielded,

@@ -392,21 +392,48 @@ impl StoreJournal {
         self.write_volume(self.snapshot.heap_volume, path, value);
     }
 
+    /// As [`Self::write`], for a caller that holds `access`.
+    pub(crate) fn write_in(
+        &mut self,
+        access: &RuntimeValueAccess<'_>,
+        path: Vec<Key>,
+        value: PublicValue,
+    ) {
+        self.write_volume_in(access, self.snapshot.heap_volume, path, value);
+    }
+
     pub(crate) fn write_volume(&mut self, volume: VolumeId, path: Vec<Key>, value: PublicValue) {
-        debug_assert_eq!(value.runtime_id(), self.snapshot.values.runtime_id());
-        let edit = StoreEdit::Set {
-            address: ConflictAddress::reflection(volume, ConflictPath::from_keys(path)),
-            value,
-        };
-        if let Some(view) = self.views.get(&volume).cloned() {
-            self.views
-                .insert_mut(volume, apply_edit(&self.snapshot.values, view, &edit));
-        }
-        self.edits.push(edit);
+        let edit = self.set_edit(volume, path, value);
+        let values = self.snapshot.values.clone();
+        self.push_edit(volume, edit, |view, edit| {
+            values.with_boundary_access(|access| apply_edit(&access, view, edit))
+        });
+    }
+
+    /// As [`Self::write_volume`], for a caller that holds `access`.
+    pub(crate) fn write_volume_in(
+        &mut self,
+        access: &RuntimeValueAccess<'_>,
+        volume: VolumeId,
+        path: Vec<Key>,
+        value: PublicValue,
+    ) {
+        let edit = self.set_edit(volume, path, value);
+        self.push_edit(volume, edit, |view, edit| apply_edit(access, view, edit));
     }
 
     pub(crate) fn rewrite(&mut self, path: Vec<Key>, updater: PublicValue) {
         self.rewrite_volume(self.snapshot.heap_volume, path, updater);
+    }
+
+    /// As [`Self::rewrite`], for a caller that holds `access`.
+    pub(crate) fn rewrite_in(
+        &mut self,
+        access: &RuntimeValueAccess<'_>,
+        path: Vec<Key>,
+        updater: PublicValue,
+    ) {
+        self.rewrite_volume_in(access, self.snapshot.heap_volume, path, updater);
     }
 
     pub(crate) fn rewrite_volume(
@@ -415,14 +442,51 @@ impl StoreJournal {
         path: Vec<Key>,
         updater: PublicValue,
     ) {
+        let edit = self.rewrite_edit(volume, path, updater);
+        let values = self.snapshot.values.clone();
+        self.push_edit(volume, edit, |view, edit| {
+            values.with_boundary_access(|access| apply_edit(&access, view, edit))
+        });
+    }
+
+    /// As [`Self::rewrite_volume`], for a caller that holds `access`.
+    pub(crate) fn rewrite_volume_in(
+        &mut self,
+        access: &RuntimeValueAccess<'_>,
+        volume: VolumeId,
+        path: Vec<Key>,
+        updater: PublicValue,
+    ) {
+        let edit = self.rewrite_edit(volume, path, updater);
+        self.push_edit(volume, edit, |view, edit| apply_edit(access, view, edit));
+    }
+
+    fn set_edit(&self, volume: VolumeId, path: Vec<Key>, value: PublicValue) -> StoreEdit {
+        debug_assert_eq!(value.runtime_id(), self.snapshot.values.runtime_id());
+        StoreEdit::Set {
+            address: ConflictAddress::reflection(volume, ConflictPath::from_keys(path)),
+            value,
+        }
+    }
+
+    fn rewrite_edit(&self, volume: VolumeId, path: Vec<Key>, updater: PublicValue) -> StoreEdit {
         debug_assert_eq!(updater.runtime_id(), self.snapshot.values.runtime_id());
-        let edit = StoreEdit::Rewrite {
+        StoreEdit::Rewrite {
             address: ConflictAddress::reflection(volume, ConflictPath::from_keys(path)),
             updater,
-        };
+        }
+    }
+
+    /// Records `edit`, applying it to the volume's view when the journal keeps
+    /// one.
+    fn push_edit(
+        &mut self,
+        volume: VolumeId,
+        edit: StoreEdit,
+        apply: impl FnOnce(PublicValue, &StoreEdit) -> PublicValue,
+    ) {
         if let Some(view) = self.views.get(&volume).cloned() {
-            self.views
-                .insert_mut(volume, apply_edit(&self.snapshot.values, view, &edit));
+            self.views.insert_mut(volume, apply(view, &edit));
         }
         self.edits.push(edit);
     }
@@ -624,7 +688,9 @@ impl ReflectionStore {
         {
             journal.views.clone()
         } else {
-            apply_edits(&self.values, self.roots.clone(), &journal.edits)
+            self.values.with_boundary_access(|access| {
+                apply_edits(&access, self.roots.clone(), &journal.edits)
+            })
         };
         self.revision = self.revision.wrapping_add(1);
         for path in normalized_edit_paths(&journal.edits) {
@@ -684,7 +750,7 @@ fn normalized_edit_paths(edits: &[StoreEdit]) -> Vec<ConflictAddress> {
 }
 
 fn apply_edits(
-    values: &CoreValueFactory,
+    access: &RuntimeValueAccess<'_>,
     mut roots: RedBlackTreeMapSync<VolumeId, PublicValue>,
     edits: &[StoreEdit],
 ) -> RedBlackTreeMapSync<VolumeId, PublicValue> {
@@ -694,7 +760,7 @@ fn apply_edits(
             .get(&volume)
             .cloned()
             .expect("commit validates every edited volume before replay");
-        roots.insert_mut(volume, apply_edit(values, root, edit));
+        roots.insert_mut(volume, apply_edit(access, root, edit));
     }
     roots
 }
@@ -782,8 +848,8 @@ pub(crate) fn decode_query_state(
     ))
 }
 
-fn apply_edit(values: &CoreValueFactory, root: PublicValue, edit: &StoreEdit) -> PublicValue {
-    PublicValue::from_runtime_root(values.construct_runtime_value_root(|access| match edit {
+fn apply_edit(access: &RuntimeValueAccess<'_>, root: PublicValue, edit: &StoreEdit) -> PublicValue {
+    PublicValue::from_runtime_root(access.root_runtime_value(match edit {
         StoreEdit::Set { address, value } => {
             let (_, path) = address.reflection_parts();
             apply_value_at_path_in(

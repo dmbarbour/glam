@@ -72,19 +72,23 @@ control-flow overview.
   the work it polls. A suspension costs about two heap entries; let
   adjacent operations share one. Nested synchronous drivers do not run
   inside quanta; a test source that depends on an input reads it with
-  `promise_or_block_for_test` or runs as a host call. Code that may be a
-  thread's outermost heap entry takes access with
-  `CoreValueFactory::with_boundary_access` (or `Values::with_access`), which
-  takes a mutator or nests; `with_runtime_value_access` is for code under
-  one. `CountedCondvar`
+  `promise_or_block_for_test` or runs as a host call. A thread's outermost
+  heap entry is a boundary: a driver takes `with_runtime_value_mutator`, and
+  other code `CoreValueFactory::with_boundary_access` (or
+  `Values::with_access`). Neither nests: code that holds access or the
+  mutator passes it on (`_in` forms such as `StoreJournal::write_in` and
+  `TaskHalt::root_in`, or `EvaluationPollContext::with_runtime_access`)
+  instead of calling a boundary (`no-recursive-heap-entries`).
+  `with_runtime_value_access` is for code under a mutator until
+  `gc-hold-pass-access`. `CountedCondvar`
   waits, launchers and pressure servicing assert that the thread holds no
   mutator (`assert_outside_mutator`), so they run suspended. A forced collection inside a quantum reports an active
   mutator; probe for open value access with
   `thread_has_runtime_value_access_for_test` instead.
 - `glam-gc` also has owned mutators (`Heap::mutate`, `Mutator::suspend`,
   `GcRef`), which Glam adopts from `gc-hold-boundaries` on. `mutate` must
-  be the thread's outer entry (`mutate_recursive` is the migration aid),
-  and a held-region release point reached under an owned mutator panics:
+  be the thread's outer entry, and a held-region release point reached
+  under an owned mutator panics:
   convert such a point to a suspension or defer it past admission.
 - Every driver services collection pressure at each quantum boundary, with
   its mutator suspended. A waiting `collect_full` sets the heap's

@@ -517,13 +517,6 @@ the separate liveness and exactly-once obligations at each call site.
   thread's record panics: a release would end admission beneath the
   mutator's borrows, and doing nothing could leave a wait blocking a
   collection.
-- `Heap::mutate_recursive` is a migration aid with a distinct name. Outside
-  every entry it is `mutate`. Inside another entry for its heap it is a
-  recursive entry: it takes no admission, does not mark the record owned,
-  and its `suspend` panics before touching any state, so it never ends
-  admission it does not hold. A release point under it does nothing, as
-  under any recursive entry, since the region is then not the thread's only
-  active entry.
 - `Mutator::suspend` is a scoped safepoint. It refuses while a legacy access
   is open inside the mutator. It marks the record suspended, ends the entry
   (cache quiescence before the coordinator obligation, as at any outer

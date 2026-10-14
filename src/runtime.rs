@@ -1266,14 +1266,12 @@ mod tests {
             let admission = admission.clone();
             let values = values.clone();
             move || {
-                values.with_recursive_runtime_value_mutator(|_| {
+                values.with_runtime_value_mutator(|_| {
                     quantum_tx.send(()).unwrap();
                     boundary_rx.recv().unwrap();
                 });
                 admission.service_collection_pressure(&values);
-                values.with_recursive_runtime_value_mutator(|_| {
-                    values.completed_collection_epoch_for_test()
-                })
+                values.with_runtime_value_mutator(|_| values.completed_collection_epoch_for_test())
             }
         });
         quantum_rx.recv().unwrap();

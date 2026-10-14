@@ -472,6 +472,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
 
     fn capture_continuation(
         &mut self,
+        context: &EvaluationPollContext,
         continuation: CapturedContinuation,
     ) -> Result<RuntimeValueRoot, TaskHalt> {
         let id = self.next_continuation;
@@ -480,21 +481,18 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .checked_add(1)
             .ok_or_else(|| TaskHalt::new("reflection continuation IDs exhausted"))?;
         self.continuations.insert(ContinuationKey(id), continuation);
-        Ok(self
-            .eval_context
-            .values()
-            .construct_runtime_value_root(|access| {
-                request_function_in(
-                    access,
-                    self.tags.resume.clone(),
-                    3,
-                    vec![
-                        Value::Number(Number::from_u64(self.id.get())),
-                        Value::Number(Number::from_u64(id)),
-                    ],
-                    true,
-                )
-            }))
+        Ok(context.with_runtime_access(|access| {
+            access.root_runtime_value(request_function_in(
+                &access,
+                self.tags.resume.clone(),
+                3,
+                vec![
+                    Value::Number(Number::from_u64(self.id.get())),
+                    Value::Number(Number::from_u64(id)),
+                ],
+                true,
+            ))
+        }))
     }
 
     fn restart_fixpoint_at_scope(
@@ -539,7 +537,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
     /// and suspends it to wait or to settle (`driver-mutator`).
     pub(super) fn run(&mut self) -> Result<TaskOutcome, TaskHalt> {
         let values = self.eval_context.values().clone();
-        values.with_recursive_runtime_value_mutator(|mut mutator| loop {
+        values.with_runtime_value_mutator(|mut mutator| loop {
             match self.poll_under(&mut mutator, 256) {
                 EffectTaskPoll::Yielded => {}
                 EffectTaskPoll::Blocked(blocked) => {
@@ -592,9 +590,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                                 }) {
                                     continue;
                                 }
-                                let error = TaskHalt::new(
-                                    "synchronous reflection task has no runnable producer for its dependency",
-                                );
+                                let error = mutator.with_access(|access| {
+                                    TaskHalt::new(
+                                        "synchronous reflection task has no runnable producer for its dependency",
+                                    )
+                                    .root_in(&access)
+                                });
                                 mutator.suspend(|| self.finish(TaskTerminal::Failed(error.clone())));
                                 return Err(error);
                             }
@@ -664,7 +665,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 .as_ref()
                 .and_then(|dependency| self.eval_context.recursive_promise_dependency(dependency))
             {
-                let error = TaskHalt::new(error);
+                let error =
+                    context.with_runtime_access(|access| TaskHalt::new(error).root_in(&access));
                 self.finish(TaskTerminal::Failed(error.clone()));
                 return EffectTaskPoll::Failed(error);
             }
@@ -685,7 +687,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     if let Some(error) = blocked.dependency.as_ref().and_then(|dependency| {
                         self.eval_context.recursive_promise_dependency(dependency)
                     }) {
-                        let error = TaskHalt::new(error);
+                        let error = context
+                            .with_runtime_access(|access| TaskHalt::new(error).root_in(&access));
                         self.finish(TaskTerminal::Failed(error.clone()));
                         return EffectTaskPoll::Failed(error);
                     }
@@ -806,7 +809,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             return EffectTaskPoll::Exit(poll);
                         }
                         MachineStep::Terminal(terminal) => {
-                            self.finish(terminal);
+                            self.finish(rooted_terminal(context, terminal));
                             return self.terminal.as_ref().expect("terminal set above").poll();
                         }
                     },
@@ -924,7 +927,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     }
                 }
                 Ok(MachineStep::Terminal(terminal)) => {
-                    self.finish(terminal);
+                    self.finish(rooted_terminal(context, terminal));
                     return self.terminal.as_ref().expect("terminal set above").poll();
                 }
                 Ok(MachineStep::Exit(intent)) => {
@@ -972,6 +975,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         context: &mut EvaluationPollContext,
         error: TaskHalt,
     ) -> EffectTaskPoll {
+        let error = context.with_runtime_access(|access| error.root_in(&access));
         if let Some(retry) = self.retry_wake() {
             let blocked =
                 BlockedExecution::evaluation_error(error, retry, self.eval_context.values());
@@ -1065,11 +1069,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 step_budget,
             ) {
                 WhnfOwnerPoll::Ready(value) => {
-                    let values = Values::from_core_factory(self.eval_context.values().clone());
-                    SpecializationRequestInput::Value(EvaluatedValue::from_whnf(
-                        &values,
-                        PublicValue::from_runtime_root(value),
-                    ))
+                    SpecializationRequestInput::Value(context.with_runtime_access(|access| {
+                        EvaluatedValue::from_whnf_in(&access, PublicValue::from_runtime_root(value))
+                    }))
                 }
                 WhnfOwnerPoll::Pending(dependency) => {
                     return SpecializationStep::Blocked(specializing, dependency);
@@ -1346,20 +1348,22 @@ impl<S: TaskSpecialization> EffectTask<S> {
                                     );
                                 }
                             };
-                            let continuation =
-                                match self.capture_continuation(CapturedContinuation {
+                            let continuation = match self.capture_continuation(
+                                context,
+                                CapturedContinuation {
                                     sequence: std::mem::take(&mut branch.control.sequence),
                                     delimiters: Vec::new(),
                                     reset_frames: Vec::new(),
-                                }) {
-                                    Ok(continuation) => continuation,
-                                    Err(error) => {
-                                        return ControlStep::Failed(
-                                            ControlWork::poisoned(branch, scope_depth),
-                                            error,
-                                        );
-                                    }
-                                };
+                                },
+                            ) {
+                                Ok(continuation) => continuation,
+                                Err(error) => {
+                                    return ControlStep::Failed(
+                                        ControlWork::poisoned(branch, scope_depth),
+                                        error,
+                                    );
+                                }
+                            };
                             frames.push(ResetFrame {
                                 key,
                                 continuation,
@@ -1401,20 +1405,22 @@ impl<S: TaskSpecialization> EffectTask<S> {
                                 .unwrap_or(branch.control.delimiters.len());
                             let inner_delimiters =
                                 branch.control.delimiters.split_off(first_inner_delimiter);
-                            let continuation =
-                                match self.capture_continuation(CapturedContinuation {
+                            let continuation = match self.capture_continuation(
+                                context,
+                                CapturedContinuation {
                                     sequence: std::mem::take(&mut branch.control.sequence),
                                     delimiters: inner_delimiters,
                                     reset_frames: inner_reset_frames,
-                                }) {
-                                    Ok(continuation) => continuation,
-                                    Err(error) => {
-                                        return ControlStep::Failed(
-                                            ControlWork::poisoned(branch, scope_depth),
-                                            error,
-                                        );
-                                    }
-                                };
+                                },
+                            ) {
+                                Ok(continuation) => continuation,
+                                Err(error) => {
+                                    return ControlStep::Failed(
+                                        ControlWork::poisoned(branch, scope_depth),
+                                        error,
+                                    );
+                                }
+                            };
                             let state = context.evaluate(&self.eval_context, |evaluator| {
                                 evaluator.project_root(&branch.state, |access, state| {
                                     encode_reset_frames_in_state(
@@ -2046,16 +2052,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             StorePathOperation::HeapSet(value) => {
                 if let Some(transaction) = branch.transaction.as_mut() {
-                    transaction
-                        .store
-                        .write(path, PublicValue::from_runtime_root(value));
-                    return StatePathStep::Complete(
-                        self.eval_context
-                            .values()
-                            .with_runtime_value_access(|access| {
-                                MachineWork::deliver_unit(&access, branch, scope_depth)
-                            }),
-                    );
+                    context.with_runtime_access(|access| {
+                        transaction.store.write_in(
+                            &access,
+                            path,
+                            PublicValue::from_runtime_root(value),
+                        )
+                    });
+                    return StatePathStep::Complete(context.with_runtime_access(|access| {
+                        MachineWork::deliver_unit(&access, branch, scope_depth)
+                    }));
                 }
                 // One suspension covers the snapshot, the edit and the
                 // commit.
@@ -2072,16 +2078,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             StorePathOperation::HeapRewrite(updater) => {
                 if let Some(transaction) = branch.transaction.as_mut() {
-                    transaction
-                        .store
-                        .rewrite(path, PublicValue::from_runtime_root(updater));
-                    return StatePathStep::Complete(
-                        self.eval_context
-                            .values()
-                            .with_runtime_value_access(|access| {
-                                MachineWork::deliver_unit(&access, branch, scope_depth)
-                            }),
-                    );
+                    context.with_runtime_access(|access| {
+                        transaction.store.rewrite_in(
+                            &access,
+                            path,
+                            PublicValue::from_runtime_root(updater),
+                        )
+                    });
+                    return StatePathStep::Complete(context.with_runtime_access(|access| {
+                        MachineWork::deliver_unit(&access, branch, scope_depth)
+                    }));
                 }
                 // One suspension covers the snapshot, the edit and the
                 // commit.
@@ -2116,15 +2122,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         .with_runtime_value_access(|access| {
                             lazy_value_path_root(&access, &root.clone().into_runtime_root(), &path)
                         }),
-                    None => self
-                        .eval_context
-                        .values()
-                        .construct_runtime_value_root(|access| {
-                            Value::Lazy(LazyValue::error_in(
-                                access,
-                                format!("reflection volume {} has been revoked", volume.get()),
-                            ))
-                        }),
+                    None => context.with_runtime_access(|access| {
+                        access.root_runtime_value(Value::Lazy(LazyValue::error_in(
+                            &access,
+                            format!("reflection volume {} has been revoked", volume.get()),
+                        )))
+                    }),
                 };
                 return StatePathStep::Complete(MachineWork::deliver_root(
                     value,
@@ -2134,18 +2137,17 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             StorePathOperation::VolumeSet(volume, value) => {
                 if let Some(transaction) = branch.transaction.as_mut() {
-                    transaction.store.write_volume(
-                        volume,
-                        path,
-                        PublicValue::from_runtime_root(value),
-                    );
-                    return StatePathStep::Complete(
-                        self.eval_context
-                            .values()
-                            .with_runtime_value_access(|access| {
-                                MachineWork::deliver_unit(&access, branch, scope_depth)
-                            }),
-                    );
+                    context.with_runtime_access(|access| {
+                        transaction.store.write_volume_in(
+                            &access,
+                            volume,
+                            path,
+                            PublicValue::from_runtime_root(value),
+                        )
+                    });
+                    return StatePathStep::Complete(context.with_runtime_access(|access| {
+                        MachineWork::deliver_unit(&access, branch, scope_depth)
+                    }));
                 }
                 // One suspension covers the snapshot, the edit and the
                 // commit.
@@ -2162,18 +2164,17 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             StorePathOperation::VolumeRewrite(volume, updater) => {
                 if let Some(transaction) = branch.transaction.as_mut() {
-                    transaction.store.rewrite_volume(
-                        volume,
-                        path,
-                        PublicValue::from_runtime_root(updater),
-                    );
-                    return StatePathStep::Complete(
-                        self.eval_context
-                            .values()
-                            .with_runtime_value_access(|access| {
-                                MachineWork::deliver_unit(&access, branch, scope_depth)
-                            }),
-                    );
+                    context.with_runtime_access(|access| {
+                        transaction.store.rewrite_volume_in(
+                            &access,
+                            volume,
+                            path,
+                            PublicValue::from_runtime_root(updater),
+                        )
+                    });
+                    return StatePathStep::Complete(context.with_runtime_access(|access| {
+                        MachineWork::deliver_unit(&access, branch, scope_depth)
+                    }));
                 }
                 // One suspension covers the snapshot, the edit and the
                 // commit.
@@ -3116,7 +3117,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 ));
                 Ok(restarted
                     .map(|work| MachineStep::Control(Box::new(work)))
-                    .unwrap_or_else(|| self.advance_isolated_search()))
+                    .unwrap_or_else(|| self.advance_isolated_search(context)))
             }
             BranchOutcome::Fork(left, right) => {
                 let branch = self
@@ -3137,7 +3138,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 let transaction = Self::isolated_transaction(&mut failed);
                 self.search
                     .retain(IsolatedSearchBranch::failed(transaction));
-                Ok(self.advance_isolated_search())
+                Ok(self.advance_isolated_search(context))
             }
             BranchOutcome::Retry(mut failed) => {
                 if let Some(restarted) =
@@ -3171,7 +3172,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
     }
 
-    fn advance_isolated_search(&mut self) -> MachineStep<S> {
+    fn advance_isolated_search(&mut self, context: &EvaluationPollContext) -> MachineStep<S> {
         if let Some(branch) = self.search.next_alternative() {
             MachineStep::Continue(MachineWork::Drive {
                 branch,
@@ -3179,8 +3180,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
             })
         } else {
             self.search.finish();
-            let values = crate::api::Values::from_core_factory(self.eval_context.values().clone());
-            MachineStep::Terminal(TaskTerminal::Complete(values.unit()))
+            MachineStep::Terminal(TaskTerminal::Complete(context.with_runtime_access(
+                |access| PublicValue::from_runtime_root(access.root_runtime_value(access.unit())),
+            )))
         }
     }
 
@@ -3303,7 +3305,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 BlockedRetryPoll::Restarted
             }
             Some(ValidationResult::MissingVolume(volume)) => {
-                self.finish(TaskTerminal::Failed(missing_volume_error(volume)));
+                let error = context
+                    .with_runtime_access(|access| missing_volume_error(volume).root_in(&access));
+                self.finish(TaskTerminal::Failed(error));
                 BlockedRetryPoll::Terminal(
                     self.terminal.as_ref().expect("terminal set above").poll(),
                 )
@@ -3411,7 +3415,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             Some(ValidationResult::Conflict) => {}
             Some(ValidationResult::MissingVolume(volume)) => {
-                self.finish(TaskTerminal::Failed(missing_volume_error(volume)));
+                let error = context
+                    .with_runtime_access(|access| missing_volume_error(volume).root_in(&access));
+                self.finish(TaskTerminal::Failed(error));
                 return Some(self.terminal.as_ref().expect("terminal set above").poll());
             }
             Some(ValidationResult::Closed) => {
@@ -3578,6 +3584,17 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.blocked = None;
         self.exit = None;
         self.terminal = Some(terminal);
+    }
+}
+
+/// Roots a failed terminal through the poll's access, so `finish` takes no
+/// access of its own under the poll's mutator.
+fn rooted_terminal(context: &EvaluationPollContext, terminal: TaskTerminal) -> TaskTerminal {
+    match terminal {
+        TaskTerminal::Failed(error) => {
+            TaskTerminal::Failed(context.with_runtime_access(|access| error.root_in(&access)))
+        }
+        terminal => terminal,
     }
 }
 

@@ -450,62 +450,60 @@ impl EvaluationDemandState {
         };
         // The drain holds the thread's mutator; its polls borrow it, and its
         // waits and quantum boundaries suspend it (`driver-mutator`).
-        let quiescent = self
-            .values
-            .with_recursive_runtime_value_mutator(|mut mutator| {
-                loop {
-                    let claimed = loop {
-                        if self.is_closed() {
-                            return false;
-                        }
-                        // Read before claiming, so a task a worker requeues after
-                        // a failed claim changes the generation compared below.
-                        let generation = coordinator.work_generation();
-                        if let Some(claimed) = self.claim_ready_task(&coordinator) {
-                            break claimed;
-                        }
-                        // A probe acts as another worker would, releasing
-                        // work, so it runs with the drain's mutator suspended.
-                        #[cfg(test)]
-                        mutator.suspend(|| self.probe_drain(super::SessionDrainPoint::ClaimMissed));
-                        if self.task_is_running(&coordinator) {
-                            let changed = mutator.suspend(|| {
-                                coordinator.wait_for_change_for(
-                                    generation,
-                                    None,
-                                    CoordinatorWaiterClass::SessionDrain,
-                                )
-                            });
-                            if changed {
-                                coordinator.record_waiter_outcome(
-                                    CoordinatorWaiterClass::SessionDrain,
-                                    if coordinator.session_has_ready_task(self.id) {
-                                        CoordinatorWaiterOutcome::Productive
-                                    } else if !self.task_is_running(&coordinator) {
-                                        CoordinatorWaiterOutcome::Relevant
-                                    } else {
-                                        CoordinatorWaiterOutcome::Unrelated
-                                    },
-                                );
-                            }
-                            continue;
-                        }
-                        #[cfg(test)]
-                        mutator.suspend(|| {
-                            self.probe_drain(super::SessionDrainPoint::BeforeQuiescence);
+        let quiescent = self.values.with_runtime_value_mutator(|mut mutator| {
+            loop {
+                let claimed = loop {
+                    if self.is_closed() {
+                        return false;
+                    }
+                    // Read before claiming, so a task a worker requeues after
+                    // a failed claim changes the generation compared below.
+                    let generation = coordinator.work_generation();
+                    if let Some(claimed) = self.claim_ready_task(&coordinator) {
+                        break claimed;
+                    }
+                    // A probe acts as another worker would, releasing
+                    // work, so it runs with the drain's mutator suspended.
+                    #[cfg(test)]
+                    mutator.suspend(|| self.probe_drain(super::SessionDrainPoint::ClaimMissed));
+                    if self.task_is_running(&coordinator) {
+                        let changed = mutator.suspend(|| {
+                            coordinator.wait_for_change_for(
+                                generation,
+                                None,
+                                CoordinatorWaiterClass::SessionDrain,
+                            )
                         });
-                        // Any change since the claim attempt, such as a worker
-                        // requeueing or claiming a task between the checks above,
-                        // means the session may not be quiescent: look again.
-                        if coordinator.work_generation() != generation {
-                            continue;
+                        if changed {
+                            coordinator.record_waiter_outcome(
+                                CoordinatorWaiterClass::SessionDrain,
+                                if coordinator.session_has_ready_task(self.id) {
+                                    CoordinatorWaiterOutcome::Productive
+                                } else if !self.task_is_running(&coordinator) {
+                                    CoordinatorWaiterOutcome::Relevant
+                                } else {
+                                    CoordinatorWaiterOutcome::Unrelated
+                                },
+                            );
                         }
-                        return true;
-                    };
-                    let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
-                    claimed.poll_and_release(&mut mutator, &mut budget);
-                }
-            });
+                        continue;
+                    }
+                    #[cfg(test)]
+                    mutator.suspend(|| {
+                        self.probe_drain(super::SessionDrainPoint::BeforeQuiescence);
+                    });
+                    // Any change since the claim attempt, such as a worker
+                    // requeueing or claiming a task between the checks above,
+                    // means the session may not be quiescent: look again.
+                    if coordinator.work_generation() != generation {
+                        continue;
+                    }
+                    return true;
+                };
+                let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
+                claimed.poll_and_release(&mut mutator, &mut budget);
+            }
+        });
         if quiescent {
             self.session_run_report(&coordinator)
         } else {
@@ -628,18 +626,16 @@ pub(super) fn pump_demand(
     reservation_allowance: usize,
 ) -> EvaluationPumpOutcome {
     let mut reservation_allowance = reservation_allowance;
-    context
-        .values()
-        .with_recursive_runtime_value_mutator(|mut mutator| {
-            pump_demand_on_route(
-                &mut mutator,
-                coordinator,
-                context,
-                target,
-                &mut reservation_allowance,
-                &mut ExactDemandRoute::default(),
-            )
-        })
+    context.values().with_runtime_value_mutator(|mut mutator| {
+        pump_demand_on_route(
+            &mut mutator,
+            coordinator,
+            context,
+            target,
+            &mut reservation_allowance,
+            &mut ExactDemandRoute::default(),
+        )
+    })
 }
 
 /// Pumps work toward `target` under `mutator`, drawing whole poll quanta
@@ -1161,7 +1157,7 @@ impl EvaluationWorkCoordinator {
             .value_observer()
             .upgrade()
             .expect("claimed work must retain its value domain");
-        values.with_recursive_runtime_value_mutator(|mut mutator| {
+        values.with_runtime_value_mutator(|mut mutator| {
             let mut claimed = ClaimedTask::new(self.clone(), work);
             let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
             let polled = claimed.poll_under(&mut mutator, &mut budget);
@@ -1313,7 +1309,7 @@ impl EvaluationWorkCoordinator {
         self.value_observer()
             .upgrade()
             .expect("test work must retain its value domain")
-            .with_recursive_runtime_value_mutator(|mut mutator| operation(&mut mutator))
+            .with_runtime_value_mutator(|mut mutator| operation(&mut mutator))
     }
 
     pub(super) fn poll_runtime_work_bounded_for_test(
