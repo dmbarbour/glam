@@ -9,13 +9,43 @@ allocation-class cache landed (`perf-allocation-path`) and transient-root
 avoidance landed (`perf-transient-root-avoidance`, `2484ad2a`). Steps, in
 order: `gc-hold-api`, `gc-hold-boundaries` through its third slice,
 `gc-hold-transient-roots`, the rest of `gc-hold-boundaries`,
-`gc-hold-tests`, `gc-hold-entry-cost`, `gc-hold-suspension-review`,
+`gc-hold-outer-boundaries`, `gc-hold-tests`, `gc-hold-pass-access`,
+`gc-hold-entry-cost`, `gc-hold-suspension-review`,
 `gc-hold-thread-context`, then `gc-hold-values-api`; `gc-hold-class-cache`
 is narrowed to a measurement. The maintainer moved transient roots ahead of
 the remaining enforcement on 2026-10-13, once every poll lent its mutator,
 and on 2026-10-14 chose that drivers hold the mutator across quanta
-(`driver-mutator`) and added the entry-cost and `Values` steps. The Steps use the
-review's vocabulary: an owned `Mutator`, not a `Hold`.
+(`driver-mutator`), added the entry-cost and `Values` steps, and chose that
+no heap entry nests in the end (see "Decisions, 2026-10-14"). The Steps use
+the review's vocabulary: an owned `Mutator`, not a `Hold`.
+
+## Decisions, 2026-10-14
+
+- **No recursive heap entries in the end** (maintainer, agreeing to the
+  agent's proposal; `no-recursive-heap-entries`): glam-gc keeps `Heap::mutate`, outermost only, with
+  `Mutator::suspend` and `readmit`; the legacy `Heap::with_mutator`,
+  `Heap::mutate_recursive` and held regions go, with the thread record's
+  entry depth. Glam's boundaries (drivers, workers, the public `Values`
+  API, the compile entry) take the mutator, and reaching one under a
+  mutator is a bug. Everything inside takes its capability from its
+  caller: access for code that cannot suspend, `&mut RuntimeValueMutator`
+  for code that may. Reasons: a nested entry is a borrow the compiler
+  cannot see, guarded at a suspension only by a runtime panic; a view
+  cannot outlive the entry that made it, so code that opens its own access
+  must root what it returns; and every glam-gc entry path branches on outer
+  against recursive. Cost is not the reason: after `225775e3` the profiling
+  workloads make 17 to 23 recursive entries a run outside the per-definition
+  ones. Open: whether a plain `Values` handle nests inside a future client
+  scope, for `gc-hold-values-api`.
+- **Tests follow the runtime** (maintainer; `tests-follow-the-runtime`): tests hold the heap the way
+  runtime code does, except test-only hooks, and are fixed to the new
+  architecture instead of anchoring legacy or transitional paths. A test
+  that existed only for a retired mechanism retires with it.
+  `Heap::mutate_recursive` was a transition aid: it goes as early as is
+  safe, ahead of the test conversion.
+- **The gate re-entry check stays a debug panic** (maintainer).
+- **Release builds use one codegen unit** (maintainer,
+  `release-one-codegen-unit`).
 
 ## Decisions, 2026-10-12
 
@@ -400,7 +430,7 @@ aid, `Heap::mutate_recursive`, is `mutate` outside every entry and a
 recursive mutator that cannot suspend inside one. Distinct names show
 where a feature's transition has stabilized: a boundary moves from
 `mutate_recursive` to `mutate` once every caller takes its own mutator,
-and `gc-hold-tests` removes the aid with the legacy token.
+and `gc-hold-outer-boundaries` removes the aid.
 
 Slices, in order (2026-10-13):
 
@@ -625,12 +655,53 @@ Slices, in order (2026-10-13):
    23 recursive entries a run, except `chain` and `defs_unused`, which make
    about one per definition. Instructions -0.8% to 0.0% (one codegen unit).
 
+### Outer boundaries (`gc-hold-outer-boundaries`)
+
+Boundaries stop nesting, and `Heap::mutate_recursive` goes. Recorded
+2026-10-14 by logging each nested boundary with its backtrace across the
+workspace tests (2,794 nestings, at `225775e3`): production nests through a
+few helpers, each called where the caller already holds the mutator or an
+access:
+
+| Nested boundary | Production callers |
+| --- | --- |
+| `construct_runtime_value_root` | reflection store edits (`apply_edit`, 964), `capture_continuation`, `from_promise_root`, the poll context's `root_value`, `root_unit` and `duplicate_and_root_value` |
+| `RuntimeFailureRoot::new` | the poll context's and evaluator access's `root_failure` (about 460), `TaskHalt::root_for_values`, `from_observer`, `interpret_poll` |
+| `Values` methods | `specialization_step` (`from_whnf`, 895), `advance_isolated_search` (`unit`, 91) |
+
+Each gets a form that takes the caller's access, or the caller uses the
+access it holds. Tests that nest a boundary inside their own access do the
+same. Then Glam's drivers and boundaries take `Heap::mutate`, renamed to
+plain mutator entries (`with_recursive_runtime_value_mutator` becomes
+`with_runtime_value_mutator`), and glam-gc loses `mutate_recursive` and its
+tests. Legacy accesses (`with_runtime_value_access`) still nest inside a
+mutator until `gc-hold-pass-access`.
+
+Before this step, the same probe found a release that dropped a lazy
+route's last demand lease under the mutation gate, and a retirement that
+dropped one under the coordinator lock (`route-leases-drop-outside-locks`,
+`ec18f579`).
+
 ### Tests and enforcement (`gc-hold-tests`)
 
-Convert the test helpers, then remove the shim, so access without a
-mutator panics in every build. Retire held regions with it: Glam opens none
-since `gc-hold-quantum-mutator`, so `Heap::with_held_region`,
-`Heap::release_held_region` and their thread-cache support go.
+Tests hold the heap as runtime code does: a test takes a mutator at its top
+or calls production boundaries outside any access, and passes access down
+to the production functions it calls directly. Then the legacy outer entry
+goes: `Heap::with_mutator` panics outside an owned mutator, in every build,
+so every admission is a `Heap::mutate`. Glam-gc's own tests move to
+`Heap::mutate` too. Retire held regions with it: Glam opens none since
+`gc-hold-quantum-mutator`, so `Heap::with_held_region`,
+`Heap::release_held_region` and their thread-cache support go. Tests that
+exercised only implicit outer entries or held regions retire.
+
+### Passed access (`gc-hold-pass-access`)
+
+Added 2026-10-14 (`no-recursive-heap-entries`): interior code takes access
+or the mutator from its caller instead of opening a legacy access, about
+110 production `with_runtime_value_access` sites in 27 files on
+2026-10-14, with the test sites that remain. Then `Heap::with_mutator`
+goes, with the recursive entry's thread-record depth, so glam-gc has one
+entry path.
 
 ### Mutator entry cost (`gc-hold-entry-cost`)
 
@@ -640,8 +711,8 @@ resuming a mutator cheaper. Measured that day in a loop benchmark: an outer
 579, a legacy recursive entry 255. The outer entry's cost is spread out:
 ending the thread entry 90, activating it 64, finding and preparing the
 thread record 78, three layers of admission 107, merging region metrics 23,
-the admission gate's exit 21. After `gc-hold-tests`, which removes the
-legacy entry paths this one shares code with.
+the admission gate's exit 21. After `gc-hold-pass-access`, which removes the
+legacy and recursive entry paths this one shares code with.
 
 ### Class cache (`gc-hold-class-cache`), narrowed
 
@@ -850,7 +921,10 @@ code, but brief.
 With one heap per thread, Glam's call chains could find their runtime from
 the mutator instead of passing value factories down (maintainer,
 2026-10-09). Investigate the trade: a thread-local lookup against passed
-references, and which same-runtime validations it makes redundant.
+references, and which same-runtime validations it makes redundant. After
+`gc-hold-pass-access`, code that holds an access already reaches its
+runtime through it (`access.values()`), so what remains is code that holds
+none.
 
 ### The public value API (`gc-hold-values-api`)
 

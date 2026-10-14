@@ -199,6 +199,19 @@ maps the short names used here to file names.
 - **Recorded in:** explicit heap holds plan, `gc-hold-boundaries` fourth
   slice.
 
+### Tests follow the runtime, not legacy paths
+`tests-follow-the-runtime` · 2026-10-14 · maintainer · accepted
+- **Context:** tests that hold the heap differently from production keep
+  legacy and transitional entry paths alive and test something production
+  no longer does.
+- **Decision:** tests reflect runtime behavior where feasible; test-only
+  hooks are the exception. When the architecture moves, the tests move with
+  it, and a test that existed only for a retired mechanism retires with it.
+  Transition aids go as early as is safe rather than staying for tests.
+- **Consequences:** `Heap::mutate_recursive` goes before the test
+  conversion (`gc-hold-outer-boundaries`).
+- **Recorded in:** explicit heap holds plan, "Decisions, 2026-10-14".
+
 ### Retired plans and reviews are deleted, not archived
 `retired-history-is-deleted` · 2026-10-05 · maintainer · accepted
 - **Context:** retirable history docs add search noise, and several state
@@ -2105,6 +2118,30 @@ maps the short names used here to file names.
 - **Rule lives in:** `docs/architecture/evaluation.md`;
   `agent_context/evaluation.md` "Values and Forcing".
 - **Recorded in:** explicit heap holds plan, `gc-hold-lend-mutator`.
+
+### No heap entry nests; capabilities pass from caller to callee
+`no-recursive-heap-entries` · 2026-10-14 · maintainer · accepted
+- **Context:** after `driver-mutator`, most heap entries borrow the
+  driver's mutator, but code can still open a legacy access or take a
+  boundary's mutator inside another entry, as a recursive entry. glam-gc
+  supports that with an entry depth in each thread record and an
+  outer-or-recursive branch in every entry path.
+- **Decision:** in the end state glam-gc has one entry, `Heap::mutate`,
+  outermost only, with `Mutator::suspend` and `readmit`. Glam's boundaries
+  take the mutator, and reaching one under a mutator is a bug. Interior
+  code takes access, which cannot suspend, or `&mut RuntimeValueMutator`,
+  which may, from its caller. The transition aid `Heap::mutate_recursive`
+  goes first, then the legacy outer entry, then the legacy recursive one.
+- **Consequences:** suspension safety and heap use show in signatures and
+  are checked by the borrow checker, where a nested entry relied on a
+  runtime panic in `Mutator::suspend`. Values can travel between steps as
+  views, which a nested entry would have to root. Entry cost was not the
+  reason: the profiling workloads make 17 to 23 recursive entries a run
+  outside one per definition. Whether a plain `Values` handle nests inside
+  a client scope is left to `gc-hold-values-api`.
+- **Rule lives in:** `agent_context/evaluation.md` "Values and Forcing",
+  once the steps land.
+- **Recorded in:** explicit heap holds plan, "Decisions, 2026-10-14".
 
 ### Drivers hold the thread's mutator across quanta
 `driver-mutator` · 2026-10-14 · maintainer · accepted
