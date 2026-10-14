@@ -9,10 +9,12 @@ allocation-class cache landed (`perf-allocation-path`) and transient-root
 avoidance landed (`perf-transient-root-avoidance`, `2484ad2a`). Steps, in
 order: `gc-hold-api`, `gc-hold-boundaries` through its third slice,
 `gc-hold-transient-roots`, the rest of `gc-hold-boundaries`,
-`gc-hold-tests`, `gc-hold-suspension-review`, then
-`gc-hold-thread-context`; `gc-hold-class-cache` is narrowed to a
-measurement. The maintainer moved transient roots ahead of the remaining
-enforcement on 2026-10-13, once every poll lent its mutator. The Steps use the
+`gc-hold-tests`, `gc-hold-entry-cost`, `gc-hold-suspension-review`,
+`gc-hold-thread-context`, then `gc-hold-values-api`; `gc-hold-class-cache`
+is narrowed to a measurement. The maintainer moved transient roots ahead of
+the remaining enforcement on 2026-10-13, once every poll lent its mutator,
+and on 2026-10-14 chose that drivers hold the mutator across quanta
+(`driver-mutator`) and added the entry-cost and `Values` steps. The Steps use the
 review's vocabulary: an owned `Mutator`, not a `Hold`.
 
 ## Decisions, 2026-10-12
@@ -480,10 +482,69 @@ Slices, in order (2026-10-13):
 4. The public API, the compile entry, the remaining waits and the
    production nesting sites.
 
+   Inventory (2026-10-14, at `18fd1696`): the public-API integration tests,
+   probed for heap entries outside any mutator, reached 89 sites. The
+   public API about 56 (`Values` about 40 in `api/value.rs`, `Assembler`
+   7, the evaluator 5, diagnostics 2, and their helpers in `core.rs` and
+   `diagnostic.rs`); the compile entry about 17 (module lowering 7, source
+   parsing 5, the macro runner and effects 4, the compiler 1); and 14 in
+   work that runs while a quantum is suspended (specialization requests 10,
+   host calls 2, terminal publication 1, one reflection-machine helper),
+   which must take a mutator of their own once access requires one. Glam
+   no longer opens held regions, so `release_held_region` in Glam only
+   panics under an owned mutator: an assertion in all but name.
+
+   Measured the same day with a probe, reverted, across the profiling
+   workloads: single-threaded runs never block on a condvar and collect at
+   most twice; plain evaluation (`countdown`, `sum`, lists, literal loops)
+   suspends nowhere, so all of a run's 193 to 196 suspensions are the
+   compile pipeline's (`TaskHost` validation in macro expansion 136 to
+   167, releasing pumped work 47 to 77). A `.r ()` step polls 5.1 quanta
+   and suspends 5.1 times, every one releasing pumped work. With four
+   workers (`chain_w4_800`), threads waited 5,109 times against 1,408
+   quanta, idle each time. An outer entry costs about 476 instructions, a
+   suspension and resumption 579, a legacy recursive entry 255; with
+   quanta of about 232 K instructions (`countdown_800`), entries and
+   suspensions are 0.1 to 0.5% of plain workloads, 1.3% of `minimal` and of
+   a `.r ()` step.
+
+   Decided (maintainer, 2026-10-14): drivers hold the mutator across quanta
+   (`driver-mutator`). A driver takes the thread's mutator at its outermost
+   boundary, the quanta it runs borrow it as pumped work already does
+   (`EvaluationPollContext::nested_quantum`), waits suspend it before taking
+   their locks, and a quantum boundary suspends it only to join a requested
+   collection, so a collection still waits for at most one quantum. The
+   entry cost is the lesser gain: threading the mutator lets views rather
+   than roots carry values between steps, and `&` against `&mut` marks
+   which code may suspend, a local capability for reasoning about
+   suspension. Quanta may grow: 64 steps is fine-grained, small only while
+   steps cost so many instructions. Rejected: driving without a mutator,
+   with access phases taking short ones.
+
+   Order: drivers (the worker loop, the client demand driver, the pump
+   entry points and the coordinator's claimed polls); the compile entry,
+   suspending around macro runs; the public API, one mutator per method
+   (`mutate_recursive` while tests nest); the remaining waits as suspends
+   above their locks, with `release_held_region` an assertion; the nesting
+   sites; then the work that runs suspended.
+
 ### Tests and enforcement (`gc-hold-tests`)
 
 Convert the test helpers, then remove the shim, so access without a
-mutator panics in every build.
+mutator panics in every build. Retire held regions with it: Glam opens none
+since `gc-hold-quantum-mutator`, so `Heap::with_held_region`,
+`Heap::release_held_region` and their thread-cache support go.
+
+### Mutator entry cost (`gc-hold-entry-cost`)
+
+Added by the maintainer on 2026-10-14: make taking, ending, suspending and
+resuming a mutator cheaper. Measured that day in a loop benchmark: an outer
+`Heap::mutate` costs about 476 instructions, a suspension and resumption
+579, a legacy recursive entry 255. The outer entry's cost is spread out:
+ending the thread entry 90, activating it 64, finding and preparing the
+thread record 78, three layers of admission 107, merging region metrics 23,
+the admission gate's exit 21. After `gc-hold-tests`, which removes the
+legacy entry paths this one shares code with.
 
 ### Class cache (`gc-hold-class-cache`), narrowed
 
@@ -679,9 +740,24 @@ that wait inside polls. For each, decide whether it waits on the outside
 world, and whether it could run under the mutator or return its request
 to a driver instead.
 
+Counts from 2026-10-14 (see `gc-hold-boundaries`, fourth slice): releasing
+pumped work suspends once per pump, 5.1 times per `.r ()` step, the only
+frequent suspension; it suspends because settling a terminal task can
+evaluate a diagnostic through a nested driver, which under `driver-mutator`
+could borrow the mutator instead (about 0.7% of a step). `TaskHost`
+validation suspends 136 to 257 times per run during macro expansion: client
+code, but brief.
+
 ### Heap context in Glam (`gc-hold-thread-context`)
 
 With one heap per thread, Glam's call chains could find their runtime from
 the mutator instead of passing value factories down (maintainer,
 2026-10-09). Investigate the trade: a thread-local lookup against passed
 references, and which same-runtime validations it makes redundant.
+
+### The public value API (`gc-hold-values-api`)
+
+Each `Values` method takes its own mutator, so a client building or
+reading values call by call enters the heap once per call. The maintainer
+deferred this on 2026-10-14 until heap entries elsewhere are reduced. One
+idea: a public scope that holds one mutator across calls.

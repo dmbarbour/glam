@@ -2036,6 +2036,31 @@ maps the short names used here to file names.
   `agent_context/evaluation.md` "Values and Forcing".
 - **Recorded in:** explicit heap holds plan, `gc-hold-lend-mutator`.
 
+### Drivers hold the thread's mutator across quanta
+`driver-mutator` · 2026-10-14 · maintainer · accepted
+- **Context:** converting Glam's boundaries left a choice for code that
+  drives evaluation: hold a mutator across the drive and suspend at each
+  wait, or drive without one and take short mutators for access phases.
+  Measured: single-threaded runs never block on a condvar, plain evaluation
+  suspends nowhere, and a `.r ()` step suspends 5.1 times, each releasing
+  pumped work; entries and suspensions are 0.1 to 1.3% of instructions.
+- **Decision:** a driver takes the thread's mutator at its outermost
+  boundary, and the quanta it runs borrow it, as pumped work already does.
+  A wait suspends the mutator before taking its lock, and a quantum
+  boundary suspends it only to join a requested collection. Entry cost is
+  the lesser reason: a threaded mutator lets views carry values between
+  steps instead of roots, and `&Mutator` against `&mut Mutator` marks which
+  code may suspend, a local capability for reasoning about suspension.
+  Rejected: driving without a mutator.
+- **Consequences:** a collection still waits for at most one quantum, and
+  memory is unchanged. Drivers, the pump entry points and the coordinator's
+  claimed polls take the mutator as a parameter. Quanta may grow later; 64
+  steps is fine-grained, small only while steps are costly.
+- **Rule lives in:** the explicit heap holds plan until drivers convert,
+  then `docs/architecture/evaluation.md` and `agent_context/evaluation.md`
+  "Values and Forcing".
+- **Recorded in:** explicit heap holds plan, `gc-hold-boundaries`.
+
 ### Root slots are reclaimed apart from heap collections
 `root-chunk-reclamation` · 2026-10-14 · maintainer · accepted
 - **Context:** under `pooled-roots`, dropped slots returned only at a heap
