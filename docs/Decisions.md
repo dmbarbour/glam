@@ -1663,8 +1663,7 @@ maps the short names used here to file names.
   on the way to the relocked mutex.
 - **Rule lives in:** `architecture/evaluation.md`; `agent_context/evaluation.md`
   "Values and Forcing".
-- **Recorded in:** explicit heap holds plan, `gc-hold-tests` (preliminary
-  fix).
+- **Recorded in:** explicit heap holds plan, `gc-hold-outer-boundaries`.
 
 ## Assembly
 
@@ -2086,7 +2085,8 @@ maps the short names used here to file names.
   named `Heap::mutate_recursive`, a recursive mutator that cannot suspend
   when nested, and moves to `mutate` once its callers convert, so the
   names show where a transition has stabilized (maintainer). The aid
-  retires with the legacy token in `gc-hold-tests`.
+  retired on 2026-10-14, ahead of the legacy token
+  (`gc-hold-outer-boundaries`, `no-recursive-heap-entries`).
 - **Rule lives in:** `crates/glam-gc/SAFETY.md` "Regional Mutator
   Admission Invariants".
 - **Recorded in:** explicit heap holds plan, `gc-hold-api`.
