@@ -11272,21 +11272,11 @@ mod tests {
     }
 
     #[test]
-    fn forgotten_scoped_allocator_does_not_retain_its_heap() {
-        let heap = Heap::new();
-        let weak = Arc::downgrade(&heap.inner);
-
-        heap.mutate(|mutator| {
-            let allocator = mutator.allocator::<u64>().unwrap();
-            // This deliberately leaks the allocator's inert 24-byte frontier
-            // cell. The sanitizer and Miri harnesses run this fixture
-            // separately with leak detection disabled while retaining every
-            // other check; see their scripts and `VERIFY.md`.
-            std::mem::forget(allocator);
-        });
-        drop(heap);
-
-        assert!(weak.upgrade().is_none());
+    fn a_scoped_allocator_owns_nothing() {
+        // An allocator borrows its mutator and carries its class's metadata
+        // and id, so one that escapes or is forgotten neither retains its
+        // heap nor leaks.
+        assert!(!std::mem::needs_drop::<crate::Allocator<'static, u64>>());
     }
 
     #[test]

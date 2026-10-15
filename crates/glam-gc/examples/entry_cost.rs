@@ -1,8 +1,11 @@
-//! Loops over mutator entries or suspensions, for instruction counts.
+//! Loops over mutator entries, suspensions or allocator acquisitions, for
+//! instruction counts.
 //!
 //! `cargo run --release --example entry_cost -- <mode> <count>`, where mode
 //! is `mutate` (an outer entry and exit), `suspend` (a suspension and
-//! resumption inside one entry) or `idle` (neither, the baseline). Compare
+//! resumption inside one entry), `allocator` (acquiring and dropping an
+//! allocator for a cached class inside one entry) or `idle` (none, the
+//! baseline). Compare
 //! `perf stat -e instructions:u` across two counts: the difference over the
 //! difference in count is one operation's cost.
 
@@ -17,9 +20,12 @@ fn main() {
         .get(1)
         .map_or(1_000_000, |count| count.parse().expect("count is a number"));
     let heap = Heap::new();
-    // One entry first, so every measured one finds the thread's record.
+    // One entry first, so every measured one finds the thread's record
+    // and every measured acquisition finds its class cached.
     heap.mutate(|mutator| {
-        black_box(mutator);
+        drop(black_box(
+            mutator.allocator::<u64>().expect("u64 has a class"),
+        ));
     });
     match mode {
         "mutate" => {
@@ -32,6 +38,13 @@ fn main() {
         "suspend" => heap.mutate(|mutator| {
             for _ in 0..count {
                 mutator.suspend(|| black_box(()));
+            }
+        }),
+        "allocator" => heap.mutate(|mutator| {
+            for _ in 0..count {
+                drop(black_box(
+                    mutator.allocator::<u64>().expect("u64 has a class"),
+                ));
             }
         }),
         "idle" => {

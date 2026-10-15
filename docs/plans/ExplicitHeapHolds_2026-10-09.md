@@ -1,7 +1,8 @@
 # Explicit Heap Holds — 2026-10-09
 
-Status: in progress; `gc-hold-api` landed on 2026-10-13, and the steps
-through `gc-hold-boundary-release` by 2026-10-15. The maintainer adopted the 2026-10-10
+Status: complete; `gc-hold-api` landed on 2026-10-13, and the steps
+through `gc-hold-class-cache` by 2026-10-15, when the maintainer closed
+`gc-hold-values-api` without a change. The maintainer adopted the 2026-10-10
 design review on 2026-10-12 (see "Decisions, 2026-10-12") and suggested
 pulling this plan forward, ahead of the leftovers of
 `perf-reflection-step-cost`. Since the plan was written, a per-thread
@@ -12,9 +13,9 @@ order: `gc-hold-api`, `gc-hold-boundaries` through its third slice,
 `gc-hold-outer-boundaries`, `gc-hold-pass-access` (which absorbed
 `gc-hold-tests`),
 `gc-hold-entry-cost`, `gc-hold-suspension-review`,
-`gc-hold-boundary-release`, then `gc-hold-values-api`
-(`gc-hold-thread-context` was skipped); `gc-hold-class-cache`
-is narrowed to a measurement. The maintainer moved transient roots ahead of
+`gc-hold-boundary-release`, then `gc-hold-values-api`, closed without
+a change (`gc-hold-thread-context` was skipped); `gc-hold-class-cache`,
+narrowed to a measurement, landed on 2026-10-15. The maintainer moved transient roots ahead of
 the remaining enforcement on 2026-10-13, once every poll lent its mutator,
 and on 2026-10-14 chose that drivers hold the mutator across quanta
 (`driver-mutator`), added the entry-cost and `Values` steps, and chose that
@@ -37,8 +38,9 @@ the review's vocabulary: an owned `Mutator`, not a `Hold`.
   must root what it returns; and every glam-gc entry path branches on outer
   against recursive. Cost is not the reason: after `225775e3` the profiling
   workloads make 17 to 23 recursive entries a run outside the per-definition
-  ones. Open: whether a plain `Values` handle nests inside a future client
-  scope, for `gc-hold-values-api`.
+  ones. Whether a plain `Values` handle nests inside a future client scope
+  was left to `gc-hold-values-api`, which closed without a scope, so none
+  does.
 - **Tests follow the runtime** (maintainer; `tests-follow-the-runtime`): tests hold the heap the way
   runtime code does, except test-only hooks, and are fixed to the new
   architecture instead of anchoring legacy or transitional paths. A test
@@ -833,6 +835,24 @@ allocator acquisition is a `RefCell` borrow, a `TypeId` lookup and an
 `Arc` clone. Measure that once mutators exist; move the cache only if it
 shows.
 
+Measured 2026-10-15 with the `entry_cost` example's `allocator` mode:
+acquiring an allocator for a cached class cost about 93 instructions, and
+Glam acquires one per allocation, about 64,000 times in `sum_800`. Most of
+it went to an `Arc` clone and drop of the class's shared state, which only
+a cursor refill uses, and to the prologue of a function that inlined class
+discovery. An allocator now carries its class's metadata and id, and its
+refill takes the shared state from the thread's cache; discovery and
+refill run out of line. An acquisition costs 65 instructions, of which the
+`TypeId` probe of the thread's class map is about 25; an entry is
+unchanged at 269. Across the profiling workloads, 0.39% fewer
+instructions, at most 1.34% (`chain_w4_200`; `sum_800` 1.00%). An
+allocator now owns nothing, so the fixture that forgot one to show it
+could not retain its heap, which leaked its `Arc` deliberately, became an
+assertion that `Allocator` needs no drop, and Miri and AddressSanitizer
+run the whole suite with leak checks. Left: a direct-mapped slot per
+`TypeId`, whose hash is a constant, in front of the class map would save
+most of the probe, about 0.2% more.
+
 ### Transient roots (`gc-hold-transient-roots`)
 
 `countdown_800` registered more roots than it allocated objects (211,594
@@ -1106,3 +1126,23 @@ Each `Values` method takes its own mutator, so a client building or
 reading values call by call enters the heap once per call. The maintainer
 deferred this on 2026-10-14 until heap entries elsewhere are reduced. One
 idea: a public scope that holds one mutator across calls.
+
+Measured 2026-10-15 with callgrind on `minimal`: 276 heap entries a run,
+about 175 of them public `Values` calls. The CLI's reflection environment
+makes 106, one `Values::bytes` for each environment variable's name and
+value; its batch and configuration code about 50; library code built on
+the public API (`Assembler::module`, `ReflectionStore::new`, reflection
+request values) about 10. At about 270 instructions an entry, the public
+calls cost about 47,000 of `minimal`'s 24.06 million instructions (0.2%),
+a count that grows with the environment and the arguments, not the
+workload. The options were a public scope holding one mutator across
+calls, bulk constructors that build a value from host data in one entry
+(the environment's 106 entries would become one), or neither.
+
+Closed 2026-10-15 without a change (maintainer). A scope would run client
+code under the mutator, where it could stall collections or deadlock by
+waiting on evaluation, and a plain `Values` call inside it would have to
+panic or nest; those constraints would be hard to explain, and the cost
+does not call for them. A bulk constructor stays cheap to add when a
+client needs one. `Values::with_access`'s comment, which still said a
+call nests inside another entry, now says it panics.

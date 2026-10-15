@@ -481,6 +481,18 @@ impl ThreadCacheHandle {
         cursor.try_allocate_with(value, before_initialize)
     }
 
+    /// The metadata and id of the class this thread resolved earlier for `T`
+    /// in its heap, if any: what an allocator carries, without the class's
+    /// shared state, which only a cursor refill needs.
+    #[inline]
+    pub(crate) fn cached_class_key<T: Trace>(
+        &self,
+    ) -> Option<(&'static ObjectMetadata, AllocationClassId)> {
+        let state = self.state.borrow();
+        let class = state.classes.get(&TypeId::of::<T>())?;
+        Some((class.metadata, class.id))
+    }
+
     /// The class this thread resolved earlier for `T` in its heap, if any.
     pub(crate) fn cached_class<T: Trace>(&self, heap: &HeapInner) -> Option<AllocationClass<T>> {
         let state = self.state.borrow();

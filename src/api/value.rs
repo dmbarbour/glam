@@ -346,9 +346,12 @@ impl Values {
     }
 
     /// Runs one public value operation under a mutator of its own, the
-    /// operation's boundary (`driver-mutator`); inside another entry for the
-    /// runtime it nests. Callers collect any client iterator first, so no
-    /// client code runs under the mutator.
+    /// operation's boundary (`no-recursive-heap-entries`). Callers collect
+    /// any client iterator first, so no client code runs under the mutator.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this thread already has a heap entry.
     pub(crate) fn with_access<R>(
         &self,
         operation: impl for<'scope> FnOnce(ScopedValues<'scope>) -> R,

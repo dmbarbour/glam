@@ -4,9 +4,10 @@ use std::ops::Deref;
 use std::ptr::NonNull;
 use std::sync::Arc;
 
+use crate::class::{ObjectMetadata, metadata_for};
+use crate::run::{AllocationClassId, RunGeometry};
 use crate::thread_cache::{ThreadCacheHandle, ThreadHeapEntry};
 use crate::{Gc, GcRef, Root, Trace, UnsupportedLayout, heap::HeapInner};
-use crate::{class::AllocationClass, class::metadata_for, run::RunGeometry};
 
 use crate::trace::ErasedGc;
 
@@ -204,23 +205,32 @@ impl<'heap> MutatorAccess<'heap> {
     /// });
     /// ```
     pub fn allocator<T: Trace>(&self) -> Result<Allocator<'_, T>, UnsupportedLayout> {
-        let class = match self.cache.cached_class::<T>(self.heap) {
-            Some(class) => class,
-            None => {
-                let metadata = metadata_for::<T>();
-                let geometry =
-                    RunGeometry::derive(metadata.layout(), metadata.requested_slot_size())
-                        .map_err(UnsupportedLayout::from_validated_geometry)?;
-                let class = self.heap.discover_class(metadata, geometry);
-                self.cache.remember_class(&class);
-                class
-            }
+        let (metadata, id) = match self.cache.cached_class_key::<T>() {
+            Some(key) => key,
+            None => self.discover_class::<T>()?,
         };
         Ok(Allocator {
             heap: self.heap.as_ref(),
             cache: &self.cache,
-            class,
+            metadata,
+            id,
+            marker: PhantomData,
         })
+    }
+
+    /// Resolves `T`'s class in this heap for the first time on this thread
+    /// and caches it, off the allocator's hot path.
+    #[cold]
+    #[inline(never)]
+    fn discover_class<T: Trace>(
+        &self,
+    ) -> Result<(&'static ObjectMetadata, AllocationClassId), UnsupportedLayout> {
+        let metadata = metadata_for::<T>();
+        let geometry = RunGeometry::derive(metadata.layout(), metadata.requested_slot_size())
+            .map_err(UnsupportedLayout::from_validated_geometry)?;
+        let class = self.heap.discover_class::<T>(metadata, geometry);
+        self.cache.remember_class(&class);
+        Ok((class.metadata(), class.id()))
     }
 
     /// Constructs and publishes an external root for one viewed value.
@@ -297,7 +307,12 @@ impl<'heap> MutatorAccess<'heap> {
 pub struct Allocator<'mutator, T: Trace> {
     heap: &'mutator HeapInner,
     cache: &'mutator ThreadCacheHandle,
-    class: AllocationClass<T>,
+    // The class's metadata and id, which its thread's cache resolved for this
+    // heap. A refill takes the class's shared state from that cache, so
+    // acquiring an allocator clones no `Arc`.
+    metadata: &'static ObjectMetadata,
+    id: AllocationClassId,
+    marker: PhantomData<fn() -> T>,
 }
 
 impl<'mutator, T: Trace> Allocator<'mutator, T> {
@@ -328,24 +343,29 @@ impl<'mutator, T: Trace> Allocator<'mutator, T> {
             );
         }
 
-        debug_assert!(
-            self.class.belongs_to(self.heap),
-            "scoped allocator class does not belong to its heap"
-        );
-        let value = match self.cache.try_allocate(self.class.id(), value) {
+        match self.cache.try_allocate(self.id, value) {
             Ok(pointer) => {
                 // SAFETY: the worker-local allocator initialized `T` in its
                 // exclusively leased range and published the allocation bit.
-                return unsafe { Gc::from_raw(pointer) };
+                unsafe { Gc::from_raw(pointer) }
             }
-            Err(value) => value,
-        };
+            Err(value) => self.alloc_after_refill(value),
+        }
+    }
 
-        let cursor = self.heap.claim_allocation_cursor(&self.class);
+    /// Claims a fresh cursor for this class and allocates from it.
+    #[cold]
+    #[inline(never)]
+    fn alloc_after_refill(&self, value: T) -> Gc<T> {
+        let class = self
+            .cache
+            .cached_class::<T>(self.heap)
+            .expect("an allocator's class stays cached for its heap");
+        let cursor = self.heap.claim_allocation_cursor(&class);
         self.cache.install(cursor);
         let pointer = self
             .cache
-            .try_allocate_after_refill(self.class.id(), value)
+            .try_allocate_after_refill(self.id, value)
             .unwrap_or_else(|_| panic!("fresh allocation cursor contains no free slot"));
 
         // SAFETY: the worker-local allocator initialized `T` in its exclusively
@@ -366,18 +386,18 @@ impl<'mutator, T: Trace> Allocator<'mutator, T> {
     }
 
     #[cfg(test)]
-    pub(crate) fn id(&self) -> crate::run::AllocationClassId {
-        self.class.id()
+    pub(crate) fn id(&self) -> AllocationClassId {
+        self.id
     }
 
     #[cfg(test)]
-    pub(crate) fn metadata(&self) -> &'static crate::class::ObjectMetadata {
-        self.class.metadata()
+    pub(crate) fn metadata(&self) -> &'static ObjectMetadata {
+        self.metadata
     }
 
     #[cfg(test)]
     pub(crate) fn belongs_to(&self, heap: &HeapInner) -> bool {
-        self.class.belongs_to(heap)
+        std::ptr::eq(self.heap, heap)
     }
 
     #[cfg(test)]
@@ -386,10 +406,9 @@ impl<'mutator, T: Trace> Allocator<'mutator, T> {
         value: T,
         before_initialize: impl FnOnce(),
     ) -> Gc<T> {
-        debug_assert!(self.class.belongs_to(self.heap));
         let pointer = self
             .cache
-            .try_allocate_with(self.class.id(), value, before_initialize)
+            .try_allocate_with(self.id, value, before_initialize)
             .unwrap_or_else(|_| panic!("test allocation requires a retained cursor"));
         // SAFETY: the retained cursor returns only after initialization and
         // allocation-bit publication, as in the public allocation path.
@@ -401,7 +420,8 @@ impl<T: Trace> fmt::Debug for Allocator<'_, T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Allocator")
-            .field("class", &self.class)
+            .field("type_name", &self.metadata.type_name())
+            .field("id", &self.id)
             .finish_non_exhaustive()
     }
 }

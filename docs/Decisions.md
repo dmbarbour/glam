@@ -2174,8 +2174,10 @@ maps the short names used here to file names.
   runtime panic in `Mutator::suspend`. Values can travel between steps as
   views, which a nested entry would have to root. Entry cost was not the
   reason: the profiling workloads make 17 to 23 recursive entries a run
-  outside one per definition. Whether a plain `Values` handle nests inside
-  a client scope is left to `gc-hold-values-api`. Landed 2026-10-14
+  outside one per definition. Each public `Values` call is a boundary of
+  its own: `gc-hold-values-api` closed on 2026-10-15 without a client scope
+  that holds one mutator across calls (maintainer), which would run client
+  code under the mutator. Landed 2026-10-14
   (`gc-hold-pass-access`): `Heap::with_mutator` and held regions went, a
   thread record's depth is 0 or 1, and `Heap::thread_holds_mutator`
   answers whether a thread may wait. A managed destructor may not enter

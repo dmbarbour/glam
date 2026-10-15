@@ -1284,4 +1284,14 @@ quantum boundary no longer drive evaluation to publish a failure, and a
 release that changes a published status runs suspended
 (`senders-never-evaluate-diagnostics`): `scripts/check.sh full` passed at
 `fef17642`, including aggressive-GC verification, Miri (229 passed) and
-both sanitizers.
+both sanitizers. It passed again at `0849f579`, once a diagnostic named its
+origin and Rust summaries became static (Miri 229 passed).
+
+An allocator carries its class's metadata and id instead of an `Arc` of its
+shared state, which a refill takes from the thread's cache
+(`gc-hold-class-cache`). It owns nothing, so
+`forgotten_scoped_allocator_does_not_retain_its_heap`, which forgot one and
+deliberately leaked its `Arc`, became `a_scoped_allocator_owns_nothing`, an
+assertion that `Allocator` needs no drop; `check-miri.sh` and
+`check-sanitizer.sh address` no longer run that fixture apart without leak
+checks, so both check leaks over the whole suite.

@@ -56,7 +56,8 @@ its plan's topic, and unique across all docs. Examples:
   and checks it before N8 and net fuzzing.
 - [`ExplicitHeapHolds_2026-10-09.md`](ExplicitHeapHolds_2026-10-09.md)
   separates holding a heap from accessing it, so admission happens only at
-  explicit boundaries. Planned, not started.
+  explicit boundaries. Done 2026-10-15: `Heap::mutate` is the only entry,
+  outermost only, and code takes access or a mutator from its caller.
 - [`FastChecks_2026-10-09.md`](FastChecks_2026-10-09.md) keeps
   `scripts/check.sh fast` quick: per-thread test runtimes and an optimized
   dev profile. `test-slow-tier` waits until a test needs it.

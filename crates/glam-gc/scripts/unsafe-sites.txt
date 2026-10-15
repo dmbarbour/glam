@@ -116,7 +116,7 @@ crates/glam-gc/src/mutation.rs:    pub unsafe fn with_edge_state_transition<Owne
 crates/glam-gc/src/mutation.rs:    pub unsafe fn with_edge_transition<Owner, Leaving, Adding, Result>(
 crates/glam-gc/src/mutation.rs:    unsafe impl Trace for Leaf {
 crates/glam-gc/src/mutation.rs:    unsafe impl Trace for MutableNode {
-crates/glam-gc/src/mutator.rs:                return unsafe { Gc::from_raw(pointer) };
+crates/glam-gc/src/mutator.rs:                unsafe { Gc::from_raw(pointer) }
 crates/glam-gc/src/mutator.rs:        unsafe { Gc::from_raw(pointer) }
 crates/glam-gc/src/mutator.rs:        unsafe { Gc::from_raw(pointer) }
 crates/glam-gc/src/mutator.rs:        unsafe { GcRef::fresh(edge) }
