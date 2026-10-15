@@ -15,7 +15,8 @@ use super::layout::LayoutView;
 use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
 use super::pattern::{parse_complete_pattern, parse_guard_clauses};
 use super::structural::{
-    is_layout_empty, parse_expression_in_context, split_braced_members, trim_layout,
+    in_keyword_position, is_layout_empty, parse_expression_in_context, split_braced_members,
+    trim_layout,
 };
 
 type ParseResult<T> = Result<T, Vec<Diagnostic>>;
@@ -227,7 +228,7 @@ enum PostfixIfBoundary {
 fn postfix_if_boundary(view: TokenView<'_, '_>, if_index: usize) -> PostfixIfBoundary {
     let mut nested = Vec::new();
     for indexed in view.top_level() {
-        if indexed.index() <= if_index || !is_contextual_keyword(view, indexed.index()) {
+        if indexed.index() <= if_index || !in_keyword_position(view, indexed.index()) {
             continue;
         }
         match indexed.token().kind() {
@@ -299,7 +300,7 @@ fn parse_match_like_expression(
     let after_head = trim_layout(view_between(view, body_start, view.range().end()));
     if let Some((when_index, when_token)) = after_head.first_significant()
         && token_is_name(when_token, "when")
-        && is_contextual_keyword(after_head, when_index)
+        && in_keyword_position(after_head, when_index)
     {
         let body = view_between(after_head, when_index + 1, after_head.range().end());
         let (arms, end) = choice_members(
@@ -325,7 +326,7 @@ fn parse_match_like_expression(
         .top_level()
         .find(|indexed| {
             indexed.index() > head_index
-                && is_contextual_keyword(view, indexed.index())
+                && in_keyword_position(view, indexed.index())
                 && token_is_name(indexed.token(), "with")
         })
         .map(|indexed| indexed.index())
@@ -628,7 +629,7 @@ where
 fn top_level_contextual_names(view: TokenView<'_, '_>, expected: &str) -> Vec<usize> {
     view.top_level()
         .filter(|indexed| {
-            is_contextual_keyword(view, indexed.index()) && token_is_name(indexed.token(), expected)
+            in_keyword_position(view, indexed.index()) && token_is_name(indexed.token(), expected)
         })
         .map(|indexed| indexed.index())
         .collect()
@@ -649,7 +650,7 @@ fn conditional_boundaries(
     let mut outer_then = None;
 
     for indexed in view.top_level() {
-        if indexed.index() <= head_index || !is_contextual_keyword(view, indexed.index()) {
+        if indexed.index() <= head_index || !in_keyword_position(view, indexed.index()) {
             continue;
         }
         match indexed.token().kind() {
@@ -729,18 +730,6 @@ fn conditional_hard_end(view: TokenView<'_, '_>, head_index: usize) -> usize {
             .then_some(indexed.index())
         })
         .unwrap_or(containing_close)
-}
-
-fn is_contextual_keyword(view: TokenView<'_, '_>, index: usize) -> bool {
-    let Some(token) = view.token_at(index) else {
-        return false;
-    };
-    token.leading() != LeadingTrivia::Joint
-        || index == view.range().start()
-        || index.checked_sub(1).is_some_and(|previous| {
-            view.token_at(previous)
-                .is_some_and(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
-        })
 }
 
 fn token_is_name(token: &SpannedToken<'_>, expected: &str) -> bool {

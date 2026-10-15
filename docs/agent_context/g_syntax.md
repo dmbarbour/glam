@@ -109,6 +109,10 @@ disagree.
 - `g_syntax/keywords.rs` is the single `g0` reserved-word table. Enforce it for
   bare definition roots, locals, and bare references; do not grow parser-local
   keyword lists. Explicit member/key positions may use keyword spellings.
+- `structural::in_keyword_position` alone decides whether a keyword spelling
+  stands where a keyword has meaning; the grammar's `form_keyword` mirrors it
+  while the grammar lives. A keyword before a joint `:` or `.` is a tag's key
+  or a path's root. Do not add parser-local keyword-position checks.
 - A source local may not shadow another active local or a global introduced or
   actually selected by the same file through a visible namespace. The
   file-wide global check belongs in `name_analysis.rs`, not parser routing.

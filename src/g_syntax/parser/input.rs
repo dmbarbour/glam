@@ -403,6 +403,15 @@ pub(super) fn keyword<'lex, 'source: 'lex>(
     .labelled(expected)
 }
 
+/// The keyword `expected` heading a form, as the structural layer's
+/// `keyword_head` judges it: not before a joint `:` or `.`, which make it a
+/// tag's key or a path's root.
+pub(super) fn form_keyword<'lex, 'source: 'lex>(
+    expected: &'static str,
+) -> impl Parser<'lex, TokenInput<'lex, 'source>, (), TokenExtra<'lex, 'source>> {
+    keyword(expected).then_ignore(joint(symbol(":").or(symbol("."))).not())
+}
+
 pub(super) fn number<'lex, 'source: 'lex>()
 -> impl Parser<'lex, TokenInput<'lex, 'source>, NumberId, TokenExtra<'lex, 'source>> {
     chumsky::primitive::select_ref(|token: &'lex SpannedToken<'source>, _| {

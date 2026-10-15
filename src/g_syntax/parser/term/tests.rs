@@ -708,21 +708,23 @@ const KEYWORD_NESTING_SHAPES: &[(&str, &str, &str)] = &[
     ("(let a = 1 in ", ")", "a"),
     ("(do { .r ", " })", "1"),
     ("(\\z -> if c then ", " else z)", "1"),
-    // A keyword the term parser delegates though a joint `.` follows it.
-    ("(if.x then ", " else 0)", "1"),
 ];
 
 /// Keywords nested where they head no form: as path keys, quoted atoms, tag
-/// and dict keys, and contextual keywords as path keys. A head among them
-/// opens a keyword region that no structural parser takes, so the term
-/// parser interprets its groups itself, still once each.
+/// keys and tag path roots, dict keys, and contextual keywords as path and
+/// tag keys. None opens a keyword region, so the term parser interprets each
+/// group itself, once; a region it took anyway would cost a level of Rust
+/// recursion.
 const KEYWORD_KEY_NESTING_SHAPES: &[(&str, &str, &str)] = &[
     ("(x.if ", ")", "1"),
     ("(f 'match ", ")", "1"),
     ("(x.do.y ", ")", "1"),
     ("(:if ", ")", "1"),
     ("{if: ", "}", "1"),
+    ("(if.x:", ")", "1"),
+    ("(f if:", ")", "1"),
     ("(then:", ")", "1"),
+    ("(f where:", ")", "1"),
     ("[x.try, ", "]", "1"),
     ("(foo.then ", ")", "1"),
     ("(f 'else ", ")", "1"),
@@ -791,6 +793,12 @@ const KEYWORDS_AS_KEYS: &[&str] = &[
     "if:(a)",
     "match:[a] (b)",
     "do.x:(a)",
+    "if.x:(a)",
+    "f if:(a)",
+    "f where:(a)",
+    "if.x (a)",
+    "if.x then (a) else b",
+    "x where.y (a)",
     ":if (a)",
     ":do.x (a)",
     "{if: (a), b: (c)}",

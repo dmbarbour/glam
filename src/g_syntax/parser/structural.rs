@@ -78,21 +78,13 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
         ParsedExpression::new(result?, view.range().end())
     } else if let Some(result) = parse_object(view, context) {
         result?
-    } else if let Some((if_index, token)) = view.first_significant()
-        && token_is_name(token, "if")
-    {
+    } else if let Some(if_index) = keyword_head(view, "if") {
         parse_if_expression(view, if_index, context.may_yield())?
-    } else if let Some((try_index, token)) = view.first_significant()
-        && token_is_name(token, "try")
-    {
+    } else if let Some(try_index) = keyword_head(view, "try") {
         parse_try_expression(view, try_index, context.may_yield())?
-    } else if let Some((match_index, token)) = view.first_significant()
-        && token_is_name(token, "match")
-    {
+    } else if let Some(match_index) = keyword_head(view, "match") {
         parse_match_expression(view, match_index, context.may_yield())?
-    } else if let Some((try_match_index, token)) = view.first_significant()
-        && token_is_name(token, "try_match")
-    {
+    } else if let Some(try_match_index) = keyword_head(view, "try_match") {
         parse_try_match_expression(view, try_match_index, context.may_yield())?
     } else if let Some(result) = parse_with(view, context) {
         result?
@@ -158,21 +150,17 @@ fn parse_parenthesized_structural(
     // A match leading a tuple, as in `(match y with {…}, 1)`, ends at its
     // comma, since its arms cannot hold an unparenthesized one. The
     // expression grammar parses the tuple and delimits the member.
-    let leads_with_match = contents.first_significant().is_some_and(|(_, token)| {
-        token_is_name(token, "match") || token_is_name(token, "try_match")
-    });
+    let leads_with_match = ["match", "try_match"]
+        .into_iter()
+        .any(|head| keyword_head(contents, head).is_some());
     if leads_with_match && !top_level_symbols(contents, ",").is_empty() {
         return None;
     }
     let context = context.complete();
-    let starts_structural = contents.first_significant().is_some_and(|(_, token)| {
-        token_is_name(token, "let")
-            || token_is_name(token, "using")
-            || token_is_name(token, "match")
-            || token_is_name(token, "try_match")
-            || token_is_name(token, "try")
-            || token_is_name(token, "object")
-    }) || contextual_keywords(contents, "where").next().is_some()
+    let starts_structural = ["let", "using", "match", "try_match", "try", "object"]
+        .into_iter()
+        .any(|head| keyword_head(contents, head).is_some())
+        || contextual_keywords(contents, "where").next().is_some()
         || postfix_if_suffix(contents).is_some()
         || has_compound_with_body(contents);
     starts_structural.then(|| {
@@ -914,8 +902,9 @@ fn has_compound_with_body(view: TokenView<'_, '_>) -> bool {
 }
 
 fn line_begins_object_member(view: TokenView<'_, '_>) -> bool {
-    view.first_significant()
-        .is_some_and(|(_, token)| token_is_name(token, "object") || token_is_name(token, "extend"))
+    ["object", "extend"]
+        .into_iter()
+        .any(|head| keyword_head(view, head).is_some())
         || object_expression_head(view)
             .is_some_and(|(realization, _)| realization == ObjectRealization::Abstract)
         || ["=", ":=", "::="]
@@ -1171,16 +1160,13 @@ fn parse_object_header(
 }
 
 fn object_expression_head(view: TokenView<'_, '_>) -> Option<(ObjectRealization, usize)> {
-    let (head_index, head) = view.first_significant()?;
-    match head.kind() {
-        TokenKind::Name("object") => Some((ObjectRealization::Instance, head_index)),
-        TokenKind::Name("abstract") => {
-            let object = next_significant_after(view, head_index)?;
-            matches!(object.token().kind(), TokenKind::Name("object"))
-                .then_some((ObjectRealization::Abstract, object.index()))
-        }
-        _ => None,
+    if let Some(object_index) = keyword_head(view, "object") {
+        return Some((ObjectRealization::Instance, object_index));
     }
+    let abstract_index = keyword_head(view, "abstract")?;
+    let object = next_significant_after(view, abstract_index)?;
+    is_contextual_keyword_at(view, object.index(), "object")
+        .then_some((ObjectRealization::Abstract, object.index()))
 }
 
 fn parse_with_header(
@@ -1271,7 +1257,29 @@ fn contextual_keyword_after(
         .find(|index| is_contextual_keyword_at(view, *index, expected))
 }
 
+/// The first significant token of `view`, when it is the keyword `expected`
+/// in a keyword position.
+pub(in crate::g_syntax::parser) fn keyword_head(
+    view: TokenView<'_, '_>,
+    expected: &str,
+) -> Option<usize> {
+    view.first_significant()
+        .map(|(index, _)| index)
+        .filter(|index| is_contextual_keyword_at(view, *index, expected))
+}
+
 fn is_contextual_keyword_at(view: TokenView<'_, '_>, index: usize, expected: &str) -> bool {
+    view.token_at(index)
+        .is_some_and(|token| token_is_name(token, expected))
+        && in_keyword_position(view, index)
+}
+
+/// Whether the token at `index` stands where a keyword has meaning: first in
+/// `view`, after a space, or first on its line, and not before a key mark.
+pub(in crate::g_syntax::parser) fn in_keyword_position(
+    view: TokenView<'_, '_>,
+    index: usize,
+) -> bool {
     view.token_at(index).is_some_and(|token| {
         (index == view.range().start()
             || token.leading() != LeadingTrivia::Joint
@@ -1279,7 +1287,18 @@ fn is_contextual_keyword_at(view: TokenView<'_, '_>, index: usize, expected: &st
                 view.token_at(previous)
                     .is_some_and(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
             }))
-            && token_is_name(token, expected)
+            && !before_key_mark(view, index)
+    })
+}
+
+/// Whether a joint `:` or `.` follows the token at `index`. A name there is
+/// a tag's key (`where:Value`) or a path's root (`if.x`), so a keyword
+/// spelled there is never a keyword: the tag is data, and the path an error,
+/// since a keyword may not root a path.
+pub(in crate::g_syntax::parser) fn before_key_mark(view: TokenView<'_, '_>, index: usize) -> bool {
+    view.token_at(index + 1).is_some_and(|mark| {
+        mark.leading() == LeadingTrivia::Joint
+            && matches!(mark.kind(), TokenKind::Symbol(":" | "."))
     })
 }
 

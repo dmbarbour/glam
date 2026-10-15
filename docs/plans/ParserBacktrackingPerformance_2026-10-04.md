@@ -7,9 +7,10 @@ remain, and `parser-cover-ir` is done only for expressions (see
 [Steps](#steps)). Rechecked 2026-10-15 (`01ec2fbc`): no parser step had
 landed since `adcd994b` (2026-10-07), and a keyword form in parentheses
 nested in another was exponential ([Measures 2026-10-15](#measures-2026-10-15)).
-Keyword regions, the first part of `parser-keyword-frames`, remove that
-exponential and the whole-source scans; what remains, and a proposed order
-for it, is in [Keyword regions 2026-10-15](#keyword-regions-2026-10-15).
+Keyword regions, the first part of `parser-keyword-frames`, merged
+2026-10-15, remove that exponential and the whole-source scans; what
+remains, and the agreed order for it, is in
+[Keyword regions 2026-10-15](#keyword-regions-2026-10-15).
 This is the `perf-parser` step of the
 [performance roadmap](PerformanceRoadmap_2026-10-05.md). The fix is a merged
 grammar with prefix sharing, parsing into a cover syntax (IR) for patterns and
@@ -308,10 +309,10 @@ production keeps the old parser until the oracle agrees.
   (`parser-term-parser-first`, `eb84587c`; `parser-keyword-delegation`,
   `adcd994b`).
 - `parser-patterns`: not started.
-- `parser-keyword-frames`: first part built 2026-10-15 on its branch:
-  keyword regions, the lexer's token tables and a lazy keyword search
-  ([Keyword regions 2026-10-15](#keyword-regions-2026-10-15)). Native
-  keyword frames remain.
+- `parser-keyword-frames`: first part merged 2026-10-15: keyword regions,
+  the lexer's token tables, a lazy keyword search, and one key test for
+  keywords ([Keyword regions 2026-10-15](#keyword-regions-2026-10-15)).
+  Native keyword frames remain.
 - `parser-scope-analysis`: added 2026-10-15; not started.
 - `parser-grammar-retirement`: not started. Chumsky still parses the
   views the term parser reports as unsupported, and runs as the oracle in
@@ -504,8 +505,7 @@ exponent, with cost ≈ a + b·n^k.
 
 ## Keyword regions 2026-10-15
 
-The first part of `parser-keyword-frames` (branch
-`parser-keyword-frames`).
+The first part of `parser-keyword-frames`, merged 2026-10-15.
 
 **The exponential.** A test-only counter confirmed the 2026-10-08 reading:
 `(if c then … else 0)` nested d deep cost 2^d − 1 group interpretations.
@@ -520,20 +520,20 @@ forms are, without parsing them:
   opens a region in its frame, up to the frame's separator or close: the
   extent `parse_structural_atom` gives the form, found by the same
   `group_separator`.
-- A keyword that is surely a key opens none: after a joint `.` (a path
-  segment or effect name), after a joint `'` (a quoted atom or path), after
-  a constructor's `:`, or before a joint `:` (a tag or member key). The term
-  parser delegates a keyword form only where the same test holds, so every
-  delegated form has its region.
+- A keyword spelled as a key opens none: after a joint `.` (a path segment
+  or effect name), after a joint `'` (a quoted atom or path), after a
+  constructor's `:`, or before a joint `:` or `.` (a tag's key or a path's
+  root). The term parser delegates a keyword form only where the same test
+  holds, so every delegated form has its region.
 - Groups closing inside a region are deferred, so each group is interpreted
   by exactly one parser. A deferred group the term parser consumes anyway is
   interpreted when consumed.
 - Regions never change a parse; they decide only which parser interprets a
   group. A missed region would cost time: the form's groups interpreted
   twice, doubling the work below it. A region the term parser takes anyway,
-  at the root of a tag path such as `if.x:1` or after a form that ends
-  before its group member does, as in `(do {…} (…))`, costs a deferred
-  interpretation: one level of Rust recursion each, where such regions nest.
+  after a form that ends before its group member does, as in
+  `(do {…} (…))`, costs a deferred interpretation: one level of Rust
+  recursion each, where such regions nest.
 - The rule is a prediction of where the structural layer takes over, from
   a keyword and its neighbouring tokens; nothing peeks past a group, and no
   alternative is guarded. It shares its head test with the term parser,
@@ -552,7 +552,7 @@ though most callers wanted the first; a `where` suffix rescanned the whole
 view for the next `where`, quadratic in a chain of them. It is now an
 iterator, and a suffix searches only what follows it.
 
-**Testing the regions** (2026-10-16, after the maintainer asked how we know
+**Testing the regions** (2026-10-15, after the maintainer asked how we know
 they are not fragile):
 - `keyword_regions_never_change_a_parse` parses every sample, edge case,
   keyword-as-key case, nesting shape (depths 1–6) and generated program
@@ -561,7 +561,7 @@ they are not fragile):
 - `keywords_as_keys_agree_with_the_grammar` runs the oracle over keywords as
   path keys, quoted atoms and paths, tag, constructor and dict keys, effect
   names and words containing them, each before a group a region would defer.
-- The count tests nest eight keyword forms and nine keyword keys 12 deep and
+- The count tests nest seven keyword forms and twelve keyword keys 12 deep and
   fail if any group is interpreted twice; 12 levels fail at once (4,095
   interpretations of 12 groups) instead of hanging the suite.
 - `keywords_as_keys_nest_without_recursion` nests the keys 2,000 deep.
@@ -641,10 +641,22 @@ region checks repeated by the pattern parser's trial parses, which
   data. The structural layer dispatches on a keyword without the key test
   that the term parser and regions apply. And `if.x then a else b` parses as
   an `if` on the effect `.x`, though a keyword may not be a bare path root.
+  *Fixed 2026-10-15* (`keyword-before-key-mark-is-a-key` in
+  [Decisions](../Decisions.md)): one test, `in_keyword_position`, decides
+  for every keyword head and contextual keyword, in both expression parsers
+  and the term parser's regions. A keyword before a joint `:` or `.` is a
+  tag's key or a path's root, so `if:1` is a tag in every expression
+  position, and `if.x then a else b` reports `if` as reserved. Contextual
+  keywords follow too: `then.x`, `else.x` and `in.x` are paths, so the form
+  reports its missing keyword. Tag paths rooted at a keyword, `if.x:1`, no
+  longer open a region.
 
 ### Proposal
 
-For review; not yet agreed.
+*Agreed (maintainer, 2026-10-15):* land keyword regions (merged), then
+`parser-patterns`. The maintainer judged regions adequate for the
+bootstrap: a filter that spares the term parser pointless work, which can
+cost time where a keyword is mispredicted but never changes a parse.
 
 1. **Land keyword regions as this step's first part.** They remove the
    measured exponential and every whole-source scan, and leave the
@@ -679,10 +691,10 @@ For review; not yet agreed.
   `NESTING_SHAPES` in the term parser's tests holds no keyword form, which
   is how the exponential above went unnoticed: `parser-keyword-frames` adds
   parenthesized `if`, `match`, `try` and `let` shapes to it.
-  As built (2026-10-16), `KEYWORD_NESTING_SHAPES` holds eight keyword
+  As built (2026-10-15), `KEYWORD_NESTING_SHAPES` holds seven keyword
   shapes: parenthesized `if`, `try`, `match`, `let` and `do`, an `if` as an
-  argument, an `if` in a lambda body, and `if.x`, which the term parser
-  delegates. Its test counts group interpretations at depth 12 rather than
+  argument, and an `if` in a lambda body. Its test counts group
+  interpretations at depth 12 rather than
   timing the parse, and fails if any group is interpreted twice. A timing
   bound waits for native keyword frames, since keyword nesting still costs
   O(n·d). See [Keyword regions 2026-10-15](#keyword-regions-2026-10-15) for
@@ -721,11 +733,14 @@ in the panic-safety plan, because an overflow crashes the process.
 - **Keywords as tag keys.** Should the structural layer use the term
   parser's key test, so `if:1` is tagged data as the syntax reference says,
   and `if.x` a bare-root error? See What is left under
-  [Keyword regions 2026-10-15](#keyword-regions-2026-10-15).
+  [Keyword regions 2026-10-15](#keyword-regions-2026-10-15). *Answered
+  (maintainer, 2026-10-15): yes;* fixed the same day
+  (`keyword-before-key-mark-is-a-key`).
 - **What follows keyword regions?** Proposed in
   [Keyword regions 2026-10-15](#keyword-regions-2026-10-15): land them, take
   `parser-patterns` next for the remaining `op -> P` exponential and the
   quadratic patterns, then native frames for the other keyword forms.
+  *Answered (maintainer, 2026-10-15):* agreed; keyword regions merged.
 - **`parser-cover-ir` as designed.** The shared pattern-and-expression
   IR was never built; the term parser's covers are expression-only and
   group-level. Should `parser-patterns` absorb the step, or does the

@@ -406,6 +406,30 @@ maps the short names used here to file names.
 - **Rule lives in:** `SyntaxCheatSheet.md` "Atoms, Tagged Data, Dicts".
 - **Recorded in:** parser backtracking plan, "Progress 2026-10-06".
 
+### A keyword before a joint `:` or `.` is a key, never a keyword
+`keyword-before-key-mark-is-a-key` · 2026-10-15 · maintainer · accepted
+- **Context:** testing keyword regions found that the structural layer chose
+  keyword forms and contextual keywords by spelling alone. `if:1`,
+  `where:1` and `object:1` were rejected as malformed forms, `(f if:1)` was
+  read as a postfix `if`, and `if.x then a else b` parsed as an `if` on the
+  effect `.x`. The term parser already treated `if:1` as a tag. Four
+  parser-local checks judged keyword position, each slightly differently.
+- **Decision:** one predicate, `in_keyword_position`, decides for every
+  keyword head and contextual keyword. A keyword before a joint `:` or `.`
+  is a tag's key or a path's root, never a keyword. The term parser's
+  keyword regions and the grammar's keyword forms (`form_keyword`) apply
+  the same test.
+- **Consequences:**
+  - `if:1` and `if.x:1` are tags in every expression position, as
+    `Syntax.md` "Keywords" requires.
+  - A keyword path root such as `if.x` or `object.x` reports the keyword as
+    reserved. `then.x`, `else.x` and `in.x` are paths too, so their form
+    reports its missing keyword.
+  - No `.g` source used a keyword before a joint `.` or `:`.
+- **Rule lives in:** `Syntax.md` "Keywords"; `agent_context/g_syntax.md`
+  "Names and Scope".
+- **Recorded in:** parser backtracking plan, "Keyword regions 2026-10-15".
+
 ### Only a lone quoted name is an atom key in a key path
 `lone-quoted-name-is-an-atom-key` · 2026-10-06 · maintainer · superseded
 - **Context:** the grammar committed to a leading `'name` as the whole key.

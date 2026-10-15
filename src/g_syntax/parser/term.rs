@@ -62,6 +62,7 @@ use super::expression_context::ExpressionContext;
 use super::input::TokenView;
 use super::layout::group_separator;
 use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
+use super::structural::before_key_mark;
 
 /// Why the term parser produced no syntax tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,11 +283,11 @@ fn opens_keyword_region(view: TokenView<'_, '_>, index: usize) -> bool {
 /// Whether the token at `index` may head a keyword form, judged from it and
 /// its neighbours. The term parser delegates a keyword form only where this
 /// holds, so every delegated form has its region; a missed one would parse
-/// the form's groups twice, doubling the work below it. Only a keyword that
-/// is surely a key fails: after a joint `.` (a path segment or effect name),
-/// after a joint `'` (a quoted atom or path), after a constructor's `:`, or
-/// before a joint `:` (a tag or member key). A keyword that passes but heads
-/// nothing, such as the root of a tag path `if.x:1` or a form that ends
+/// the form's groups twice, doubling the work below it. A keyword spelled as
+/// a key fails: after a joint `.` (a path segment or effect name), after a
+/// joint `'` (a quoted atom or path), after a constructor's `:`, or before a
+/// key mark, as the structural layer judges it (a tag's key or a path's
+/// root). A keyword that passes but heads nothing, such as a form that ends
 /// before its group member does, costs a deferred interpretation, one level
 /// of Rust recursion each where such regions nest.
 fn may_head_keyword_form(view: TokenView<'_, '_>, index: usize) -> bool {
@@ -312,8 +313,7 @@ fn may_head_keyword_form(view: TokenView<'_, '_>, index: usize) -> bool {
                 || symbol(mark, "'")
                 || symbol(mark, ":") && is_constructor_colon(view, mark)
         });
-    let before_key_mark = symbol(index + 1, ":") && joint(index + 1);
-    !after_key_mark && !before_key_mark
+    !after_key_mark && !before_key_mark(view, index)
 }
 
 /// Whether the `:` at `index` starts a constructor (`:path`) rather than

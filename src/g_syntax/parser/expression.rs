@@ -19,8 +19,8 @@ use super::conditional::{
 use super::do_expr::parse_do_expression;
 use super::expression_context::{ExpressionContext, ParsedExpression};
 use super::input::{
-    ParseSession, TokenExtra, TokenInput, TokenRange, TokenView, close, embedded_value_id, joint,
-    keyword, line_start, name, number, open, space_before, symbol, text_id,
+    ParseSession, TokenExtra, TokenInput, TokenRange, TokenView, close, embedded_value_id,
+    form_keyword, joint, keyword, line_start, name, number, open, space_before, symbol, text_id,
 };
 use super::layout::group_separator;
 use super::lexical::{ByteSpan, Delimiter, GroupId, LeadingTrivia, SpannedToken, TokenKind};
@@ -802,7 +802,7 @@ fn do_expr<'lex, 'source: 'lex>(
     view: TokenView<'lex, 'source>,
     context: ExpressionContext,
 ) -> impl Parser<'lex, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>> {
-    keyword("do").ignore_then(structural_atom_after_head(
+    form_keyword("do").ignore_then(structural_atom_after_head(
         view,
         context,
         parse_do_expression,
@@ -813,7 +813,7 @@ fn using_expr<'lex, 'source: 'lex>(
     view: TokenView<'lex, 'source>,
     context: ExpressionContext,
 ) -> impl Parser<'lex, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>> {
-    keyword("using").ignore_then(structural_atom_after_head(
+    form_keyword("using").ignore_then(structural_atom_after_head(
         view,
         context,
         parse_using_expression,
@@ -824,7 +824,7 @@ fn if_expr<'lex, 'source: 'lex>(
     view: TokenView<'lex, 'source>,
     context: ExpressionContext,
 ) -> impl Parser<'lex, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>> {
-    keyword("if").ignore_then(structural_atom_after_head(
+    form_keyword("if").ignore_then(structural_atom_after_head(
         view,
         context,
         parse_if_expression,
@@ -835,7 +835,7 @@ fn match_expr<'lex, 'source: 'lex>(
     view: TokenView<'lex, 'source>,
     context: ExpressionContext,
 ) -> impl Parser<'lex, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>> {
-    keyword("match").ignore_then(structural_atom_after_head(
+    form_keyword("match").ignore_then(structural_atom_after_head(
         view,
         context,
         parse_match_expression,
@@ -846,7 +846,7 @@ fn try_expr<'lex, 'source: 'lex>(
     view: TokenView<'lex, 'source>,
     context: ExpressionContext,
 ) -> impl Parser<'lex, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>> {
-    keyword("try").ignore_then(structural_atom_after_head(
+    form_keyword("try").ignore_then(structural_atom_after_head(
         view,
         context,
         parse_try_expression,
@@ -857,7 +857,7 @@ fn try_match_expr<'lex, 'source: 'lex>(
     view: TokenView<'lex, 'source>,
     context: ExpressionContext,
 ) -> impl Parser<'lex, TokenInput<'lex, 'source>, SyntaxExpr, TokenExtra<'lex, 'source>> {
-    keyword("try_match").ignore_then(structural_atom_after_head(
+    form_keyword("try_match").ignore_then(structural_atom_after_head(
         view,
         context,
         parse_try_match_expression,
@@ -868,7 +868,7 @@ fn postfix_if_tail<'lex, 'source: 'lex>(
     view: TokenView<'lex, 'source>,
     context: ExpressionContext,
 ) -> impl Parser<'lex, TokenInput<'lex, 'source>, IfExpr, TokenExtra<'lex, 'source>> {
-    keyword("if").ignore_then(custom::<
+    form_keyword("if").ignore_then(custom::<
         _,
         TokenInput<'lex, 'source>,
         IfExpr,

@@ -13,7 +13,8 @@ use super::layout::LayoutView;
 use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
 use super::pattern::parse_pattern;
 use super::structural::{
-    is_layout_empty, parse_expression_in_context, single_reserved_keyword, trim_layout,
+    is_layout_empty, keyword_head, parse_expression_in_context, single_reserved_keyword,
+    trim_layout,
 };
 
 type ParseResult<T> = Result<T, Vec<Diagnostic>>;
@@ -194,7 +195,7 @@ fn hanging_statement_alignment_error(
 }
 
 fn line_begins_do_statement(view: TokenView<'_, '_>) -> bool {
-    starts_with_contextual_name(view, "declare")
+    keyword_head(view, "declare").is_some()
         || top_level_symbols(view, "<-")
             .into_iter()
             .next()
@@ -332,7 +333,7 @@ fn parse_statement(
 ) -> ParseResult<ParsedDoStatement> {
     let view = trim_layout(view);
     let context = parent_context.child_owner(view);
-    if starts_with_contextual_name(view, "declare") {
+    if keyword_head(view, "declare").is_some() {
         return parse_declare(view);
     }
 
@@ -446,13 +447,6 @@ fn parse_declare(view: TokenView<'_, '_>) -> ParseResult<ParsedDoStatement> {
         ));
     }
     Ok(ParsedDoStatement::Declare(names))
-}
-
-fn starts_with_contextual_name(view: TokenView<'_, '_>, expected: &str) -> bool {
-    view.first_significant().is_some_and(|(index, token)| {
-        token_is_name(token, expected)
-            && (index == view.range().start() || token.leading() != LeadingTrivia::Joint)
-    })
 }
 
 fn top_level_symbols(view: TokenView<'_, '_>, expected: &str) -> Vec<usize> {

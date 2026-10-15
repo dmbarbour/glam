@@ -610,12 +610,34 @@ fn g0_keywords_are_reserved_across_source_name_positions() {
 }
 
 #[test]
-fn bare_keyword_references_are_rejected() {
+fn bare_keyword_references_and_path_roots_are_rejected() {
     for (keyword, source) in [
         ("where", "language g0\nvalue = f (where)\n"),
         ("abstract", "language g0\nvalue = abstract\n"),
+        ("if", "language g0\nvalue = if.x then 1 else 0\n"),
+        ("match", "language g0\nvalue = (match.x)\n"),
+        ("where", "language g0\nvalue = f where.y\n"),
+        ("object", "language g0\nvalue = object.x\n"),
     ] {
         assert_reserved_keyword_diagnostic(source, keyword);
+    }
+}
+
+/// A keyword before a joint `:` is a tag's key wherever an expression
+/// stands, never a form's head, a suffix or a postfix `if`.
+#[test]
+fn keyword_tags_are_data_in_every_expression_position() {
+    for keyword in crate::g_syntax::keywords::G0_KEYWORDS {
+        let spelling = keyword.spelling();
+        for expression in [
+            format!("{spelling}:atom"),
+            format!("({spelling}:atom)"),
+            format!("{spelling}.key:atom"),
+            format!("(\\x -> x) {spelling}:atom"),
+        ] {
+            let parsed = parse(&format!("language g0\natom = 'a\nvalue = {expression}\n"));
+            assert_eq!(parsed.diagnostics, [], "value = {expression}");
+        }
     }
 }
 
