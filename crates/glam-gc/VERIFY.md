@@ -1301,4 +1301,6 @@ passed, none run apart) and both sanitizers. That run also covers
 failure beside its diagnostic. A direct-mapped table in
 front of the thread's class map answers a known type with one slot; a type
 that another evicted from its slot reads the map and refills it, without
-reaching the heap (`an_evicted_class_key_falls_back_to_the_thread_class_map`).
+reaching the heap (`an_evicted_class_key_falls_back_to_the_thread_class_map`):
+`scripts/check.sh full` passed at `69a08453`, which includes it (`ce7d3657`),
+with Miri (231 passed) and both sanitizers.

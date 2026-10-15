@@ -541,7 +541,8 @@ in the panic-safety plan, because an overflow crashes the process.
 - **`parser-cover-ir` as designed.** The shared pattern-and-expression
   IR was never built; the term parser's covers are expression-only and
   group-level. Should `parser-patterns` absorb the step, or does the
-  design change?
+  design change? *Answered (maintainer, 2026-10-15):* `parser-patterns`
+  absorbs what remains of it; the design stands.
 - **Who owns deep-source stack depth?** *Answered (maintainer,
   2026-10-15): the roadmap's `perf-pre-eval-stack-depth`.* `Decisions.md`
   (`no-semantic-recursion-on-rust-stack`) says the parser still recurses
