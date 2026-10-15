@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::core::{
     Builtin, CoreValueFactory, Dict, EvaluationFailure, Key, List, OpaquePayloadFamily,
-    OpaquePayloadRecord, OpaqueValue, RuntimeValueAccess, RuntimeValueMutator, Value, keys,
+    OpaquePayloadRecord, OpaqueValue, RuntimeValueAccess, Value, keys,
 };
 use crate::number::Number;
 use crate::runtime::RuntimeValueRoot;
@@ -374,6 +374,22 @@ pub(crate) fn diagnostic_with_frames_in(
     Value::builtin_call_in(access, Builtin::Anno, vec![annotation, diagnostic])
 }
 
+/// `message` as a diagnostic object extended by the object `updates`,
+/// composed without evaluating either:
+/// `diagnostic_object message with updates`.
+pub(crate) fn apply_updates_in(
+    access: &RuntimeValueAccess<'_>,
+    message: Value,
+    updates: Value,
+) -> Value {
+    let object = Value::builtin_call_in(access, Builtin::DiagnosticObject, vec![message]);
+    let defs = Value::PartialBuiltin(crate::core::BuiltinCall {
+        builtin: Builtin::ObjectOverrideDefs,
+        arguments: Arc::from([updates]),
+    });
+    Value::builtin_call_in(access, Builtin::ObjectWithDefs, vec![object, defs])
+}
+
 /// The diagnostic for `failure`, composed without evaluating it, as a
 /// boundary of its own.
 pub(crate) fn failure_diagnostic_root_with(
@@ -397,173 +413,6 @@ pub(crate) fn assembler_metadata(
         message = message.insert((*keys::ORIGIN).clone(), origin);
     }
     Dict::new_sync().insert((*keys::MSG).clone(), Value::Dict(message))
-}
-
-/// Applies one set of object updates as a definitions mixin. Keeping this
-/// operation separate lets observers add their own context without mutating
-/// the original emission.
-/// Root-preserving form of [`apply_emission_updates`] for orchestration which
-/// must release managed access before diagnostic normalization can demand
-/// values or run object builtins.
-pub(crate) fn apply_emission_updates_root(
-    values: &CoreValueFactory,
-    message: RuntimeValueRoot,
-    updates: RuntimeValueRoot,
-) -> Result<RuntimeValueRoot, crate::core::EvaluationHalt> {
-    values.with_runtime_value_mutator(|mut mutator| {
-        with_isolated_context(&mut mutator, |context, mutator| {
-            let message = diagnostic_object_root(context, mutator, message)?;
-            apply_updates_root(context, mutator, message, updates)
-        })
-    })
-}
-
-/// Runs `normalize` with an isolated evaluation context, under `mutator`,
-/// then drops the context with the mutator suspended: closing its session
-/// may settle or cancel work the normalization launched.
-fn with_isolated_context<R>(
-    mutator: &mut RuntimeValueMutator<'_, '_>,
-    normalize: impl FnOnce(&crate::evaluation::EvalContext, &mut RuntimeValueMutator<'_, '_>) -> R,
-) -> R {
-    let context = crate::evaluation::EvalContext::isolated(mutator.values().clone());
-    let result = normalize(&context, mutator);
-    mutator.suspend(|| drop(context));
-    result
-}
-
-fn apply_updates_root(
-    context: &crate::evaluation::EvalContext,
-    mutator: &mut RuntimeValueMutator<'_, '_>,
-    message: RuntimeValueRoot,
-    updates: RuntimeValueRoot,
-) -> Result<RuntimeValueRoot, crate::core::EvaluationHalt> {
-    context.evaluate_builtin_whnf_under(mutator, Builtin::ObjectWithDefs, |access| {
-        let extension_defs = Value::builtin_call_in(
-            access,
-            Builtin::ObjectOverrideDefs,
-            vec![updates.clone_core_with(access)],
-        );
-        vec![message.clone_core_with(access), extension_defs]
-    })
-}
-
-pub(crate) fn prepend_contexts_root(
-    values: &CoreValueFactory,
-    message: RuntimeValueRoot,
-    contexts: RuntimeValueRoot,
-) -> Result<RuntimeValueRoot, crate::core::EvaluationHalt> {
-    values.with_runtime_value_mutator(|mut mutator| {
-        prepend_contexts_root_under(&mut mutator, message, contexts)
-    })
-}
-
-/// As [`prepend_contexts_root`], under a caller's `mutator`.
-pub(crate) fn prepend_contexts_root_under(
-    mutator: &mut RuntimeValueMutator<'_, '_>,
-    message: RuntimeValueRoot,
-    contexts: RuntimeValueRoot,
-) -> Result<RuntimeValueRoot, crate::core::EvaluationHalt> {
-    with_isolated_context(mutator, |context, mutator| {
-        let message = diagnostic_object_root(context, mutator, message)?;
-        let interface = mutator.with_access(|access| {
-            message.with_core(&access, |message| match message {
-                Value::Dict(message) => message
-                    .get(&*keys::MSG)
-                    .map(|interface| access.root_runtime_value(access.duplicate_value(interface))),
-                _ => None,
-            })
-        });
-        let interface = match interface.flatten() {
-            Some(interface) => Some(context.evaluate_root_whnf_under(mutator, interface)?),
-            None => None,
-        };
-        let updates = mutator.with_access(|access| {
-            let access = &access;
-            let prefix = contexts
-                .with_core(access, |contexts| match contexts {
-                    Value::List(contexts) => contexts.clone(),
-                    _ => List::empty(),
-                })
-                .unwrap_or_else(List::empty);
-            let existing = interface
-                .as_ref()
-                .and_then(|interface| {
-                    interface.with_core(access, |interface| match interface {
-                        Value::Dict(interface) => interface
-                            .get(&*keys::CONTEXT)
-                            .map(|context| access.duplicate_value(context)),
-                        _ => None,
-                    })
-                })
-                .flatten();
-            let existing = match existing {
-                Some(Value::List(contexts)) => contexts,
-                Some(context) => List::from_values(vec![context]),
-                None => List::empty(),
-            };
-            let contexts = List::concat(prefix, existing);
-            access.root_runtime_value(Value::Dict(Dict::new_sync().insert(
-                (*keys::MSG).clone(),
-                Value::Dict(
-                    Dict::new_sync().insert((*keys::CONTEXT).clone(), Value::List(contexts)),
-                ),
-            )))
-        });
-        apply_updates_root(context, mutator, message, updates)
-    })
-}
-
-pub(crate) fn enrich_root(
-    values: &CoreValueFactory,
-    message: RuntimeValueRoot,
-    severity: Severity,
-    origin: Option<RuntimeValueRoot>,
-) -> Result<RuntimeValueRoot, crate::core::EvaluationHalt> {
-    let updates = values.construct_runtime_value_root(|access| {
-        let origin = origin.as_ref().map(|origin| origin.clone_core_with(access));
-        Value::Dict(assembler_metadata(access, values, severity, origin))
-    });
-    apply_emission_updates_root(values, message, updates)
-}
-
-/// Prepends semantic demand frames while preserving context supplied by the
-/// original diagnostic emission. An empty prefix still normalizes
-/// `msg.context` to a list.
-fn diagnostic_object_root(
-    context: &crate::evaluation::EvalContext,
-    mutator: &mut RuntimeValueMutator<'_, '_>,
-    message: crate::runtime::RuntimeValueRoot,
-) -> Result<crate::runtime::RuntimeValueRoot, crate::core::EvaluationHalt> {
-    let message = context.evaluate_root_whnf_under(mutator, message)?;
-    let spec = mutator.with_access(|access| {
-        message
-            .with_core(&access, |message| match message {
-                Value::Dict(message) => message
-                    .get(&*keys::SPEC)
-                    .map(|spec| access.root_runtime_value(access.duplicate_value(spec))),
-                _ => None,
-            })
-            .flatten()
-    });
-    let has_defined_spec = if let Some(spec) = spec {
-        let spec = context.evaluate_root_whnf_under(mutator, spec)?;
-        mutator.with_access(|access| {
-            spec.with_core(
-                &access,
-                |spec| !matches!(spec, Value::Dict(spec) if spec.is_empty()),
-            )
-            .unwrap_or(false)
-        })
-    } else {
-        false
-    };
-    if has_defined_spec {
-        Ok(message)
-    } else {
-        context.evaluate_builtin_whnf_under(mutator, Builtin::ObjectFromDict, |access| {
-            vec![message.clone_core_with(access)]
-        })
-    }
 }
 
 /// The message `value` presents without evaluating anything: itself, a

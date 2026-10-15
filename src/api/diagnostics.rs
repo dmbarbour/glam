@@ -11,7 +11,7 @@ use super::runtime::{
     set_runtime_diagnostic_route_guarded,
 };
 use super::{Error, EvaluationRuntime, Value, Values};
-use crate::core::{Builtin, CoreValueFactory, Dict, Key, Value as CoreValue};
+use crate::core::{CoreValueFactory, Dict, Key, Value as CoreValue};
 use crate::diagnostic::{CompilationTrace, Severity};
 use crate::evaluation::{TaskStatusPublisher, TaskStatusWake};
 use crate::number::Number;
@@ -106,36 +106,10 @@ impl Diagnostic {
         self.origin.as_ref()
     }
 
-    /// Applies authoritative assembler metadata to a fresh diagnostic object.
+    /// Applies authoritative assembler metadata to a fresh diagnostic object,
+    /// as a mixin composed without evaluating the emission
+    /// (`senders-never-evaluate-diagnostics`). Its renderer evaluates it.
     pub fn enrich(&self, values: &Values) -> Result<Value, Error> {
-        self.emission.require_runtime(values.runtime)?;
-        self.enrich_with_factory(&values.core)
-    }
-
-    pub(crate) fn enrich_with_factory(&self, values: &CoreValueFactory) -> Result<Value, Error> {
-        let public_values = Values::from_core_factory(values.clone());
-        self.emission.require_runtime(public_values.runtime)?;
-        if let Some(origin) = &self.origin {
-            origin.require_runtime(public_values.runtime)?;
-        }
-        crate::diagnostic::enrich_root(
-            values,
-            self.emission.0.clone(),
-            self.severity,
-            self.origin.as_ref().map(|origin| origin.0.clone()),
-        )
-        .map(Value::from_runtime_root)
-        .map_err(|error| Error::from_eval(values, error))
-    }
-
-    /// Composes authoritative assembler enrichment without demanding it.
-    ///
-    /// Effect specializations use this form after claiming an input event so
-    /// their host callback can return before semantic evaluation begins. The
-    /// ordinary reflection machine then owns any suspension while the caller
-    /// observes the returned diagnostic.
-    #[doc(hidden)]
-    pub fn prepare_enrichment(&self, values: &Values) -> Result<Value, Error> {
         self.emission.require_runtime(values.runtime)?;
         if let Some(origin) = &self.origin {
             origin.require_runtime(values.runtime)?;
@@ -153,34 +127,25 @@ impl Diagnostic {
                 self.severity,
                 origin,
             ));
-            let message = CoreValue::builtin_call_in(
+            Ok(access.wrap(crate::diagnostic::apply_updates_in(
                 access.runtime_access(),
-                Builtin::DiagnosticObject,
-                vec![emission],
-            );
-            let extension_defs = CoreValue::PartialBuiltin(crate::core::BuiltinCall {
-                builtin: Builtin::ObjectOverrideDefs,
-                arguments: Arc::from([updates]),
-            });
-            Ok(access.wrap(CoreValue::builtin_call_in(
-                access.runtime_access(),
-                Builtin::ObjectWithDefs,
-                vec![message, extension_defs],
+                emission,
+                updates,
             )))
         })
     }
 
-    /// Applies assembler metadata followed by observer-specific object updates.
-    /// The raw emission and other enriched views remain unchanged.
+    /// Applies assembler metadata followed by observer-specific object
+    /// updates, composed without evaluating either. The raw emission and
+    /// other enriched views remain unchanged.
     pub fn enrich_with(&self, values: &Values, updates: Value) -> Result<Value, Error> {
         updates.require_runtime(values.runtime)?;
         let enriched = self.enrich(values)?;
-        crate::diagnostic::apply_emission_updates_root(&values.core, enriched.0, updates.0)
-            .map(Value::from_runtime_root)
-            .map_err(|error| Error::from_eval(&values.core, error))
+        Self::apply_updates(values, &enriched, updates)
     }
 
-    /// Applies observer-owned updates to an arbitrary diagnostic-style value.
+    /// Applies observer-owned updates to an arbitrary diagnostic-style
+    /// value, composed without evaluating either.
     ///
     /// Unlike [`Self::enrich`] and [`Self::enrich_with`], this does not inject
     /// assembler severity or origin metadata. This supports recursive context
@@ -188,9 +153,15 @@ impl Diagnostic {
     pub fn apply_updates(values: &Values, message: &Value, updates: Value) -> Result<Value, Error> {
         message.require_runtime(values.runtime)?;
         updates.require_runtime(values.runtime)?;
-        crate::diagnostic::apply_emission_updates_root(&values.core, message.0.clone(), updates.0)
-            .map(Value::from_runtime_root)
-            .map_err(|error| Error::from_eval(&values.core, error))
+        values.with_access(|access| {
+            let message = access.clone_core(message)?;
+            let updates = access.clone_core(&updates)?;
+            Ok(access.wrap(crate::diagnostic::apply_updates_in(
+                access.runtime_access(),
+                message,
+                updates,
+            )))
+        })
     }
 
     /// Prepends one structured frame describing why this diagnostic was

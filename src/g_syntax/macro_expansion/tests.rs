@@ -1092,12 +1092,13 @@ answer = @meta.expected actual
     assert!(diagnostic.message().contains("at input line 5, column"));
     assert!(diagnostic.message().contains("the word `expected`"));
 
-    let message = diagnostic.emission().clone_core_for_test();
-    let Value::Dict(message) = &message else {
-        panic!("macro failure should remain an object diagnostic")
-    };
-    let Value::Dict(context) = message
-        .get(&Key::atom_from_text("macro"))
+    let message = evaluated(&assembler, &diagnostic.emission().clone_core_for_test())
+        .expect("a macro failure should evaluate as its renderer would");
+    assert!(
+        matches!(message, Value::Dict(_)),
+        "macro failure should remain an object diagnostic"
+    );
+    let Value::Dict(context) = member(&assembler, &message, "macro")
         .expect("macro diagnostics should carry compiler-owned context")
     else {
         panic!("macro diagnostic context should be a dictionary")
@@ -1176,12 +1177,14 @@ fn invalid_expanded_source_reports_an_excerpt_and_expansion_frames() {
         })
         .expect("invalid expanded syntax should receive macro context");
     assert!(diagnostic.message().contains("expansion: `answer = $`"));
-    let message = diagnostic.emission().clone_core_for_test();
-    let Value::Dict(message) = &message else {
-        panic!("invalid expansion should remain an object diagnostic")
-    };
+    let message = evaluated(&assembler, &diagnostic.emission().clone_core_for_test())
+        .expect("an invalid expansion should evaluate as its renderer would");
+    assert!(
+        matches!(message, Value::Dict(_)),
+        "invalid expansion should remain an object diagnostic"
+    );
     assert!(matches!(
-        message.get(&Key::atom_from_text("macro")),
+        member(&assembler, &message, "macro"),
         Some(Value::Dict(_))
     ));
 }
@@ -1370,12 +1373,13 @@ answer = @meta.notice
         .iter()
         .find(|diagnostic| diagnostic.message() == "macro notice")
         .expect("accepted macro log should be published");
-    let message = diagnostic.emission().clone_core_for_test();
-    let Value::Dict(message) = &message else {
-        panic!("macro log should remain an object")
-    };
-    let Value::Dict(context) = message
-        .get(&Key::atom_from_text("macro"))
+    let message = evaluated(&assembler, &diagnostic.emission().clone_core_for_test())
+        .expect("a macro log should evaluate as its renderer would");
+    assert!(
+        matches!(message, Value::Dict(_)),
+        "macro log should remain an object"
+    );
+    let Value::Dict(context) = member(&assembler, &message, "macro")
         .expect("compiler context should replace the open macro metadata field")
     else {
         panic!("compiler macro context should be a dictionary")

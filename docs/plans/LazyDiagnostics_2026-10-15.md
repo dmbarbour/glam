@@ -1,7 +1,7 @@
 # Lazy Diagnostics — 2026-10-15
 
-Status: in progress; `diag-context-mixin` and `diag-lazy-failures` landed
-on 2026-10-15. The maintainer decided on 2026-10-15 that senders
+Status: in progress; `diag-context-mixin`, `diag-lazy-failures` and
+`diag-lazy-enrichment` landed on 2026-10-15. The maintainer decided on 2026-10-15 that senders
 never evaluate diagnostics; only renderers do
 (`senders-never-evaluate-diagnostics`, in `Decisions.md`).
 
@@ -106,6 +106,16 @@ the isolated session's suspended drop, serve enrichment until
 `Diagnostic::enrich` (as `prepare_enrichment` does), `enrich_with`,
 `apply_updates`, `with_context`, `Error::with_context`, and the front end's
 cause frames and macro context compose mixins instead of evaluating.
+
+Landed 2026-10-15. `enrich` composes what `prepare_enrichment` did, which
+went; `enrich_with` and `apply_updates` compose `diagnostic_object message
+with updates` (`apply_updates_in`), and `with_context` prepends one frame,
+keeping its summary. The eager builders went with the isolated session and
+its suspended drop, and the client-demand driver returned to the shape it
+had before `gc-hold-boundary-release`, which lent it a mutator only for
+diagnostics. Composition can no longer fail: a failing update surfaces
+where the composed value is rendered, as a test of a viewer update now
+shows.
 
 ### Renderers evaluate (`diag-renderers-evaluate`)
 

@@ -876,7 +876,10 @@ fn diagnostic_enrichment_is_an_authoritative_object_mixin() {
     let enriched = diagnostic
         .enrich(&values)
         .expect("diagnostic should enrich");
-    let enriched = enriched.clone_core_for_test();
+    // A renderer evaluates the composed enrichment.
+    let enriched = crate::evaluation::EvalContext::isolated(values.core().clone())
+        .evaluate_compatibility_whnf(&enriched.clone_core_for_test())
+        .unwrap_or_else(|_| panic!("the enriched diagnostic should evaluate"));
     let CoreValue::Dict(enriched) = &enriched else {
         panic!("enriched diagnostic should be an object dictionary");
     };
@@ -913,27 +916,36 @@ fn diagnostic_enrichment_is_an_authoritative_object_mixin() {
     ));
 }
 
+/// Enrichment, updates and context compose mixins without evaluating the
+/// diagnostic; its renderer evaluates it
+/// (`senders-never-evaluate-diagnostics`).
 #[test]
-fn prepared_diagnostic_enrichment_defers_work_and_matches_eager_enrichment() {
+fn diagnostic_enrichment_composes_without_evaluating() {
     let runtime = EvaluationRuntime::new(0).expect("test runtime should build");
     let values = runtime.values();
-    let diagnostic = Diagnostic::new(&values, Severity::Warning, "prepared warning");
-    let prepared = diagnostic
-        .prepare_enrichment(&values)
-        .expect("diagnostic enrichment should compose");
-    assert!(matches!(prepared.clone_core_for_test(), CoreValue::Lazy(_)));
-
-    let context = crate::evaluation::EvalContext::isolated(values.core().clone());
-    let prepared = context
-        .evaluate_compatibility_whnf(&prepared.clone_core_for_test())
-        .expect("prepared enrichment should evaluate");
-    let eager = diagnostic
-        .enrich(&values)
-        .expect("eager enrichment should evaluate")
-        .clone_core_for_test();
-    values
-        .core()
-        .assert_same_representation_for_test(&prepared, &eager);
+    let diagnostic = Diagnostic::new(&values, Severity::Warning, "composed warning");
+    let updates = values
+        .record([("viewer", values.text("terminal"))])
+        .expect("viewer updates are local");
+    let composed = [
+        diagnostic
+            .enrich(&values)
+            .expect("enrichment should compose"),
+        diagnostic
+            .enrich_with(&values, updates.clone())
+            .expect("enrichment with updates should compose"),
+        Diagnostic::apply_updates(&values, diagnostic.emission(), updates)
+            .expect("updates should compose"),
+        diagnostic
+            .clone()
+            .with_context(&values, values.text("context"))
+            .expect("context should compose")
+            .emission()
+            .clone(),
+    ];
+    for value in composed {
+        assert!(matches!(value.clone_core_for_test(), CoreValue::Lazy(_)));
+    }
 }
 
 #[test]
@@ -962,11 +974,18 @@ fn viewers_can_inherit_one_diagnostic_independently() {
     let CoreValue::Dict(original) = &original else {
         unreachable!()
     };
-    let first = first.clone_core_for_test();
+    // Each view is composed; its renderer evaluates it.
+    let context = EvalContext::isolated(values.core().clone());
+    let render = |view: Value| {
+        context
+            .evaluate_compatibility_whnf(&view.clone_core_for_test())
+            .unwrap_or_else(|_| panic!("a viewer's diagnostic should evaluate"))
+    };
+    let first = render(first);
     let CoreValue::Dict(first) = &first else {
         unreachable!()
     };
-    let second = second.clone_core_for_test();
+    let second = render(second);
     let CoreValue::Dict(second) = &second else {
         unreachable!()
     };

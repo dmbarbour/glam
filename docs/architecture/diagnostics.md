@@ -20,6 +20,16 @@ Only an explicit client projection chooses a human-readable summary. A public
 diagnostics emitted while attempting the operation; its Rust `Display` is an
 emergency summary, not the semantic message.
 
+Projecting a failure to a diagnostic composes it without evaluating
+(`senders-never-evaluate-diagnostics`): the emission, normalized lazily by
+`DiagnosticObject`, extended by a mixin that prepends the failure's context
+frames to `msg.context` (`DiagnosticContextDefs`), under an
+`eval:{op:'diagnostic_message}` frame. A `RuntimeFailureRoot` shares its one
+composition with every publication. Only a renderer evaluates it, usually on
+the logger's thread; a message that fails to evaluate fails its renderer.
+The Rust summaries `Diagnostic::message` and `line` read what is immediately
+built, through such compositions.
+
 Evaluator-owned context describes why a value was demanded rather than which
 Rust function happened to fail. Conventional frames use tagged dictionaries
 such as `eval`, `task`, `conf`, `import`, `asm`, and `g`. The built-in front end
@@ -72,8 +82,9 @@ capability. Neither evaluation nor rendering recursively searches arbitrary
 diagnostics for opaque values.
 
 An observer may enrich an event with authoritative `msg.severity` and
-`msg.origin`, producing an independent object view. Enrichment does not mutate
-the original event or publish a second message.
+`msg.origin`, producing an independent object view. Enrichment composes a
+mixin without evaluating or observing the event, and does not mutate the
+original event or publish a second message.
 
 ## Runtime Diagnostic Ingress
 

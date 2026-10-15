@@ -518,16 +518,18 @@ fn with_cause(
     let Some(cause) = cause else {
         return emission;
     };
-    let contexts = values.construct_runtime_value_root(|access| {
-        Value::List(List::from_values(vec![
-            cause
-                .emission()
-                .clone()
-                .into_runtime_root()
-                .clone_core_with(access),
-        ]))
-    });
-    crate::diagnostic::prepend_contexts_root(values, emission.clone(), contexts).unwrap_or(emission)
+    values.construct_runtime_value_root(|access| {
+        let cause = cause
+            .emission()
+            .clone()
+            .into_runtime_root()
+            .clone_core_with(access);
+        crate::diagnostic::diagnostic_with_frames_in(
+            access,
+            emission.clone_core_with(access),
+            vec![cause],
+        )
+    })
 }
 
 fn apply_public_macro_context(
@@ -553,11 +555,10 @@ fn apply_macro_context(
     cases: &[PublicValue],
     frames: &[OriginalMacroInvocation],
 ) -> RuntimeValueRoot {
-    let updates = values.construct_runtime_value_root(|access| {
-        macro_context_updates(access, frontier, cases, frames)
-    });
-    crate::diagnostic::apply_emission_updates_root(values, message.clone(), updates)
-        .unwrap_or(message)
+    values.construct_runtime_value_root(|access| {
+        let updates = macro_context_updates(access, frontier, cases, frames);
+        crate::diagnostic::apply_updates_in(access, message.clone_core_with(access), updates)
+    })
 }
 
 fn macro_context_updates(

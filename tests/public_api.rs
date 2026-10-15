@@ -960,8 +960,13 @@ fn diagnostic_value_updates_preserve_structured_evaluation_failures() {
         [("msg", record(&values, [("text", values.text("nested"))]))],
     );
 
-    let error = Diagnostic::apply_updates(&assembler.values(), &message, failed_update)
-        .expect_err("demanding the viewer update should preserve its failure");
+    // The update composes without evaluating; rendering it demands the
+    // update, which fails.
+    let composed = Diagnostic::apply_updates(&assembler.values(), &message, failed_update)
+        .expect("a diagnostic update should compose without evaluating");
+    let Err(error) = evaluate(&assembler, &composed) else {
+        panic!("demanding the viewer update should preserve its failure");
+    };
     assert_eq!(error.to_string(), "glam evaluation failed");
     let diagnostic = error
         .diagnostic(&values)

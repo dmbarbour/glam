@@ -435,7 +435,7 @@ fn read_test_log(context: &mut RequestContext<'_, TestEffects>) -> Result<Reques
         };
         journal.consumed_diagnostics += 1;
         return diagnostic
-            .prepare_enrichment(&Values::from_core_factory(values))
+            .enrich(&Values::from_core_factory(values))
             .map(RequestResult::Return)
             .map_err(TaskHalt::from);
     }
@@ -447,7 +447,7 @@ fn read_test_log(context: &mut RequestContext<'_, TestEffects>) -> Result<Reques
             return Ok(RequestResult::Fail);
         };
         let value = diagnostic
-            .prepare_enrichment(&context.values())
+            .enrich(&context.values())
             .map_err(TaskHalt::from)?;
         let commit = TaskCommit::new(
             StoreJournal::new(snapshot.store().clone()),
