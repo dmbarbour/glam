@@ -160,8 +160,10 @@ required that `Error` evaluated.
 Landed 2026-10-15. Compile diagnostics carry their text and line beside
 their emission (`CompileDiagnostic`), and the transport envelope carries
 the message. `ReasoningFailure::message` is static too. With no reader of
-the blocked failure left, a deadlock snapshot keeps it only as an owner,
-which tests read. Production no longer builds isolated evaluation sessions
+the blocked failure left, deadlock snapshots and settlement reports no
+longer keep it beside its diagnostic (maintainer): its composed diagnostic
+retains what a renderer needs, which the retention tests now check by
+rendering it after a collection. Production no longer builds isolated evaluation sessions
 at all, so they are test-only. About forty tests that asserted the summary
 of a diagnostic built from a value now evaluate its `msg.text`, as a
 renderer does, through test helpers (`rendered_text_for_test`).

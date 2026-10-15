@@ -621,13 +621,6 @@ pub struct RuntimeDeadlockWork {
     dependency: Option<RuntimeDependency>,
     observed_epoch: Option<u64>,
     blocked_diagnostic: Option<Diagnostic>,
-    /// Retains the blocked failure, whose diagnostic is composed from it,
-    /// for as long as the snapshot or report lives.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "an owner that only tests read back")
-    )]
-    blocked_failure: Option<RuntimeFailureRoot>,
 }
 
 impl RuntimeDeadlockWork {
@@ -668,11 +661,6 @@ impl RuntimeDeadlockWork {
     /// evaluated: its renderer evaluates it.
     pub fn blocked_diagnostic(&self) -> Option<&Diagnostic> {
         self.blocked_diagnostic.as_ref()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn blocked_failure_root(&self) -> Option<&RuntimeFailureRoot> {
-        self.blocked_failure.as_ref()
     }
 }
 
@@ -825,7 +813,6 @@ pub(super) fn runtime_deadlock_work_from_snapshot(
     values: &CoreValueFactory,
     snapshot: RuntimeDeadlockWorkSnapshot,
 ) -> RuntimeDeadlockWork {
-    let blocked_failure = snapshot.blocked_error;
     RuntimeDeadlockWork {
         work_id: snapshot.work.get(),
         session_id: snapshot.session.map(|session| session.get()),
@@ -844,10 +831,10 @@ pub(super) fn runtime_deadlock_work_from_snapshot(
         },
         dependency: snapshot.dependency.map(runtime_dependency_from_snapshot),
         observed_epoch: snapshot.observed_epoch.map(RuntimeObservationEpoch::get),
-        blocked_diagnostic: blocked_failure
+        blocked_diagnostic: snapshot
+            .blocked_error
             .as_ref()
             .map(|error| reasoning_diagnostic(values, error)),
-        blocked_failure,
     }
 }
 
@@ -855,16 +842,14 @@ pub(super) fn runtime_deadlock_work_from_snapshot(
 mod tests {
     use super::*;
 
-    /// Compile-exhaustive ownership latch for the host-visible blocked-work
-    /// failure retained by readiness snapshots and settlement reports.
+    /// Ownership latch for the host-visible blocked-work failure retained by
+    /// readiness snapshots and settlement reports: only its composed
+    /// diagnostic, never a raw failure.
     fn assert_runtime_deadlock_work_failure_boundary(work: &RuntimeDeadlockWork) {
         let RuntimeDeadlockWork {
-            blocked_diagnostic,
-            blocked_failure,
-            ..
+            blocked_diagnostic, ..
         } = work;
         let _: &Option<Diagnostic> = blocked_diagnostic;
-        let _: &Option<crate::runtime::RuntimeFailureRoot> = blocked_failure;
     }
 
     #[test]
