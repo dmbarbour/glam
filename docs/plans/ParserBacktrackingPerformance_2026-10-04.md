@@ -516,19 +516,29 @@ it.
 
 **Keyword regions.** The term parser's token pass now knows where keyword
 forms are, without parsing them:
-- A keyword head (`if`, `match`, `try`, `try_match`, `do` or `using`,
-  wherever it appears) opens a region in its frame, up to the frame's
-  separator or close: the extent `parse_structural_atom` gives the form.
+- A keyword head (`if`, `match`, `try`, `try_match`, `do` or `using`)
+  opens a region in its frame, up to the frame's separator or close: the
+  extent `parse_structural_atom` gives the form, found by the same
+  `group_separator`.
+- A keyword that is surely a key opens none: after a joint `.` (a path
+  segment or effect name), after a joint `'` (a quoted atom or path), after
+  a constructor's `:`, or before a joint `:` (a tag or member key). The term
+  parser delegates a keyword form only where the same test holds, so every
+  delegated form has its region.
 - Groups closing inside a region are deferred, so each group is interpreted
-  by exactly one parser. A deferred group the term parser consumes anyway,
-  after a form that ended before its region, is interpreted when consumed,
-  post-order on an explicit stack.
-- Correctness never depends on the region rule: missing a region costs
-  time, and a region that overreaches costs a deferred interpretation.
-- This is not option A's lookahead. A region opens at the keyword head,
-  judged by that token and the next (a joint `:` or `.` makes the name a
-  tag or a path), and closes at a separator the token pass meets anyway.
-  Nothing peeks past a group, and no alternative is guarded.
+  by exactly one parser. A deferred group the term parser consumes anyway is
+  interpreted when consumed.
+- Regions never change a parse; they decide only which parser interprets a
+  group. A missed region would cost time: the form's groups interpreted
+  twice, doubling the work below it. A region the term parser takes anyway,
+  at the root of a tag path such as `if.x:1` or after a form that ends
+  before its group member does, as in `(do {…} (…))`, costs a deferred
+  interpretation: one level of Rust recursion each, where such regions nest.
+- The rule is a prediction of where the structural layer takes over, from
+  a keyword and its neighbouring tokens; nothing peeks past a group, and no
+  alternative is guarded. It shares its head test with the term parser,
+  but still mirrors the structural layer's extent, until native keyword
+  frames replace both.
 
 **Whole-source scans.** Four structural sites found a keyword's enclosing
 group by walking every group in the source (`structural_view_at`,
@@ -541,6 +551,33 @@ enclosing group and line indentation once.
 though most callers wanted the first; a `where` suffix rescanned the whole
 view for the next `where`, quadratic in a chain of them. It is now an
 iterator, and a suffix searches only what follows it.
+
+**Testing the regions** (2026-10-16, after the maintainer asked how we know
+they are not fragile):
+- `keyword_regions_never_change_a_parse` parses every sample, edge case,
+  keyword-as-key case, nesting shape (depths 1–6) and generated program
+  with regions and without, 11,392 parses, and compares trees and
+  diagnostics.
+- `keywords_as_keys_agree_with_the_grammar` runs the oracle over keywords as
+  path keys, quoted atoms and paths, tag, constructor and dict keys, effect
+  names and words containing them, each before a group a region would defer.
+- The count tests nest eight keyword forms and nine keyword keys 12 deep and
+  fail if any group is interpreted twice; 12 levels fail at once (4,095
+  interpretations of 12 groups) instead of hanging the suite.
+- `keywords_as_keys_nest_without_recursion` nests the keys 2,000 deep.
+- Each test was checked against a deliberate fault: deferred groups the
+  term parser takes become errors (three tests fail, first on `x.if (a)`,
+  which no sample or edge case reaches); `do` opens no region (8,190
+  interpretations of 24 groups); the first rule, which missed `if.x` and
+  took keys after `.`, `'` and `:` as heads (4,095 interpretations of 12;
+  stack overflow at 2,000 deep). Every token opening an unclosed region
+  leaves results unchanged but overflows the 2,000-deep nesting test.
+
+These found two faults in the first rule, both fixed: `(if.x then … else
+0)`, which the term parser delegates, opened no region and stayed
+exponential (126 M instructions at depth 12 on `main`, about 1 M now); and
+keys such as `(x.if (…))`, `(f 'if (…))` and `(:if (…))` opened regions,
+so 10,000 levels overflowed the stack where `main` parses them.
 
 **The oracle.** The sweep (`GLAM_TERM_ORACLE`) compared every expression
 the grammar's keyword forms parsed through the term parser while the oracle
@@ -593,6 +630,17 @@ region checks repeated by the pattern parser's trial parses, which
   remaining excess, about 160 M at 1,600): `parser-scope-analysis`.
 - **Downstream depth.** Nested 512 deep, a parenthesized `if` now parses,
   then overflows the stack after parsing (`perf-pre-eval-stack-depth`).
+- **Forms that end early, nested.** `(do { .r 1 } (…))` nested 10,000 deep
+  overflows the stack in a debug build, where `main` parses it: each level's
+  argument is a deferred group the term parser takes on demand. It is
+  keyword nesting, which overflows sooner for a parenthesized `if`; native
+  keyword frames remove both.
+- **Keywords as tag keys** (on `main` too). `if:1`, `where:1` and
+  `match:[a] (b)` are rejected as malformed forms, and `(f if:1)` is read as
+  a postfix `if`, though the syntax reference makes `where:Value` tagged
+  data. The structural layer dispatches on a keyword without the key test
+  that the term parser and regions apply. And `if.x then a else b` parses as
+  an `if` on the effect `.x`, though a keyword may not be a bare path root.
 
 ### Proposal
 
@@ -631,12 +679,14 @@ For review; not yet agreed.
   `NESTING_SHAPES` in the term parser's tests holds no keyword form, which
   is how the exponential above went unnoticed: `parser-keyword-frames` adds
   parenthesized `if`, `match`, `try` and `let` shapes to it.
-  As built (2026-10-15), `KEYWORD_NESTING_SHAPES` holds seven keyword
+  As built (2026-10-16), `KEYWORD_NESTING_SHAPES` holds eight keyword
   shapes: parenthesized `if`, `try`, `match`, `let` and `do`, an `if` as an
-  argument, and an `if` in a lambda body. Its test counts group
-  interpretations at depth 40 rather than timing the parse, and fails if
-  any group is interpreted twice. A timing bound waits for native keyword
-  frames, since keyword nesting still costs O(n·d).
+  argument, an `if` in a lambda body, and `if.x`, which the term parser
+  delegates. Its test counts group interpretations at depth 12 rather than
+  timing the parse, and fails if any group is interpreted twice. A timing
+  bound waits for native keyword frames, since keyword nesting still costs
+  O(n·d). See [Keyword regions 2026-10-15](#keyword-regions-2026-10-15) for
+  the tests of keywords as keys and of regions themselves.
 - The invalid-syntax samples keep their diagnostics. Chumsky merges expected
   tokens from failed alternatives, so check closest-match wording explicitly.
 - Compare compile time on the samples and the X3 corpus before and after.
@@ -668,6 +718,10 @@ in the panic-safety plan, because an overflow crashes the process.
   *Resolved 2026-10-15:* keyword regions, the first part of
   `parser-keyword-frames`, remove it without memoization or lookahead
   guards.
+- **Keywords as tag keys.** Should the structural layer use the term
+  parser's key test, so `if:1` is tagged data as the syntax reference says,
+  and `if.x` a bare-root error? See What is left under
+  [Keyword regions 2026-10-15](#keyword-regions-2026-10-15).
 - **What follows keyword regions?** Proposed in
   [Keyword regions 2026-10-15](#keyword-regions-2026-10-15): land them, take
   `parser-patterns` next for the remaining `op -> P` exponential and the
