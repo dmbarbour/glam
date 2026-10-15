@@ -2149,6 +2149,28 @@ maps the short names used here to file names.
   `crates/glam-gc/SAFETY.md` "Regional Mutator Admission Invariants".
 - **Recorded in:** explicit heap holds plan, "Decisions, 2026-10-14".
 
+### A quantum boundary releases under the mutator
+`boundary-release-under-mutator` · 2026-10-14 · maintainer · accepted
+- **Context:** after `driver-mutator`, a driver suspended its mutator for
+  each quantum boundary's whole release, about five times per `.r ()` step.
+  Most of the release is internal: coordinator transitions, terminal
+  publication, route-lease release. A failed task's status diagnostic was
+  built by a driver holding its own mutator, which needed the suspension.
+- **Decision:** the release runs under the driver's mutator, suspending
+  only to run deferred work, join a requested collection, run client code
+  (status callbacks, machine cancellation and disposal) or wait.
+  Diagnostics a terminal result needs are built under the mutator, which is
+  passed to the code that needs it. Rejected: keeping the whole boundary
+  suspended, a single safepoint costing about 300 instructions.
+- **Consequences:** the coordinator lock and the runtime gate are taken
+  under a mutator. That cannot deadlock on admission, since a synchronous
+  collection admits entries until no mutator is active; nobody may call
+  `collect_full` while holding them. Code the release reaches takes access
+  from its caller instead of opening a boundary.
+- **Rule lives in:** `agent_context/evaluation.md` "Values and Forcing".
+- **Recorded in:** explicit heap holds plan, `gc-hold-suspension-review`,
+  `gc-hold-boundary-release`.
+
 ### Drivers hold the thread's mutator across quanta
 `driver-mutator` · 2026-10-14 · maintainer · accepted
 - **Context:** converting Glam's boundaries left a choice for code that

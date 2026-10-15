@@ -990,10 +990,21 @@ impl EvalContext {
         &self,
         value: RuntimeValueRoot,
     ) -> Result<RuntimeValueRoot, crate::core::EvaluationHalt> {
+        self.values().with_runtime_value_mutator(|mut mutator| {
+            self.evaluate_root_whnf_under(&mut mutator, value)
+        })
+    }
+
+    /// As [`Self::evaluate_root_whnf`], driving under a caller's `mutator`.
+    pub(crate) fn evaluate_root_whnf_under(
+        &self,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
+        value: RuntimeValueRoot,
+    ) -> Result<RuntimeValueRoot, crate::core::EvaluationHalt> {
         let handle = self
             .demand_whnf(value)
             .map_err(|error| crate::core::EvaluationHalt::new(error.as_ref()))?;
-        match self.drive_client_demand(handle)? {
+        match self.drive_client_demand_under(mutator, handle)? {
             ClientDemandResult::Complete(value) => Ok(value),
             ClientDemandResult::Abandoned => unreachable!(
                 "WHNF client demand must return a value or a propagated evaluation failure"
@@ -1006,46 +1017,48 @@ impl EvalContext {
         }
     }
 
-    /// Constructs one semantic builtin call inside a callback-free value
-    /// access region. The returned value is durable, but the access carrier
-    /// and its mutator cannot escape the higher-ranked callback.
-    pub(crate) fn compose_builtin(
-        &self,
-        builtin: Builtin,
-        arguments: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> Vec<Value>,
-    ) -> RuntimeValueRoot {
-        self.values().construct_runtime_value_root(|access| {
-            let arguments = arguments(access);
-            Value::builtin_call_in(access, builtin, arguments)
-        })
-    }
-
-    /// Composes and demands a builtin call without carrying managed access
-    /// through scheduler pumping, waits, reflection, or host callbacks.
+    /// Composes and demands a builtin call, as a boundary of its own.
+    #[cfg(test)]
     pub(crate) fn evaluate_builtin_whnf(
         &self,
         builtin: Builtin,
         arguments: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> Vec<Value>,
     ) -> Result<RuntimeValueRoot, crate::core::EvaluationHalt> {
-        let value = self.compose_builtin(builtin, arguments);
-        let handle = self
-            .demand_whnf(value)
-            .map_err(|error| crate::core::EvaluationHalt::new(error.as_ref()))?;
-        match self.drive_client_demand(handle)? {
-            ClientDemandResult::Complete(value) => Ok(value),
-            ClientDemandResult::Abandoned => unreachable!(
-                "WHNF client demand must return a value or a propagated evaluation failure"
-            ),
-            ClientDemandResult::Failed(_)
-            | ClientDemandResult::Killed(_)
-            | ClientDemandResult::Panicked(_) => {
-                unreachable!("client failures and panics are returned by drive_client_demand")
-            }
-        }
+        self.values().with_runtime_value_mutator(|mut mutator| {
+            self.evaluate_builtin_whnf_under(&mut mutator, builtin, arguments)
+        })
     }
 
+    /// Composes and demands a builtin call under a caller's `mutator`, which
+    /// the demand's driver borrows.
+    pub(crate) fn evaluate_builtin_whnf_under(
+        &self,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
+        builtin: Builtin,
+        arguments: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> Vec<Value>,
+    ) -> Result<RuntimeValueRoot, crate::core::EvaluationHalt> {
+        let value = mutator.with_access(|access| compose_builtin_in(&access, builtin, arguments));
+        self.evaluate_root_whnf_under(mutator, value)
+    }
+
+    /// Drives `handle` to a result, as a boundary of its own: the driver
+    /// takes the thread's mutator.
+    #[cfg(test)]
     fn drive_client_demand(
         &self,
+        handle: ClientDemandHandle,
+    ) -> Result<ClientDemandResult, crate::core::EvaluationHalt> {
+        self.values().with_runtime_value_mutator(|mut mutator| {
+            self.drive_client_demand_under(&mut mutator, handle)
+        })
+    }
+
+    /// Drives `handle` to a result under a caller's `mutator`: its polls and
+    /// pumps borrow it, and its waits and quantum boundaries suspend it
+    /// (`driver-mutator`).
+    fn drive_client_demand_under(
+        &self,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
         mut handle: ClientDemandHandle,
     ) -> Result<ClientDemandResult, crate::core::EvaluationHalt> {
         let coordinator = self
@@ -1053,16 +1066,13 @@ impl EvalContext {
             .map_err(|error| crate::core::EvaluationHalt::new(error.as_ref()))?;
         let mut exact_demand_route = ExactDemandRoute::default();
 
-        // The driver holds the thread's mutator: its polls and pumps borrow
-        // it, and its waits and quantum boundaries suspend it
-        // (`driver-mutator`).
-        let driven = self.values().with_runtime_value_mutator(|mut mutator| {
+        let driven = (|| -> Result<ClientDemandResult, WorkDependency> {
             loop {
                 if let Some(result) = handle.poll() {
                     return Ok(result);
                 }
                 if let Some(claimed) = coordinator.claim_client_demand(handle.work) {
-                    coordinator.poll_claimed_client_demand(&mut mutator, claimed);
+                    coordinator.poll_claimed_client_demand(mutator, claimed);
                     continue;
                 }
 
@@ -1088,7 +1098,7 @@ impl EvalContext {
                         let producer_wait = dependency.producer_wait();
                         if let Some(wait) = producer_wait.as_ref() {
                             match self.pump_wait_on_route_under(
-                                &mut mutator,
+                                mutator,
                                 wait,
                                 4_096,
                                 &mut exact_demand_route,
@@ -1123,7 +1133,7 @@ impl EvalContext {
                             match coordinator.claim_causal_child_work(None, self.causal_task_ids())
                             {
                                 CausalChildSelection::Claimed(work) => {
-                                    coordinator.poll_claimed_task(&mut mutator, work);
+                                    coordinator.poll_claimed_task(mutator, work);
                                     continue;
                                 }
                                 CausalChildSelection::Busy => {
@@ -1153,7 +1163,7 @@ impl EvalContext {
                     }
                 }
             }
-        });
+        })();
         match driven {
             Ok(result) => terminal_client_demand_result(result),
             Err(dependency) => Err(client_demand_halt(dependency)),
@@ -2477,4 +2487,14 @@ fn client_demand_halt(dependency: WorkDependency) -> crate::core::EvaluationHalt
             "client evaluation blocked on a synthetic test dependency",
         ),
     }
+}
+
+/// Constructs one semantic builtin call and roots it.
+pub(crate) fn compose_builtin_in(
+    access: &RuntimeValueAccess<'_>,
+    builtin: Builtin,
+    arguments: impl for<'scope> FnOnce(&RuntimeValueAccess<'scope>) -> Vec<Value>,
+) -> RuntimeValueRoot {
+    let arguments = arguments(access);
+    access.root_runtime_value(Value::builtin_call_in(access, builtin, arguments))
 }

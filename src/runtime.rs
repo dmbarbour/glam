@@ -273,16 +273,29 @@ impl RuntimeMutationAdmission {
     }
 
     /// Collects at a driver's quantum boundary when collector pressure asks
-    /// for it.
+    /// for it, suspending the driver's `mutator` only when it might
+    /// (`boundary-release-under-mutator`).
     ///
     /// Callers are drivers between poll quanta, such as an evaluation worker
-    /// or a client-demand loop. No access region is open on the calling
-    /// thread there, and every in-flight value is rooted or traced. Ordinary
-    /// mutator entry never collects. The collector waits for other threads to
-    /// leave their access regions. A nested driver whose thread still holds a
-    /// mutator gets `ActiveMutator`, which records no failure, and simply
-    /// skips.
-    pub(crate) fn service_collection_pressure(self: &Arc<Self>, values: &CoreValueFactory) {
+    /// or a client-demand loop. No access region is open there, and every
+    /// in-flight value is rooted or traced. Ordinary mutator entry never
+    /// collects. The collector waits for other threads to suspend or end
+    /// their mutators.
+    pub(crate) fn service_collection_pressure_under(
+        self: &Arc<Self>,
+        mutator: &mut crate::core::RuntimeValueMutator<'_, '_>,
+    ) {
+        if self.is_poisoned() || !self.gc_pressure_possible(mutator.values()) {
+            return;
+        }
+        let values = mutator.values().clone();
+        // Pressure is checked again once the mutator is suspended: a
+        // collection another thread waits for runs as soon as it suspends,
+        // and the driver then has nothing to join.
+        mutator.suspend(|| self.service_collection_pressure(&values));
+    }
+
+    fn service_collection_pressure(self: &Arc<Self>, values: &CoreValueFactory) {
         #[cfg(test)]
         if values.is_shared_test_domain() {
             return;
@@ -290,11 +303,24 @@ impl RuntimeMutationAdmission {
         if self.is_poisoned() || !self.gc_pressure_requested(values) {
             return;
         }
-        // Collection waits for every mutator, so the caller holds none: a
-        // quantum boundary services pressure with its mutator suspended.
+        // Collection waits for every mutator, so the caller holds none.
         crate::core::assert_outside_mutator();
         let lease = self.begin_gc_activity();
         let _ = collect_under_lease(lease, values, || {});
+    }
+
+    /// Whether [`Self::gc_pressure_requested`] might hold, without its
+    /// side effects.
+    #[cfg(not(feature = "aggressive-gc-verification"))]
+    fn gc_pressure_possible(&self, values: &CoreValueFactory) -> bool {
+        values.managed_collection_requested()
+    }
+
+    #[cfg(feature = "aggressive-gc-verification")]
+    fn gc_pressure_possible(&self, values: &CoreValueFactory) -> bool {
+        values.managed_allocation_count()
+            > self.aggressive_promoted_allocations.load(Ordering::Relaxed)
+            || values.managed_collection_requested()
     }
 
     #[cfg(not(feature = "aggressive-gc-verification"))]
@@ -1096,6 +1122,20 @@ impl RuntimeFailureRoot {
         self.0.diagnostic.get_or_init(|| built).clone()
     }
 
+    /// As [`Self::diagnostic`], under a caller's `mutator`, which the
+    /// normalization's drivers borrow.
+    pub(crate) fn diagnostic_under(
+        &self,
+        mutator: &mut crate::core::RuntimeValueMutator<'_, '_>,
+    ) -> RuntimeValueRoot {
+        debug_assert_eq!(mutator.runtime_id(), self.runtime_id());
+        if let Some(diagnostic) = self.0.diagnostic.get() {
+            return diagnostic.clone();
+        }
+        let built = crate::diagnostic::failure_diagnostic_root_under(mutator, &self.0.failure);
+        self.0.diagnostic.get_or_init(|| built).clone()
+    }
+
     /// Whether this failure's diagnostic is already built.
     pub(crate) fn has_diagnostic(&self) -> bool {
         self.0.diagnostic.get().is_some()
@@ -1273,12 +1313,12 @@ mod tests {
             let admission = admission.clone();
             let values = values.clone();
             move || {
-                values.with_runtime_value_mutator(|_| {
+                values.with_runtime_value_mutator(|mut mutator| {
                     quantum_tx.send(()).unwrap();
                     boundary_rx.recv().unwrap();
-                });
-                admission.service_collection_pressure(&values);
-                values.with_runtime_value_mutator(|_| values.completed_collection_epoch_for_test())
+                    admission.service_collection_pressure_under(&mut mutator);
+                    values.completed_collection_epoch_for_test()
+                })
             }
         });
         quantum_rx.recv().unwrap();

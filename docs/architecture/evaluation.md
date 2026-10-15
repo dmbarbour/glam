@@ -250,16 +250,21 @@ thread's mutator, and each poll quantum it runs (a deferred, lazy-route or
 reflection task poll, a client demand, or a spark) borrows it
 (`EvaluationPollContext::quantum_under`). The poll context lends it in turn:
 the many short value accesses inside a quantum borrow the mutator rather than
-enter the heap. Each quantum boundary suspends the driver's mutator once, for
-the poll's deferred work, its release (settlement, client callbacks, any
-nested driver evaluating a diagnostic) and collection pressure; waits
-suspend it too (`driver-mutator`). Within a quantum, work that waits on
+enter the heap. Each quantum boundary releases the polled work under the
+driver's mutator (`boundary-release-under-mutator`): coordinator transitions,
+terminal publication and route-lease release take the coordinator lock and
+the runtime gate under it, and a failed task's status diagnostic is built by
+drivers that borrow it. The boundary suspends the mutator only to run the
+poll's deferred work, to join a requested collection, to publish to a status
+observer, which runs client code (a task with one settles wholly
+suspended), or to cancel or drop a released machine; waits suspend it too
+(`driver-mutator`). Within a quantum, work that waits on
 another thread or calls out to a host either suspends the mutator
 (`suspend`: host calls, whose result the same quantum then consumes,
 reflection host callbacks, and specialization requests) or runs at the
 boundary (`after_admission`: reflection launches and the net contention
 wait, after which the quantum ends). Pumped work borrows the pumping
-quantum's mutator, and its boundary suspends it. A suspension costs about
+quantum's mutator, and its boundary releases under it. A suspension costs about
 two heap entries, so adjacent operations share one; the evaluation budget
 bounds how long a quantum runs between boundaries.
 

@@ -23,7 +23,6 @@ use super::session::{
 use super::{EvaluationDemandState, EvaluationPollContext, evaluation_failure};
 use crate::core::RuntimeValueMutator;
 use crate::core::{EvaluationFailure, LazyCycle};
-use crate::runtime::RuntimeFailureRoot;
 
 impl ClientDemandOperation {
     pub(super) fn poll(
@@ -109,6 +108,12 @@ enum WorkRetirement {
 }
 
 impl ReleasedTaskMachine {
+    /// Cancels or drops the machine with `mutator` suspended, since that may
+    /// run client code, then retires its work.
+    fn finish_under(self, mutator: &mut RuntimeValueMutator<'_, '_>) {
+        mutator.suspend(|| self.finish());
+    }
+
     fn finish(self) {
         let retirement = match self {
             Self::DropOnly(machine) => {
@@ -186,8 +191,8 @@ impl ClaimedTask {
 
     /// Polls the claimed machine under the driver's `mutator`, behind the
     /// scheduler's panic boundary. The quantum boundary that follows runs
-    /// with the mutator suspended: [`Self::finish_polled`], then
-    /// [`Self::release`].
+    /// under the mutator too: [`Self::finish_polled_under`], then
+    /// [`Self::release`] (`boundary-release-under-mutator`).
     ///
     /// A panic during the poll ends this work as `Panicked` instead of
     /// stranding its claim. Work blocked on a panicked dependency also ends
@@ -236,9 +241,22 @@ impl ClaimedTask {
         }
     }
 
+    /// Returns the poll to release, running the work it deferred, such as a
+    /// host call, with `mutator` suspended, when there is any.
+    fn finish_polled_under(
+        &self,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
+        polled: PolledTask,
+    ) -> EvaluationMachinePoll {
+        if polled.deferred.is_empty() {
+            return halt_blocked_on_panic(polled.poll);
+        }
+        mutator.suspend(|| self.finish_polled(polled))
+    }
+
     /// Runs the work the poll deferred, such as a host call, behind the
-    /// poll's panic boundary, and returns the poll to release. Runs at the
-    /// quantum boundary, with the driver's mutator suspended.
+    /// poll's panic boundary, and returns the poll to release. Runs with no
+    /// mutator.
     fn finish_polled(&self, polled: PolledTask) -> EvaluationMachinePoll {
         let PolledTask { poll, deferred } = polled;
         match catch_unwind(AssertUnwindSafe(|| run_deferred(deferred))) {
@@ -261,26 +279,28 @@ impl ClaimedTask {
         self.cross_boundary(mutator, polled)
     }
 
-    /// The quantum boundary, with `mutator` suspended: the work the poll
-    /// deferred, the release, and the released machine's disposal, which may
-    /// run client code. Returns whether the poll yielded.
+    /// The quantum boundary, under the driver's `mutator`: the work the poll
+    /// deferred, the release, and the released machine's disposal, each
+    /// suspending it only as it must. Returns whether the poll yielded.
     fn cross_boundary(self, mutator: &mut RuntimeValueMutator<'_, '_>, polled: PolledTask) -> bool {
-        mutator.suspend(|| {
-            let poll = self.finish_polled(polled);
-            let yielded = matches!(
-                poll,
-                EvaluationMachinePoll::Yielded | EvaluationMachinePoll::ScheduleSpark(_)
-            );
-            let (_, _, released, _) = self.release(poll);
-            if let Some(machine) = released {
-                machine.finish();
-            }
-            yielded
-        })
+        let poll = self.finish_polled_under(mutator, polled);
+        let yielded = matches!(
+            poll,
+            EvaluationMachinePoll::Yielded | EvaluationMachinePoll::ScheduleSpark(_)
+        );
+        let (_, _, released, _) = self.release(mutator, poll);
+        if let Some(machine) = released {
+            machine.finish_under(mutator);
+        }
+        yielded
     }
 
+    /// Releases the polled work under the driver's `mutator`, which a
+    /// requested collection, status callbacks and failure diagnostics
+    /// suspend or borrow as they need.
     fn release(
         self,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
         poll: EvaluationMachinePoll,
     ) -> (
         bool,
@@ -288,10 +308,10 @@ impl ClaimedTask {
         Option<ReleasedTaskMachine>,
         Option<ExactRouteRelease>,
     ) {
-        // The quantum boundary: the poll's mutator has ended or is
-        // suspended, its result is rooted, and the work is still claimed, so
-        // readiness stays `Busy` through any collection here.
-        self.coordinator.service_collection_pressure();
+        // The quantum boundary: the poll's result is rooted and the work is
+        // still claimed, so readiness stays `Busy` through any collection
+        // here.
+        self.coordinator.service_collection_pressure_under(mutator);
         let (poll, spark) = match poll {
             EvaluationMachinePoll::ScheduleSpark(value) => {
                 (EvaluationMachinePoll::Yielded, Some(value))
@@ -301,10 +321,14 @@ impl ClaimedTask {
         let demand = spark.as_ref().map(|_| self.kind.demand().demand());
         let released = match self.kind {
             ClaimedTaskKind::Reflection(task) => {
-                release_reflection_task(&self.coordinator, task, poll)
+                release_reflection_task(mutator, &self.coordinator, task, poll)
             }
-            ClaimedTaskKind::Deferred(task) => release_deferred_task(&self.coordinator, task, poll),
-            ClaimedTaskKind::LazyRoute(route) => release_lazy_route(&self.coordinator, route, poll),
+            ClaimedTaskKind::Deferred(task) => {
+                release_deferred_task(mutator, &self.coordinator, task, poll)
+            }
+            ClaimedTaskKind::LazyRoute(route) => {
+                release_lazy_route(mutator, &self.coordinator, route, poll)
+            }
         };
         if let Some(value) = spark {
             self.coordinator.submit_spark_root(
@@ -368,6 +392,7 @@ fn drop_torn<T>(value: T) {
 }
 
 fn release_lazy_route(
+    mutator: &mut RuntimeValueMutator<'_, '_>,
     coordinator: &Arc<EvaluationWorkCoordinator>,
     claimed: ClaimedLazyRoute,
     poll: EvaluationMachinePoll,
@@ -398,7 +423,7 @@ fn release_lazy_route(
         EvaluationMachinePoll::Panicked { report, torn } => (
             DeferredWorkPoll::Terminal,
             Some(if torn {
-                record_lazy_panic(coordinator, &lazy, report)
+                mutator.with_access(|access| record_lazy_panic(&access, &lazy, report))
             } else {
                 EvaluationWaitTerminal::Panicked(report)
             }),
@@ -408,6 +433,7 @@ fn release_lazy_route(
     let route = release.route.take();
     if !release.cycle.is_empty() {
         poison_lazy_cycle(
+            mutator,
             coordinator,
             std::mem::take(&mut release.cycle),
             release.cycle_error.take(),
@@ -424,7 +450,7 @@ fn release_lazy_route(
         }
         EvaluationWaitTerminal::Failed(error) => error.as_failure().clone(),
         EvaluationWaitTerminal::Panicked(report) => {
-            coordinator.settle_panicked_work(work, report.clone());
+            coordinator.settle_panicked_work_under(mutator, work, report.clone());
             coordinator.retire_lazy_route(work);
             return (release.made_progress, false, None, route);
         }
@@ -435,7 +461,7 @@ fn release_lazy_route(
             unreachable!("lazy route terminal is complete, failed, or panicked")
         }
     };
-    coordinator.settle_terminal_work(work, terminal, failure);
+    coordinator.settle_terminal_work_under(mutator, work, terminal, failure);
     coordinator.retire_lazy_route(work);
     (release.made_progress, false, None, route)
 }
@@ -706,32 +732,28 @@ pub(super) fn pump_demand_on_route(
         let mut budget = super::EvaluationStepBudget::new(quantum);
         let polled = claimed.poll_under(mutator, &mut budget);
         debug_assert_eq!(budget.spent() + budget.remaining(), budget.granted());
-        // The quantum boundary runs suspended: releasing may publish terminal
-        // status, which can evaluate a diagnostic, and may collect.
-        let yielded = mutator.suspend(|| {
-            let poll = claimed.finish_polled(polled);
-            let yielded = matches!(
-                poll,
-                EvaluationMachinePoll::Yielded | EvaluationMachinePoll::ScheduleSpark(_)
-            );
-            let (_, _, released, route_release) = claimed.release(poll);
-            if exact_claim {
-                if let Some(release) = route_release {
-                    let _handed_off =
-                        coordinator.reconcile_exact_route_release(target, route, release);
-                    #[cfg(any(test, feature = "glam-prof"))]
-                    if _handed_off {
-                        coordinator.record_exact_route_handoffs(1);
-                    }
-                } else {
-                    route.invalidate_missing_release();
+        // The quantum boundary runs under the mutator, which the release
+        // suspends only as it must (`boundary-release-under-mutator`).
+        let poll = claimed.finish_polled_under(mutator, polled);
+        let yielded = matches!(
+            poll,
+            EvaluationMachinePoll::Yielded | EvaluationMachinePoll::ScheduleSpark(_)
+        );
+        let (_, _, released, route_release) = claimed.release(mutator, poll);
+        if exact_claim {
+            if let Some(release) = route_release {
+                let _handed_off = coordinator.reconcile_exact_route_release(target, route, release);
+                #[cfg(any(test, feature = "glam-prof"))]
+                if _handed_off {
+                    coordinator.record_exact_route_handoffs(1);
                 }
+            } else {
+                route.invalidate_missing_release();
             }
-            if let Some(machine) = released {
-                machine.finish();
-            }
-            yielded
-        });
+        }
+        if let Some(machine) = released {
+            machine.finish_under(mutator);
+        }
         if yielded && !exact_claim {
             // Causal launch provenance is not an exact zipper edge. Preserve
             // its immediate continuation within this bounded call only; a
@@ -742,6 +764,7 @@ pub(super) fn pump_demand_on_route(
 }
 
 fn release_reflection_task(
+    mutator: &mut RuntimeValueMutator<'_, '_>,
     coordinator: &Arc<EvaluationWorkCoordinator>,
     claimed: ClaimedReflectionWork,
     poll: EvaluationMachinePoll,
@@ -784,10 +807,11 @@ fn release_reflection_task(
         }
     };
 
-    let mut release = coordinator.release_reflection(claimed, work_poll);
+    let mut release = coordinator.release_reflection_under(mutator, claimed, work_poll);
     let route = release.route.take();
     if !release.cycle.is_empty() {
         poison_lazy_cycle(
+            mutator,
             coordinator,
             std::mem::take(&mut release.cycle),
             release.cycle_error.take(),
@@ -837,10 +861,10 @@ fn release_reflection_task(
     };
     match (terminal, promise_failure) {
         (EvaluationWaitTerminal::Panicked(report), _) => {
-            coordinator.settle_panicked_work(work, report);
+            coordinator.settle_panicked_work_under(mutator, work, report);
         }
         (terminal, Some(promise_failure)) => {
-            coordinator.settle_terminal_work(work, terminal, promise_failure);
+            coordinator.settle_terminal_work_under(mutator, work, terminal, promise_failure);
         }
         (_, None) => unreachable!("only a panic omits the promise failure"),
     }
@@ -869,6 +893,7 @@ fn release_reflection_task(
 }
 
 fn release_deferred_task(
+    mutator: &mut RuntimeValueMutator<'_, '_>,
     coordinator: &Arc<EvaluationWorkCoordinator>,
     claimed: ClaimedDeferredWork,
     poll: EvaluationMachinePoll,
@@ -900,14 +925,13 @@ fn release_deferred_task(
         ),
         EvaluationMachinePoll::Cancelled => (
             DeferredWorkPoll::Terminal,
-            Some(EvaluationWaitTerminal::Failed(
-                RuntimeFailureRoot::from_observer(
-                    &coordinator.value_observer(),
-                    Arc::new(EvaluationFailure::message(
+            Some(EvaluationWaitTerminal::Failed(mutator.with_access(
+                |access| {
+                    access.root_runtime_failure(Arc::new(EvaluationFailure::message(
                         "deferred evaluation task was cancelled",
-                    )),
-                ),
-            )),
+                    )))
+                },
+            ))),
         ),
         EvaluationMachinePoll::Panicked {
             report,
@@ -925,6 +949,7 @@ fn release_deferred_task(
     let route = release.route.take();
     if !release.cycle.is_empty() {
         poison_lazy_cycle(
+            mutator,
             coordinator,
             std::mem::take(&mut release.cycle),
             release.cycle_error.take(),
@@ -964,10 +989,10 @@ fn release_deferred_task(
     };
     match (terminal, promise_failure) {
         (EvaluationWaitTerminal::Panicked(report), _) => {
-            coordinator.settle_panicked_work(work, report);
+            coordinator.settle_panicked_work_under(mutator, work, report);
         }
         (terminal, Some(promise_failure)) => {
-            coordinator.settle_terminal_work(work, terminal, promise_failure);
+            coordinator.settle_terminal_work_under(mutator, work, terminal, promise_failure);
         }
         (_, None) => unreachable!("only a panic omits the promise failure"),
     }
@@ -1000,32 +1025,24 @@ fn release_deferred_task(
 /// with this report and the work is never replayed. A lazy that cached its
 /// result before the panic keeps it, and the route settles with that result.
 fn record_lazy_panic(
-    coordinator: &Arc<EvaluationWorkCoordinator>,
+    access: &crate::core::RuntimeValueAccess<'_>,
     lazy: &crate::core::ManagedLazyRoot,
     report: EvaluationPanic,
 ) -> EvaluationWaitTerminal {
-    let values = coordinator
-        .value_observer()
-        .upgrade()
-        .expect("a claimed lazy route must retain a live value domain");
-    // Release runs outside the driver's mutator.
-    values.with_boundary_access(|access| {
-        if lazy.enter_panicked(&access, &report) {
-            return EvaluationWaitTerminal::Panicked(report);
+    if lazy.enter_panicked(access, &report) {
+        return EvaluationWaitTerminal::Panicked(report);
+    }
+    match lazy.access(access).and_then(|lazy| lazy.cached()) {
+        Some(Ok(value)) => {
+            EvaluationWaitTerminal::Complete(access.root_runtime_value(value.into_value_in(access)))
         }
-        match lazy.access(&access).and_then(|lazy| lazy.cached()) {
-            Some(Ok(value)) => EvaluationWaitTerminal::Complete(
-                access.root_runtime_value(value.into_value_in(&access)),
-            ),
-            Some(Err(failure)) => {
-                EvaluationWaitTerminal::Failed(access.root_runtime_failure(failure))
-            }
-            None => EvaluationWaitTerminal::Panicked(report),
-        }
-    })
+        Some(Err(failure)) => EvaluationWaitTerminal::Failed(access.root_runtime_failure(failure)),
+        None => EvaluationWaitTerminal::Panicked(report),
+    }
 }
 
 fn poison_lazy_cycle(
+    mutator: &mut RuntimeValueMutator<'_, '_>,
     coordinator: &Arc<EvaluationWorkCoordinator>,
     mut members: Vec<DeferredLazyCycleMember>,
     cycle_error: Option<String>,
@@ -1036,18 +1053,14 @@ fn poison_lazy_cycle(
     let failure = cycle_error
         .map(evaluation_failure)
         .unwrap_or_else(|| Arc::new(EvaluationFailure::dependency_cycle(cycle)));
-    let values = coordinator
-        .value_observer()
-        .upgrade()
-        .expect("lazy-cycle publication requires its live value domain");
     // Make the shared failure authoritative in every lazy before any
     // producer wait wakes. The already-batched `Terminalizing` transition
     // prevents another worker from reclaiming a cycle member meanwhile.
-    let mut terminals = values.with_boundary_access(|access| {
+    let mut terminals = mutator.with_access(|access| {
         members
             .iter()
             .map(|member| {
-                debug_assert_eq!(member.wait.runtime_id(), values.runtime_id());
+                debug_assert_eq!(member.wait.runtime_id(), access.runtime_id());
                 let terminal = match member.lazy.cache(&access, Err(failure.clone())) {
                     Err(error) => EvaluationWaitTerminal::Failed(access.root_runtime_failure(error)),
                     Ok(value) => {
@@ -1065,8 +1078,12 @@ fn poison_lazy_cycle(
             .collect::<Vec<_>>()
     });
     for (member, terminal) in &mut terminals {
-        *terminal =
-            coordinator.settle_terminal_work(member.work, terminal.clone(), failure.clone());
+        *terminal = coordinator.settle_terminal_work_under(
+            mutator,
+            member.work,
+            terminal.clone(),
+            failure.clone(),
+        );
     }
     for (member, terminal) in &terminals {
         debug_assert_eq!(member.wait.terminal_poll(), Some(terminal.to_poll()));
@@ -1086,7 +1103,10 @@ fn poison_lazy_cycle(
         .filter_map(|member| member.machine)
         .collect::<Vec<_>>();
     drop(blocks);
-    drop(machines);
+    // Dropping a machine may run client code.
+    if !machines.is_empty() {
+        mutator.suspend(|| drop(machines));
+    }
 }
 
 impl EvaluationWorkCoordinator {
@@ -1162,33 +1182,31 @@ impl EvaluationWorkCoordinator {
             let mut claimed = ClaimedTask::new(self.clone(), work);
             let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
             let polled = claimed.poll_under(&mut mutator, &mut budget);
-            mutator.suspend(|| {
-                let poll = claimed.finish_polled(polled);
-                probe(&poll);
-                let (_, _, released, _) = claimed.release(poll);
-                if let Some(machine) = released {
-                    machine.finish();
-                }
-            });
+            let poll = claimed.finish_polled_under(&mut mutator, polled);
+            // A collection may run at the boundary, with the mutator
+            // suspended.
+            mutator.suspend(|| probe(&poll));
+            let (_, _, released, _) = claimed.release(&mut mutator, poll);
+            if let Some(machine) = released {
+                machine.finish_under(&mut mutator);
+            }
         });
     }
 
     /// Polls a claimed client demand under a driver's `mutator`, behind the
     /// scheduler's panic boundary, as [`ClaimedTask::poll_under`] does for
-    /// task work, and crosses its quantum boundary with the mutator
-    /// suspended.
+    /// task work, and crosses its quantum boundary under the mutator too.
     pub(super) fn poll_claimed_client_demand(
         self: &Arc<Self>,
         mutator: &mut RuntimeValueMutator<'_, '_>,
         mut claimed: coordinator::ClaimedClientDemand,
     ) {
         if let Some(report) = claimed.prior_dependency_panic() {
-            mutator.suspend(|| {
-                self.release_client_demand(
-                    claimed,
-                    coordinator::ClientDemandPoll::Panicked(report),
-                );
-            });
+            self.release_client_demand_under(
+                mutator,
+                claimed,
+                coordinator::ClientDemandPoll::Panicked(report),
+            );
             return;
         }
         let demand = claimed.demand.demand();
@@ -1199,18 +1217,25 @@ impl EvaluationWorkCoordinator {
             })
         }));
         mutator.readmit();
-        mutator.suspend(|| self.release_polled_client_demand(claimed, polled));
+        self.release_polled_client_demand(mutator, claimed, polled);
     }
 
-    /// The quantum boundary of a client demand poll: its deferred work, under
-    /// the poll's panic boundary, then collection pressure and the release.
+    /// The quantum boundary of a client demand poll, under the driver's
+    /// `mutator`: its deferred work, suspended and under the poll's panic
+    /// boundary, then collection pressure and the release.
     fn release_polled_client_demand(
         self: &Arc<Self>,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
         claimed: coordinator::ClaimedClientDemand,
         polled: std::thread::Result<(coordinator::ClientDemandPoll, DeferredWork)>,
     ) {
         let polled = polled.and_then(|(poll, deferred)| {
-            catch_unwind(AssertUnwindSafe(|| run_deferred(deferred))).map(|()| poll)
+            if deferred.is_empty() {
+                return Ok(poll);
+            }
+            mutator
+                .suspend(|| catch_unwind(AssertUnwindSafe(|| run_deferred(deferred))))
+                .map(|()| poll)
         });
         let poll = match polled {
             Ok(coordinator::ClientDemandPoll::Blocked(dependency)) => {
@@ -1226,12 +1251,12 @@ impl EvaluationWorkCoordinator {
             )),
         };
         // The quantum boundary, while the demand is still claimed.
-        self.service_collection_pressure();
-        self.release_client_demand(claimed, poll);
+        self.service_collection_pressure_under(mutator);
+        self.release_client_demand_under(mutator, claimed, poll);
     }
 
     /// Polls claimed spark work under a driver's `mutator`, crossing its
-    /// quantum boundary with the mutator suspended.
+    /// quantum boundary under the mutator too.
     pub(super) fn poll_claimed_spark(
         self: &Arc<Self>,
         mutator: &mut RuntimeValueMutator<'_, '_>,
@@ -1246,10 +1271,8 @@ impl EvaluationWorkCoordinator {
         // blocks on panicked work, it simply retires: the value's real demand
         // reports any panic to its own waiters.
         if claimed.prior_dependency_panicked() {
-            mutator.suspend(|| {
-                drop(context);
-                self.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
-            });
+            drop(context);
+            self.release_spark(claimed, coordinator::SparkWorkPoll::Complete);
             return;
         }
         let result = catch_unwind(AssertUnwindSafe(|| {
@@ -1260,18 +1283,23 @@ impl EvaluationWorkCoordinator {
             })
         }));
         mutator.readmit();
-        mutator.suspend(|| {
-            let result = result.and_then(|(poll, deferred)| {
-                catch_unwind(AssertUnwindSafe(|| run_deferred(deferred))).map(|()| poll)
-            });
-            self.release_polled_spark(claimed, context, result);
+        let result = result.and_then(|(poll, deferred)| {
+            if deferred.is_empty() {
+                return Ok(poll);
+            }
+            mutator
+                .suspend(|| catch_unwind(AssertUnwindSafe(|| run_deferred(deferred))))
+                .map(|()| poll)
         });
+        self.release_polled_spark(mutator, claimed, context, result);
     }
 
-    /// The quantum boundary of a spark poll: collection pressure and the
-    /// release, after its evaluator context is gone.
+    /// The quantum boundary of a spark poll, under the driver's `mutator`:
+    /// collection pressure and the release, after its evaluator context is
+    /// gone.
     fn release_polled_spark(
         self: &Arc<Self>,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
         claimed: coordinator::ClaimedSparkWork,
         context: EvalContext,
         result: std::thread::Result<crate::eval::strategy_machine::StrategyDemandPoll>,
@@ -1295,7 +1323,7 @@ impl EvaluationWorkCoordinator {
         };
         drop(context);
         // The quantum boundary, while the spark is still claimed.
-        self.service_collection_pressure();
+        self.service_collection_pressure_under(mutator);
         self.release_spark(claimed, poll);
     }
 }
@@ -1395,9 +1423,12 @@ impl TestWorkerClaim {
 
     /// Releases the task unpolled, as a worker that yields, requeueing it.
     pub(super) fn yield_back(self) {
-        let (_, _, released, _) = self.0.release(EvaluationMachinePoll::Yielded);
-        if let Some(machine) = released {
-            machine.finish();
-        }
+        let coordinator = self.0.coordinator.clone();
+        coordinator.with_driver_mutator_for_test(|mutator| {
+            let (_, _, released, _) = self.0.release(mutator, EvaluationMachinePoll::Yielded);
+            if let Some(machine) = released {
+                machine.finish_under(mutator);
+            }
+        });
     }
 }

@@ -201,6 +201,11 @@ impl TaskTerminalPublisher {
         }
     }
 
+    /// Whether a status query or a host lifecycle observes this task.
+    pub(super) fn publishes_status(&self) -> bool {
+        self.protected_status.is_some() || self.lifecycle_status.is_some()
+    }
+
     pub(super) fn attach_status(&mut self, publisher: TaskStatusPublisher) {
         assert!(
             self.protected_status.replace(publisher).is_none(),

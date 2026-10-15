@@ -524,6 +524,11 @@ impl<'mu> RuntimeValueMutator<'_, 'mu> {
         self.values.runtime_id()
     }
 
+    /// The factory view which took this mutator.
+    pub(crate) fn values(&self) -> &CoreValueFactory {
+        self.values
+    }
+
     /// The value access this mutator grants while it stays borrowed.
     #[inline]
     pub(crate) fn access(&self) -> RuntimeValueAccess<'_> {

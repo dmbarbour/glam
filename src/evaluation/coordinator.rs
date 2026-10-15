@@ -18,11 +18,11 @@ use crate::core::LazyValue;
 use crate::core::PromisedValue;
 use crate::core::{
     CoreValueFactory, EvaluationFailure, EvaluationPanic, ManagedPromiseRoot, PromiseAssignment,
-    PromiseId, RuntimeValueAccess,
+    PromiseId, RuntimeValueAccess, RuntimeValueMutator,
 };
 use crate::runtime::{
-    EvaluationRuntimeId, RuntimeCoreState, RuntimeIds, RuntimeMutationAdmission,
-    RuntimeMutationAuthority, RuntimeMutationGuard, RuntimeValueRoot,
+    EvaluationRuntimeId, RuntimeCoreState, RuntimeFailureRoot, RuntimeIds,
+    RuntimeMutationAdmission, RuntimeMutationAuthority, RuntimeMutationGuard, RuntimeValueRoot,
 };
 
 #[cfg(test)]
@@ -258,30 +258,22 @@ impl TaskOwnedPromiseObligation {
         self,
         coordinator: &Arc<EvaluationWorkCoordinator>,
         mutation: &dyn RuntimeMutationAuthority,
+        access: &RuntimeValueAccess<'_>,
         terminal: &EvaluationWaitTerminal,
         unresolved_failure: &Arc<EvaluationFailure>,
     ) -> (PromiseProducerPublication, CompletionWake) {
-        let values = coordinator
-            .value_observer()
-            .upgrade()
-            .expect("a registered promise root must retain a live value domain owner");
-        let (publication, wake) = values.with_boundary_access(|access| {
-            let assignment = self
-                .terminal
-                .assignment(&access, terminal, unresolved_failure);
-            self.root
-                .publish_guarded(&access, coordinator, mutation, assignment, |assignment| {
-                    self.producer.publish_assignment_guarded(
-                        &access,
-                        coordinator,
-                        mutation,
-                        assignment,
-                    )
-                })
-                .unwrap_or_else(|_| {
-                    panic!("a terminalizing task-owned promise must remain unresolved")
-                })
-        });
+        let assignment = self
+            .terminal
+            .assignment(access, terminal, unresolved_failure);
+        let (publication, wake) = self
+            .root
+            .publish_guarded(access, coordinator, mutation, assignment, |assignment| {
+                self.producer
+                    .publish_assignment_guarded(access, coordinator, mutation, assignment)
+            })
+            .unwrap_or_else(|_| {
+                panic!("a terminalizing task-owned promise must remain unresolved")
+            });
         (publication.retain_snapshot_root(self.root), wake)
     }
 
@@ -1307,11 +1299,14 @@ impl EvaluationWorkCoordinator {
 
     /// Collects at a quantum boundary when collector pressure asks for it:
     /// after a claimed task, spark or client demand is polled and before it
-    /// is released. See `RuntimeMutationAdmission::service_collection_pressure`.
-    pub(crate) fn service_collection_pressure(&self) {
-        if let Some(values) = self.values.upgrade() {
-            self.admission.service_collection_pressure(&values);
-        }
+    /// is released. The boundary holds `mutator`, which suspends only to
+    /// collect. See
+    /// `RuntimeMutationAdmission::service_collection_pressure_under`.
+    pub(crate) fn service_collection_pressure_under(
+        &self,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
+    ) {
+        self.admission.service_collection_pressure_under(mutator);
     }
 
     pub(crate) fn mark_runtime_poisoned(&self) {
@@ -2722,6 +2717,9 @@ impl EvaluationWorkCoordinator {
     /// publishes its failure-ledger decision, wait terminal, and protected
     /// status query under one runtime mutation admission before the record may
     /// retire.
+    ///
+    /// The caller holds no mutator; settlement opens a boundary when it
+    /// publishes values.
     pub(super) fn settle_terminal_work(
         self: &Arc<Self>,
         work: EvaluationWorkId,
@@ -2732,7 +2730,24 @@ impl EvaluationWorkCoordinator {
             !matches!(terminal, EvaluationWaitTerminal::Panicked(_)),
             "panicked work settles through settle_panicked_work"
         );
-        self.settle_work(work, terminal, Some(promise_failure))
+        self.settle_work(None, work, terminal, Some(promise_failure))
+    }
+
+    /// As [`Self::settle_terminal_work`], under a quantum boundary's
+    /// `mutator`, which settlement borrows and suspends only for status
+    /// callbacks (`boundary-release-under-mutator`).
+    pub(super) fn settle_terminal_work_under(
+        self: &Arc<Self>,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
+        work: EvaluationWorkId,
+        terminal: EvaluationWaitTerminal,
+        promise_failure: Arc<EvaluationFailure>,
+    ) -> EvaluationWaitTerminal {
+        debug_assert!(
+            !matches!(terminal, EvaluationWaitTerminal::Panicked(_)),
+            "panicked work settles through settle_panicked_work"
+        );
+        self.settle_work(Some(mutator), work, terminal, Some(promise_failure))
     }
 
     /// Settles work interrupted by a panic.
@@ -2745,7 +2760,75 @@ impl EvaluationWorkCoordinator {
         work: EvaluationWorkId,
         report: EvaluationPanic,
     ) -> EvaluationWaitTerminal {
-        self.settle_work(work, EvaluationWaitTerminal::Panicked(report), None)
+        self.settle_work(None, work, EvaluationWaitTerminal::Panicked(report), None)
+    }
+
+    /// As [`Self::settle_panicked_work`], under a quantum boundary's
+    /// `mutator`.
+    pub(super) fn settle_panicked_work_under(
+        self: &Arc<Self>,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
+        work: EvaluationWorkId,
+        report: EvaluationPanic,
+    ) -> EvaluationWaitTerminal {
+        self.settle_work(
+            Some(mutator),
+            work,
+            EvaluationWaitTerminal::Panicked(report),
+            None,
+        )
+    }
+
+    /// Roots `failure` with access `mutator` lends, or, when the caller holds
+    /// none, with a boundary of its own.
+    fn root_failure(
+        &self,
+        mutator: Option<&RuntimeValueMutator<'_, '_>>,
+        failure: Arc<EvaluationFailure>,
+    ) -> RuntimeFailureRoot {
+        match mutator {
+            Some(mutator) => mutator.with_access(|access| access.root_runtime_failure(failure)),
+            None => RuntimeFailureRoot::from_observer(&self.values, failure),
+        }
+    }
+
+    /// Runs `publish` with value access when it publishes values: `mutator`
+    /// lends it, or, when the caller holds none, a boundary of its own.
+    fn with_settlement_access<R>(
+        &self,
+        mutator: Option<&RuntimeValueMutator<'_, '_>>,
+        needed: bool,
+        publish: impl FnOnce(Option<&RuntimeValueAccess<'_>>) -> R,
+    ) -> R {
+        if !needed {
+            return publish(None);
+        }
+        match mutator {
+            Some(mutator) => mutator.with_access(|access| publish(Some(&access))),
+            None => self.with_settlement_boundary(publish),
+        }
+    }
+
+    /// Runs `publish` in a boundary of its own, for settlement whose caller
+    /// holds no mutator.
+    fn with_settlement_boundary<R>(
+        &self,
+        publish: impl FnOnce(Option<&RuntimeValueAccess<'_>>) -> R,
+    ) -> R {
+        self.value_observer()
+            .upgrade()
+            .expect("settlement publishing values must retain a live value domain")
+            .with_boundary_access(|access| publish(Some(&access)))
+    }
+
+    /// Whether `work` publishes its status: a `.task.status` query or a
+    /// host lifecycle observes it.
+    fn publishes_status(state: &mut WorkCoordinatorState, work: EvaluationWorkId) -> bool {
+        state
+            .work
+            .get_mut(&work)
+            .and_then(|record| record.obligations.task_publisher_mut())
+            .is_some_and(|publisher| publisher.publishes_status())
     }
 
     /// The failure whose diagnostic `work`'s protected `.task.status`
@@ -2769,6 +2852,7 @@ impl EvaluationWorkCoordinator {
 
     fn settle_work(
         self: &Arc<Self>,
+        mut mutator: Option<&mut RuntimeValueMutator<'_, '_>>,
         work: EvaluationWorkId,
         terminal: EvaluationWaitTerminal,
         promise_failure: Option<Arc<EvaluationFailure>>,
@@ -2780,18 +2864,34 @@ impl EvaluationWorkCoordinator {
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
             if let Some(failure) = Self::unbuilt_status_diagnostic(&mut state, work, &terminal) {
-                // Building it evaluates through a nested driver whose quanta
-                // take the gate again, which `RwLock` refuses once a
-                // settlement queues behind this guard. Build it first, then
-                // look again: a status publisher may attach meanwhile.
+                // Building it evaluates through drivers whose quanta take the
+                // gate again, which `RwLock` refuses once a settlement queues
+                // behind this guard. Build it first, under the caller's
+                // mutator when it lends one, then look again: a status
+                // publisher may attach meanwhile.
                 drop(state);
                 drop(mutation);
-                let values = self
-                    .value_observer()
-                    .upgrade()
-                    .expect("a task publishing its status must retain a live value domain");
-                drop(failure.diagnostic(&values));
+                match mutator.as_deref_mut() {
+                    Some(mutator) => drop(failure.diagnostic_under(mutator)),
+                    None => {
+                        let values = self
+                            .value_observer()
+                            .upgrade()
+                            .expect("a task publishing its status must retain a live value domain");
+                        drop(failure.diagnostic(&values));
+                    }
+                }
                 continue;
+            }
+            if let Some(mutator) = mutator.as_deref_mut()
+                && Self::publishes_status(&mut state, work)
+            {
+                // A status publisher builds its value through a boundary of its
+                // own and runs client code, so the whole settlement runs
+                // suspended, under one gate as ever.
+                drop(state);
+                drop(mutation);
+                return mutator.suspend(|| self.settle_work(None, work, terminal, promise_failure));
             }
             let (producer, failure, status_update, promises) = {
                 let record = state
@@ -2845,26 +2945,37 @@ impl EvaluationWorkCoordinator {
         let mut completion_wakes = vec![wake];
         let mut status_wakes = Vec::with_capacity(status_update.len());
         let mut status_publishers = Vec::with_capacity(status_update.len());
+        let mut promise_publications = Vec::with_capacity(promises.len());
+        // A status publisher builds its value and runs client code itself,
+        // so settlement reaches here with one only when it holds no mutator.
+        debug_assert!(status_update.is_empty() || mutator.is_none());
         for update in status_update {
             debug_assert_eq!(update.status, terminal_task_status(&terminal));
             let publisher = update.publisher.clone();
             status_wakes.push(publisher.publish_update_guarded(&mutation, update));
             status_publishers.push(publisher);
         }
-        let mut promise_publications = Vec::with_capacity(promises.len());
-        for obligation in promises {
-            let (producer, completion) = match (&terminal, &promise_failure) {
-                (EvaluationWaitTerminal::Panicked(report), _) => {
-                    obligation.publish_panicked_guarded(self, &mutation, report)
-                }
-                (_, Some(failure)) => {
-                    obligation.publish_terminal_guarded(self, &mutation, &terminal, failure)
-                }
-                (_, None) => unreachable!("only panicked settlement omits its promise failure"),
-            };
-            promise_publications.push(producer);
-            completion_wakes.push(completion);
-        }
+        self.with_settlement_access(mutator.as_deref(), !promises.is_empty(), |access| {
+            for obligation in promises {
+                let (producer, completion) = match (&terminal, &promise_failure) {
+                    (EvaluationWaitTerminal::Panicked(report), _) => {
+                        obligation.publish_panicked_guarded(self, &mutation, report)
+                    }
+                    (_, Some(failure)) => obligation.publish_terminal_guarded(
+                        self,
+                        &mutation,
+                        access.expect("promise publication has access"),
+                        &terminal,
+                        failure,
+                    ),
+                    (_, None) => {
+                        unreachable!("only panicked settlement omits its promise failure")
+                    }
+                };
+                promise_publications.push(producer);
+                completion_wakes.push(completion);
+            }
+        });
         {
             let state = self
                 .state

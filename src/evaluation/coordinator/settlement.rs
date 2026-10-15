@@ -545,12 +545,17 @@ impl EvaluationWorkCoordinator {
                 status_publishers.push(publisher);
             }
             for obligation in &selected.promises {
-                let (producer, completion) = obligation.clone().publish_terminal_guarded(
-                    self,
-                    mutation,
-                    &selected.terminal,
-                    selected.promise_failure.as_failure(),
-                );
+                // Runtime settlement is outermost: each promise publication
+                // takes a boundary of its own.
+                let (producer, completion) = self.with_settlement_access(None, true, |access| {
+                    obligation.clone().publish_terminal_guarded(
+                        self,
+                        mutation,
+                        access.expect("promise publication has access"),
+                        &selected.terminal,
+                        selected.promise_failure.as_failure(),
+                    )
+                });
                 promise_publications.push(producer);
                 completion_wakes.push(completion);
             }

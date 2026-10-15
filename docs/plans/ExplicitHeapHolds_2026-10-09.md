@@ -1,7 +1,7 @@
 # Explicit Heap Holds — 2026-10-09
 
 Status: in progress; `gc-hold-api` landed on 2026-10-13, and the steps
-through `gc-hold-entry-cost` by 2026-10-14. The maintainer adopted the 2026-10-10
+through `gc-hold-boundary-release` by 2026-10-15. The maintainer adopted the 2026-10-10
 design review on 2026-10-12 (see "Decisions, 2026-10-12") and suggested
 pulling this plan forward, ahead of the leftovers of
 `perf-reflection-step-cost`. Since the plan was written, a per-thread
@@ -12,7 +12,7 @@ order: `gc-hold-api`, `gc-hold-boundaries` through its third slice,
 `gc-hold-outer-boundaries`, `gc-hold-pass-access` (which absorbed
 `gc-hold-tests`),
 `gc-hold-entry-cost`, `gc-hold-suspension-review`,
-`gc-hold-thread-context`, then `gc-hold-values-api`; `gc-hold-class-cache`
+`gc-hold-boundary-release`, `gc-hold-thread-context`, then `gc-hold-values-api`; `gc-hold-class-cache`
 is narrowed to a measurement. The maintainer moved transient roots ahead of
 the remaining enforcement on 2026-10-13, once every poll lent its mutator,
 and on 2026-10-14 chose that drivers hold the mutator across quanta
@@ -47,6 +47,14 @@ the review's vocabulary: an owned `Mutator`, not a `Hold`.
 - **The gate re-entry check stays a debug panic** (maintainer).
 - **Release builds use one codegen unit** (maintainer,
   `release-one-codegen-unit`).
+- **A quantum boundary releases under the mutator** (maintainer, choosing
+  between the agent's options; `boundary-release-under-mutator`): the
+  release of polled work runs under its driver's mutator, which suspends
+  only to join a requested collection, run client code (status callbacks,
+  machine cancellation and disposal, deferred work) or wait. Diagnostics a
+  terminal result needs are built under the mutator, passed as needed,
+  rather than by a driver that takes its own. Rejected: keeping the whole
+  boundary suspended, one obvious safepoint at about 300 instructions.
 
 ## Decisions, 2026-10-12
 
@@ -1017,6 +1025,59 @@ evaluate a diagnostic through a nested driver, which under `driver-mutator`
 could borrow the mutator instead (about 0.7% of a step). `TaskHost`
 validation suspends 136 to 257 times per run during macro expansion: client
 code, but brief.
+
+Reviewed 2026-10-14. Every production suspension waits on another thread
+or runs client code (`TaskHost` calls, host calls, specialization requests,
+macro expansion, status callbacks), except the cross-runtime pump, which
+one heap per thread requires, and the quantum boundary's release. That
+release is internal: coordinator transitions, terminal publication and
+route-lease release, which take the coordinator lock and the runtime gate,
+and a failed task's status diagnostic, built by a driver of its own. Taking
+those locks under a mutator cannot deadlock on admission: a synchronous
+collection waits in the `Ordinary` phase, admitting entries, until no
+mutator is active, so no entry blocks while another thread holds one; only
+calling `collect_full` while holding them could, which is already
+forbidden. The maintainer chose to release under the mutator
+(`boundary-release-under-mutator`), which `gc-hold-boundary-release`
+implements.
+
+### Release under the mutator (`gc-hold-boundary-release`)
+
+Added 2026-10-14 by the suspension review. A quantum boundary's release
+runs under the driver's mutator, for claimed tasks, client demands and
+sparks. It suspends only:
+
+- to run the poll's deferred work, when there is any;
+- to join a collection, when pressure asks for one;
+- to deliver task-status callbacks and to cancel or drop a released
+  machine, which may run client code.
+
+Code the release reaches that opens a heap boundary borrows the mutator
+instead: rooting failures and panics, poisoning a lazy cycle, submitting a
+spark, promise publication and the status publisher. A failed task's
+status diagnostic is built under the mutator before settlement takes the
+gate, by drivers that borrow it, instead of by one holding its own.
+
+Landed 2026-10-15. Claimed tasks, client demands and sparks release under
+the driver's mutator; the coordinator's release and settlement functions
+take an optional mutator, which the release lends and other callers
+(session closure, cancellation, wait completion, runtime settlement) do
+not, settling with boundaries of their own as before. Status publication
+stays outside every mutator: the query writer opens its own boundary and
+runs the client's conflict analysis, so a task with a status observer
+settles wholly suspended, under one gate as ever, once its diagnostic is
+built under the mutator, and a nonterminal release's advisory status
+publishes after the release's gate, suspended under a gate of its own (its
+order check drops a stale one). Collection pressure is checked under the
+mutator without side effects and again once suspended, since a waiting
+collection runs as soon as the driver suspends. The diagnostic builders
+and the client-demand driver gained forms that borrow a mutator, and an
+isolated diagnostic context is dropped suspended, since closing its session
+may settle work it launched. Across the profiling workloads, outer heap
+regions (entries and resumptions) fall to a near-constant 425 to 471 per
+run from 782 to 3,634, so suspensions no longer grow with evaluation
+(`chain_800`: 1,900 to 440; `chain_w4_800`, with workers: 7,191 to
+5,714); instructions fall 0.12%, 0.5% for the small workloads.
 
 ### Heap context in Glam (`gc-hold-thread-context`)
 

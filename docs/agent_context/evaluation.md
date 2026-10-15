@@ -89,8 +89,17 @@ control-flow overview.
   `Mutator::suspend` and `GcRef`), which must be the thread's only entry.
   Work that waits or calls out runs suspended or deferred past admission;
   `assert_outside_mutator` (`Heap::thread_holds_mutator`) checks it.
-- Every driver services collection pressure at each quantum boundary, with
-  its mutator suspended. A waiting `collect_full` sets the heap's
+- A quantum boundary releases its polled work under the driver's mutator,
+  and code the release reaches takes the mutator or access from it. It
+  suspends only for the poll's deferred work, a requested collection,
+  status publication and callbacks (a task with a status observer settles
+  wholly suspended), and machine cancellation or disposal
+  (`boundary-release-under-mutator`). Taking the coordinator lock or the
+  runtime gate under a mutator is safe, since no heap entry blocks while
+  another thread holds a mutator; never call `collect_full` while holding
+  either.
+- Every driver services collection pressure at each quantum boundary,
+  suspending its mutator to collect. A waiting `collect_full` sets the heap's
   request, which every pressure input honors, so drivers join it there
   instead of starting another quantum; that bounds a collection's wait to
   the quanta in flight (`gc-bounded-collection-wait`). A new driver loop
@@ -437,8 +446,8 @@ control-flow overview.
   before an immediate failure can be reported. Older-task modifiers remain
   ordinary committed updates.
 - Never notify task-status observers, invoke task cancellation hooks, or
-  destroy machines while holding a coordinator/component mutex or runtime
-  mutation admission. Protected status itself is published under the guard;
+  destroy machines while holding a coordinator/component mutex, runtime
+  mutation admission, or a mutator. Protected status itself is published under the guard;
   notifications and destruction happen after it is released.
 - Never evaluate or start a driver while holding runtime mutation admission:
   a second read of the gate on one thread waits behind any queued

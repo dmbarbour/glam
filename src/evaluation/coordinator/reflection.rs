@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use crate::trusted_hash::TrustedHashMap;
 use std::sync::Arc;
 
-use crate::core::EvaluationPanic;
+use crate::core::{EvaluationPanic, RuntimeValueMutator};
 use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeMutationAuthority};
 
 use super::super::{EvaluationDemandState, EvaluationTaskBlock};
@@ -16,10 +16,10 @@ use super::{
     EvaluationWorkCoordinator, EvaluationWorkId, ExactRouteRelease, ExactRouteReleaseTracker,
     ExitIntent, ObservationRegistration, ProducerSettlementObligation, RouteHazard,
     RuntimeFailureLedger, SettlementObligations, TaskFailureLedger, TaskStatusPublisher,
-    WakeRegistration, WorkCloseReason, WorkControl, WorkCoordinatorState, WorkKind, WorkRecord,
-    WorkState, demand_session_is_closed, prune_closed_session_registration,
-    publish_task_block_locked, queue_task, register_background_root, remove_ready_task,
-    unregister_background_root,
+    TaskStatusUpdate, TaskStatusWake, WakeRegistration, WorkCloseReason, WorkControl,
+    WorkCoordinatorState, WorkKind, WorkRecord, WorkState, demand_session_is_closed,
+    prune_closed_session_registration, publish_task_block_locked, queue_task,
+    register_background_root, remove_ready_task, unregister_background_root,
 };
 
 impl EvaluationWorkCoordinator {
@@ -488,8 +488,34 @@ impl EvaluationWorkCoordinator {
         outcome
     }
 
+    /// Releases claimed reflection work without a mutator, opening a
+    /// boundary for status publication; coordinator tests drive it directly.
+    #[cfg(test)]
     pub(in crate::evaluation) fn release_reflection(
         &self,
+        claimed: ClaimedReflectionWork,
+        poll: ReflectionWorkPoll,
+    ) -> ReflectionWorkRelease {
+        self.release_reflection_with(None, claimed, poll)
+    }
+
+    /// As [`Self::release_reflection`], under a quantum boundary's `mutator`.
+    /// A status publisher runs client code, so its advisory update waits
+    /// until the release's gate ends and then publishes with the mutator
+    /// suspended, under a gate of its own; its order check drops it if a
+    /// newer status was published meanwhile.
+    pub(in crate::evaluation) fn release_reflection_under(
+        &self,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
+        claimed: ClaimedReflectionWork,
+        poll: ReflectionWorkPoll,
+    ) -> ReflectionWorkRelease {
+        self.release_reflection_with(Some(mutator), claimed, poll)
+    }
+
+    fn release_reflection_with(
+        &self,
+        mutator: Option<&mut RuntimeValueMutator<'_, '_>>,
         claimed: ClaimedReflectionWork,
         poll: ReflectionWorkPoll,
     ) -> ReflectionWorkRelease {
@@ -650,48 +676,47 @@ impl EvaluationWorkCoordinator {
             release.made_progress = true;
             release.remains_blocked = false;
         }
-        let status_wakes = if !release.terminal && !release.exit_waiting {
-            let updates = {
-                let mut state = self
-                    .state
-                    .lock()
-                    .expect("evaluation work coordinator was poisoned");
-                state
-                    .work
-                    .get_mut(&id)
-                    .and_then(|record| {
-                        // Releasing makes queued work claimable before this
-                        // advisory status tail. A later quantum may therefore
-                        // have advanced or retired the same stable record.
-                        // Publish its current state when it remains live; a
-                        // terminal update owns the final status otherwise.
-                        let status = match record.state {
-                            WorkState::Blocked => Some(EvaluationTaskStatus::Blocked),
-                            WorkState::Dormant
-                            | WorkState::Reserved
-                            | WorkState::Queued
-                            | WorkState::Running => Some(EvaluationTaskStatus::Launched),
-                            WorkState::ExitWaiting | WorkState::Terminalizing => None,
-                            WorkState::InlineForced => {
-                                unreachable!("only a lazy route is forced inline")
-                            }
-                        }?;
-                        record
-                            .obligations
-                            .task_publisher_mut()
-                            .map(|publisher| publisher.update_status(status, false))
-                    })
-                    .unwrap_or_default()
-            };
-            updates
-                .into_iter()
-                .map(|update| {
-                    let publisher = update.publisher.clone();
-                    publisher.publish_update_guarded(&mutation, update)
+        let status_updates = if !release.terminal && !release.exit_waiting {
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            state
+                .work
+                .get_mut(&id)
+                .and_then(|record| {
+                    // Releasing makes queued work claimable before this
+                    // advisory status tail. A later quantum may therefore
+                    // have advanced or retired the same stable record.
+                    // Publish its current state when it remains live; a
+                    // terminal update owns the final status otherwise.
+                    let status = match record.state {
+                        WorkState::Blocked => Some(EvaluationTaskStatus::Blocked),
+                        WorkState::Dormant
+                        | WorkState::Reserved
+                        | WorkState::Queued
+                        | WorkState::Running => Some(EvaluationTaskStatus::Launched),
+                        WorkState::ExitWaiting | WorkState::Terminalizing => None,
+                        WorkState::InlineForced => {
+                            unreachable!("only a lazy route is forced inline")
+                        }
+                    }?;
+                    record
+                        .obligations
+                        .task_publisher_mut()
+                        .map(|publisher| publisher.update_status(status, false))
                 })
-                .collect::<Vec<_>>()
+                .unwrap_or_default()
         } else {
             Vec::new()
+        };
+        let (status_wakes, status_updates) = if mutator.is_some() {
+            (Vec::new(), status_updates)
+        } else {
+            (
+                Self::publish_status_updates(&mutation, status_updates),
+                Vec::new(),
+            )
         };
         release.route = Some({
             let state = self
@@ -707,8 +732,33 @@ impl EvaluationWorkCoordinator {
         for wake in status_wakes {
             wake.notify();
         }
+        if let Some(mutator) = mutator
+            && !status_updates.is_empty()
+        {
+            mutator.suspend(|| {
+                let mutation = self.admission.mutation_guard();
+                let wakes = Self::publish_status_updates(&mutation, status_updates);
+                drop(mutation);
+                for wake in wakes {
+                    wake.notify();
+                }
+            });
+        }
         release.machine = machine;
         release
+    }
+
+    fn publish_status_updates(
+        mutation: &dyn RuntimeMutationAuthority,
+        updates: Vec<TaskStatusUpdate>,
+    ) -> Vec<TaskStatusWake> {
+        updates
+            .into_iter()
+            .map(|update| {
+                let publisher = update.publisher.clone();
+                publisher.publish_update_guarded(mutation, update)
+            })
+            .collect()
     }
 
     pub(in crate::evaluation) fn retire_reflection(

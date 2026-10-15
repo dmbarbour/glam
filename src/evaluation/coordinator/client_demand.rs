@@ -6,7 +6,7 @@ use crate::counted_condvar::CountedCondvar;
 
 #[cfg(test)]
 use crate::core::EvaluationFailure;
-use crate::core::EvaluationPanic;
+use crate::core::{EvaluationPanic, RuntimeValueMutator};
 use crate::eval::whnf::WhnfComputation;
 use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeValueRoot};
 
@@ -495,8 +495,31 @@ impl EvaluationWorkCoordinator {
         }
     }
 
+    /// Releases a claimed client demand without a mutator; coordinator
+    /// tests drive it directly.
+    #[cfg(test)]
     pub(in crate::evaluation) fn release_client_demand(
         &self,
+        claimed: ClaimedClientDemand,
+        poll: ClientDemandPoll,
+    ) {
+        self.release_client_demand_with(None, claimed, poll);
+    }
+
+    /// Releases a claimed client demand under a quantum boundary's
+    /// `mutator`, which lends access to root a failure.
+    pub(in crate::evaluation) fn release_client_demand_under(
+        &self,
+        mutator: &RuntimeValueMutator<'_, '_>,
+        claimed: ClaimedClientDemand,
+        poll: ClientDemandPoll,
+    ) {
+        self.release_client_demand_with(Some(mutator), claimed, poll);
+    }
+
+    fn release_client_demand_with(
+        &self,
+        mutator: Option<&RuntimeValueMutator<'_, '_>>,
         mut claimed: ClaimedClientDemand,
         poll: ClientDemandPoll,
     ) {
@@ -580,8 +603,8 @@ impl EvaluationWorkCoordinator {
                             claimed.id,
                             claimed.operation.take(),
                             claimed.prior_subscription.take(),
-                            ClientDemandResult::Failed(RuntimeFailureRoot::from_observer(
-                                &self.values,
+                            ClientDemandResult::Failed(self.root_failure(
+                                mutator,
                                 Arc::new(crate::core::EvaluationFailure::message(
                                     "client demand blocked on another evaluation runtime",
                                 )),
