@@ -133,20 +133,35 @@ point. Its levels are cumulative:
   profiling-specific and profiling-augmented fixtures; it does not repeat the
   whole suite under instrumentation.
 - `scripts/check.sh full` — adds the expensive tier: the aggressive-GC
-  verification pass over the whole workspace, the cursor-stress and
-  million-edge scale proofs, and Miri and the sanitizers. Run it before
-  performance work and after any change to runtime or collector code, or to
-  unsafe, tracing, mutation, root, admission, finalization, or scheduler
-  behavior. Documentation-only changes may reuse the last result. Running it
-  only periodically once let a regression stay unnoticed for weeks.
+  verification pass over the whole workspace and the cursor-stress and
+  million-edge scale proofs. Run it before performance work and after any
+  change to runtime or collector code, or to unsafe, tracing, mutation, root,
+  admission, finalization, or scheduler behavior. Documentation-only changes
+  may reuse the last result. Running it only periodically once let a
+  regression stay unnoticed for weeks.
+- `scripts/check.sh dynamic` — adds Miri and the address and thread
+  sanitizers, which run glam-gc's library suite only and take about an hour
+  (`dynamic-tools-by-judgement`). A judgement call: run it after changes to
+  glam-gc, or to Glam code whose correctness rests on glam-gc's concurrency
+  contracts (workers, admission, collection, finalization, roots); not for
+  front-end, evaluator or documentation work, which these tools never
+  execute.
 
 Scale-only proofs (cursor stress, million-edge) stay `#[ignore]`d in the
 ordinary suite and run only at `full`. The project pins a stable toolchain, so
-`full` skips Miri and the sanitizers with a notice unless a nightly with the
+`dynamic` skips Miri and the sanitizers with a notice unless a nightly with the
 `miri` and `rust-src` components is installed; run
 `crates/glam-gc/scripts/check-miri.sh` and
 `crates/glam-gc/scripts/check-sanitizer.sh {address,thread}` directly once a
 nightly is available. There is no CI yet; `scripts/check.sh` is the gate.
+
+Fuzz-style runs are judgement calls too, never routine, and none joins
+`scripts/check.sh` (`panic-discovery-by-inspection`). After parser changes
+that move work between the term parser and the grammar, sweep the
+differential oracle over every expression the tests parse
+(`GLAM_TERM_ORACLE=1 cargo test --lib`, about a minute), and multiply the
+generated cases with `GLAM_TERM_FUZZ=<n>` when a change widens what the
+generators cover.
 
 Dynamic tools detect defects; they are not ordering evidence. A clean
 sanitizer run proves nothing about concurrency order, which still needs forced

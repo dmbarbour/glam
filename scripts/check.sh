@@ -2,25 +2,29 @@
 #
 # Workspace verification entry point.
 #
-#   scripts/check.sh [fast|all|full]
+#   scripts/check.sh [fast|all|full|dynamic]
 #
 # Levels are cumulative; each runs everything in the level before it:
 #
-#   fast  Formatting, workspace Clippy, and the workspace test suite at default
-#         features. The quick inner-loop gate.
+#   fast     Formatting, workspace Clippy, and the workspace test suite at
+#            default features. The quick inner-loop gate.
 #
-#   all   (default) Adds the collector's own check suite (glam-gc all-features
-#         tests, persistent-edge codegen latch, unsafe-site audit), the G0
-#         semantic regressions, and the glam-prof profiling fixtures.
-#         This is the pre-commit gate for ordinary code changes.
+#   all      (default) Adds the collector's own check suite (glam-gc
+#            all-features tests, persistent-edge codegen latch, unsafe-site
+#            audit), the G0 semantic regressions, and the glam-prof profiling
+#            fixtures. The pre-commit gate for ordinary code changes.
 #
-#   full  Adds the expensive, periodic tier: the aggressive-GC verification
-#         pass over the whole workspace, the cursor-stress and million-edge
-#         scale proofs, and -- when a nightly toolchain is installed -- Miri and
-#         the sanitizers. Run before performance work and on a periodic basis.
+#   full     Adds the expensive tier: the aggressive-GC verification pass over
+#            the whole workspace and the cursor-stress and million-edge scale
+#            proofs. Run before performance work and after changes to runtime
+#            or collector behavior (see docs/AgentContext.md, "Verification").
 #
-# The project pins only a stable toolchain (rust-toolchain.toml), so Miri and
-# the sanitizers are skipped with a notice unless a nightly is available.
+#   dynamic  Adds the dynamic tools over glam-gc's suite: Miri and the address
+#            and thread sanitizers, about an hour. A judgement call, for
+#            changes to glam-gc or to code its concurrency contracts govern.
+#
+# The project pins only a stable toolchain (rust-toolchain.toml), so `dynamic`
+# skips Miri and the sanitizers with a notice unless a nightly is available.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -29,17 +33,17 @@ cd "$root"
 level="${1:-all}"
 
 usage() {
-  sed -n '3,21p' "$0" | sed 's/^#\{0,1\} \{0,1\}//'
+  sed -n '3,27p' "$0" | sed 's/^#\{0,1\} \{0,1\}//'
 }
 
 case "$level" in
-  fast | all | full) ;;
+  fast | all | full | dynamic) ;;
   -h | --help | help)
     usage
     exit 0
     ;;
   *)
-    echo "usage: $(basename "$0") [fast|all|full]" >&2
+    echo "usage: $(basename "$0") [fast|all|full|dynamic]" >&2
     exit 2
     ;;
 esac
@@ -91,6 +95,10 @@ run_full() {
   scripts/check-cursor-stress.sh
   step "glam-gc million-edge scale proofs"
   crates/glam-gc/scripts/check-scale.sh
+}
+
+run_dynamic() {
+  run_full
   run_nightly_checks
 }
 
@@ -98,6 +106,7 @@ case "$level" in
   fast) run_fast ;;
   all) run_all ;;
   full) run_full ;;
+  dynamic) run_dynamic ;;
 esac
 
 step "check.sh $level: OK"

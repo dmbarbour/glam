@@ -1111,7 +1111,8 @@ Miri and ASan with only leak checking disabled.
 
 ## Production-runtime dynamic matrix
 
-`scripts/check.sh full` runs Miri and the sanitizers over `glam-gc` only. The
+`scripts/check.sh dynamic` (`full` until 2026-10-15) runs Miri and the
+sanitizers over `glam-gc` only. The
 production runtime's matrix is run by hand with a nightly toolchain. It last
 passed on 2026-10-01 with nightly 1.101.
 
@@ -1304,3 +1305,7 @@ that another evicted from its slot reads the map and refills it, without
 reaching the heap (`an_evicted_class_key_falls_back_to_the_thread_class_map`):
 `scripts/check.sh full` passed at `69a08453`, which includes it (`ce7d3657`),
 with Miri (231 passed) and both sanitizers.
+
+From 2026-10-15, Miri and the sanitizers run at `scripts/check.sh dynamic`,
+by judgement, after changes to glam-gc or to code its concurrency contracts
+govern (`dynamic-tools-by-judgement`); records before that name `full`.

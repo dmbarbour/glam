@@ -160,6 +160,20 @@ maps the short names used here to file names.
 - **Recorded in:** D2h review D2HR-006; GCI11R002 holistic review GCI2HR-006;
   documentation disposition, maintainer answer 5.
 
+### Miri and the sanitizers run by judgement
+`dynamic-tools-by-judgement` · 2026-10-15 · maintainer · accepted
+- **Context:** `scripts/check.sh full` ran Miri and both sanitizers, about an
+  hour, after every runtime change, though they exercise only glam-gc's
+  library suite; most Glam changes gained nothing from them.
+- **Decision:** they move to a level of their own, `scripts/check.sh
+  dynamic`, run by judgement after changes to glam-gc, or to Glam code its
+  concurrency contracts govern (workers, admission, collection,
+  finalization). `full` keeps the aggressive-GC pass and the scale proofs,
+  with its triggers unchanged (`aggressive-gc-rerun-triggers`). Fuzz-style
+  runs, such as the parser's oracle sweep, are judgement calls as well.
+- **Rule lives in:** `AgentContext.md` "Verification"; `AGENTS.md` "Routine
+  Checks".
+
 ### Fast tests come from fixing their causes
 `fast-test-suite` · 2026-10-09 · maintainer and agent · accepted
 - **Context:** workspace tests took about 225 s in `scripts/check.sh fast`.

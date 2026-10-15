@@ -52,11 +52,15 @@ Contingent:
 Run `scripts/check.sh` after Rust edits. Its levels are cumulative:
 
 ```sh
-scripts/check.sh fast   # fmt, workspace clippy, workspace tests
-scripts/check.sh        # (all) fast + glam-gc suite, G0 semantics, profiling
-scripts/check.sh full   # all + aggressive GC, scale, cursor stress, miri/san
+scripts/check.sh fast      # fmt, workspace clippy, workspace tests
+scripts/check.sh           # (all) fast + glam-gc suite, G0 semantics, profiling
+scripts/check.sh full      # all + aggressive GC, scale, cursor stress
+scripts/check.sh dynamic   # full + Miri and sanitizers over glam-gc
 ```
 
 Use `all` (the default) as the pre-commit gate. Run `full` before performance
-work and after changes to runtime, collector, or unsafe-sensitive code. See [`docs/AgentContext.md`](docs/AgentContext.md) for
-what each level covers and the nightly-only Miri/sanitizer gap.
+work and after changes to runtime, collector, or unsafe-sensitive code. Run
+`dynamic` by judgement, after changes to glam-gc or to code its concurrency
+contracts govern (workers, admission, collection, finalization). See
+[`docs/AgentContext.md`](docs/AgentContext.md) for what each level covers and
+the nightly-only Miri/sanitizer gap.
