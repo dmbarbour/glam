@@ -6957,6 +6957,24 @@ mod tests {
     }
 
     #[test]
+    fn an_evicted_class_key_falls_back_to_the_thread_class_map() {
+        let heap = Heap::new();
+        let _ = allocate(&heap, 1_u64);
+        let type_id = std::any::TypeId::of::<u64>();
+        assert!(crate::thread_cache::class_key_cached(&heap.inner, type_id));
+
+        // Another type that shares the slot evicts it; the next acquisition
+        // reads the thread's class map, not the heap, and refills the slot.
+        crate::thread_cache::evict_class_key(&heap.inner, type_id);
+        assert!(!crate::thread_cache::class_key_cached(&heap.inner, type_id));
+        let _ = allocate(&heap, 2_u64);
+        assert!(crate::thread_cache::class_key_cached(&heap.inner, type_id));
+        let metrics = heap.metrics();
+        assert_eq!(metrics.cold_class_discoveries(), 1);
+        assert_eq!(metrics.retained_class_lookups(), 0);
+    }
+
+    #[test]
     fn c7_allocation_metrics_batch_hot_path_observations_per_region() {
         let heap = Heap::new();
         heap.mutate(|mutator| {

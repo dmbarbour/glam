@@ -1,8 +1,9 @@
-use crate::trusted_hash::TrustedHashMap;
+use crate::trusted_hash::{TrustedHashMap, TrustedState};
 use std::any::TypeId;
 #[cfg(debug_assertions)]
 use std::cell::Cell;
 use std::cell::RefCell;
+use std::hash::BuildHasher;
 use std::num::NonZeroU64;
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -19,6 +20,8 @@ use crate::{
 };
 
 const CACHED_CLASS_SLOTS: usize = 64;
+/// Slots in the direct-mapped table in front of a record's class map.
+const CLASS_KEY_SLOTS: usize = 128;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AllocationLeaseEpoch(NonZeroU64);
@@ -174,6 +177,64 @@ fn cursor_slot(class_id: AllocationClassId) -> usize {
         .expect("bounded cursor slot always fits usize")
 }
 
+/// A direct-mapped table in front of a record's class map, so acquiring an
+/// allocator for a known type usually takes one slot load and a `TypeId`
+/// comparison rather than a hash-map probe. A type's slot index folds to a
+/// constant where the type is known. Two types that share a slot evict each
+/// other, and a miss reads the map.
+struct ClassKeyTable {
+    slots: Box<[Option<ClassKey>; CLASS_KEY_SLOTS]>,
+}
+
+#[derive(Clone, Copy)]
+struct ClassKey {
+    type_id: TypeId,
+    metadata: &'static ObjectMetadata,
+    id: AllocationClassId,
+}
+
+impl Default for ClassKeyTable {
+    fn default() -> Self {
+        // Built in heap storage, as `ClassCursorCache` is, to keep entry
+        // stack use small.
+        let slots: Box<[Option<ClassKey>]> = vec![None; CLASS_KEY_SLOTS].into_boxed_slice();
+        Self {
+            slots: slots
+                .try_into()
+                .unwrap_or_else(|_| unreachable!("the table has its fixed width")),
+        }
+    }
+}
+
+impl ClassKeyTable {
+    #[inline(always)]
+    fn slot(type_id: TypeId) -> usize {
+        let hash = TrustedState::<TypeId>::default().hash_one(type_id);
+        // Truncation keeps the low bits, which pick the slot.
+        hash as usize % CLASS_KEY_SLOTS
+    }
+
+    #[inline(always)]
+    fn get(&self, type_id: TypeId) -> Option<(&'static ObjectMetadata, AllocationClassId)> {
+        self.slots[Self::slot(type_id)]
+            .filter(|key| key.type_id == type_id)
+            .map(|key| (key.metadata, key.id))
+    }
+
+    fn insert(
+        &mut self,
+        type_id: TypeId,
+        metadata: &'static ObjectMetadata,
+        id: AllocationClassId,
+    ) {
+        self.slots[Self::slot(type_id)] = Some(ClassKey {
+            type_id,
+            metadata,
+            id,
+        });
+    }
+}
+
 /// A class this thread already resolved for its heap. A heap never removes a
 /// class, so an entry stays valid for the heap's lifetime.
 struct CachedClass {
@@ -192,6 +253,8 @@ struct ThreadHeapState {
     /// takes neither the process-wide metadata registry nor the heap's data
     /// mutex.
     classes: TrustedHashMap<TypeId, CachedClass>,
+    /// The classes most recently looked up, in front of `classes`.
+    class_keys: ClassKeyTable,
     /// Owned mutators of this heap suspended on this thread. A suspended
     /// mutator keeps its record, so collection inside the suspension cannot
     /// orphan it.
@@ -277,6 +340,7 @@ impl ThreadHeapState {
             heap_id: heap.id(),
             active: false,
             classes: TrustedHashMap::default(),
+            class_keys: ClassKeyTable::default(),
             suspended: 0,
             captured_epoch,
             cursors: ClassCursorCache::default(),
@@ -488,9 +552,26 @@ impl ThreadCacheHandle {
     pub(crate) fn cached_class_key<T: Trace>(
         &self,
     ) -> Option<(&'static ObjectMetadata, AllocationClassId)> {
-        let state = self.state.borrow();
-        let class = state.classes.get(&TypeId::of::<T>())?;
-        Some((class.metadata, class.id))
+        let type_id = TypeId::of::<T>();
+        if let Some(key) = self.state.borrow().class_keys.get(type_id) {
+            return Some(key);
+        }
+        self.cached_class_key_from_map(type_id)
+    }
+
+    /// Reads the class map after a miss in its direct-mapped table, and
+    /// installs what it finds there.
+    #[cold]
+    #[inline(never)]
+    fn cached_class_key_from_map(
+        &self,
+        type_id: TypeId,
+    ) -> Option<(&'static ObjectMetadata, AllocationClassId)> {
+        let mut state = self.state.borrow_mut();
+        let class = state.classes.get(&type_id)?;
+        let (metadata, id) = (class.metadata, class.id);
+        state.class_keys.insert(type_id, metadata, id);
+        Some((metadata, id))
     }
 
     /// The class this thread resolved earlier for `T` in its heap, if any.
@@ -517,7 +598,8 @@ impl ThreadCacheHandle {
     }
 
     pub(crate) fn remember_class<T: Trace>(&self, class: &AllocationClass<T>) {
-        self.state.borrow_mut().classes.insert(
+        let mut state = self.state.borrow_mut();
+        state.classes.insert(
             TypeId::of::<T>(),
             CachedClass {
                 metadata: class.metadata(),
@@ -525,6 +607,9 @@ impl ThreadCacheHandle {
                 shared: Arc::clone(class.shared()),
             },
         );
+        state
+            .class_keys
+            .insert(TypeId::of::<T>(), class.metadata(), class.id());
     }
 
     /// Takes a free root slot from this thread's list, counting one root
@@ -809,6 +894,29 @@ pub(crate) fn cursor(
     class_id: AllocationClassId,
 ) -> Option<AllocationCursor> {
     state_for(heap)?.borrow().cursors.get(class_id)
+}
+
+/// Whether `type_id`'s slot in this thread's direct-mapped class table for
+/// `heap` holds it.
+#[cfg(test)]
+pub(crate) fn class_key_cached(heap: &Arc<HeapInner>, type_id: TypeId) -> bool {
+    state_for(heap).is_some_and(|state| state.borrow().class_keys.get(type_id).is_some())
+}
+
+/// Fills `type_id`'s slot in this thread's direct-mapped class table for
+/// `heap` with another type's key, as a colliding type would.
+#[cfg(test)]
+pub(crate) fn evict_class_key(heap: &Arc<HeapInner>, type_id: TypeId) {
+    let state = state_for(heap).expect("test eviction requires a heap-cache entry");
+    let mut state = state.borrow_mut();
+    let slot = ClassKeyTable::slot(type_id);
+    let intruder = TypeId::of::<ClassKeyTable>();
+    assert_ne!(intruder, type_id);
+    let key = state.class_keys.slots[slot].expect("the evicted type is cached");
+    state.class_keys.slots[slot] = Some(ClassKey {
+        type_id: intruder,
+        ..key
+    });
 }
 
 #[cfg(test)]
