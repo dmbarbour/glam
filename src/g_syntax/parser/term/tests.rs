@@ -708,12 +708,33 @@ const KEYWORD_NESTING_SHAPES: &[(&str, &str, &str)] = &[
     ("(let a = 1 in ", ")", "a"),
     ("(do { .r ", " })", "1"),
     ("(\\z -> if c then ", " else z)", "1"),
+    // A keyword the term parser delegates though a joint `.` follows it.
+    ("(if.x then ", " else 0)", "1"),
 ];
 
-#[test]
-fn keyword_forms_in_groups_interpret_each_group_once() {
-    for shape in KEYWORD_NESTING_SHAPES {
-        let text = nested(40, *shape);
+/// Keywords nested where they head no form: as path keys, quoted atoms, tag
+/// and dict keys, and contextual keywords as path keys. A head among them
+/// opens a keyword region that no structural parser takes, so the term
+/// parser interprets its groups itself, still once each.
+const KEYWORD_KEY_NESTING_SHAPES: &[(&str, &str, &str)] = &[
+    ("(x.if ", ")", "1"),
+    ("(f 'match ", ")", "1"),
+    ("(x.do.y ", ")", "1"),
+    ("(:if ", ")", "1"),
+    ("{if: ", "}", "1"),
+    ("(then:", ")", "1"),
+    ("[x.try, ", "]", "1"),
+    ("(foo.then ", ")", "1"),
+    ("(f 'else ", ")", "1"),
+];
+
+/// Counts group interpretations rather than timing the parse. Twelve levels
+/// tell once from twice (4,095 interpretations of 12 groups), and a
+/// regression fails at once instead of hanging the suite.
+#[track_caller]
+fn assert_each_group_interpreted_once(shapes: &[(&str, &str, &str)]) {
+    for shape in shapes {
+        let text = nested(12, *shape);
         let groups = text
             .chars()
             .filter(|c| matches!(c, '(' | '[' | '{'))
@@ -730,6 +751,118 @@ fn keyword_forms_in_groups_interpret_each_group_once() {
             "{preview}… interpreted {interpreted} groups of {groups}"
         );
     }
+}
+
+#[test]
+fn keyword_forms_in_groups_interpret_each_group_once() {
+    assert_each_group_interpreted_once(KEYWORD_NESTING_SHAPES);
+}
+
+#[test]
+fn keywords_as_keys_interpret_each_group_once() {
+    assert_each_group_interpreted_once(KEYWORD_KEY_NESTING_SHAPES);
+}
+
+/// A keyword region the term parser takes anyway interprets its groups on
+/// demand, one level of Rust recursion each, so keys must open none: nested
+/// as deep as plain groups, they parse without recursion too.
+#[test]
+fn keywords_as_keys_nest_without_recursion() {
+    for shape in KEYWORD_KEY_NESTING_SHAPES {
+        assert_term_parses_quickly(&nested(2_000, *shape), std::time::Duration::from_secs(2));
+    }
+}
+
+/// Keywords where they head no form, each before a group a region would
+/// defer: as path keys, quoted atoms and quoted paths, tag keys and
+/// constructors, dict keys, effect names, and names that only contain one.
+const KEYWORDS_AS_KEYS: &[&str] = &[
+    "x.if (a)",
+    "x.match [a] (b)",
+    "x.do {a: 1}",
+    "x.try (a) (b)",
+    "x.try_match (a)",
+    "x.using (a)",
+    "a.b.if.c (d)",
+    "x.do.y (a)",
+    "f 'if (a)",
+    "f 'do [a]",
+    "f '.a.match (b)",
+    "if:(a)",
+    "match:[a] (b)",
+    "do.x:(a)",
+    ":if (a)",
+    ":do.x (a)",
+    "{if: (a), b: (c)}",
+    "{do: 1, using: (a)}",
+    "{:if, :match}",
+    "{x.if: (a)}",
+    ".do (a)",
+    ".if (a) (b)",
+    "[x.try, (a)]",
+    "(x.match, (a))",
+    "foo.then (a)",
+    "f 'else (a)",
+    "x.where (a)",
+    "{then: (a), else: [b]}",
+    "f 'with (a)",
+    "x.in (a)",
+    "x.as (a)",
+    "iff (a)",
+    "do_it (a)",
+    "if_ (a)",
+    "matcher [a]",
+    "f (x.if) (if c then (a) else (b))",
+    "{if: (if c then (a) else b)}",
+];
+
+#[test]
+fn keywords_as_keys_agree_with_the_grammar() {
+    let report = oracle_over(KEYWORDS_AS_KEYS.iter().map(|text| source(text)));
+    assert_agrees(&report, KEYWORDS_AS_KEYS.len() / 2);
+}
+
+/// Regions only decide which parser interprets a group: the parse with them
+/// and without them is the same, trees and diagnostics alike.
+#[test]
+fn keyword_regions_never_change_a_parse() {
+    let shapes = NESTING_SHAPES
+        .iter()
+        .chain(KEYWORD_NESTING_SHAPES)
+        .chain(KEYWORD_KEY_NESTING_SHAPES);
+    let sources = sample_files()
+        .into_iter()
+        .map(|path| std::fs::read(path).expect("samples are readable"))
+        .chain(
+            SNIPPETS
+                .iter()
+                .chain(KEYWORDS_AS_KEYS)
+                .map(|text| source(text)),
+        )
+        .chain(shapes.flat_map(|shape| (1..=6).map(move |depth| source(&nested(depth, *shape)))))
+        .chain(generated_sources(
+            0x5eed_0001,
+            generated_count(10_000),
+            |generator, out| generator.soup(0, out),
+        ))
+        .chain(generated_sources(
+            0x5eed_0002,
+            generated_count(800),
+            |generator, out| generator.expression(0, out),
+        ));
+    let mut compared = 0;
+    for source in sources {
+        let with = parse_source(&source);
+        let without = super::without_regions(|| parse_source(&source));
+        assert_eq!(
+            with,
+            without,
+            "keyword regions changed the parse of {:?}",
+            String::from_utf8_lossy(&source)
+        );
+        compared += 1;
+    }
+    eprintln!("keyword regions: {compared} parses unchanged");
 }
 
 #[test]

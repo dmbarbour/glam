@@ -265,23 +265,72 @@ impl Frame {
     }
 }
 
-/// Whether the token at `index` heads a keyword form, which opens a keyword
-/// region: the rest of its group member, up to the group's separator or
-/// close, as `parse_structural_atom` delimits it. The form's structural
-/// parser reads the region from its tokens, so groups closing inside it are
+/// Whether the token at `index` opens a keyword region: the rest of its
+/// group member, up to the group's separator or close, as
+/// `parse_structural_atom` delimits the form. The form's structural parser
+/// reads the region from its tokens, so groups closing inside it are
 /// deferred rather than interpreted, and every group is interpreted by one
-/// parser. A keyword that a joint `:` or `.` follows may be a tag key or a
-/// path, and opens none; deferral only saves work, so missing a region costs
-/// time, not correctness.
+/// parser.
 fn opens_keyword_region(view: TokenView<'_, '_>, index: usize) -> bool {
-    let TokenKind::Name(name) = token(view, index).kind() else {
+    #[cfg(test)]
+    if REGIONS_OFF.with(std::cell::Cell::get) {
+        return false;
+    }
+    may_head_keyword_form(view, index)
+}
+
+/// Whether the token at `index` may head a keyword form, judged from it and
+/// its neighbours. The term parser delegates a keyword form only where this
+/// holds, so every delegated form has its region; a missed one would parse
+/// the form's groups twice, doubling the work below it. Only a keyword that
+/// is surely a key fails: after a joint `.` (a path segment or effect name),
+/// after a joint `'` (a quoted atom or path), after a constructor's `:`, or
+/// before a joint `:` (a tag or member key). A keyword that passes but heads
+/// nothing, such as the root of a tag path `if.x:1` or a form that ends
+/// before its group member does, costs a deferred interpretation, one level
+/// of Rust recursion each where such regions nest.
+fn may_head_keyword_form(view: TokenView<'_, '_>, index: usize) -> bool {
+    let head = token(view, index);
+    let TokenKind::Name(name) = head.kind() else {
         return false;
     };
-    structural_atom_parser(name).is_some()
-        && !view.token_at(index + 1).is_some_and(|next| {
-            next.leading() == LeadingTrivia::Joint
-                && matches!(next.kind(), TokenKind::Symbol(":" | "."))
-        })
+    if structural_atom_parser(name).is_none() {
+        return false;
+    }
+    let joint = |index: usize| {
+        view.token_at(index)
+            .is_some_and(|token| token.leading() == LeadingTrivia::Joint)
+    };
+    let symbol = |index: usize, expected: &str| {
+        view.token_at(index).is_some_and(
+            |token| matches!(token.kind(), TokenKind::Symbol(symbol) if *symbol == expected),
+        )
+    };
+    let after_key_mark = joint(index)
+        && index.checked_sub(1).is_some_and(|mark| {
+            symbol(mark, ".")
+                || symbol(mark, "'")
+                || symbol(mark, ":") && is_constructor_colon(view, mark)
+        });
+    let before_key_mark = symbol(index + 1, ":") && joint(index + 1);
+    !after_key_mark && !before_key_mark
+}
+
+/// Whether the `:` at `index` starts a constructor (`:path`) rather than
+/// ending a tag's key (`a:`, `[k]:`, `(p):`): it follows a space, a line
+/// break, an opening delimiter, a symbol, or nothing.
+fn is_constructor_colon(view: TokenView<'_, '_>, index: usize) -> bool {
+    let colon = token(view, index);
+    colon.leading() != LeadingTrivia::Joint
+        || index
+            .checked_sub(1)
+            .and_then(|before| view.token_at(before))
+            .is_none_or(|before| {
+                matches!(
+                    before.kind(),
+                    TokenKind::Open { .. } | TokenKind::Symbol(_) | TokenKind::LineStart { .. }
+                )
+            })
 }
 
 /// One element of a group's flat contents: a token, or a nested group
@@ -527,6 +576,17 @@ thread_local! {
     /// Groups this thread's term parsers have interpreted, for tests that
     /// check no group is interpreted twice.
     static INTERPRETED_GROUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static REGIONS_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `work` with no keyword regions on this thread, for tests that check
+/// regions never change a parse.
+#[cfg(test)]
+fn without_regions<R>(work: impl FnOnce() -> R) -> R {
+    let was = REGIONS_OFF.with(|off| off.replace(true));
+    let result = work();
+    REGIONS_OFF.with(|off| off.set(was));
+    result
 }
 
 fn interpret_group(scope: Scope<'_, '_, '_>, frame: &Frame, close: usize) -> Parse<Cover> {
@@ -1279,7 +1339,11 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                             if *name == "abstract_global_path" {
                                 break self.abstract_global_path()?;
                             }
-                            if let Some(parse) = structural_atom_parser(name) {
+                            if let Some(parse) = structural_atom_parser(name)
+                                && self.here().is_some_and(|head| {
+                                    may_head_keyword_form(self.scope.view, head)
+                                })
+                            {
                                 break self.structural_atom(parse)?;
                             }
                         }
