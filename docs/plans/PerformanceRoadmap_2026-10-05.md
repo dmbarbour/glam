@@ -6,8 +6,10 @@ done, `perf-parser` is in production, and `perf-evaluation-recursion` is
 done (2026-10-08). `perf-structural-overheads` closed on 2026-10-15
 (maintainer); its reflection steps continue as `perf-reflection-effects`
 ([plan](ReflectionPerformance_2026-10-15.md)), and the rest became
-[standalone steps](#standalone-steps). The maintainer expects to return to
-`perf-parser` next. The latest measurements are in
+[standalone steps](#standalone-steps). Next, in the maintainer's order
+(2026-10-15): the rest of `perf-parser`, then the representations, then
+`perf-reflection-effects`, since representation costs now bury other
+signals. The latest measurements are in
 [Snapshot 2026-10-15](#snapshot-2026-10-15). This is the umbrella for
 performance work. Each step gets its own plan when it starts; the existing
 plans it names stay the detailed records. Steps are referred to by name,
@@ -213,14 +215,7 @@ gains this consequence when it lands.
      separates holding a heap from accessing it. Pulled ahead of the
      leftovers of `perf-reflection-step-cost`; done 2026-10-15.
 
-6. **Reflection effects** (`perf-reflection-effects`).
-   [Reflection Performance](ReflectionPerformance_2026-10-15.md), split from
-   the structural overheads plan on 2026-10-15: `perf-reflection-step-cost`
-   (a `.r ()` step is 376 K instructions, mostly net reduction, allocation
-   and lazy routes) and `perf-reflection-scanner` (on the order of 9 M of
-   `minimal`'s 24 M). Much of a step's cost is now representation, so its
-   order against the next step is open.
-7. **Representations**, two parallel steps:
+6. **Representations**, two parallel steps:
    - **Values** (`perf-value-representation`):
      [Value Representation Refinement](ValueRepresentationRefinement_2026-08-19.md),
      with special focus on lists and dicts and on list processing:
@@ -248,6 +243,14 @@ gains this consequence when it lands.
        histories. The compact node needs those levels, so GAL comes first
        or alongside. It also takes on the deferred positive-erasure
        translation.
+7. **Reflection effects** (`perf-reflection-effects`).
+   [Reflection Performance](ReflectionPerformance_2026-10-15.md), split from
+   the structural overheads plan on 2026-10-15: `perf-reflection-step-cost`
+   (a `.r ()` step is 376 K instructions, mostly net reduction, allocation
+   and lazy routes) and `perf-reflection-scanner` (on the order of 9 M of
+   `minimal`'s 24 M). It follows the representations (maintainer,
+   2026-10-15): much of a step's cost is now representation, which buries
+   any other signal.
 8. **Normal forms and batching**, as separate steps:
    - **Normal forms at construction** (`perf-normal-forms`). These make hashing and memoization
      possible later, and simplify bulk materialization and multi-step

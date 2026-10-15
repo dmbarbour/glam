@@ -43,7 +43,7 @@ flags a step for discussion when work reaches it, not a decision.
   budgets treat batching, and the order of its `perf-` steps. Latest
   measurements: Snapshot 2026-10-15.
 - [`ParserBacktrackingPerformance_2026-10-04.md`](ParserBacktrackingPerformance_2026-10-04.md):
-  `perf-parser`, likely next (maintainer, 2026-10-15). The prefix-shared
+  `perf-parser`, next (maintainer, 2026-10-15). The prefix-shared
   term parser parses every ordinary expression in production. No `parser-`
   step has landed since 2026-10-07: a keyword form in parentheses inside
   another is still exponential (`parse_ifs`), so `parser-keyword-frames`
@@ -53,7 +53,8 @@ flags a step for discussion when work reaches it, not a decision.
   `perf-reflection-effects`, split from the structural overheads plan on
   2026-10-15. Reflection effect steps (`perf-reflection-step-cost`, 376 K
   instructions a `.r ()` step) and the compiler's scanner
-  (`perf-reflection-scanner`).
+  (`perf-reflection-scanner`). Waits for the parser work and the
+  representations (maintainer, 2026-10-15).
 - [`UserInputPanicSafety_2026-10-04.md`](UserInputPanicSafety_2026-10-04.md)
   keeps code that observes user input from panicking, and keeps a caught panic
   from poisoning the runtime. Interaction-net inspection

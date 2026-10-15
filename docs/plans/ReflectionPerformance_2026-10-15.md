@@ -6,7 +6,8 @@ plan closed on 2026-10-15, with its two reflection steps:
 `perf-reflection-step-cost`, whose first changes landed on 2026-10-12 and
 which was remeasured on 2026-10-15, and `perf-reflection-scanner`. Their
 sections below moved here unchanged. This is the `perf-reflection-effects`
-step of the [performance roadmap](PerformanceRoadmap_2026-10-05.md).
+step of the [performance roadmap](PerformanceRoadmap_2026-10-05.md),
+after the parser work and the representations (maintainer, 2026-10-15).
 
 ## Purpose
 
@@ -172,8 +173,9 @@ steps reduce it directly.
 
 ## Open questions (2026-10-15)
 
-- **Order.** Much of a step's cost is now representation. Take this plan
-  before, beside or after `perf-value-representation` and
-  `perf-net-representation`?
+- **Order.** *Answered (maintainer, 2026-10-15):* after the parser work
+  and the representations (`perf-value-representation`,
+  `perf-net-representation`), whose costs now bury other signals in a
+  step.
 - **Pure Effect Access Fusion.** Fold it into `perf-reflection-step-cost`,
   or close it at its first step?

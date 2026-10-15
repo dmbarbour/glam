@@ -2,11 +2,11 @@
 
 Status: preliminary and deferred (2026-10-15). It is the
 [performance roadmap](PerformanceRoadmap_2026-10-05.md)'s
-`perf-value-representation`, which runs beside `perf-net-representation`
-once `perf-structural-overheads` closes. On 2026-10-15 that step still has
-`perf-definition-assertions`, `perf-reflection-scanner`,
-`perf-reflection-step-cost`, `perf-debug-annotations` and
-`perf-worker-route-walks` open. The roadmap names the focus: lists and
+`perf-value-representation`, which runs beside `perf-net-representation`.
+`perf-structural-overheads` closed on 2026-10-15, and the maintainer
+ordered the next steps that day: the rest of `perf-parser`, then the
+representations, then `perf-reflection-effects`, since representation
+costs now bury other signals. The roadmap names the focus: lists and
 dicts, contiguous chunks for strict lists, ropes for concatenation, small
 inline dicts and a persistent map for large ones, shared key shapes where
 keys are static, and no `Arc` in basic data types (maintainer, 2026-10-09).
