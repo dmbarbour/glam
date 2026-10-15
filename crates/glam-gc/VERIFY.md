@@ -1272,3 +1272,9 @@ An entry checks the thread's active-entry slot, takes admission, and only
 then finds and activates its thread record (`gc-hold-entry-cost`):
 `scripts/check.sh full` passed at `352a2d4d` (Miri 229 passed), with both
 sanitizers.
+
+Glam's quantum boundaries release under the driver's mutator, taking the
+coordinator lock and the runtime gate while it is held
+(`gc-hold-boundary-release`): `scripts/check.sh full` passed at `d050b272`,
+including aggressive-GC verification, Miri (229 passed) and both
+sanitizers.
