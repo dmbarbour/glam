@@ -127,3 +127,15 @@ evaluator); its header's line came from the Rust summary, which an
 unevaluated message lacks, so it now evaluates `msg.location.line` when
 the summary has none. `project_blocked_diagnostic` evaluates its summary
 (`diag-lazy-failures`).
+
+## Measurements
+
+The profiling workloads build no failure diagnostics, so the plan changes
+no work there; their outer heap regions are unchanged. Instructions rose
+0.24% against `gc-hold-boundary-release` (`sum_800` 0.7%). Callgrind on
+`sum_800` traced 0.7 M to `ManagedLazyAccess::source_snapshot`, which the
+summary's new call site moved out of line in the lazy poll's hot path, and
+1.1 M to `EvaluatorStepContext::finish`'s own code, about 14 instructions
+per call with unchanged callees: a codegen shift, not more work. Forcing
+`source_snapshot` inline recovers part: 0.19% over all workloads, at most
+0.6%.
