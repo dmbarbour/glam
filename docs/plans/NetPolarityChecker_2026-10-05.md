@@ -330,6 +330,10 @@ before or alongside compact net nodes; it has not started.)
 
 ## Open questions (2026-10-15)
 
+The maintainer confirmed the order the same day: `panic-net-inspection`
+first, then fuzzing to robustify and find undiscovered issues, but not
+while lower-hanging fruit remains. Where the fuzzing step lives stays open.
+
 - **Hand `polarity-net-fuzzing` to the panic-safety plan?** Its
   interaction-net workstream owns inspection, and fuzzing follows only if
   inspection stalls. With the step moved, this plan has no remaining work.

@@ -13,7 +13,9 @@ marker; this summary was checked against `01ec2fbc`.
   (2026-10-06).
 - **P2 became `perf-structural-overheads`.** The performance roadmap owns it,
   after `perf-evaluation-recursion`. V1 and most of S1, E2, E8 and N3 are
-  done. R1, R2 and R6 are `perf-reflection-step-cost`.
+  done. R1, R2 and R6 are `perf-reflection-step-cost`, in the reflection
+  performance plan since the structural overheads plan closed on
+  2026-10-15.
 - **Owned elsewhere:**
   - V2, V3 and V5 are VRR's V-1 prework.
   - N2, E3, S4 and F5 are Concurrent GC's CG0 prerequisites.

@@ -35,34 +35,35 @@ its plan's topic, and unique across all docs. Examples:
 ## Active Plans
 
 Swept for status and drift on 2026-10-15; each plan names its open
-questions under "Open questions (2026-10-15)".
+questions under "Open questions (2026-10-15)". A "Likely deprecated" mark
+flags a step for discussion when work reaches it, not a decision.
 
 - [`PerformanceRoadmap_2026-10-05.md`](PerformanceRoadmap_2026-10-05.md):
   the umbrella for performance work, covering shared measurement, how
   budgets treat batching, and the order of its `perf-` steps. Latest
   measurements: Snapshot 2026-10-15.
-- [`StructuralOverheads_2026-10-08.md`](StructuralOverheads_2026-10-08.md):
-  `perf-structural-overheads`. Costs that are not representation: access
-  regions, rooting, wake-ups, and algorithmic defects such as quadratic
-  walks. `perf-definition-assertions` is done; next are the leftovers of
-  `perf-reflection-step-cost`, remeasured 2026-10-15, whose remaining cost
-  is mostly representation. `perf-root-check-kinds` is likely deprecated.
 - [`ParserBacktrackingPerformance_2026-10-04.md`](ParserBacktrackingPerformance_2026-10-04.md):
-  `perf-parser`. The prefix-shared term parser parses every ordinary
-  expression in production. No `parser-` step has landed since 2026-10-07:
-  a keyword form in parentheses inside another is still exponential
-  (`parse_ifs`), so `parser-keyword-frames` is next, then `parser-patterns`
-  and `parser-grammar-retirement`.
+  `perf-parser`, likely next (maintainer, 2026-10-15). The prefix-shared
+  term parser parses every ordinary expression in production. No `parser-`
+  step has landed since 2026-10-07: a keyword form in parentheses inside
+  another is still exponential (`parse_ifs`), so `parser-keyword-frames`
+  is next, then `parser-patterns`, `parser-grammar-retirement` and
+  `parser-scope-analysis` (name analysis over nested `where`).
+- [`ReflectionPerformance_2026-10-15.md`](ReflectionPerformance_2026-10-15.md):
+  `perf-reflection-effects`, split from the structural overheads plan on
+  2026-10-15. Reflection effect steps (`perf-reflection-step-cost`, 376 K
+  instructions a `.r ()` step) and the compiler's scanner
+  (`perf-reflection-scanner`).
 - [`UserInputPanicSafety_2026-10-04.md`](UserInputPanicSafety_2026-10-04.md)
   keeps code that observes user input from panicking, and keeps a caught panic
   from poisoning the runtime. Interaction-net inspection
-  (`panic-net-inspection`) remains; the deep-nesting stack overflow has no
-  owner.
+  (`panic-net-inspection`) remains; the deep-nesting stack overflow went
+  to the roadmap's `perf-pre-eval-stack-depth` (maintainer, 2026-10-15).
 - [`NetPolarityChecker_2026-10-05.md`](NetPolarityChecker_2026-10-05.md)
   requires every interaction net to be polarized, with a `+` exposed port.
-  Done except `polarity-net-fuzzing`, which runs only if inspection stalls
-  (`panic-discovery-by-inspection`); the plan retires once that step has
-  another owner.
+  Done except `polarity-net-fuzzing`, which follows `panic-net-inspection`
+  once lower-hanging fruit is gone (`panic-discovery-by-inspection`); the
+  plan retires once that step has another owner.
 - [`FastChecks_2026-10-09.md`](FastChecks_2026-10-09.md) keeps
   `scripts/check.sh fast` quick: per-thread test runtimes and an optimized
   dev profile. `test-slow-tier` waits until a test needs it; the plan could
@@ -81,6 +82,11 @@ questions under "Open questions (2026-10-15)".
 
 Each is done; what keeps it under the retention rule is listed.
 
+- [`StructuralOverheads_2026-10-08.md`](StructuralOverheads_2026-10-08.md),
+  `perf-structural-overheads`, closed 2026-10-15 (maintainer): costs that
+  are not representation. Its open steps moved to the reflection plan, the
+  roadmap's standalone steps and the parser plan. It holds the evidence of
+  its done steps, which `Decisions.md` and the roadmap cite.
 - [`ExplicitHeapHolds_2026-10-09.md`](ExplicitHeapHolds_2026-10-09.md),
   done 2026-10-15: `Heap::mutate` is the only entry, outermost only, and
   code takes access or a mutator from its caller. Still cited by the
@@ -108,8 +114,10 @@ Each is done; what keeps it under the retention rule is listed.
   after holistic S7 and A1.
 - [`ConcurrentGarbageCollection_2026-08-28.md`](ConcurrentGarbageCollection_2026-08-28.md):
   concurrent marking, delayed logical sweep, and epoch-safe run recycling.
-  No trigger; its nesting rationale was superseded by one heap per thread
-  and `no-recursive-heap-entries`.
+  Much lower priority (maintainer, 2026-10-15), but possibly needed after
+  the `--interactive` switch (a reflection-based, user-defined IDE). Its
+  nesting rationale was superseded by one heap per thread and
+  `no-recursive-heap-entries`.
 - [`GarbageCollectorScopedPointerSafety_2026-09-09.md`](GarbageCollectorScopedPointerSafety_2026-09-09.md):
   likely deprecated. Its branded views landed as `GcRef`
   (`owned-mutator-views`, 2026-10-12).

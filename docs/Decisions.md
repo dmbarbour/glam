@@ -95,7 +95,10 @@ maps the short names used here to file names.
   - Every finding becomes a deterministic regression. No fuzz run joins
     `scripts/check.sh`.
 - **Consequences:** supersedes the P0-2 fuzz target. Net fuzzing (polarity
-  plan's `polarity-net-fuzzing`) follows this policy.
+  plan's `polarity-net-fuzzing`) follows this policy: inspection
+  (`panic-net-inspection`) comes first, and fuzzing later robustifies and
+  finds undiscovered issues, but not while lower-hanging fruit remains
+  (maintainer, 2026-10-15).
 - **Recorded in:** panic-safety plan, "Method" and decision 1; commit
   `64092e4b`.
 
@@ -1387,7 +1390,10 @@ maps the short names used here to file names.
 - **Consequences:**
   - Tests use small-stack controls.
   - Parsing `.g` files is not yet covered: the parser still recurses on the
-    Rust stack. The deep-nesting remedy belongs to the panic-safety plan.
+    Rust stack. The deep-nesting remedy, from the syntax tree's drop
+    through the later front-end walks, belongs to the roadmap's
+    `perf-pre-eval-stack-depth` (maintainer, 2026-10-15; first assigned to
+    the panic-safety plan).
   - Core-value drop depth is still open (holistic review V3).
 - **Rule lives in:** `agent_context/evaluation.md` "Values and Forcing".
 - **Recorded in:** resumable-WHNF plan W7A.1; W7 review; documentation
@@ -1589,6 +1595,12 @@ maps the short names used here to file names.
   handoffs with budget left now continue in the route instead of yielding to
   the scheduler (part of holistic review E1). A non-tail chain still spills
   about every 32 lazies; tail forwarding is the next step.
+  A lazy forced inline that panics records the panic, and so does the
+  route's own lazy as the route unwinds, although its own code did not
+  panic: its machine unwound mid-step, so its progress is torn. Stickiness
+  thus spreads one level, to the forcing lazy, beyond the panic-safety
+  plan's "never spreads past where the panic happened" (accepted,
+  maintainer, 2026-10-15).
 - **Rule lives in:** `architecture/evaluation.md`, the paragraph on claimed
   routes forcing lazies inline.
 - **Recorded in:** evaluation-recursion plan, `eval-recursion-inline-forcing`.

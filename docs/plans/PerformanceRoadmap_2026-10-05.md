@@ -3,8 +3,11 @@
 Status: agreed with the maintainer on 2026-10-05, including the harness
 questions. `perf-profiling-harness` and `perf-foreground-collection` are
 done, `perf-parser` is in production, and `perf-evaluation-recursion` is
-done (2026-10-08). `perf-structural-overheads` is active, with its own
-[plan](StructuralOverheads_2026-10-08.md). The latest measurements are in
+done (2026-10-08). `perf-structural-overheads` closed on 2026-10-15
+(maintainer); its reflection steps continue as `perf-reflection-effects`
+([plan](ReflectionPerformance_2026-10-15.md)), and the rest became
+[standalone steps](#standalone-steps). The maintainer expects to return to
+`perf-parser` next. The latest measurements are in
 [Snapshot 2026-10-15](#snapshot-2026-10-15). This is the umbrella for
 performance work. Each step gets its own plan when it starts; the existing
 plans it names stay the detailed records. Steps are referred to by name,
@@ -149,7 +152,9 @@ gains this consequence when it lands.
        removes the structural layer's whole-file scans. It also removes
        an exponential found on 2026-10-08: a keyword form inside
        parentheses, nested in another, doubles parse time per level;
-     - `parser-grammar-retirement`.
+     - `parser-grammar-retirement`;
+     - `parser-scope-analysis` (added 2026-10-15): name analysis is
+       superlinear in `where` nesting (`chain_where`, Snapshot 2026-10-15).
    - This closes the parser exception in
      `no-semantic-recursion-on-rust-stack`.
    - **Stack depth before evaluation** (`perf-pre-eval-stack-depth`). A
@@ -159,7 +164,9 @@ gains this consequence when it lands.
      an audit for recursion on user-controlled depth. That covers the
      syntax tree and its drop, name analysis, resolution, and lowering.
      Known instance: lowering's `collect_free_bindings` recurses to a
-     dictionary literal's depth (see `perf-lowering-free-bindings`).
+     dictionary literal's depth (see `perf-lowering-free-bindings`). It
+     owns the deep-nesting remedy that `no-semantic-recursion-on-rust-stack`
+     first gave the panic-safety plan (maintainer, 2026-10-15).
 4. **Evaluation recursion cost** (`perf-evaluation-recursion`). Diagnose
    [Evaluation Recursion Performance](EvaluationRecursionPerformance_2026-10-04.md)
    before any representation work: a simple countdown costs tens of
@@ -178,6 +185,7 @@ gains this consequence when it lands.
    rooting path, the reflection branch clone, and obvious algorithmic
    defects), which would otherwise mask representation measurements. The
    review after the recursion work (2026-10-08) added the open steps.
+   *Closed 2026-10-15* (maintainer).
    - *Done:* `perf-admission-wakeups`, `perf-idle-wakeups`,
      `perf-fast-id-hashing`, `perf-net-builder-wired-ports`,
      `perf-scaling-workloads`, `perf-list-front-walk`,
@@ -193,18 +201,26 @@ gains this consequence when it lands.
      `perf-runtime-net-attach`, `perf-application-values` and
      `perf-definition-assertions` (2026-10-12). The scheduler round trips
      were `perf-evaluation-recursion`.
-   - *Open, in order:* the leftovers of `perf-reflection-step-cost`
-     (remeasured 2026-10-15: a `.r ()` step is 376 K instructions, mostly
-     net reduction, allocation and lazy routes), `perf-reflection-scanner`,
-     `perf-debug-annotations` and `perf-worker-route-walks`.
-     `perf-root-check-kinds` is likely deprecated by `root-evidence`.
-   - *Experiments:* `perf-coalesced-wakeups` (open),
-     `perf-mimalloc-allocator` and `perf-poll-root-frames` (not adopted).
+   - *Moved on closing:* `perf-reflection-step-cost` and
+     `perf-reflection-scanner` to `perf-reflection-effects` (below);
+     `perf-debug-annotations`, `perf-worker-route-walks`,
+     `perf-root-check-kinds` and the open experiment
+     `perf-coalesced-wakeups` to [standalone steps](#standalone-steps);
+     `chain_where`'s name analysis to `parser-scope-analysis`.
+   - *Experiments:* `perf-mimalloc-allocator` and `perf-poll-root-frames`
+     (not adopted).
    - *Planned separately:* [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md)
      separates holding a heap from accessing it. Pulled ahead of the
      leftovers of `perf-reflection-step-cost`; done 2026-10-15.
 
-6. **Representations**, two parallel steps:
+6. **Reflection effects** (`perf-reflection-effects`).
+   [Reflection Performance](ReflectionPerformance_2026-10-15.md), split from
+   the structural overheads plan on 2026-10-15: `perf-reflection-step-cost`
+   (a `.r ()` step is 376 K instructions, mostly net reduction, allocation
+   and lazy routes) and `perf-reflection-scanner` (on the order of 9 M of
+   `minimal`'s 24 M). Much of a step's cost is now representation, so its
+   order against the next step is open.
+7. **Representations**, two parallel steps:
    - **Values** (`perf-value-representation`):
      [Value Representation Refinement](ValueRepresentationRefinement_2026-08-19.md),
      with special focus on lists and dicts and on list processing:
@@ -232,7 +248,7 @@ gains this consequence when it lands.
        histories. The compact node needs those levels, so GAL comes first
        or alongside. It also takes on the deferred positive-erasure
        translation.
-7. **Normal forms and batching**, as separate steps:
+8. **Normal forms and batching**, as separate steps:
    - **Normal forms at construction** (`perf-normal-forms`). These make hashing and memoization
      possible later, and simplify bulk materialization and multi-step
      evaluation without explicit materialization. Pure nets can diverge,
@@ -246,6 +262,43 @@ gains this consequence when it lands.
      [Pure Effect Access Fusion](PureEffectAccessFusion_2026-09-23.md).
 
 **Deferred:** JIT compilation. There is much to gain without it.
+
+### Standalone steps
+
+Small steps without a plan of their own, moved here when the structural
+overheads plan closed (2026-10-15). Its sections hold their earlier
+evidence.
+
+- **Root checks by kind** (`perf-root-check-kinds`), after the
+  representation steps (maintainer, 2026-10-15). A root made from a view
+  registers without validation (`root-evidence`), about 82 instructions in
+  a pooled slot (`pooled-roots`); a bare `Gc` is validated. Inner roots,
+  made by the runtime from values it holds and never crossing runtimes,
+  might skip more, even registration. Root registration was 3% of a
+  `.r ()` step on 2026-10-15, but its share should rise as the
+  representation steps shrink the rest; measure then.
+- **Debug annotations** (`perf-debug-annotations`). Each module definition
+  carries `anno {context: {g: {origin, line, definition}}} value` for
+  diagnostics; building without it saved 8 to 10% of the `chain` family
+  (2026-10-10). Debugging annotations should be far cheaper (maintainer,
+  2026-10-10, open to investigation). Starting points: what evaluating one
+  costs, and whether a context known at compile time, as an origin and
+  line are, can travel with its definition without an evaluation step.
+- **Route walks with workers** (`perf-worker-route-walks`). With four
+  workers, `chain_800` runs within 1% of the foreground's instructions but
+  about 1.6 times its CPU (Snapshot 2026-10-15; 2.3 times on 2026-10-09).
+  A worker finds work by walking each reflection root's exact producer
+  chain from the top on every claim (`exact_producer_probe_locked`), which
+  the counters do not see; it could keep a route as the foreground does.
+  A worker's change in the middle of the foreground's route makes
+  validation fall back to a complete search, where the route could shrink
+  to its proven frames. Workers are opt-in, so this comes last.
+- **Coalesced wake-ups** (`perf-coalesced-wakeups`), an open experiment
+  (maintainer's suggestion). Coordinator mutations set a notify flag
+  flushed once per quantum, trading up to a quantum of latency for fewer
+  wakes of parked threads; a notifying thread flushes before it parks or
+  blocks. It matters only with threads parked, so it starts from a profile
+  with workers.
 
 ## Baseline 2026-10-06
 

@@ -1,6 +1,10 @@
 # Concurrent Garbage Collection Plan — 2026-08-28
 
-Status: preliminary and deferred, with no trigger as of 2026-10-15. Its
+Status: preliminary and deferred, at much lower priority (maintainer,
+2026-10-15). It may still be needed once the `--interactive` switch
+exists: an assembler that keeps running `conf.ide`, a reflection-based,
+user-defined IDE (`Design.md`, interactive mode), is long-lived and
+latency-sensitive in a way batch assembly is not. Its
 original gate, roadmap Gate G4, passed on 2026-10-02. The expected order
 completes Value Representation Refinement first (see Relationship to
 Existing Plans), and the holistic pre-performance review adds CG0
@@ -788,7 +792,10 @@ For the maintainer:
    back new entrants possible. If shorter pauses are the remaining motive,
    what measured pause or collection share should trigger CG0? The
    maintainer named generational collection as the eventual mitigation for
-   long-lived structure (2026-10-09); should it come first?
+   long-lived structure (2026-10-09); should it come first? *Answered in
+   part (maintainer, 2026-10-15):* much lower priority now, but possibly
+   needed after the `--interactive` switch. The trigger and the order
+   against generational collection stay open.
 2. **Handshakes at suspend.** Is acknowledgement only at `Mutator::suspend`
    or mutator end, where no view is live, the answer to Open Design Gate 1?
    A driver suspends only at waits, client code and collection joins, so a

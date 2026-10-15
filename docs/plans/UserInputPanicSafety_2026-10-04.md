@@ -16,9 +16,11 @@ interaction-net inspection.
   (`polarity-net-generator`) also landed on 2026-10-05.
 - **Remaining.** The interaction-net inspection, named
   `panic-net-inspection` on 2026-10-15, has not started. The deep-nesting
-  stack overflow is deferred, with no step (see "Parser findings").
-- **Next.** `panic-net-inspection`, unless the polarity plan's
-  `polarity-net-fuzzing` absorbs it (see "Open questions").
+  stack overflow belongs to the roadmap's `perf-pre-eval-stack-depth`
+  (maintainer, 2026-10-15).
+- **Next.** `panic-net-inspection`. The polarity plan's
+  `polarity-net-fuzzing` follows it, once lower-hanging fruit is gone
+  (maintainer, 2026-10-15; `panic-discovery-by-inspection`).
 
 This plan responds to the holistic pre-performance review, X4 and Maintainer
 Decision 1 ([review](../reviews/HolisticArchitecturePrePerformance_2026-10-03.md)).
@@ -677,6 +679,11 @@ site that this ordering would delay can be fixed immediately when found.
 - Remaining panics are class I, with invariant-stating messages.
 
 ## Open questions (2026-10-15)
+
+Answered the same day by the maintainer: the comment was corrected; inline
+forcing's spread is accepted (`inline-lazy-forcing`); inspection comes
+before fuzzing; and deep nesting belongs to `perf-pre-eval-stack-depth`.
+The helper duplication remains open.
 
 - **`ErrorKind::Panic`'s documentation.** In `src/api/error.rs` it says "a
   later demand of the same value may run it again". It was written for

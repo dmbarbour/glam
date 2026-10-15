@@ -1,7 +1,7 @@
 # Structural Overheads — 2026-10-08
 
-Status: active, as the `perf-structural-overheads` step of the
-[performance roadmap](PerformanceRoadmap_2026-10-05.md). Done:
+Status: closed 2026-10-15 (maintainer), as the `perf-structural-overheads`
+step of the [performance roadmap](PerformanceRoadmap_2026-10-05.md). Done:
 `perf-admission-wakeups`, `perf-idle-wakeups`, `perf-fast-id-hashing`,
 `perf-net-builder-wired-ports`, `perf-scaling-workloads`,
 `perf-list-front-walk`, `perf-list-leaf-walk`, `perf-access-region-cost`,
@@ -14,29 +14,31 @@ Status: active, as the `perf-structural-overheads` step of the
 `perf-interface-route-ownership`, `perf-reduced-source-copy`,
 `perf-driver-path-inlining`, `perf-module-definition-cost`,
 `perf-runtime-net-attach`, `perf-application-values` and
-`perf-definition-assertions` (2026-10-12).
-`gc-two-level-mutator-access` and `gc-thread-local-heap-context` moved to
-[Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md), which the
-maintainer pulled ahead of the leftovers of `perf-reflection-step-cost` and
-which was done on 2026-10-15. Next: `perf-reflection-step-cost`, remeasured
-on 2026-10-15 (below), then `perf-root-check-kinds`, which waited on
-explicit heap holds.
+`perf-definition-assertions` (2026-10-12). `gc-two-level-mutator-access`
+and `gc-thread-local-heap-context` moved to
+[Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md), done 2026-10-15.
+What remained moved on closing:
+- `perf-reflection-scanner` and `perf-reflection-step-cost` to the
+  [reflection performance plan](ReflectionPerformance_2026-10-15.md): a
+  `.r ()` step's remaining cost is mostly representation;
+- `perf-debug-annotations`, `perf-worker-route-walks`,
+  `perf-root-check-kinds` and the open experiment `perf-coalesced-wakeups`
+  to the roadmap as standalone steps;
+- `chain_where`'s superlinear name analysis to the parser plan
+  (`parser-scope-analysis`).
+
+This plan stays as the record of its done steps and their evidence.
 
 ## Open questions (2026-10-15)
 
-- **Scope.** What remains open here is mostly reflection-specific
-  (`perf-reflection-scanner`, the leftovers of `perf-reflection-step-cost`)
-  plus `perf-debug-annotations` and `perf-worker-route-walks`. A `.r ()`
-  step's remaining cost is now mostly representation. Close this plan and
-  move the reflection steps to a plan of their own, so the roadmap can
-  start `perf-value-representation` and `perf-net-representation`, or
-  finish them here first?
-- **`perf-root-check-kinds`.** Retire it, given `root-evidence`?
-- **Name analysis over nested `where`.** `chain_where` grows as n^1.76
-  with no collections: at 1,600, about 160 M instructions above linear
-  are in `mark_used_locals` and `NestedLocals::bind`, besides the
-  structural parser's token scans (`parser-keyword-frames`). A step here,
-  or in the parser plan?
+Answered the same day by the maintainer:
+- **Scope.** Close this plan and move the reflection steps to a plan of
+  their own.
+- **`perf-root-check-kinds`.** Not deprecated: root registration's share
+  should rise once the representation steps shrink everything else.
+  Revisit after them, from the roadmap.
+- **Name analysis over nested `where`.** Part of the parser steps
+  (`parser-scope-analysis`).
 
 ## Purpose
 
@@ -95,13 +97,12 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 | Forward following (`follow_forwards`, inclusive) | 3% |
 | Coordinator claims, releases and admissions | under 2% |
 
-## Open Steps, in Order
+## Steps Open Until Closing
 
 ### Introduce and override checks (`perf-definition-assertions`)
 
 Done 2026-10-12: every step below landed except `defs-with-union`, which
-the maintainer deferred. The scanner's once-only check waits on
-`perf-reflection-scanner`.
+the maintainer deferred.
 
 Each introduced module definition carries an assertion that the
 definitions before it do not define its name (an override, that they do).
@@ -336,171 +337,22 @@ Steps:
 
 ### Reflection scanner (`perf-reflection-scanner`)
 
-A module's first reflection boundary launches the `refl.*` scanner, which
-waits for the final `refl.*` and launches its tasks. It cannot be skipped
-when a module defines no `refl` tasks, since imports act as mixins
-(maintainer, 2026-10-10). It costs about 22 M instructions per module:
-44% of `minimal`, and 11.5% of `list_computed_2000` (building without any
-boundary, before `reflection-boundary-shared`). By callgrind on
-`minimal`, the boundary's effect program runs through net evaluation
-(net checkpoints 20 M instructions with it, 9 M without), creating and
-activating the reflection task costs about 2 M, and tearing down the
-reflection store and launchers about 2.4 M. The maintainer expects the
-speed and quality of the scanner, and of other compiler-generated
-reflection tasks and annotations, to improve. Related:
-`perf-reflection-step-cost`.
-
-Those figures are from 2026-10-10. On 2026-10-15 (`01ec2fbc`), `minimal`
-costs 24.3 M instructions in all, with 626 reflection machine steps,
-about 25 `.r ()` steps' worth: on the order of 9 M for the scanner and
-the `defs-refl-state` check together, an estimate from the per-step cost,
-not a measurement of the scanner alone.
+Moved on 2026-10-15 to the
+[reflection performance plan](ReflectionPerformance_2026-10-15.md).
 
 ### Reflection step cost (`perf-reflection-step-cost`)
 
-Holistic R1, R2 and R6, still open: the reflection store's change log grows
-without bound and each validation scans it; the reflection machine
-deep-clones its active branch every step, so a `do` chain costs O(n²); and
-captured continuations are never released. No profile has measured them
-yet. The `do_chain` workload does not: its pure effects reduce in nets, and
-its reflection-step count stays constant. A workload that runs a long chain
-of reflection effects would.
+Moved on 2026-10-15 to the
+[reflection performance plan](ReflectionPerformance_2026-10-15.md), with
+its 2026-10-12 investigation and 2026-10-15 remeasurement.
 
-Measured 2026-10-12 (maintainer: "a million CPU steps per reflection step
-is rather absurd"). Workloads: a `refl.*` task running a straight chain of
-200 effects (`.r () =>> ... =>> .r ()`, the same with `.heap.set ['k] 1`
-or `.heap.get ['k]`), and loops of 400 iterations through a recursive
-`loop n`. Instructions per step, compile cost excluded:
-- `.r ()` about 540 K, `.heap.get` about 530 K, `.heap.set` about 780 K;
-  the loops add about 360 K per iteration of evaluating
-  `if n == 0 then ... else loop (n - 1)`, as pure `countdown` does.
-- Per `.r ()` step (callgrind): lazy route tasks run by the pump about
-  294 K, the reflection machine about 185 K, of which cloning the whole
-  machine work, its branch and continuation stack each step (R2) about
-  32 K. Within the lazy routes: claim nets about 57 K, `ClaimedTask`
-  release 48 K, checkpoint production and installation about 61 K,
-  following forwards 22 K.
-- Per step (counters): 5.3 fresh work admissions, 10.9 work releases,
-  26.8 coordinator `notify_all`s, 85 heap slots, 55 net work items. One
-  `a =>> b` (`seq a (\x -> assert_unit x b)`) step forces about five
-  lazies: the chain node's effect value, the decoded request, the `.r ()`
-  value, the continuation applied to its result and the next effect;
-  each admits its own route at about 100 K instructions, of which
-  evaluating it is a small part.
-- The recursive loop also collects: about 105 K per iteration in full
-  collections and 80 K in finalization.
-- First changes (2026-10-12): a step moves its machine work rather than
-  cloning it unless a failed step's recovery could read it (a
-  transaction, a retry checkpoint or a cut owning a transaction); and a
-  reflection task run by the coordinator pumps a dependency it blocks on
-  within its own poll, as a directly run task does, rather than returning
-  to the scheduler for a round trip. Per step: `.r ()` -5%, `.heap.set`
-  -8%; `minimal` -5.7%, `hello_elf` -1.2%. The lazies' own routes remain
-  most of a step (about 296 K): net WHNF evaluation of each small lazy
-  about 28 K, plus checkpoints and route claims. Dropping the reflection
-  store at exit also costs about 37 K per step, but only because it holds
-  the last reference to the managed heap, whose teardown scales with what
-  the run allocated (about 85 slots per step); it is not R1's change log.
-- Remeasured against a baseline that compiles the same chain without
-  running it (`meta.bench` for `refl.bench`), after those changes: a
-  `.r ()` step costs 519 K, a `.heap.set` 685 K. Of a `.r ()` step: lazy
-  routes the task pumps 315 K (61%: net WHNF of the small lazies 135 K,
-  WHNF checkpoints 73 K, claim nets 55 K), the reflection machine 149 K,
-  validating new roots 41 K, allocation and free about 75 K.
-- By each function's own cost, a `.r ()` step (518 K) divides as: net
-  reduction 138 K (27%), `malloc`/`free` 112 K (22%), heap region entry
-  and thread cache 58 K (11%), root registration and validation 57 K
-  (11%), coordinator, pump and routes 51 K (10%), WHNF and checkpoints
-  44 K (8.5%), the reflection machine's own code 7 K. Per step: 64 root
-  registrations (value nodes most, then lazy cells, lazy checkpoints, net
-  cells, list fronts), about 35 outer and 118 nested heap regions, 80
-  allocated slots. Explicit heap holds would address the regions and the
-  transient roots, about a quarter to a third of a step directly
-  (maintainer, 2026-10-12: consider pushing them before the leftovers).
+### Debug annotations, worker route walks, root checks by kind
 
-Remeasured 2026-10-15, after explicit heap holds, `root-evidence` and the
-allocator class cache, with the same chains (`.r ()` and `.heap.set`, 200
-steps against a baseline that compiles them without running them): a
-`.r ()` step costs 376 K instructions (519 K on 2026-10-12, −28%), a
-`.heap.set` step 510 K (685 K, −26%). Per `.r ()` step: 0.23 outer heap
-regions (about 35 outer and 118 nested before), 64 root registrations and
-80.5 allocations (unchanged), 20.3 coordinator `notify_all`s (26.8) and
-53.5 net work items (55). By each function's own cost (callgrind), a step
-divides as:
-
-| Area | K instr | Share | 2026-10-12 |
-| --- | ---: | ---: | ---: |
-| Net reduction and building | 118 | 31% | 138 K |
-| `malloc`, `free`, `memcpy` | 73 | 19% | 112 K |
-| Coordinator, pump and lazy routes | 68 | 18% | 51 K |
-| Value duplication, drops and the rest | 56 | 15% | |
-| WHNF and checkpoints | 33 | 9% | 44 K |
-| Root registration | 11 | 3% | 57 K |
-| Heap entry, thread cache and allocation | 8 | 2% | 58 K |
-| The reflection machine's own code | 8 | 2% | 7 K |
-
-Explicit heap holds removed the regions as expected. Root registrations
-did not fall, but `root-evidence` made each one cheap: a root made from a
-view registers without validation in release builds, about 170
-instructions. `RuntimeNet::reference`, which resolves every port through a
-hash map, is 26 K of the net share (`perf-net-representation`). What
-remains of a step is mostly representation (nets and allocation volume)
-and the routes that evaluate each small lazy, not structural overhead.
-R1 (the change log) and R6 (captured continuations) remain unmeasured.
-
-Reflection task polls hold no heap region (`perf-quantum-region`), since
-they call into their host between steps. Their pure steps, such as local
-state, could hold one, provided no client callback runs inside it
-(maintainer, 2026-10-09).
-
-### Debug annotations (`perf-debug-annotations`)
-
-Each module definition carries a context annotation for diagnostics,
-`anno {context: {g: {origin, line, definition}}} value`; building without
-it saves 8 to 10% of the `chain` family. Debugging annotations should be
-far cheaper (maintainer, 2026-10-10, open to investigation and
-brainstorming). Starting points: what evaluating one costs, and whether a
-context known at compile time, as an origin and line are, can travel
-with the definition without an evaluation step.
-
-### Route walks with workers (`perf-worker-route-walks`)
-
-After `perf-worker-scaling`, `chain_w4_800` still runs 8% more
-instructions than `chain_800` and 2.3 times its CPU time, growing as
-n^1.27 against n^1.23. On 2026-10-15 (Snapshot 2026-10-15 in the roadmap)
-it runs within 1% of `chain_800`'s instructions, both growing as about
-n^0.85 at 400 to 1,600, but still about 1.6 times its CPU time at 800 and
-1,600 (single runs). Two walks remain quadratic:
-- **Workers walk from the root.** A worker finds work by walking each
-  reflection root's exact producer chain from the top on every claim
-  (`exact_producer_probe_locked`). The profiling counters do not see these
-  walks. A worker could keep a route as the foreground does.
-- **Mid-route mismatches rebuild.** When a worker changes a record in the
-  middle of the foreground's route, validation falls back to a complete
-  search (781 `changed_dependency_fallbacks` and 290
-  `guarded_release_mutation_fallbacks` at `chain_w4_800`). The frames above
-  the mismatch are proven, so the route could shrink to them, as it now
-  does for a retired tip, and reach the same tip a rebuild would.
-
-Walks are about 8% of samples and lock contention 4%. Workers are opt-in
-and help only programs with parallel work, so this comes last.
-
-### Root checks by kind (`perf-root-check-kinds`), a later lever
-
-Registering a root validates it in release builds (about 935 instructions
-of the roughly 1,400 a transient root costs), because `Root` is a safe API
-and a stale `Gc` must not become rootable. Users' API roots need that;
-inner roots that never cross runtimes, made by the runtime from values it
-holds, may not. Robustly distinguishing the two kinds could skip most
-checks (maintainer, 2026-10-12). After explicit heap holds, which remove
-many inner roots outright, measure what remains.
-
-Likely deprecated (2026-10-15): `root-evidence` (explicit heap holds)
-distinguished the kinds by evidence instead. `MutatorAccess::root`
-registers a value proven live by a view without validation in release
-builds, and only `root_checked`, for a bare `Gc`, validates. A `.r ()`
-step's 64 registrations now cost about 11 K instructions together, 3% of
-the step (see `perf-reflection-step-cost`).
+`perf-debug-annotations`, `perf-worker-route-walks` and
+`perf-root-check-kinds` moved on 2026-10-15 to the
+[performance roadmap](PerformanceRoadmap_2026-10-05.md) as standalone
+steps, with their evidence. `perf-root-check-kinds` waits until after the
+representation steps (maintainer, 2026-10-15).
 
 ## Experiments
 
@@ -519,12 +371,8 @@ the step (see `perf-reflection-step-cost`).
   about what its registration saved. Framing every value root a poll
   creates, rather than chosen sites, framed durable roots too, in code
   unaware of frames.
-- **Coalesced wake-ups** (`perf-coalesced-wakeups`), open. The maintainer's
-  suggestion: coordinator mutations set a notify flag that is flushed once
-  per quantum, trading up to a quantum of latency for fewer wakes of parked
-  threads. The notifying thread must flush before it parks or blocks
-  itself. It matters only with threads parked, so it starts with a profile
-  that has workers enabled.
+- **Coalesced wake-ups** (`perf-coalesced-wakeups`), open; moved on
+  2026-10-15 to the performance roadmap.
 - **mimalloc** (`perf-mimalloc-allocator`), not adopted. A temporary build
   with the mimalloc global allocator ran 9–16% fewer user-space
   instructions but used more CPU, apparently in the kernel (memory

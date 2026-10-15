@@ -282,6 +282,14 @@ Steps are referred to by name; see the plans README, "Step names".
 5. **Retirement** (`parser-grammar-retirement`). Delete the old expression and pattern parsers once the
    oracle has held across the corpus. Keep the differential corpus as
    regression tests.
+6. **Nested scope analysis** (`parser-scope-analysis`; added 2026-10-15,
+   the maintainer placing it with the parser steps). Name analysis is
+   superlinear in `where` nesting: `chain_where` grows as n^1.76 with no
+   collections. At 1,600 nested definitions, about 520 M of 1,411 M
+   instructions exceed linear: the structural parser's top-level token
+   scans 245 M (`parser-keyword-frames`), `mark_used_locals` and
+   `NestedLocals::bind` about 160 M, name comparisons 71 M, and binding-view
+   parsing the rest. Make analysis linear in nesting depth.
 
 `parser-cover-ir` and `parser-term-parser` are additive and low-risk:
 production keeps the old parser until the oracle agrees.
@@ -298,6 +306,7 @@ production keeps the old parser until the oracle agrees.
   `adcd994b`).
 - `parser-patterns`: not started.
 - `parser-keyword-frames`: not started; next, for the exponential below.
+- `parser-scope-analysis`: added 2026-10-15; not started.
 - `parser-grammar-retirement`: not started. Chumsky still parses the
   views the term parser reports as unsupported, and runs as the oracle in
   tests.
@@ -533,7 +542,8 @@ in the panic-safety plan, because an overflow crashes the process.
   IR was never built; the term parser's covers are expression-only and
   group-level. Should `parser-patterns` absorb the step, or does the
   design change?
-- **Who owns deep-source stack depth?** `Decisions.md`
+- **Who owns deep-source stack depth?** *Answered (maintainer,
+  2026-10-15): the roadmap's `perf-pre-eval-stack-depth`.* `Decisions.md`
   (`no-semantic-recursion-on-rust-stack`) says the parser still recurses
   and assigns the remedy to the panic-safety plan. The roadmap says
   `perf-parser` closes that exception, and gives syntax-tree drop and later
