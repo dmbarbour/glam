@@ -8038,8 +8038,10 @@ fn runtime_deadlock_readiness_with_error_is_observational() {
     };
     assert_eq!(first.unfinished().len(), 1);
     assert_eq!(
-        first.unfinished()[0].blocked_error(),
-        Some("retryable evaluation error")
+        first.unfinished()[0]
+            .blocked_diagnostic()
+            .map(crate::api::Diagnostic::message),
+        Some("EvalFailure")
     );
     let generation = context
         .coordinator()

@@ -38,6 +38,8 @@ protocol_key!(EXTENDS, "extends");
 
 protocol_key!(VALUE, "value");
 protocol_key!(CONTEXT, "context");
+protocol_key!(DIAGNOSTIC, "diagnostic");
+protocol_key!(FROM, "from");
 protocol_key!(EVAL, "eval");
 protocol_key!(OP, "op");
 protocol_key!(ARGS, "args");

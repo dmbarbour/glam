@@ -4,7 +4,7 @@ use std::sync::Arc;
 use rpds::RedBlackTreeMapSync;
 
 use super::{EvaluationRuntime, RuntimeDeliveryFailureSnapshot};
-use crate::api::{Diagnostic, Error, ReasoningFailure, Value, Values};
+use crate::api::{Diagnostic, ReasoningFailure, Value, Values};
 use crate::core::{CoreValueFactory, Dict, EvaluationFailure, Key, Value as CoreValue};
 use crate::diagnostic::Severity;
 #[cfg(test)]
@@ -28,6 +28,8 @@ pub(super) fn reasoning_diagnostic(
         Severity::Error,
         Value::from_runtime_root(failure.diagnostic(values)),
         None,
+        None,
+        Arc::from(crate::api::diagnostics::FAILURE_SUMMARY),
     )
 }
 
@@ -619,6 +621,12 @@ pub struct RuntimeDeadlockWork {
     dependency: Option<RuntimeDependency>,
     observed_epoch: Option<u64>,
     blocked_diagnostic: Option<Diagnostic>,
+    /// Retains the blocked failure, whose diagnostic is composed from it,
+    /// for as long as the snapshot or report lives.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "an owner that only tests read back")
+    )]
     blocked_failure: Option<RuntimeFailureRoot>,
 }
 
@@ -655,35 +663,11 @@ impl RuntimeDeadlockWork {
         self.observed_epoch
     }
 
-    /// Retryable evaluation failure retained at the blocked checkpoint, when
-    /// the participant had reached one and its text is immediately available.
-    pub fn blocked_error(&self) -> Option<&str> {
-        self.blocked_diagnostic.as_ref().and_then(|diagnostic| {
-            let message = diagnostic.message();
-            (message != "<diagnostic has no immediate text view>").then_some(message)
-        })
-    }
-
     /// Structured retryable evaluation failure retained at this blocked
-    /// checkpoint, when the participant had reached one.
+    /// checkpoint, when the participant had reached one. It is composed, not
+    /// evaluated: its renderer evaluates it.
     pub fn blocked_diagnostic(&self) -> Option<&Diagnostic> {
         self.blocked_diagnostic.as_ref()
-    }
-
-    /// Demands a retained blocked failure far enough to project its complete
-    /// diagnostic view. Unlike [`Self::blocked_diagnostic`], this may perform
-    /// evaluation work and is intended for rendering after settlement.
-    #[doc(hidden)]
-    pub fn project_blocked_diagnostic(&self, values: &Values) -> Result<Option<Diagnostic>, Error> {
-        let Some(failure) = self.blocked_failure.as_ref() else {
-            return Ok(None);
-        };
-        if let Some(diagnostic) = &self.blocked_diagnostic {
-            diagnostic.emission.require_runtime(values.runtime)?;
-        }
-        Ok(Some(
-            reasoning_diagnostic(&values.core, failure).summarized_for_rendering(values),
-        ))
     }
 
     #[cfg(test)]

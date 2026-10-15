@@ -1,6 +1,7 @@
 # Lazy Diagnostics — 2026-10-15
 
-Status: complete; every step landed on 2026-10-15. The maintainer decided on 2026-10-15 that senders
+Status: complete; every step landed on 2026-10-15, the maintainer adding
+`diag-origin-frame` and `diag-static-summaries` that day. The maintainer decided on 2026-10-15 that senders
 never evaluate diagnostics; only renderers do
 (`senders-never-evaluate-diagnostics`, in `Decisions.md`).
 
@@ -28,7 +29,7 @@ the evaluated object, and it usually runs on the logger's thread.
 A diagnostic is an unevaluated composition built with value access only:
 
 ```
-anno context:{eval:{op:'diagnostic_message}}
+anno context:diagnostic:{from:Frames}
   (diagnostic_object Emission with mixins)
 ```
 
@@ -42,8 +43,10 @@ anno context:{eval:{op:'diagnostic_message}}
   compiler-private definitions builtin, `DiagnosticContextDefs`, partially
   applied to its frames as `ObjectOverrideDefs` is to its updates, stands
   for that mixin.
-- A message that fails to evaluate fails its renderer, with the
-  `eval:{op:'diagnostic_message}` frame. There is no fallback text.
+- A message that fails to evaluate fails its renderer, under a
+  `diagnostic:{from:Frames}` frame carrying the composed frames
+  (`diag-origin-frame`; first `eval:{op:'diagnostic_message}`). There is
+  no fallback text.
 
 ## Steps
 
@@ -128,6 +131,41 @@ unevaluated message lacks, so it now evaluates `msg.location.line` when
 the summary has none. `project_blocked_diagnostic` evaluates its summary
 (`diag-lazy-failures`).
 
+### Origin frame (`diag-origin-frame`)
+
+Added by the maintainer on 2026-10-15. The `eval:{op:'diagnostic_message}`
+frame names only what failed. A composed diagnostic instead evaluates
+under `anno context:diagnostic:{from:Frames}`, the frames it prepends, so
+an error raised while rendering it carries where the diagnostic came from
+through the error side channel, a redundant expression of its location
+and context, as the eager normalization's fallback text did.
+
+Landed 2026-10-15: `diagnostic_with_frames_in` annotates with
+`{diagnostic:{from:Frames}}`, and a test shows a failing message's render
+error carrying the original failure's frame.
+
+### Static summaries (`diag-static-summaries`)
+
+Added by the maintainer on 2026-10-15: eliminate the Rust summaries read
+from diagnostic values. A diagnostic built from Rust text, including the
+front end's, keeps that text and line, passed beside its emission rather
+than read back from it. A diagnostic built from a value summarizes
+statically: `EvalFailure` for a failure, `EvalDiagnostic` for another
+emission. `conventional_summary`, its reading through compositions,
+readiness's evaluated summary and `blocked_error` go. Reflection semantics
+may change, since they do not affect the assembly result's reproducibility
+(maintainer); `.eval` returns its value or `err:Error`, and nothing
+required that `Error` evaluated.
+
+Landed 2026-10-15. Compile diagnostics carry their text and line beside
+their emission (`CompileDiagnostic`), and the transport envelope carries
+the message. `ReasoningFailure::message` is static too. With no reader of
+the blocked failure left, a deadlock snapshot keeps it only as an owner,
+which tests read. Production no longer builds isolated evaluation sessions
+at all, so they are test-only. About forty tests that asserted the summary
+of a diagnostic built from a value now evaluate its `msg.text`, as a
+renderer does, through test helpers (`rendered_text_for_test`).
+
 ## Measurements
 
 The profiling workloads build no failure diagnostics, so the plan changes
@@ -138,4 +176,5 @@ summary's new call site moved out of line in the lazy poll's hot path, and
 1.1 M to `EvaluatorStepContext::finish`'s own code, about 14 instructions
 per call with unchanged callees: a codegen shift, not more work. Forcing
 `source_snapshot` inline recovers part: 0.19% over all workloads, at most
-0.6%.
+0.6%. `diag-static-summaries` removed that caller and the forced inline:
+0.17% over all workloads, at most 0.5%, the codegen shift in `finish`.

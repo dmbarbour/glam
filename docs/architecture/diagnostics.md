@@ -23,12 +23,15 @@ emergency summary, not the semantic message.
 Projecting a failure to a diagnostic composes it without evaluating
 (`senders-never-evaluate-diagnostics`): the emission, normalized lazily by
 `DiagnosticObject`, extended by a mixin that prepends the failure's context
-frames to `msg.context` (`DiagnosticContextDefs`), under an
-`eval:{op:'diagnostic_message}` frame. A `RuntimeFailureRoot` shares its one
+frames to `msg.context` (`DiagnosticContextDefs`), under a
+`diagnostic:{from:Frames}` frame that carries those frames, so an error
+raised while rendering it says where it came from. A `RuntimeFailureRoot`
+shares its one
 composition with every publication. Only a renderer evaluates it, usually on
 the logger's thread; a message that fails to evaluate fails its renderer.
-The Rust summaries `Diagnostic::message` and `line` read what is immediately
-built, through such compositions.
+The Rust summaries `Diagnostic::message` and `line` never read a
+diagnostic's value: they keep the Rust text a diagnostic was built from, or
+summarize one built from a value statically.
 
 Evaluator-owned context describes why a value was demanded rather than which
 Rust function happened to fail. Conventional frames use tagged dictionaries

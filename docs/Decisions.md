@@ -717,9 +717,14 @@ maps the short names used here to file names.
   `msg.context ::= \ prior -> frames ++ prior`; a compiler-private builtin
   may serve as a convenience or accelerator but is not required
   semantically. A message that fails to evaluate is an error in the error,
-  reported to whoever renders it with an `eval:{op:'diagnostic_message}`
-  frame, with no fallback text (maintainer). The ordering of
-  `status-diagnostic-before-gate` was vestigial and goes.
+  reported to whoever renders it under a `diagnostic:{from:Frames}` frame
+  that carries the composed frames, where the diagnostic came from, with no
+  fallback text (maintainer). Rust summaries are not read from diagnostic
+  values: a diagnostic built from Rust text keeps it, and one built from a
+  value summarizes statically (maintainer). Reflection semantics may change
+  with it (maintainer): `.eval`'s `err:Error` and `.task.status`'s `err`
+  are compositions. The ordering of `status-diagnostic-before-gate` was
+  vestigial and goes.
 - **Consequences:** settlement, the quantum boundary and the public API stop
   evaluating diagnostics, so nothing evaluates to publish a failure.
   Diagnostics nobody renders cost nothing. A Rust reader that inspects a

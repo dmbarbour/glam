@@ -509,6 +509,7 @@ impl CoreValueFactory {
             .upgrade()
     }
 
+    #[cfg(test)]
     pub(crate) fn work_coordinator_or_attach(
         &self,
         candidate: Arc<EvaluationWorkCoordinator>,

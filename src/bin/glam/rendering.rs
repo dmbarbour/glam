@@ -541,6 +541,17 @@ impl DefaultLogger {
     }
 }
 
+/// A diagnostic's `msg.text`, evaluated as a renderer does: a diagnostic
+/// built from a value summarizes statically.
+#[cfg(test)]
+pub(crate) fn rendered_text_for_test(assembler: &Assembler, diagnostic: &Diagnostic) -> String {
+    let text = assembler
+        .values()
+        .access_names(diagnostic.emission(), ["msg", "text"])
+        .expect("a diagnostic's text path should compose");
+    diagnostic_text(assembler, &text).expect("a test diagnostic's text should evaluate")
+}
+
 fn diagnostic_text(assembler: &Assembler, value: &Value) -> Option<String> {
     let value = assembler.evaluator().eval(value).ok()?;
     value

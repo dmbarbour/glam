@@ -501,11 +501,8 @@ fn a_cycle_among_inline_forced_lazies_is_a_dependency_cycle() {
     let diagnostic = error
         .diagnostic(&assembler.values())
         .expect("the cycle failure should have a diagnostic");
-    assert!(
-        diagnostic.message().contains("lazy dependency cycle"),
-        "{}",
-        diagnostic.message()
-    );
+    let text = diagnostic.rendered_text_for_test(&assembler.values());
+    assert!(text.contains("lazy dependency cycle"), "{text}");
 }
 
 #[test]
@@ -2017,7 +2014,7 @@ fn semantic_binary_conversion_preserves_structured_failures() {
         missing
             .diagnostic(&assembler.values())
             .unwrap()
-            .message()
+            .rendered_text_for_test(&assembler.values())
             .contains("requires a list or binary")
     );
     assert!(missing.structured_diagnostic().is_some());
@@ -2030,7 +2027,7 @@ fn semantic_binary_conversion_preserves_structured_failures() {
         invalid
             .diagnostic(&assembler.values())
             .unwrap()
-            .message()
+            .rendered_text_for_test(&assembler.values())
             .contains("requires a list or binary")
     );
     assert!(invalid.structured_diagnostic().is_some());
@@ -2048,7 +2045,7 @@ fn semantic_binary_conversion_preserves_structured_failures() {
         invalid_item
             .diagnostic(&assembler.values())
             .unwrap()
-            .message()
+            .rendered_text_for_test(&assembler.values())
             .contains("cannot encode number `256`")
     );
     assert!(invalid_item.structured_diagnostic().is_some());
@@ -2123,7 +2120,7 @@ fn origin_inspection_rejects_unrelated_opaque_values() {
         error
             .diagnostic(&assembler.values())
             .unwrap()
-            .message()
+            .rendered_text_for_test(&assembler.values())
             .contains("origin inspection requires an opaque compilation origin")
     );
 }
@@ -2333,7 +2330,7 @@ fn dropped_builder_environment_resolver_fails_its_promise() {
         error
             .diagnostic(&assembler.values())
             .unwrap()
-            .message()
+            .rendered_text_for_test(&assembler.values())
             .contains("was dropped before completion")
     );
 }
@@ -3045,7 +3042,7 @@ fn reflection_annotations_require_their_tasks_to_return_unit() {
         error
             .diagnostic(&assembler.values())
             .unwrap()
-            .message()
+            .rendered_text_for_test(&assembler.values())
             .contains("reflection annotation result: unit expected, received Binary")
     );
 }
@@ -3083,7 +3080,10 @@ fn reflection_annotation_logs_use_the_assembler_diagnostic_bus() {
         .expect("diagnostic collection mutex should not be poisoned");
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].severity(), Severity::Warning);
-    assert_eq!(diagnostics[0].message(), "from annotation");
+    assert_eq!(
+        diagnostics[0].rendered_text_for_test(&assembler.values()),
+        "from annotation"
+    );
 }
 
 #[test]

@@ -12,7 +12,16 @@ pub(crate) type ModuleLoader =
     Arc<dyn Fn(ModuleLoadArgs) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync>;
 pub(crate) type BinaryFileLoader =
     Arc<dyn Fn(BinaryLoadArgs) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> + Send + Sync>;
-pub(crate) type CompileDiagnosticEmitter = Arc<dyn Fn(Severity, RuntimeValueRoot) + Send + Sync>;
+pub(crate) type CompileDiagnosticEmitter = Arc<dyn Fn(Severity, CompileDiagnostic) + Send + Sync>;
+
+/// One diagnostic a compilation emits: its emission, with the Rust text and
+/// line the front end built it from, which its summary keeps
+/// (`senders-never-evaluate-diagnostics`).
+pub(crate) struct CompileDiagnostic {
+    pub(crate) emission: RuntimeValueRoot,
+    pub(crate) line: Option<usize>,
+    pub(crate) text: Arc<str>,
+}
 
 /// Validates a location-independent local source request. This is deliberately
 /// lexical and platform-independent: source code uses `/`, while filesystem
@@ -272,8 +281,8 @@ impl CompileContext {
         ))))
     }
 
-    pub(crate) fn emit_diagnostic(&self, severity: Severity, message: RuntimeValueRoot) {
-        debug_assert_eq!(message.runtime_id(), self.values.runtime_id());
+    pub(crate) fn emit_diagnostic(&self, severity: Severity, message: CompileDiagnostic) {
+        debug_assert_eq!(message.emission.runtime_id(), self.values.runtime_id());
         if let Some(emitter) = &self.diagnostic_emitter {
             emitter(severity, message);
         }

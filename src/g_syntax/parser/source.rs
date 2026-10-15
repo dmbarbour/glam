@@ -382,7 +382,14 @@ impl<'source> StagedSourceParser<'source> {
                         &[],
                         std::slice::from_ref(&original),
                     );
-                    context.emit_diagnostic(diagnostic.severity(), emission);
+                    context.emit_diagnostic(
+                        diagnostic.severity(),
+                        crate::compiler::CompileDiagnostic {
+                            emission,
+                            line: diagnostic.line(),
+                            text: std::sync::Arc::from(diagnostic.message()),
+                        },
+                    );
                 }
             }
         } else {

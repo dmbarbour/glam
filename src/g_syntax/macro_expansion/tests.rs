@@ -78,10 +78,11 @@ fn cause_text(assembler: &Assembler, frame: &Value) -> Option<String> {
     Some(String::from_utf8_lossy(&text).into_owned())
 }
 
-/// A diagnostic's headline followed by the text of each nested cause. A
-/// macro failure's reason is its cause, not part of its headline.
+/// A diagnostic's headline followed by the text of each nested cause, as a
+/// renderer evaluates them. A macro failure's reason is its cause, not part
+/// of its headline.
 fn diagnostic_text(assembler: &Assembler, diagnostic: &Diagnostic) -> String {
-    let mut text = diagnostic.message().to_owned();
+    let mut text = diagnostic.rendered_text_for_test(&assembler.values());
     for frame in context_frames(assembler, diagnostic) {
         if let Some(cause) = cause_text(assembler, &frame) {
             text.push_str("\n  cause: ");
@@ -196,7 +197,10 @@ fn macro_runner_exposes_environment_log_and_scoped_cases() {
     let result = run(&execution, &effect, environment).expect("macro effect should succeed");
     assert_eq!(result.diagnostics().len(), 1);
     assert_eq!(result.diagnostics()[0].severity(), Severity::Info);
-    assert_eq!(result.diagnostics()[0].message(), "visible");
+    assert_eq!(
+        result.diagnostics()[0].rendered_text_for_test(&assembler.values()),
+        "visible"
+    );
     assert_eq!(result.visited_cases().len(), 1);
 }
 
@@ -210,7 +214,10 @@ fn macro_runner_selects_one_unit_branch_and_discards_other_journals() {
     let result = run(&execution, &effect, Value::Dict(Dict::new_sync()))
         .expect("one successful macro branch should be accepted");
     assert_eq!(result.diagnostics().len(), 1);
-    assert_eq!(result.diagnostics()[0].message(), "selected");
+    assert_eq!(
+        result.diagnostics()[0].rendered_text_for_test(&assembler.values()),
+        "selected"
+    );
 }
 
 #[test]
@@ -249,12 +256,10 @@ fn macro_runner_distinguishes_a_non_effect_value() {
     let cause = error
         .cause()
         .expect("the effect's own failure is the macro failure's cause");
+    let text = cause.rendered_text_for_test(&assembler.values());
     assert!(
-        cause
-            .message()
-            .contains("reflection task requires an effect object"),
-        "unexpected diagnostic: {}",
-        cause.message(),
+        text.contains("reflection task requires an effect object"),
+        "unexpected diagnostic: {text}"
     );
 }
 
@@ -1371,7 +1376,7 @@ answer = @meta.notice
         .expect("diagnostic observation mutex should not be poisoned");
     let diagnostic = diagnostics
         .iter()
-        .find(|diagnostic| diagnostic.message() == "macro notice")
+        .find(|diagnostic| diagnostic.rendered_text_for_test(&assembler.values()) == "macro notice")
         .expect("accepted macro log should be published");
     let message = evaluated(&assembler, &diagnostic.emission().clone_core_for_test())
         .expect("a macro log should evaluate as its renderer would");

@@ -5911,7 +5911,10 @@ fn metadata_inspection_returns_hidden_values_without_forcing_them() {
         .expect_err_without_debug("the returned hidden failure should remain demandable");
     assert_eq!(error.to_string(), "glam evaluation failed");
     assert_eq!(
-        error.diagnostic(&assembler.values()).unwrap().message(),
+        error
+            .diagnostic(&assembler.values())
+            .unwrap()
+            .rendered_text_for_test(&assembler.values()),
         "latent metadata failure"
     );
 }
@@ -7531,7 +7534,10 @@ fn task_halt_conversions_preserve_evaluation_and_public_error_structure() {
 
     let evaluation_halt = TaskHalt::failure(failure.clone());
     let evaluation_diagnostic = evaluation_halt.diagnostic(&assembler.values());
-    assert_eq!(evaluation_diagnostic.message(), "converted failure");
+    assert_eq!(
+        evaluation_diagnostic.rendered_text_for_test(&assembler.values()),
+        "converted failure"
+    );
     assembler.core_values().assert_same_representation_for_test(
         &task_halt_contexts(&assembler, &evaluation_halt),
         std::slice::from_ref(&frame),
@@ -7550,7 +7556,10 @@ fn task_halt_conversions_preserve_evaluation_and_public_error_structure() {
         ApiError::from_eval(&assembler.core_values(), EvaluationHalt::failure(failure));
     let public_halt = TaskHalt::from(public_error);
     let public_diagnostic = public_halt.diagnostic(&assembler.values());
-    assert_eq!(public_diagnostic.message(), "converted failure");
+    assert_eq!(
+        public_diagnostic.rendered_text_for_test(&assembler.values()),
+        "converted failure"
+    );
     assembler.core_values().assert_same_representation_for_test(
         &task_halt_contexts(&assembler, &public_halt),
         &[frame],
@@ -7597,7 +7606,10 @@ fn effect_dispatch_preserves_structured_failure_and_adds_stage_context() {
     let halt = run_standard_test(&assembler, &effect)
         .expect_err_without_debug("the effect function should fail");
     let diagnostic = halt.diagnostic(&assembler.values());
-    assert_eq!(diagnostic.message(), "dispatch failed");
+    assert_eq!(
+        diagnostic.rendered_text_for_test(&assembler.values()),
+        "dispatch failed"
+    );
     assert_eq!(
         value_i64(
             &assembler,
@@ -7642,11 +7654,8 @@ fn effect_dispatch_preserves_application_and_request_stage_contexts() {
         let halt = run_standard_test(&assembler, &effect)
             .expect_err_without_debug("the selected effect-dispatch phase should fail");
         let diagnostic = halt.diagnostic(&assembler.values());
-        assert!(
-            diagnostic.message().contains(message),
-            "unexpected {stage} failure: {}",
-            diagnostic.message()
-        );
+        let text = diagnostic.rendered_text_for_test(&assembler.values());
+        assert!(text.contains(message), "unexpected {stage} failure: {text}");
         let expected = assembler
             .core_values()
             .with_boundary_access(|access| effect_dispatch_context(&access, stage));
@@ -9120,7 +9129,7 @@ fn heap_root_replacement_and_path_errors_remain_lazy() {
         error
             .diagnostic(&assembler.values())
             .unwrap()
-            .message()
+            .rendered_text_for_test(&assembler.values())
             .contains("not a dictionary")
     );
 

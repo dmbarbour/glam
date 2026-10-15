@@ -216,6 +216,8 @@ fn macro_reflection_diagnostic(values: &CoreValueFactory, diagnostic: &Diagnosti
         diagnostic.severity,
         diagnostic.emission.clone(),
         Some(origin),
+        diagnostic.line,
+        diagnostic.message.clone(),
     )
 }
 

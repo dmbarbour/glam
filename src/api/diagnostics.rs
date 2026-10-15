@@ -29,12 +29,20 @@ pub struct Diagnostic {
     pub(super) emission: Value,
     pub(super) origin: Option<Value>,
     // Transitional projections for simple embedding clients that do not yet
-    // inspect the object message.
+    // inspect the object message. They come from the Rust text a diagnostic
+    // was built with, never from its value: one built from a value
+    // summarizes statically (`senders-never-evaluate-diagnostics`).
     pub(super) source: Option<Arc<str>>,
     pub(super) severity: Severity,
     pub(super) line: Option<usize>,
     pub(super) message: Arc<str>,
 }
+
+/// The Rust summary of a diagnostic built from an evaluation failure.
+pub(crate) const FAILURE_SUMMARY: &str = "EvalFailure";
+
+/// The Rust summary of a diagnostic built from another Glam value.
+pub(crate) const EMISSION_SUMMARY: &str = "EvalDiagnostic";
 
 impl Diagnostic {
     pub fn new(values: &Values, severity: Severity, message: impl Into<Arc<str>>) -> Self {
@@ -55,7 +63,15 @@ impl Diagnostic {
                 &message,
             ))
         });
-        Self::from_parts(&public_values, None, severity, emission, None)
+        Self::from_parts(
+            &public_values,
+            None,
+            severity,
+            emission,
+            None,
+            None,
+            message,
+        )
     }
 
     /// Wraps an arbitrary diagnostic value with separately supplied severity.
@@ -66,7 +82,15 @@ impl Diagnostic {
         emission: Value,
     ) -> Result<Self, Error> {
         emission.require_runtime(values.runtime)?;
-        Ok(Self::from_parts(values, None, severity, emission, None))
+        Ok(Self::from_parts(
+            values,
+            None,
+            severity,
+            emission,
+            None,
+            None,
+            Arc::from(EMISSION_SUMMARY),
+        ))
     }
 
     pub fn with_source_location(
@@ -92,6 +116,8 @@ impl Diagnostic {
                     &self.message,
                 )),
                 Some(access.wrap(origin)),
+                Some(line),
+                self.message.clone(),
             ))
         })
     }
@@ -276,27 +302,43 @@ impl Diagnostic {
                     .transpose()?;
                 let origin = field("origin")
                     .map(|origin| access.wrap(access.runtime_access().duplicate_value(origin)));
-                let (projected_line, projected_message) =
-                    crate::diagnostic::conventional_summary(access.runtime_access(), &emission);
                 let message = match field("message") {
                     Some(CoreValue::Binary(message)) => {
-                        Some(Arc::from(String::from_utf8_lossy(message).as_ref()))
+                        Arc::from(String::from_utf8_lossy(message).as_ref())
                     }
                     Some(_) => {
                         return Err(Error::new("diagnostic transport message must be text"));
                     }
-                    None => projected_message,
+                    None => Arc::from(EMISSION_SUMMARY),
                 };
                 Ok(Self {
                     emission: access.wrap(emission),
                     origin,
                     source,
                     severity,
-                    line: line.or(projected_line),
-                    message: message
-                        .unwrap_or_else(|| Arc::from("<diagnostic has no immediate text view>")),
+                    line,
+                    message,
                 })
             })?
+        })
+    }
+
+    /// The text a renderer shows: `msg.text`, evaluated, since a
+    /// diagnostic built from a value summarizes statically.
+    #[cfg(test)]
+    pub(crate) fn rendered_text_for_test(&self, values: &Values) -> String {
+        let text = values
+            .access_names(&self.emission, ["msg", "text"])
+            .expect("a diagnostic's text path should compose");
+        let text = crate::evaluation::EvalContext::isolated(values.core().clone())
+            .evaluate_root_whnf(text.0)
+            .unwrap_or_else(|_| panic!("a test diagnostic's text should evaluate"));
+        values.with_access(|access| {
+            text.with_core(access.runtime_access(), |text| match text {
+                CoreValue::Binary(text) => String::from_utf8_lossy(text).into_owned(),
+                _ => panic!("a diagnostic's text should evaluate to text"),
+            })
+            .expect("a diagnostic's text should belong to its runtime")
         })
     }
 
@@ -320,7 +362,7 @@ impl Diagnostic {
         values: &CoreValueFactory,
         trace: &CompilationTrace,
         severity: Severity,
-        message: &crate::runtime::RuntimeValueRoot,
+        message: &crate::compiler::CompileDiagnostic,
     ) -> Self {
         let public_values = Values::from_core_factory(values.clone());
         let origin = values.construct_runtime_value_root(|access| trace.origin_value(access));
@@ -328,8 +370,10 @@ impl Diagnostic {
             &public_values,
             Some(Arc::from(trace.source_label())),
             severity,
-            Value::from_runtime_root(message.clone()),
+            Value::from_runtime_root(message.emission.clone()),
             Some(Value::from_runtime_root(origin)),
+            message.line,
+            message.text.clone(),
         )
     }
 
@@ -339,14 +383,17 @@ impl Diagnostic {
         severity: Severity,
         emission: Value,
         origin: Option<Value>,
+        line: Option<usize>,
+        message: Arc<str>,
     ) -> Self {
-        values
-            .with_access(|access| Self::from_parts_in(&access, source, severity, emission, origin))
+        values.with_access(|access| {
+            Self::from_parts_in(&access, source, severity, emission, origin, line, message)
+        })
     }
 
     /// The diagnostic for an evaluation `failure`, composed without
-    /// evaluating it (`senders-never-evaluate-diagnostics`). Its line and
-    /// message summarize the failure's emission as built.
+    /// evaluating it (`senders-never-evaluate-diagnostics`). It summarizes
+    /// statically.
     pub(crate) fn from_failure(
         values: &Values,
         severity: Severity,
@@ -357,53 +404,16 @@ impl Diagnostic {
                 access.runtime_access(),
                 failure,
             ));
-            Self::from_parts_in(&access, None, severity, emission, None)
+            Self::from_parts_in(
+                &access,
+                None,
+                severity,
+                emission,
+                None,
+                None,
+                Arc::from(FAILURE_SUMMARY),
+            )
         })
-    }
-
-    /// Summarizes this diagnostic by evaluating its `msg.text` and
-    /// `msg.location.line`, as a renderer does. Only a projection for
-    /// rendering may call it; senders never evaluate a diagnostic
-    /// (`senders-never-evaluate-diagnostics`). A part that does not evaluate
-    /// to text or a line keeps its summary.
-    pub(crate) fn summarized_for_rendering(mut self, values: &Values) -> Self {
-        let context = crate::evaluation::EvalContext::isolated(values.core().clone());
-        let evaluate = |path: &[&str]| {
-            let value = values
-                .access_names(&self.emission, path.iter().copied())
-                .ok()?;
-            context.evaluate_root_whnf(value.0).ok()
-        };
-        let text = evaluate(&["msg", "text"]);
-        let line = evaluate(&["msg", "location", "line"]);
-        values.with_access(|access| {
-            let runtime = access.runtime_access();
-            let text = text.and_then(|text| {
-                text.with_core(runtime, |text| match text {
-                    CoreValue::Binary(text) => {
-                        Some(Arc::from(String::from_utf8_lossy(text).as_ref()))
-                    }
-                    _ => None,
-                })
-                .flatten()
-            });
-            let line = line.and_then(|line| {
-                line.with_core(runtime, |line| match line {
-                    CoreValue::Number(line) => line
-                        .to_i64_if_integer()
-                        .and_then(|line| usize::try_from(line).ok()),
-                    _ => None,
-                })
-                .flatten()
-            });
-            if let Some(text) = text {
-                self.message = text;
-            }
-            if line.is_some() {
-                self.line = line;
-            }
-        });
-        self
     }
 
     /// As [`Self::from_parts`], within an open access to its values.
@@ -413,6 +423,8 @@ impl Diagnostic {
         severity: Severity,
         emission: Value,
         origin: Option<Value>,
+        line: Option<usize>,
+        message: Arc<str>,
     ) -> Self {
         let runtime = access.runtime_access().values().runtime_id();
         emission
@@ -423,18 +435,13 @@ impl Diagnostic {
                 .require_runtime(runtime)
                 .expect("diagnostic origin must belong to its Values domain");
         }
-        let (line, text) = access
-            .with_core(&emission, |emission| {
-                crate::diagnostic::conventional_summary(access.runtime_access(), emission)
-            })
-            .unwrap_or((None, None));
         Self {
             emission,
             origin,
             source,
             severity,
             line,
-            message: text.unwrap_or_else(|| Arc::from("<diagnostic has no immediate text view>")),
+            message,
         }
     }
 }

@@ -69,6 +69,15 @@ fn required_access(assembler: &Assembler, root: &Value, path: &str) -> Result<Va
     evaluated_value(assembler, &required)
 }
 
+/// A diagnostic's `msg.text`, evaluated as a renderer does: a diagnostic
+/// built from a value summarizes statically.
+fn rendered_text(assembler: &Assembler, diagnostic: &Diagnostic) -> String {
+    let text = required_access(assembler, diagnostic.emission(), "msg.text")
+        .expect("a diagnostic should define its text");
+    let bytes = binary_value(assembler, text).expect("a diagnostic's text should evaluate");
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 fn same_representation(assembler: &Assembler, left: &Value, right: &Value) -> bool {
     assembler
         .reflection()
@@ -290,7 +299,7 @@ fn public_evaluation_errors_preserve_their_structured_diagnostic() {
     let diagnostic = error
         .diagnostic(&values)
         .expect("failure diagnostic should belong to the assembler runtime");
-    assert_eq!(diagnostic.message(), "structured failure");
+    assert_eq!(rendered_text(&assembler, &diagnostic), "structured failure");
     let enriched = diagnostic
         .enrich(&assembler.values())
         .expect("the primary failure diagnostic should remain enrichable");
@@ -396,7 +405,7 @@ fn public_promise_resolver_can_fail_or_be_abandoned() {
         .expect_err("a failed promise should expose its producer error");
     assert_eq!(error.to_string(), "glam evaluation failed");
     assert_eq!(
-        error.diagnostic(&assembler.values()).unwrap().message(),
+        rendered_text(&assembler, &error.diagnostic(&assembler.values()).unwrap()),
         "host operation failed"
     );
 
@@ -406,8 +415,9 @@ fn public_promise_resolver_can_fail_or_be_abandoned() {
         .expect_err("dropping a resolver should permanently fail its promise");
     assert_eq!(error.to_string(), "glam evaluation failed");
     let message = error.diagnostic(&assembler.values()).unwrap();
-    assert!(message.message().contains("abandoned input"));
-    assert!(message.message().contains("dropped before completion"));
+    let text = rendered_text(&assembler, &message);
+    assert!(text.contains("abandoned input"));
+    assert!(text.contains("dropped before completion"));
 }
 
 #[test]
@@ -520,7 +530,10 @@ fn public_promise_completion_resumes_blocked_reasoning_in_its_session() {
 
     let diagnostics = take_diagnostics(&diagnostics);
     assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].message(), "promise resumed");
+    assert_eq!(
+        rendered_text(&assembler, &diagnostics[0]),
+        "promise resumed"
+    );
 }
 
 #[test]
@@ -555,7 +568,9 @@ fn public_reasoning_report_exposes_retryable_blocked_errors() {
     let diagnostic = blocked
         .blocked_diagnostic()
         .expect("blocked task should expose its diagnostic");
-    assert_eq!(blocked.blocked_error(), None);
+    // The diagnostic is composed and summarized statically; its renderer
+    // evaluates its text.
+    assert_eq!(diagnostic.message(), "EvalFailure");
     assert_eq!(
         evaluate(
             &assembler,
@@ -567,21 +582,14 @@ fn public_reasoning_report_exposes_retryable_blocked_errors() {
         .unwrap(),
         Some(7)
     );
-    let projected = blocked
-        .project_blocked_diagnostic(&assembler.values())
-        .expect("blocked diagnostic projection should use the owning runtime")
-        .expect("blocked task should retain its structured failure");
-    assert_eq!(projected.message(), "structured retryable failure");
     assert_eq!(
-        evaluate(
+        binary_value(
             &assembler,
-            &required_access(&assembler, projected.emission(), "detail")
-                .expect("the projected diagnostic should retain ad hoc fields"),
+            required_access(&assembler, diagnostic.emission(), "msg.text")
+                .expect("the retryable diagnostic should keep its text"),
         )
-        .expect("projected diagnostic detail should evaluate")
-        .as_i64()
-        .unwrap(),
-        Some(7)
+        .expect("diagnostic text should evaluate"),
+        b"structured retryable failure".as_slice()
     );
 
     let RuntimeReadiness::Deadlocked(second) = assembler.drain_reasoning() else {
@@ -592,8 +600,7 @@ fn public_reasoning_report_exposes_retryable_blocked_errors() {
         .iter()
         .find_map(|task| task.blocked_diagnostic())
         .expect("repeated reporting should retain the failure");
-    // Every report shares the failure's one diagnostic, so the projection's
-    // evaluation above serves the repeated report's summary too.
+    // Every report shares the failure's one diagnostic.
     assert!(same_representation(
         &assembler,
         repeated.emission(),
@@ -601,7 +608,7 @@ fn public_reasoning_report_exposes_retryable_blocked_errors() {
     ));
     assert_eq!(repeated.severity(), diagnostic.severity());
     assert_eq!(repeated.source(), diagnostic.source());
-    assert_eq!(repeated.message(), "structured retryable failure");
+    assert_eq!(repeated.message(), diagnostic.message());
 }
 
 fn volume_write_annotation(assembler: &Assembler, effects: Value, value: Value) -> Value {
@@ -834,11 +841,13 @@ fn revoked_volume_capability_cannot_recreate_its_volume() {
         binary_value(&assembler, annotated).expect_err("stale blind write must fail at commit");
     assert_eq!(error.to_string(), "glam evaluation failed");
     assert!(
-        error
-            .diagnostic(&values)
-            .expect("revoked-volume failure should belong to the assembler runtime")
-            .message()
-            .contains("revoked before its edits committed")
+        rendered_text(
+            &assembler,
+            &error
+                .diagnostic(&values)
+                .expect("revoked-volume failure should belong to the assembler runtime")
+        )
+        .contains("revoked before its edits committed")
     );
 }
 
@@ -971,7 +980,10 @@ fn diagnostic_value_updates_preserve_structured_evaluation_failures() {
     let diagnostic = error
         .diagnostic(&values)
         .expect("viewer failure should belong to the assembler runtime");
-    assert_eq!(diagnostic.message(), "viewer update failed");
+    assert_eq!(
+        rendered_text(&assembler, &diagnostic),
+        "viewer update failed"
+    );
     assert_eq!(
         evaluate(
             &assembler,
@@ -1257,7 +1269,10 @@ fn public_evaluation_leaves_automatic_reflection_tasks_for_explicit_drain() {
 
     let diagnostics = take_diagnostics(&diagnostics);
     assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].message(), "automatic reflection");
+    assert_eq!(
+        rendered_text(&assembler, &diagnostics[0]),
+        "automatic reflection"
+    );
 }
 
 #[test]
@@ -1332,7 +1347,10 @@ fn replacing_retained_diagnostic_subscriber_preserves_scheduled_reasoning() {
         .lock()
         .expect("callback collection mutex should not be poisoned");
     assert_eq!(received.len(), 1);
-    assert_eq!(received[0].message(), "survived subscriber replacement");
+    assert_eq!(
+        rendered_text(&assembler, &received[0]),
+        "survived subscriber replacement"
+    );
 }
 
 #[test]
@@ -1416,7 +1434,7 @@ fn client_reflection_environment_is_visible_to_reflection_annotations() {
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message() == "HOST VALUE")
+            .any(|diagnostic| rendered_text(&assembler, diagnostic) == "HOST VALUE")
     );
 }
 
@@ -1721,12 +1739,10 @@ fn source_extensions_without_a_front_end_are_rejected_before_loading() {
     let diagnostic = error
         .diagnostic(&assembler.values())
         .expect("import failure should belong to the assembler runtime");
+    let text = rendered_text(&assembler, &diagnostic);
     assert!(
-        diagnostic
-            .message()
-            .contains("local import `data.json`: no front-end compiler for extension `.json`"),
-        "{}",
-        diagnostic.message()
+        text.contains("local import `data.json`: no front-end compiler for extension `.json`"),
+        "{text}"
     );
 }
 
@@ -1916,10 +1932,12 @@ fn checked_net_builder_constructs_an_opaque_identity_net() {
         .expect_err("raw nets require an explicit lambda-style arity bridge");
     assert_eq!(error.to_string(), "glam evaluation failed");
     assert_eq!(
-        error
-            .diagnostic(&values)
-            .expect("application failure should belong to the assembler runtime")
-            .message(),
+        rendered_text(
+            &assembler,
+            &error
+                .diagnostic(&values)
+                .expect("application failure should belong to the assembler runtime")
+        ),
         "application requires a function value, received Net"
     );
 }

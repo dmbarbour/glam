@@ -63,7 +63,16 @@ pub(crate) fn compile_source(source: &[u8], context: &CompileContext) -> Runtime
     } = lower_source(source, context);
     for diagnostic in diagnostics {
         let severity = diagnostic.severity;
-        context.emit_diagnostic(severity, diagnostic.into_emission(context.values()));
+        let line = diagnostic.line;
+        let text = std::sync::Arc::from(diagnostic.message.as_str());
+        context.emit_diagnostic(
+            severity,
+            crate::compiler::CompileDiagnostic {
+                emission: diagnostic.into_emission(context.values()),
+                line: Some(line),
+                text,
+            },
+        );
     }
     definitions_root
 }

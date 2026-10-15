@@ -1161,7 +1161,9 @@ fn quiescence_report_snapshots_failures_independently_of_acknowledgement() {
         context.session_id().get()
     );
     assert_eq!(
-        report.task_failures()[0].message(),
+        report.task_failures()[0]
+            .diagnostic()
+            .rendered_text_for_test(&assembler.values()),
         "public reasoning failure"
     );
     assert!(
@@ -2311,7 +2313,12 @@ fn reasoning_failure_acknowledgement_is_idempotent_and_runtime_bound() {
         panic!("drain should report exactly one task failure")
     };
     assert_eq!(failure.task_id(), task.id().get());
-    assert_eq!(failure.message(), "public reasoning failure");
+    assert_eq!(
+        failure
+            .diagnostic()
+            .rendered_text_for_test(&assembler.values()),
+        "public reasoning failure"
+    );
     let failure = failure.clone();
 
     let error = foreign

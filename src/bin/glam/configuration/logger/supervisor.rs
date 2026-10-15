@@ -278,7 +278,7 @@ pub(crate) fn settled_report_diagnostics(
         );
     }
     for work in selection.killed_work {
-        let blocked_error = work.project_blocked_diagnostic(values)?;
+        let blocked_error = work.blocked_diagnostic().cloned();
         let mut args = vec![
             ("work", report_id(values, work.work_id())?),
             (

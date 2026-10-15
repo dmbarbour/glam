@@ -1150,7 +1150,10 @@ fn configured_cli_returns_only_selected_branch_diagnostics() {
     let expansion = expand_configured(&assembler, &configuration, configured_arguments(&["build"]))
         .expect("logged configured command should expand");
     assert_eq!(expansion.diagnostics().len(), 1);
-    assert_eq!(expansion.diagnostics()[0].message(), "selected");
+    assert_eq!(
+        crate::rendering::rendered_text_for_test(&assembler, &expansion.diagnostics()[0]),
+        "selected"
+    );
     assert_eq!(assembler.diagnostic_bus().counts().total(), 0);
 }
 

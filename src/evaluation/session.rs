@@ -401,6 +401,7 @@ impl EvaluationSession {
         })
     }
 
+    #[cfg(test)]
     fn isolated(values: CoreValueFactory) -> Arc<Self> {
         let coordinator = values.work_coordinator().unwrap_or_else(|| {
             let candidate = EvaluationWorkCoordinator::new(
@@ -789,8 +790,9 @@ impl EvalContext {
     }
 
     /// Creates a zero-worker context in an explicitly selected runtime value
-    /// domain. This is for pure closed bootstrap construction and focused
-    /// tests; production task services use a runtime-registered session.
+    /// domain, for focused tests; production task services use a
+    /// runtime-registered session.
+    #[cfg(test)]
     pub(crate) fn isolated(values: CoreValueFactory) -> OwnedEvalContext {
         OwnedEvalContext::new(EvaluationSession::isolated(values))
     }

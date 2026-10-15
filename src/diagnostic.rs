@@ -352,14 +352,20 @@ pub(crate) fn failure_diagnostic_in(
 
 /// `message` as a diagnostic object with `frames` prepended to its
 /// `msg.context`, composed without evaluating either:
-/// `diagnostic_object message with { msg.context ::= \ prior -> frames ++
-/// prior }`. A failure to evaluate the message carries an
-/// `eval:{op:'diagnostic_message}` frame.
+/// `anno context:diagnostic:{from:frames} (diagnostic_object message with
+/// { msg.context ::= \ prior -> frames ++ prior })`. An error raised while
+/// rendering it carries the frames, where the diagnostic came from.
 pub(crate) fn diagnostic_with_frames_in(
     access: &RuntimeValueAccess<'_>,
     message: Value,
     frames: Vec<Value>,
 ) -> Value {
+    let origin = Value::List(List::from_values(
+        frames
+            .iter()
+            .map(|frame| access.duplicate_value(frame))
+            .collect(),
+    ));
     let object = Value::builtin_call_in(access, Builtin::DiagnosticObject, vec![message]);
     let context_defs = Value::PartialBuiltin(crate::core::BuiltinCall {
         builtin: Builtin::DiagnosticContextDefs,
@@ -367,10 +373,11 @@ pub(crate) fn diagnostic_with_frames_in(
     });
     let diagnostic =
         Value::builtin_call_in(access, Builtin::ObjectWithDefs, vec![object, context_defs]);
-    let annotation = Value::Dict(Dict::new_sync().insert(
-        (*keys::CONTEXT).clone(),
-        evaluation_context_frame_in(access, "diagnostic_message"),
+    let frame = Value::Dict(Dict::new_sync().insert(
+        (*keys::DIAGNOSTIC).clone(),
+        Value::Dict(Dict::new_sync().insert((*keys::FROM).clone(), origin)),
     ));
+    let annotation = Value::Dict(Dict::new_sync().insert((*keys::CONTEXT).clone(), frame));
     Value::builtin_call_in(access, Builtin::Anno, vec![annotation, diagnostic])
 }
 
@@ -413,68 +420,6 @@ pub(crate) fn assembler_metadata(
         message = message.insert((*keys::ORIGIN).clone(), origin);
     }
     Dict::new_sync().insert((*keys::MSG).clone(), Value::Dict(message))
-}
-
-/// The message `value` presents without evaluating anything: itself, a
-/// lazy's cached result, or, for an unevaluated diagnostic composition
-/// (`senders-never-evaluate-diagnostics`), the message it composes. The
-/// mixins senders compose add context, metadata and viewer fields; the
-/// message keeps its text and location.
-fn immediate_message_in(access: &RuntimeValueAccess<'_>, value: &Value) -> Option<Value> {
-    // Compositions nest one level per sender that enriched the diagnostic.
-    const DEPTH_LIMIT: usize = 32;
-    let mut current = access.duplicate_value(value);
-    for _ in 0..DEPTH_LIMIT {
-        let Value::Lazy(lazy) = &current else {
-            return Some(current);
-        };
-        let lazy = lazy.access(access);
-        if let Some(result) = lazy.cached() {
-            current = result.ok()?.into_value_in(access);
-            continue;
-        }
-        let Some(crate::core::LazySource::Builtin(call)) = lazy.source_snapshot() else {
-            return None;
-        };
-        current = match (call.builtin, call.arguments.as_ref()) {
-            (Builtin::Anno, [_, message])
-            | (Builtin::ObjectWithDefs, [message, _])
-            | (Builtin::DiagnosticObject, [message]) => access.duplicate_value(message),
-            _ => return None,
-        };
-    }
-    None
-}
-
-pub(crate) fn conventional_summary(
-    access: &RuntimeValueAccess<'_>,
-    message: &Value,
-) -> (Option<usize>, Option<Arc<str>>) {
-    let Some(message) = immediate_message_in(access, message) else {
-        return (None, None);
-    };
-    let Value::Dict(message) = &message else {
-        return (None, None);
-    };
-    let Some(Value::Dict(interface)) = message.get(&*keys::MSG) else {
-        return (None, None);
-    };
-    let text = interface.get(&*keys::TEXT).and_then(|value| match value {
-        Value::Binary(bytes) => Some(Arc::from(String::from_utf8_lossy(bytes).as_ref())),
-        _ => None,
-    });
-    let line = interface
-        .get(&*keys::LOCATION)
-        .and_then(|value| match value {
-            Value::Dict(location) => location.get(&*keys::LINE),
-            _ => None,
-        })
-        .and_then(|value| match value {
-            Value::Number(number) => number.to_i64_if_integer(),
-            _ => None,
-        })
-        .and_then(|line| usize::try_from(line).ok());
-    (line, text)
 }
 
 #[cfg(test)]

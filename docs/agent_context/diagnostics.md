@@ -29,6 +29,9 @@ client-owned rendering. Current flow lives in
 - Failed intermediate path demand adds
   `eval:{op:'path_lookup, args:{path:Text}}`; a merely absent member does not.
 - Configuration entry failures use `{conf:{entry:Text}}`.
+- Rendering a composed diagnostic evaluates under
+  `{diagnostic:{from:Frames}}`, the frames its sender composed onto it, so
+  an error raised by the diagnostic itself says where it came from.
 - `.task.join` adds `{task:{operation:'join, id:Number}}` only when propagating
   a child failure. Status and error inspection observe the failure as data and
   add no frame.
@@ -75,10 +78,13 @@ client-owned rendering. Current flow lives in
   (`senders-never-evaluate-diagnostics`). Building, enriching or adding
   context composes an unevaluated object: `diagnostic_object` of the
   emission with mixins, such as `DiagnosticContextDefs` for context frames.
-  A message that fails to evaluate fails its renderer with an
-  `eval:{op:'diagnostic_message}` frame. Rust summaries
-  (`Diagnostic::message`, `line`) read only immediate structure, through
-  such compositions; only a projection for rendering may evaluate one.
+  A message that fails to evaluate fails its renderer under a
+  `diagnostic:{from:Frames}` frame carrying the frames it composed, where
+  the diagnostic came from. Rust summaries (`Diagnostic::message`, `line`)
+  never read a diagnostic's value: one built from Rust text keeps it, the
+  front end passing its text and line beside the emission, and one built
+  from a value summarizes statically (`EvalFailure`, `EvalDiagnostic`).
+  Code that needs a diagnostic's text renders it.
 - Severity is an argument to publication, not inferred by evaluating the
   message.
 - Transactional diagnostics publish only after commit. Abandoned alternatives

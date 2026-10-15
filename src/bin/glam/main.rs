@@ -316,6 +316,7 @@ fn inspect_g_source_command(path: &Path, verbosity: command_line::ParseVerbosity
 mod tests {
     use super::*;
     use glam::SourceSystem;
+    use rendering::rendered_text_for_test;
 
     trait TestValueFacade {
         fn get(&self, root: &Value, path: &str) -> Result<Value, Error>;
@@ -790,11 +791,9 @@ mod tests {
             .lock()
             .expect("rendered diagnostic collection should not be poisoned");
         assert_eq!(rendered.len(), 2);
-        assert!(
-            rendered
-                .iter()
-                .any(|diagnostic| diagnostic.message().contains("reflection task failed"))
-        );
+        assert!(rendered.iter().any(|diagnostic| {
+            rendered_text_for_test(&assembler, diagnostic).contains("reflection task failed")
+        }));
         assert!(rendered.iter().any(|diagnostic| {
             diagnostic
                 .message()
@@ -911,9 +910,13 @@ mod tests {
         assert!(
             rendered
                 .iter()
-                .any(|diagnostic| diagnostic.message() == "settled exit failure"),
+                .any(|diagnostic| rendered_text_for_test(&assembler, diagnostic)
+                    == "settled exit failure"),
             "rendered messages: {:?}",
-            rendered.iter().map(Diagnostic::message).collect::<Vec<_>>()
+            rendered
+                .iter()
+                .map(|diagnostic| rendered_text_for_test(&assembler, diagnostic))
+                .collect::<Vec<_>>()
         );
         assert!(rendered.iter().any(|diagnostic| {
             diagnostic
@@ -951,11 +954,13 @@ mod tests {
         let callback_republished = republished.clone();
         let callback_bus = diagnostics.clone();
         let callback_values = input.runtime.values();
+        let callback_assembler = assembler.clone();
         let supervisor = LoggerSupervisor::new(input.clone(), move |diagnostic| {
+            let text = rendered_text_for_test(&callback_assembler, &diagnostic);
             rendered_messages
                 .lock()
                 .expect("rendered diagnostic collection should not be poisoned")
-                .push(diagnostic.message().to_owned());
+                .push(text);
             if !callback_republished.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 callback_bus.publish_local(Diagnostic::new(
                     &callback_values,

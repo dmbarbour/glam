@@ -853,7 +853,11 @@ fn diagnostic_enrichment_is_an_authoritative_object_mixin() {
 
     let values = EvaluationRuntime::new(0).unwrap().values();
     let trace = test_compilation_trace("test.g");
-    let message = values.core().construct_runtime_value_root(|_| message);
+    let message = crate::compiler::CompileDiagnostic {
+        emission: values.core().construct_runtime_value_root(|_| message),
+        line: Some(7),
+        text: Arc::from("careful"),
+    };
     let diagnostic = Diagnostic::from_compile(values.core(), &trace, Severity::Warning, &message);
     assert_eq!(diagnostic.severity(), Severity::Warning);
 
@@ -952,9 +956,13 @@ fn diagnostic_enrichment_composes_without_evaluating() {
 fn viewers_can_inherit_one_diagnostic_independently() {
     let trace = test_compilation_trace("test.g");
     let values = EvaluationRuntime::new(0).unwrap().values();
-    let message = values
-        .core()
-        .construct_runtime_value_root(|_| crate::diagnostic::text_message(Some(3), "hello"));
+    let message = crate::compiler::CompileDiagnostic {
+        emission: values
+            .core()
+            .construct_runtime_value_root(|_| crate::diagnostic::text_message(Some(3), "hello")),
+        line: Some(3),
+        text: Arc::from("hello"),
+    };
     let diagnostic = Diagnostic::from_compile(values.core(), &trace, Severity::Info, &message);
     let viewer_key = Key::atom_from_text("viewer");
     let inherit = |name: &str| {
@@ -1131,10 +1139,11 @@ fn failure_diagnostics_compose_lazily_and_prepend_their_frames() {
     }
 }
 
-/// A message that fails to evaluate fails its renderer, with a frame naming
-/// the diagnostic message, rather than falling back to other text.
+/// A message that fails to evaluate fails its renderer, under a
+/// `diagnostic:{from:Frames}` frame that carries where the diagnostic came
+/// from, rather than falling back to other text.
 #[test]
-fn a_failing_diagnostic_message_fails_its_renderer_with_a_frame() {
+fn a_failing_diagnostic_message_fails_its_renderer_with_its_origin() {
     let runtime = EvaluationRuntime::new(0).expect("test runtime should build");
     let values = runtime.values();
     let core = values.core();
@@ -1147,7 +1156,10 @@ fn a_failing_diagnostic_message_fails_its_renderer_with_a_frame() {
                 CoreValue::Number(1.into()),
             ],
         );
-        let failure = crate::core::EvaluationFailure::emission_in(access, broken);
+        let failure = crate::core::EvaluationFailure::emission_in(access, broken).with_context_in(
+            access,
+            crate::diagnostic::evaluation_context_frame("origin"),
+        );
         crate::diagnostic::failure_diagnostic_in(access, &failure)
     });
     let context = EvalContext::isolated(core.clone());
@@ -1157,12 +1169,20 @@ fn a_failing_diagnostic_message_fails_its_renderer_with_a_frame() {
     let failure = halt
         .permanent_failure()
         .expect("a failing message is a permanent failure");
-    let expected = crate::diagnostic::evaluation_context_frame("diagnostic_message");
+    let expected = CoreValue::Dict(crate::core::Dict::new_sync().insert(
+        crate::core::keys::DIAGNOSTIC.clone(),
+        CoreValue::Dict(crate::core::Dict::new_sync().insert(
+            crate::core::keys::FROM.clone(),
+            CoreValue::List(crate::core::List::from_values(vec![
+                crate::diagnostic::evaluation_context_frame("origin"),
+            ])),
+        )),
+    ));
     assert!(
         core.test_access(|access| failure
             .contexts()
             .iter()
             .any(|frame| access.same_representation(frame, &expected))),
-        "the failure should name the diagnostic message"
+        "the failure should carry the diagnostic's origin frames"
     );
 }

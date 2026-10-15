@@ -696,10 +696,6 @@ impl<'access, 'scope> ManagedLazyAccess<'access, 'scope> {
         self.cell.id
     }
 
-    // The lazy poll's hot path reads it; a second, cold caller (diagnostic
-    // summaries) once moved it out of line there, costing 0.3% of
-    // instructions in the evaluation workloads.
-    #[inline(always)]
     pub(crate) fn source_snapshot(&self) -> Option<LazySource> {
         let _ = self.authority.runtime_id();
         if self.cell.result.get().is_some() {

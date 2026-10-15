@@ -429,6 +429,19 @@ fn latent_source_meta_refl_cycle_reclaims_with_its_module() {
     assert_eq!(reclaimed.marked_slots(), baseline.marked_slots());
 }
 
+/// Each event's text, evaluated as a renderer does: a diagnostic built from
+/// a value summarizes statically.
+fn rendered_texts(
+    context: &crate::evaluation::EvalContext,
+    events: &[crate::api::DiagnosticEvent],
+) -> Vec<String> {
+    let values = crate::api::Values::from_core_factory(context.values().clone());
+    events
+        .iter()
+        .map(|event| event.diagnostic().rendered_text_for_test(&values))
+        .collect()
+}
+
 fn take_reflection_diagnostics(
     diagnostics: &Arc<Mutex<Vec<crate::api::DiagnosticEvent>>>,
 ) -> Vec<crate::api::DiagnosticEvent> {
@@ -6875,7 +6888,7 @@ fn compile_source_emits_relative_diagnostics_through_context() {
     assert_eq!(emitted[0].0, Severity::Error);
     let message = context
         .values()
-        .with_boundary_access(|access| emitted[0].1.clone_core_with(&access));
+        .with_boundary_access(|access| emitted[0].1.emission.clone_core_with(&access));
     let Value::Dict(message) = &message else {
         panic!("diagnostic message must be a dictionary");
     };
@@ -6960,10 +6973,7 @@ meta.probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join s
         &resolved_value_at_path_with_context(&context, &module, &["meta", "probe"]),
         &Value::binary_from_text("probe"),
     );
-    let messages = take_reflection_diagnostics(&diagnostics)
-        .iter()
-        .map(|diagnostic| diagnostic.message().to_owned())
-        .collect::<Vec<_>>();
+    let messages = rendered_texts(&context, &take_reflection_diagnostics(&diagnostics));
     assert_eq!(
         messages,
         [
@@ -7261,10 +7271,7 @@ meta.probe = anno { refl:(.heap.get [[abstract_global_path foo, 'meta, 'refl]:()
         &resolved_value_at_path_with_context(&context, &module, &["meta", "probe"]),
         &Value::binary_from_text("probe"),
     );
-    let messages = take_reflection_diagnostics(&diagnostics)
-        .iter()
-        .map(|diagnostic| diagnostic.message().to_owned())
-        .collect::<Vec<_>>();
+    let messages = rendered_texts(&context, &take_reflection_diagnostics(&diagnostics));
     assert_eq!(
         messages,
         [
@@ -7393,7 +7400,10 @@ probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join scanne
 
     let diagnostics = take_reflection_diagnostics(&diagnostics);
     assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].message(), "final reflection task");
+    assert_eq!(
+        rendered_texts(&context, &diagnostics)[0],
+        "final reflection task"
+    );
 }
 
 #[test]
@@ -7427,7 +7437,10 @@ object foo with
 
     let diagnostics = take_reflection_diagnostics(&diagnostics);
     assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].message(), "object reflection task");
+    assert_eq!(
+        rendered_texts(&context, &diagnostics)[0],
+        "object reflection task"
+    );
 }
 
 #[test]
@@ -7457,7 +7470,10 @@ extend parent.child with
 
     let diagnostics = take_reflection_diagnostics(&diagnostics);
     assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].message(), "extended child reflection task");
+    assert_eq!(
+        rendered_texts(&context, &diagnostics)[0],
+        "extended child reflection task"
+    );
 }
 
 #[test]
@@ -7485,7 +7501,10 @@ object derived extends base with
     );
     let derived_diagnostics = take_reflection_diagnostics(&diagnostics);
     assert_eq!(derived_diagnostics.len(), 1);
-    assert_eq!(derived_diagnostics[0].message(), "derived reflection task");
+    assert_eq!(
+        rendered_texts(&context, &derived_diagnostics)[0],
+        "derived reflection task"
+    );
 
     assert_same_value_representation(
         &resolved_value_at_path_with_context(&context, &module, &["base", "inherited"]),
@@ -7497,7 +7516,10 @@ object derived extends base with
     );
     let base_diagnostics = take_reflection_diagnostics(&diagnostics);
     assert_eq!(base_diagnostics.len(), 1);
-    assert_eq!(base_diagnostics[0].message(), "base reflection task");
+    assert_eq!(
+        rendered_texts(&context, &base_diagnostics)[0],
+        "base reflection task"
+    );
 }
 
 #[test]
@@ -7597,10 +7619,7 @@ ordinary = "ordinary"
         &resolved_value_at_path_with_context(&context, &module, &["meta", "probe"]),
         &Value::binary_from_text("probe"),
     );
-    let messages = take_reflection_diagnostics(&diagnostics)
-        .iter()
-        .map(|diagnostic| diagnostic.message().to_owned())
-        .collect::<Vec<_>>();
+    let messages = rendered_texts(&context, &take_reflection_diagnostics(&diagnostics));
     assert_eq!(
         messages,
         ["the reflection scanner ran again for its namespace"]
