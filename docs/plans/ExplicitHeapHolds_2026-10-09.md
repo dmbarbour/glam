@@ -12,7 +12,8 @@ order: `gc-hold-api`, `gc-hold-boundaries` through its third slice,
 `gc-hold-outer-boundaries`, `gc-hold-pass-access` (which absorbed
 `gc-hold-tests`),
 `gc-hold-entry-cost`, `gc-hold-suspension-review`,
-`gc-hold-boundary-release`, `gc-hold-thread-context`, then `gc-hold-values-api`; `gc-hold-class-cache`
+`gc-hold-boundary-release`, then `gc-hold-values-api`
+(`gc-hold-thread-context` was skipped); `gc-hold-class-cache`
 is narrowed to a measurement. The maintainer moved transient roots ahead of
 the remaining enforcement on 2026-10-13, once every poll lent its mutator,
 and on 2026-10-14 chose that drivers hold the mutator across quanta
@@ -1093,6 +1094,11 @@ references, and which same-runtime validations it makes redundant. After
 `gc-hold-pass-access`, code that holds an access already reaches its
 runtime through it (`access.values()`), so what remains is code that holds
 none.
+
+Skipped 2026-10-15 (maintainer): written before the current design, it
+would undo the explicit foundation the steps since built, in which code
+takes `&` access or `&mut` mutator from its caller and its signature shows
+whether it may suspend.
 
 ### The public value API (`gc-hold-values-api`)
 
