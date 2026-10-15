@@ -38,6 +38,11 @@
 //! entry points the Chumsky grammar uses. The cursor then skips to the end
 //! the structural parser reports. A postfix `if`, on the same line or a
 //! continuation line, ends the innermost open lambda's body (`ChainTail`).
+//! A keyword head opens a region to its group member's end, and groups
+//! closing inside it are deferred, not interpreted: the form's structural
+//! parser reads them from their tokens, so a group is interpreted by one
+//! parser only. A group the term parser consumes after a form that ended
+//! early is interpreted when it is consumed.
 //!
 //! **Coverage.** Constructs not yet covered report `Fail::Unsupported`:
 //! keywords as lambda parameters, and invalid tokens.
@@ -55,6 +60,7 @@ use super::expression::{
 };
 use super::expression_context::ExpressionContext;
 use super::input::TokenView;
+use super::layout::group_separator;
 use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
 
 /// Why the term parser produced no syntax tree.
@@ -129,6 +135,9 @@ pub(super) fn parse_term_chain(
         group: None,
         close: 0,
         pieces: Vec::new(),
+        separator: None,
+        inherited_region: false,
+        region: false,
     }];
     let range = view.range();
     let mut index = range.start();
@@ -141,11 +150,18 @@ pub(super) fn parse_term_chain(
                     .and_then(|group| group.close_token())
                     .filter(|close| *close < range.end())
                     .ok_or(Fail::Unsupported("a delimiter group crossing the view"))?;
+                let inherited_region = stack
+                    .last()
+                    .expect("the view frame encloses every group")
+                    .in_region();
                 stack.push(Frame {
                     delimiter: Some(*delimiter),
                     group: Some(*group),
                     close,
                     pieces: Vec::new(),
+                    separator: Some(group_separator(view.source(), *delimiter, index)),
+                    inherited_region,
+                    region: false,
                 });
             }
             TokenKind::Close { .. } => {
@@ -154,25 +170,39 @@ pub(super) fn parse_term_chain(
                     .group(frame.group.expect("a group frame records its group"))
                     .expect("an open frame's group exists")
                     .open_token();
-                let cover = covers.push(
-                    interpret_group(scope, &frame, index)
-                        .unwrap_or_else(|fail| Cover::Invalid(fail.or_at(Some(open)))),
-                );
-                stack
+                let parent = stack
                     .last_mut()
-                    .expect("the view frame encloses every group")
-                    .pieces
-                    .push(Piece::Group {
+                    .expect("the view frame encloses every group");
+                let cover = if parent.in_region() {
+                    covers.defer(Deferred {
+                        frame,
                         open,
                         close: index,
-                        cover,
-                    });
+                        in_parent_region: parent.region,
+                    })
+                } else {
+                    covers.ready(
+                        interpret_group(scope, &frame, index)
+                            .unwrap_or_else(|fail| Cover::Invalid(fail.or_at(Some(open)))),
+                    )
+                };
+                parent.pieces.push(Piece::Group {
+                    open,
+                    close: index,
+                    cover,
+                });
             }
-            _ => stack
-                .last_mut()
-                .expect("the view frame is never popped")
-                .pieces
-                .push(Piece::Token(index)),
+            _ => {
+                let frame = stack.last_mut().expect("the view frame is never popped");
+                if opens_keyword_region(view, index) {
+                    frame.region = true;
+                } else if frame.separator.is_some_and(|separator| {
+                    matches!(token.kind(), TokenKind::Symbol(symbol) if *symbol == separator)
+                }) {
+                    frame.region = false;
+                }
+                frame.pieces.push(Piece::Token(index));
+            }
         }
         index += 1;
     }
@@ -217,6 +247,38 @@ struct Frame {
     group: Option<super::lexical::GroupId>,
     close: usize,
     pieces: Vec<Piece>,
+    /// The symbol between this group's members, which ends a keyword
+    /// region; the view has none, so a region in it runs to its end.
+    separator: Option<&'static str>,
+    /// Whether this group lies in a keyword region of an enclosing frame.
+    inherited_region: bool,
+    /// Whether a keyword region is open among this frame's pieces.
+    region: bool,
+}
+
+impl Frame {
+    fn in_region(&self) -> bool {
+        self.inherited_region || self.region
+    }
+}
+
+/// Whether the token at `index` heads a keyword form, which opens a keyword
+/// region: the rest of its group member, up to the group's separator or
+/// close, as `parse_structural_atom` delimits it. The form's structural
+/// parser reads the region from its tokens, so groups closing inside it are
+/// deferred rather than interpreted, and every group is interpreted by one
+/// parser. A keyword that a joint `:` or `.` follows may be a tag key or a
+/// path, and opens none; deferral only saves work, so missing a region costs
+/// time, not correctness.
+fn opens_keyword_region(view: TokenView<'_, '_>, index: usize) -> bool {
+    let TokenKind::Name(name) = token(view, index).kind() else {
+        return false;
+    };
+    structural_atom_parser(name).is_some()
+        && !view.token_at(index + 1).is_some_and(|next| {
+            next.leading() == LeadingTrivia::Joint
+                && matches!(next.kind(), TokenKind::Symbol(":" | "."))
+        })
 }
 
 /// One element of a group's flat contents: a token, or a nested group
@@ -230,36 +292,100 @@ enum Piece {
     },
 }
 
-/// Every interpreted group's cover. A cover is inspected freely but taken
-/// exactly once, by the role that consumes it, so no subtree is copied.
+/// Every group's cover. A cover is inspected freely but taken exactly once,
+/// by the role that consumes it, so no subtree is copied.
 #[derive(Default)]
 struct Covers {
-    slots: RefCell<Vec<Option<Cover>>>,
+    slots: RefCell<Vec<Slot>>,
+}
+
+enum Slot {
+    Ready(Cover),
+    /// A group in a keyword region, left to the form's structural parser. A
+    /// role that consumes it anyway, after a form that ended before its
+    /// region did, interprets it then.
+    Deferred(Deferred),
+    Taken,
+}
+
+struct Deferred {
+    frame: Frame,
+    open: usize,
+    close: usize,
+    /// Whether the group lies in a keyword region of its own parent, rather
+    /// than only inside a deferred parent; interpreting the parent then
+    /// leaves it deferred.
+    in_parent_region: bool,
 }
 
 impl Covers {
-    fn push(&self, cover: Cover) -> usize {
+    fn ready(&self, cover: Cover) -> usize {
         let mut slots = self.slots.borrow_mut();
-        slots.push(Some(cover));
+        slots.push(Slot::Ready(cover));
         slots.len() - 1
     }
 
-    fn take(&self, id: usize) -> Cover {
-        self.slots.borrow_mut()[id]
-            .take()
-            .expect("a cover is consumed exactly once")
+    fn defer(&self, deferred: Deferred) -> usize {
+        let mut slots = self.slots.borrow_mut();
+        slots.push(Slot::Deferred(deferred));
+        slots.len() - 1
     }
 
-    fn shape(&self, id: usize) -> Shape {
-        match self.slots.borrow()[id]
-            .as_ref()
-            .expect("a cover is inspected before it is consumed")
-        {
-            Cover::Bracket(items) => Shape::Bracket {
+    fn take(&self, scope: Scope<'_, '_, '_>, id: usize) -> Cover {
+        self.interpret_deferred(scope, id);
+        match std::mem::replace(&mut self.slots.borrow_mut()[id], Slot::Taken) {
+            Slot::Ready(cover) => cover,
+            Slot::Deferred(_) | Slot::Taken => unreachable!("a cover is consumed exactly once"),
+        }
+    }
+
+    fn shape(&self, scope: Scope<'_, '_, '_>, id: usize) -> Shape {
+        self.interpret_deferred(scope, id);
+        match &self.slots.borrow()[id] {
+            Slot::Ready(Cover::Bracket(items)) => Shape::Bracket {
                 empty: items.is_empty(),
             },
-            Cover::Paren(ParenCover::Grouped(_)) => Shape::Grouped,
-            Cover::Paren(_) | Cover::Brace(_) | Cover::Invalid(_) => Shape::Other,
+            Slot::Ready(Cover::Paren(ParenCover::Grouped(_))) => Shape::Grouped,
+            Slot::Ready(Cover::Paren(_) | Cover::Brace(_) | Cover::Invalid(_)) => Shape::Other,
+            Slot::Deferred(_) | Slot::Taken => {
+                unreachable!("a cover is inspected before it is consumed")
+            }
+        }
+    }
+
+    /// Interprets a deferred group as the pass would have: its deferred
+    /// descendants first, except those in a keyword region of their own
+    /// parent. Post-order on an explicit stack, so nesting costs no Rust
+    /// recursion.
+    fn interpret_deferred(&self, scope: Scope<'_, '_, '_>, id: usize) {
+        let mut stack = vec![(id, false)];
+        while let Some((slot, children_done)) = stack.pop() {
+            if !children_done {
+                let slots = self.slots.borrow();
+                let Slot::Deferred(deferred) = &slots[slot] else {
+                    continue;
+                };
+                stack.push((slot, true));
+                stack.extend(deferred.frame.pieces.iter().filter_map(|piece| {
+                    match piece {
+                        Piece::Group { cover, .. } => matches!(
+                            &slots[*cover],
+                            Slot::Deferred(child) if !child.in_parent_region
+                        )
+                        .then_some((*cover, false)),
+                        Piece::Token(_) => None,
+                    }
+                }));
+                continue;
+            }
+            let Slot::Deferred(deferred) =
+                std::mem::replace(&mut self.slots.borrow_mut()[slot], Slot::Taken)
+            else {
+                unreachable!("a deferred group is interpreted once");
+            };
+            let cover = interpret_group(scope, &deferred.frame, deferred.close)
+                .unwrap_or_else(|fail| Cover::Invalid(fail.or_at(Some(deferred.open))));
+            self.slots.borrow_mut()[slot] = Slot::Ready(cover);
         }
     }
 }
@@ -390,7 +516,16 @@ fn separated_items<'a>(
     Ok(items)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Groups this thread's term parsers have interpreted, for tests that
+    /// check no group is interpreted twice.
+    static INTERPRETED_GROUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn interpret_group(scope: Scope<'_, '_, '_>, frame: &Frame, close: usize) -> Parse<Cover> {
+    #[cfg(test)]
+    INTERPRETED_GROUPS.with(|count| count.set(count.get() + 1));
     let view = scope.view;
     let delimiter = frame.delimiter.expect("only group frames close");
     debug_assert_eq!(frame.close, close);
@@ -621,7 +756,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
 
     fn shape_at(&self, offset: usize) -> Option<Shape> {
         match self.peek_at(offset) {
-            Some(Piece::Group { cover, .. }) => Some(self.scope.covers.shape(*cover)),
+            Some(Piece::Group { cover, .. }) => Some(self.scope.covers.shape(self.scope, *cover)),
             _ => None,
         }
     }
@@ -634,7 +769,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             unreachable!("take_group is called on a group");
         };
         self.position += 1;
-        match self.scope.covers.take(*cover) {
+        match self.scope.covers.take(self.scope, *cover) {
             Cover::Invalid(fail) => Err(fail),
             cover => Ok(cover),
         }
@@ -659,7 +794,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     fn data_path_end(&self) -> Option<usize> {
         let mut position = self.position;
         match self.peek() {
-            Some(Piece::Group { cover, .. }) => match self.scope.covers.shape(*cover) {
+            Some(Piece::Group { cover, .. }) => match self.scope.covers.shape(self.scope, *cover) {
                 Shape::Bracket { empty: false } | Shape::Grouped => return Some(position + 1),
                 _ => return None,
             },
@@ -688,7 +823,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         }
         let accepted = match self.peek_at(1) {
             Some(Piece::Group { cover, .. }) => matches!(
-                self.scope.covers.shape(*cover),
+                self.scope.covers.shape(self.scope, *cover),
                 Shape::Bracket { .. } | Shape::Grouped
             ),
             Some(piece @ Piece::Token(_)) => matches!(

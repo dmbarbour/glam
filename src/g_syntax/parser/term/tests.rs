@@ -696,6 +696,40 @@ fn deep_nesting_parses_in_linear_time_without_recursion() {
     }
 }
 
+/// Keyword forms nested in groups, as open, close and innermost text. A
+/// keyword form's structural parser reads its groups from their tokens, so
+/// the term parser must not interpret them too: each level would double the
+/// work below it.
+const KEYWORD_NESTING_SHAPES: &[(&str, &str, &str)] = &[
+    ("(if c then ", " else 0)", "1"),
+    ("f (if c then ", " else 0)", "1"),
+    ("(try c then ", " else 0)", "1"),
+    ("(match x with {_ => ", "})", "1"),
+    ("(let a = 1 in ", ")", "a"),
+    ("(do { .r ", " })", "1"),
+    ("(\\z -> if c then ", " else z)", "1"),
+];
+
+#[test]
+fn keyword_forms_in_groups_interpret_each_group_once() {
+    for shape in KEYWORD_NESTING_SHAPES {
+        let text = nested(40, *shape);
+        let groups = text
+            .chars()
+            .filter(|c| matches!(c, '(' | '[' | '{'))
+            .count();
+        super::INTERPRETED_GROUPS.with(|count| count.set(0));
+        let parsed = super::super::structural::parse_compound_expression_fragment(text.as_bytes());
+        let interpreted = super::INTERPRETED_GROUPS.with(std::cell::Cell::get);
+        let preview: String = text.chars().take(24).collect();
+        assert!(parsed.is_ok(), "{preview}…: {parsed:?}");
+        assert!(
+            interpreted <= groups,
+            "{preview}… interpreted {interpreted} groups of {groups}"
+        );
+    }
+}
+
 #[test]
 fn long_flat_chains_parse_without_recursion() {
     const TERMS: usize = 100_000;
