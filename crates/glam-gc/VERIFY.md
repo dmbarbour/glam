@@ -1278,3 +1278,10 @@ coordinator lock and the runtime gate while it is held
 (`gc-hold-boundary-release`): `scripts/check.sh full` passed at `d050b272`,
 including aggressive-GC verification, Miri (229 passed) and both
 sanitizers.
+
+Glam composes diagnostics instead of evaluating them, so settlement and the
+quantum boundary no longer drive evaluation to publish a failure, and a
+release that changes a published status runs suspended
+(`senders-never-evaluate-diagnostics`): `scripts/check.sh full` passed at
+`fef17642`, including aggressive-GC verification, Miri (229 passed) and
+both sanitizers.
