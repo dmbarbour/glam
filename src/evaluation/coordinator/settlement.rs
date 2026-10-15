@@ -547,7 +547,7 @@ impl EvaluationWorkCoordinator {
             for obligation in &selected.promises {
                 // Runtime settlement is outermost: each promise publication
                 // takes a boundary of its own.
-                let (producer, completion) = self.with_settlement_access(None, true, |access| {
+                let (producer, completion) = self.with_settlement_boundary(|access| {
                     obligation.clone().publish_terminal_guarded(
                         self,
                         mutation,

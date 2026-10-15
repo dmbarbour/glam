@@ -603,7 +603,7 @@ impl EvaluationWorkCoordinator {
                             claimed.id,
                             claimed.operation.take(),
                             claimed.prior_subscription.take(),
-                            ClientDemandResult::Failed(self.root_failure(
+                            ClientDemandResult::Failed(self.root_release_failure(
                                 mutator,
                                 Arc::new(crate::core::EvaluationFailure::message(
                                     "client demand blocked on another evaluation runtime",

@@ -2779,9 +2779,10 @@ impl EvaluationWorkCoordinator {
         )
     }
 
-    /// Roots `failure` with access `mutator` lends, or, when the caller holds
-    /// none, with a boundary of its own.
-    fn root_failure(
+    /// Roots `failure` for a release: with access its quantum boundary's
+    /// `mutator` lends, or, for a release whose caller holds none, with a
+    /// boundary of its own.
+    fn root_release_failure(
         &self,
         mutator: Option<&RuntimeValueMutator<'_, '_>>,
         failure: Arc<EvaluationFailure>,
@@ -2811,7 +2812,7 @@ impl EvaluationWorkCoordinator {
 
     /// Runs `publish` in a boundary of its own, for settlement whose caller
     /// holds no mutator.
-    fn with_settlement_boundary<R>(
+    pub(super) fn with_settlement_boundary<R>(
         &self,
         publish: impl FnOnce(Option<&RuntimeValueAccess<'_>>) -> R,
     ) -> R {
