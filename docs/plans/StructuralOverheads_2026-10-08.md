@@ -32,6 +32,11 @@ explicit heap holds.
   start `perf-value-representation` and `perf-net-representation`, or
   finish them here first?
 - **`perf-root-check-kinds`.** Retire it, given `root-evidence`?
+- **Name analysis over nested `where`.** `chain_where` grows as n^1.76
+  with no collections: at 1,600, about 160 M instructions above linear
+  are in `mark_used_locals` and `NestedLocals::bind`, besides the
+  structural parser's token scans (`parser-keyword-frames`). A step here,
+  or in the parser plan?
 
 ## Purpose
 
@@ -462,7 +467,10 @@ with the definition without an evaluation step.
 
 After `perf-worker-scaling`, `chain_w4_800` still runs 8% more
 instructions than `chain_800` and 2.3 times its CPU time, growing as
-n^1.27 against n^1.23. Two walks remain quadratic:
+n^1.27 against n^1.23. On 2026-10-15 (Snapshot 2026-10-15 in the roadmap)
+it runs within 1% of `chain_800`'s instructions, both growing as about
+n^0.85 at 400 to 1,600, but still about 1.6 times its CPU time at 800 and
+1,600 (single runs). Two walks remain quadratic:
 - **Workers walk from the root.** A worker finds work by walking each
   reflection root's exact producer chain from the top on every claim
   (`exact_producer_probe_locked`). The profiling counters do not see these

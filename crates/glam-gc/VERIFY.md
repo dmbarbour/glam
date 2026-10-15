@@ -1294,7 +1294,11 @@ shared state, which a refill takes from the thread's cache
 deliberately leaked its `Arc`, became `a_scoped_allocator_owns_nothing`, an
 assertion that `Allocator` needs no drop; `check-miri.sh` and
 `check-sanitizer.sh address` no longer run that fixture apart without leak
-checks, so both check leaks over the whole suite. A direct-mapped table in
+checks, so both check leaks over the whole suite: `scripts/check.sh full`
+passed at `01ec2fbc`, including aggressive-GC verification, Miri (230
+passed, none run apart) and both sanitizers. That run also covers
+`e803e31b`, where Glam's readiness stopped retaining a deadlock's blocked
+failure beside its diagnostic. A direct-mapped table in
 front of the thread's class map answers a known type with one slot; a type
 that another evicted from its slot reads the map and refills it, without
 reaching the heap (`an_evicted_class_key_falls_back_to_the_thread_class_map`).

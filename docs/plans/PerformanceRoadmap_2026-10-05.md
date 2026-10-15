@@ -5,7 +5,7 @@ questions. `perf-profiling-harness` and `perf-foreground-collection` are
 done, `perf-parser` is in production, and `perf-evaluation-recursion` is
 done (2026-10-08). `perf-structural-overheads` is active, with its own
 [plan](StructuralOverheads_2026-10-08.md). The latest measurements are in
-[Snapshot 2026-10-11](#snapshot-2026-10-11). This is the umbrella for
+[Snapshot 2026-10-15](#snapshot-2026-10-15). This is the umbrella for
 performance work. Each step gets its own plan when it starts; the existing
 plans it names stay the detailed records. Steps are referred to by name,
 never by number (see the plans README, "Step names").
@@ -402,6 +402,96 @@ The default suite now has 60 workloads and costs 25.1 G instructions and
   access regions and root registrations grow with k = 1.78 and 1.45. With
   four workers, `chain_w4_800` takes 42% more CPU than `chain_800` for the
   same instructions (`perf-worker-route-walks`).
+
+## Snapshot 2026-10-15
+
+At `ce7d3657`, after the rest of `perf-application-values`,
+`perf-definition-assertions`, explicit heap holds, lazy diagnostics and
+the allocator class cache. Same machine and toolchain as the earlier
+snapshots (Intel Core i7-6700, rustc 1.99.0), the same workload sources,
+zero workers, release builds with `glam-prof`, and the mean of three runs.
+The 2026-10-11 binary (`e6e07f2d`) was rerun the same day: its
+instruction counts match that snapshot exactly, and its CPU times differ
+by up to 18%, mostly higher, so the CPU columns compare against that
+rerun.
+
+| Workload | M instr 10-06 | 10-11 | Now | Since 10-11 | Since 10-06 | CPU ms 10-11 (rerun) | Now |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `minimal` | 63.5 | 23.6 | 24.2 | +2.5% | −62% | 22.1 | 22.3 |
+| `hello_do` | 119.8 | 33.8 | 30.9 | −8.6% | −74% | 21.9 | 21.2 |
+| `hello_elf` | 9,645 | 1,305 | 597 | −54% | −93.8% | 322 | 156 |
+| `parse_parens_10` | 3,565 | 24.2 | 24.5 | +1.2% | −99.3% | 20.4 | 20.2 |
+| `parse_lists_16` | 5,194 | 24.2 | 24.6 | +1.7% | −99.5% | 20.5 | 20.7 |
+| `countdown_100` | 1,685 | 113.6 | 46.0 | −60% | −97.3% | 42.8 | 25.2 |
+| `countdown_200` | 5,127 | 198.0 | 65.1 | −67% | −98.7% | 65.4 | 31.5 |
+| `countdown_400` | 17,374 | 391.7 | 103.5 | −74% | −99.4% | 108.5 | 39.5 |
+| `list_map_1000` | 3,043 | 94.2 | 71.3 | −24% | −97.7% | 33.8 | 29.5 |
+| `dict_lookup_1000` | 4,848 | 47.2 | 42.8 | −9.3% | −99.1% | 25.5 | 23.3 |
+
+Counters, 10-11 to now (outer heap regions replace access regions):
+
+| Workload | Reductions | Heap regions | Root registrations | Allocations | Collections |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `minimal` | 1,596 → 2,213 | 479 → 423 | 1,134 → 1,640 | 1,664 → 2,417 | 0 → 0 |
+| `hello_elf` | 137,796 → 76,608 | 5,883 → 1,001 | 61,430 → 37,639 | 92,607 → 68,666 | 1 → 1 |
+| `countdown_400` | 58,244 → 24,108 | 1,695 → 423 | 27,932 → 14,000 | 50,594 → 29,547 | 1 → 0 |
+| `list_map_1000` | 15,038 → 15,508 | 825 → 424 | 4,417 → 6,313 | 9,041 → 9,670 | 0 → 0 |
+| `dict_lookup_1000` | 1,865 → 2,349 | 486 → 423 | 1,293 → 1,729 | 1,899 → 2,550 | 0 → 0 |
+
+Growth at twice the default sizes (`GLAM_PROFILE_SCALE=2`), as in the
+2026-10-11 snapshot, with `parse_ifs` and `list_sum` at their default
+sizes:
+
+| Family | Sizes | k 10-11 | k now | K instr per unit 10-11 | Now |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `countdown` | 400/800/1,600 | 1.06 | 1.06 | 960 | 255 |
+| `sum` | 400/800/1,600 | 0.96 | 1.31 | 1,012 | 312 |
+| `chain` (module definitions) | 400/800/1,600 | 0.94 | 0.84 | 1,795 | 578 |
+| `do_chain` | 400/800/1,600 | 1.00 | 0.81 | 994 | 503 |
+| `dict_lookup` | 1,000/2,000/4,000 | 1.07 | 1.08 | 24 | 20 |
+| `list_map` | 1,000/2,000/4,000 | 1.23 | 1.01 | 78 | 45 |
+| `list_sum` | 200/400/800 | 1.01 | 0.55 | 1,144 | 296 |
+| `parse_lists` (depth) | 200/400/800 | 0.91 | 0.92 | 6 | 6 |
+| `parse_ifs` (depth) | 4/8/16 | 7.78 | 7.77 | 172,670 | 175,701 |
+| `append_walk` | 400/800/1,600 | | 1.89 | | 1,626 |
+| `chain_where` | 400/800/1,600 | 1.44 at 200–800 | 1.76 | | 1,193 |
+
+The default suite's 60 workloads cost 13.07 G instructions and 3.43 s of
+CPU, from 25.09 G and 6.16 s; `parse_ifs_16` alone is 1.44 G (11%).
+
+**Observations**
+- **Hello World** takes 597 M instructions and 156 ms of CPU: half of
+  10-11, and a sixteenth of the 10-06 instructions (22 times less CPU).
+- **Recursion** costs about 255 K instructions and 54 reductions per
+  level, from 960 K and 140.
+- **Heap regions** are about 423 a run in every small workload, whatever
+  its size: drivers hold one mutator across their quanta
+  (`driver-mutator`), so entries no longer scale with work. About 175 of
+  `minimal`'s entries are public `Values` calls, most of them the CLI's
+  environment (`gc-hold-values-api`, closed).
+- **Fixed cost** grew 2.5%: `minimal` makes more reductions, roots and
+  allocations than at 10-11, from the reflection-state check and journals
+  (`defs-refl-state`, `defs-journal-flat`). The scanner and that check are
+  on the order of 9 M of its 24.2 M (`perf-reflection-scanner`).
+- **A reflection step** (`.r ()`) costs 376 K instructions, from 519 K on
+  2026-10-12, now mostly net reduction, allocation and lazy routes (see
+  `perf-reflection-step-cost`).
+- **Superlinear:**
+  - `parse_ifs` is still exponential (`parser-keyword-frames`).
+  - `append_walk` (k = 1.89): collections double with size (1, 2, 4 at
+    400 to 1,600), each tracing live list structure, while every counter
+    is linear. Marking shared `Arc` spines once per path is
+    `perf-value-representation`'s ("no `Arc` in basic data types").
+  - `chain_where` (k = 1.76, no collections): the front end. At 1,600,
+    about 520 M of 1,411 M instructions exceed linear, in the structural
+    parser's top-level token scans (245 M; `parser-keyword-frames`), name
+    analysis's `mark_used_locals` and `NestedLocals::bind` over n nested
+    `where` scopes (160 M), and name comparisons (71 M). No step owns the
+    name-analysis part.
+  - `sum` (k = 1.31): its collections (1, 1, 2), not its counters.
+- **Workers:** `chain_w4` runs within 1% of `chain`'s instructions (8%
+  more on 2026-10-09), but about 1.6 times its CPU at 800 and 1,600
+  (single runs; `perf-worker-route-walks`).
 
 ## Settled Harness Questions
 

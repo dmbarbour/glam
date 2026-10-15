@@ -39,7 +39,8 @@ questions under "Open questions (2026-10-15)".
 
 - [`PerformanceRoadmap_2026-10-05.md`](PerformanceRoadmap_2026-10-05.md):
   the umbrella for performance work, covering shared measurement, how
-  budgets treat batching, and the order of its `perf-` steps.
+  budgets treat batching, and the order of its `perf-` steps. Latest
+  measurements: Snapshot 2026-10-15.
 - [`StructuralOverheads_2026-10-08.md`](StructuralOverheads_2026-10-08.md):
   `perf-structural-overheads`. Costs that are not representation: access
   regions, rooting, wake-ups, and algorithmic defects such as quadratic
