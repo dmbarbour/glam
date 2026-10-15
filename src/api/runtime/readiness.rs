@@ -16,44 +16,17 @@ use crate::evaluation::{
 };
 use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot};
 
+/// The diagnostic for a retained failure: its one composition, shared by
+/// every report of it, so repeated reports present the same diagnostic.
 pub(super) fn reasoning_diagnostic(
     values: &CoreValueFactory,
-    failure: &EvaluationFailure,
+    failure: &RuntimeFailureRoot,
 ) -> Diagnostic {
-    let public_values = Values::from_core_factory(values.clone());
     Diagnostic::from_parts(
-        &public_values,
+        &Values::from_core_factory(values.clone()),
         None,
         Severity::Error,
-        Value::from_runtime_root(crate::diagnostic::failure_diagnostic_root_with(
-            values, failure,
-        )),
-        None,
-    )
-}
-
-/// Projects retryable blocked-work failures without demanding their payloads.
-/// Readiness is observational: using the runtime-aware diagnostic projection
-/// here would create an isolated evaluation session and change coordinator
-/// generations merely by inspecting a deadlock.
-fn blocked_reasoning_diagnostic(
-    values: &CoreValueFactory,
-    failure: &EvaluationFailure,
-) -> Diagnostic {
-    let public_values = Values::from_core_factory(values.clone());
-    let emission =
-        values.construct_runtime_value_root(|access| match failure.emission_value_in(access) {
-            Some(CoreValue::Binary(message)) => {
-                crate::diagnostic::text_message_in(access, None, String::from_utf8_lossy(message))
-            }
-            Some(emission) => access.duplicate_value(emission),
-            None => crate::diagnostic::text_message_in(access, None, failure.to_string()),
-        });
-    Diagnostic::from_parts(
-        &public_values,
-        None,
-        Severity::Error,
-        Value::from_runtime_root(emission),
+        Value::from_runtime_root(failure.diagnostic(values)),
         None,
     )
 }
@@ -708,10 +681,9 @@ impl RuntimeDeadlockWork {
         if let Some(diagnostic) = &self.blocked_diagnostic {
             diagnostic.emission.require_runtime(values.runtime)?;
         }
-        Ok(Some(reasoning_diagnostic(
-            &values.core,
-            failure.as_failure(),
-        )))
+        Ok(Some(
+            reasoning_diagnostic(&values.core, failure).summarized_for_rendering(values),
+        ))
     }
 
     #[cfg(test)]
@@ -890,7 +862,7 @@ pub(super) fn runtime_deadlock_work_from_snapshot(
         observed_epoch: snapshot.observed_epoch.map(RuntimeObservationEpoch::get),
         blocked_diagnostic: blocked_failure
             .as_ref()
-            .map(|error| blocked_reasoning_diagnostic(values, error.as_failure())),
+            .map(|error| reasoning_diagnostic(values, error)),
         blocked_failure,
     }
 }

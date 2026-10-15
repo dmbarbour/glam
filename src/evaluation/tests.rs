@@ -4761,12 +4761,13 @@ fn terminal_reflection_machines_drop_after_releasing_runtime_locks() {
     );
 }
 
-/// Publishing a failed reflection task's `.task.status` builds the failure's
-/// diagnostic, which evaluates. Publication holds the runtime mutation gate
-/// for reading, and Linux's `RwLock` refuses further readers once a writer
-/// queues, so a diagnostic built under the gate must not take it again, as
-/// the quanta of a nested driver do. The publisher queues a settlement before
-/// building the status value.
+/// Publishing a failed reflection task's `.task.status` publishes its
+/// failure's diagnostic. Publication holds the runtime mutation gate for
+/// reading, and Linux's `RwLock` refuses further readers once a writer
+/// queues, so the status value must not take the gate again, as evaluating
+/// the diagnostic would; it is composed without evaluation
+/// (`senders-never-evaluate-diagnostics`). The publisher queues a settlement
+/// before building the status value.
 #[cfg(target_os = "linux")]
 #[test]
 fn failed_status_publication_never_retakes_the_gate_behind_a_queued_settlement() {

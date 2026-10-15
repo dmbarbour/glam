@@ -71,6 +71,14 @@ client-owned rendering. Current flow lives in
 
 ## Publication and Counts
 
+- Senders never evaluate a diagnostic; renderers do
+  (`senders-never-evaluate-diagnostics`). Building, enriching or adding
+  context composes an unevaluated object: `diagnostic_object` of the
+  emission with mixins, such as `DiagnosticContextDefs` for context frames.
+  A message that fails to evaluate fails its renderer with an
+  `eval:{op:'diagnostic_message}` frame. Rust summaries
+  (`Diagnostic::message`, `line`) read only immediate structure, through
+  such compositions; only a projection for rendering may evaluate one.
 - Severity is an argument to publication, not inferred by evaluating the
   message.
 - Transactional diagnostics publish only after commit. Abandoned alternatives

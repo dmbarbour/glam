@@ -1893,6 +1893,64 @@ fn session_close_does_not_steal_an_already_terminalizing_claims_settlement() {
     assert_eq!(coordinator.registered_session_count(), 1);
 }
 
+/// A release under a quantum boundary's mutator that blocks an observed task
+/// publishes the blocked status with its transition, before the release's
+/// gate ends, so a runtime observed stable has published every blocked
+/// state (`boundary-release-under-mutator`). The probe runs at the end of
+/// the release's gate, where a deferred publication had not yet run.
+#[test]
+fn a_release_under_a_mutator_publishes_an_observed_block_with_its_transition() {
+    let (coordinator, _executor) =
+        super::super::test_execution_resources(0).expect("test execution resources should build");
+    let session = TestDemand::new(&coordinator);
+    let session_id = session.demand.id;
+    let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
+    let statuses = Arc::new(Mutex::new(Vec::new()));
+    let published = statuses.clone();
+    assert!(coordinator.attach_reflection_lifecycle_publisher(
+        work,
+        TaskStatusPublisher::new(move |_mutation, status| {
+            published.lock().unwrap().push(status);
+            TaskStatusWake::new(|| {})
+        }),
+    ));
+    let claimed = claim_ready_test_reflection(&coordinator, session_id);
+    let blocked_at_gate_end = Arc::new(AtomicBool::new(false));
+    coordinator.set_reflection_release_end_probe({
+        let statuses = statuses.clone();
+        let blocked_at_gate_end = blocked_at_gate_end.clone();
+        move || {
+            let blocked = statuses
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|status| matches!(status, EvaluationTaskStatus::Blocked));
+            blocked_at_gate_end.store(blocked, Ordering::Release);
+        }
+    });
+
+    let release = coordinator.with_driver_mutator_for_test(|mutator| {
+        coordinator.release_reflection_under(
+            mutator,
+            claimed,
+            ReflectionWorkPoll::Blocked(EvaluationTaskBlock {
+                dependency: None,
+                observed_epoch: Some(coordinator.current_observation_epoch()),
+                error: None,
+            }),
+        )
+    });
+    assert!(release.remains_blocked);
+    assert!(
+        blocked_at_gate_end.load(Ordering::Acquire),
+        "the blocked status must publish before the release's gate ends"
+    );
+    assert_eq!(
+        statuses.lock().unwrap().as_slice(),
+        [EvaluationTaskStatus::Blocked]
+    );
+}
+
 #[test]
 fn reflection_release_publishes_nonterminal_status_before_session_close() {
     let (coordinator, _executor) =

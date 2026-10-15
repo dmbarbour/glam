@@ -110,7 +110,7 @@ impl RuntimeMutationAdmission {
 
     /// Panics if this thread already holds the gate. A thread never takes it
     /// twice: a second read waits behind any queued settlement, which waits
-    /// for the first (`status-diagnostic-before-gate`). Unwinding skips the
+    /// for the first, so nothing evaluates under the gate. Unwinding skips the
     /// check, so a destructor that settles does not turn one report into an
     /// abort.
     #[cfg(debug_assertions)]
@@ -1106,13 +1106,11 @@ impl RuntimeFailureRoot {
         &self.0.failure
     }
 
-    /// The failure normalized to a diagnostic object, built on first use and
-    /// shared by every publication of this failure.
-    ///
-    /// Building it evaluates through a nested driver, which takes the runtime
-    /// mutation gate, so the caller must hold no runtime lock
-    /// (`status-diagnostic-before-gate`). A concurrent first use builds its
-    /// own and keeps whichever was stored first.
+    /// The failure's diagnostic, composed without evaluating it on first use
+    /// and shared by every publication of this failure, so a renderer that
+    /// evaluates one evaluates it for all
+    /// (`senders-never-evaluate-diagnostics`). The caller holds no mutator. A concurrent first use
+    /// composes its own and keeps whichever was stored first.
     pub(crate) fn diagnostic(&self, values: &CoreValueFactory) -> RuntimeValueRoot {
         debug_assert_eq!(values.runtime_id(), self.runtime_id());
         if let Some(diagnostic) = self.0.diagnostic.get() {
@@ -1120,25 +1118,6 @@ impl RuntimeFailureRoot {
         }
         let built = crate::diagnostic::failure_diagnostic_root_with(values, &self.0.failure);
         self.0.diagnostic.get_or_init(|| built).clone()
-    }
-
-    /// As [`Self::diagnostic`], under a caller's `mutator`, which the
-    /// normalization's drivers borrow.
-    pub(crate) fn diagnostic_under(
-        &self,
-        mutator: &mut crate::core::RuntimeValueMutator<'_, '_>,
-    ) -> RuntimeValueRoot {
-        debug_assert_eq!(mutator.runtime_id(), self.runtime_id());
-        if let Some(diagnostic) = self.0.diagnostic.get() {
-            return diagnostic.clone();
-        }
-        let built = crate::diagnostic::failure_diagnostic_root_under(mutator, &self.0.failure);
-        self.0.diagnostic.get_or_init(|| built).clone()
-    }
-
-    /// Whether this failure's diagnostic is already built.
-    pub(crate) fn has_diagnostic(&self) -> bool {
-        self.0.diagnostic.get().is_some()
     }
 
     pub(crate) fn into_failure(self) -> Arc<EvaluationFailure> {

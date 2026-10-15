@@ -6,7 +6,6 @@ use super::machine::{ContextualValueEffectTask, EffectTask, UnitEffectTask, Valu
 use super::protocol::{StandardEffects, TaskHalt, TaskHost, TaskOutcome, TaskSpecialization};
 use crate::api::{DiagnosticIngress, EvaluationRuntime, Value as PublicValue};
 use crate::core::EvaluationFailure;
-use crate::eval;
 use crate::evaluation::{
     EvalContext, EvaluationSession, EvaluationSessionRun, EvaluationTaskHandle,
     EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitPoll, PreparedEvaluationTask,
@@ -598,7 +597,7 @@ fn combine_composed_result(
                 .permanent_failure()
                 .expect("composed child reporting produces a permanent failure");
             Err(values.with_boundary_access(|access| {
-                let context = eval::failure_diagnostic_value_in(&access, child_failure);
+                let context = crate::diagnostic::failure_diagnostic_in(&access, child_failure);
                 parent.with_core_context_in(&access, context)
             }))
         }

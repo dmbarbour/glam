@@ -36,6 +36,22 @@ enum ObjectPhase {
         message: Value,
         spec: RegionalWhnfWork,
     },
+    /// `frames` is a list, and `prior` and `interface` dictionaries.
+    ContextDefsPrior {
+        frames: Value,
+        prior: RegionalWhnfWork,
+    },
+    ContextDefsInterface {
+        frames: Value,
+        prior: Value,
+        interface: RegionalWhnfWork,
+    },
+    ContextDefsContext {
+        frames: Value,
+        prior: Value,
+        interface: Value,
+        context: RegionalWhnfWork,
+    },
     LocalHost {
         host: RegionalWhnfWork,
         parts: Value,
@@ -91,6 +107,7 @@ impl RegionalObjectBuiltinMachine {
             Builtin::ObjectSpec
                 | Builtin::ObjectLocalName
                 | Builtin::DiagnosticObject
+                | Builtin::DiagnosticContextDefs
                 | Builtin::ObjectInstance
                 | Builtin::ObjectInstanceFromParts
                 | Builtin::ObjectDefaultDefs
@@ -124,6 +141,19 @@ impl RegionalObjectBuiltinMachine {
                 };
                 ObjectPhase::DiagnosticMessage {
                     message: demand(message),
+                }
+            }
+            Builtin::DiagnosticContextDefs => {
+                let [frames, prior, _final] = arguments else {
+                    unreachable!("diagnostic context definitions retain three operands")
+                };
+                assert!(
+                    matches!(frames, Value::List(_)),
+                    "diagnostic context frames are a list their sender built"
+                );
+                ObjectPhase::ContextDefsPrior {
+                    frames: duplicate(frames),
+                    prior: demand(prior),
                 }
             }
             Builtin::ObjectLocalName => {
@@ -244,6 +274,68 @@ impl RegionalObjectBuiltinMachine {
                 } else {
                     RegionalBuiltinPoll::Ready(access.values().duplicate_value(message))
                 }
+            }
+            ObjectPhase::ContextDefsPrior { frames, prior } => {
+                let prior = match poll_whnf_in(access, prior, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
+                };
+                let Value::Dict(definitions) = &prior else {
+                    return failure("diagnostic context requires dictionary definitions");
+                };
+                let Some(interface) = definitions.get(&*keys::MSG) else {
+                    let interface = Value::Dict(Dict::new_sync());
+                    return finish_context_defs_in(access, frames, &prior, &interface, None);
+                };
+                self.phase = ObjectPhase::ContextDefsInterface {
+                    frames: access.values().duplicate_value(frames),
+                    interface: regional_demand(
+                        access,
+                        access.values().duplicate_value(interface),
+                        source_owner,
+                    ),
+                    prior,
+                };
+                RegionalBuiltinPoll::Yielded
+            }
+            ObjectPhase::ContextDefsInterface {
+                frames,
+                prior,
+                interface,
+            } => {
+                let interface = match poll_whnf_in(access, interface, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
+                };
+                let Value::Dict(members) = &interface else {
+                    return failure("a diagnostic's `msg` interface must be a dictionary");
+                };
+                let Some(context) = members.get(&*keys::CONTEXT) else {
+                    return finish_context_defs_in(access, frames, prior, &interface, None);
+                };
+                self.phase = ObjectPhase::ContextDefsContext {
+                    frames: access.values().duplicate_value(frames),
+                    prior: access.values().duplicate_value(prior),
+                    context: regional_demand(
+                        access,
+                        access.values().duplicate_value(context),
+                        source_owner,
+                    ),
+                    interface,
+                };
+                RegionalBuiltinPoll::Yielded
+            }
+            ObjectPhase::ContextDefsContext {
+                frames,
+                prior,
+                interface,
+                context,
+            } => {
+                let context = match poll_whnf_in(access, context, step_budget) {
+                    Ok(value) => value,
+                    Err(poll) => return poll,
+                };
+                finish_context_defs_in(access, frames, prior, interface, Some(&context))
             }
             ObjectPhase::LocalHost { host, parts } => {
                 let host = match poll_whnf_in(access, host, step_budget) {
@@ -420,6 +512,30 @@ impl ObjectPhase {
                 trace_compatibility_value_managed_edges(message, visitor);
                 spec.trace_managed_edges(visitor);
             }
+            Self::ContextDefsPrior { frames, prior } => {
+                trace_compatibility_value_managed_edges(frames, visitor);
+                prior.trace_managed_edges(visitor);
+            }
+            Self::ContextDefsInterface {
+                frames,
+                prior,
+                interface,
+            } => {
+                trace_compatibility_value_managed_edges(frames, visitor);
+                trace_compatibility_value_managed_edges(prior, visitor);
+                interface.trace_managed_edges(visitor);
+            }
+            Self::ContextDefsContext {
+                frames,
+                prior,
+                interface,
+                context,
+            } => {
+                for value in [frames, prior, interface] {
+                    trace_compatibility_value_managed_edges(value, visitor);
+                }
+                context.trace_managed_edges(visitor);
+            }
             Self::LocalHost { host, parts } => {
                 host.trace_managed_edges(visitor);
                 trace_compatibility_value_managed_edges(parts, visitor);
@@ -475,6 +591,36 @@ fn regional_demand(
     source_owner: LazyId,
 ) -> RegionalWhnfWork {
     RegionalWhnfWork::from_focus(access, value).with_source_owner(source_owner)
+}
+
+/// `prior` with `frames` prepended to its `msg.context`: a list context
+/// follows the frames, an absent or undefined one contributes nothing, and
+/// any other value is one frame.
+fn finish_context_defs_in(
+    access: &EvaluationValueAccess<'_>,
+    frames: &Value,
+    prior: &Value,
+    interface: &Value,
+    context: Option<&Value>,
+) -> RegionalBuiltinPoll {
+    let (Value::List(frames), Value::Dict(prior), Value::Dict(interface)) =
+        (frames, prior, interface)
+    else {
+        unreachable!("diagnostic context phases hold a frame list and dictionaries")
+    };
+    let existing = match context {
+        Some(Value::List(context)) => context.clone(),
+        Some(context) if is_undefined_in(access, context) => List::empty(),
+        Some(context) => List::from_values(vec![access.values().duplicate_value(context)]),
+        None => List::empty(),
+    };
+    let interface = interface.insert(
+        (*keys::CONTEXT).clone(),
+        Value::List(List::concat(frames.clone(), existing)),
+    );
+    RegionalBuiltinPoll::Ready(Value::Dict(
+        prior.insert((*keys::MSG).clone(), Value::Dict(interface)),
+    ))
 }
 
 fn finish_dict_defs_in(

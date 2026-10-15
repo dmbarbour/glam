@@ -2,7 +2,7 @@ use super::super::*;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use crate::core::{Builtin, Key, Value as CoreValue};
+use crate::core::{Builtin, Key, TestAccess as _, Value as CoreValue};
 use crate::diagnostic::Severity;
 use crate::evaluation::{EvalContext, EvaluationMachinePoll, EvaluationTaskMachine};
 use crate::reflection::{StoreCommitResult, StoreJournal};
@@ -989,4 +989,161 @@ fn viewers_can_inherit_one_diagnostic_independently() {
         Some(CoreValue::PartialBuiltin(call))
             if call.builtin == Builtin::ObjectComposedDefs
     ));
+}
+
+/// The `msg.text` and `msg.context` of an evaluated diagnostic, evaluating
+/// each as a renderer would.
+fn evaluated_message_fields(
+    context: &EvalContext,
+    diagnostic: &CoreValue,
+) -> (CoreValue, Vec<CoreValue>) {
+    let values = context.values();
+    let field = |value: &CoreValue, key: &Key| -> CoreValue {
+        let CoreValue::Dict(dict) = value else {
+            panic!("an evaluated diagnostic level should be a dictionary");
+        };
+        let member = dict
+            .get(key)
+            .map(|member| member.duplicate_for_test(values))
+            .unwrap_or_else(|| CoreValue::Dict(crate::core::Dict::new_sync()));
+        context
+            .evaluate_compatibility_whnf(&member)
+            .expect("a diagnostic member should evaluate")
+    };
+    let message = field(diagnostic, &crate::core::keys::MSG);
+    let text = field(&message, &crate::core::keys::TEXT);
+    let CoreValue::List(frames) = field(&message, &crate::core::keys::CONTEXT) else {
+        panic!("a diagnostic's context should evaluate to a list");
+    };
+    let mut items = Vec::new();
+    frames
+        .for_each_segment(
+            &mut |bytes| panic!("diagnostic context must not hold bytes: {bytes:?}"),
+            &mut |segment| {
+                items.extend(segment.iter().map(|frame| frame.duplicate_for_test(values)));
+                Ok::<_, ()>(())
+            },
+        )
+        .expect("diagnostic context frames should be materialized");
+    (text, items)
+}
+
+/// A failure's diagnostic is composed without evaluating anything, and,
+/// once a renderer evaluates it, it carries the emission's text with the
+/// failure's frames before the emission's own context: a list follows them,
+/// a single frame counts as one, and an absent context adds nothing
+/// (`senders-never-evaluate-diagnostics`).
+#[test]
+fn failure_diagnostics_compose_lazily_and_prepend_their_frames() {
+    let runtime = EvaluationRuntime::new(0).expect("test runtime should build");
+    let values = runtime.values();
+    let core = values.core();
+    let context = EvalContext::isolated(core.clone());
+    let frame = |name: &str| crate::diagnostic::evaluation_context_frame(name);
+    let message = |context: Option<CoreValue>| {
+        let mut interface = crate::core::Dict::new_sync().insert(
+            crate::core::keys::TEXT.clone(),
+            CoreValue::binary_from_text("emitted"),
+        );
+        if let Some(context) = context {
+            interface = interface.insert(crate::core::keys::CONTEXT.clone(), context);
+        }
+        CoreValue::Dict(
+            crate::core::Dict::new_sync()
+                .insert(crate::core::keys::MSG.clone(), CoreValue::Dict(interface)),
+        )
+    };
+    let cases = [
+        (None, vec![frame("outer"), frame("inner")], "plain"),
+        (
+            Some(message(Some(CoreValue::List(
+                crate::core::List::from_values(vec![frame("own")]),
+            )))),
+            vec![frame("outer"), frame("own")],
+            "emitted",
+        ),
+        (
+            Some(message(Some(frame("own")))),
+            vec![frame("outer"), frame("own")],
+            "emitted",
+        ),
+        (Some(message(None)), vec![frame("outer")], "emitted"),
+        (
+            Some(CoreValue::binary_from_text("binary")),
+            vec![frame("outer")],
+            "binary",
+        ),
+    ];
+    for (emission, expected_frames, expected_text) in cases {
+        let diagnostic = core.construct_runtime_value_root(|access| {
+            let failure = match &emission {
+                Some(emission) => crate::core::EvaluationFailure::emission_in(
+                    access,
+                    access.duplicate_value(emission),
+                ),
+                None => crate::core::EvaluationFailure::message("plain"),
+            };
+            let failure = if expected_frames.len() == 2 && emission.is_none() {
+                failure
+                    .with_context_in(access, frame("inner"))
+                    .with_context_in(access, frame("outer"))
+            } else {
+                failure.with_context_in(access, frame("outer"))
+            };
+            crate::diagnostic::failure_diagnostic_in(access, &failure)
+        });
+        let composed = diagnostic.clone_core_for_test();
+        assert!(
+            matches!(composed, CoreValue::Lazy(_)),
+            "a failure's diagnostic should be composed, not evaluated"
+        );
+        let evaluated = context
+            .evaluate_compatibility_whnf(&composed)
+            .expect("the composed diagnostic should evaluate");
+        let (text, frames) = evaluated_message_fields(&context, &evaluated);
+        core.assert_same_representation_for_test(
+            &text,
+            &CoreValue::binary_from_text(expected_text),
+        );
+        assert_eq!(frames.len(), expected_frames.len(), "{expected_text}");
+        for (frame, expected) in frames.iter().zip(&expected_frames) {
+            core.assert_same_representation_for_test(frame, expected);
+        }
+    }
+}
+
+/// A message that fails to evaluate fails its renderer, with a frame naming
+/// the diagnostic message, rather than falling back to other text.
+#[test]
+fn a_failing_diagnostic_message_fails_its_renderer_with_a_frame() {
+    let runtime = EvaluationRuntime::new(0).expect("test runtime should build");
+    let values = runtime.values();
+    let core = values.core();
+    let diagnostic = core.construct_runtime_value_root(|access| {
+        let broken = CoreValue::builtin_call_in(
+            access,
+            Builtin::Add,
+            vec![
+                CoreValue::Dict(crate::core::Dict::new_sync()),
+                CoreValue::Number(1.into()),
+            ],
+        );
+        let failure = crate::core::EvaluationFailure::emission_in(access, broken);
+        crate::diagnostic::failure_diagnostic_in(access, &failure)
+    });
+    let context = EvalContext::isolated(core.clone());
+    let Err(halt) = context.evaluate_compatibility_whnf(&diagnostic.clone_core_for_test()) else {
+        panic!("a diagnostic whose message fails should fail to evaluate");
+    };
+    let failure = halt
+        .permanent_failure()
+        .expect("a failing message is a permanent failure");
+    let expected = crate::diagnostic::evaluation_context_frame("diagnostic_message");
+    assert!(
+        core.test_access(|access| failure
+            .contexts()
+            .iter()
+            .any(|frame| access.same_representation(frame, &expected))),
+        "the failure should name the diagnostic message"
+    );
 }

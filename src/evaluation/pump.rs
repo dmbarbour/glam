@@ -1331,7 +1331,7 @@ impl EvaluationWorkCoordinator {
 #[cfg(test)]
 impl EvaluationWorkCoordinator {
     /// Runs `operation` as a driver would, under a mutator of its own.
-    fn with_driver_mutator_for_test<R>(
+    pub(in crate::evaluation) fn with_driver_mutator_for_test<R>(
         &self,
         operation: impl FnOnce(&mut RuntimeValueMutator<'_, '_>) -> R,
     ) -> R {

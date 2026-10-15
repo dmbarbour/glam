@@ -15,33 +15,77 @@ use super::io::{
 };
 use super::{MacroFailure, MacroRun, run_macro_effect};
 
-struct DiagnosticMessages(Arc<Mutex<Vec<String>>>);
+/// Collects each published diagnostic's text, evaluating it as a renderer
+/// does (`senders-never-evaluate-diagnostics`).
+struct DiagnosticMessages {
+    assembler: Assembler,
+    messages: Arc<Mutex<Vec<String>>>,
+}
+
+impl DiagnosticMessages {
+    fn new(assembler: &Assembler, messages: Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            assembler: assembler.clone(),
+            messages,
+        }
+    }
+}
 
 impl DiagnosticSubscriber for DiagnosticMessages {
     fn receive(&self, event: DiagnosticEvent) {
-        self.0
+        let text = diagnostic_text(&self.assembler, event.diagnostic());
+        self.messages
             .lock()
             .expect("diagnostic observation mutex should not be poisoned")
-            .push(diagnostic_text(event.diagnostic()));
+            .push(text);
     }
+}
+
+/// `value` evaluated to weak head normal form, as a renderer evaluates it.
+fn evaluated(assembler: &Assembler, value: &Value) -> Option<Value> {
+    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&assembler.eval_context(), value)
+        .ok()
+}
+
+/// The evaluated member `name` of an evaluated dictionary.
+fn member(assembler: &Assembler, value: &Value, name: &str) -> Option<Value> {
+    let Value::Dict(dict) = value else {
+        return None;
+    };
+    evaluated(assembler, dict.get(&Key::atom_from_text(name))?)
+}
+
+/// A diagnostic's context frames, evaluated as a renderer evaluates them.
+fn context_frames(assembler: &Assembler, diagnostic: &Diagnostic) -> Vec<Value> {
+    let frames = || {
+        let emission = evaluated(assembler, &diagnostic.emission().clone_core_for_test())?;
+        let message = member(assembler, &emission, "msg")?;
+        let Value::List(contexts) = member(assembler, &message, "context")? else {
+            return None;
+        };
+        eval::list_to_value_items(&assembler.eval_context(), &contexts).ok()
+    };
+    frames().unwrap_or_default()
+}
+
+/// The text of a nested cause frame.
+fn cause_text(assembler: &Assembler, frame: &Value) -> Option<String> {
+    let cause = evaluated(assembler, frame)?;
+    let message = member(assembler, &cause, "msg")?;
+    let Value::Binary(text) = member(assembler, &message, "text")? else {
+        return None;
+    };
+    Some(String::from_utf8_lossy(&text).into_owned())
 }
 
 /// A diagnostic's headline followed by the text of each nested cause. A
 /// macro failure's reason is its cause, not part of its headline.
-fn diagnostic_text(diagnostic: &Diagnostic) -> String {
+fn diagnostic_text(assembler: &Assembler, diagnostic: &Diagnostic) -> String {
     let mut text = diagnostic.message().to_owned();
-    if let Value::Dict(emission) = diagnostic.emission().clone_core_for_test()
-        && let Some(Value::Dict(message)) = emission.get(&Key::atom_from_text("msg"))
-        && let Some(Value::List(contexts)) = message.get(&Key::atom_from_text("context"))
-    {
-        for frame in contexts.value_slice().unwrap_or(&[]) {
-            if let Value::Dict(frame) = frame
-                && let Some(Value::Dict(cause)) = frame.get(&Key::atom_from_text("msg"))
-                && let Some(Value::Binary(cause_text)) = cause.get(&Key::atom_from_text("text"))
-            {
-                text.push_str("\n  cause: ");
-                text.push_str(&String::from_utf8_lossy(cause_text));
-            }
+    for frame in context_frames(assembler, diagnostic) {
+        if let Some(cause) = cause_text(assembler, &frame) {
+            text.push_str("\n  cause: ");
+            text.push_str(&cause);
         }
     }
     text
@@ -455,7 +499,7 @@ fn compilation_execution_drain_reports_detached_failure_and_deadlock() {
         let observed = Arc::new(Mutex::new(Vec::new()));
         let _subscription = assembler
             .diagnostic_bus()
-            .subscribe(DiagnosticMessages(observed.clone()));
+            .subscribe(DiagnosticMessages::new(&assembler, observed.clone()));
         let execution = assembler.test_compilation_execution();
 
         run(&execution, &effect, Value::Dict(Dict::new_sync()))
@@ -972,7 +1016,7 @@ fn source_macro_anchor_contract_rejects_ambiguous_or_empty_items() {
             error
                 .diagnostics()
                 .iter()
-                .any(|diagnostic| diagnostic_text(diagnostic).contains(expected)),
+                .any(|diagnostic| diagnostic_text(&assembler, diagnostic).contains(expected)),
             "unexpected diagnostics for `{body}` at `{invocation}`: {:?}",
             error.diagnostics()
         );
@@ -1003,7 +1047,7 @@ fn source_macro_rejects_reserved_or_unbalanced_generated_text() {
         let observed = Arc::new(Mutex::new(Vec::new()));
         let _subscription = assembler
             .diagnostic_bus()
-            .subscribe(DiagnosticMessages(observed.clone()));
+            .subscribe(DiagnosticMessages::new(&assembler, observed.clone()));
         let result = assembler
             .module(["invalid_macro_source_test"])
             .script(
@@ -1100,29 +1144,14 @@ fn macro_evaluation_failures_keep_their_structured_cause() {
             "{macro_definition}: the cause carries its own text, so the headline omits it"
         );
 
-        let Value::Dict(emission) = diagnostic.emission().clone_core_for_test() else {
-            panic!("{macro_definition}: a macro failure is an object diagnostic")
-        };
-        let Some(Value::Dict(message)) = emission.get(&Key::atom_from_text("msg")) else {
-            panic!("{macro_definition}: the diagnostic has a message interface")
-        };
-        let Some(Value::List(contexts)) = message.get(&Key::atom_from_text("context")) else {
-            panic!("{macro_definition}: the cause is carried as a context frame")
-        };
-        let cause = contexts
-            .value_slice()
-            .and_then(<[Value]>::first)
-            .expect("the cause is the first context frame");
-        let Value::Dict(cause) = cause else {
-            panic!("{macro_definition}: the cause is a nested diagnostic")
-        };
-        let Some(Value::Dict(cause_message)) = cause.get(&Key::atom_from_text("msg")) else {
-            panic!("{macro_definition}: the cause keeps its own message interface")
-        };
-        let Some(Value::Binary(text)) = cause_message.get(&Key::atom_from_text("text")) else {
-            panic!("{macro_definition}: the cause keeps its own text")
-        };
-        assert!(String::from_utf8_lossy(text).contains("cannot divide by zero"));
+        let frames = context_frames(&assembler, diagnostic);
+        let cause = frames
+            .first()
+            .unwrap_or_else(|| panic!("{macro_definition}: the cause is the first context frame"));
+        let text = cause_text(&assembler, cause).unwrap_or_else(|| {
+            panic!("{macro_definition}: the cause is a nested diagnostic with its own text")
+        });
+        assert!(text.contains("cannot divide by zero"));
     }
 }
 
@@ -1240,7 +1269,7 @@ fn declaration_macros_expand_right_to_left_and_share_the_evolving_view() {
     let observed = Arc::new(Mutex::new(Vec::new()));
     let _subscription = assembler
         .diagnostic_bus()
-        .subscribe(DiagnosticMessages(observed.clone()));
+        .subscribe(DiagnosticMessages::new(&assembler, observed.clone()));
     let module = assembler
         .module(["reverse_macro_test"])
         .script(
@@ -1363,7 +1392,7 @@ fn invalid_generated_source_discards_direct_macro_logs() {
     let observed = Arc::new(Mutex::new(Vec::new()));
     let _subscription = assembler
         .diagnostic_bus()
-        .subscribe(DiagnosticMessages(observed.clone()));
+        .subscribe(DiagnosticMessages::new(&assembler, observed.clone()));
     assembler
         .module(["discard_invalid_macro_log_test"])
         .script(

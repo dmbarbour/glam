@@ -1079,6 +1079,11 @@ run from 782 to 3,634, so suspensions no longer grow with evaluation
 (`chain_800`: 1,900 to 440; `chain_w4_800`, with workers: 7,191 to
 5,714); instructions fall 0.12%, 0.5% for the small workloads.
 
+Corrected 2026-10-15 under `diag-lazy-failures`: deferring a nonterminal
+release's status past its gate let a runtime observed stable show a
+blocked root still `Launched`. A release expected to change a published
+status now runs suspended, under one gate with its transition.
+
 ### Heap context in Glam (`gc-hold-thread-context`)
 
 With one heap per thread, Glam's call chains could find their runtime from

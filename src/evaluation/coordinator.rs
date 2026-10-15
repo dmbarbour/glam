@@ -853,6 +853,8 @@ pub(crate) struct EvaluationWorkCoordinator {
     terminal_publication_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     reflection_release_status_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    reflection_release_end_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(any(test, feature = "glam-prof"))]
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     exact_route_profile: Mutex<ExactDemandRouteProfile>,
@@ -1271,6 +1273,8 @@ impl EvaluationWorkCoordinator {
             terminal_publication_probe: Mutex::new(None),
             #[cfg(test)]
             reflection_release_status_probe: Mutex::new(None),
+            #[cfg(test)]
+            reflection_release_end_probe: Mutex::new(None),
             #[cfg(any(test, feature = "glam-prof"))]
             exact_route_profile: Mutex::new(ExactDemandRouteProfile::default()),
             #[cfg(any(test, feature = "glam-prof"))]
@@ -1397,6 +1401,8 @@ impl EvaluationWorkCoordinator {
             test_values: Some(values.clone()),
             terminal_publication_probe: Mutex::new(None),
             reflection_release_status_probe: Mutex::new(None),
+            #[cfg(test)]
+            reflection_release_end_probe: Mutex::new(None),
             exact_route_profile: Mutex::new(ExactDemandRouteProfile::default()),
             exact_route_mutation_profile: Mutex::new(ExactRouteMutationProfile::default()),
             notification_profile: Mutex::new(CoordinatorNotificationProfile::default()),
@@ -1685,6 +1691,28 @@ impl EvaluationWorkCoordinator {
             .reflection_release_status_probe
             .lock()
             .expect("reflection release status probe was poisoned") = Some(Box::new(probe));
+    }
+
+    /// Runs `probe` once a reflection release's gate ends, before anything
+    /// it defers.
+    #[cfg(test)]
+    pub(super) fn set_reflection_release_end_probe(&self, probe: impl FnOnce() + Send + 'static) {
+        *self
+            .reflection_release_end_probe
+            .lock()
+            .expect("reflection release end probe was poisoned") = Some(Box::new(probe));
+    }
+
+    #[cfg(test)]
+    fn run_reflection_release_end_probe(&self) {
+        let probe = self
+            .reflection_release_end_probe
+            .lock()
+            .expect("reflection release end probe was poisoned")
+            .take();
+        if let Some(probe) = probe {
+            probe();
+        }
     }
 
     #[cfg(test)]
@@ -2832,25 +2860,6 @@ impl EvaluationWorkCoordinator {
             .is_some_and(|publisher| publisher.publishes_status())
     }
 
-    /// The failure whose diagnostic `work`'s protected `.task.status`
-    /// publisher would build under the mutation gate, if it is not built yet
-    /// (`status-diagnostic-before-gate`).
-    fn unbuilt_status_diagnostic(
-        state: &mut WorkCoordinatorState,
-        work: EvaluationWorkId,
-        terminal: &EvaluationWaitTerminal,
-    ) -> Option<crate::runtime::RuntimeFailureRoot> {
-        let EvaluationWaitTerminal::Failed(failure) = terminal else {
-            return None;
-        };
-        let publishes_status = state
-            .work
-            .get_mut(&work)
-            .and_then(|record| record.obligations.task_publisher_mut())
-            .is_some_and(|publisher| publisher.protected_status.is_some());
-        (publishes_status && !failure.has_diagnostic()).then(|| failure.clone())
-    }
-
     fn settle_work(
         self: &Arc<Self>,
         mut mutator: Option<&mut RuntimeValueMutator<'_, '_>>,
@@ -2858,32 +2867,12 @@ impl EvaluationWorkCoordinator {
         terminal: EvaluationWaitTerminal,
         promise_failure: Option<Arc<EvaluationFailure>>,
     ) -> EvaluationWaitTerminal {
-        let (mutation, producer, status_update, promises) = loop {
+        let (mutation, producer, status_update, promises) = {
             let mutation = self.admission.mutation_guard();
             let mut state = self
                 .state
                 .lock()
                 .expect("evaluation work coordinator was poisoned");
-            if let Some(failure) = Self::unbuilt_status_diagnostic(&mut state, work, &terminal) {
-                // Building it evaluates through drivers whose quanta take the
-                // gate again, which `RwLock` refuses once a settlement queues
-                // behind this guard. Build it first, under the caller's
-                // mutator when it lends one, then look again: a status
-                // publisher may attach meanwhile.
-                drop(state);
-                drop(mutation);
-                match mutator.as_deref_mut() {
-                    Some(mutator) => drop(failure.diagnostic_under(mutator)),
-                    None => {
-                        let values = self
-                            .value_observer()
-                            .upgrade()
-                            .expect("a task publishing its status must retain a live value domain");
-                        drop(failure.diagnostic(&values));
-                    }
-                }
-                continue;
-            }
             if let Some(mutator) = mutator.as_deref_mut()
                 && Self::publishes_status(&mut state, work)
             {
@@ -2933,7 +2922,7 @@ impl EvaluationWorkCoordinator {
                     RouteHazard::None,
                 );
             }
-            break (mutation, producer, status_update, promises);
+            (mutation, producer, status_update, promises)
         };
         let wait = match &producer {
             ProducerSettlementObligation::ReflectionTask(publisher) => &publisher.wait,

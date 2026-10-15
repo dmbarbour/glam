@@ -699,6 +699,36 @@ maps the short names used here to file names.
 
 ## Diagnostics
 
+### Senders never evaluate diagnostics; renderers do
+`senders-never-evaluate-diagnostics` · 2026-10-15 · maintainer · accepted
+- **Context:** the runtime built a failure's diagnostic eagerly, through an
+  isolated session and nested drivers, wherever it published one: a failed
+  task's `.task.status`, `.eval` results, public `Error`, macro causes and
+  readiness reports. Public enrichment (`Diagnostic::enrich`,
+  `with_context`, `apply_updates`) evaluated too. Settlement had to build a
+  status diagnostic before taking the runtime gate
+  (`status-diagnostic-before-gate`), and a quantum boundary had to lend its
+  mutator to the drivers that built it (`boundary-release-under-mutator`).
+- **Decision:** a diagnostic is evaluated only to render it, usually on the
+  logger's thread. Senders build and enrich diagnostics as unevaluated
+  compositions, closer to a lowering than an evaluation, without observing
+  the emission: an object normalization of the emission with mixins
+  applied. Context frames prepend through the mixin
+  `msg.context ::= \ prior -> frames ++ prior`; a compiler-private builtin
+  may serve as a convenience or accelerator but is not required
+  semantically. A message that fails to evaluate is an error in the error,
+  reported to whoever renders it with an `eval:{op:'diagnostic_message}`
+  frame, with no fallback text (maintainer). The ordering of
+  `status-diagnostic-before-gate` was vestigial and goes.
+- **Consequences:** settlement, the quantum boundary and the public API stop
+  evaluating diagnostics, so nothing evaluates to publish a failure.
+  Diagnostics nobody renders cost nothing. A Rust reader that inspects a
+  diagnostic's fields evaluates it first, or sees only what is immediately
+  built.
+- **Rule lives in:** `agent_context/diagnostics.md` "Publication and
+  Counts".
+- **Recorded in:** lazy diagnostics plan.
+
 ### A failure's cause is a nested `msg` frame; the headline states only its own finding
 `failure-cause-as-nested-msg-frame` · 2026-10-05 · maintainer and agent · accepted
 - **Context:** macro, `conf.cli` and killed-work failures were flattened to
@@ -1616,7 +1646,7 @@ maps the short names used here to file names.
 - **Recorded in:** structural overheads plan, `perf-worker-scaling`.
 
 ### Nothing evaluates under the runtime mutation gate; a failed status's diagnostic is built first
-`status-diagnostic-before-gate` · 2026-10-14 · agent · accepted
+`status-diagnostic-before-gate` · 2026-10-14 · agent · superseded
 - **Context:** publishing a failed reflection task's `.task.status` built
   the failure's diagnostic under the gate's shared guard, through an
   isolated session and a nested driver that took the gate again. The gate
@@ -1638,6 +1668,7 @@ maps the short names used here to file names.
 - **Rule lives in:** `agent_context/evaluation.md` "Values and Forcing".
 - **Recorded in:** explicit heap holds plan, `gc-hold-boundaries` (fourth
   slice, `status-diagnostic-before-gate`).
+- **Superseded by:** `senders-never-evaluate-diagnostics`.
 
 ### A task block, dependency or wait is dropped outside runtime locks
 `route-leases-drop-outside-locks` · 2026-10-14 · agent · accepted
@@ -2166,7 +2197,10 @@ maps the short names used here to file names.
   under a mutator. That cannot deadlock on admission, since a synchronous
   collection admits entries until no mutator is active; nobody may call
   `collect_full` while holding them. Code the release reaches takes access
-  from its caller instead of opening a boundary.
+  from its caller instead of opening a boundary. A release expected to
+  change a published task status runs suspended, under one gate with its
+  transition, so a runtime observed stable has published every blocked
+  state (corrected 2026-10-15).
 - **Rule lives in:** `agent_context/evaluation.md` "Values and Forcing".
 - **Recorded in:** explicit heap holds plan, `gc-hold-suspension-review`,
   `gc-hold-boundary-release`.

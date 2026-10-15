@@ -52,10 +52,10 @@ control-flow overview.
   macro-bearing declaration. Each poll
   runs as a quantum under it (`EvaluationPollContext::quantum_under` or
   `quantum_for_context_under`), whose context lends value access; machine
-  polls receive it as `&mut EvaluationPollContext`. A quantum boundary is
-  one suspension of the driver's mutator: the poll's deferred work, the
-  release (which may settle, call client code, evaluate a diagnostic
-  through a nested driver, or collect) and the released machine's disposal.
+  polls receive it as `&mut EvaluationPollContext`. A quantum boundary
+  releases under the driver's mutator, suspending it only for the poll's
+  deferred work, a requested collection, status publication and the
+  released machine's disposal (`boundary-release-under-mutator`).
   Waits suspend the mutator before taking their locks; an idle worker ends
   its hold instead. A panic inside one of a poll's suspensions leaves the
   mutator without admission, so a driver that catches a poll's panic calls
@@ -194,7 +194,7 @@ control-flow overview.
   Pollable computations may propagate all three cases. Only the permanent
   variant may enter a lazy cache, promise failure, terminal wait cell, or
   failure ledger. Diagnostic projection belongs to `eval`, not the core halt
-  representation. Diagnostic normalization and object/viewer mixins also
+  representation. Diagnostic compositions and object/viewer mixins also
   retain this halt until the public `Error` boundary; they must not stringify
   a failure merely because they operate on diagnostics.
 - Computed lazy work is owned by runtime-coordinator deferred-work records
@@ -452,9 +452,9 @@ control-flow overview.
 - Never evaluate or start a driver while holding runtime mutation admission:
   a second read of the gate on one thread waits behind any queued
   settlement, which waits for the first. Debug builds panic when a thread
-  takes the gate twice. A failed task's status diagnostic is built on its
-  `RuntimeFailureRoot` before settlement takes the gate
-  (`status-diagnostic-before-gate`).
+  takes the gate twice. Settlement never evaluates: a failed task's status
+  diagnostic is composed, not evaluated
+  (`senders-never-evaluate-diagnostics`).
 
 ## Sessions and Workers
 

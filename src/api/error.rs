@@ -45,28 +45,13 @@ impl Error {
         if let Some(report) = error.panic_report() {
             return Self::panicked(report.clone());
         }
-        Self::from_eval_parts(
-            values,
-            crate::diagnostic::halt_diagnostic_root_with(values, &error),
-        )
-    }
-
-    fn from_eval_parts(
-        values: &CoreValueFactory,
-        emission: Option<crate::runtime::RuntimeValueRoot>,
-    ) -> Self {
         let message: Arc<str> = Arc::from("glam evaluation failed");
-        let diagnostic = match emission {
-            Some(emission) => {
-                let public_values = Values::from_core_factory(values.clone());
-                Diagnostic::from_parts(
-                    &public_values,
-                    None,
-                    Severity::Error,
-                    Value::from_runtime_root(emission),
-                    None,
-                )
-            }
+        let diagnostic = match error.permanent_failure() {
+            Some(failure) => Diagnostic::from_failure(
+                &Values::from_core_factory(values.clone()),
+                Severity::Error,
+                failure,
+            ),
             None => Diagnostic::new_with_factory(values, Severity::Error, Arc::clone(&message)),
         };
         Self {

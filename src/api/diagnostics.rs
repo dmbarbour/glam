@@ -196,33 +196,23 @@ impl Diagnostic {
     /// Prepends one structured frame describing why this diagnostic was
     /// produced or propagated. The original emission remains otherwise
     /// unchanged.
+    ///
+    /// The frame is composed onto the emission without evaluating it
+    /// (`senders-never-evaluate-diagnostics`); the line and message keep
+    /// summarizing the original emission.
     pub fn with_context(self, values: &Values, context: Value) -> Result<Self, Error> {
         self.emission.require_runtime(values.runtime)?;
         context.require_runtime(values.runtime)?;
-        let contexts = values.with_access(|access| {
-            let context = access
-                .clone_core(&context)
-                .expect("the diagnostic runtime was checked");
-            access
-                .wrap(CoreValue::List(crate::core::List::from_values(vec![
-                    context,
-                ])))
-                .0
-        });
-        let emission = crate::diagnostic::prepend_contexts_root(
-            &values.core,
-            self.emission.0.clone(),
-            contexts,
-        )
-        .map(Value::from_runtime_root)
-        .unwrap_or_else(|_| self.emission.clone());
-        Ok(Self::from_parts(
-            values,
-            self.source,
-            self.severity,
-            emission,
-            self.origin,
-        ))
+        let emission = values.with_access(|access| {
+            let emission = access.clone_core(&self.emission)?;
+            let context = access.clone_core(&context)?;
+            Ok::<_, Error>(access.wrap(crate::diagnostic::diagnostic_with_frames_in(
+                access.runtime_access(),
+                emission,
+                vec![context],
+            )))
+        })?;
+        Ok(Self { emission, ..self })
     }
 
     /// Encodes this Rust envelope as one runtime-local value for buffered
@@ -259,6 +249,12 @@ impl Diagnostic {
                     CoreValue::Number(Number::integer(line as i64)),
                 );
             }
+            // The message summarizes the emission as built, which a composed
+            // emission no longer shows.
+            fields = fields.insert(
+                Key::atom_from_text("message"),
+                CoreValue::binary_from_text(self.message.as_ref()),
+            );
             Ok(access.wrap(CoreValue::Dict(fields)))
         })
     }
@@ -309,8 +305,17 @@ impl Diagnostic {
                     .transpose()?;
                 let origin = field("origin")
                     .map(|origin| access.wrap(access.runtime_access().duplicate_value(origin)));
-                let (projected_line, message) =
+                let (projected_line, projected_message) =
                     crate::diagnostic::conventional_summary(access.runtime_access(), &emission);
+                let message = match field("message") {
+                    Some(CoreValue::Binary(message)) => {
+                        Some(Arc::from(String::from_utf8_lossy(message).as_ref()))
+                    }
+                    Some(_) => {
+                        return Err(Error::new("diagnostic transport message must be text"));
+                    }
+                    None => projected_message,
+                };
                 Ok(Self {
                     emission: access.wrap(emission),
                     origin,
@@ -366,6 +371,68 @@ impl Diagnostic {
     ) -> Self {
         values
             .with_access(|access| Self::from_parts_in(&access, source, severity, emission, origin))
+    }
+
+    /// The diagnostic for an evaluation `failure`, composed without
+    /// evaluating it (`senders-never-evaluate-diagnostics`). Its line and
+    /// message summarize the failure's emission as built.
+    pub(crate) fn from_failure(
+        values: &Values,
+        severity: Severity,
+        failure: &crate::core::EvaluationFailure,
+    ) -> Self {
+        values.with_access(|access| {
+            let emission = access.wrap(crate::diagnostic::failure_diagnostic_in(
+                access.runtime_access(),
+                failure,
+            ));
+            Self::from_parts_in(&access, None, severity, emission, None)
+        })
+    }
+
+    /// Summarizes this diagnostic by evaluating its `msg.text` and
+    /// `msg.location.line`, as a renderer does. Only a projection for
+    /// rendering may call it; senders never evaluate a diagnostic
+    /// (`senders-never-evaluate-diagnostics`). A part that does not evaluate
+    /// to text or a line keeps its summary.
+    pub(crate) fn summarized_for_rendering(mut self, values: &Values) -> Self {
+        let context = crate::evaluation::EvalContext::isolated(values.core().clone());
+        let evaluate = |path: &[&str]| {
+            let value = values
+                .access_names(&self.emission, path.iter().copied())
+                .ok()?;
+            context.evaluate_root_whnf(value.0).ok()
+        };
+        let text = evaluate(&["msg", "text"]);
+        let line = evaluate(&["msg", "location", "line"]);
+        values.with_access(|access| {
+            let runtime = access.runtime_access();
+            let text = text.and_then(|text| {
+                text.with_core(runtime, |text| match text {
+                    CoreValue::Binary(text) => {
+                        Some(Arc::from(String::from_utf8_lossy(text).as_ref()))
+                    }
+                    _ => None,
+                })
+                .flatten()
+            });
+            let line = line.and_then(|line| {
+                line.with_core(runtime, |line| match line {
+                    CoreValue::Number(line) => line
+                        .to_i64_if_integer()
+                        .and_then(|line| usize::try_from(line).ok()),
+                    _ => None,
+                })
+                .flatten()
+            });
+            if let Some(text) = text {
+                self.message = text;
+            }
+            if line.is_some() {
+                self.line = line;
+            }
+        });
+        self
     }
 
     /// As [`Self::from_parts`], within an open access to its values.

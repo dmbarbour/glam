@@ -279,13 +279,11 @@ pub(in crate::g_syntax) fn evaluation_cause(
     values: &CoreValueFactory,
     halt: &EvaluationHalt,
 ) -> Option<Diagnostic> {
-    crate::diagnostic::halt_diagnostic_root_with(values, halt).map(|emission| {
-        Diagnostic::from_parts(
+    halt.permanent_failure().map(|failure| {
+        Diagnostic::from_failure(
             &Values::from_core_factory(values.clone()),
-            None,
             Severity::Error,
-            PublicValue::from_runtime_root(emission),
-            None,
+            failure,
         )
     })
 }

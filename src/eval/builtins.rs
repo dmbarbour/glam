@@ -160,6 +160,7 @@ pub(super) fn apply_builtin_in(
         Builtin::ObjectSpec
         | Builtin::ObjectLocalName
         | Builtin::DiagnosticObject
+        | Builtin::DiagnosticContextDefs
         | Builtin::ObjectWithDefs
         | Builtin::ObjectComposedDefs
         | Builtin::ObjectOverrideDefs

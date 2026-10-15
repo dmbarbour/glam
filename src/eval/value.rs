@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-#[cfg(test)]
-use crate::core::ListThunk;
 use crate::core::{
     Dict, EvaluatedValue, EvaluationFailure, EvaluationHalt, FixpointComputation, Key,
-    LazyProducerView, LazySource, LazyValue, List, ManagedLazyRoot, ManagedPromiseRoot,
-    PromisedValue, RuntimeValueAccess, Value, keys,
+    LazyProducerView, LazySource, LazyValue, ManagedLazyRoot, ManagedPromiseRoot, PromisedValue,
+    RuntimeValueAccess, Value, keys,
 };
+#[cfg(test)]
+use crate::core::{List, ListThunk};
 use crate::core_net::CoreDataKey;
 use crate::evaluation::{
     EvalContext, EvaluationMachinePoll, EvaluationTaskBlock, EvaluationTaskMachine,
@@ -29,51 +29,29 @@ use super::list_effect_machine::{
 use super::net::*;
 use super::object_machine::{RegionalObjectFixpoint, RegionalObjectFixpointPoll};
 
-pub(crate) fn failure_diagnostic_value_in(
-    access: &RuntimeValueAccess<'_>,
-    failure: &EvaluationFailure,
-) -> Value {
-    let emission = match failure.emission_value_in(access) {
-        Some(Value::Binary(text)) => {
-            crate::diagnostic::text_message_in(access, None, String::from_utf8_lossy(text))
-        }
-        Some(emission @ Value::Dict(_)) => access.duplicate_value(emission),
-        Some(other) => {
-            return fallback_failure_diagnostic(
-                access,
-                failure,
-                Some(access.duplicate_value(other)),
-                failure_contexts_value(access, failure),
-            );
-        }
-        None => crate::diagnostic::text_message_in(access, None, failure.to_string()),
-    };
-
-    crate::diagnostic::prepend_contexts_in(
-        access,
-        access.duplicate_value(&emission),
-        failure.contexts_in(access),
-    )
-    .unwrap_or_else(|_| {
-        fallback_failure_diagnostic(
-            access,
-            failure,
-            Some(emission),
-            failure_contexts_value(access, failure),
-        )
-    })
-}
-
+/// A failure's diagnostic composed and then evaluated to weak head normal
+/// form, as a renderer would.
 #[cfg(test)]
 pub(crate) fn failure_diagnostic_value(failure: &EvaluationFailure) -> Value {
     let values = crate::core::test_value_factory();
-    values.with_boundary_access(|access| failure_diagnostic_value_in(&access, failure))
+    let diagnostic = values.with_boundary_access(|access| {
+        access.root_runtime_value(crate::diagnostic::failure_diagnostic_in(&access, failure))
+    });
+    let evaluated = crate::evaluation::EvalContext::isolated(values.clone())
+        .evaluate_root_whnf(diagnostic)
+        .unwrap_or_else(|_| panic!("a test failure's diagnostic should evaluate"));
+    values.with_boundary_access(|access| evaluated.clone_core_with(&access))
 }
 
+/// A permanent halt's diagnostic, composed without evaluating it.
 #[cfg(test)]
 pub(crate) fn halt_diagnostic_value(halt: &EvaluationHalt) -> Option<Value> {
-    halt.permanent_failure()
-        .map(|failure| failure_diagnostic_value(failure))
+    let values = crate::core::test_value_factory();
+    halt.permanent_failure().map(|failure| {
+        values.with_boundary_access(|access| {
+            crate::diagnostic::failure_diagnostic_in(&access, failure)
+        })
+    })
 }
 
 pub(crate) fn evaluation_context_frame_in(
@@ -106,34 +84,6 @@ pub(crate) fn evaluation_context_frame(operation: &str) -> Value {
 #[cfg(test)]
 pub(crate) fn evaluation_context_frame_with_args(operation: &str, args: Dict) -> Value {
     crate::diagnostic::evaluation_context_frame_with_args(operation, args)
-}
-
-fn fallback_failure_diagnostic(
-    _access: &RuntimeValueAccess<'_>,
-    failure: &EvaluationFailure,
-    emission: Option<Value>,
-    contexts: Value,
-) -> Value {
-    let mut message = Dict::new_sync()
-        .insert(
-            (*keys::TEXT).clone(),
-            Value::binary_from_text(&failure.to_string()),
-        )
-        .insert((*keys::CONTEXT).clone(), contexts);
-    if let Some(emission) = emission {
-        message = message.insert((*keys::VALUE).clone(), emission);
-    }
-    Value::Dict(Dict::new_sync().insert((*keys::MSG).clone(), Value::Dict(message)))
-}
-
-fn failure_contexts_value(access: &RuntimeValueAccess<'_>, failure: &EvaluationFailure) -> Value {
-    Value::List(List::from_values(
-        failure
-            .contexts_in(access)
-            .iter()
-            .map(|context| access.duplicate_value(context))
-            .collect(),
-    ))
 }
 
 enum LazyTaskWork {

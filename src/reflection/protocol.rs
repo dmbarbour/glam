@@ -643,16 +643,7 @@ impl TaskHalt {
         let failure = self
             .permanent_failure()
             .expect("a task halt that did not panic is a failure");
-        Diagnostic::from_parts(
-            values,
-            None,
-            Severity::Error,
-            PublicValue::from_runtime_root(crate::diagnostic::failure_diagnostic_root_with(
-                values.core(),
-                failure,
-            )),
-            None,
-        )
+        Diagnostic::from_failure(values, Severity::Error, failure)
     }
 
     pub(super) fn into_failure(self) -> Arc<EvaluationFailure> {

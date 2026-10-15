@@ -500,17 +500,47 @@ impl EvaluationWorkCoordinator {
     }
 
     /// As [`Self::release_reflection`], under a quantum boundary's `mutator`.
-    /// A status publisher runs client code, so its advisory update waits
-    /// until the release's gate ends and then publishes with the mutator
-    /// suspended, under a gate of its own; its order check drops it if a
-    /// newer status was published meanwhile.
+    ///
+    /// A status publisher builds its value and runs client code, so a
+    /// release expected to change a published status runs suspended, under
+    /// one gate with its transition: a runtime observed stable has published
+    /// every blocked state. Any other change it makes publishes after the
+    /// release's gate, suspended under a gate of its own; the advisory
+    /// update's order check drops it if a newer status was published
+    /// meanwhile.
     pub(in crate::evaluation) fn release_reflection_under(
         &self,
         mutator: &mut RuntimeValueMutator<'_, '_>,
         claimed: ClaimedReflectionWork,
         poll: ReflectionWorkPoll,
     ) -> ReflectionWorkRelease {
+        if self.release_changes_published_status(claimed.id, &poll) {
+            return mutator.suspend(|| self.release_reflection_with(None, claimed, poll));
+        }
         self.release_reflection_with(Some(mutator), claimed, poll)
+    }
+
+    /// Whether releasing `work` with `poll` is expected to change a status
+    /// its observers have seen.
+    fn release_changes_published_status(
+        &self,
+        work: EvaluationWorkId,
+        poll: &ReflectionWorkPoll,
+    ) -> bool {
+        let status = match poll {
+            ReflectionWorkPoll::Yielded => EvaluationTaskStatus::Launched,
+            ReflectionWorkPoll::Blocked(_) => EvaluationTaskStatus::Blocked,
+            ReflectionWorkPoll::Exit(_) | ReflectionWorkPoll::Terminal => return false,
+        };
+        let mut state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        state
+            .work
+            .get_mut(&work)
+            .and_then(|record| record.obligations.task_publisher_mut())
+            .is_some_and(|publisher| publisher.would_publish(&status))
     }
 
     fn release_reflection_with(
@@ -726,6 +756,8 @@ impl EvaluationWorkCoordinator {
             route_tracker.finish(&state)
         });
         drop(mutation);
+        #[cfg(test)]
+        self.run_reflection_release_end_probe();
         // A route's last lease releases the route, which takes the gate.
         drop(promoted_wait);
         self.notify_all(CoordinatorMutationKind::WorkRelease);

@@ -34,6 +34,9 @@ its plan's topic, and unique across all docs. Examples:
 
 ## Active Plans
 
+- [`LazyDiagnostics_2026-10-15.md`](LazyDiagnostics_2026-10-15.md): senders
+  build and enrich diagnostics without evaluating them; only renderers
+  evaluate (`diag-` steps).
 - [`PerformanceRoadmap_2026-10-05.md`](PerformanceRoadmap_2026-10-05.md):
   the umbrella for performance work, covering shared measurement, how
   budgets treat batching, and the order of its `perf-` steps.

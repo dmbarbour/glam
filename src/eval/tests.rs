@@ -1058,10 +1058,13 @@ fn immediate_diagnostic_shell_operations_share_one_root_neutral_access_region() 
             Value::Dict(Dict::new_sync().insert(detail.clone(), n(7))),
         )
         .with_context_in(&access, frame);
-        let Value::Dict(diagnostic) = failure_diagnostic_value_in(&access, &failure) else {
-            panic!("a dictionary emission should remain a diagnostic dictionary")
-        };
-        access.assert_same_representation_for_test(&diagnostic.get(&detail), &Some(&n(7)));
+        assert!(
+            matches!(
+                crate::diagnostic::failure_diagnostic_in(&access, &failure),
+                Value::Lazy(_)
+            ),
+            "a failure's diagnostic is composed, not evaluated"
+        );
 
         let Value::Dict(split) = split_result_value(&access, n(1), n(2)) else {
             panic!("a split result should be a dictionary")

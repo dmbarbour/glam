@@ -2,9 +2,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::core::{
-    Builtin, CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, Key, List,
-    OpaquePayloadFamily, OpaquePayloadRecord, OpaqueValue, RuntimeValueAccess, RuntimeValueMutator,
-    Value, keys,
+    Builtin, CoreValueFactory, Dict, EvaluationFailure, Key, List, OpaquePayloadFamily,
+    OpaquePayloadRecord, OpaqueValue, RuntimeValueAccess, RuntimeValueMutator, Value, keys,
 };
 use crate::number::Number;
 use crate::runtime::RuntimeValueRoot;
@@ -330,89 +329,60 @@ pub(crate) fn evaluation_context_frame_with_args(operation: &str, args: Dict) ->
     Value::Dict(Dict::new_sync().insert((*keys::EVAL).clone(), Value::Dict(detail)))
 }
 
-/// Transitional runtime-aware projection of one evaluator failure, as a
+/// The diagnostic for `failure`, composed without evaluating it
+/// (`senders-never-evaluate-diagnostics`): its emission, or its text,
+/// normalized to an object, with its context frames prepended to
+/// `msg.context`. A renderer evaluates it.
+pub(crate) fn failure_diagnostic_in(
+    access: &RuntimeValueAccess<'_>,
+    failure: &EvaluationFailure,
+) -> Value {
+    let emission = match failure.emission_value_in(access) {
+        Some(Value::Binary(text)) => text_message_in(access, None, String::from_utf8_lossy(text)),
+        Some(emission) => access.duplicate_value(emission),
+        None => text_message_in(access, None, failure.to_string()),
+    };
+    let frames = failure
+        .contexts_in(access)
+        .iter()
+        .map(|context| access.duplicate_value(context))
+        .collect();
+    diagnostic_with_frames_in(access, emission, frames)
+}
+
+/// `message` as a diagnostic object with `frames` prepended to its
+/// `msg.context`, composed without evaluating either:
+/// `diagnostic_object message with { msg.context ::= \ prior -> frames ++
+/// prior }`. A failure to evaluate the message carries an
+/// `eval:{op:'diagnostic_message}` frame.
+pub(crate) fn diagnostic_with_frames_in(
+    access: &RuntimeValueAccess<'_>,
+    message: Value,
+    frames: Vec<Value>,
+) -> Value {
+    let object = Value::builtin_call_in(access, Builtin::DiagnosticObject, vec![message]);
+    let context_defs = Value::PartialBuiltin(crate::core::BuiltinCall {
+        builtin: Builtin::DiagnosticContextDefs,
+        arguments: Arc::from([Value::List(List::from_values(frames))]),
+    });
+    let diagnostic =
+        Value::builtin_call_in(access, Builtin::ObjectWithDefs, vec![object, context_defs]);
+    let annotation = Value::Dict(Dict::new_sync().insert(
+        (*keys::CONTEXT).clone(),
+        evaluation_context_frame_in(access, "diagnostic_message"),
+    ));
+    Value::builtin_call_in(access, Builtin::Anno, vec![annotation, diagnostic])
+}
+
+/// The diagnostic for `failure`, composed without evaluating it, as a
 /// boundary of its own.
-///
-/// Unlike `eval::failure_diagnostic_value_in`, this path may evaluate the
-/// emission while normalizing it into a diagnostic object. It therefore must
-/// not receive or retain an active value-access region.
 pub(crate) fn failure_diagnostic_root_with(
     values: &CoreValueFactory,
     failure: &EvaluationFailure,
 ) -> RuntimeValueRoot {
-    values.with_runtime_value_mutator(|mut mutator| {
-        failure_diagnostic_root_under(&mut mutator, failure)
+    values.with_boundary_access(|access| {
+        access.root_runtime_value(failure_diagnostic_in(&access, failure))
     })
-}
-
-/// As [`failure_diagnostic_root_with`], under a caller's `mutator`, which
-/// the normalization's drivers borrow.
-pub(crate) fn failure_diagnostic_root_under(
-    mutator: &mut RuntimeValueMutator<'_, '_>,
-    failure: &EvaluationFailure,
-) -> RuntimeValueRoot {
-    let (emission, contexts) = mutator.with_access(|access| {
-        let emission = match failure.emission_value_in(&access) {
-            Some(Value::Binary(text)) => {
-                text_message_in(&access, None, String::from_utf8_lossy(text))
-            }
-            Some(emission) => access.duplicate_value(emission),
-            None => text_message_in(&access, None, failure.to_string()),
-        };
-        let contexts = failure
-            .contexts_in(&access)
-            .iter()
-            .map(|context| access.duplicate_value(context))
-            .collect();
-        (
-            access.root_runtime_value(emission),
-            access.root_runtime_value(Value::List(List::from_values(contexts))),
-        )
-    });
-    prepend_contexts_root_under(mutator, emission.clone(), contexts).unwrap_or_else(|_| {
-        mutator.with_access(|access| {
-            let emission = emission.clone_core_with(&access);
-            let contexts = Value::List(List::from_values(
-                failure
-                    .contexts_in(&access)
-                    .iter()
-                    .map(|context| access.duplicate_value(context))
-                    .collect(),
-            ));
-            access.root_runtime_value(fallback_failure_diagnostic(
-                &access,
-                failure,
-                Some(emission),
-                contexts,
-            ))
-        })
-    })
-}
-
-pub(crate) fn halt_diagnostic_root_with(
-    values: &CoreValueFactory,
-    halt: &EvaluationHalt,
-) -> Option<RuntimeValueRoot> {
-    halt.permanent_failure()
-        .map(|failure| failure_diagnostic_root_with(values, failure))
-}
-
-fn fallback_failure_diagnostic(
-    _access: &RuntimeValueAccess<'_>,
-    failure: &EvaluationFailure,
-    emission: Option<Value>,
-    contexts: Value,
-) -> Value {
-    let mut message = Dict::new_sync()
-        .insert(
-            (*keys::TEXT).clone(),
-            Value::binary_from_text(&failure.to_string()),
-        )
-        .insert((*keys::CONTEXT).clone(), contexts);
-    if let Some(emission) = emission {
-        message = message.insert((*keys::VALUE).clone(), emission);
-    }
-    Value::Dict(Dict::new_sync().insert((*keys::MSG).clone(), Value::Dict(message)))
 }
 
 pub(crate) fn assembler_metadata(
@@ -459,36 +429,6 @@ fn with_isolated_context<R>(
     let result = normalize(&context, mutator);
     mutator.suspend(|| drop(context));
     result
-}
-
-pub(crate) fn prepend_contexts_in(
-    access: &RuntimeValueAccess<'_>,
-    message: Value,
-    contexts: &[Value],
-) -> Result<Value, crate::core::EvaluationHalt> {
-    let Value::Dict(message) = message else {
-        return Err(crate::core::EvaluationHalt::new(
-            "diagnostic context requires an immediately structured diagnostic",
-        ));
-    };
-    let interface = match message.get(&*keys::MSG) {
-        Some(Value::Dict(interface)) => interface.clone(),
-        _ => Dict::new_sync(),
-    };
-    let existing = match interface.get(&*keys::CONTEXT) {
-        Some(Value::List(contexts)) => contexts.clone(),
-        Some(context) => List::from_values(vec![access.duplicate_value(context)]),
-        None => List::empty(),
-    };
-    let prefix = contexts
-        .iter()
-        .map(|context| access.duplicate_value(context))
-        .collect();
-    let contexts = List::concat(List::from_values(prefix), existing);
-    let interface = interface.insert((*keys::CONTEXT).clone(), Value::List(contexts));
-    Ok(Value::Dict(
-        message.insert((*keys::MSG).clone(), Value::Dict(interface)),
-    ))
 }
 
 fn apply_updates_root(
@@ -626,11 +566,45 @@ fn diagnostic_object_root(
     }
 }
 
+/// The message `value` presents without evaluating anything: itself, a
+/// lazy's cached result, or, for an unevaluated diagnostic composition
+/// (`senders-never-evaluate-diagnostics`), the message it composes. The
+/// mixins senders compose add context, metadata and viewer fields; the
+/// message keeps its text and location.
+fn immediate_message_in(access: &RuntimeValueAccess<'_>, value: &Value) -> Option<Value> {
+    // Compositions nest one level per sender that enriched the diagnostic.
+    const DEPTH_LIMIT: usize = 32;
+    let mut current = access.duplicate_value(value);
+    for _ in 0..DEPTH_LIMIT {
+        let Value::Lazy(lazy) = &current else {
+            return Some(current);
+        };
+        let lazy = lazy.access(access);
+        if let Some(result) = lazy.cached() {
+            current = result.ok()?.into_value_in(access);
+            continue;
+        }
+        let Some(crate::core::LazySource::Builtin(call)) = lazy.source_snapshot() else {
+            return None;
+        };
+        current = match (call.builtin, call.arguments.as_ref()) {
+            (Builtin::Anno, [_, message])
+            | (Builtin::ObjectWithDefs, [message, _])
+            | (Builtin::DiagnosticObject, [message]) => access.duplicate_value(message),
+            _ => return None,
+        };
+    }
+    None
+}
+
 pub(crate) fn conventional_summary(
-    _access: &RuntimeValueAccess<'_>,
+    access: &RuntimeValueAccess<'_>,
     message: &Value,
 ) -> (Option<usize>, Option<Arc<str>>) {
-    let Value::Dict(message) = message else {
+    let Some(message) = immediate_message_in(access, message) else {
+        return (None, None);
+    };
+    let Value::Dict(message) = &message else {
         return (None, None);
     };
     let Some(Value::Dict(interface)) = message.get(&*keys::MSG) else {

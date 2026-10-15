@@ -2082,6 +2082,13 @@ pub enum Builtin {
     /// object. Host readers compose this with ordinary object updates without
     /// evaluating either step inside their callback.
     DiagnosticObject,
+    /// Compiler-private object definitions `(frames, prior, final)` that
+    /// prepend `frames` to a diagnostic's `msg.context`: the mixin
+    /// `msg.context ::= \ prior -> frames ++ prior`, where an absent context
+    /// contributes nothing and a non-list context is one frame. Partially
+    /// applied to its frames, it extends a diagnostic object lazily
+    /// (`senders-never-evaluate-diagnostics`).
+    DiagnosticContextDefs,
     /// Internal protocol adapters used while object/effect construction is
     /// still implemented by the bootstrap evaluator.
     EffectApply,
@@ -2182,6 +2189,7 @@ impl Builtin {
             Self::ObjectInstanceFromParts => 3,
             Self::ObjectInstance => 1,
             Self::DiagnosticObject => 1,
+            Self::DiagnosticContextDefs => 3,
             Self::EffectApply => 3,
             Self::EffectCall => 3,
             Self::EffectMap => 2,

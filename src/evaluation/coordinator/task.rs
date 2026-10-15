@@ -206,6 +206,11 @@ impl TaskTerminalPublisher {
         self.protected_status.is_some() || self.lifecycle_status.is_some()
     }
 
+    /// Whether updating to `status` would publish it to an observer.
+    pub(super) fn would_publish(&self, status: &EvaluationTaskStatus) -> bool {
+        self.publishes_status() && self.published_status != *status
+    }
+
     pub(super) fn attach_status(&mut self, publisher: TaskStatusPublisher) {
         assert!(
             self.protected_status.replace(publisher).is_none(),
