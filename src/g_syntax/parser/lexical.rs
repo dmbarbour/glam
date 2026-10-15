@@ -224,10 +224,45 @@ pub(super) struct LexedSource<'source> {
     texts: Vec<LexedText>,
     embedded_values: Vec<RuntimeValueRoot>,
     groups: Vec<DelimiterGroup>,
+    /// Per token, the innermost group whose contents hold it.
+    enclosing_groups: Vec<Option<GroupId>>,
+    /// Per token, the indentation of the nearest line start at or before it.
+    line_indentations: Vec<Option<usize>>,
     declarations: Vec<DeclarationSection>,
     line_starts: Vec<usize>,
     diagnostics: Vec<Diagnostic>,
     has_errors: bool,
+}
+
+/// Each token's innermost enclosing group and line indentation, computed
+/// once so that structural parsers look them up instead of walking the
+/// source's groups or the line before a token.
+fn token_tables(tokens: &[SpannedToken<'_>]) -> (Vec<Option<GroupId>>, Vec<Option<usize>>) {
+    let mut enclosing = Vec::with_capacity(tokens.len());
+    let mut indentations = Vec::with_capacity(tokens.len());
+    let mut open: Vec<GroupId> = Vec::new();
+    let mut indentation = None;
+    for token in tokens {
+        match token.kind() {
+            TokenKind::Open { group, .. } => {
+                enclosing.push(open.last().copied());
+                open.push(*group);
+            }
+            TokenKind::Close { group, .. } => {
+                let closed = open.pop();
+                debug_assert_eq!(closed, Some(*group), "close tokens pair with their open");
+                enclosing.push(open.last().copied());
+            }
+            kind => {
+                if let TokenKind::LineStart { indentation: found } = kind {
+                    indentation = Some(*found);
+                }
+                enclosing.push(open.last().copied());
+            }
+        }
+        indentations.push(indentation);
+    }
+    (enclosing, indentations)
 }
 
 impl<'source> LexedSource<'source> {
@@ -277,6 +312,24 @@ impl<'source> LexedSource<'source> {
 
     pub(super) fn groups(&self) -> &[DelimiterGroup] {
         &self.groups
+    }
+
+    /// The innermost closed group whose contents hold token `index`; for an
+    /// open or close token, the group around its own.
+    pub(super) fn enclosing_group(&self, index: usize) -> Option<GroupId> {
+        let mut group = *self.enclosing_groups.get(index)?;
+        while let Some(id) = group {
+            if self.groups[id].close_token.is_some() {
+                return Some(id);
+            }
+            group = self.groups[id].parent;
+        }
+        None
+    }
+
+    /// The indentation of the nearest line start at or before token `index`.
+    pub(super) fn line_indentation(&self, index: usize) -> Option<usize> {
+        self.line_indentations.get(index).copied().flatten()
     }
 
     pub(super) fn declarations(&self) -> &[DeclarationSection] {
@@ -446,6 +499,8 @@ pub(super) fn embedded_source(value: RuntimeValueRoot) -> LexedSource<'static> {
         texts: Vec::new(),
         embedded_values: vec![value],
         groups: Vec::new(),
+        enclosing_groups: vec![None],
+        line_indentations: vec![None],
         declarations: Vec::new(),
         line_starts: vec![0],
         diagnostics: Vec::new(),
@@ -579,6 +634,7 @@ impl<'source> Lexer<'source> {
         diagnostics.extend(self.structural_diagnostics);
         diagnostics.sort_by_key(|diagnostic| diagnostic.line);
 
+        let (enclosing_groups, line_indentations) = token_tables(&self.tokens);
         LexedSource {
             source: self.source,
             tokens: self.tokens,
@@ -586,6 +642,8 @@ impl<'source> Lexer<'source> {
             texts: self.texts,
             embedded_values: self.embedded_values,
             groups: self.groups,
+            enclosing_groups,
+            line_indentations,
             declarations: self.declarations,
             line_starts: self.line_starts,
             diagnostics,

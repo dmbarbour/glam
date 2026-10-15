@@ -716,15 +716,8 @@ fn conditional_boundaries(
 fn conditional_hard_end(view: TokenView<'_, '_>, head_index: usize) -> usize {
     let containing_close = view
         .source()
-        .groups()
-        .iter()
-        .filter_map(|group| {
-            let close = group.close_token()?;
-            (group.open_token() < head_index && head_index < close)
-                .then_some((group.open_token(), close))
-        })
-        .max_by_key(|(open, _)| *open)
-        .map(|(_, close)| close)
+        .enclosing_group(head_index)
+        .and_then(|group| view.source().groups()[group].close_token())
         .unwrap_or(view.range().end())
         .min(view.range().end());
     let candidate = view_between(view, head_index, containing_close);

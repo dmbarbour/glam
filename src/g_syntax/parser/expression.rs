@@ -1041,19 +1041,8 @@ fn structural_view_at<'lex, 'source>(
 ) -> TokenView<'lex, 'source> {
     let Some(group) = view
         .source()
-        .groups()
-        .iter()
-        .filter(|group| {
-            group
-                .close_token()
-                .is_some_and(|close| group.open_token() < head_index && head_index < close)
-        })
-        .min_by_key(|group| {
-            group
-                .close_token()
-                .expect("filtered groups are closed")
-                .saturating_sub(group.open_token())
-        })
+        .enclosing_group(head_index)
+        .map(|group| &view.source().groups()[group])
     else {
         return view;
     };
@@ -1279,12 +1268,17 @@ fn parse_grammar_chain_view(
 /// ```sh
 /// GLAM_TERM_ORACLE=1 cargo test --lib
 /// ```
+///
+/// Expressions the grammar's keyword forms parse while the oracle runs it
+/// are not compared again. The term parser's own parse reaches the same
+/// expressions, and comparing them would run the grammar again at every
+/// nesting level below, exponential in keyword nesting.
 #[cfg(test)]
 pub(in crate::g_syntax::parser) mod term_oracle {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     use super::super::term::Fail;
-    use super::{ExpressionContext, InfixChain, TokenView, parse_grammar_chain_view};
+    use super::{Diagnostic, ExpressionContext, InfixChain, TokenView, parse_grammar_chain_view};
 
     #[derive(Debug, Default)]
     pub(in crate::g_syntax::parser) struct Report {
@@ -1299,6 +1293,27 @@ pub(in crate::g_syntax::parser) mod term_oracle {
 
     thread_local! {
         static ACTIVE: RefCell<Option<Report>> = const { RefCell::new(None) };
+        static SUSPENDED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Runs `work` with the oracle off on this thread, as it is while the
+    /// oracle runs the grammar. A test that counts the term parser's work
+    /// suspends it, since the grammar's keyword forms parse through the term
+    /// parser too.
+    pub(in crate::g_syntax::parser) fn suspended<R>(work: impl FnOnce() -> R) -> R {
+        let was = SUSPENDED.with(|suspended| suspended.replace(true));
+        let result = work();
+        SUSPENDED.with(|suspended| suspended.set(was));
+        result
+    }
+
+    /// The grammar's parse of `view`, without comparing the expressions it
+    /// parses through the term parser.
+    fn reference(
+        view: TokenView<'_, '_>,
+        context: ExpressionContext,
+    ) -> Result<InfixChain, Vec<Diagnostic>> {
+        suspended(|| parse_grammar_chain_view(view, context))
     }
 
     fn sweeping() -> bool {
@@ -1324,9 +1339,12 @@ pub(in crate::g_syntax::parser) mod term_oracle {
         context: ExpressionContext,
         new: &Result<InfixChain, Fail>,
     ) {
+        if SUSPENDED.with(Cell::get) {
+            return;
+        }
         if !ACTIVE.with(|active| active.borrow().is_some()) {
             if sweeping() && !matches!(new, Err(Fail::Unsupported(_))) {
-                let old = parse_grammar_chain_view(view, context);
+                let old = reference(view, context);
                 let agree = match (new, &old) {
                     (Ok(new), Ok(old)) => new == old,
                     (Err(Fail::Error { .. } | Fail::Reported(_)), Err(_)) => true,
@@ -1349,7 +1367,7 @@ pub(in crate::g_syntax::parser) mod term_oracle {
             });
             return;
         }
-        let old = parse_grammar_chain_view(view, context);
+        let old = reference(view, context);
         ACTIVE.with(|active| {
             let mut active = active.borrow_mut();
             let report = active.as_mut().expect("checked as enabled");

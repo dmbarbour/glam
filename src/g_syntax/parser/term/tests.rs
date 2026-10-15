@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use super::super::expression::term_oracle::{Report, observe};
+use super::super::expression::term_oracle::{Report, observe, suspended};
 use super::super::expression_context::ExpressionContext;
 use super::super::parse_source;
 use crate::g_syntax::SyntaxExpr;
@@ -719,7 +719,9 @@ fn keyword_forms_in_groups_interpret_each_group_once() {
             .filter(|c| matches!(c, '(' | '[' | '{'))
             .count();
         super::INTERPRETED_GROUPS.with(|count| count.set(0));
-        let parsed = super::super::structural::parse_compound_expression_fragment(text.as_bytes());
+        let parsed = suspended(|| {
+            super::super::structural::parse_compound_expression_fragment(text.as_bytes())
+        });
         let interpreted = super::INTERPRETED_GROUPS.with(std::cell::Cell::get);
         let preview: String = text.chars().take(24).collect();
         assert!(parsed.is_ok(), "{preview}…: {parsed:?}");

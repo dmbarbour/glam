@@ -533,6 +533,54 @@ fn delimiter_symbol(delimiter: Delimiter, opening: bool) -> char {
     }
 }
 
+/// Each token's enclosing group and line indentation, looked up from the
+/// tables, match what the structural parsers computed by walking every
+/// group and the line before the token.
+#[test]
+fn token_tables_match_walking_groups_and_lines() {
+    let mut sources: Vec<String> = [
+        "samples/syntax",
+        "samples/config",
+        "samples/assembly",
+        "samples/hello",
+    ]
+    .into_iter()
+    .flat_map(|folder| sample_files(Path::new(folder)))
+    .map(|path| fs::read_to_string(&path).expect("samples are UTF-8 text"))
+    .collect();
+    sources.push("x = (a, [b, {c: (d)}])\n  y = f (g [h])\n".to_owned());
+    for source in &sources {
+        let lexed = lex_source(source);
+        for index in 0..lexed.tokens().len() {
+            let walked_group = lexed
+                .groups()
+                .iter()
+                .enumerate()
+                .filter(|(_, group)| {
+                    group
+                        .close_token()
+                        .is_some_and(|close| group.open_token() < index && index < close)
+                })
+                .max_by_key(|(_, group)| group.open_token())
+                .map(|(id, _)| id);
+            assert_eq!(lexed.enclosing_group(index), walked_group, "token {index}");
+            let walked_indentation =
+                lexed.tokens()[..=index]
+                    .iter()
+                    .rev()
+                    .find_map(|token| match token.kind() {
+                        TokenKind::LineStart { indentation } => Some(*indentation),
+                        _ => None,
+                    });
+            assert_eq!(
+                lexed.line_indentation(index),
+                walked_indentation,
+                "token {index}"
+            );
+        }
+    }
+}
+
 fn sample_files(folder: &Path) -> Vec<PathBuf> {
     let mut paths = fs::read_dir(folder)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", folder.display()))

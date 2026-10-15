@@ -98,7 +98,7 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
         result?
     } else if let Some(body) = parse_postfix_if_body(view, context)? {
         body
-    } else if let Some(where_index) = contextual_keywords(view, "where").into_iter().next() {
+    } else if let Some(where_index) = contextual_keywords(view, "where").next() {
         let where_token = view
             .token_at(where_index)
             .expect("a selected where suffix remains within its expression view");
@@ -172,7 +172,7 @@ fn parse_parenthesized_structural(
             || token_is_name(token, "try_match")
             || token_is_name(token, "try")
             || token_is_name(token, "object")
-    }) || !contextual_keywords(contents, "where").is_empty()
+    }) || contextual_keywords(contents, "where").next().is_some()
         || postfix_if_suffix(contents).is_some()
         || has_compound_with_body(contents);
     starts_structural.then(|| {
@@ -202,10 +202,10 @@ pub(in crate::g_syntax::parser) fn parse_using_expression(
         ));
     }
 
-    let in_boundary = contextual_keywords(rest, "in").into_iter().next();
+    let in_boundary = contextual_keywords(rest, "in").next();
     let (boundary, body_start) = if let Some(boundary) = in_boundary {
         (boundary, boundary + 1)
-    } else if let Some(boundary) = contextual_keywords(rest, "do").into_iter().next() {
+    } else if let Some(boundary) = contextual_keywords(rest, "do").next() {
         (boundary, boundary)
     } else {
         return Err(error_at_token(
@@ -250,15 +250,8 @@ pub(in crate::g_syntax::parser) fn parse_using_expression(
 fn structural_expression_hard_end(view: TokenView<'_, '_>, head_index: usize) -> usize {
     let containing_close = view
         .source()
-        .groups()
-        .iter()
-        .filter_map(|group| {
-            let close = group.close_token()?;
-            (group.open_token() < head_index && head_index < close)
-                .then_some((group.open_token(), close))
-        })
-        .max_by_key(|(open, _)| *open)
-        .map(|(_, close)| close)
+        .enclosing_group(head_index)
+        .and_then(|group| view.source().groups()[group].close_token())
         .unwrap_or(view.range().end())
         .min(view.range().end());
     let candidate = view_between(view, head_index, containing_close);
@@ -294,7 +287,7 @@ fn parse_let(
         )));
     }
 
-    let in_index = contextual_keywords(rest, "in").into_iter().next();
+    let in_index = contextual_keywords(rest, "in").next();
     let (bindings, braced_bindings, body) = if let Some(in_index) = in_index {
         let bindings_view = trim_layout(view_between(rest, rest.range().start(), in_index));
         if bindings_view
@@ -371,10 +364,8 @@ fn parse_where_suffix(
     let where_token = view
         .token_at(where_index)
         .expect("a selected where suffix remains within its expression view");
-    let suffix_end = contextual_keywords(view, "where")
-        .into_iter()
-        .find(|candidate| *candidate > where_index)
-        .unwrap_or(view.range().end());
+    let suffix_end =
+        contextual_keyword_after(view, where_index, "where").unwrap_or(view.range().end());
     let all_bindings = trim_layout(view_between(view, where_index + 1, suffix_end));
     if is_layout_empty(all_bindings) {
         return Err(error_at_token(
@@ -589,7 +580,6 @@ fn parse_postfix_if_body(
 
 fn postfix_if_suffix(view: TokenView<'_, '_>) -> Option<usize> {
     contextual_keywords(view, "if")
-        .into_iter()
         .next()
         .filter(|index| is_postfix_if_candidate(view, *index))
 }
@@ -709,7 +699,7 @@ fn parse_object(
     context: ExpressionContext,
 ) -> Option<ParseResult<ParsedExpression>> {
     object_expression_head(view)?;
-    if !contextual_keywords(view, "where").is_empty() && !has_compound_with_body(view) {
+    if contextual_keywords(view, "where").next().is_some() && !has_compound_with_body(view) {
         return None;
     }
     let (owned_view, end) = match structural_body_extent(view, context) {
@@ -935,7 +925,6 @@ fn line_begins_object_member(view: TokenView<'_, '_>) -> bool {
 
 fn find_structural_body(view: TokenView<'_, '_>) -> Option<StructuralBody> {
     let where_boundary = contextual_keywords(view, "where")
-        .into_iter()
         .next()
         .unwrap_or(view.range().end());
     // The first ungrouped `with` after a `match` or `try_match` head is the
@@ -943,7 +932,7 @@ fn find_structural_body(view: TokenView<'_, '_>) -> Option<StructuralBody> {
     // opens an update or object body here.
     let match_head = ["match", "try_match"]
         .into_iter()
-        .filter_map(|head| contextual_keywords(view, head).first().copied())
+        .filter_map(|head| contextual_keywords(view, head).next())
         .min()
         .unwrap_or(view.range().end());
     for with_index in contextual_keywords(view, "with") {
@@ -1103,8 +1092,8 @@ fn parse_object_header(
         )));
     }
 
-    let as_index = contextual_keywords(header, "as").into_iter().next();
-    let extends_index = contextual_keywords(header, "extends").into_iter().next();
+    let as_index = contextual_keywords(header, "as").next();
+    let extends_index = contextual_keywords(header, "extends").next();
     let name_end = [as_index, extends_index]
         .into_iter()
         .flatten()
@@ -1209,7 +1198,7 @@ fn parse_with_header(
         .map(|(index, _)| index)
         .expect("with header has a final token");
     let base_and_alias = trim_layout(view_between(header, header.range().start(), with_index));
-    let as_index = contextual_keywords(base_and_alias, "as").into_iter().last();
+    let as_index = contextual_keywords(base_and_alias, "as").last();
     let (base_view, alias) = if let Some(as_index) = as_index {
         let alias_view = trim_layout(view_between(
             base_and_alias,
@@ -1258,22 +1247,40 @@ fn parse_with_header(
     Some(Ok(WithHeader { base, alias }))
 }
 
-pub(in crate::g_syntax::parser) fn contextual_keywords(
-    view: TokenView<'_, '_>,
-    expected: &str,
-) -> Vec<usize> {
+/// The top-level tokens of `view` that are the keyword `expected` in a
+/// keyword position, lazily, so a caller that wants the first stops there.
+pub(in crate::g_syntax::parser) fn contextual_keywords<'lex, 'source, 'e>(
+    view: TokenView<'lex, 'source>,
+    expected: &'e str,
+) -> impl Iterator<Item = usize> + use<'lex, 'source, 'e> {
     view.top_level()
-        .filter(|indexed| {
-            (indexed.index() == view.range().start()
-                || indexed.token().leading() != LeadingTrivia::Joint
-                || indexed.index().checked_sub(1).is_some_and(|previous| {
-                    view.token_at(previous)
-                        .is_some_and(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
-                }))
-                && token_is_name(indexed.token(), expected)
-        })
         .map(|indexed| indexed.index())
-        .collect()
+        .filter(move |index| is_contextual_keyword_at(view, *index, expected))
+}
+
+/// The first contextual `expected` after token `after` in `view`, judged as
+/// in `view`, scanning only what follows `after`.
+fn contextual_keyword_after(
+    view: TokenView<'_, '_>,
+    after: usize,
+    expected: &str,
+) -> Option<usize> {
+    view_between(view, after + 1, view.range().end())
+        .top_level()
+        .map(|indexed| indexed.index())
+        .find(|index| is_contextual_keyword_at(view, *index, expected))
+}
+
+fn is_contextual_keyword_at(view: TokenView<'_, '_>, index: usize, expected: &str) -> bool {
+    view.token_at(index).is_some_and(|token| {
+        (index == view.range().start()
+            || token.leading() != LeadingTrivia::Joint
+            || index.checked_sub(1).is_some_and(|previous| {
+                view.token_at(previous)
+                    .is_some_and(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
+            }))
+            && token_is_name(token, expected)
+    })
 }
 
 fn top_level_symbols(view: TokenView<'_, '_>, expected: &str) -> Vec<usize> {

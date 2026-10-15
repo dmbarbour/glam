@@ -200,17 +200,7 @@ impl<'lex, 'source> TokenView<'lex, 'source> {
     }
 
     pub(super) fn line_indentation_at(self, absolute_index: usize) -> Option<usize> {
-        (absolute_index < self.source.tokens().len())
-            .then(|| {
-                self.source.tokens()[..=absolute_index]
-                    .iter()
-                    .rev()
-                    .find_map(|token| match token.kind() {
-                        TokenKind::LineStart { indentation } => Some(*indentation),
-                        _ => None,
-                    })
-            })
-            .flatten()
+        self.source.line_indentation(absolute_index)
     }
 
     pub(super) fn line_span(self, line: usize) -> Option<ByteSpan> {

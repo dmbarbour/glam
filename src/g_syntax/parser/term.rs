@@ -194,12 +194,15 @@ pub(super) fn parse_term_chain(
             }
             _ => {
                 let frame = stack.last_mut().expect("the view frame is never popped");
-                if opens_keyword_region(view, index) {
+                if frame.region {
+                    // Only an open region needs its end found.
+                    if frame.separator.is_some_and(|separator| {
+                        matches!(token.kind(), TokenKind::Symbol(symbol) if *symbol == separator)
+                    }) {
+                        frame.region = false;
+                    }
+                } else if opens_keyword_region(view, index) {
                     frame.region = true;
-                } else if frame.separator.is_some_and(|separator| {
-                    matches!(token.kind(), TokenKind::Symbol(symbol) if *symbol == separator)
-                }) {
-                    frame.region = false;
                 }
                 frame.pieces.push(Piece::Token(index));
             }
@@ -358,6 +361,9 @@ impl Covers {
     /// parent. Post-order on an explicit stack, so nesting costs no Rust
     /// recursion.
     fn interpret_deferred(&self, scope: Scope<'_, '_, '_>, id: usize) {
+        if !matches!(self.slots.borrow()[id], Slot::Deferred(_)) {
+            return;
+        }
         let mut stack = vec![(id, false)];
         while let Some((slot, children_done)) = stack.pop() {
             if !children_done {

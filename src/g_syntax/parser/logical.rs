@@ -349,19 +349,8 @@ fn logical_item(
     let mut inside_group = false;
 
     if let Some(group) = source
-        .groups()
-        .iter()
-        .filter(|group| {
-            group
-                .close_token()
-                .is_some_and(|close| group.open_token() < invocation && invocation < close)
-        })
-        .min_by_key(|group| {
-            group
-                .close_token()
-                .expect("filtered groups are closed")
-                .saturating_sub(group.open_token())
-        })
+        .enclosing_group(invocation)
+        .map(|group| &source.groups()[group])
     {
         inside_group = true;
         let close = group.close_token().expect("filtered groups are closed");

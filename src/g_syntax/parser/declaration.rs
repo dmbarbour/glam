@@ -606,7 +606,7 @@ fn parse_static_object_header(
     context: ExpressionContext,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<StaticObjectHeader> {
-    let with_index = contextual_keywords(header, "with").into_iter().next();
+    let with_index = contextual_keywords(header, "with").next();
     let has_with = with_index.is_some();
     if let Some(with_index) = with_index {
         if header.last_significant().map(|(index, _)| index) != Some(with_index) {
@@ -619,8 +619,8 @@ fn parse_static_object_header(
         header = trim_layout(view_between(header, header.range().start(), with_index));
     }
 
-    let as_index = contextual_keywords(header, "as").into_iter().next();
-    let extends_index = contextual_keywords(header, "extends").into_iter().next();
+    let as_index = contextual_keywords(header, "as").next();
+    let extends_index = contextual_keywords(header, "extends").next();
     if extend && extends_index.is_some() {
         diagnostics.push(Diagnostic::error(
             line,
