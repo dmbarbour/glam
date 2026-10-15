@@ -1,7 +1,6 @@
 # Lazy Diagnostics — 2026-10-15
 
-Status: in progress; `diag-context-mixin`, `diag-lazy-failures` and
-`diag-lazy-enrichment` landed on 2026-10-15. The maintainer decided on 2026-10-15 that senders
+Status: complete; every step landed on 2026-10-15. The maintainer decided on 2026-10-15 that senders
 never evaluate diagnostics; only renderers do
 (`senders-never-evaluate-diagnostics`, in `Decisions.md`).
 
@@ -121,3 +120,10 @@ shows.
 
 Renderers, and any Rust reader that inspects a diagnostic's fields,
 evaluate it where they render it.
+
+Landed 2026-10-15. The default logger already evaluated what it formats
+(the message through the Glam formatter, context frames through its
+evaluator); its header's line came from the Rust summary, which an
+unevaluated message lacks, so it now evaluates `msg.location.line` when
+the summary has none. `project_blocked_diagnostic` evaluates its summary
+(`diag-lazy-failures`).

@@ -506,8 +506,23 @@ impl DefaultLogger {
         rendered
     }
 
+    /// The diagnostic's line: its immediate summary or, when its message is
+    /// still unevaluated, `msg.location.line` evaluated as a renderer does
+    /// (`senders-never-evaluate-diagnostics`).
+    fn line(&self, diagnostic: &Diagnostic) -> Option<usize> {
+        diagnostic.line().or_else(|| {
+            let line = self
+                .evaluator
+                .values()
+                .access_names(diagnostic.emission(), ["msg", "location", "line"])
+                .ok()?;
+            let line = self.evaluator.evaluator().eval(&line).ok()?;
+            usize::try_from(line.as_i64().ok()??).ok()
+        })
+    }
+
     fn location(&self, diagnostic: &Diagnostic) -> String {
-        match (diagnostic.source(), diagnostic.line()) {
+        match (diagnostic.source(), self.line(diagnostic)) {
             (Some(source), Some(line)) => {
                 format!("{}:{line}: ", self.display_source(Path::new(source)))
             }
@@ -738,6 +753,50 @@ mod tests {
             rendered,
             Bytes::from_static(b"src/test.g:4: warning: first\n    second\n    \n    fourth\n")
         );
+    }
+
+    /// A message composed but not yet evaluated still renders its line: the
+    /// renderer evaluates `msg.location.line` when the summary lacks it.
+    #[test]
+    fn glam_default_formatter_evaluates_the_line_of_an_unevaluated_message() {
+        let evaluator = Assembler::default();
+        let values = evaluator.values();
+        let logger = DefaultLogger {
+            formatter: evaluator.default_diagnostic_formatter(),
+            evaluator,
+            working_directory: PathBuf::from("/work"),
+        };
+        let held = record(
+            &values,
+            [(
+                "message",
+                record(
+                    &values,
+                    [
+                        ("text", values.text("computed")),
+                        ("location", record(&values, [("line", values.integer(7))])),
+                    ],
+                ),
+            )],
+        );
+        let message = values
+            .access_names(&held, ["message"])
+            .expect("the message path should compose");
+        let emission = record(&values, [("msg", message)]);
+        let diagnostic = Diagnostic::from_emission(&values, Severity::Error, emission)
+            .expect("the emission should belong to the diagnostic runtime");
+        assert_eq!(diagnostic.line(), None, "the message is not yet evaluated");
+        let terminal = TerminalContext {
+            columns: 80,
+            color: TerminalColor::None,
+            term: None,
+            language: None,
+        };
+        let rendered = logger
+            .format_diagnostic(&diagnostic, &terminal)
+            .expect("the closed Glam formatter should return bytes");
+
+        assert_eq!(rendered, Bytes::from_static(b"line 7: error: computed\n"));
     }
 
     #[test]
