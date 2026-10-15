@@ -4,10 +4,13 @@ Status: design agreed with the maintainer on 2026-10-06. `parser-term-parser`
 is in production since 2026-10-07 (see [Production switch](#production-switch-2026-10-07));
 `parser-patterns`, `parser-keyword-frames` and `parser-grammar-retirement`
 remain, and `parser-cover-ir` is done only for expressions (see
-[Steps](#steps)). Rechecked 2026-10-15 (`01ec2fbc`): no parser step has
-landed since `adcd994b` (2026-10-07). A keyword form in parentheses nested
-in another is still exponential ([Measures 2026-10-15](#measures-2026-10-15)),
-so `parser-keyword-frames` is next. This is the `perf-parser` step of the
+[Steps](#steps)). Rechecked 2026-10-15 (`01ec2fbc`): no parser step had
+landed since `adcd994b` (2026-10-07), and a keyword form in parentheses
+nested in another was exponential ([Measures 2026-10-15](#measures-2026-10-15)).
+Keyword regions, the first part of `parser-keyword-frames`, remove that
+exponential and the whole-source scans; what remains, and a proposed order
+for it, is in [Keyword regions 2026-10-15](#keyword-regions-2026-10-15).
+This is the `perf-parser` step of the
 [performance roadmap](PerformanceRoadmap_2026-10-05.md). The fix is a merged
 grammar with prefix sharing, parsing into a cover syntax (IR) for patterns and
 expressions, implemented with an explicit stack; see [Design](#design). It
@@ -305,7 +308,10 @@ production keeps the old parser until the oracle agrees.
   (`parser-term-parser-first`, `eb84587c`; `parser-keyword-delegation`,
   `adcd994b`).
 - `parser-patterns`: not started.
-- `parser-keyword-frames`: not started; next, for the exponential below.
+- `parser-keyword-frames`: first part built 2026-10-15 on its branch:
+  keyword regions, the lexer's token tables and a lazy keyword search
+  ([Keyword regions 2026-10-15](#keyword-regions-2026-10-15)). Native
+  keyword frames remain.
 - `parser-scope-analysis`: added 2026-10-15; not started.
 - `parser-grammar-retirement`: not started. Chumsky still parses the
   views the term parser reports as unsupported, and runs as the oracle in
@@ -475,6 +481,8 @@ replaced on 2026-10-08 (`c65f9cfd`) by families at three depths:
   parentheses, else-if chains and `then if …` parse linearly.
   `parser-keyword-frames` removes it; until then, real code with a few
   levels of parenthesized `if` or `match` pays a factor of 2 per level.
+  *Removed 2026-10-15* by keyword regions
+  ([Keyword regions 2026-10-15](#keyword-regions-2026-10-15)).
 
 ## Measures 2026-10-15
 
@@ -494,6 +502,119 @@ exponent, with cost ≈ a + b·n^k.
   depth 8 costs 8.8 M and depth 16 1,415 M: about 1.9× per level. Its
   reduction count is the same at every depth, so the growth is parsing.
 
+## Keyword regions 2026-10-15
+
+The first part of `parser-keyword-frames` (branch
+`parser-keyword-frames`).
+
+**The exponential.** A test-only counter confirmed the 2026-10-08 reading:
+`(if c then … else 0)` nested d deep cost 2^d − 1 group interpretations.
+The term parser interpreted every group as it closed, before knowing that a
+keyword form would claim it; the form's structural parser then parsed the
+same groups again from their tokens, so each level doubled the work below
+it.
+
+**Keyword regions.** The term parser's token pass now knows where keyword
+forms are, without parsing them:
+- A keyword head (`if`, `match`, `try`, `try_match`, `do` or `using`,
+  wherever it appears) opens a region in its frame, up to the frame's
+  separator or close: the extent `parse_structural_atom` gives the form.
+- Groups closing inside a region are deferred, so each group is interpreted
+  by exactly one parser. A deferred group the term parser consumes anyway,
+  after a form that ended before its region, is interpreted when consumed,
+  post-order on an explicit stack.
+- Correctness never depends on the region rule: missing a region costs
+  time, and a region that overreaches costs a deferred interpretation.
+- This is not option A's lookahead. A region opens at the keyword head,
+  judged by that token and the next (a joint `:` or `.` makes the name a
+  tag or a path), and closes at a separator the token pass meets anyway.
+  Nothing peeks past a group, and no alternative is guarded.
+
+**Whole-source scans.** Four structural sites found a keyword's enclosing
+group by walking every group in the source (`structural_view_at`,
+`conditional_hard_end`, `structural_expression_hard_end`, and macro
+invocations in `logical.rs`), and `line_indentation_at` walked back to the
+line start on every call. The lexer now records each token's innermost
+enclosing group and line indentation once.
+
+**Keyword search.** `contextual_keywords` collected every match in a view,
+though most callers wanted the first; a `where` suffix rescanned the whole
+view for the next `where`, quadratic in a chain of them. It is now an
+iterator, and a suffix searches only what follows it.
+
+**The oracle.** The sweep (`GLAM_TERM_ORACLE`) compared every expression
+the grammar's keyword forms parsed through the term parser while the oracle
+ran the grammar, so it reran the grammar at every nesting level below and
+never finished the depth-40 nesting test. It no longer compares inside its
+own grammar parse, which the term parser's own parse covers, and a test
+that counts the term parser's work suspends it. The sweep agrees across all
+1,970 library tests, in 16 s instead of 61 s.
+
+**Measured** (release `glam-prof`, instructions):
+
+| Workload | `main` | Keyword regions |
+| --- | ---: | ---: |
+| `parse_ifs_16` | 1,439 M | 31.3 M |
+| `parse_ifs` growth (4/8/16) | n^7.77 | n^1.03 |
+| `chain_where_800` | 456 M | 309 M |
+| `chain_where` growth (200–800) | n^1.62 | n^1.44 |
+
+Across the 60 profiling workloads, 12.3% fewer instructions; `minimal`,
+`hello_do` and `hello_elf` within 0.03%. Long flat literals pay about 1%
+(`list_literal_4000` +1.1%, `dict_lookup_2000` +0.65%), mostly building the
+token tables. Parse only, nested 128 deep: a parenthesized `if` 18 M (`main`
+does not finish 32 deep), a parenthesized `match` 5.7 M (7.1 M), a `where`
+chain 5.2 M (9.3 M). Nested patterns cost 4 to 10% more than on `main`
+(`((p) as q)` 30.7 M against 27.8 M at 128 deep), from the token pass's
+region checks repeated by the pattern parser's trial parses, which
+`parser-patterns` replaces.
+
+### What is left
+
+- **`op -> P` is still exponential**, through cause 2's trial parses: a
+  `do` statement or guard whose operation holds a parenthesized keyword
+  form, as in `do { (do {…}) -> z; .r z }` (depth 8: 11.6 M instructions,
+  205 M on `main`; depth 16: 2.9 G). `parse_braced_body` parses the whole
+  statement as an expression, which fails at `->` after interpreting
+  everything before it, and then parses the operation again. Guards do the
+  same. A deterministic split needs to know which top-level `->` belongs to
+  a lambda head, a guard or a layout arm; `parser-patterns` does that by
+  parsing one cover term and converting by role, as the design says. A
+  lexical pre-check would be the rejected option A.
+- **Patterns are quadratic** in nesting (`((p) as q)`, `(p) ++ [q]`):
+  n^1.9–2.0 at depths 32–128, on `main` and with keyword regions alike.
+  `parser-patterns`.
+- **Keyword nesting rescans.** Each keyword level still parses its own view
+  afresh, so nested keyword forms cost O(n·d) (n^1.77 for a parenthesized
+  `if` at depths 32–128) and recurse on the Rust stack per level: parse
+  only overflows near 2,000 levels in a release build. Native keyword frames
+  remove both.
+- **Name analysis** is quadratic in `where` nesting (`chain_where`'s
+  remaining excess, about 160 M at 1,600): `parser-scope-analysis`.
+- **Downstream depth.** Nested 512 deep, a parenthesized `if` now parses,
+  then overflows the stack after parsing (`perf-pre-eval-stack-depth`).
+
+### Proposal
+
+For review; not yet agreed.
+
+1. **Land keyword regions as this step's first part.** They remove the
+   measured exponential and every whole-source scan, and leave the
+   structural parsers in place.
+2. **`parser-patterns` next.** It removes the remaining exponential
+   (`op -> P` in `do` statements and guards) and the quadratic patterns,
+   and brings the cover IR to patterns. Native frames for `do` statements,
+   guards and `match` arms belong with it, since those are where patterns
+   live.
+3. **Then native keyword frames** for the rest: `if`/`try`, postfix `if`,
+   `let`, `where`, `with`, `object`, `using`. Each form becomes frames on
+   the term parser's stack, its phases split by its own keywords as the
+   token pass meets them, so keyword nesting costs heap frames and each
+   token is visited once. The payoff now is depth and the O(n·d) rescans,
+   not the common case; it fits with `parser-grammar-retirement`.
+4. **`parser-scope-analysis`** is independent and small: one marking pass
+   with a scope stack instead of a walk per binding group.
+
 ## Verification
 
 - The differential oracle above, while both parsers exist.
@@ -510,6 +631,12 @@ exponent, with cost ≈ a + b·n^k.
   `NESTING_SHAPES` in the term parser's tests holds no keyword form, which
   is how the exponential above went unnoticed: `parser-keyword-frames` adds
   parenthesized `if`, `match`, `try` and `let` shapes to it.
+  As built (2026-10-15), `KEYWORD_NESTING_SHAPES` holds seven keyword
+  shapes: parenthesized `if`, `try`, `match`, `let` and `do`, an `if` as an
+  argument, and an `if` in a lambda body. Its test counts group
+  interpretations at depth 40 rather than timing the parse, and fails if
+  any group is interpreted twice. A timing bound waits for native keyword
+  frames, since keyword nesting still costs O(n·d).
 - The invalid-syntax samples keep their diagnostics. Chumsky merges expected
   tokens from failed alternatives, so check closest-match wording explicitly.
 - Compare compile time on the samples and the X3 corpus before and after.
@@ -525,8 +652,8 @@ performance phase begins:
 
 As of 2026-10-15, the first is resolved in production: Chumsky runs only
 for views the term parser reports as unsupported, and as the test oracle.
-`parser-patterns` owns the second, and `parser-keyword-frames` the third
-(`structural_view_at` still scans every group).
+`parser-patterns` owns the second. The third is resolved by keyword
+regions (2026-10-15): the lexer records each token's enclosing group.
 
 Stack-overflow aborts on very deep nesting are a separate concern, tracked
 in the panic-safety plan, because an overflow crashes the process.
@@ -538,6 +665,13 @@ in the panic-safety plan, because an overflow crashes the process.
   2026-10-06 direction rejected lookahead guards (option A), including as
   a stopgap, but did not rule on option B, memoizing structural parses by
   token range. Wait for `parser-keyword-frames`, or bound it sooner?
+  *Resolved 2026-10-15:* keyword regions, the first part of
+  `parser-keyword-frames`, remove it without memoization or lookahead
+  guards.
+- **What follows keyword regions?** Proposed in
+  [Keyword regions 2026-10-15](#keyword-regions-2026-10-15): land them, take
+  `parser-patterns` next for the remaining `op -> P` exponential and the
+  quadratic patterns, then native frames for the other keyword forms.
 - **`parser-cover-ir` as designed.** The shared pattern-and-expression
   IR was never built; the term parser's covers are expression-only and
   group-level. Should `parser-patterns` absorb the step, or does the
