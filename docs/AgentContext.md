@@ -201,6 +201,13 @@ deterministic hooks.
   access-region totals. Runtime phases (parse, lower, collect) are summed
   across threads and may overlap the binary's phases, since imports compile
   lazily during evaluation.
+- **Call paths and allocation sites.** Valgrind's Callgrind attributes a
+  release binary's instructions to functions and call paths, and DHAT its
+  heap allocations to sites. Build with
+  `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only` and a separate
+  `CARGO_TARGET_DIR`; one codegen unit inlines heavily, so read inlined
+  code by source line (`callgrind_annotate` with a source file). Compare
+  counts only within one tool.
 - **Counters are exact.** For a fixed worker count, a counter change is a
   real change. Timings are trend data: record them with `rustc --version`,
   the commit and the CPU.

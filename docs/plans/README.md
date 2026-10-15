@@ -92,12 +92,6 @@ Each is done; what keeps it under the retention rule is listed.
   done 2026-10-09: recursion is linear, and tail recursion runs in
   constant space. The route-validation hazard log has no `Decisions.md`
   entry, and two follow-ups have no owner (see its open questions).
-- [`ResumableWhnfHolistic_2026-09-28.md`](../reviews/ResumableWhnfHolistic_2026-09-28.md)
-  and [`ResumableWhnfW6G4_2026-09-23.md`](../reviews/ResumableWhnfW6G4_2026-09-23.md)
-  held measurement series and the Callgrind/DHAT recipe until a performance
-  harness gave those numbers a home; `perf-profiling-harness` did
-  (2026-10-06). Ready to retire once the holistic review's links to them
-  become plain names.
 
 ## Deferred Plans
 
@@ -221,3 +215,5 @@ Each line moves into a plan as soon as one owns it.
 | `reviews/ArchitectureAndVerification_2026-10-03.md` | `8b1ace22` | parallel review (`AR-…`, `RF-…`) |
 | `plans/DocumentationDisposition_2026-10-05.md` | `f53e9b51` | documentation cleanup (its maintainer answers are in `Decisions.md`) |
 | `reviews/PerformanceAfterRecursionWork_2026-10-08.md` | `b2ee16c9` | performance steps (`perf-…`); its findings are in `plans/StructuralOverheads_2026-10-08.md` |
+| `reviews/ResumableWhnfHolistic_2026-09-28.md` | `d893d0a2` | resumable WHNF (`HR…`, `WHNFHR-…`); its Callgrind/DHAT recipe is in `AgentContext.md` "Profiling" |
+| `reviews/ResumableWhnfW6G4_2026-09-23.md` | `d893d0a2` | resumable WHNF (`W6G.4…`, `W6G4R-…`) |

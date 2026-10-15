@@ -339,9 +339,9 @@ profiling check is now `scripts/check-profiling-fixtures.sh` (`7962639e`,
   workloads are dominated by process startup.
 - **The working perf workload is a test fixture.** Earlier work measured a
   test fixture (`tests/executable_samples.rs`) with Callgrind and DHAT. That
-  recipe exists only in dated reviews
-  ([W6G4](ResumableWhnfW6G4_2026-09-23.md),
-  [holistic](ResumableWhnfHolistic_2026-09-28.md)).
+  recipe exists only in dated reviews (the W6G4 review and the
+  resumable-WHNF holistic review, retired 2026-10-15; the recipe is now
+  in `AgentContext.md` "Profiling").
 - **Test builds are not production builds.** The dev-dependency enables
   `glam-gc/deterministic-test-hooks`, so every test binary, even with
   `--release`, carries probe branches on edge-transition paths. Timings
@@ -540,7 +540,7 @@ a bug, contained as an interruption and never treated as semantics.* The
   yet it names the *production* structural value representation and is
   defined nowhere. About 296 eval test call sites use
   `evaluate_compatibility_whnf`, which the
-  [holistic WHNF review](ResumableWhnfHolistic_2026-09-28.md) marks as a
+  resumable-WHNF holistic review (retired 2026-10-15) marked as a
   transitional facade.
 
 **Recommendation**
