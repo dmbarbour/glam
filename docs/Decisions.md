@@ -1786,7 +1786,7 @@ maps the short names used here to file names.
 - **Consequences:** a future collector can supply its own visitor without
   changing mutator code.
 - **Rule lives in:** `architecture/evaluation.md` "Collector Boundary".
-- **Recorded in:** aggressive-verification remediation plan.
+- **Recorded in:** aggressive-GC remediation plan.
 
 ### Owner-qualified edge-transition gateways are kept as no-op barrier sites
 `owner-qualified-edge-gateways` · 2026-09-10 · agent · accepted
@@ -1855,7 +1855,7 @@ maps the short names used here to file names.
   and moving-GC retirement policy"; I5 review GCI5R-008.
 
 ### Lifetime-branded `ScopedGc` is deferred until a defect demands it
-`scoped-gc-deferred` · 2026-10-01 · agent · accepted
+`scoped-gc-deferred` · 2026-10-01 · agent · superseded
 - **Context:** an unbranded `Gc<T>` can outlive its region; today's proof
   rests on audit.
 - **Decision:** defer branding. Adopt it only after reproducing a concrete
@@ -1863,6 +1863,8 @@ maps the short names used here to file names.
 - **Consequences:** no concurrent or moving readiness is claimed.
 - **Rule lives in:** `architecture/evaluation.md` "WHNF Submachine Flow".
 - **Recorded in:** D2h review D2HR-004; scoped-pointer plan SP0.
+- **Superseded by:** `owned-mutator-views` (2026-10-12), which branded
+  views (`GcRef`) for their cost, not after a defect.
 
 ### Runtimes never collect on mutator entry (`NoAuto`); drivers collect at quantum boundaries
 `noauto-runtime-collection-policy` · 2026-10-02, revised 2026-10-05 · maintainer · accepted
@@ -2086,7 +2088,7 @@ maps the short names used here to file names.
 - **Recorded in:** explicit heap holds plan.
 
 ### An owned mutator per thread; access borrows it
-`owned-mutator-views` · 2026-10-12 · maintainer · accepted (planned)
+`owned-mutator-views` · 2026-10-12 · maintainer · accepted
 - **Context:** the 2026-10-10 design review of explicit heap holds, and
   the costs it would remove: about 180 instructions per heap entry and
   about 1,400 per transient root, a fifth to a third of a lazy-heavy step
@@ -2103,7 +2105,10 @@ maps the short names used here to file names.
 - **Consequences:** about 690 access parameters gain a mutator borrow
   over time; evaluator polls need no suspend, as their release points
   move to drivers; reflection polls release or suspend around dependency
-  pumping.
+  pumping. Landed by 2026-10-15, when the explicit heap holds plan
+  finished. `LocalRoot` was never built: pooled roots (`pooled-roots`)
+  brought a root to about 82 instructions, and a root made from a view
+  skips validation (`root-evidence`).
 - **Recorded in:** explicit heap holds plan, "Decisions, 2026-10-12".
 
 ### An owned mutator is taken outermost; legacy release under it panics
@@ -2177,7 +2182,11 @@ maps the short names used here to file names.
   outside one per definition. Each public `Values` call is a boundary of
   its own: `gc-hold-values-api` closed on 2026-10-15 without a client scope
   that holds one mutator across calls (maintainer), which would run client
-  code under the mutator. Landed 2026-10-14
+  code under the mutator. Nor does Glam find its runtime through the
+  thread's mutator: `gc-hold-thread-context`, which would have, was skipped
+  (maintainer, 2026-10-15), since code takes `&` access or a `&mut`
+  mutator from its caller and its signature shows whether it may suspend.
+  Landed 2026-10-14
   (`gc-hold-pass-access`): `Heap::with_mutator` and held regions went, a
   thread record's depth is 0 or 1, and `Heap::thread_holds_mutator`
   answers whether a thread may wait. A managed destructor may not enter
@@ -2455,6 +2464,8 @@ Short names used under **Recorded in**, with their files under `docs/`.
 | structural overheads plan | `plans/StructuralOverheads_2026-10-08.md` |
 | fast checks plan | `plans/FastChecks_2026-10-09.md` |
 | explicit heap holds plan | `plans/ExplicitHeapHolds_2026-10-09.md` |
+| lazy diagnostics plan | `plans/LazyDiagnostics_2026-10-15.md` |
+| parser backtracking plan | `plans/ParserBacktrackingPerformance_2026-10-04.md` |
 | C2C review | `reviews/GarbageCollectorC2C_2026-08-22.md` |
 | C6 review | `reviews/GarbageCollectorC6_2026-08-24.md` |
 | C8 review | `reviews/GarbageCollectorC8_2026-10-03.md` |

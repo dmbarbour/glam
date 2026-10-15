@@ -2,13 +2,17 @@
 
 Date: 2026-09-23
 
-Status: preliminary and deferred. Its original gate, the resumable-WHNF W6G
-performance closure, was met by the W6G review on 2026-09-24, and the whole
+Status: preliminary and deferred (2026-10-15), with no step in the
+performance roadmap. Its original gate, the resumable-WHNF W6G performance
+closure, was met by the W6G review on 2026-09-24, and the whole
 resumable-WHNF plan completed on 2026-09-28. The holistic pre-performance
-review now sequences this plan last, after its findings S7 (gaps in the
-client-demand driver) and A1 (a hidden public API tier). This plan
-consolidates an API transition which was previously mentioned only as
-deferred follow-up in the resumable-WHNF plan and reviews.
+review sequences this plan last, after its
+findings S7 (gaps in the client-demand driver) and A1 (a hidden public API
+tier). Both are still open on 2026-10-15: `advance_client_demand_for_test`
+still duplicates the driver, and `pub mod reflection` and 41
+`#[doc(hidden)]` items remain. This plan consolidates an API transition
+which was previously mentioned only as deferred follow-up in the
+resumable-WHNF plan and reviews.
 
 ## Purpose
 
@@ -57,6 +61,27 @@ second evaluation mechanism:
 No public `Evaluation` or `try_advance` API exists today. The current
 `ValueEvaluator::eval` admits a private demand and drives it to completion in
 one blocking call.
+
+Changes since drafting (2026-10-15):
+- **The driver holds a mutator.** `drive_client_demand`
+  (`src/evaluation/session.rs`) takes the thread's mutator for the whole
+  drive, lends it to the quanta it runs, and suspends it to wait
+  (`driver-mutator`, 2026-10-14). A public handle cannot keep a mutator
+  between calls: each public call is a boundary of its own, and the
+  maintainer closed `gc-hold-values-api` on 2026-10-15 without a client
+  scope that holds one across calls. So `try_advance` would take the
+  mutator for its call, and a change wait would run without one.
+- **Waits** use `CountedCondvar`, which notifies only registered waiters
+  (`counted-condvar-notifications`).
+- **Busy.** A blocked record whose dependency is terminal counts as busy:
+  the publishing thread owns its wake (`pending-wake-is-busy`). This fits
+  invariant 7.
+- **Diagnostics** are unevaluated compositions; senders never evaluate them
+  (`senders-never-evaluate-diagnostics`). Converting a terminal failure, as
+  invariant 8 requires, evaluates nothing.
+- **Fixture names.** Tests lost their step IDs on 2026-10-05, so PRE-0
+  must find the W6G4R-001F fixtures by behaviour; the route retention tests
+  are in `src/evaluation/coordinator/tests.rs`.
 
 ## Provisional API Shape
 
@@ -314,5 +339,19 @@ Repeating a concurrent test is not evidence.
 - The public surface exposes semantic outcomes and opaque waiting only, not
   bootstrap scheduler identities.
 - Full formatting, lint, ordinary tests, profiling tests, and any applicable
-  Loom/Miri gates pass.
+  Loom/Miri gates pass (since 2026-10-03, `scripts/check.sh full`).
+
+## Open Questions (2026-10-15)
+
+For the maintainer:
+1. **Trigger.** What starts this plan: S7 and A1 closing, or a client that
+   needs bounded evaluation? It has no roadmap step.
+2. **One mutator per call.** Taking the mutator in each `try_advance` costs
+   one heap entry per call, as `gc-hold-values-api` accepted for `Values`.
+   Is that the intended shape, rather than an `Evaluation` borrowing a
+   client scope that holds one, which that step declined?
+3. **The test seam.** Should S7's PRE-1 extraction land early?
+   `advance_client_demand_for_test` duplicates the driver with different
+   semantics, a transitional path `tests-follow-the-runtime` asks tests not
+   to anchor.
 

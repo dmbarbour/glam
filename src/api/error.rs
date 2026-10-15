@@ -24,8 +24,9 @@ pub enum ErrorKind {
     Failure,
     /// Scheduled evaluation was interrupted by a panic. This means a runtime
     /// implementation error or a client contract violation, never a Glam
-    /// semantic outcome. The runtime remains usable, and a later demand of
-    /// the same value may run it again.
+    /// semantic outcome. The runtime remains usable; a lazy whose evaluation
+    /// panicked keeps that state, so a later demand of it reports the same
+    /// panic instead of running it again.
     Panic,
 }
 

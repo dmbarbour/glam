@@ -1,11 +1,24 @@
 # User-Input Panic Safety Plan — 2026-10-04
 
-Status: open. The parser and evaluation inspections are done: F1 is fixed,
-and no further panic was found. The poisoning audit is done, and its
-containment design is decided, and its implementation steps are done
-(`panic-no-regret-changes` through `panic-callback-containment`). The net
-polarity change it waited on has landed: `Bind >< Bind` now joins crossed.
-What remains is the interaction-net inspection.
+Status: open (reviewed 2026-10-15). The parser and evaluation inspections
+are done: F1 is fixed, and no further panic was found. The poisoning audit
+is done, and its containment design is decided, and its implementation
+steps are done (`panic-no-regret-changes` through
+`panic-callback-containment`). The net polarity change it waited on has
+landed: `Bind >< Bind` now joins crossed. What remains is the
+interaction-net inspection.
+- **Done.** F1's fix, `0e3e456b` (2026-10-04). `panic-no-regret-changes`
+  `3a9eb1a6`, `panic-poll-boundary-containment` `f8a00dde`,
+  `panic-lazy-panicked-state` `94f5e635` and `panic-runtime-core-faults`
+  `04798681`, all 2026-10-04; `panic-callback-containment` `e50a641d`,
+  committed just after midnight on 2026-10-05. These commits predate
+  `Plan-Step:` trailers. The polarity plan's N8 generator
+  (`polarity-net-generator`) also landed on 2026-10-05.
+- **Remaining.** The interaction-net inspection, named
+  `panic-net-inspection` on 2026-10-15, has not started. The deep-nesting
+  stack overflow is deferred, with no step (see "Parser findings").
+- **Next.** `panic-net-inspection`, unless the polarity plan's
+  `polarity-net-fuzzing` absorbs it (see "Open questions").
 
 This plan responds to the holistic pre-performance review, X4 and Maintainer
 Decision 1 ([review](../reviews/HolisticArchitecturePrePerformance_2026-10-03.md)).
@@ -64,6 +77,15 @@ All timings use a release build unless noted.
   Hand-written source does not reach these depths, so this abort class is
   deferred within the parser workstream. The likely remedies are a nesting-limit diagnostic for
   nested syntax, plus iterative handling of infix chains and deep-tree drop.
+
+  These thresholds predate the term parser. Since `parser-term-parser-first`
+  (`eb84587c`, 2026-10-07) the term parser uses an explicit stack. The
+  [parser plan](ParserBacktrackingPerformance_2026-10-04.md) reports that
+  every survey nesting shape parses at depth 2,000 and that flat chains of
+  100k terms parse and resolve, but dropping a deep `SyntaxExpr` still
+  overflows, and later tree walks probably recurse. `Decisions.md`
+  (`no-semantic-recursion-on-rust-stack`) assigns the deep-nesting remedy
+  to this plan.
 - **The lexer withstands hostile text.** Twenty-two probes covered non-ASCII
   names, text, comments, and operators; a BOM; CRLF and lone CR; tabs;
   zero-width and non-breaking spaces; invalid and truncated UTF-8; NUL bytes;
@@ -72,6 +94,10 @@ All timings use a release build unless noted.
 - **Duplicated parser helpers have not drifted further.** The copies of
   `view_between`, `split_top_level`, and `error_at_view` are byte-identical.
   F1 shows how such copies diverge, so deduplicating them remains worthwhile.
+  Still duplicated on 2026-10-15: `do_expr.rs` copies all three from
+  `structural.rs`, identical apart from visibility. `conditional.rs` and
+  `pattern.rs` copy `view_between`, differing only in its `expect` message,
+  and `error_at_view`.
 
 ## Evaluation findings (2026-10-04)
 
@@ -100,15 +126,18 @@ All timings use a release build unless noted.
   issue only.
 - **Deep recursion is slow, not unsafe.** Evaluation time grows roughly
   quadratically with recursion depth, but nothing crashes. The finding is
-  recorded in the deferred
-  [evaluation recursion performance plan](EvaluationRecursionPerformance_2026-10-04.md).
+  recorded in the
+  [evaluation recursion performance plan](EvaluationRecursionPerformance_2026-10-04.md),
+  deferred then and done since 2026-10-08: recursion is linear.
 
 ## Poisoning findings (2026-10-04)
 
 Three read-only audits covered every production lock class (44), every
 client-callback site, and the scheduler's behavior when a claimed poll
 unwinds. Today a client that catches a panic generally does **not** keep a
-usable runtime. Lock poisoning is only one of three mechanisms:
+usable runtime. Lock poisoning is only one of three mechanisms. ("Today"
+is 2026-10-04, before the containment steps below; the counts are from
+that audit.)
 
 - **Stranded claims.** No unwind boundary exists between a claimed poll and
   the coordinator. The only production `catch_unwind` calls are the two GC
@@ -279,6 +308,10 @@ The panic hook still prints every panic, so each one remains a visible bug.
 
 Steps are referred to by name; see the plans README, "Step names".
 
+The inventories named below were source-scanning tests. Their counts,
+fingerprints and call-edge lists were retired on 2026-10-05 (`b5de34f0`),
+so those entries are history.
+
 1. **No-regret changes** (`panic-no-regret-changes`), which every
    alternative needs. Done on
    2026-10-04, except for destructors that reach runtime-core locks:
@@ -318,6 +351,9 @@ Steps are referred to by name; see the plans README, "Step names".
    `poll_claimed_client_demand`, and `poll_claimed_spark` ends the claim as
    `Panicked` through the existing terminal path. Waiters halt, the client
    API reports the panicked kind, and workers survive. Done on 2026-10-04.
+   `ClaimedTask::poll` has since become `ClaimedTask::poll_under`, which
+   borrows its driver's mutator and re-admits it after a panic inside a
+   suspension (`gc-hold-boundaries`, 2026-10-14).
 
    Implementation rules:
    - **Only the poll boundary creates a panic value.** An evaluator machine
@@ -398,7 +434,11 @@ Steps are referred to by name; see the plans README, "Step names".
      probing: a direct demand and a dependent's demand both catch the panic
      in the panicking lazy's route. So a route's own-panic release records
      `Panicked` on exactly the lazy whose evaluation panicked, whatever the
-     scheduling.
+     scheduling. No longer exact: since `eval-recursion-inline-forcing`
+     (`d77192b1`, 2026-10-07) a route forces the lazies it needs inline. A
+     panic in an inline lazy is recorded in it, then unwinds to the
+     boundary, which also records it in the route's own lazy
+     (`architecture/evaluation.md`).
    - **What the state does.** It releases the source or checkpoint, so the
      work is never replayed and its edges are reclaimed. A lazy that cached
      its result before panicking keeps the result, and the route settles
@@ -433,6 +473,9 @@ Steps are referred to by name; see the plans README, "Step names".
      - one cold-path outer admission and one same-region root publication,
        both in `record_lazy_panic`;
      - the changed acyclic call-edge fingerprint.
+
+     `record_lazy_panic` no longer opens an admission: it takes access from
+     its caller's mutator (`gc-hold-pass-access`, 2026-10-14).
    - **Remaining limit.** A net shared by several lazies, once torn, faults
      each later observer with "shared runtime net was poisoned", not the
      original report.
@@ -543,7 +586,7 @@ and collects.
 
 ## Method
 
-Production modules contain about 3,900 panic-capable sites (`panic!`,
+On 2026-10-04, production modules contained about 3,900 panic-capable sites (`panic!`,
 `unreachable!`, `expect`, `unwrap`, and assertions). This count includes
 inline test modules, so it is an upper bound. The inspection is risk-driven
 rather than line by line. Each site reachable from an entry surface is
@@ -575,11 +618,15 @@ Entry surfaces:
 - **Lowering, builtins, and operators.** Find panics reachable from
   program-supplied values, such as arity, shape, and type mismatches, and
   convert them to `EvaluationFailure`.
-- **Interaction nets.** Covers builder validation and reduction-time
+- **Interaction nets** (`panic-net-inspection`, named 2026-10-15; not
+  started). Covers builder validation and reduction-time
   panics. N8's random closed-net generator follows the net polarity change,
   so the generator exercises the final `bind >< bind` semantics. That
   change landed on 2026-10-05: binds join crossed (`B.1-C.2`, `B.2-C.1`),
-  and function binds list `[result, argument]`.
+  and function binds list `[result, argument]`. The generator landed the
+  same day (`polarity-net-generator`): it reduces random polarized nets in
+  three orders and checks the net's invariants after every step, with
+  calls inert. Builder validation was probed under "Evaluation findings".
   Construction rejects a net with a component disconnected from the public
   port, as a miswiring error, enforced at `NetBuilder::try_finish` since
   2026-10-05. Only disconnected garbage that
@@ -628,3 +675,32 @@ site that this ordering would delay can be fixed immediately when found.
   unrelated work, settles, and collects. No panic is observable as an
   `EvaluationFailure`.
 - Remaining panics are class I, with invariant-stating messages.
+
+## Open questions (2026-10-15)
+
+- **`ErrorKind::Panic`'s documentation.** In `src/api/error.rs` it says "a
+  later demand of the same value may run it again". It was written for
+  `panic-poll-boundary-containment`. Since `panic-lazy-panicked-state`, a
+  panicked lazy halts with its original report and never reruns. Should
+  the comment be corrected, or should it say which demands can rerun?
+- **Inline forcing spreads `Panicked` one level.** When a route forces a
+  lazy inline and that lazy panics, the route's own lazy also enters
+  `Panicked`, although its own code did not panic. The containment design
+  says stickiness never spreads past where the panic happened. Is this
+  accepted as torn progress, since the outer machine unwound? Or should
+  only the inline lazy record it, leaving the outer lazy a retryable
+  dependent? `Decisions.md` (`inline-lazy-forcing`) does not say.
+- **Net inspection against net fuzzing.** Does `panic-net-inspection` stay
+  separate from the polarity plan's `polarity-net-fuzzing`, now that
+  `polarity-net-generator` exercises reduction? Its scope has also grown:
+  compiled nets and annotation-requested normalization (`compiled-nets`,
+  `nets-compile-on-request`, 2026-10-11) add reduction paths that postdate
+  this plan.
+- **Deep nesting has no owner step.** `no-semantic-recursion-on-rust-stack`
+  assigns the remedy to this plan. The parser plan calls the remaining
+  overflow (deep-tree drop and later walks) outside the parser and
+  undecided. Should this plan gain a step for it, or should the parser plan
+  own it?
+- **Parser helper duplication has no owner.** Does `parser-grammar-retirement`
+  remove the copies in `do_expr.rs`, `conditional.rs` and `pattern.rs`, or
+  should a step here?

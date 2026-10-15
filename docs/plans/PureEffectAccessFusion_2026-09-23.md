@@ -1,13 +1,45 @@
 # Pure Effect Access Fusion Plan — 2026-09-23
 
 Status: preliminary and deliberately deferred until after
-[Value Representation Refinement](ValueRepresentationRefinement_2026-08-19.md).
+[Value Representation Refinement](ValueRepresentationRefinement_2026-08-19.md);
+it is the performance roadmap's `perf-effect-chain-fusion`, after
+`perf-value-representation`. Its premise has shrunk since 2026-10-05 (see
+"Changes since 2026-10-05"): a reflection poll now holds one mutator for its
+whole quantum, and a root costs about 82 instructions. PEAF1's decision gate
+is likely to close the plan (assessment, 2026-10-15).
 Rebased 2026-10-05 on the current dispatch shortcut. An earlier draft assumed
 a bounded multi-step fusion loop, which the resumable-WHNF work removed
 (holistic pre-performance review, finding R4).
 This plan was extracted from the resumable-WHNF plan (now retired; see
 [`README.md`](README.md) Retired History) so effect-fusion performance work
 does not block stack, budget, or GC work.
+
+## Changes since 2026-10-05
+
+Recorded 2026-10-15.
+- **One mutator per quantum.** A reflection poll holds a mutator for its
+  whole quantum and suspends only around host callbacks and specialization
+  requests (`coarse-grained-mutator`, 2026-10-13). Drivers hold the
+  thread's mutator across quanta (`driver-mutator`, 2026-10-14). So the
+  consecutive effect steps of one poll already share heap access. Per
+  `.r ()` step, heap entries fell from 34.6 outer and 117.6 recursive to
+  15.4 and 3.0.
+- **Values between steps.** Code under a mutator can carry values between
+  steps as views rather than roots (`no-recursive-heap-entries`), and raw
+  values stay valid until the mutator suspends or ends. What remains of
+  this plan is carrying effect intermediates that way instead of as
+  `RuntimeValueRoot`s.
+- **Cheap roots.** A root costs about 82 instructions (`pooled-roots`),
+  from about 1,130 before `root-evidence`.
+- **Where a step's cost lies.** On 2026-10-12 (`perf-reflection-step-cost`,
+  before explicit heap holds), the lazy routes a task pumps were 61% of a
+  `.r ()` step's roughly 520 K instructions, and the reflection machine's
+  own code about 7 K; a step made 64 root registrations. No long effect
+  chain has been profiled since.
+- **R2 mostly fixed.** A step moves its machine work instead of cloning
+  it, unless a failed step's recovery could read it: a branch transaction,
+  a retry checkpoint, or a cut that owns a transaction (`b6222f5f`,
+  2026-10-12).
 
 ## Purpose
 
@@ -42,6 +74,11 @@ active branch there (review finding R2), and keeps every intermediate value
 as a durable root. Nothing retains managed access across steps, so nothing
 here is "fused" in this plan's sense.
 
+Drift (2026-10-15): the step loop now moves the branch unless recovery
+could read it, and the steps of one poll share its mutator. Intermediate
+values are still durable roots (`Request::Return` carries a
+`RuntimeValueRoot`).
+
 The test-only `forcing_unfused` switch disables the shortcut, and
 `EFFECT_FUSION_BUDGET` survives only as a test chain length. Neither is an
 independent oracle: both paths share the decoder, the continuation
@@ -72,13 +109,16 @@ work proceed without it.
 From the holistic pre-performance review:
 
 - **A performance harness with counters** (P1 item 5). PEAF1 measures with
-  it; this plan does not build its own.
+  it; this plan does not build its own. *Done:* `perf-profiling-harness`
+  (2026-10-06). No profiling workload runs a long reflection effect chain;
+  `do_chain`'s pure effects reduce in nets.
 - **An effect step that moves its branch instead of cloning it** (R2). Until
   then the per-step clone dominates long chains and would mask what PEAF1
-  measures. Land it before PEAF1.
+  measures. Land it before PEAF1. *Mostly done* (`b6222f5f`): a step still
+  clones under a transaction, retry checkpoint or transaction-owning cut.
 - **One shared regional poll type** (E4). PEAF2's regional driver must reuse
   it rather than add another `{Ready, Boundary, Yielded, Failed}` enum. Land
-  it before PEAF2.
+  it before PEAF2. *Open* (2026-10-15).
 
 ## Semantic Boundary
 
@@ -149,6 +189,12 @@ criterion before changing production dispatch.
 
 ## Phase PEAF2 — Regional Driver Prototype
 
+Likely deprecated (2026-10-15): a regional driver that shares one access
+across steps is what the quantum's mutator already provides
+(`coarse-grained-mutator`). If PEAF1 justifies work, the smaller change is
+to carry intermediates as raw values or views within a quantum and root
+them only at a suspend or at the poll's end.
+
 - Prototype a regional standard-effect work form analogous to
   `drive_regional`, using the caller's existing matching access, shared
   mutable budget, and the shared regional poll type.
@@ -203,7 +249,8 @@ Use barriers or explicit dependencies for disputed concurrent orderings;
 repetition is stress evidence only. Run the routine repository gates, the
 interaction-net profiling regressions, relevant aggressive-GC verification,
 and Miri/model checks required by whichever post-refinement representations
-the implementation touches.
+the implementation touches. (2026-10-15: that is `scripts/check.sh full`;
+the profiling regressions are now its `glam-prof` fixtures.)
 
 ## Completion Criteria
 
@@ -218,3 +265,16 @@ Close this plan in one of two valid states:
 In either case, update current architecture only after the selected production
 shape exists. Do not make future stack, budget, or GC work depend on the
 optimization being implemented.
+
+## Open Questions (2026-10-15)
+
+For the maintainer:
+1. **Close or fold?** Close this plan now, or fold its remainder (rooting
+   effect intermediates only at a suspend or the poll's end) into
+   `perf-reflection-step-cost`, whose measurements found the lazy routes,
+   not the reflection machine, dominating a step?
+2. **Order.** Must it still wait for value representation? Shared access
+   no longer depends on it, and roots are already cheap.
+3. **Workload.** Should PEAF1 start by adding a long reflection effect
+   chain to the profiling suite, like the 2026-10-12 `refl.*` chains, since
+   the suite has none?

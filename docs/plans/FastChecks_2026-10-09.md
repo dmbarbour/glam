@@ -1,7 +1,9 @@
 # Fast Checks — 2026-10-09
 
-Status: active. Done: `test-fast-tier`. Open: `test-slow-tier`, deferred
-until a test needs it.
+Status: active. Done: `test-fast-tier` (2026-10-09, `9e651b11`). Open:
+`test-slow-tier`, deferred until a test needs it; no commit has advanced it
+as of 2026-10-15. The decision is `fast-test-suite` in `Decisions.md`, and
+its rule lives in `AgentContext.md` "Verification".
 
 ## Purpose
 
@@ -46,10 +48,16 @@ were also timed alone, with their CPU time.
     | Per-thread runtimes, optimized dependencies | 39 s | 27 s | 24 s | 12 s |
     | And opt-level 1 | 9 s | 2.7 s | 2.7 s | 15 s |
 
-    All workspace tests now take about 20 s. After a one-file edit,
-    `scripts/check.sh fast` takes 53 s and `all` 77 s; `full` took 565 s
-    from a cold build. The slowest test takes 2.5 s, so nothing moved to a
-    slower tier.
+    On 2026-10-09, all workspace tests took about 20 s. After a one-file
+    edit, `scripts/check.sh fast` took 53 s and `all` 77 s; `full` took
+    565 s from a cold build, without Miri or the sanitizers, since no
+    nightly was installed. The slowest test took 2.5 s, so nothing moved
+    to a slower tier.
+  - **Not remeasured since** (2026-10-15). The suite has grown from 2,367
+    `#[test]` functions in `src/`, `tests/` and `crates/` at `9e651b11` to
+    2,435, counted in source. A nightly toolchain is now installed, so
+    `full` also runs Miri and both sanitizers, and 565 s no longer
+    describes it.
 
 ## Open
 
@@ -63,5 +71,17 @@ prefix. `all` runs them with
 filter from matching ordinary tests, and the `full`-only fixtures
 (`cursor_stress_`, `c5d_scale_`) do not match it. The aggressive-GC pass in
 `full` runs them the same way. The nearest candidates are the source audits
-(1 to 2.5 s each), and `sample_nets_are_polarized` and
-`hello_assemblies`, which both assemble all 43 `hello` samples.
+(1 to 2.5 s each on 2026-10-09), and `sample_nets_are_polarized` and
+`hello_assemblies`, which both assemble all 43 `hello` samples. As of
+2026-10-15 `scripts/check.sh` has no `slow_` pass, and no test has the
+prefix.
+
+## Open questions (2026-10-15)
+
+- Only the contingent `test-slow-tier` remains. Should its recipe (the
+  `slow_` prefix, the `#[ignore]` reason, and how `all` and `full` run
+  them) move into `AgentContext.md` "Verification", so that this plan can
+  retire? `fast-test-suite` already holds the decision.
+- Should the `fast`, `all` and `full` times be remeasured once the machine
+  is free? `AgentContext.md` still quotes the 2026-10-09 figures, and `full`
+  now includes Miri and the sanitizers.

@@ -22,6 +22,12 @@ and on 2026-10-14 chose that drivers hold the mutator across quanta
 no heap entry nests in the end (see "Decisions, 2026-10-14"). The Steps use
 the review's vocabulary: an owned `Mutator`, not a `Hold`.
 
+Retirement (2026-10-15): not yet. Its decisions are in `Decisions.md`,
+with rules in `crates/glam-gc/SAFETY.md` and `agent_context/evaluation.md`,
+but the performance roadmap, the structural overheads plan and
+`crates/glam-gc/VERIFY.md` ("Owned mutators and views") still link or name
+it.
+
 ## Decisions, 2026-10-14
 
 - **No recursive heap entries in the end** (maintainer, agreeing to the
@@ -568,7 +574,10 @@ Slices, in order (2026-10-13):
    its diagnostic under the runtime mutation gate through a nested driver,
    which took the gate again and deadlocked behind a queued settlement. A
    test forcing that order hung; the diagnostic is now built before the
-   gate, and debug builds panic when a thread takes the gate twice. The
+   gate, and debug builds panic when a thread takes the gate twice.
+   (Superseded 2026-10-15 by `senders-never-evaluate-diagnostics`: the
+   diagnostic is composed, not evaluated, so its ordering went; the debug
+   panic stays.) The
    same analysis found that release between quanta runs client callbacks
    and, for failed statuses, nested drivers, so for now each quantum
    boundary is one suspension covering the quantum's deferred work, its
@@ -835,9 +844,10 @@ allocator acquisition is a `RefCell` borrow, a `TypeId` lookup and an
 `Arc` clone. Measure that once mutators exist; move the cache only if it
 shows.
 
-Measured 2026-10-15 with the `entry_cost` example's `allocator` mode:
+Landed 2026-10-15 (`01ec2fbc`, `ce7d3657`). Measured that day with the `entry_cost`
+example's `allocator` mode:
 acquiring an allocator for a cached class cost about 93 instructions, and
-Glam acquires one per allocation, about 64,000 times in `sum_800`. Most of
+Glam acquires one per allocation, about 33,000 times in `sum_800`. Most of
 it went to an `Arc` clone and drop of the class's shared state, which only
 a cursor refill uses, and to the prologue of a function that inlined class
 discovery. An allocator now carries its class's metadata and id, and its
@@ -845,13 +855,20 @@ refill takes the shared state from the thread's cache; discovery and
 refill run out of line. An acquisition costs 65 instructions, of which the
 `TypeId` probe of the thread's class map is about 25; an entry is
 unchanged at 269. Across the profiling workloads, 0.39% fewer
-instructions, at most 1.34% (`chain_w4_200`; `sum_800` 1.00%). An
+instructions, at most 1.18% (`countdown_400`; `sum_800` 1.00%). An
 allocator now owns nothing, so the fixture that forgot one to show it
 could not retain its heap, which leaked its `Arc` deliberately, became an
 assertion that `Allocator` needs no drop, and Miri and AddressSanitizer
-run the whole suite with leak checks. Left: a direct-mapped slot per
-`TypeId`, whose hash is a constant, in front of the class map would save
-most of the probe, about 0.2% more.
+run the whole suite with leak checks.
+
+Then (maintainer, 2026-10-15; `ce7d3657`) a 128-slot direct-mapped table
+in front of the class map: a type's slot index folds to a constant, so a
+hit is one load and a `TypeId` comparison, and a type evicted by another
+that shares its slot reads the map out of line and refills the slot. An
+acquisition costs 34 instructions. Across the profiling workloads 0.12%
+fewer instructions, at most 0.48% (`countdown_400`); both changes
+together, 0.51%. Worker workloads such as `chain_w4_200` vary by about 1%
+with scheduling, so their deltas are noise.
 
 ### Transient roots (`gc-hold-transient-roots`)
 
@@ -1104,6 +1121,11 @@ Corrected 2026-10-15 under `diag-lazy-failures`: deferring a nonterminal
 release's status past its gate let a runtime observed stable show a
 blocked root still `Launched`. A release expected to change a published
 status now runs suspended, under one gate with its transition.
+
+Also changed 2026-10-15 by `diag-lazy-failures` and `diag-lazy-enrichment`
+(`senders-never-evaluate-diagnostics`): a failed task's status diagnostic
+is composed, not built under the mutator, and the drivers that borrowed a
+mutator for diagnostics went with the isolated session's suspended drop.
 
 ### Heap context in Glam (`gc-hold-thread-context`)
 

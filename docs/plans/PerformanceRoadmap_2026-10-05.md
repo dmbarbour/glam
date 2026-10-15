@@ -190,15 +190,19 @@ gains this consequence when it lands.
      `perf-lowering-free-bindings`, `perf-interface-demand-walk`,
      `perf-interface-route-ownership`, `perf-reduced-source-copy`,
      `perf-driver-path-inlining`, `perf-module-definition-cost`,
-     `perf-runtime-net-attach` and `perf-application-values`. The
-     scheduler round trips were `perf-evaluation-recursion`.
-   - *Open, in order:* `perf-definition-assertions`, `perf-reflection-scanner`,
-     `perf-reflection-step-cost`, `perf-debug-annotations` and
-     `perf-worker-route-walks`.
+     `perf-runtime-net-attach`, `perf-application-values` and
+     `perf-definition-assertions` (2026-10-12). The scheduler round trips
+     were `perf-evaluation-recursion`.
+   - *Open, in order:* the leftovers of `perf-reflection-step-cost`
+     (remeasured 2026-10-15: a `.r ()` step is 376 K instructions, mostly
+     net reduction, allocation and lazy routes), `perf-reflection-scanner`,
+     `perf-debug-annotations` and `perf-worker-route-walks`.
+     `perf-root-check-kinds` is likely deprecated by `root-evidence`.
    - *Experiments:* `perf-coalesced-wakeups` (open),
      `perf-mimalloc-allocator` and `perf-poll-root-frames` (not adopted).
    - *Planned separately:* [Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md)
-     separates holding a heap from accessing it, after lower-hanging work.
+     separates holding a heap from accessing it. Pulled ahead of the
+     leftovers of `perf-reflection-step-cost`; done 2026-10-15.
 
 6. **Representations**, two parallel steps:
    - **Values** (`perf-value-representation`):

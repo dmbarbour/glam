@@ -233,8 +233,12 @@ coordinator state. Two revisions decide whether the hint survives. The broad
 route-hazard revision advances only for the mutation kinds that can change a
 retained tip, ancestor, or projection (`affects_exact_route`). If the hazard
 revision is unchanged and the claimed tip matches, the release hands off in
-O(1) even though the generation moved. Otherwise the driver revalidates every
-frame under the coordinator lock and keeps the route if validation passes.
+O(1) even though the generation moved. Otherwise the driver reads the
+coordinator's hazard log since the route's last validation: a route-affecting
+mutation names the works it touched, so the driver revalidates only from the
+lowest touched frame of its route, under the coordinator lock, and keeps the
+route if validation passes. It revalidates every frame when a hazard names no
+work or the bounded log no longer reaches back to its last validation.
 Retired work at the tip returns the route to its nearest registered parent,
 since the route grows and shrinks only at its tip; a mismatch or an
 interrupted release falls back to the complete guarded traversal from the
@@ -477,8 +481,8 @@ handles. Those clones share one root registration and gain no equality,
 ordering, or hash. Duplicating an edge never registers a temporary root, which
 would be correct but far too costly; the collector's release code-generation
 check keeps duplication one pointer load. Glam's managed facades expose no unqualified pointer-copy or address-
-comparison surface. Lifetime-branded temporary pointer views remain a deferred
-safety enhancement rather than a claim of the current non-moving boundary.
+comparison surface. Temporary pointer views are lifetime-branded: a `GcRef`
+borrows its mutator, so none outlives a suspension (`owned-mutator-views`).
 
 Deferred external host calls separate traceable semantics from opaque host
 behavior. `HostCallProducer` keeps every recursive Glam capture as an ordinary

@@ -34,70 +34,107 @@ its plan's topic, and unique across all docs. Examples:
 
 ## Active Plans
 
-- [`LazyDiagnostics_2026-10-15.md`](LazyDiagnostics_2026-10-15.md): senders
-  build and enrich diagnostics without evaluating them; only renderers
-  evaluate (`diag-` steps).
+Swept for status and drift on 2026-10-15; each plan names its open
+questions under "Open questions (2026-10-15)".
+
 - [`PerformanceRoadmap_2026-10-05.md`](PerformanceRoadmap_2026-10-05.md):
   the umbrella for performance work, covering shared measurement, how
   budgets treat batching, and the order of its `perf-` steps.
-- [`ParserBacktrackingPerformance_2026-10-04.md`](ParserBacktrackingPerformance_2026-10-04.md):
-  `perf-parser`. The prefix-shared term parser parses every ordinary
-  expression in production. `parser-patterns`, `parser-keyword-frames` and
-  `parser-grammar-retirement` remain.
 - [`StructuralOverheads_2026-10-08.md`](StructuralOverheads_2026-10-08.md):
   `perf-structural-overheads`. Costs that are not representation: access
   regions, rooting, wake-ups, and algorithmic defects such as quadratic
-  walks.
-- [`EvaluationRecursionPerformance_2026-10-04.md`](EvaluationRecursionPerformance_2026-10-04.md):
-  `perf-evaluation-recursion`, done 2026-10-08. Recursion is linear, and
-  tail recursion runs in constant space.
-- [`NetPolarityChecker_2026-10-05.md`](NetPolarityChecker_2026-10-05.md)
-  requires every interaction net to be polarized, with a `+` exposed port,
-  and checks it before N8 and net fuzzing.
-- [`ExplicitHeapHolds_2026-10-09.md`](ExplicitHeapHolds_2026-10-09.md)
-  separates holding a heap from accessing it, so admission happens only at
-  explicit boundaries. Done 2026-10-15: `Heap::mutate` is the only entry,
-  outermost only, and code takes access or a mutator from its caller.
-- [`FastChecks_2026-10-09.md`](FastChecks_2026-10-09.md) keeps
-  `scripts/check.sh fast` quick: per-thread test runtimes and an optimized
-  dev profile. `test-slow-tier` waits until a test needs it.
+  walks. `perf-definition-assertions` is done; next are the leftovers of
+  `perf-reflection-step-cost`, remeasured 2026-10-15, whose remaining cost
+  is mostly representation. `perf-root-check-kinds` is likely deprecated.
+- [`ParserBacktrackingPerformance_2026-10-04.md`](ParserBacktrackingPerformance_2026-10-04.md):
+  `perf-parser`. The prefix-shared term parser parses every ordinary
+  expression in production. No `parser-` step has landed since 2026-10-07:
+  a keyword form in parentheses inside another is still exponential
+  (`parse_ifs`), so `parser-keyword-frames` is next, then `parser-patterns`
+  and `parser-grammar-retirement`.
 - [`UserInputPanicSafety_2026-10-04.md`](UserInputPanicSafety_2026-10-04.md)
   keeps code that observes user input from panicking, and keeps a caught panic
-  from poisoning the runtime. Interaction-net inspection remains.
+  from poisoning the runtime. Interaction-net inspection
+  (`panic-net-inspection`) remains; the deep-nesting stack overflow has no
+  owner.
+- [`NetPolarityChecker_2026-10-05.md`](NetPolarityChecker_2026-10-05.md)
+  requires every interaction net to be polarized, with a `+` exposed port.
+  Done except `polarity-net-fuzzing`, which runs only if inspection stalls
+  (`panic-discovery-by-inspection`); the plan retires once that step has
+  another owner.
+- [`FastChecks_2026-10-09.md`](FastChecks_2026-10-09.md) keeps
+  `scripts/check.sh fast` quick: per-thread test runtimes and an optimized
+  dev profile. `test-slow-tier` waits until a test needs it; the plan could
+  retire once its recipe moves into `AgentContext.md`.
 
 ## Active Reviews
 
 - [`HolisticArchitecturePrePerformance_2026-10-03.md`](../reviews/HolisticArchitecturePrePerformance_2026-10-03.md)
-  is the pre-performance backlog: its P1 and P2 sequences and open maintainer
-  decisions.
+  is the pre-performance backlog. P0 and P1 are done, except P1-6's
+  oracles; P2 became `perf-structural-overheads`. Its "Status 2026-10-15"
+  lists the open findings and their owners; maintainer decision 6
+  (reflection semantics) is open. About 30 findings have no other home, so
+  it cannot retire yet.
+
+## Completed, Awaiting Retirement
+
+Each is done; what keeps it under the retention rule is listed.
+
+- [`ExplicitHeapHolds_2026-10-09.md`](ExplicitHeapHolds_2026-10-09.md),
+  done 2026-10-15: `Heap::mutate` is the only entry, outermost only, and
+  code takes access or a mutator from its caller. Still cited by the
+  roadmap, the structural overheads plan and `crates/glam-gc/VERIFY.md`.
+- [`LazyDiagnostics_2026-10-15.md`](LazyDiagnostics_2026-10-15.md), done
+  2026-10-15: senders build and enrich diagnostics without evaluating
+  them; only renderers evaluate. Still cited by the explicit heap holds
+  plan.
+- [`EvaluationRecursionPerformance_2026-10-04.md`](EvaluationRecursionPerformance_2026-10-04.md),
+  done 2026-10-09: recursion is linear, and tail recursion runs in
+  constant space. The route-validation hazard log has no `Decisions.md`
+  entry, and two follow-ups have no owner (see its open questions).
+- [`ResumableWhnfHolistic_2026-09-28.md`](../reviews/ResumableWhnfHolistic_2026-09-28.md)
+  and [`ResumableWhnfW6G4_2026-09-23.md`](../reviews/ResumableWhnfW6G4_2026-09-23.md)
+  held measurement series and the Callgrind/DHAT recipe until a performance
+  harness gave those numbers a home; `perf-profiling-harness` did
+  (2026-10-06). Ready to retire once the holistic review's links to them
+  become plain names.
 
 ## Deferred Plans
 
+- [`ValueRepresentationRefinement_2026-08-19.md`](ValueRepresentationRefinement_2026-08-19.md):
+  compact tagged values and representation splitting. It is the roadmap's
+  `perf-value-representation`, after `perf-structural-overheads`.
+- [`PureEffectAccessFusion_2026-09-23.md`](PureEffectAccessFusion_2026-09-23.md):
+  regional fusion for pure standard-effect chains
+  (`perf-effect-chain-fusion`). Drivers now hold one mutator across a
+  poll's steps, so most of its premise is gone; likely to close at PEAF1.
+- [`PublicResumableEvaluation_2026-09-23.md`](PublicResumableEvaluation_2026-09-23.md):
+  a library API to retain, advance, and resume one foreground evaluation,
+  after holistic S7 and A1.
 - [`ConcurrentGarbageCollection_2026-08-28.md`](ConcurrentGarbageCollection_2026-08-28.md):
   concurrent marking, delayed logical sweep, and epoch-safe run recycling.
-- [`ValueRepresentationRefinement_2026-08-19.md`](ValueRepresentationRefinement_2026-08-19.md):
-  compact tagged values and representation splitting.
+  No trigger; its nesting rationale was superseded by one heap per thread
+  and `no-recursive-heap-entries`.
 - [`GarbageCollectorScopedPointerSafety_2026-09-09.md`](GarbageCollectorScopedPointerSafety_2026-09-09.md):
-  the lifetime-branded `ScopedGc` experiment, deferred until a defect demands
-  it.
-- [`PureEffectAccessFusion_2026-09-23.md`](PureEffectAccessFusion_2026-09-23.md):
-  regional fusion for pure standard-effect chains, after value-representation
-  refinement.
-- [`PublicResumableEvaluation_2026-09-23.md`](PublicResumableEvaluation_2026-09-23.md):
-  a library API to retain, advance, and resume one foreground evaluation.
+  likely deprecated. Its branded views landed as `GcRef`
+  (`owned-mutator-views`, 2026-10-12).
 
 ## Open Items Without a Plan
 
 Each line moves into a plan as soon as one owns it.
 
-- **Public diagnostic projection.** Review the transitional
-  `Diagnostic::from_parts` policy, which caches shallow `message` and `line`
-  views beside the structured emission, and decide which conveniences stay.
+- **Public diagnostic summaries.** Since `diag-static-summaries`
+  (2026-10-15), `Diagnostic::message`, `line` and `source` hold only the
+  Rust text a diagnostic was built with; one built from a value reads
+  `EvalFailure` or `EvalDiagnostic`. The code still calls them
+  transitional. Decide whether they stay as documented conveniences or go.
 - **`.read.token` dependencies.** It turns an unavailable dependency into a
   parser error, and nested search does not suspend.
-- **Net callable performance.** Small-set followed identity, batched pure pair
-  steps, annotated normalization, and a measured specialized checkpoint. Owner
-  once it exists: a net performance plan (holistic N3).
+- **Net callable performance.** Small-set followed identity and a measured
+  specialized checkpoint. Batched pure pair steps are the roadmap's
+  `perf-net-pattern-batching`, and annotated normalization landed as
+  `anno 'normalize` (`perf-compiled-nets`, 2026-10-11). Owner once it
+  exists: a plan for the roadmap's net steps (holistic N3).
 - **Net construction performance.** Budgeted or incremental replay of large
   netlists, batching, split counters, and moving reusable pure handler
   definitions into Glam source. Indexed list-fix reevaluation is potentially
@@ -106,17 +143,12 @@ Each line moves into a plan as soon as one owns it.
   refinement.
 - **Comment review** (maintainer, 2026-10-05). Find comments that are too
   large and belong in a standing doc or `Decisions.md`, and comments that are
-  mostly redundant because the code already says it. Replace the step IDs
-  that remain in test-module comments along the way.
+  mostly redundant because the code already says it. Few step IDs remain:
+  `W4` in two test strings in `src/eval/value/tests/lazy_checkpoint.rs`, and
+  `C8` in glam-gc's `examples/c8_measurements.rs` and `src/deterministic.rs`.
 - **History-coupling guard scope.** `tests/source_doc_coupling.rs` scans
-  `src/` only; extend it to `tests/` and `crates/`.
-
-## Completed, Awaiting Extraction
-
-- [`ResumableWhnfHolistic_2026-09-28.md`](../reviews/ResumableWhnfHolistic_2026-09-28.md)
-  and [`ResumableWhnfW6G4_2026-09-23.md`](../reviews/ResumableWhnfW6G4_2026-09-23.md)
-  hold measurement series and the Callgrind/DHAT recipe. They stay until the
-  holistic review's performance harness (P1-5) gives those numbers a home.
+  `src/` only; extend it to `tests/` and `crates/`. No Rust file there
+  references the history directories today, so the extension passes at once.
 
 ## Retired History
 

@@ -13,10 +13,25 @@ Status: active, as the `perf-structural-overheads` step of the
 `perf-lowering-free-bindings`, `perf-interface-demand-walk`,
 `perf-interface-route-ownership`, `perf-reduced-source-copy`,
 `perf-driver-path-inlining`, `perf-module-definition-cost`,
-`perf-runtime-net-attach` and `perf-application-values`. Next:
-`perf-definition-assertions`.
+`perf-runtime-net-attach`, `perf-application-values` and
+`perf-definition-assertions` (2026-10-12).
 `gc-two-level-mutator-access` and `gc-thread-local-heap-context` moved to
-[Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md).
+[Explicit Heap Holds](ExplicitHeapHolds_2026-10-09.md), which the
+maintainer pulled ahead of the leftovers of `perf-reflection-step-cost` and
+which was done on 2026-10-15. Next: `perf-reflection-step-cost`, remeasured
+on 2026-10-15 (below), then `perf-root-check-kinds`, which waited on
+explicit heap holds.
+
+## Open questions (2026-10-15)
+
+- **Scope.** What remains open here is mostly reflection-specific
+  (`perf-reflection-scanner`, the leftovers of `perf-reflection-step-cost`)
+  plus `perf-debug-annotations` and `perf-worker-route-walks`. A `.r ()`
+  step's remaining cost is now mostly representation. Close this plan and
+  move the reflection steps to a plan of their own, so the roadmap can
+  start `perf-value-representation` and `perf-net-representation`, or
+  finish them here first?
+- **`perf-root-check-kinds`.** Retire it, given `root-evidence`?
 
 ## Purpose
 
@@ -78,6 +93,10 @@ Where a countdown's time goes (`countdown_2000`, share of samples):
 ## Open Steps, in Order
 
 ### Introduce and override checks (`perf-definition-assertions`)
+
+Done 2026-10-12: every step below landed except `defs-with-union`, which
+the maintainer deferred. The scanner's once-only check waits on
+`perf-reflection-scanner`.
 
 Each introduced module definition carries an assertion that the
 definitions before it do not define its name (an override, that they do).
@@ -326,6 +345,12 @@ speed and quality of the scanner, and of other compiler-generated
 reflection tasks and annotations, to improve. Related:
 `perf-reflection-step-cost`.
 
+Those figures are from 2026-10-10. On 2026-10-15 (`01ec2fbc`), `minimal`
+costs 24.3 M instructions in all, with 626 reflection machine steps,
+about 25 `.r ()` steps' worth: on the order of 9 M for the scanner and
+the `defs-refl-state` check together, an estimate from the per-step cost,
+not a measurement of the scanner alone.
+
 ### Reflection step cost (`perf-reflection-step-cost`)
 
 Holistic R1, R2 and R6, still open: the reflection store's change log grows
@@ -388,6 +413,36 @@ or `.heap.get ['k]`), and loops of 400 iterations through a recursive
   transient roots, about a quarter to a third of a step directly
   (maintainer, 2026-10-12: consider pushing them before the leftovers).
 
+Remeasured 2026-10-15, after explicit heap holds, `root-evidence` and the
+allocator class cache, with the same chains (`.r ()` and `.heap.set`, 200
+steps against a baseline that compiles them without running them): a
+`.r ()` step costs 376 K instructions (519 K on 2026-10-12, −28%), a
+`.heap.set` step 510 K (685 K, −26%). Per `.r ()` step: 0.23 outer heap
+regions (about 35 outer and 118 nested before), 64 root registrations and
+80.5 allocations (unchanged), 20.3 coordinator `notify_all`s (26.8) and
+53.5 net work items (55). By each function's own cost (callgrind), a step
+divides as:
+
+| Area | K instr | Share | 2026-10-12 |
+| --- | ---: | ---: | ---: |
+| Net reduction and building | 118 | 31% | 138 K |
+| `malloc`, `free`, `memcpy` | 73 | 19% | 112 K |
+| Coordinator, pump and lazy routes | 68 | 18% | 51 K |
+| Value duplication, drops and the rest | 56 | 15% | |
+| WHNF and checkpoints | 33 | 9% | 44 K |
+| Root registration | 11 | 3% | 57 K |
+| Heap entry, thread cache and allocation | 8 | 2% | 58 K |
+| The reflection machine's own code | 8 | 2% | 7 K |
+
+Explicit heap holds removed the regions as expected. Root registrations
+did not fall, but `root-evidence` made each one cheap: a root made from a
+view registers without validation in release builds, about 170
+instructions. `RuntimeNet::reference`, which resolves every port through a
+hash map, is 26 K of the net share (`perf-net-representation`). What
+remains of a step is mostly representation (nets and allocation volume)
+and the routes that evaluate each small lazy, not structural overhead.
+R1 (the change log) and R6 (captured continuations) remain unmeasured.
+
 Reflection task polls hold no heap region (`perf-quantum-region`), since
 they call into their host between steps. Their pure steps, such as local
 state, could hold one, provided no client callback runs inside it
@@ -431,6 +486,13 @@ inner roots that never cross runtimes, made by the runtime from values it
 holds, may not. Robustly distinguishing the two kinds could skip most
 checks (maintainer, 2026-10-12). After explicit heap holds, which remove
 many inner roots outright, measure what remains.
+
+Likely deprecated (2026-10-15): `root-evidence` (explicit heap holds)
+distinguished the kinds by evidence instead. `MutatorAccess::root`
+registers a value proven live by a view without validation in release
+builds, and only `root_checked`, for a bare `Gc`, validates. A `.r ()`
+step's 64 registrations now cost about 11 K instructions together, 3% of
+the step (see `perf-reflection-step-cost`).
 
 ## Experiments
 

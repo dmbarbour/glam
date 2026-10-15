@@ -2778,7 +2778,7 @@ fn lazy_aliases_share_and_cache_their_final_whnf() {
 }
 
 /// Demanding the root caches the chain's ends. A member between may be left
-/// forwarding to the leaf (`eval-recursion-tail-forwarding`); it caches the
+/// forwarding to the leaf (`lazy-tail-forwarding`); it caches the
 /// same value when it is observed.
 #[test]
 fn demanded_forwarding_chain_caches_its_ends_and_members_on_observation() {

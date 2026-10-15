@@ -5,6 +5,29 @@ recommended order of work. It does not authorize a plan.
 
 Revision reviewed: `7452e13c` (clean `main`).
 
+*Status 2026-10-15.* Each finding and sequence step carries a dated status
+marker; this summary was checked against `01ec2fbc`.
+- **P0 is done** (2026-10-03 to 2026-10-05).
+- **P1 is done,** except the independent oracles in P1-6 and the split of
+  `architecture/evaluation.md` (X8). The harness is `perf-profiling-harness`
+  (2026-10-06).
+- **P2 became `perf-structural-overheads`.** The performance roadmap owns it,
+  after `perf-evaluation-recursion`. V1 and most of S1, E2, E8 and N3 are
+  done. R1, R2 and R6 are `perf-reflection-step-cost`.
+- **Owned elsewhere:**
+  - V2, V3 and V5 are VRR's V-1 prework.
+  - N2, E3, S4 and F5 are Concurrent GC's CG0 prerequisites.
+  - S7 and A1 come before Public Resumable Evaluation.
+  - N3's node storage is the roadmap's `perf-net-representation`.
+  - F3's remaining hot spots are `perf-parser` steps.
+  - X4's net inspection is the panic plan's `panic-net-inspection`.
+- **Open with no plan:** X6, X7, X8 (in part), S2, S5, S6, S8, E1, E4–E6,
+  E9, N4 (in part), N6, N7, R3 (structure), R5, R8, R9, F2, F4, F6, F8 (in
+  part), A2, A4, A5 (in part) and AR-006.
+- **Maintainer decisions:** 6 is open; the rest are answered.
+- **New questions** are under
+  [Open questions (2026-10-15)](#open-questions-2026-10-15).
+
 ## Purpose and Scope
 
 The next phase will be performance-focused. The likely candidates are
@@ -215,6 +238,10 @@ folds singleton `List::concat`s into an N-deep left spine
   references `docs/plans` or `docs/reviews`. It scans `src/` only.
 - **Gate.** `scripts/check.sh` is now the pre-commit gate; see X2.
 
+*Status 2026-10-15:* the guard still scans `src/` only. Extending it to
+`tests/` and `crates/` is an open item in `plans/README.md`. No Rust file
+there references the history directories today.
+
 ### X2 — High — The routine checks cover less than they appear to
 
 **Verified.**
@@ -293,6 +320,11 @@ folds singleton `List::concat`s into an N-deep left spine
   is installed. The production-runtime Miri and sanitizer matrix is not
   scripted, and no docs link check was added.
 
+*Status 2026-10-15:* unchanged. The production-runtime matrix is documented
+in `VERIFY.md`, "Production-runtime dynamic matrix", but not scripted. The
+profiling check is now `scripts/check-profiling-fixtures.sh` (`7962639e`,
+2026-10-06); `scripts/check-interaction-net-profiling.sh` is gone.
+
 ### X3 — High — There is no performance harness, and the existing hooks are unused
 
 **Verified.**
@@ -360,6 +392,22 @@ Before the first optimization, add `scripts/perf/` containing:
   maintenance reports.
 
 Then capture and check in a post-G4 baseline in one owning doc.
+
+*Done 2026-10-06* as `perf-profiling-harness` (`7962639e`), in the shape the
+maintainer settled on 2026-10-05 (performance roadmap, "Settled Harness
+Questions").
+- The `glam-prof` feature replaces `interaction-net-profiling`.
+- A `glam-prof` binary writes a JSON report to the path in `GLAM_PROF`: the
+  runtime's counters, phase timers, and `HeapMetrics`.
+- `scripts/profile.sh` runs workload families at three sizes and reports
+  growth. `scripts/check-profiling-fixtures.sh` runs in `check.sh all`.
+- The baseline is the roadmap's "Baseline 2026-10-06". Usage is in
+  `AgentContext.md`, "Profiling".
+- CLI assembly now collects (Decision 2).
+
+*Likely deprecated (2026-10-15):* `scripts/perf/`, the JSONL runner,
+`GLAM_STATS=1` and `[profile.profiling]`. The settled harness replaced them,
+and baselines are working data in the plan that uses them.
 
 ### X4 — High — User input can crash the process, and panics are not contained
 
@@ -440,6 +488,14 @@ a bug, contained as an interruption and never treated as semantics.* The
   until inspection stalls. Deeply nested source still overflows the parser's
   stack.
 
+*Status 2026-10-15:*
+- N8's generator landed on 2026-10-05 (`polarity-net-generator`).
+- The net inspection is `panic-net-inspection` in the panic plan, not
+  started. Net fuzzing is `polarity-net-fuzzing`.
+- The term parser has used an explicit stack since 2026-10-07. Dropping a
+  deep syntax tree still overflows. The roadmap's
+  `perf-pre-eval-stack-depth` audits recursion before evaluation.
+
 ### X5 — High — Transition scaffolding taxes every structural change
 
 **Reproduced (allows) / Verified (counts) / Reported (inventory details).**
@@ -517,6 +573,13 @@ Before VRR V1:
 4. **Define "compatibility" once** in a values architecture doc (X8), or
    rename it, for example to "structural shell".
 
+*Done 2026-10-05.* Items 1–3 are in P1-7 and V4. Item 4:
+`architecture/values.md` defines "compatibility" ("Compatibility Shells").
+*Status 2026-10-15:* no `allow(dead_code)` remains. Two `W4` strings remain
+in `src/eval/value/tests/lazy_checkpoint.rs`, part of the README's comment
+review. The `evaluate_compatibility_whnf` facade has about 396 call sites;
+see E9.
+
 ### X6 — Medium — Layering cycles around core
 
 **Verified.**
@@ -548,6 +611,14 @@ Counts are of `crate::X` mentions in production code. The generic
 None of this is urgent. Each item should land with whatever plan touches
 those files.
 
+*Status 2026-10-15:* open, with no plan. The diagnostic → evaluation edge is
+gone: diagnostics compose instead of evaluating (`07038531`,
+`diag-lazy-enrichment`). These edges remain:
+- core → evaluation, eval and api;
+- core_net → eval;
+- `compiler.rs` and `g_syntax/parser/source.rs` → `api::CompilationExecution`;
+- `LazyTaskMachine` in `eval/value.rs` (E5).
+
 ### X7 — Medium — The main crate's unsafe surface has no ledger or lint policy
 
 **Verified / Reported.**
@@ -574,6 +645,12 @@ impls. Their exactness is what keeps the collector sound.
 - Add an inventory diff in the style of `glam-gc`'s.
 - Write one short owning doc for the unsafe family contracts.
 - Script the dynamic-tool matrix.
+
+*Status 2026-10-15:* mostly open, with no plan. `architecture/values.md`
+(2026-10-05) documents the family traits and their unsafe contracts.
+`VERIFY.md` documents a production-runtime dynamic matrix, but no script runs
+it. `src/lib.rs` still has no unsafe lints, and the main crate has no unsafe
+ledger.
 
 ### X8 — Medium — Documentation gaps that matter for the next phase
 
@@ -656,6 +733,12 @@ impls. Their exactness is what keeps the collector sound.
   - its completion hash is listed in `plans/README.md`.
 - Refresh the status lines of the deferred perf plans now.
 
+*Status 2026-10-15:* mostly done; see P1-8.
+- `README.md` gained build instructions on 2026-10-03 (`4c849c19`).
+- The stale identifiers and overstated claims are gone from current docs.
+- Open: splitting `architecture/evaluation.md`, now about 70 KB under 13
+  headings, and defining its terms.
+
 ---
 
 ## Subsystem Findings
@@ -685,6 +768,14 @@ by metadata address, and let allocators and roots reuse it. Compact roots
 opportunistically. Expose `HeapMetrics` through the X3 counters. Do this
 before VRR V0, or V0 will measure lock contention.
 
+*Done.*
+- **Class cache.** `perf-allocation-path` (2026-10-10, `3b44499a`,
+  `9bab3101`) gave each thread a class cache that allocators and roots share.
+- **Roots.** Roots became counted slots in heap-owned pools, reclaimed apart
+  from collections (`pooled-roots`, `root-chunk-reclamation`, 2026-10-14,
+  `gc-hold-pooled-roots`).
+- **Metrics.** `HeapMetrics` is in the `glam-prof` report.
+
 **V2 — High — The structural trace is logical, recursive, and wasteful.**
 Reported.
 
@@ -705,6 +796,12 @@ risks stack overflow inside collection.
 - Use an explicit worklist.
 - Keep the statistics in a test-only variant.
 - Add "logical versus physical visits" as a required VRR V0 measurement.
+
+*Status 2026-10-15:* open, owned by VRR's V-1 prework ("A physical,
+iterative trace"). The production trace still calls `key_node_count` for
+every dictionary entry and discards the count. The roadmap's
+`perf-value-representation` adds "no `Arc` in basic data types" (maintainer,
+2026-10-09), which removes the trace of shared shells once per reference.
 
 **V3 — High (medium confidence on trigger depth) — Core walks and
 destruction are not stack-safe.** Verified (list literal and `Drop`),
@@ -729,6 +826,19 @@ Reported (walks).
 - Add small-stack tests that build, trace, collect, and drop a 100k-deep
   concat and a 10k-nested strict dictionary.
 - Extend the recursion rule to core and `list.rs`.
+
+*Status 2026-10-15:* partly done.
+- **Done.** List literals no longer build deep spines, and pops reshape a
+  spine (`perf-list-front-walk`, 2026-10-08;
+  `perf-list-literal-composition`, 2026-10-10). The recursion audit covers
+  `src/core` (V4).
+- **Open, in VRR's V-1 prework:**
+  - an iterative `ListNode` drop (the test in `list.rs` still leaks its
+    20k-deep spine);
+  - iterative key conversions (the audit still lists four core functions
+    as known defects);
+  - the small-stack tests;
+  - extending the audit to `list.rs`.
 
 **V4 — High (cost) — Inventory disposition.** Reported, endorsed by the lead
 reviewer.
@@ -808,6 +918,11 @@ Reported.
 *Recommendation:* add these to a VRR "V-1 prework" checkpoint together with
 V1–V4. Boxing `Number` is a measurable precursor to V2.
 
+*Status 2026-10-15:* in VRR's V-1 prework. Lazies no longer carry labels
+(`0e8743d7`, `f5856d82`, 2026-10-12, `perf-lazy-force`). The rest is open:
+`core::Value` is still 64 bytes, and `with_context_in` still copies earlier
+contexts.
+
 ### Evaluation scheduler and runtime (S)
 
 **S1 — High — Many scheduler round trips per unit of semantic progress.**
@@ -850,6 +965,22 @@ three angles:
 
 Re-baseline the exact-budget fixtures deliberately.
 
+*Status 2026-10-15:* largely done.
+- **`perf-evaluation-recursion`** (2026-10-07 to 2026-10-08) validates
+  exact routes from their lowest touched frame. It also forces lazies
+  inline in a claimed route (item 5, Decision 3) and forwards tail calls.
+  Coordinator work is now under 2% of the countdown.
+- **Wake-ups.** Condvars notify only registered waiters
+  (`perf-admission-wakeups`, `perf-idle-wakeups`, 2026-10-08).
+- **Regions.** One heap region spans each evaluation quantum
+  (`perf-quantum-region`, 2026-10-09); drivers hold the mutator across
+  quanta (`driver-mutator`, 2026-10-14).
+- **Open:** item 2 (E1) and item 4's merged release steps (S5).
+
+*Likely deprecated (2026-10-15):* item 2's "charging administrative
+units". `reduction-costs-one-budget-unit` charges only reductions, and
+observation is free.
+
 **S2 — High — Worker selection and claiming are O(records) under the global
 lock.** Verified in part.
 
@@ -862,6 +993,11 @@ lock.** Verified in part.
 
 *Recommendation:* keep a runnable-root index maintained on block and wake.
 Drop the ordered queue. Make the probes use a reusable scratch buffer.
+
+*Status 2026-10-15:* open, with no plan. `remove_ready_task` still runs
+`ready_tasks.retain(..)`, and `claim_causal_background` still scans. Related:
+`perf-worker-scaling` (2026-10-09) fixed a client spin. Workers' walks from
+the root are `perf-worker-route-walks` (structural overheads plan, open).
 
 **S3 — High — Claims have no unwind guard.** See X4.
 
@@ -900,6 +1036,18 @@ a managed edge transition.** Reported.
 *Docs progress 2026-10-05:* `agent_context/evaluation.md` names this as a
 known exception to callback-free access. The code fix remains open.
 
+*Status 2026-10-15:* partly superseded by explicit heap holds.
+- **Gone.** No heap entry nests (`no-recursive-heap-entries`, 2026-10-14),
+  and `gc_activity_for_entries` no longer exists.
+- **Asserted.** Taking the runtime gate twice on one thread is a debug
+  panic (`8d326eaa`, 2026-10-14). The maintainer kept that check.
+- **Accepted.** The coordinator lock is now taken under a mutator by design
+  (`boundary-release-under-mutator`, 2026-10-14).
+- **Open, a CG0 prerequisite.** Promise publication still locks the
+  coordinator inside a managed edge transition
+  (`PromiseProducerObligation::publish_assignment_guarded`), and there is
+  no lock-order table.
+
 **S5 — Medium — The lifecycle state machine is written five times.**
 Reported.
 
@@ -923,6 +1071,12 @@ Reported.
 
 Do this before S1 and S2, so those fixes land once instead of five times.
 
+*Status 2026-10-15:* open, with no plan. Each work kind still has its own
+release function, and there is no shared release plan. `coordinator.rs` is
+about 4,500 lines.
+*Likely deprecated (2026-10-15):* "before S1". S1's round trips were removed
+without this refactoring.
+
 **S6 — Medium — No model checking for the multi-lock wake and claim
 protocols.** Reported.
 
@@ -933,6 +1087,11 @@ protocols.** Reported.
 
 *Recommendation:* Loom the extracted protocol before S1 changes lock
 granularity.
+
+*Status 2026-10-15:* open, with no plan. S1's lock and wake changes landed
+without it, guarded by forced-order tests. The collector's admission gate
+has Loom models (`admission-gate-fast-path`); the wake and claim protocol
+has none.
 
 **S7 — Medium — Gaps for Public Resumable Evaluation.** Reported.
 
@@ -947,6 +1106,9 @@ granularity.
 *Recommendation:* do the PRE-1 extraction now, replace the test seam, and
 thread exact spend.
 
+*Status 2026-10-15:* open. The deferred Public Resumable Evaluation plan
+names it as a prerequisite. `advance_client_demand_for_test` still exists.
+
 **S8 — Low.**
 
 - Release functions compute `made_progress` and `remains_blocked`, and
@@ -960,10 +1122,19 @@ thread exact spend.
   `SessionClosureWork`.
 - `evaluation/tests.rs` (9,875 lines, 171 tests) has no submodules.
 
+*Status 2026-10-15:* open, not rechecked item by item.
+`evaluation/tests.rs` is now about 10,200 lines.
+
 ### Evaluator semantic machines (E)
 
 **E1 — High — `Yielded` conflates progress with budget exhaustion.** See
 S1. Verified at `comparison_machine.rs:146-171`.
+
+*Status 2026-10-15:* partly done; open, with no plan. A claimed route with
+budget left now continues past a family handoff (`inline-lazy-forcing`).
+`Yielded` still means both things (`Decisions.md`,
+`step-budget-is-reservation`), and the comparison machine still yields
+after every frame transition.
 
 **E2 — High — Lazy routes rebuild state on every poll.** Reported.
 
@@ -974,6 +1145,12 @@ S1. Verified at `comparison_machine.rs:146-171`.
 - Family-to-WHNF handoffs allocate a new WHNF cell and then yield.
 
 *Recommendation:* see S1, items 3 and 5.
+
+*Status 2026-10-15:* largely done.
+- Forced lazies run inline (`perf-evaluation-recursion`).
+- One heap region spans each quantum (`perf-quantum-region`). Access
+  regions fell 99% in `hello_elf` (roadmap, "Snapshot 2026-10-11").
+- The fixed costs of a force were cut (`perf-lazy-force`, 2026-10-12).
 
 **E3 — Medium — Nine hand-copied managed checkpoint cells with inconsistent
 poison policy.** Reported.
@@ -991,6 +1168,10 @@ poison policy.** Reported.
 transition function and a structured-failure poison policy, plus a generic
 durable-regional adapter.
 
+*Status 2026-10-15:* open, a CG0 prerequisite in the Concurrent GC plan.
+There are now seven checkpoint kinds (`ManagedLazyCheckpointKindTag`), each
+with its own cell type.
+
 **E4 — Medium — No shared regional poll type.** Reported.
 
 - Twelve enums have the same `{Ready, Boundary, Yielded, Failed}` shape.
@@ -1002,6 +1183,10 @@ durable-regional adapter.
 macro, and one `demand_whnf` helper hosting an already-WHNF fast path.
 Without it, PEAF2 would add a thirteenth enum.
 
+*Status 2026-10-15:* open, with no plan. The PEAF plan names it as a
+prerequisite. Thirteen `Regional*Poll` and `Regional*Status` enums exist,
+and there is no `RegionalPoll<T>`.
+
 **E5 — Medium — `LazyTaskMachine` lives in `eval/value.rs` and creates the
 eval⇄evaluation cycle (X6).** Reported.
 
@@ -1011,6 +1196,10 @@ and production discards the result.
 
 *Recommendation:* move it to its own module and dispatch on the checkpoint
 kind inside one access region.
+
+*Status 2026-10-15:* open, with no plan. `LazyTaskMachine` is still in
+`eval/value.rs`. One heap region per quantum (`perf-quantum-region`) now
+covers "inside one access region".
 
 **E6 — Medium — Semantic rules are implemented twice, and builtin
 classification tables can drift.** Reported.
@@ -1025,6 +1214,9 @@ classification tables can drift.** Reported.
 
 *Recommendation:* one exhaustive `builtin_strategy(Builtin)` used by all
 four, and shared, unit-tested semantic predicates.
+
+*Status 2026-10-15:* open, with no plan. `builtin_machine.rs` still falls
+back to `Numeric`.
 
 **E7 — Medium — The evaluator prints to stderr under managed access.**
 Verified.
@@ -1070,6 +1262,18 @@ Reported (others).
 *Recommendation:* fix these through the E4 helper. Build list literals
 directly from the operand vector.
 
+*Status 2026-10-15:* mostly done in `perf-structural-overheads`, without the
+E4 helper.
+- **List literals** compose bounded lists with `++`
+  (`perf-list-literal-composition`, 2026-10-10).
+- **Applications** are built directly with the function copied in
+  (`perf-runtime-net-attach`, 2026-10-10).
+- **Operator operands** collect straight into the array the operator keeps.
+  A WHNF walk records only the promises it follows, which cycle detection
+  reads (`0e8743d7`, `perf-lazy-force`, 2026-10-12).
+- **Not rechecked:** `BigRational` clones in `duplicate_value`, and a
+  `RegionalWhnfWork` per child demand.
+
 **E9 — Medium — Tests are organized by milestone, and the semantic suite
 rests on a transitional facade.** Reported.
 
@@ -1080,6 +1284,10 @@ rests on a transitional facade.** Reported.
 
 *Recommendation:* add that harness **before** S1 and E1 change yield
 behavior, and move the suite to a root-returning client-demand helper.
+
+*Status 2026-10-15:* open, with no plan. There is no budget-differential
+harness; S1's changes landed without it. `evaluate_compatibility_whnf` now
+has about 396 call sites.
 
 **E10 — Low — Dead protocol vocabulary in `eval/whnf.rs`.** Reproduced via
 the `#[expect]` classification.
@@ -1144,6 +1352,11 @@ per-transaction log. At minimum, add a feature-gated differential oracle
 that compares predicted against actual `visit_logical_payloads` across the
 suite. Do this before optimizing `rewrite.rs` or starting Concurrent GC.
 
+*Status 2026-10-15:* open, a CG0 prerequisite in the Concurrent GC plan.
+The exact delta records and their count tests remain, and no differential
+oracle exists. Net reduction has changed a lot since; see the open
+questions.
+
 **N3 — Medium — Hot-path representation and driver costs.** Reported.
 
 - **Node storage:** SipHash `HashMap<NodeId, RuntimeEntry>` with 120-byte
@@ -1166,6 +1379,22 @@ VRR does not cover graph storage.
 *Recommendation:* assign these to an explicit net performance plan after
 X3 provides a baseline.
 
+*Status 2026-10-15:* partly done in `perf-structural-overheads`; the rest is
+in the roadmap.
+- **Hashing.** Node maps hash with `trusted_hash`, not SipHash
+  (`perf-fast-id-hashing`, 2026-10-07).
+- **Builder.** `NetBuilder` tracks wired ports (`perf-net-builder-wired-ports`,
+  2026-10-08).
+- **Spine walk.** Interface walks resume from a remembered route
+  (`perf-interface-demand-walk`, 2026-10-10).
+- **Per-call construction.** Application nets are built directly
+  (`perf-runtime-net-attach`, 2026-10-10), and nets with no evaluation left
+  run compiled (`perf-compiled-nets`, 2026-10-11).
+- **Roadmap.** Node storage, ID reuse with generations, and fan identities
+  are `perf-net-representation` (slab, compact nodes, GAL levels).
+- **Not rechecked:** assertion-only lookups and payload duplication before a
+  rule match.
+
 **N4 — Medium — Profiling sits in the wrong layer and is too thin.**
 Reported.
 
@@ -1174,6 +1403,11 @@ coordinator and exact-route types that `api/runtime.rs` patches in. It has
 no timing and no CLI dump.
 
 *Recommendation:* fold it into the runtime-level counters from X3.
+
+*Status 2026-10-15:* partly done by `perf-profiling-harness`. The module now
+exists only in `glam-prof` builds. The JSON report carries its counts, with
+phase timers. It still defines coordinator and exact-route snapshot types in
+the generic net layer.
 
 **N5 — Medium — Dead blocked-pair protocols.** Reported, consistent with the
 `#[expect]` classification.
@@ -1205,11 +1439,16 @@ guards. A test-only parallel API (the direct gateway) sits alongside them.
 methods directly on the generic types, and split `runtime.rs` (3,687
 lines).
 
+*Status 2026-10-15:* open, with no plan. `interaction_net/runtime.rs` is
+about 3,800 lines.
+
 **N7 — Low (medium confidence) — Isolated one-port pairs are never
 reduced.** Reported.
 
 `Erase >< Data` and `Erase >< RemoteCursor` pairs are invisible to demand
 spines and keep their payloads, including copy sources, alive.
+
+*Status 2026-10-15:* open, with no plan; not rechecked.
 
 **N8 — Medium — Reduction semantics are verified only by example.**
 Reported.
@@ -1356,6 +1595,9 @@ total cost grows roughly quadratically with task count.
 - Lock the index once per validation.
 - Add a test that commit cost is independent of retired-task count.
 
+*Status 2026-10-15:* open, owned by `perf-reflection-step-cost` (structural
+overheads plan). `latest_changes` is still never pruned.
+
 **R2 — High — The machine deep-clones its active branch every step.**
 Verified.
 
@@ -1379,6 +1621,11 @@ continuations pay O(depth) per step.
 - Build retry checkpoints lazily.
 
 Do this before PEAF1 measures anything.
+
+*Status 2026-10-15:* partly done, owned by `perf-reflection-step-cost`.
+Since `b6222f5f` (2026-10-12), a step moves its machine work instead of
+cloning it, unless a failed step's recovery could read it. Persistent
+continuations, edits and journals, and lazy retry checkpoints remain open.
 
 **R3 — Medium — `machine.rs` (5,733 lines) mixes interpreter, three
 drivers, and control families, with an illegal-state-permitting
@@ -1414,6 +1661,10 @@ drivers, and control families, with an illegal-state-permitting
 
 The structural recommendations above remain open.
 
+*Status 2026-10-15:* the structure is still open, with no plan.
+`machine.rs` is about 5,800 lines. `TaskExecution` keeps its five optional
+sub-work slots, and `run()` is still in the machine.
+
 **R4 — Medium — Docs and the PEAF plan describe "bounded standard-effect
 fusion" that no longer exists.** Reported.
 
@@ -1443,6 +1694,9 @@ Reported.
 *Recommendation:* expose the eval machines through a specialization
 adapter and delete the copy. Until then, add composite-key `.env` tests.
 
+*Status 2026-10-15:* open, with no plan; `reflection/requests.rs` still
+classifies keys itself.
+
 **R6 — Medium — Captured continuations are never released.** Verified
 (insert-only).
 
@@ -1458,6 +1712,10 @@ adapter and delete the copy. Until then, add composite-key `.env` tests.
   drop it on branch discard and terminal states.
 - Cache the decoded stack, checked by root identity.
 - Document retention semantics.
+
+*Status 2026-10-15:* open, owned by `perf-reflection-step-cost`. The map
+still has one `insert` and no removal. Retention semantics wait on
+Decision 6.
 
 **R7 — Medium — `TaskHalt::Blocked` is a leftover suspension channel.**
 Verified (the variant exists), Reported (production-unreachable, medium
@@ -1507,6 +1765,8 @@ forced-suspension matrix).
 *Recommendation:* add seeded generative differential tests against a small
 reference model before representation changes.
 
+*Status 2026-10-15:* open, with no plan (P1-6).
+
 **R9 — Low.**
 
 - The three scheduler adapters handle completion inconsistently: the unit
@@ -1517,6 +1777,8 @@ reference model before representation changes.
 - `ConflictObservationIndex::clone_box` is required but never called.
 - A panicking client strategy poisons a mutex while the transaction lock is
   held.
+
+*Status 2026-10-15:* open, with no plan; not rechecked.
 
 ### Built-in front end (F)
 
@@ -1551,6 +1813,10 @@ deleted from `do_expr.rs` in favor of the shared helpers. The invalid sample
 *Recommendation:* move view utilities onto `TokenView`, and add one layout
 owner validator.
 
+*Status 2026-10-15:* open, with no plan. `view_between` and `error_at_view`
+still have four copies each, and `layout.rs` still hard-codes its
+introducers. `parser-grammar-retirement` may remove some copies.
+
 **F3 — Medium — Superlinear compile hot spots.** Reported. Parse is linear
 on a flat list literal (reproduced), so these concern structure.
 
@@ -1566,6 +1832,18 @@ on a flat list literal (reproduced), so these concern structure.
 first, then add a per-token innermost-group index and bottom-up free
 variables.
 
+*Status 2026-10-15:* partly done; the rest is owned by `perf-parser`.
+- **Grammar per leaf.** The term parser has parsed every ordinary
+  expression since 2026-10-07. The Chumsky grammar remains a fallback and
+  oracle until `parser-grammar-retirement`.
+- **Keyword scans.** Structural keyword scans are `parser-keyword-frames`.
+- **Free variables.** Lowering finds closure captures from recorded uses
+  (`perf-lowering-free-bindings`, 2026-10-10).
+- **Unused locals.** The analysis no longer copies enclosing locals
+  (`25c66455`, 2026-10-10). Each binder still re-walks its body once.
+- **Not rechecked:** `op -> pat` trial parses and floor-validation
+  allocations.
+
 **F4 — Medium — Stage boundaries leak.** Reported.
 
 - `parser/source.rs` orchestrates macros, evaluates through the compilation
@@ -1578,6 +1856,11 @@ variables.
 *Recommendation:* move the macro driver into `macro_expansion/`, derive
 unused-local warnings from resolver `BindingId` uses, and send all
 diagnostics through one ordered channel.
+
+*Status 2026-10-15:* open, with no plan. `parser/source.rs` still imports
+`api::CompilationExecution` and drives macros. Macro causes are now
+composed, not evaluated (`diag-lazy-enrichment`). Diagnostic ordering was
+not rechecked.
 
 **F5 — Medium — Resolution is coupled to the managed runtime.** Reported.
 
@@ -1593,6 +1876,12 @@ diagnostics through one ordered channel.
 table, syntactic scope kinds, and managed access opened only in
 `net_lowering`, chunked per member.
 
+*Status 2026-10-15:* open, a CG0 prerequisite in the Concurrent GC plan.
+`ResolvedExpr<Value>` remains. *Drift:* since `fdc9c60a` (2026-10-14,
+`gc-hold-boundaries`), one mutator spans parsing and lowering a whole
+source, suspended for macro expansion. That holds the heap longer than one
+declaration.
+
 **F6 — Medium — Verification gaps.** Reported.
 
 - Invalid syntax samples reach only `inspect_g_source`, so there are no
@@ -1607,6 +1896,11 @@ table, syntactic scope kinds, and managed access opened only in
 *Recommendation:* compile every valid sample, use exact matching, add
 compile-path invalid families, make the tests hermetic, fuzz (X4), and add
 a nesting-limit diagnostic or a small-stack test.
+
+*Status 2026-10-15:* open, with no plan. `tests/invalid_samples.rs` still
+runs the binary with the developer's environment, and matching is still
+subset-only. Fuzzing is deferred and never gates
+(`panic-discovery-by-inspection`, 2026-10-04).
 
 **F7 — Low — Fail-fast language versioning is not implemented.**
 Reproduced.
@@ -1660,6 +1954,12 @@ an ASCII-only source unless `utf8` is declared.*
 The line-only diagnostics, `abstract_global_path` string round trip, and
 macro re-lexing cost remain open.
 
+*Status 2026-10-15:* the `abstract` point is moot. `declare Name` replaced
+the top-level `abstract` statement (`ec4fa6ab`, 2026-10-12). A declaration
+is now a journal entry that the module's reflection boundary checks
+(`929cde62`, `perf-definition-assertions`). The three items above remain
+open, with no plan; `abstract_global_path` is still in `compiler.rs`.
+
 ### Embedding API, diagnostics, and CLI (A)
 
 **A1 — Medium — A hidden public tier.** Reported.
@@ -1686,6 +1986,10 @@ macro re-lexing cost remain open.
 
 Do this before designing Public Resumable Evaluation.
 
+*Status 2026-10-15:* open. The deferred Public Resumable Evaluation plan
+names it as a prerequisite. `pub mod reflection` remains, and production
+code has about 41 `#[doc(hidden)]` sites.
+
 **A2 — Medium — `api/assembly.rs` is a mid-layer.** Reported.
 
 It contains:
@@ -1698,6 +2002,9 @@ It contains:
   `CompileContext` builder chains.
 
 See X6 for the inverse dependencies.
+
+*Status 2026-10-15:* open, with no plan. `CompilationExecution` is still in
+`api/`.
 
 **A3 — Medium — Structured failures are flattened to text at host
 boundaries, and one path swallows errors.** Verified (`.ok()`), Reported
@@ -1792,6 +2099,14 @@ promise, the headline keeps the reason text.
 - `RuntimeDeadlockWork::blocked_error()` is a public text accessor that only
   tests use.
 
+*Status 2026-10-15:* lazy diagnostics changed two points above.
+- `blocked_error()` is gone (`0849f579`, `diag-static-summaries`).
+- A deadlock snapshot keeps only the composed blocked diagnostic
+  (`blocked_diagnostic()`), not the failure (`e803e31b`). The logger
+  supervisor still reports it as a cause after the `runtime: killed` frame.
+- Storing the kill's emission unnormalized is now the general rule
+  (`senders-never-evaluate-diagnostics`).
+
 **A4 — Medium — Public-contract verification gaps.** Reported.
 
 - Runtime endpoints, `DiagnosticIngress`, maintenance, and `pump_background`
@@ -1803,6 +2118,10 @@ promise, the headline keeps the reason text.
   given a value from another runtime consumes that value and leaves its
   promise unassigned forever. Decide whether to reject the value before
   consuming it.
+
+*Status 2026-10-15:* open, with no plan. `tests/` still has no tests for
+runtime endpoints, `DiagnosticIngress`, maintenance or `pump_background`.
+The promise-resolver point was not rechecked.
 
 **A5 — Low.**
 
@@ -1828,6 +2147,10 @@ usage errors, and 2 for an invalid bootstrap command line.
 `architecture/diagnostics.md` now documents the `viewer` record. The script
 extension is decision 7 below, now implemented. The settle driver,
 conf-entry idiom, default builder, and binary test placement remain open.
+
+*Status 2026-10-15:* those four remain open, with no plan.
+`settle_batch_runtime` and `settle_batch_runtime_default` both remain in
+`batch.rs`.
 
 ---
 
@@ -1894,6 +2217,7 @@ cheaper. Items within a group are independent.
    - Drop the `rg` dependency from scripts.
    - Fail on vacuous filters.
    - Run one aggressive workspace pass and record it.
+   - *Done 2026-10-03 to 2026-10-04;* see X1 and X2.
 2. **Fix the reproduced defects with regressions:**
    - the net crash (N1) and parser crash (F1);
    - the manifest alias overwrite (GPT AR-001; see the cross-reference
@@ -1902,14 +2226,20 @@ cheaper. Items within a group are independent.
    - a front-end no-panic fuzz target seeded from samples.
    - Then make worker activation transactional, using an injectable spawner
      (GPT AR-002).
+   - *Done 2026-10-04 to 2026-10-05:* N1 `0d5c54df`, F1 `0e3e456b`, AR-001
+     and AR-002 `1f58d0f0`, N8 `bfee6b15`. The fuzz target was superseded
+     by `panic-discovery-by-inspection` (2026-10-04).
 3. **Panic policy (X4, S3).** Decide contain versus abort, implement claim
    guards or a deliberate abort, and add forced-panic tests.
+   *Done 2026-10-04 to 2026-10-05;* see X4 and Decision 1.
 4. **Cheap correctness and policy fixes:**
    - E7, unknown-annotation stderr;
    - A3, the completion-script `.ok()`;
    - F7, language version enforcement;
    - R3, the squared isolated-search budget;
    - R7, the leftover `TaskHalt::Blocked`.
+   - *Done 2026-10-05:* E7 `d701396d`, A3 `4cceabbc`, F7 `8853d4e8`, R3
+     `4a0fa1b3`, R7 `6215f517`.
 
 ### P1 — Measurement and oracles (before baselining)
 
@@ -1920,6 +2250,8 @@ cheaper. Items within a group are independent.
      in release mode, the direct-assembly Hello World sample produced the
      same 166-byte ELF each run (SHA-256 `e18df1ef…1e01`), in 3.52–3.55 s
      wall time over three warm runs. Descriptive only, not a threshold.
+   - *Done 2026-10-06* as `perf-profiling-harness`; see X3. The baseline is
+     the performance roadmap's "Baseline 2026-10-06".
 6. **Independent oracles** to protect upcoming representation changes:
    - the budget-differential harness (E9);
    - a seeded alt/cut/get/set/heap model test (R8);
@@ -1927,6 +2259,9 @@ cheaper. Items within a group are independent.
    - random closed-net confluence (N8);
    - small-stack deep-structure tests (V3);
    - an edge-delta differential oracle (N2).
+   - *Status 2026-10-15:* only N8 is done (2026-10-05). The small-stack
+     tests are in VRR's V-1 prework, and the N2 oracle is a CG0
+     prerequisite. E9 and R8 have no plan.
 7. **Scaffolding retirement (X5, V4).**
    - Inventory triage.
    - `#[expect]` everywhere.
@@ -1988,23 +2323,42 @@ cheaper. Items within a group are independent.
          prerequisites stated.
        - `architecture/interaction_nets.md`, describing the net driver and
          cursor-WHNF control flow. Writing it surfaced N9.
+   - *Status 2026-10-15:* done, except splitting `architecture/evaluation.md`
+     (X8).
 
 ### P2 — Remove structural overheads that would mask representation measurements
 
 Measure each item against the P1 baseline before and after.
+
+*Status 2026-10-15:* P2 became the roadmap's `perf-structural-overheads`
+([Structural Overheads](../plans/StructuralOverheads_2026-10-08.md)), after
+`perf-evaluation-recursion`. Its measurements are in that plan and in the
+roadmap's snapshots.
 
 9. **Scheduler and evaluator round trips (S1, S5, E1–E4).**
    - Shared release and poll abstractions first.
    - Then single-meaning `Yielded`.
    - Then single-region route polls.
    - Then the inline-lazy decision.
+   - *Status 2026-10-15:* the round trips were removed by
+     `perf-evaluation-recursion` (done 2026-10-08) and `perf-quantum-region`
+     (2026-10-09). The inline-lazy decision is made (Decision 3). S5, E1, E3
+     and E4 remain open.
+   - *Likely deprecated (2026-10-15):* "shared abstractions first". The
+     round trips went without them.
 10. **Allocation path (V1).** Class cache and root compaction.
+    *Done* (2026-10-10 and 2026-10-14); see V1.
 11. **Reflection step cost (R1, R2, R6).** Store log, persistent branch,
     continuation release.
+    *Status 2026-10-15:* `perf-reflection-step-cost`, open. R2 is partly
+    done (2026-10-12).
 12. **Obvious algorithmic defects:**
     - list literal construction and iterative drop (E8, V3);
     - trace walk quick wins (V2);
     - `NetBuilder` wiring (N3).
+    - *Status 2026-10-15:* list literals (2026-10-10) and `NetBuilder` wiring
+      (2026-10-08) are done. The iterative drop and the trace fixes are in
+      VRR's V-1 prework.
 
 ### Then the planned performance phase
 
@@ -2018,6 +2372,12 @@ Measure each item against the P1 baseline before and after.
       (S4);
     - bounded front-end access regions (F5).
 16. **Public Resumable Evaluation**, after S7 and A1.
+
+*Status 2026-10-15:* 13 is the roadmap's `perf-value-representation` and
+14 its `perf-effect-chain-fusion`. Both plans are deferred, and so are
+Concurrent GC (15) and Public Resumable Evaluation (16). The Concurrent GC
+plan names N2, E3, S4 and F5 as CG0 prerequisites, all open. The Public
+Resumable Evaluation plan names S7 and A1, both open.
 
 ## Decisions for the Maintainer
 
@@ -2056,6 +2416,11 @@ findings that raise them are noted, and lower-confidence items are marked.
 3. **Inline-first lazy forcing.** It would change the "every uncached lazy
    is a coordinator route" invariant and exact-dependency routing.
    (S1, E2; size of the win unknown until measured)
+   - *Decided 2026-10-07, maintainer and agent:* the maintainer asked for
+     the easiest equivalent of tail-call optimization and approved the
+     inline mechanism (`inline-lazy-forcing`). A claimed route forces the
+     lazies it needs inline, and only a suspended lazy gets a route. It
+     landed as `eval-recursion-inline-forcing`.
 4. **Inventory retirement scope.** Which negative latches encode durable
    rules worth keeping in a consolidated audit? (V4)
    - *Maintainer decision, 2026-10-03:* retire most inventories. Keep the
@@ -2071,6 +2436,8 @@ findings that raise them are noted, and lower-confidence items are marked.
 6. **Reflection semantics:**
    - whether `.heap.get` outside a cut should be retry-observable;
    - the lifetime of captured continuations. (R6, R8)
+   - *Status 2026-10-15:* open; no decision is recorded. R6's continuation
+     release in `perf-reflection-step-cost` depends on the second point.
 7. **Script extensions.** Reject unknown extensions, or correct the docs.
    (A5)
    - *Maintainer decision, 2026-10-05:* reject unknown extensions. Only an
@@ -2085,6 +2452,37 @@ findings that raise them are noted, and lower-confidence items are marked.
    - *Maintainer decision, 2026-10-05:* fail-fast on an unknown base or
      extension. Without `utf8` the whole source, including texts and
      comments, must be ASCII. Resolved under F7.
+
+## Open questions (2026-10-15)
+
+1. **Retiring this review.** P0 and P1 are done, and P2 lives in
+   `perf-structural-overheads`. Should the open findings move out so this
+   review can retire? The Concurrent GC, Public Resumable Evaluation and VRR
+   plans cite their findings by ID only (N2, E3, S4, F5; S7, A1; V1–V3,
+   V5), so the details would move with them. The findings with no plan
+   could join the plans README's open items, or a cleanup plan.
+2. **CG0 prerequisites after explicit heap holds.** The coordinator lock is
+   now taken under a mutator by design, and one mutator spans lowering a
+   whole source. Do S4 and F5 still state the right prerequisites, or should
+   the Concurrent GC plan restate them in terms of mutators and suspension?
+   That plan's own questions (2026-10-15) ask whether it is still wanted.
+3. **Edge-delta oracle (N2).** Net reduction has changed a lot since
+   2026-10-03: compiled nets, direct application nets, whole copies of
+   reduced sources. Should the differential oracle come before
+   `perf-net-representation`, rather than waiting for CG0?
+4. **Oracles without a plan (E9, R8).** Budgets are now scheduling
+   heuristics (roadmap, "Budgets and Batching"). Is a budget-differential
+   harness still wanted as a semantic oracle? Who owns it and the R8 model
+   tests?
+5. **E1 and S5.** Most scheduler round trips are gone without a
+   single-meaning `Yielded` or a shared release plan. Keep them open as
+   cleanups, or close them unless a profile asks?
+6. **Unsafe policy before VRR (X7).** VRR rewrites the `Trace` and
+   `ManagedFamily` impls. Should the main crate's unsafe lints and ledger
+   land before VRR's V0?
+7. **Deep-nesting overflow (X4).** The panic plan defers it with no step,
+   while the roadmap names `perf-pre-eval-stack-depth` for recursion before
+   evaluation. Which owns it?
 
 ## Cross-Reference: Parallel Review
 
@@ -2110,6 +2508,7 @@ All three were re-checked against source.
     reject outputs whose filesystem identity matches a tracked input.
   - Regressions to add: output symlink, input symlink, parent-directory
     alias, hard link, and failed publication.
+  - *Done 2026-10-05* (`1f58d0f0`, `atomic-identity-checked-manifest`).
 - **AR-002 — Worker activation is not transactional (P0, after the
   crashes).** Verified ordering.
   - `EvaluationExecutor::activate_workers` (`evaluation/executor.rs`) sets
@@ -2121,8 +2520,11 @@ All three were re-checked against source.
   - Fix: prepare workers behind a startup gate, then publish atomically.
   - Testing needs an injectable spawner, because no deterministic failure
     exists today.
+  - *Done 2026-10-05* (`1f58d0f0`, `transactional-worker-activation`).
 - **AR-006 — Empty `.expect` files make invalid fixtures that cannot fail.**
   This complements F6. Reject empty negative expectation sets.
+  *Status 2026-10-15:* open, with no plan. `tests/invalid_samples.rs` still
+  accepts an empty expectation set; no sample has one today.
 
 ### Shared findings, noted by both reviews
 
@@ -2172,6 +2574,8 @@ The classification came from converting every site to
 and `cargo check --all-targets --all-features`. Line numbers are attribute
 lines at `7452e13c`.
 
+*Resolved 2026-10-05:* no `allow(dead_code)` remains (P1-7).
+
 **Stale (item live in the production build), 39 sites:**
 
 - `core.rs`: 2002, 2007, 2012, 2017, 2022, 2027, 2032, 2037, 2042, 2047,
@@ -2206,6 +2610,9 @@ lines at `7452e13c`.
 - `evaluation/access.rs:62` (deliberate temporary-owner payloads)
 
 ### B. Broken links and anchors in history docs
+
+*Likely deprecated (2026-10-15):* all three history docs below are retired
+(see the plans README, "Retired History").
 
 Current docs have no broken relative links. History docs contain three:
 

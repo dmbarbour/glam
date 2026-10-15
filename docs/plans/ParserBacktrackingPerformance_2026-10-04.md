@@ -3,7 +3,11 @@
 Status: design agreed with the maintainer on 2026-10-06. `parser-term-parser`
 is in production since 2026-10-07 (see [Production switch](#production-switch-2026-10-07));
 `parser-patterns`, `parser-keyword-frames` and `parser-grammar-retirement`
-remain. This is the `perf-parser` step of the
+remain, and `parser-cover-ir` is done only for expressions (see
+[Steps](#steps)). Rechecked 2026-10-15 (`01ec2fbc`): no parser step has
+landed since `adcd994b` (2026-10-07). A keyword form in parentheses nested
+in another is still exponential ([Measures 2026-10-15](#measures-2026-10-15)),
+so `parser-keyword-frames` is next. This is the `perf-parser` step of the
 [performance roadmap](PerformanceRoadmap_2026-10-05.md). The fix is a merged
 grammar with prefix sharing, parsing into a cover syntax (IR) for patterns and
 expressions, implemented with an explicit stack; see [Design](#design). It
@@ -14,7 +18,9 @@ inspection.
 ## Problem
 
 Parse time grows exponentially with the nesting depth of parentheses and
-lists. Release-build timings for `x = ((…1…))` with `--parse`:
+lists. Release-build timings for `x = ((…1…))` with `--parse`, measured
+2026-10-04 under the Chumsky grammar (historical; the term parser made the
+first two rows linear):
 
 | Form | Growth per level | Measurements |
 | --- | --- | --- |
@@ -280,6 +286,22 @@ Steps are referred to by name; see the plans README, "Step names".
 `parser-cover-ir` and `parser-term-parser` are additive and low-risk:
 production keeps the old parser until the oracle agrees.
 
+**Step status 2026-10-15** (`01ec2fbc`):
+- `parser-cover-ir`: partly done, inside `parser-term-parser` (`8d36263e`,
+  2026-10-06). Each group is interpreted once into a `Cover` in
+  `parser/term.rs`, but covers hold `SyntaxExpr` items and convert only to
+  expression roles. The shared pattern-and-expression IR, conversion to
+  `SyntaxPattern`, and covers below group level were not built;
+  `parser-patterns` needs them.
+- `parser-term-parser`: done; in production since 2026-10-07
+  (`parser-term-parser-first`, `eb84587c`; `parser-keyword-delegation`,
+  `adcd994b`).
+- `parser-patterns`: not started.
+- `parser-keyword-frames`: not started; next, for the exponential below.
+- `parser-grammar-retirement`: not started. Chumsky still parses the
+  views the term parser reports as unsupported, and runs as the oracle in
+  tests.
+
 **Progress 2026-10-06.** The core of `parser-term-parser` is in
 `parser/term.rs`; it is test-only so far.
 - **How it works:**
@@ -359,6 +381,9 @@ production keeps the old parser until the oracle agrees.
     - flatter trees, such as an application holding an argument list, or
       n-ary chains of associative operators.
 
+    The performance roadmap's `perf-pre-eval-stack-depth` has owned this
+    since 2026-10-06; it has not started (2026-10-15).
+
 ## Production switch (2026-10-07)
 
 **Term parser first** (`parser-term-parser-first`, `eb84587c`).
@@ -375,7 +400,9 @@ Term parser errors carry the token where parsing stopped:
 
 Three invalid-sample expectations changed with the wording.
 
-Measured in a release `glam-prof` build:
+Measured in a release `glam-prof` build. These single-size workloads were
+replaced on 2026-10-08 (`c65f9cfd`) by families at three depths:
+`parse_parens` and `parse_lists` at 100/200/400, `parse_ifs` at 4/8/16.
 
 | Workload | Baseline 2026-10-06 | After `parser-term-parser-first` |
 | --- | --- | --- |
@@ -440,6 +467,24 @@ Measured in a release `glam-prof` build:
   `parser-keyword-frames` removes it; until then, real code with a few
   levels of parenthesized `if` or `match` pays a factor of 2 per level.
 
+## Measures 2026-10-15
+
+User-space instructions at `01ec2fbc` from `scripts/profile.sh` (release
+`glam-prof`, no workers). `minimal` is 24.3 M. k is the script's growth
+exponent, with cost ≈ a + b·n^k.
+
+| Family | Depths | M instructions | k |
+| --- | --- | --- | ---: |
+| `parse_parens` | 100/200/400 | 24.9 / 25.2 / 25.9 | 0.83 |
+| `parse_lists` | 100/200/400 | 25.2 / 25.8 / 27.0 | 0.83 |
+| `parse_ifs` | 4/8/16 | 26.7 / 33.1 / 1,439.4 | 7.78 |
+
+- Nested parentheses and brackets cost about 3 K and 6 K instructions per
+  level, as in the roadmap's 2026-10-11 snapshot.
+- `parse_ifs` is unchanged since that snapshot (k 7.78). Beyond `minimal`,
+  depth 8 costs 8.8 M and depth 16 1,415 M: about 1.9× per level. Its
+  reduction count is the same at every depth, so the growth is parsing.
+
 ## Verification
 
 - The differential oracle above, while both parsers exist.
@@ -447,6 +492,12 @@ Measured in a release `glam-prof` build:
   chains of 100k terms. The fixed grammar finishes immediately; a
   reintroduced exponential would hang the test visibly rather than slowly
   degrade. The profiling parser workloads must grow linearly.
+  As built, `deep_nesting_parses_in_linear_time_without_recursion` parses
+  each of the term parser's `NESTING_SHAPES` at depth 2,000 within two
+  seconds, and `long_flat_chains_parse_without_recursion` parses 100k-term
+  chains. Survey constructs outside the term parser, such as patterns, `do`
+  blocks and keyword forms, have no depth regression in the parser
+  tests yet.
   `NESTING_SHAPES` in the term parser's tests holds no keyword form, which
   is how the exponential above went unnoticed: `parser-keyword-frames` adds
   parenthesized `if`, `match`, `try` and `let` shapes to it.
@@ -463,5 +514,33 @@ performance phase begins:
 - `op -> pat` statements are trial-parsed at least twice;
 - structural keywords scan every group in the file.
 
+As of 2026-10-15, the first is resolved in production: Chumsky runs only
+for views the term parser reports as unsupported, and as the test oracle.
+`parser-patterns` owns the second, and `parser-keyword-frames` the third
+(`structural_view_at` still scans every group).
+
 Stack-overflow aborts on very deep nesting are a separate concern, tracked
 in the panic-safety plan, because an overflow crashes the process.
+
+## Open questions (2026-10-15)
+
+- **Interim fix for the keyword-form exponential?** It has stood since
+  2026-10-08, and `parse_ifs_16` alone costs 1.4 G instructions. The
+  2026-10-06 direction rejected lookahead guards (option A), including as
+  a stopgap, but did not rule on option B, memoizing structural parses by
+  token range. Wait for `parser-keyword-frames`, or bound it sooner?
+- **`parser-cover-ir` as designed.** The shared pattern-and-expression
+  IR was never built; the term parser's covers are expression-only and
+  group-level. Should `parser-patterns` absorb the step, or does the
+  design change?
+- **Who owns deep-source stack depth?** `Decisions.md`
+  (`no-semantic-recursion-on-rust-stack`) says the parser still recurses
+  and assigns the remedy to the panic-safety plan. The roadmap says
+  `perf-parser` closes that exception, and gives syntax-tree drop and later
+  passes to `perf-pre-eval-stack-depth`. The term parser is iterative, but
+  the structural and pattern parsers still recurse on nested input.
+- **Standing documentation.** `docs/architecture/front_end.md` and
+  `src/README.md` describe only the Chumsky input adapter; the term parser,
+  its oracle (`GLAM_TERM_ORACLE`, `GLAM_TERM_FUZZ`) and the Chumsky
+  fallback are documented only here and in `parser/term.rs`. Document them
+  now, or after `parser-grammar-retirement`?

@@ -3,7 +3,20 @@
 Status: complete; every step landed on 2026-10-15, the maintainer adding
 `diag-origin-frame` and `diag-static-summaries` that day. The maintainer decided on 2026-10-15 that senders
 never evaluate diagnostics; only renderers do
-(`senders-never-evaluate-diagnostics`, in `Decisions.md`).
+(`senders-never-evaluate-diagnostics`, in `Decisions.md`). Commits:
+`3ad91c7c` (`diag-context-mixin`, `diag-lazy-failures`), `07038531`
+(`diag-lazy-enrichment`), `fef17642`, `2bc61681` and `a9c0804e`
+(`diag-renderers-evaluate`), `0849f579` (`diag-origin-frame`,
+`diag-static-summaries`) and `e803e31b` (`diag-static-summaries`). Later
+steps revised earlier ones the same day; the step texts record each as it
+landed, with notes where a later step replaced it.
+
+Retirement (2026-10-15): the decision and its rules are in standing docs
+(`agent_context/diagnostics.md` "Publication and Counts",
+`architecture/diagnostics.md`). No code or test names this plan. It is
+still cited by `Decisions.md` ("Recorded in"), the plans README and the
+explicit heap holds plan, and `Decisions.md`'s "History docs cited" table
+has no row for "lazy diagnostics plan" yet.
 
 ## Purpose
 
@@ -87,7 +100,9 @@ Landed 2026-10-15, with three findings:
   non-normalizing projection went, its reason (an isolated session) gone,
   and every report of a retained failure shares its one composition
   (`RuntimeFailureRoot::diagnostic`), so a renderer's evaluation serves
-  later reports' summaries too.
+  later reports' summaries too. `diag-static-summaries` replaced this the
+  same day: `conventional_summary`, `summarized_for_rendering` and
+  `project_blocked_diagnostic` went (`0849f579`).
 - **Advisory status.** A release under a mutator deferred its nonterminal
   status publication past its gate (`gc-hold-boundary-release`), so a
   runtime observed stable could show a blocked root still `Launched`; a
@@ -129,7 +144,7 @@ Landed 2026-10-15. The default logger already evaluated what it formats
 evaluator); its header's line came from the Rust summary, which an
 unevaluated message lacks, so it now evaluates `msg.location.line` when
 the summary has none. `project_blocked_diagnostic` evaluates its summary
-(`diag-lazy-failures`).
+(`diag-lazy-failures`); it went with `diag-static-summaries`.
 
 ### Origin frame (`diag-origin-frame`)
 
@@ -152,7 +167,10 @@ front end's, keeps that text and line, passed beside its emission rather
 than read back from it. A diagnostic built from a value summarizes
 statically: `EvalFailure` for a failure, `EvalDiagnostic` for another
 emission. `conventional_summary`, its reading through compositions,
-readiness's evaluated summary and `blocked_error` go. Reflection semantics
+readiness's evaluated summary and the public
+`RuntimeDeadlockWork::blocked_error` go. (The coordinator's internal
+snapshot field `blocked_error` stays; readiness projects it to the
+public `blocked_diagnostic`.) Reflection semantics
 may change, since they do not affect the assembly result's reproducibility
 (maintainer); `.eval` returns its value or `err:Error`, and nothing
 required that `Error` evaluated.
@@ -180,3 +198,13 @@ per call with unchanged callees: a codegen shift, not more work. Forcing
 `source_snapshot` inline recovers part: 0.19% over all workloads, at most
 0.6%. `diag-static-summaries` removed that caller and the forced inline:
 0.17% over all workloads, at most 0.5%, the codegen shift in `finish`.
+
+## Open questions (2026-10-15)
+
+- The plans README lists "Public diagnostic projection" as an open item:
+  review the transitional `Diagnostic::from_parts` policy, which keeps
+  shallow `message` and `line` views beside the emission. Since
+  `diag-static-summaries`, keeping a Rust-built diagnostic's text and line
+  beside its emission is the design, and a value-built one summarizes
+  statically. Does that close the item, or do other conveniences still
+  need review?

@@ -297,15 +297,15 @@ is in [`VERIFY.md`](../../crates/glam-gc/VERIFY.md).
 
 - [Value Representation Refinement](../plans/ValueRepresentationRefinement_2026-08-19.md):
   tagged values; managed spines replacing shells; shared persistent spines
-  revisited during logical tracing; the shell walk's recursion; a
-  process-wide metadata lock plus heap lock per allocation; unmeasured
+  revisited during logical tracing; the shell walk's recursion; unmeasured
   pressure thresholds.
 - [Concurrent Garbage Collection](../plans/ConcurrentGarbageCollection_2026-08-28.md):
   concurrent marking; work that stays inside one access region cannot
   collect until its driver's next quantum boundary; settlement's reliance on
   non-moving collection.
 - [Scoped Pointer Safety](../plans/GarbageCollectorScopedPointerSafety_2026-09-09.md):
-  branded `ScopedGc`, only after a concrete defect.
+  likely deprecated, since branded views landed as `GcRef`
+  (`owned-mutator-views`); Glam's `Value` stays unbranded.
 - Moving collection waits for parallel-root retirement: no bare value across a
   yield, no data beside a parallel root, no `CompatibilityValueEdges`, and
   rewritable persistent edges.

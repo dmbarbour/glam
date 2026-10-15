@@ -1,12 +1,37 @@
 # Garbage-Collector Scoped Pointer Safety Plan — 2026-09-09
 
-Status: deferred lifetime-branding safety enhancement. The completed
+Status: likely deprecated (2026-10-15). Its central proposal landed under
+another plan. The [explicit heap holds plan](ExplicitHeapHolds_2026-10-09.md)
+added `GcRef<'m, T>`, a `Copy`, non-`Send` view that borrows the thread's
+owned mutator, so none lives across `Mutator::suspend` (`gc-hold-api`,
+`b83646a5`, 2026-10-13). The maintainer adopted it on performance grounds
+(`owned-mutator-views`, 2026-10-12): views carry values between steps
+without roots. That revises `scoped-gc-deferred`, which waited for a
+concrete defect. Earlier, the completed
 `GarbageCollectorPersistentEdgeTraits_2026-09-12.md`
-plan removed implicit traits from persistent `Gc<T>` during GCI11R-002D. That
-prerequisite has settled. This plan remains deliberately deferred until after
-Gate G3 and a fresh review coordinates `ScopedGc` with Value Representation
-Refinement and future moving-collector work; it is not part of the remaining
-I11 certification path.
+plan removed implicit traits from persistent `Gc<T>` during GCI11R-002D
+(`persistent-edges-move-only`). What is left belongs elsewhere: the
+relocation seam to a future moving-collector plan
+(`moving-gc-retirement-gate`), and whether compact `Value` words carry a
+brand to [Value Representation Refinement](ValueRepresentationRefinement_2026-08-19.md).
+
+The earlier status read: deferred until after Gate G3 and a fresh review
+coordinating `ScopedGc` with Value Representation Refinement and future
+moving-collector work.
+
+## How the Proposal Landed (2026-10-15)
+
+| This plan | Now |
+| --- | --- |
+| `ScopedGc<'mutator, T>` | `GcRef<'m, T>` (`crates/glam-gc/src/pointer.rs`), borrowing `&'m MutatorAccess`. One pointer in release builds; debug builds add an admission generation checked on use. |
+| `Root::access` | `Root::as_gc` returns a `GcRef`. |
+| `Gc::access`, safe | Rejected: viewing a bare `Gc` stays `unsafe` (`Gc::view_unchecked`), since safe code can hold a detached `Gc` past its liveness. Glam views an edge through `view_edge`, whose `EdgeLiveness` argument names its provenance claim (`root-evidence`). |
+| Persisting an edge | `GcRef::edge` detaches one, `Gc::duplicate_in` duplicates one, and `MutatorAccess::root` roots a view without revalidation in release builds. |
+| Fresh edge or fresh token | Both: `Allocator::alloc` returns a `Gc`, `Allocator::alloc_view` a view. |
+| Borrowed tracing | `Visitor::visit(&Gc<T>)`. |
+| Compile-fail evidence, Miri | A view or allocator cannot live across a suspension (E0502), views cannot escape `Heap::mutate`, and mutators and views are not `Send` (`VERIFY.md` "Owned mutators and views"). `scripts/check.sh full` passed with Miri and both sanitizers at `c864db35` (2026-10-13). |
+| SP0's defect gate | Not used: adoption was on performance grounds. |
+| `Value` branding | Not done: raw `core::Value` stays unbranded, valid until the mutator suspends or ends. |
 
 ## Purpose
 
@@ -67,7 +92,8 @@ roots and exact tracing.
 GCI5R-008 added a mutator-qualified `Root::as_gc` returning an unbranded
 `Gc<T>`. That is a local API repair and an admitted-use convention, not
 lifetime enforcement. This later plan may change its result to
-`ScopedGc<'mutator, T>` without restoring cached root/edge pairs.
+`ScopedGc<'mutator, T>` without restoring cached root/edge pairs. (Done
+under `gc-hold-api`: it returns a `GcRef`.)
 
 ## Provisional Model
 
@@ -152,7 +178,8 @@ without preventing an observed defect.
 
 ### Tracing and rewriting
 
-The current `Trace` visitor consumes copied `Gc<T>` values. A move-only stored
+When drafted, the `Trace` visitor consumed copied `Gc<T>` values; since the
+persistent-edge cutover it borrows them. A move-only stored
 edge likely changes ordinary tracing to borrow the edge:
 
 ```rust
@@ -223,6 +250,11 @@ or persistent-edge gateway calls must be measured.
    worthwhile safety improvement.
 
 ## Transition Phases
+
+Likely deprecated (2026-10-15): SP0 to SP3 happened, in substance, as the
+explicit heap holds plan's `gc-hold-api` through `gc-hold-pass-access`
+(see the table above), without SP0's defect gate. SP4's moving-collector
+handoff has no plan; `moving-gc-retirement-gate` records its preconditions.
 
 ### SP0 — Fresh Inventory and Decision Gate
 
@@ -305,10 +337,32 @@ or persistent-edge gateway calls must be measured.
 
 ## Deferred Decisions
 
+Resolutions as of 2026-10-15 are in parentheses.
+
 - Final names (`ScopedGc`, `GcRef`, `GcAccess`, or another spelling).
+  (`GcRef`.)
 - Whether allocation returns `Gc<T>` directly or a distinct fresh-edge token.
+  (Both: `alloc` and `alloc_view`.)
 - Whether persistent conversion is a general mutator operation or exists only
   through destination-aware edge writers in Glam production code.
-- The exact mutable-edge representation used by a moving collector.
+  (General: `GcRef::edge` and `Gc::duplicate_in`. Concurrent-GC Open Design
+  Gate 2 still asks whether barriers need destination-aware writers.)
+- The exact mutable-edge representation used by a moving collector. (Open;
+  no moving-collector plan.)
 - Whether the transition follows Value Representation Refinement or becomes
-  one of its implementation phases after a future joint review.
+  one of its implementation phases after a future joint review. (Moot: it
+  landed first, and only `Value` branding remains.)
+
+## Open Questions (2026-10-15)
+
+For the maintainer:
+1. **Retire this plan?** Its decisions live in `Decisions.md`
+   (`persistent-edges-move-only`, `scoped-gc-deferred`,
+   `owned-mutator-views`, `root-evidence`) and in `SAFETY.md`. Before
+   retirement, `SAFETY.md` "Non-goals and Deferred Work" and
+   `architecture/values.md` "Deferred Work" still name this plan as the
+   owner of branded views, and `scoped-gc-deferred` is still marked
+   accepted rather than superseded.
+2. **The relocation seam.** Should SP2's open choice (a mutable slot
+   visitor, a collector-owned edge cell or a stable handle) move to Value
+   Representation Refinement, or wait for a moving-collector plan?

@@ -1,13 +1,42 @@
 # Concurrent Garbage Collection Plan — 2026-08-28
 
-Status: preliminary and deferred. Its original gate, roadmap Gate G4, passed
-on 2026-10-02. The expected order now completes Value Representation
-Refinement first (see Relationship to Existing Plans), and the holistic
-pre-performance review adds CG0 prerequisites: its findings N2, E3, S4, and
-F5. Open Design Gates 1–9 remain open. This is a successor to, not a
-continuation or renaming of, the completed C0-C6 stop-the-world collector
-implementation. Its phase
-names use `CG` so historical collector checkpoints remain unambiguous.
+Status: preliminary and deferred, with no trigger as of 2026-10-15. Its
+original gate, roadmap Gate G4, passed on 2026-10-02. The expected order
+completes Value Representation Refinement first (see Relationship to
+Existing Plans), and the holistic pre-performance review adds CG0
+prerequisites: its findings N2, E3, S4, and F5, which appear still open on
+2026-10-15 (S4 is still the "known exception" in
+`agent_context/evaluation.md`). The performance roadmap has no
+concurrent-collection step, and the structural overheads plan found
+nothing in collection that stands out ("Not a Step"). Open Design Gates 1–9
+remain open. This is a successor to, not a continuation or renaming of, the
+completed C0-C6 stop-the-world collector implementation. Its phase names
+use `CG` so historical collector checkpoints remain unambiguous.
+
+**Changes since drafting (2026-10-15).** Standing docs win where this plan
+disagrees; the main ones:
+- **One heap per thread, no nesting.** A thread holds a mutator for at most
+  one heap (`one-heap-per-thread`, 2026-10-09), and no heap entry nests
+  (`no-recursive-heap-entries`, 2026-10-14). glam-gc has one entry,
+  `Heap::mutate`, outermost only, with `Mutator::suspend` and `readmit`.
+  The arbitrary multi-heap nesting this plan designs around is gone.
+- **Starvation is bounded in Glam.** glam-gc still elects collection only at
+  an idle heap, but every driver joins a requested collection at its next
+  quantum boundary (`quantum-boundary-collection-join`, step
+  `gc-bounded-collection-wait`). Under two busy workers a collection waited
+  5 to 15 ms.
+- **Views.** `GcRef<'m, T>` borrows the owned mutator, so no view lives
+  across a suspend (`owned-mutator-views`; `gc-hold-api`, 2026-10-13). Its
+  liveness proof is that no mark or sweep runs while the mutator is
+  admitted (`SAFETY.md` "Managed Pointer and Access Invariants"), which is
+  what concurrent collection would relax.
+- **Roots** are counted slots in heap-owned pools (`pooled-roots`,
+  2026-10-14). Each collection rebuilds their free lists, on the premise
+  that nobody creates roots during a collection.
+- **Root frames were tried.** glam-gc gained a `RootFrame` in the
+  `perf-poll-root-frames` experiment (`1f35ad1e`, 2026-10-10), reverted in
+  `15bbb0bb`: it saved registrations but no instructions. `LocalRoot` is
+  shelved (`pooled-roots`).
 
 ## Purpose
 
@@ -23,6 +52,12 @@ after a stop request is not a general repair: a thread may hold an outer heap
 while entering an inner heap, and another hierarchy may acquire the same heaps
 in the opposite order. Allowing those entries to bypass the stop avoids
 deadlock but restores starvation.
+
+Likely deprecated (2026-10-15): the nesting argument above. With one heap
+per thread, no thread can hold one heap while entering another, and Glam
+already holds back new quanta while a collection waits. What remains of
+this purpose is collection work overlapping mutators, for shorter pauses;
+no measurement asks for that yet.
 
 This plan removes collection progress from heap-wide mutator exclusivity. It
 separates:
@@ -78,6 +113,12 @@ reference collector may still starve under continuously overlapping mutators;
 CG0 adds that failing schedule, and CG1 must preserve arbitrary heap nesting
 while replacing inactive TLS records with independently acknowledged
 heap-participant state.
+
+Drift (2026-10-15): of that baseline, heap-qualified TLS records
+and explicit worker-thread cache release (`Heap::release_current_thread_caches`)
+remain. Recursive same-heap depth and cross-heap entry are gone
+(`one-heap-per-thread`, `no-recursive-heap-entries`), and mutator-free poll
+contexts were dropped (`a8c22e0a`). A thread record's depth is 0 or 1.
 
 ## Initial Scope
 
@@ -160,6 +201,11 @@ Each active thread/heap participant records at least:
 Different heaps have independent participant records. No transition waits
 while holding coordinator or managed-data locks belonging to another heap.
 
+(2026-10-15: the depth is now 0 or 1, and a thread has one heap at a time.
+The owned mutator suggests where acknowledgements fall: at
+`Mutator::suspend` or mutator end, where a thread holds no view. The
+explicit heap holds plan's 2026-10-10 design review sketches this.)
+
 ### Run lifecycle
 
 The provisional lifecycle is:
@@ -194,7 +240,8 @@ Concurrent recycling adds:
 - an atomic run state checked before a new lease claim;
 - one active cursor pin acquired lazily on first use during a mutator quantum;
 - a state/generation recheck after pin acquisition;
-- release of active pins at outer mutator exit; and
+- release of active pins at outer mutator exit (and, since `gc-hold-api`,
+  at `Mutator::suspend`); and
 - cursor discard when the cached generation no longer matches.
 
 Inactive TLS cache entries do not pin runs. They may retain stale cursor bits
@@ -215,7 +262,20 @@ valid for its mutator borrow without adding a pointer-local lock or per-read
 run pin. It does not prove semantic reachability of an otherwise unregistered
 local `Gc<T>`; CG0-CG1 must close that root problem separately.
 
+(2026-10-15: that property is now a type. A `GcRef<'m, T>` view borrows the
+mutator, and viewing a bare `Gc` is `unsafe`. Code under a mutator carries
+values between steps as views rather than roots (`no-recursive-heap-entries`),
+so views are the unregistered local references CG0 must account for.)
+
 ### Root-adjacent trace-immediate frames (tentative)
+
+Drift (2026-10-15): `ManagedWhnfCell` below was renamed
+`ManagedLazyCheckpointCell` at W6G.1f.1 (`55b39bc6`, 2026-09-19);
+`ManagedWhnfRoot` holds its `Root` (`src/eval/whnf/managed_state.rs`). Its
+`Trace` still uses `try_lock` and assumes quiescence, as do the lazy
+checkpoint cells (`src/eval/lazy_checkpoint.rs`), the runtime net cell and
+the promise producer. A `RootFrame` existed briefly in glam-gc as a
+performance experiment (see Status), not as this design.
 
 One promising transient-root representation is a collector-owned
 `RootFrame<T>` for mutable, root-adjacent state which lives outside the managed
@@ -422,7 +482,9 @@ generation must reject it.
 1. Collection initiation never waits for heap-wide mutator count to reach
    zero and never makes nested heap order part of progress.
 2. A mutator may enter several heaps in any order. Each heap's epochs, barriers,
-   cursor pins, and acknowledgements remain independent.
+   cursor pins, and acknowledgements remain independent. Likely deprecated
+   (2026-10-15): a thread holds a mutator for one heap at a time
+   (`one-heap-per-thread`); per-heap independence still holds.
 3. A run closed to reservation cannot receive a new allocation-word lease.
    A claimant racing closure either pins the old open generation or observes
    closure and retries elsewhere.
@@ -462,27 +524,39 @@ or accidental under the same policy as the integration plan.
   `all_managed_entries_have_bounded_mutator_regions` inventory. Classify each
   inactive cache record which becomes a CG1 participant record; a poll context
   still must not constitute participation until it opens managed access.
+  Drift (2026-10-15): that inventory retired in `b5de34f0` (2026-10-05).
+  Heap use now shows in signatures: code takes access or
+  `&mut RuntimeValueMutator` from its caller, and the borrow checker keeps
+  views out of suspensions (`no-recursive-heap-entries`).
 - Add deterministic starvation fixtures with continuously overlapping
   mutators, including an outer heap which is always entered before an
   allocation-heavy inner heap and the opposite order on another thread.
+  The two-heap orders are likely deprecated (2026-10-15): a thread can no
+  longer hold two heaps. Glam's drivers already bound the wait at quantum
+  boundaries (`gc-bounded-collection-wait`); only glam-gc used alone can
+  still starve.
 - Inventory every way a bare managed pointer or managed reference can remain
   local across concurrent epoch initiation.
 - Inventory every managed `Trace` implementation which locks, uses
   `try_lock`, or assumes heap-wide quiescence. Record its maximum lock-hold
   region and whether the state is immutable/one-write, receives a
   collector-coherent snapshot protocol, or migrates to a trace-immediate
-  frame. Treat `ManagedWhnfCell` as the motivating forced case rather than an
-  optional profiling cleanup.
+  frame. Treat `ManagedWhnfCell` (now `ManagedLazyCheckpointCell`) as the
+  motivating forced case rather than an optional profiling cleanup.
 - Select the transient-root protocol: explicit local-root handles, registered
-  mutator root frames as sketched above, or another exact construction. Review
+  mutator root frames as sketched above, or another exact construction
+  (2026-10-15: or acknowledgement only at `Mutator::suspend` or mutator
+  end, where no view is live). Review
   the decision against the completed Value Representation Refinement and the
   then-current evaluator-machine layout. Do not assume that the Rust stack can
   be scanned, and do not retain a raw state plus parallel root record merely as
   migration scaffolding.
 - Record baseline pause, throughput, run pressure, lease retention, and memory
-  behavior under the reference collector. For scale, on 2026-10-08 two
-  collections took 65 ms of `hello_elf`'s 794 ms, and collection plus the
-  finalization batch were about 6% of a recursion countdown.
+  behavior under the reference collector. For scale, historical
+  (2026-10-08): two collections took 65 ms of `hello_elf`'s 794 ms, and
+  collection plus the finalization batch were about 6% of a recursion
+  countdown. On 2026-10-15 (`01ec2fbc`), `hello_elf` ran 598 M
+  instructions with one collection, and `countdown_800` 202 M with one.
 
 Hard gate: concurrent marking may not begin until every pre-existing local
 managed reference is either discoverable or protected by a proven SATB origin
@@ -511,7 +585,9 @@ collector's heap-wide-quiescence lock assumption.
 
 Verification forces every two-heap acquisition ordering, recursive same-heap
 entry, participant exit during initiation, thread exit, panic, and a participant
-which delays acknowledgement while unrelated heaps continue. It additionally
+which delays acknowledgement while unrelated heaps continue. (Likely
+deprecated, 2026-10-15: the two-heap orderings and recursive entry, which
+glam-gc now forbids.) It additionally
 forces mark initiation immediately before frame-guard acquisition, while a
 WHNF quantum owns the guard, and immediately after publication; panic and
 budget yield must release the guard with one complete traceable state.
@@ -615,7 +691,8 @@ payload is dropped exactly once or remains durably pending after panic.
 
 ## Verification Matrix
 
-At every implementation checkpoint:
+At every implementation checkpoint, `scripts/check.sh full` (2026-10-15;
+these commands predate it):
 
 ```sh
 cargo fmt --check
@@ -628,7 +705,8 @@ The concurrency proof relies on controlled schedules, not stress alone. The
 minimum forced cases include:
 
 - perpetual overlap which starves the reference idle-entry collector;
-- opposing two-heap nesting orders with only the inner heap allocating;
+- opposing two-heap nesting orders with only the inner heap allocating
+  (likely deprecated, 2026-10-15: `one-heap-per-thread`);
 - collection initiation during every mutator admission/exit boundary;
 - edge and root deletion immediately around snapshot publication;
 - WHNF frame mutation immediately before, during, and after the initial root
@@ -668,7 +746,8 @@ it in [`Decisions.md`](../Decisions.md).
 4. Atomic packing and synchronization of run state, generation, and active
    cursor pins.
 5. Per-thread participant slots versus another heap-local reclamation-epoch
-   registry.
+   registry. (2026-10-15: with one heap per thread, the thread's cache
+   record is a natural participant slot.)
 6. Whether sealed survivor runs reopen automatically or remain sealed until a
    later compaction/performance plan.
 7. Whether final remark needs a brief scheduler-coordinated pause or can remain
@@ -691,14 +770,48 @@ it in [`Decisions.md`](../Decisions.md).
      collection that needs it, deadlocks settlement. Either allocation must
      never require the gate, or settlement must stop constructing values
      under its exclusive hold.
+   - Added 2026-10-15: Glam takes the coordinator lock and the runtime gate
+     under a mutator (`boundary-release-under-mutator`), and promise
+     publication takes shared admission inside managed access. Both are
+     safe today because a pending collection blocks no mutator entry
+     (`agent_context/evaluation.md` "Values and Forcing"). A handshake or
+     final remark that blocks mutators needs its own argument.
 
 Each gate requires a dated decision, forced-order verification plan, and
 review of effects on later phases before its implementation begins.
 
+## Open Questions (2026-10-15)
+
+For the maintainer:
+1. **Is concurrent collection still wanted?** Its starvation motive is
+   bounded in Glam, and one heap per thread makes a collection that holds
+   back new entrants possible. If shorter pauses are the remaining motive,
+   what measured pause or collection share should trigger CG0? The
+   maintainer named generational collection as the eventual mitigation for
+   long-lived structure (2026-10-09); should it come first?
+2. **Handshakes at suspend.** Is acknowledgement only at `Mutator::suspend`
+   or mutator end, where no view is live, the answer to Open Design Gate 1?
+   A driver suspends only at waits, client code and collection joins, so a
+   handshake would wait up to one quantum. A source's compile holds one
+   mutator for the whole source (`lower_source`; holistic F5), so it could
+   delay a handshake longer.
+3. **The view invariant.** `GcRef`'s proof is "no mark or sweep while the
+   mutator is admitted". Concurrent marking must restate it, for example as
+   SATB plus retained births keeping every viewable object live through the
+   cycle.
+4. **Pooled roots.** Each collection rebuilds the root pools' free lists,
+   assuming no root is created meanwhile (`pooled-roots`). Concurrent
+   marking must keep that rebuild in a phase that excludes root creation,
+   or change it.
+5. **Rewrite or retire.** Should the nesting-era design (invariant 2, the
+   two-heap fixtures, Purpose) be rewritten for one heap per thread before
+   CG0, or the plan retired until a trigger exists?
+
 ## Completion Criteria
 
 - Collection can begin and finish despite continuously overlapping bounded
-  mutators and arbitrary multi-heap nesting order.
+  mutators and arbitrary multi-heap nesting order (2026-10-15: nesting is
+  no longer possible).
 - No collection phase requires heap-wide mutator exclusivity.
 - A sealed run receives no new reservation, and a recycled run has passed
   semantic, allocator, finalization, and access-quiescence proofs.

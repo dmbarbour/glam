@@ -8,12 +8,15 @@ Status: done 2026-10-05:
   links, with debug checks on every rewrite;
 - `polarity-net-generator`, the N8 generator and invariant checker.
 
-Next is `polarity-net-fuzzing`, which follows the panic-safety plan's
-discovery policy.
+`polarity-net-fuzzing` has not started (rechecked 2026-10-15, `01ec2fbc`).
+Under `panic-discovery-by-inspection` it runs only if inspection stalls, and
+the panic-safety plan's interaction-net inspection has not started, so no
+step here is active.
 The positive-erasure translation is deferred to the GAL performance
-adaptation. This plan comes before N8's random closed-net generator and
-before any fuzzing of nets. It follows the crossed `Bind >< Bind` join that
-landed on 2026-10-05.
+adaptation, which the performance roadmap places in
+`perf-net-representation`. This plan comes before N8's random closed-net
+generator and before any fuzzing of nets. It follows the crossed
+`Bind >< Bind` join that landed on 2026-10-05.
 
 ## Goal
 
@@ -212,6 +215,12 @@ Steps are referred to by name; see the plans README, "Step names".
 6. **Fuzzing** (`polarity-net-fuzzing`), per the panic-safety plan's discovery policy, over polarized
    nets only.
 
+   *Not started (2026-10-15).* `panic-discovery-by-inspection` defers
+   fuzzing until inspection stalls and keeps it out of `scripts/check.sh`.
+   The panic-safety plan's interaction-net workstream owns that
+   inspection. Likely deprecated as a step of this plan (2026-10-15): it
+   belongs with that workstream, which would leave this plan nothing to do.
+
 ## Runtime Invariant Design — Decided 2026-10-05
 
 `polarity-runtime-invariant` tests polarity-type preservation (subject reduction): a polarized net
@@ -263,7 +272,10 @@ keeps a lightweight polarity type rather than re-solving signs.
   constraints leave free, such as an isolated `Bind >< Bind` pair, is
   oriented arbitrarily. Subject reduction holds for any valid typing.
 - **Logical copies.** A remote cursor stands for the source port across its
-  link. Materialization copies the source node's references.
+  link. Materialization copies the source node's references. *As built
+  (2026-10-05),* materialization binds the copied node where its cursor
+  stood and takes the node's auxiliary signs from its rule; see
+  `agent_context/interaction_nets.md`, "Runtime Polarity Type".
 - **Exempt fixtures.** A template from an `unpolarized_for_test` builder,
   its runtime nets, and copies of them carry a test-only flag that skips the
   checks.
@@ -284,7 +296,9 @@ An earlier design discussion explored adapting GAL level tracking to nets not
 built from λ-calculus. GAL is an optimization of Lamping's brackets and
 croissants. That discussion is deferred: no work toward levels, boxes,
 brackets, or croissants is planned. It is recorded here because the polarity
-checker is its first, independently useful step.
+checker is its first, independently useful step. (Later on 2026-10-05, the
+performance roadmap scheduled a GAL adaptation in `perf-net-representation`,
+before or alongside compact net nodes; it has not started.)
 
 - **Polarity and roles.** The discussion's polarity is "+ provides, −
   consumes", and a net's root is `+` by fiat. It inferred bind roles by
@@ -313,3 +327,20 @@ checker is its first, independently useful step.
 
   Each would change reduction semantics or runtime representation, and needs
   its own design discussion first.
+
+## Open questions (2026-10-15)
+
+- **Hand `polarity-net-fuzzing` to the panic-safety plan?** Its
+  interaction-net workstream owns inspection, and fuzzing follows only if
+  inspection stalls. With the step moved, this plan has no remaining work.
+- **A standing home for the background?** `Decisions.md`
+  (`polarized-interaction-nets`, `remote-polarity-runtime-type`) and
+  `agent_context/interaction_nets.md` ("Polarity", "Runtime Polarity Type")
+  hold the rules. The Lafont and Mazza background, and the list of deferred
+  GAL work, live only here. Move them to `Design.md`'s interaction-net
+  section before retirement, or leave them to git history?
+- **Retirement.** No code, test or script cites this plan or its step
+  names. References remain in `Decisions.md` (`panic-discovery-by-inspection`
+  names `polarity-net-fuzzing`), the holistic review (N8, "Still open:
+  fuzzing nets"), the panic-safety plan's interaction-net workstream, and
+  the plans README. Retire once the fuzzing step has a new owner?

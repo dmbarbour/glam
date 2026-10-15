@@ -10,12 +10,16 @@ route per forced lazy, mostly removed by `eval-recursion-inline-forcing`.
 `eval-recursion-tail-forwarding` made tail recursion run in constant space;
 `eval-recursion-forward-resync` (2026-10-09) fixed a race in it between
 sessions. The review that followed found the costs that remain; they are steps of
-[Structural Overheads](StructuralOverheads_2026-10-08.md).
+[Structural Overheads](StructuralOverheads_2026-10-08.md). Rechecked
+2026-10-15 (`01ec2fbc`): no step remains, recursion stays linear
+([Measures 2026-10-15](#measures-2026-10-15)), and three follow-ups have no
+owner yet ([Open questions](#open-questions-2026-10-15)).
 
 ## Problem
 
 Time to evaluate a simple recursive function grows superlinearly with
-recursion depth, roughly quadratically. A release build evaluates:
+recursion depth, roughly quadratically. A release build evaluates
+(measured 2026-10-04; historical):
 
 ```text
 loop n = if n == 0 then 0 else loop (n - 1)
@@ -60,15 +64,26 @@ Steps are referred to by name; see the plans README, "Step names".
 - **Profile the countdown** (`eval-recursion-profile`). Profile `loop 400`
   with Callgrind or `perf`, and count coordinator transitions per call. The
   `glam-prof` counters (the holistic review's X3) make this cheap.
+  *Done 2026-10-07* (`621f0fbf`); see "Findings 2026-10-07".
 - **Scaling with pending lazies** (`eval-recursion-lazy-scaling`). Check
   whether time per call scales with the number of pending lazies.
+  *Likely deprecated (2026-10-15): the profile placed the cost in route
+  validation, which tracks route depth; no separate check was made.*
 - **Countdown workloads** (`eval-recursion-workloads`). The countdown at a
   few depths is in `scripts/profile.sh` as `countdown_100` to
-  `countdown_400`.
+  `countdown_400`. *Done 2026-10-06 with the profiling harness
+  (`7962639e`).* Since 2026-10-08 (`c65f9cfd`) the `countdown` family and
+  the non-tail `sum` family run at depths 200, 400 and 800.
 - **Fix exact-route validation** (`eval-recursion-route-validation`):
-  *done 2026-10-07*; see "Route validation fix" below.
-- **Tail-call forwarding** (`eval-recursion-tail-forwarding`): to
-  investigate below, under "Findings".
+  *done 2026-10-07* (`fc2261d6`); see "Route validation fix" below.
+- **Inline private lazies** (`eval-recursion-inline-private-lazies`):
+  tried 2026-10-07 and not committed; see its result below.
+- **Inline forcing** (`eval-recursion-inline-forcing`): *done 2026-10-07*
+  (`d77192b1`, then `20c5598a` and `5dae27f9` on 2026-10-08).
+- **Tail-call forwarding** (`eval-recursion-tail-forwarding`): *done
+  2026-10-08* (`84bfd7d2`); see "Tail forwarding as built".
+- **Forwards between sessions** (`eval-recursion-forward-resync`): *done
+  2026-10-09* (`105eb543`).
 - *Rechecked 2026-10-05:* an old worker stack overflow (the
   `direct_assembly_elf` sample exited with status 134 under `--workers 4` and
   `--workers 1`, before the collector and resumable WHNF) did not reproduce
@@ -439,7 +454,9 @@ puts system time at 0.25 s of 0.85 s CPU.
 The source is the collector's admission. `release_outer_mutator` in
 `crates/glam-gc/src/heap.rs` calls `notify_all` on `admission_changed`
 whenever the active mutator count reaches zero. Single-threaded, that is
-the end of every outer access region, about 437,000 of them here. The
+the end of every outer access region, about 437,000 of them here. (Since
+2026-10-09, `3612060b`, admission is a lock-free gate in
+`crates/glam-gc/src/admission.rs`, and `admission_changed` is gone.) The
 standard library's futex condvar makes a `FUTEX_WAKE` syscall on every
 notify, waiter or not.
 
@@ -547,13 +564,16 @@ target.
 **Tests:**
 - `tail_recursion_runs_in_a_constant_heap` (`glam-prof`): the heap at depth
   1,000 stays within 1.5 times the heap at depth 250. Without forwarding it
-  grew from 112 to 253 runs; with forwarding, 112 to 130.
+  grew from 112 to 253 runs; with forwarding, 112 to 130. Since 2026-10-11
+  (`1c49f38e`) it compares depths 4,000 and 1,000, both past the first
+  collection.
 - `a_cycle_of_tail_forwards_fails_both_lazies_with_one_dependency_cycle`.
 - `a_lazy_left_forwarding_in_a_tail_chain_caches_its_value_when_observed`.
 - `managed_lazy_forward_keeps_its_target_live_and_is_reclaimed_with_it`.
 
 **What remains** is the per-reduction cost: about 11,000 instructions per
-reduction in the countdown, the subject of the performance review.
+reduction in the countdown, the subject of the performance review. (About
+4,500 on 2026-10-15; see below.)
 
 ## Forwards between sessions 2026-10-09 (`eval-recursion-forward-resync`)
 
@@ -581,3 +601,46 @@ which shifted its timing. Earlier gates passed by luck.
   a lazy left forwarding, and expects the forward's value. It fails without
   the fix; the concurrency test then passed 20 runs in 20.
 
+## Measures 2026-10-15
+
+User-space instructions and counters at `01ec2fbc` from `scripts/profile.sh`
+(release `glam-prof`, no workers). Route admissions are
+`fresh_work_admission` notifications; `minimal` makes 111.
+
+| Family | Depths | M instructions | Reductions | Route admissions |
+| --- | --- | --- | --- | --- |
+| `countdown` | 200/400/800 | 65.5 / 104.1 / 202.4 | 13,288 / 24,108 / 45,750 | 176 / 240 / 366 |
+| `sum` (non-tail) | 200/400/800 | 77.6 / 149.3 / 250.7 | 14,293 / 26,115 / 49,757 | 383 / 638 / 1,163 |
+
+- **Countdown,** from depth 400 to 800: per level, 246 K instructions, 54
+  reductions and 0.3 route admissions, so about 4,500 instructions per
+  reduction. Route validation walks 305 frames in all at depth 800.
+- **Sum,** over the same depths: per level, 254 K instructions, 59
+  reductions and 1.3 route admissions.
+- **Growth.** Reductions grow with k = 1.00 in both. Instructions read
+  k = 1.35 for the countdown and 0.50 for the sum. The countdown collects
+  only at depth 800 and the sum at 400 and 800, which likely distorts the
+  fit at these sizes.
+
+## Open questions (2026-10-15)
+
+- **Route validation is not in the standing record.** The hazard log of
+  `eval-recursion-route-validation`, approved by the maintainer on
+  2026-10-07, has no `Decisions.md` entry. `docs/architecture/evaluation.md`
+  still says the driver revalidates every frame when the hazard revision
+  moves. Record both before this plan retires?
+- **Refusals cached at the WHNF boundary.** `WhnfOwnerPoll::Failed` still
+  carries both permanent failures and observer-relative refusals, and the
+  WHNF checkpoint boundary caches both (see "Finding: refusals are cached
+  at the WHNF boundary"). No plan owns separating them. Is it wanted, and
+  where?
+- **Poll quantum.** `TASK_POLL_QUANTUM` is still 64. Its revisit, with
+  fairness between demands, was left to the performance review, which did
+  not take it up; Explicit Heap Holds notes only that quanta may grow. Who
+  owns it?
+- **Retirement.** `inline-lazy-forcing`, `lazy-tail-forwarding` and
+  `counted-condvar-notifications` are in `Decisions.md`. Besides the three
+  items above, references remain: a comment in `src/eval/tests.rs` cites
+  `eval-recursion-tail-forwarding` (the decision slug
+  `lazy-tail-forwarding` would serve), and the panic-safety, structural
+  overheads and roadmap plans link here. Retire once these move?

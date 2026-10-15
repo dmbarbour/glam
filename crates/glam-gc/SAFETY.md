@@ -1754,6 +1754,5 @@ The initial collector deliberately omits:
 Collection starts only when the heap has no active mutator, so continuously
 overlapping mutators can starve it; the baseline accepts that. The
 [concurrent-collector plan](../../docs/plans/ConcurrentGarbageCollection_2026-08-28.md)
-owns concurrent marking and that starvation remedy. The
-[scoped-pointer plan](../../docs/plans/GarbageCollectorScopedPointerSafety_2026-09-09.md)
-owns lifetime-branded pointer views.
+owns concurrent marking and that starvation remedy. Lifetime-branded
+pointer views exist as `GcRef` (`owned-mutator-views`).

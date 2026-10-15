@@ -1,11 +1,21 @@
 # Value Representation Refinement Plan — 2026-08-19
 
-Status: preliminary and deferred. Its original gate, a working Glam-owned GC
-boundary, was met when roadmap Gate G4 passed on 2026-10-02. The holistic
-pre-performance review now sequences it after that review's measurement and
-overhead-removal steps, so that it measures representation rather than lock
-and scheduler overhead. Its findings V1–V3 and V5 are the V-1 prework phase
-below.
+Status: preliminary and deferred (2026-10-15). It is the
+[performance roadmap](PerformanceRoadmap_2026-10-05.md)'s
+`perf-value-representation`, which runs beside `perf-net-representation`
+once `perf-structural-overheads` closes. On 2026-10-15 that step still has
+`perf-definition-assertions`, `perf-reflection-scanner`,
+`perf-reflection-step-cost`, `perf-debug-annotations` and
+`perf-worker-route-walks` open. The roadmap names the focus: lists and
+dicts, contiguous chunks for strict lists, ropes for concatenation, small
+inline dicts and a persistent map for large ones, shared key shapes where
+keys are static, and no `Arc` in basic data types (maintainer, 2026-10-09).
+Its original gate, a working Glam-owned GC boundary, was met when roadmap
+Gate G4 passed on 2026-10-02. The holistic pre-performance review
+sequences it after that review's measurement and overhead-removal steps, so
+that it measures representation rather than lock and scheduler overhead.
+Its findings V1–V3 and V5 are the V-1 prework phase below; on 2026-10-15
+the allocation path and lazy labels are done, the rest open.
 
 The deferred
 [Pure Effect Access Fusion plan](PureEffectAccessFusion_2026-09-23.md) follows
@@ -62,6 +72,15 @@ that decision. The same review decides whether `Gc<T>` stays `Send` and
 `Sync`, once scoped working views and real cross-thread persistent owners are
 inventoried.
 
+Update (2026-10-15): the scoped working view exists. The explicit heap holds
+plan added `GcRef<'m, T>`, which borrows the thread's owned mutator, so no
+view lives across `Mutator::suspend` (`gc-hold-api`, 2026-10-13;
+`owned-mutator-views`). `Root::as_gc` returns one, and a root names its
+liveness evidence, a view or a named `EdgeLiveness` claim (`root-evidence`).
+Raw `core::Value` stays unbranded and valid until the mutator suspends or
+ends. What remains here is the copy policy of compact value words and
+whether `Gc<T>` stays `Send` and `Sync`; it does today.
+
 ## Current Pressure
 
 The current enum stores representations such as `Number(BigRational)` inline.
@@ -70,23 +89,32 @@ common atom, builtin, small integer, or managed-pointer cases. It also combines
 semantic value classification with Rust ownership glue such as `Arc`, making
 trivial reclamation and compact copying difficult.
 
-**Allocation volume, measured 2026-10-08.** After the recursion work, the
-allocator (`malloc`, `free`, `memmove`) takes about 14% of samples in the
-countdown. It is diffuse: root registration, vector growth, finalization,
-persistent-map nodes and continuation frames. A faster allocator is not a
-free win: mimalloc ran 9–16% fewer instructions but used more CPU in this
+**Allocation volume, measured 2026-10-08 (historical).** After the
+recursion work, the allocator (`malloc`, `free`, `memmove`) takes about 14%
+of samples in the countdown. It is diffuse: root registration, vector
+growth, finalization, persistent-map nodes and continuation frames. A
+faster allocator is not a free win: mimalloc ran 9–16% fewer instructions but used more CPU in this
 container (`perf-mimalloc-allocator` in the
 [structural overheads plan](StructuralOverheads_2026-10-08.md)). Compact
 values and list and dictionary representations should allocate less.
 Root registration is the clearest single source, and is part of
 `perf-allocation-path` there.
 
+Since then (2026-10-15), `perf-allocation-path` closed (2026-10-10), and a
+root became a counted slot in a heap-owned pool. It costs about 82
+instructions (`pooled-roots`), from about 527 after `root-evidence` and
+about 1,130 before. On 2026-10-15 (`01ec2fbc`), `countdown_800` made 56,454
+managed allocations and 26,190 root registrations in 202 M instructions. No
+sampling profile has refreshed the allocator's share.
+
 **Unmanaged structure the collector traces, measured 2026-10-09.** Lists
 and dictionaries are still `Arc` structure. Each collection traces them,
 but they occupy no managed runs, so they do not raise the next collection's
 threshold. A program that holds a growing list collects at a rate set by
 its managed allocation, and each collection traces the whole list:
-`append_walk` collects 4, 8 and 14 times at 800, 1,600 and 3,200 items.
+`append_walk` collects 4, 8 and 14 times at 800, 1,600 and 3,200 items
+(on 2026-10-15, `01ec2fbc`, `append_walk_800` collected twice; the larger
+sizes were not rerun).
 Managed list nodes would count toward the threshold, so that collections
 grow with the live data rather than with the run. Generational collection
 is the eventual mitigation for long-lived structure that every full
@@ -258,6 +286,10 @@ wasteful trace, and avoidable per-construction costs rather than the
 representation itself. The holistic pre-performance review's findings V1–V3 and V5
 are the source.
 
+Status on 2026-10-15: the allocation path and lazy labels are done; the
+trace, stack-safety and remaining per-construction items are open, each
+noted below.
+
 - **Allocation and root registration without global locks**, now
   `perf-allocation-path` in the structural overheads plan. Each managed
   allocation re-acquires an allocator. That locks a process-wide `TypeId`
@@ -266,31 +298,47 @@ are the source.
   metadata address, shared by allocators and roots. Compact roots
   opportunistically, and expose `HeapMetrics` through the performance
   harness's counters.
-- **A physical, iterative trace.**
+  *Done.* A per-thread class cache serves allocators and roots (`3b44499a`,
+  `9bab3101`; closed in `9b215203`, 2026-10-10), and an allocator carries
+  its class key (`gc-hold-class-cache`, `01ec2fbc`, 2026-10-15). Roots are
+  pooled slots (`pooled-roots`), reclaimed apart from collections
+  (`root-chunk-reclamation`). The `glam-prof` report carries the heap's
+  allocation, root and region counters.
+- **A physical, iterative trace.** *Open (2026-10-15):* `visit_value_with`
+  still recurses, a list is still walked once for thunks and once for
+  values, and `visit_dict_edges` still runs `key_node_count` per entry.
   - Walk dictionary values only, and walk each list once, not once for
     thunks and once for values.
   - Drop the per-entry worklist that computes discarded statistics; keep
     those statistics in a test-only variant.
   - Replace value recursion with an explicit worklist.
-- **Stack-safe core walks and destruction.**
+- **Stack-safe core walks and destruction.** *Open (2026-10-15),* except
+  the literal shape below.
   - Give `ListNode` an iterative `Drop`.
   - Done in the structural overheads plan's `perf-list-front-walk`: list
     literals are one value leaf, and pops reshape a deep spine toward the
     popped end. A deep spine still drops recursively.
   - Make the key conversions iterative: `Key::to_value_in`,
-    `key_from_value` and `value_from_key`.
+    `key_from_value` and `value_from_key`. The recursion audit
+    (`src/eval/whnf_inventory.rs`) lists `key_from_value`,
+    `value_from_key`, `same_representation` and `visit_value_with` as open
+    defects.
   - Add small-stack tests that build, trace, collect and drop a 100k-deep
     concatenation and a 10k-nested strict dictionary.
+    (`src/eval/tests/small_stack.rs` covers evaluator chains, not these.)
   - The no-unapproved-recursion rule now covers `src/core`; extend it to
     `list.rs`.
 - **Per-construction overheads.**
-  - Each lazy allocates an `Arc<str>` from a static label.
-  - A promise allocates three side `Arc`s.
+  - Each lazy allocates an `Arc<str>` from a static label. *Done:*
+    `lazies-carry-no-labels` (`f5856d82`, 2026-10-12).
+  - A promise allocates three side `Arc`s (still so in
+    `ManagedPromiseCell`).
   - `EvaluationFailure::with_context_in` copies earlier contexts, so k
     frames cost O(k²).
   - Projecting an inline integer allocates a `BigRational`.
   - Atoms, builtins and the cached unit each cost a 64-byte node plus a
-    locked root registration.
+    locked root registration. (Since `pooled-roots`, registration takes no
+    lock; the node and root remain.)
   - `core::Value` is 64 bytes because `Number(BigRational)` is; boxing
     `Number` is a measurable precursor to V2.
 
@@ -383,6 +431,9 @@ are the source.
   internal value or the existing collector root cell for a managed node.
   Managed root type erasure, if required by the split node taxonomy, must reuse
   that root cell rather than add another registry or root representation.
+  (Since 2026-10-14 the root cell is a counted slot in a heap-owned pool,
+  `pooled-roots`, and the public wrapper already keeps small integers
+  inline: `PreparedValueRepresentation::InlineInteger`.)
 - Replace V1's mock validation with real heap/run ownership, live-slot, and
   canonical-metadata assertions at the private decoding boundary. Public value
   APIs must provide no route to forge or reinterpret pointer-bearing words.
@@ -422,6 +473,25 @@ Each phase compares old and new representations over:
 
 Differential tests should evaluate the same constructed values through both
 representations until the old form is retired.
+
+## Open Questions (2026-10-15)
+
+For the maintainer:
+1. **Where the rest of V-1 lands.** The iterative trace, iterative key
+   conversions and list drop, promise sidecars and failure contexts are
+   local fixes. Should they land under `perf-structural-overheads` first, or
+   open this plan, given that the representation change rewrites much of
+   that code?
+2. **Branding compact values.** Should compact value words be branded views
+   like `GcRef`, or stay unbranded raw words valid until the mutator
+   suspends? `root-evidence` expects its provenance claims to extend to
+   Glam's unchecked edge reads (`get_edge`, `duplicate_edge`) once
+   immediates arrive.
+3. **The scoped-pointer plan.** It is superseded by `GcRef` (see its
+   status). Is the coordination with it, above and in V2–V4, now only the
+   branding question?
+4. **Nets.** `perf-net-representation` runs beside this plan. Should the
+   two share a node or slab design, or stay independent?
 
 ## Deferred With This Plan
 
