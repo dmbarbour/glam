@@ -1,9 +1,12 @@
 # Collector Verification
 
-Run the stable collector checks from the repository root:
+Run the stable collector checks from the repository root, when glam-gc
+changes (`crate-scoped-checks`):
 
 ```sh
-crates/glam-gc/scripts/check.sh
+crates/glam-gc/scripts/check.sh            # all
+crates/glam-gc/scripts/check.sh full       # adds the million-edge scale proofs
+crates/glam-gc/scripts/check.sh dynamic    # adds Miri and the sanitizers
 ```
 
 The script formats, lints, and tests the crate, including compile-fail doctests
@@ -1111,8 +1114,8 @@ Miri and ASan with only leak checking disabled.
 
 ## Production-runtime dynamic matrix
 
-`scripts/check.sh dynamic` (`full` until 2026-10-15) runs Miri and the
-sanitizers over `glam-gc` only. The
+`crates/glam-gc/scripts/check.sh dynamic` (`scripts/check.sh full` until
+2026-10-15) runs Miri and the sanitizers over `glam-gc` only. The
 production runtime's matrix is run by hand with a nightly toolchain. It last
 passed on 2026-10-01 with nightly 1.101.
 
@@ -1306,6 +1309,6 @@ reaching the heap (`an_evicted_class_key_falls_back_to_the_thread_class_map`):
 `scripts/check.sh full` passed at `69a08453`, which includes it (`ce7d3657`),
 with Miri (231 passed) and both sanitizers.
 
-From 2026-10-15, Miri and the sanitizers run at `scripts/check.sh dynamic`,
-by judgement, after changes to glam-gc or to code its concurrency contracts
-govern (`dynamic-tools-by-judgement`); records before that name `full`.
+From 2026-10-15, glam-gc has its own gate, run when it changes, and Miri and
+the sanitizers run at its `dynamic` level, by judgement
+(`crate-scoped-checks`); records before that name `scripts/check.sh full`.

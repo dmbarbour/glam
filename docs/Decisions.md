@@ -142,7 +142,8 @@ maps the short names used here to file names.
     pre-commit gate) and `full`.
 - **Consequences:** Miri and the sanitizers run only when a nightly is
   installed. `full` first ran periodically; `aggressive-gc-rerun-triggers`
-  now sets its cadence.
+  now sets its cadence. Since 2026-10-15 the script checks the `glam`
+  package, and glam-gc has its own gate (`crate-scoped-checks`).
 - **Rule lives in:** `AgentContext.md` "Verification".
 - **Recorded in:** holistic review X2; parallel review AR-004; commits
   `4c849c19`, `5e68163d`.
@@ -160,17 +161,19 @@ maps the short names used here to file names.
 - **Recorded in:** D2h review D2HR-006; GCI11R002 holistic review GCI2HR-006;
   documentation disposition, maintainer answer 5.
 
-### Miri and the sanitizers run by judgement
-`dynamic-tools-by-judgement` · 2026-10-15 · maintainer · accepted
-- **Context:** `scripts/check.sh full` ran Miri and both sanitizers, about an
-  hour, after every runtime change, though they exercise only glam-gc's
-  library suite; most Glam changes gained nothing from them.
-- **Decision:** they move to a level of their own, `scripts/check.sh
-  dynamic`, run by judgement after changes to glam-gc, or to Glam code its
-  concurrency contracts govern (workers, admission, collection,
-  finalization). `full` keeps the aggressive-GC pass and the scale proofs,
-  with its triggers unchanged (`aggressive-gc-rerun-triggers`). Fuzz-style
-  runs, such as the parser's oracle sweep, are judgement calls as well.
+### Each crate has its own gate; dynamic tools run by judgement
+`crate-scoped-checks` · 2026-10-15 · maintainer · accepted
+- **Context:** `scripts/check.sh` tested glam-gc at every level and ran Miri
+  and both sanitizers, about an hour, at `full`, after every runtime change.
+  The dynamic tools exercise only glam-gc's library suite, so most Glam
+  changes gained nothing from them, and glam-gc is a separate crate.
+- **Decision:** `scripts/check.sh` checks the `glam` package. glam-gc's
+  gate, `crates/glam-gc/scripts/check.sh [all|full|dynamic]`, runs only when
+  glam-gc changes, beside Glam's: its suite, then the scale proofs, then Miri
+  and the sanitizers, the last by judgement. Glam's `full` keeps the
+  aggressive-GC pass and the cursor-stress proofs, with its triggers
+  unchanged (`aggressive-gc-rerun-triggers`). Fuzz-style runs, such as the
+  parser's oracle sweep, are judgement calls as well.
 - **Rule lives in:** `AgentContext.md` "Verification"; `AGENTS.md` "Routine
   Checks".
 

@@ -118,42 +118,48 @@ alongside verification results in reviews. When upgrading, or when running
 nightly tools, also check compiler future-compatibility warnings; nightly has
 warned about deep auto-trait recursion in the root crate.
 
-After Rust edits run `scripts/check.sh`, the workspace verification entry
-point. Its levels are cumulative:
+After Rust edits run `scripts/check.sh`, Glam's verification entry point. It
+checks the `glam` package; glam-gc is a separate crate with its own gate
+(`crate-scoped-checks`). Its levels are cumulative:
 
-- `scripts/check.sh fast` — `cargo fmt --check`, workspace Clippy, and the
-  workspace test suite at default features. The quick inner-loop gate. The
-  dev profile builds the workspace at opt-level 1 and dependencies at 3, and
-  each test gets its own shared test runtime, so the tests take about 20 s
+- `scripts/check.sh fast` — `cargo fmt --check`, Clippy, and Glam's test
+  suite at default features. The quick inner-loop gate. The dev profile
+  builds the workspace at opt-level 1 and dependencies at 3, and each test
+  gets its own shared test runtime, so the tests take about 20 s
   (`fast-test-suite`).
-- `scripts/check.sh` (default `all`) — adds the collector's own `check.sh`
-  (glam-gc all-features tests, persistent-edge codegen latch, unsafe-site
-  audit), the G0 semantic regressions, and the `glam-prof` profiling
-  fixtures. The pre-commit gate. The profiling check names only the
-  profiling-specific and profiling-augmented fixtures; it does not repeat the
-  whole suite under instrumentation.
+- `scripts/check.sh` (default `all`) — adds the G0 semantic regressions and
+  the `glam-prof` profiling fixtures. The pre-commit gate. The profiling
+  check names only the profiling-specific and profiling-augmented fixtures;
+  it does not repeat the whole suite under instrumentation.
 - `scripts/check.sh full` — adds the expensive tier: the aggressive-GC
-  verification pass over the whole workspace and the cursor-stress and
-  million-edge scale proofs. Run it before performance work and after any
-  change to runtime or collector code, or to unsafe, tracing, mutation, root,
-  admission, finalization, or scheduler behavior. Documentation-only changes
-  may reuse the last result. Running it only periodically once let a
-  regression stay unnoticed for weeks.
-- `scripts/check.sh dynamic` — adds Miri and the address and thread
-  sanitizers, which run glam-gc's library suite only and take about an hour
-  (`dynamic-tools-by-judgement`). A judgement call: run it after changes to
-  glam-gc, or to Glam code whose correctness rests on glam-gc's concurrency
-  contracts (workers, admission, collection, finalization, roots); not for
-  front-end, evaluator or documentation work, which these tools never
-  execute.
+  verification pass over Glam's tests and the cursor-stress proofs. Run it
+  before performance work and after any change to runtime or collector
+  code, or to unsafe, tracing, mutation, root, admission, finalization, or
+  scheduler behavior. Documentation-only changes may reuse the last result.
+  Running it only periodically once let a regression stay unnoticed for
+  weeks.
+
+glam-gc's gate, `crates/glam-gc/scripts/check.sh`, runs only when glam-gc
+changes, beside Glam's at the matching level, since Glam builds on it:
+
+- default `all` — formatting, Clippy, the all-features test suite (with the
+  compile-fail doctests and Loom models), the persistent-edge codegen latch
+  and the unsafe-site audit;
+- `full` — adds the million-edge scale proofs;
+- `dynamic` — adds Miri and the address and thread sanitizers over glam-gc's
+  library suite, about an hour. A judgement call: after changes to its
+  unsafe code, its concurrency or its contracts. Glam's own concurrent code
+  (workers, the coordinator) runs under these tools only in the
+  production-runtime matrix of `crates/glam-gc/VERIFY.md`, by hand and by
+  judgement as well.
 
 Scale-only proofs (cursor stress, million-edge) stay `#[ignore]`d in the
-ordinary suite and run only at `full`. The project pins a stable toolchain, so
-`dynamic` skips Miri and the sanitizers with a notice unless a nightly with the
-`miri` and `rust-src` components is installed; run
+ordinary suites and run only at `full`. The project pins a stable toolchain,
+so glam-gc's `dynamic` skips Miri and the sanitizers with a notice unless a
+nightly with the `miri` and `rust-src` components is installed; run
 `crates/glam-gc/scripts/check-miri.sh` and
 `crates/glam-gc/scripts/check-sanitizer.sh {address,thread}` directly once a
-nightly is available. There is no CI yet; `scripts/check.sh` is the gate.
+nightly is available. There is no CI yet; the two scripts are the gates.
 
 Fuzz-style runs are judgement calls too, never routine, and none joins
 `scripts/check.sh` (`panic-discovery-by-inspection`). After parser changes
