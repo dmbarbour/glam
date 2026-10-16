@@ -29,8 +29,12 @@ builds tagged data, `{path: x}`, read alike everywhere:
   effect.
 - **Followed by a space or line break, its operand is the rest of its
   item**, as a lambda's body is: `foo: f x` is `foo:(f x)`, and
-  `foo: a + b` is `foo:(a + b)`. The operand is an open tail, so it ends at
-  `->` where tails do (the parser backtracking plan, "Patterns 2026-10-16").
+  `foo: a + b` is `foo:(a + b)`. In an expression the operand is an open
+  tail, so it ends at `->` where tails do (the parser backtracking plan,
+  "Patterns 2026-10-16"); in a pattern, see below.
+- **An operator cannot follow a spaced prefix** (maintainer, 2026-10-16):
+  `foo: |> g` is an error, since the prefix has no operand. `(foo:) |> g`
+  passes the constructor.
 - **With nothing after it in its item, it is the constructor function.**
   `(foo:)` is its section, as `(+ 1)` is an operator's: `map (foo:) xs`,
   `[foo:, bar:]`, `x |> foo:`.
@@ -40,9 +44,16 @@ builds tagged data, `{path: x}`, read alike everywhere:
   longer constructs.
 - **A dict literal is the union of its items**, each an ordinary
   expression: `{a:1, b: f x, :c, D}`. Braces lose their member grammar.
-- **Patterns read alike:** `foo:P`, `foo: P` and `(foo:) P` are the same tag
+- **Patterns read alike:** `foo:p`, `foo: p` and `(foo:) p` are the same tag
   pattern, and `:x` captures `x` under the key `x`. A bare `foo:` is not a
   pattern.
+- **A spaced payload in a pattern is a complete position** (maintainer,
+  2026-10-16). Its item's comma or brace bounds it, as `=>` bounds an arm
+  head, and it runs to the end of its item, pattern operators included:
+  `{x: Nat n}` tags a predicate, `{x: f -> p}` a view, and `{x: a as b}`
+  both captures. A joint payload stays nested, as in expressions:
+  `x:Nat n` is a predicate `x:Nat` over `n`. A spaced tag as a view's
+  function needs parentheses: `((foo: f) -> p)`.
 
 Consequences:
 - `{foo: f x}` keeps its meaning. `{foo:f x}` changes from `foo:(f x)` to
@@ -88,10 +99,6 @@ catch anything the corpus sweep missed.
 
 ## Open questions (2026-10-16)
 
-- **Spaced payloads in patterns.** A spaced payload is bounded by its
-  item's comma or brace, much as an arm head is bounded by `=>`. Should it
-  be a complete position, so that `{x: Nat n}` is a predicate without
-  parentheses? Today it needs them, `{x: (Nat n)}`.
-- **An operator after a spaced prefix.** `foo: |> g` has no operand, and
-  reads as an error under the design. Is that right, or should `foo:` there
-  be the constructor?
+None. The maintainer answered both raised while planning, and the answers
+are in [Design](#design): a spaced payload is a complete pattern position,
+and `foo: |> g` is an error.
