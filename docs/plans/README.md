@@ -43,12 +43,16 @@ flags a step for discussion when work reaches it, not a decision.
   budgets treat batching, and the order of its `perf-` steps. Latest
   measurements: Snapshot 2026-10-15.
 - [`ParserBacktrackingPerformance_2026-10-04.md`](ParserBacktrackingPerformance_2026-10-04.md):
-  `perf-parser`, next (maintainer, 2026-10-15). The prefix-shared
-  term parser parses every ordinary expression in production. No `parser-`
-  step has landed since 2026-10-07: a keyword form in parentheses inside
-  another is still exponential (`parse_ifs`), so `parser-keyword-frames`
-  is next, then `parser-patterns`, `parser-grammar-retirement` and
-  `parser-scope-analysis` (name analysis over nested `where`).
+  `perf-parser`, in progress. The prefix-shared term parser parses every
+  ordinary expression, and in cover mode every pattern (`parser-patterns`,
+  2026-10-16). Keyword regions, the first part of `parser-keyword-frames`,
+  removed the keyword-form exponential (2026-10-15). Native keyword frames
+  are next, then `parser-grammar-retirement`; `parser-scope-analysis`
+  (name analysis over nested `where`) is independent.
+- [`TagPrefixSyntax_2026-10-16.md`](TagPrefixSyntax_2026-10-16.md):
+  `path:` becomes a prefix operator and `:name` a pun everywhere, so braces
+  lose their member grammar. Agreed 2026-10-16; follows the performance
+  work, after `parser-grammar-retirement`.
 - [`ReflectionPerformance_2026-10-15.md`](ReflectionPerformance_2026-10-15.md):
   `perf-reflection-effects`, split from the structural overheads plan on
   2026-10-15. Reflection effect steps (`perf-reflection-step-cost`, 376 K
