@@ -15,6 +15,50 @@ struct EvaluationExecutorInner {
     coordinator: Weak<EvaluationWorkCoordinator>,
     stopping: AtomicBool,
     worker_count: AtomicUsize,
+    /// Pauses the next worker that holds the value domain, for tests that
+    /// order runtime retirement against it.
+    #[cfg(test)]
+    value_hold_pause: Mutex<Option<WorkerValueHoldPause>>,
+}
+
+#[cfg(test)]
+struct WorkerValueHoldPause {
+    reached: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+/// A test's handle on a worker paused while it holds the value domain.
+#[cfg(test)]
+pub(crate) struct WorkerValueHoldProbe {
+    reached: std::sync::mpsc::Receiver<()>,
+    release: std::sync::mpsc::Sender<()>,
+}
+
+#[cfg(test)]
+impl WorkerValueHoldProbe {
+    pub(crate) fn wait_until_reached(&self, timeout: std::time::Duration) -> bool {
+        self.reached.recv_timeout(timeout).is_ok()
+    }
+
+    pub(crate) fn release(self) {
+        let _ = self.release.send(());
+    }
+}
+
+#[cfg(test)]
+impl EvaluationExecutorInner {
+    /// Pauses here, once, if a test installed a pause.
+    fn pause_while_holding_values(&self) {
+        let pause = self
+            .value_hold_pause
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(pause) = pause {
+            let _ = pause.reached.send(());
+            let _ = pause.release.recv();
+        }
+    }
 }
 
 /// Background worker resources attached to one evaluation runtime.
@@ -55,6 +99,8 @@ impl EvaluationExecutor {
                 coordinator: Arc::downgrade(coordinator),
                 stopping: AtomicBool::new(false),
                 worker_count: AtomicUsize::new(0),
+                #[cfg(test)]
+                value_hold_pause: Mutex::new(None),
             }),
             workers: Mutex::new(Vec::with_capacity(worker_count)),
             activated: Mutex::new(false),
@@ -130,6 +176,39 @@ impl EvaluationExecutor {
     pub(crate) fn worker_count(&self) -> usize {
         self.inner.worker_count.load(Ordering::Acquire)
     }
+
+    /// Pauses the next worker that takes hold of the value domain until the
+    /// returned probe releases it.
+    #[cfg(test)]
+    pub(crate) fn install_value_hold_probe_for_test(&self) -> WorkerValueHoldProbe {
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let prior = self
+            .inner
+            .value_hold_pause
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(WorkerValueHoldPause {
+                reached: reached_tx,
+                release: release_rx,
+            });
+        assert!(prior.is_none(), "value-hold probe already installed");
+        WorkerValueHoldProbe {
+            reached: reached_rx,
+            release: release_tx,
+        }
+    }
+
+    /// Takes the worker threads' handles, so a test can join them after the
+    /// runtime retires instead of leaving them detached.
+    #[cfg(test)]
+    pub(crate) fn take_workers_for_test(&self) -> Vec<thread::JoinHandle<()>> {
+        self.workers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain(..)
+            .collect()
+    }
 }
 
 impl Drop for EvaluationExecutor {
@@ -181,6 +260,8 @@ fn run_evaluation_worker(inner: &EvaluationExecutorInner) {
         let Some(values) = coordinator.value_observer().upgrade() else {
             return;
         };
+        #[cfg(test)]
+        inner.pause_while_holding_values();
         // A busy run holds the thread's mutator: its polls borrow it and each
         // quantum boundary suspends it. An idle worker leaves the heap, and
         // lets go of its value domain, before it waits (`driver-mutator`).

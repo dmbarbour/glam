@@ -71,6 +71,18 @@ struct PausedManagedWorker {
     release: mpsc::Receiver<()>,
 }
 
+struct CompletingWorker;
+
+impl EvaluationTaskMachine for CompletingWorker {
+    fn poll(
+        &mut self,
+        poll_context: &mut crate::evaluation::EvaluationPollContext,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> EvaluationMachinePoll {
+        EvaluationMachinePoll::Complete(poll_context.root_unit())
+    }
+}
+
 struct PausedHostWorker {
     entered: Option<mpsc::Sender<()>>,
     release: mpsc::Receiver<()>,
@@ -538,6 +550,10 @@ fn collection_interleaves_with_worker_quantum_without_lost_work() {
         "the post-worker explicit collection must be exactly one new pass"
     );
 
+    // Retirement detaches the workers, and a woken worker holds the domain
+    // until it observes the stop, so join them before observing retirement
+    // (`a_worker_holding_the_value_domain_outlives_runtime_retirement`).
+    let workers = runtime.take_evaluation_workers_for_test();
     let values = runtime.values();
     let domain = Arc::downgrade(values.core().value_domain());
     let escaped = values.empty_dict();
@@ -545,10 +561,57 @@ fn collection_interleaves_with_worker_quantum_without_lost_work() {
     drop(context);
     drop(assembler);
     drop(runtime);
+    for worker in workers {
+        worker.join().expect("a stopped worker should exit");
+    }
     assert!(domain.upgrade().is_none());
     assert!(
         escaped.clone_core_in_own_domain().is_err(),
         "a public value must become inert after its collected worker runtime retires"
+    );
+}
+
+/// Retiring a runtime detaches its workers, and a worker holds the value
+/// domain while it runs, so the domain retires when the last worker lets go
+/// of it, not when the last handle drops: a worker woken just before
+/// retirement keeps it until it observes the stop.
+#[test]
+fn a_worker_holding_the_value_domain_outlives_runtime_retirement() {
+    let runtime = EvaluationRuntime::new(1).expect("worker runtime should build");
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .expect("assembler should build");
+    let context = assembler.eval_context();
+    let probe = runtime.install_worker_value_hold_probe_for_test();
+    let task = context
+        .schedule_task(|_| Ok(Box::new(CompletingWorker)))
+        .expect("task should schedule");
+    assert!(
+        probe.wait_until_reached(Duration::from_secs(2)),
+        "the woken worker should hold the value domain"
+    );
+    let workers = runtime.take_evaluation_workers_for_test();
+    let values = runtime.values();
+    let domain = Arc::downgrade(values.core().value_domain());
+    let escaped = values.empty_dict();
+    drop(values);
+    drop(task);
+    drop(context);
+    drop(assembler);
+    drop(runtime);
+    assert!(
+        domain.upgrade().is_some(),
+        "the paused worker's hold keeps the domain past the last handle"
+    );
+    probe.release();
+    for worker in workers {
+        worker.join().expect("a stopped worker should exit");
+    }
+    assert!(domain.upgrade().is_none());
+    assert!(
+        escaped.clone_core_in_own_domain().is_err(),
+        "a public value becomes inert once the last worker lets go"
     );
 }
 

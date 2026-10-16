@@ -47,6 +47,8 @@ pub(crate) use coordinator::{
 #[cfg(test)]
 use coordinator::{ReflectionWorkSnapshot, test_wake_registration};
 pub(crate) use executor::EvaluationExecutor;
+#[cfg(test)]
+pub(crate) use executor::WorkerValueHoldProbe;
 pub(crate) use observation::{RuntimeObservationEpoch, RuntimeObservationState};
 pub(crate) use pump::EvaluationPumpOutcome;
 pub(crate) use session::{

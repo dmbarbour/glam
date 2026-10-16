@@ -969,6 +969,20 @@ impl EvaluationRuntime {
             .install_synchronous_collection_wait_probe_for_test()
     }
 
+    /// Pauses the next worker that takes hold of the value domain.
+    #[cfg(test)]
+    pub(crate) fn install_worker_value_hold_probe_for_test(
+        &self,
+    ) -> crate::evaluation::WorkerValueHoldProbe {
+        self.state.executor.install_value_hold_probe_for_test()
+    }
+
+    /// Takes the worker threads' handles, to join them after retirement.
+    #[cfg(test)]
+    pub(crate) fn take_evaluation_workers_for_test(&self) -> Vec<std::thread::JoinHandle<()>> {
+        self.state.executor.take_workers_for_test()
+    }
+
     #[cfg(test)]
     pub(crate) fn install_gc_outcome_publication_probe_for_test(
         &self,
