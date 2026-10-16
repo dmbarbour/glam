@@ -696,6 +696,75 @@ fn deep_nesting_parses_in_linear_time_without_recursion() {
     }
 }
 
+/// Conditionals nested in each position a frame closes from: a group, an
+/// `else` branch, a `then` group, an argument, a postfix fallback and a
+/// lambda body. Conditionals are frames of the token pass, so each shape
+/// parses 2,000 deep without recursion.
+const CONDITIONAL_NESTING_SHAPES: &[(&str, &str, &str)] = &[
+    ("(if c then ", " else 0)", "1"),
+    ("if c then 1 else ", "", "0"),
+    ("if c then (", ") else 0", "1"),
+    ("(try c then ", " else 0)", "1"),
+    ("f (if c then ", " else 0)", "1"),
+    ("(x if c else ", ")", "0"),
+    ("(\\z -> if c then ", " else z)", "1"),
+];
+
+#[test]
+fn conditional_nesting_parses_in_linear_time_without_recursion() {
+    for shape in CONDITIONAL_NESTING_SHAPES {
+        assert_term_parses_quickly(&nested(2_000, *shape), std::time::Duration::from_secs(2));
+    }
+}
+
+/// Shapes the structural conditional parser mishandled, which conditional
+/// frames read as the rest of the grammar does.
+#[test]
+fn conditional_frames_read_branches_as_expressions() {
+    // The Chumsky grammar delegates to the structural parsers, which reject
+    // these, so the oracle stays off.
+    let parse = |text: &str| {
+        suspended(|| super::super::structural::parse_compound_expression_fragment(text.as_bytes()))
+            .unwrap_or_else(|diagnostics| panic!("{text}: {diagnostics:?}"))
+    };
+    // A form in a parenthesized branch ended at its group, past `else`.
+    assert!(matches!(
+        parse("(if a then using m in y else b)"),
+        SyntaxExpr::If(conditional) if matches!(*conditional.then_result, SyntaxExpr::Using { .. })
+    ));
+    // A postfix conditional in a `then` branch ends at the outer `else`.
+    assert!(matches!(
+        parse("if a then x if c else d else b"),
+        SyntaxExpr::If(conditional)
+            if matches!(*conditional.then_result, SyntaxExpr::If(_))
+                && matches!(*conditional.else_result, SyntaxExpr::Name(_))
+    ));
+    // A `with` after a tag's `match` payload is the match's own, not an
+    // update's, in a branch as at the head of a view.
+    for text in [
+        "f (k):match s with { z => 1 }",
+        "if c then 1 else f (k):match s with { z => 1 }",
+    ] {
+        parse(text);
+    }
+}
+
+/// A conditional's guards may span lines, and its parent branch still
+/// checks those lines against its floor: here the fallback begins on a line
+/// indented 2, so its continuation must be indented further.
+#[test]
+fn conditional_guard_lines_count_for_the_enclosing_floor() {
+    let parsed =
+        parse_source(b"language g0\nx = a if b\n  - c else (if d\n  and e then f else g)\n");
+    assert!(
+        parsed.diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("indented 2 spaces; expected at least 3")),
+        "{:?}",
+        parsed.diagnostics
+    );
+}
+
 /// Keyword forms nested in groups, as open, close and innermost text. A
 /// keyword form's structural parser reads its groups from their tokens, so
 /// the term parser must not interpret them too: each level would double the

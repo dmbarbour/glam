@@ -330,7 +330,8 @@ production keeps the old parser until the oracle agrees.
   the lexer's token tables, a lazy keyword search, and one key test for
   keywords ([Keyword regions 2026-10-15](#keyword-regions-2026-10-15)).
   Native keyword frames started 2026-10-16
-  ([Native keyword frames 2026-10-16](#native-keyword-frames-2026-10-16)).
+  ([Native keyword frames 2026-10-16](#native-keyword-frames-2026-10-16)):
+  `parser-keyword-frames-conditionals` done.
 - `parser-scope-analysis`: added 2026-10-15; not started.
 - `parser-constant-factors`: added 2026-10-16; not started.
 - `parser-grammar-retirement`: not started. Chumsky still parses the
@@ -907,6 +908,58 @@ beside group frames:
 4. `parser-keyword-frames-suffixes`: `where`, `with` and `object`.
 5. The structural parsers' expression paths then serve only the oracle,
    and go with the Chumsky grammar in `parser-grammar-retirement`.
+
+**`parser-keyword-frames-conditionals` as built (2026-10-16).**
+- `parser/term/pass.rs` holds the token pass as a frame machine, and
+  conditionals are its first keyword frames.
+  - Guards stay a region, read by the guard-clause parser.
+  - Branches are interpreted from their pieces, with the contexts the
+    structural parser gave them. Their floors are checked only where they
+    span lines.
+  - A conditional opens wherever the term parser used to delegate one,
+    including as a tag's payload.
+- **Branches parsed from their view.** A branch holding a form that
+  view-level dispatch parses is still parsed from its view, as before: `let`,
+  `object`, `where` or `with` at its level, or a leading `match` or
+  `try_match`. View-level dispatch rejects `match x with {…} y`, which the
+  item interpreter reads as an application. `parser-keyword-frames-layout`
+  settles that when `match` becomes a frame.
+- **Routing.** `parse_expression_extent` sends views headed by `if` or `try`,
+  or holding a postfix `if`, to the term parser. An `if` token left in a
+  region after a form that ended early still goes to the structural
+  parsers.
+- **Retired:** `ChainTail`. It only told view-level dispatch whether a
+  postfix `if` belonged to a lambda body, which the term parser now decides
+  itself.
+- **Measures**, in user-space instructions against `main` at `3264414d`:
+  - `parse_ifs`: k 1.23 → 1.03, and 76.0 M against 89.9 M at 128 deep.
+    Conditionals nested 2,000 deep in seven shapes parse within two seconds,
+    without recursion (`conditional_nesting_parses_in_linear_time_without_recursion`).
+  - `parse_binds`: 76.6 M against 71.9 M at 128 deep (k 1.65). Its `do`
+    blocks are still delegated and re-walked at every level, and each walk
+    costs a little more. This goes when `do` is a frame.
+  - Expression workloads pay about 0.5% more: `list_literal_4000` is +3.7%
+    against `main`, of which `parser-patterns-cover` accounts for +3.2%.
+- **Fixed along the way**, each on `main` before:
+  - A form delegated from a parenthesized branch ran past the branch, so
+    `(if a then using m in y else b)` was rejected. `structural_view_at`
+    now clamps a form to the view it is parsed from.
+  - `in_keyword_position` refused a keyword that comes first in a group, as
+    in `(if …)`. Only the term parser's pass meets one there, and frames
+    for parenthesized conditionals need it.
+  - View-level dispatch read the `with` of a tag's `match` payload as an
+    object update, so `f (k):match s with {…}` was rejected.
+  - A phase switch dropped the line breaks of a conditional's guards from
+    its parent's count, skipping the parent's floor check (caught by the
+    generated-expression oracle at 200 times its usual count).
+- **Newly accepted, intended:** a postfix `if` in a `then` branch, as in
+  `if a then x if c else d else b`. Its fallback ends at the outer `else`,
+  as any open tail does.
+- **Checks:** the term oracle sweep, the generated expressions at 200 times
+  their usual count, and `check.sh all`.
+- **Not the parser:** `collection_interleaves_with_worker_quantum_without_lost_work`
+  failed once under load, with the value domain outliving its runtime. It
+  passed on four reruns.
 
 ## Verification
 

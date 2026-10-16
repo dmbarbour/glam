@@ -9,15 +9,16 @@
 use super::super::keywords::{canonical_keyword, reserved_keyword_message};
 use super::super::{Diagnostic, ObjectExpr, ObjectRealization, Severity, SyntaxExpr};
 use super::conditional::{
-    is_postfix_if_candidate, parse_if_expression, parse_match_expression, parse_postfix_if_suffix,
-    parse_try_expression, parse_try_match_expression,
+    is_postfix_if_candidate, parse_match_expression, parse_postfix_if_suffix,
+    parse_try_match_expression,
 };
 use super::declaration::{parse_nonempty_object_body, parse_object_body};
-use super::expression::{ChainTail, parse_expression_chain_view, syntax_operator};
+use super::expression::{parse_expression_chain_view, syntax_operator};
 use super::expression_context::{ExpressionContext, ParsedExpression, validate_expression_floor};
 use super::input::{TokenRange, TokenView};
 use super::layout::LayoutView;
 use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
+use super::term::may_head_keyword_form;
 
 type ParseResult<T> = Result<T, Vec<Diagnostic>>;
 
@@ -78,18 +79,19 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
         result?
     } else if let Some(result) = parse_object(view, context) {
         result?
-    } else if let Some(if_index) = keyword_head(view, "if") {
-        parse_if_expression(view, if_index, context.may_yield())?
-    } else if let Some(try_index) = keyword_head(view, "try") {
-        parse_try_expression(view, try_index, context.may_yield())?
+    } else if keyword_head(view, "if").is_some() || keyword_head(view, "try").is_some() {
+        // A conditional is a frame of the term parser, which takes the
+        // whole view: its `else` branch owns any `where` or `with` in it.
+        parse_expression_chain_view(view, context)?
     } else if let Some(match_index) = keyword_head(view, "match") {
         parse_match_expression(view, match_index, context.may_yield())?
     } else if let Some(try_match_index) = keyword_head(view, "try_match") {
         parse_try_match_expression(view, try_match_index, context.may_yield())?
     } else if let Some(result) = parse_with(view, context) {
         result?
-    } else if let Some(body) = parse_postfix_if_body(view, context)? {
-        body
+    } else if postfix_if_suffix(view).is_some() {
+        // So does a postfix conditional, whose fallback owns any `where`.
+        parse_expression_chain_view(view, context)?
     } else if let Some(where_index) = contextual_keywords(view, "where").next() {
         let where_token = view
             .token_at(where_index)
@@ -579,31 +581,6 @@ fn next_resumption_boundary(
     })
 }
 
-/// The expression before a top-level postfix `if`, which
-/// `resume_expression_suffixes` then completes. `None` when there is no such
-/// `if`, or when the expression before it ends in an open lambda. An open
-/// lambda binds a maximal trailing expression, so its body takes the
-/// postfix `if`, and the expression parser reads the whole view.
-fn parse_postfix_if_body(
-    view: TokenView<'_, '_>,
-    context: ExpressionContext,
-) -> ParseResult<Option<ParsedExpression>> {
-    let Some(if_index) = postfix_if_suffix(view) else {
-        return Ok(None);
-    };
-    let body = trim_layout(view_between(view, view.range().start(), if_index));
-    if is_layout_empty(body) {
-        return Err(error_at_token(
-            view,
-            view.token_at(if_index)
-                .expect("selected postfix `if` remains inside its expression view"),
-            "postfix `if` requires a successful result before its guards",
-        ));
-    }
-    let parsed = parse_expression_extent(body, context.complete())?;
-    Ok((parsed.tail() != ChainTail::OpenLambda).then_some(parsed))
-}
-
 fn postfix_if_suffix(view: TokenView<'_, '_>) -> Option<usize> {
     contextual_keywords(view, "if")
         .next()
@@ -956,12 +933,18 @@ fn find_structural_body(view: TokenView<'_, '_>) -> Option<StructuralBody> {
         .unwrap_or(view.range().end());
     // The first ungrouped `with` after a `match` or `try_match` head is the
     // match's own, and the match owns what follows it, so no later `with`
-    // opens an update or object body here.
-    let match_head = ["match", "try_match"]
-        .into_iter()
-        .filter_map(|head| contextual_keywords(view, head).next())
-        .min()
-        .unwrap_or(view.range().end());
+    // opens an update or object body here. A head is judged as the term
+    // parser judges it, so a match that is a tag's payload, as in
+    // `(k):match x with {…}`, owns its `with` too.
+    let match_head = view
+        .top_level()
+        .find(|indexed| {
+            matches!(
+                indexed.token().kind(),
+                TokenKind::Name("match" | "try_match")
+            ) && may_head_keyword_form(view, indexed.index())
+        })
+        .map_or(view.range().end(), |indexed| indexed.index());
     for with_index in contextual_keywords(view, "with") {
         if with_index >= where_boundary || with_index > match_head {
             break;
@@ -1313,7 +1296,8 @@ fn is_contextual_keyword_at(view: TokenView<'_, '_>, index: usize, expected: &st
 }
 
 /// Whether the token at `index` stands where a keyword has meaning: first in
-/// `view`, after a space, or first on its line, and not before a key mark.
+/// `view` or in a group's contents, after a space, or first on its line, and
+/// not before a key mark.
 pub(in crate::g_syntax::parser) fn in_keyword_position(
     view: TokenView<'_, '_>,
     index: usize,
@@ -1322,8 +1306,12 @@ pub(in crate::g_syntax::parser) fn in_keyword_position(
         (index == view.range().start()
             || token.leading() != LeadingTrivia::Joint
             || index.checked_sub(1).is_some_and(|previous| {
-                view.token_at(previous)
-                    .is_some_and(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
+                view.token_at(previous).is_some_and(|token| {
+                    matches!(
+                        token.kind(),
+                        TokenKind::LineStart { .. } | TokenKind::Open { .. }
+                    )
+                })
             }))
             && !before_key_mark(view, index)
     })

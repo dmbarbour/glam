@@ -33,16 +33,19 @@
 //! role consumes the cover. A keyword form's own groups, such as a `do` or
 //! `match` body, are never consumed here, so they raise nothing.
 //!
-//! **Keyword forms** (`if`, `match`, `try`, `try_match`, `do`, `using`, and
-//! postfix `if`) are delegated to the structural parsers through the same
-//! entry points the Chumsky grammar uses. The cursor then skips to the end
-//! the structural parser reports. A postfix `if`, on the same line or a
-//! continuation line, ends the innermost open lambda's body (`ChainTail`).
-//! A keyword head opens a region to its group member's end, and groups
-//! closing inside it are deferred, not interpreted: the form's structural
-//! parser reads them from their tokens, so a group is interpreted by one
-//! parser only. A group the term parser consumes after a form that ended
-//! early is interpreted when it is consumed.
+//! **Conditionals** (`if`, `try`, and postfix `if`) are frames of the token
+//! pass (`pass`), interpreted when they close into form pieces. A postfix
+//! `if`, on the same line or a continuation line, ends the innermost open
+//! lambda's body: `\x -> b if c else d` is `\x -> (b if c else d)`.
+//!
+//! **Other keyword forms** (`match`, `try_match`, `do` and `using`) are
+//! delegated to the structural parsers through the same entry points the
+//! Chumsky grammar uses. The cursor then skips to the end the structural
+//! parser reports. A keyword head opens a region to its group member's end,
+//! and groups closing inside it are deferred, not interpreted: the form's
+//! structural parser reads them from their tokens, so a group is
+//! interpreted by one parser only. A group the term parser consumes after a
+//! form that ended early is interpreted when it is consumed.
 //!
 //! **Cover mode** parses a pattern position. Groups are interpreted into
 //! role-neutral cover terms (`cover::Term`) instead of expressions, and the
@@ -64,21 +67,22 @@ use crate::g_syntax::{PathSuffix, SyntaxExpr, SyntaxKeyExpr, SyntaxOperator, Syn
 
 use super::conditional::is_postfix_if_candidate;
 use super::expression::{
-    ChainTail, InfixChain, StructuralAtomParser, access_if_path, parse_postfix_if_tail,
-    parse_structural_atom, quoted_path, structural_atom_parser, syntax_operator,
-    validate_dict_colon_members, validate_expr_name,
+    InfixChain, StructuralAtomParser, access_if_path, parse_postfix_if_tail, parse_structural_atom,
+    quoted_path, structural_atom_parser, syntax_operator, validate_dict_colon_members,
+    validate_expr_name,
 };
 use super::expression_context::ExpressionContext;
 use super::input::{TokenRange, TokenView};
-use super::layout::group_separator;
 use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
 use super::pattern::parse_guard_clauses;
 use super::structural::{before_key_mark, in_keyword_position};
 
 pub(super) use self::cover::Position;
 use self::cover::Term;
+use self::pass::{Form, FormShape, top_pieces};
 
 mod cover;
+mod pass;
 
 /// Why the term parser produced no syntax tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,10 +154,14 @@ pub(super) fn parse_term_chain(
     };
     let (pieces, end) = top_pieces(scope)?;
     // Trailing layout ends the expression; leading layout does not start one.
-    let mut items = Items::new(scope, trim_trailing_padding(view, &pieces));
+    let pieces = trim_trailing_padding(view, &pieces);
+    let mut items = Items::new(scope, pieces);
     items.stop_at_arrow = context.arrow_ends_tail();
     let (chain, stop) = items.expression()?;
-    Ok((chain, stop.unwrap_or(end)))
+    Ok((
+        chain,
+        stop.map_or(end, |position| piece_token(&pieces[position])),
+    ))
 }
 
 /// Parses `view` as one pattern in `position`, in cover mode.
@@ -178,112 +186,6 @@ pub(super) fn parse_pattern_term(
         .pattern_item()?
         .into_pattern(position)
         .map_err(Fail::error)
-}
-
-/// The token pass: the view's top-level pieces, with every group closing in
-/// it interpreted into its cover, or deferred in a keyword region, and the
-/// token where the pass ended. An expression whose tails end at `->` ends at
-/// a top-level one, unless a lambda head or a keyword form owns it; the form
-/// reports where it ended.
-fn top_pieces(scope: Scope<'_, '_, '_>) -> Parse<(Vec<Piece>, usize)> {
-    let view = scope.view;
-    prescan(view)?;
-    let covers = scope.covers;
-    // Only regions mark keyword forms, so the pass stops early only with
-    // them; the item stops at the same `->` regardless.
-    let stops_at_arrow =
-        scope.mode == Mode::Expression && scope.context.arrow_ends_tail() && regions_enabled();
-    let mut lambda_head = false;
-    let mut stack = vec![Frame {
-        delimiter: None,
-        group: None,
-        close: 0,
-        pieces: Vec::new(),
-        separator: None,
-        inherited_region: false,
-        region: false,
-    }];
-    let range = view.range();
-    let mut index = range.start();
-    while index < range.end() {
-        let token = token(view, index);
-        match token.kind() {
-            TokenKind::Open { group, delimiter } => {
-                let close = view
-                    .group(*group)
-                    .and_then(|group| group.close_token())
-                    .filter(|close| *close < range.end())
-                    .ok_or(Fail::Unsupported("a delimiter group crossing the view"))?;
-                let inherited_region = stack
-                    .last()
-                    .expect("the view frame encloses every group")
-                    .in_region();
-                stack.push(Frame {
-                    delimiter: Some(*delimiter),
-                    group: Some(*group),
-                    close,
-                    pieces: Vec::new(),
-                    separator: Some(group_separator(view.source(), *delimiter, index)),
-                    inherited_region,
-                    region: false,
-                });
-            }
-            TokenKind::Close { .. } => {
-                let frame = stack.pop().expect("a close token ends an open frame");
-                let open = view
-                    .group(frame.group.expect("a group frame records its group"))
-                    .expect("an open frame's group exists")
-                    .open_token();
-                let parent = stack
-                    .last_mut()
-                    .expect("the view frame encloses every group");
-                let cover = if parent.in_region() {
-                    covers.defer(Deferred {
-                        frame,
-                        open,
-                        close: index,
-                        in_parent_region: parent.region,
-                    })
-                } else {
-                    covers.ready(
-                        interpret_group(scope, &frame, index)
-                            .unwrap_or_else(|fail| Cover::Invalid(fail.or_at(Some(open)))),
-                    )
-                };
-                parent.pieces.push(Piece::Group {
-                    open,
-                    close: index,
-                    cover,
-                });
-            }
-            _ => {
-                if stops_at_arrow && stack.len() == 1 && !stack[0].region {
-                    match token.kind() {
-                        TokenKind::Symbol("->") if !lambda_head => break,
-                        TokenKind::Symbol("\\") => lambda_head = true,
-                        TokenKind::Name(_) | TokenKind::LineStart { .. } => {}
-                        _ => lambda_head = false,
-                    }
-                }
-                let frame = stack.last_mut().expect("the view frame is never popped");
-                if frame.region {
-                    // Only an open region needs its end found.
-                    if frame.separator.is_some_and(|separator| {
-                        matches!(token.kind(), TokenKind::Symbol(symbol) if *symbol == separator)
-                    }) {
-                        frame.region = false;
-                    }
-                } else if opens_keyword_region(view, index, scope.mode) {
-                    frame.region = true;
-                }
-                frame.pieces.push(Piece::Token(index));
-            }
-        }
-        index += 1;
-    }
-    let top = stack.pop().expect("the view frame remains");
-    debug_assert!(stack.is_empty(), "every group closes inside the view");
-    Ok((top.pieces, index))
 }
 
 /// Rejects, before any group is interpreted, constructs this parser does not
@@ -326,26 +228,6 @@ enum Mode {
     Cover,
 }
 
-struct Frame {
-    delimiter: Option<Delimiter>,
-    group: Option<super::lexical::GroupId>,
-    close: usize,
-    pieces: Vec<Piece>,
-    /// The symbol between this group's members, which ends a keyword
-    /// region; the view has none, so a region in it runs to its end.
-    separator: Option<&'static str>,
-    /// Whether this group lies in a keyword region of an enclosing frame.
-    inherited_region: bool,
-    /// Whether a keyword region is open among this frame's pieces.
-    region: bool,
-}
-
-impl Frame {
-    fn in_region(&self) -> bool {
-        self.inherited_region || self.region
-    }
-}
-
 /// Whether the token at `index` opens a keyword region: the rest of its
 /// group member, up to the group's separator or close, as
 /// `parse_structural_atom` delimits the form. The form's structural parser
@@ -385,7 +267,7 @@ fn is_pattern_when(view: TokenView<'_, '_>, index: usize) -> bool {
 /// root). A keyword that passes but heads nothing, such as a form that ends
 /// before its group member does, costs a deferred interpretation, one level
 /// of Rust recursion each where such regions nest.
-fn may_head_keyword_form(view: TokenView<'_, '_>, index: usize) -> bool {
+pub(super) fn may_head_keyword_form(view: TokenView<'_, '_>, index: usize) -> bool {
     let head = token(view, index);
     let TokenKind::Name(name) = head.kind() else {
         return false;
@@ -428,22 +310,34 @@ fn is_constructor_colon(view: TokenView<'_, '_>, index: usize) -> bool {
             })
 }
 
-/// One element of a group's flat contents: a token, or a nested group
-/// already interpreted into its cover form, held in the arena.
+/// One element of a group's flat contents: a token, a nested group already
+/// interpreted into its cover form, or a conditional already interpreted
+/// into its form; covers and forms are held in the arena.
 enum Piece {
     Token(usize),
     Group {
         open: usize,
         close: usize,
         cover: usize,
+        /// Whether a keyword only view-level dispatch parses stands at the
+        /// group's own level.
+        view_level: bool,
+    },
+    /// A conditional from its head to `end`, exclusive.
+    Form {
+        head: usize,
+        end: usize,
+        form: usize,
     },
 }
 
-/// Every group's cover. A cover is inspected freely but taken exactly once,
-/// by the role that consumes it, so no subtree is copied.
+/// Every group's cover and every conditional's form. A cover is inspected
+/// freely but taken exactly once, by the role that consumes it, so no
+/// subtree is copied; so is a form.
 #[derive(Default)]
 struct Covers {
     slots: RefCell<Vec<Slot>>,
+    forms: RefCell<Vec<Option<Form>>>,
 }
 
 enum Slot {
@@ -455,8 +349,17 @@ enum Slot {
     Taken,
 }
 
+/// What interpreting a closed group needs of its frame.
+struct GroupBody {
+    delimiter: Delimiter,
+    group: super::lexical::GroupId,
+    pieces: Vec<Piece>,
+    mode: Mode,
+    context: ExpressionContext,
+}
+
 struct Deferred {
-    frame: Frame,
+    body: GroupBody,
     open: usize,
     close: usize,
     /// Whether the group lies in a keyword region of its own parent, rather
@@ -466,6 +369,27 @@ struct Deferred {
 }
 
 impl Covers {
+    fn form(&self, form: Form) -> usize {
+        let mut forms = self.forms.borrow_mut();
+        forms.push(Some(form));
+        forms.len() - 1
+    }
+
+    /// A form's shape and keyword, without taking it.
+    fn form_shape(&self, id: usize) -> (FormShape, &'static str) {
+        let forms = self.forms.borrow();
+        let form = forms[id]
+            .as_ref()
+            .expect("a form is inspected before it is consumed");
+        (form.shape, form.keyword)
+    }
+
+    fn take_form(&self, id: usize) -> Form {
+        self.forms.borrow_mut()[id]
+            .take()
+            .expect("a form is consumed exactly once")
+    }
+
     fn ready(&self, cover: Cover) -> usize {
         let mut slots = self.slots.borrow_mut();
         slots.push(Slot::Ready(cover));
@@ -517,14 +441,14 @@ impl Covers {
                     continue;
                 };
                 stack.push((slot, true));
-                stack.extend(deferred.frame.pieces.iter().filter_map(|piece| {
+                stack.extend(deferred.body.pieces.iter().filter_map(|piece| {
                     match piece {
                         Piece::Group { cover, .. } => matches!(
                             &slots[*cover],
                             Slot::Deferred(child) if !child.in_parent_region
                         )
                         .then_some((*cover, false)),
-                        Piece::Token(_) => None,
+                        Piece::Token(_) | Piece::Form { .. } => None,
                     }
                 }));
                 continue;
@@ -534,7 +458,13 @@ impl Covers {
             else {
                 unreachable!("a deferred group is interpreted once");
             };
-            let cover = interpret_group(scope, &deferred.frame, deferred.close)
+            // A deferred group reads in its own frame's mode and context.
+            let scope = Scope {
+                mode: deferred.body.mode,
+                context: deferred.body.context,
+                ..scope
+            };
+            let cover = interpret_group(scope, &deferred.body, deferred.close)
                 .unwrap_or_else(|fail| Cover::Invalid(fail.or_at(Some(deferred.open))));
             self.slots.borrow_mut()[slot] = Slot::Ready(cover);
         }
@@ -572,19 +502,18 @@ enum ParenCover {
     Section(SyntaxExpr),
 }
 
-/// The token that starts a piece: the token itself, or a group's open.
+/// The token that starts a piece: the token itself, a group's open, or a
+/// form's head.
 fn piece_token(piece: &Piece) -> usize {
     match piece {
         Piece::Token(index) => *index,
         Piece::Group { open, .. } => *open,
+        Piece::Form { head, .. } => *head,
     }
 }
 
 fn piece_leading(view: TokenView<'_, '_>, piece: &Piece) -> LeadingTrivia {
-    match piece {
-        Piece::Token(index) => token(view, *index).leading(),
-        Piece::Group { open, .. } => token(view, *open).leading(),
-    }
+    token(view, piece_token(piece)).leading()
 }
 
 fn piece_kind<'lex, 'source>(
@@ -593,7 +522,7 @@ fn piece_kind<'lex, 'source>(
 ) -> Option<&'lex TokenKind<'source>> {
     match piece {
         Piece::Token(index) => Some(token(view, *index).kind()),
-        Piece::Group { .. } => None,
+        Piece::Group { .. } | Piece::Form { .. } => None,
     }
 }
 
@@ -608,7 +537,7 @@ fn is_line_start(view: TokenView<'_, '_>, piece: &Piece) -> bool {
 fn piece_operator(view: TokenView<'_, '_>, piece: &Piece) -> Option<SyntaxOperator> {
     match piece {
         Piece::Token(index) => syntax_operator(token(view, *index)),
-        Piece::Group { .. } => None,
+        Piece::Group { .. } | Piece::Form { .. } => None,
     }
 }
 
@@ -690,13 +619,12 @@ fn without_regions<R>(work: impl FnOnce() -> R) -> R {
     result
 }
 
-fn interpret_group(scope: Scope<'_, '_, '_>, frame: &Frame, close: usize) -> Parse<Cover> {
+fn interpret_group(scope: Scope<'_, '_, '_>, frame: &GroupBody, close: usize) -> Parse<Cover> {
     #[cfg(test)]
     INTERPRETED_GROUPS.with(|count| count.set(count.get() + 1));
     let view = scope.view;
-    let delimiter = frame.delimiter.expect("only group frames close");
-    debug_assert_eq!(frame.close, close);
-    match delimiter {
+    let (delimiter, group) = (&frame.delimiter, &frame.group);
+    match *delimiter {
         Delimiter::Parenthesis => interpret_paren(scope, frame, close).map(Cover::Paren),
         Delimiter::Bracket => {
             let segments = segments(view, &frame.pieces);
@@ -704,9 +632,8 @@ fn interpret_group(scope: Scope<'_, '_, '_>, frame: &Frame, close: usize) -> Par
             resolved_items(scope, items).map(Cover::Bracket)
         }
         Delimiter::Brace => {
-            let group = frame.group.expect("a brace frame records its group");
             // A pun's name is checked by role in cover mode.
-            validate_dict_colon_members(view, group, scope.mode == Mode::Expression)
+            validate_dict_colon_members(view, *group, scope.mode == Mode::Expression)
                 .map_err(Fail::error)?;
             let segments = segments(view, &frame.pieces);
             let items = separated_items(&segments, true, true)?;
@@ -719,7 +646,7 @@ fn interpret_group(scope: Scope<'_, '_, '_>, frame: &Frame, close: usize) -> Par
     }
 }
 
-fn interpret_paren(scope: Scope<'_, '_, '_>, frame: &Frame, close: usize) -> Parse<ParenCover> {
+fn interpret_paren(scope: Scope<'_, '_, '_>, frame: &GroupBody, close: usize) -> Parse<ParenCover> {
     let view = scope.view;
     let contents = trim_padding(view, &frame.pieces);
     if contents.is_empty() {
@@ -1083,7 +1010,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                 Some(TokenKind::Name(name)) if is_glam_name(name) => position += 1,
                 _ => return None,
             },
-            None => return None,
+            Some(Piece::Form { .. }) | None => return None,
         }
         let mut cursor = self.at(position);
         while let Some(width) = cursor.path_suffix_width() {
@@ -1107,7 +1034,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                 piece_kind(self.scope.view, piece),
                 Some(TokenKind::Name(name)) if is_glam_name(name)
             ),
-            None => false,
+            Some(Piece::Form { .. }) | None => false,
         };
         accepted.then_some(2)
     }
@@ -1204,17 +1131,16 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         self.expression().map(|(chain, _)| chain)
     }
 
-    /// Parses the item as an expression, returning the `->` it stopped at,
-    /// if any.
+    /// Parses the item as an expression, returning the position of the `->`
+    /// it stopped at, if any.
     fn expression(mut self) -> Parse<(InfixChain, Option<usize>)> {
-        let (chain, tail) = self.chain()?;
-        let stop = self.peek().map(piece_token);
+        let chain = self.chain()?;
+        let stop = self.peek().is_some().then_some(self.position);
         debug_assert!(
             stop.is_none() || self.stop_at_arrow,
             "an expression chain ends its item"
         );
-        let chain = self.infix_chain(chain)?.with_tail(tail);
-        Ok((chain, stop))
+        Ok((self.infix_chain(chain)?, stop))
     }
 
     /// Whether the item ends at the piece at `offset`: a pattern operator in
@@ -1301,7 +1227,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         if self.peek().is_none() || self.pattern_operator_at(0).is_some() {
             return self.expected("a pattern");
         }
-        let (chain, _) = self.chain()?;
+        let chain = self.chain()?;
         chain
             .finish_term(self.scope.context)
             .map_err(|fail| fail.or_at(self.here()))
@@ -1314,6 +1240,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         let end = match self.pieces.last().expect("the item holds its `when`") {
             Piece::Token(index) => index + 1,
             Piece::Group { close, .. } => close + 1,
+            Piece::Form { end, .. } => *end,
         };
         self.position = self.pieces.len();
         if end == when + 1 {
@@ -1333,7 +1260,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     /// cover mode up to a pattern operator. A lambda takes the rest as its
     /// body. Returns the item level's chain, its lambdas closed, and how it
     /// ends.
-    fn chain(&mut self) -> Parse<(Chain, ChainTail)> {
+    fn chain(&mut self) -> Parse<Chain> {
         let mut levels = vec![Level {
             chain: Chain::default(),
             lambda: None,
@@ -1431,17 +1358,12 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
 
     /// Closes lambdas innermost first. Each one ends with the item, so the
     /// item's chain then ends in an open lambda.
-    fn close_levels(&self, mut levels: Vec<Level>) -> Parse<(Chain, ChainTail)> {
-        let tail = if levels.len() > 1 {
-            ChainTail::OpenLambda
-        } else {
-            ChainTail::Closed
-        };
+    fn close_levels(&self, mut levels: Vec<Level>) -> Parse<Chain> {
         loop {
             let level = levels.pop().expect("levels remain while closing");
             let Some((params, attach)) = level.lambda else {
                 debug_assert!(levels.is_empty(), "only the item level has no lambda");
-                return Ok((level.chain, tail));
+                return Ok(level.chain);
             };
             let body = self
                 .infix_chain(level.chain)?
@@ -1462,14 +1384,21 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
 
     /// Whether the piece at `offset` is an `if` that the grammar reads as a
     /// postfix conditional rather than a prefix one.
+    /// An `if` token stands only in a keyword region the term parser takes
+    /// after a form that ended early; the structural parser reads it.
     fn postfix_if_at(&self, offset: usize) -> bool {
-        matches!(
-            self.peek_at(offset),
-            Some(Piece::Token(index))
-                if matches!(token(self.scope.view, *index).kind(), TokenKind::Name("if"))
+        match self.peek_at(offset) {
+            Some(Piece::Form { form, .. }) => matches!(
+                self.scope.covers.form_shape(*form),
+                (FormShape::Postfix | FormShape::Unfinished, "if")
+            ),
+            Some(Piece::Token(index)) => {
+                matches!(token(self.scope.view, *index).kind(), TokenKind::Name("if"))
                     && !self.named_tag_at(offset)
                     && is_postfix_if_candidate(self.scope.view, *index)
-        )
+            }
+            _ => false,
+        }
     }
 
     /// A postfix `if` after the innermost level's chain, which becomes that
@@ -1478,11 +1407,31 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     /// no lambda is open. Nothing but a stop (see `stops_at`) may follow it
     /// in the item.
     fn postfix_if(&mut self, levels: &mut [Level]) -> Parse<()> {
-        let if_index = self.here().expect("a postfix `if` is a piece");
-        let parsed = parse_postfix_if_tail(self.scope.view, if_index, self.scope.context)
-            .map_err(Fail::Reported)?;
-        self.position += 1;
-        self.skip_to_token(parsed.end())?;
+        let (if_index, result) = match self.peek() {
+            Some(Piece::Form { form, .. }) => {
+                let form = self.scope.covers.take_form(*form);
+                self.position += 1;
+                let result = match form.shape {
+                    FormShape::Unfinished => Err(Fail::error(
+                        "postfix `if` requires `else` and a fallback result",
+                    )
+                    .or_at(Some(form.head))),
+                    _ => form.result,
+                };
+                (form.head, result)
+            }
+            _ => {
+                let if_index = self.here().expect("a postfix `if` is a piece");
+                let parsed = parse_postfix_if_tail(self.scope.view, if_index, self.scope.context)
+                    .map_err(Fail::Reported)?;
+                self.position += 1;
+                self.skip_to_token(parsed.end())?;
+                let result = parsed
+                    .into_expression()
+                    .map_err(|message| Fail::error(message).or_at(Some(if_index)));
+                (if_index, result)
+            }
+        };
         let (breaks, _) = self.line_starts_at(0);
         if self.peek_at(breaks).is_some() && !self.stops_at(breaks) {
             self.position += breaks;
@@ -1494,10 +1443,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             .finish(self.scope.context)
             .and_then(|chain| chain.resolve().map_err(Fail::error))
             .map_err(|fail| fail.or_at(Some(if_index)))?;
-        let SyntaxExpr::If(mut postfix) = parsed
-            .into_expression()
-            .map_err(|message| Fail::error(message).or_at(Some(if_index)))?
-        else {
+        let SyntaxExpr::If(mut postfix) = result? else {
             unreachable!("a postfix conditional parses to an if expression");
         };
         postfix.then_result = Box::new(left);
@@ -1519,12 +1465,20 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             {
                 return Err(Fail::Unsupported("a structural form ending inside a group"));
             }
+            if let Piece::Form { end: form_end, .. } = piece
+                && *form_end > end
+            {
+                return Err(Fail::Unsupported(
+                    "a structural form ending inside a conditional",
+                ));
+            }
             self.position += 1;
         }
         // A form may end past the item only over layout the item trimmed.
         let item_end = self.pieces.last().map_or(0, |piece| match piece {
             Piece::Token(index) => index + 1,
             Piece::Group { close, .. } => close + 1,
+            Piece::Form { end, .. } => *end,
         });
         let only_layout = (item_end..end).all(|index| {
             self.scope
@@ -1680,6 +1634,9 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     fn starts_atom_at(&self, offset: usize) -> bool {
         match self.peek_at(offset) {
             Some(Piece::Group { .. }) => true,
+            Some(Piece::Form { form, .. }) => {
+                self.scope.covers.form_shape(*form).0 == FormShape::Prefix
+            }
             Some(piece @ Piece::Token(_)) => match piece_kind(self.scope.view, piece) {
                 Some(TokenKind::Name(name)) => {
                     (!matches!(*name, "and" | "or") || self.named_tag_at(offset))
@@ -1710,6 +1667,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             let tagged = self.symbol_at(1, ":") && self.joint_at(1) && self.joint_at(2);
             match self.peek() {
                 None => return self.expected("an expression"),
+                Some(Piece::Form { .. }) => break Term::Expr(self.conditional_atom()?),
                 Some(Piece::Group { .. }) => match self.shape_at(0) {
                     Some(Shape::Bracket { empty: false }) if tagged => {
                         tags.push(self.take_keys()?);
@@ -1765,6 +1723,35 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                 ))),
                 Mode::Cover => Ok(Term::Tag(path, Box::new(payload))),
             })
+    }
+
+    /// A prefix conditional, with path suffixes. A conditional that reads
+    /// as postfix stands where no operand precedes it.
+    fn conditional_atom(&mut self) -> Parse<SyntaxExpr> {
+        let Some(Piece::Form { form, .. }) = self.peek() else {
+            unreachable!("conditional_atom is called on a form");
+        };
+        let form = self.scope.covers.take_form(*form);
+        self.position += 1;
+        let expression = match form.shape {
+            FormShape::Prefix => form.result?,
+            FormShape::Postfix => {
+                return Err(Fail::error(format!(
+                    "{} expression requires `then` before `else`",
+                    form.keyword
+                ))
+                .or_at(Some(form.head)));
+            }
+            FormShape::Unfinished => {
+                return Err(Fail::error(format!(
+                    "{} expression requires `then` and `else`",
+                    form.keyword
+                ))
+                .or_at(Some(form.head)));
+            }
+        };
+        let suffixes = self.path_suffixes()?;
+        Ok(access_if_path(expression, suffixes))
     }
 
     /// `:path`, a tag constructor.

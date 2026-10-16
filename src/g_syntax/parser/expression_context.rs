@@ -71,6 +71,22 @@ impl ExpressionContext {
 
     /// A complete hard range, such as a group's contents, which no `->`
     /// ends.
+    /// `child_owner` for a view whose first significant token is `first`.
+    pub(super) fn child_owner_at(self, view: TokenView<'_, '_>, first: usize) -> Self {
+        Self {
+            continuation_floor: view.line_indentation_at(first).unwrap_or(0),
+            validated_through: Some(
+                self.validated_through
+                    .map_or(self.continuation_floor, |validated| {
+                        validated.max(self.continuation_floor)
+                    }),
+            ),
+            floor_enforced: true,
+            extent: ExpressionExtent::CompleteHardRange,
+            arrow_ends_tail: self.arrow_ends_tail,
+        }
+    }
+
     pub(super) fn complete(self) -> Self {
         Self {
             extent: ExpressionExtent::CompleteHardRange,
@@ -138,7 +154,9 @@ impl ExpressionContext {
                 .is_none_or(|validated| indentation > validated)
     }
 
-    fn validated(self) -> Self {
+    /// The context once its floors are checked, so that nested owners check
+    /// only the lines its floor did not cover.
+    pub(super) fn validated(self) -> Self {
         Self {
             validated_through: Some(
                 self.validated_through
@@ -180,10 +198,6 @@ impl ParsedExpression {
     #[cfg(test)]
     pub(super) fn expression(&self) -> Option<&SyntaxExpr> {
         self.expression.single_expression()
-    }
-
-    pub(super) fn tail(&self) -> super::expression::ChainTail {
-        self.expression.tail()
     }
 
     pub(super) fn into_chain(self) -> InfixChain {

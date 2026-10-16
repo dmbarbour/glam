@@ -33,18 +33,6 @@ pub(in crate::g_syntax::parser) struct InfixChain {
     first: SyntaxExpr,
     rest: Vec<(SyntaxOperator, SyntaxExpr)>,
     resumption_anchor: Option<usize>,
-    tail: ChainTail,
-}
-
-/// How a chain ends. An open lambda binds a maximal trailing expression, so
-/// a postfix `if` after a chain that ends in one belongs to the lambda's
-/// body: `\x -> b if c else d` is `\x -> (b if c else d)`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(in crate::g_syntax::parser) enum ChainTail {
-    #[default]
-    Closed,
-    /// The last operand is an ungrouped lambda, whose body runs to the end.
-    OpenLambda,
 }
 
 impl InfixChain {
@@ -53,17 +41,7 @@ impl InfixChain {
             first: expression,
             rest: Vec::new(),
             resumption_anchor: None,
-            tail: ChainTail::Closed,
         }
-    }
-
-    pub(in crate::g_syntax::parser) fn with_tail(mut self, tail: ChainTail) -> Self {
-        self.tail = tail;
-        self
-    }
-
-    pub(in crate::g_syntax::parser) fn tail(&self) -> ChainTail {
-        self.tail
     }
 
     /// Builds an unresolved chain from its operands, for the prefix-shared
@@ -76,7 +54,6 @@ impl InfixChain {
             first,
             rest,
             resumption_anchor: None,
-            tail: ChainTail::Closed,
         }
     }
 
@@ -100,7 +77,6 @@ impl InfixChain {
         }
         self.rest.push((operator, right.first));
         self.rest.append(&mut right.rest);
-        self.tail = right.tail;
         Ok(())
     }
 
@@ -703,7 +679,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
         .boxed();
 
         let ordinary = choice((
-            lambda.map(|lambda| InfixChain::single(lambda).with_tail(ChainTail::OpenLambda)),
+            lambda.map(InfixChain::single),
             application
                 .clone()
                 .then(
@@ -712,22 +688,17 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
                         .repeated()
                         .collect::<Vec<_>>(),
                 )
-                .try_map(move |((first, mut open_lambda), rest), span| {
+                .try_map(move |((first, _), rest), span| {
                     let mut chain = InfixChain::single(first);
-                    for ((operator, indentation), (right, right_open_lambda)) in rest {
+                    for ((operator, indentation), (right, _)) in rest {
                         if let Some(indentation) = indentation {
                             chain
                                 .accept_resumption_anchor(indentation, context)
                                 .map_err(|message| Rich::custom(span, message))?;
                         }
                         chain.rest.push((operator, right));
-                        open_lambda = right_open_lambda;
                     }
-                    Ok(if open_lambda {
-                        chain.with_tail(ChainTail::OpenLambda)
-                    } else {
-                        chain
-                    })
+                    Ok(chain)
                 }),
         ))
         .boxed();
@@ -1072,6 +1043,8 @@ fn structural_view_at<'lex, 'source>(
     )
     .expect("delimiter contents remain within the source");
     let separator = group_separator(view.source(), group.delimiter(), group.open_token());
+    // A form ends at its group member's end, and never past the view it is
+    // parsed from, such as a conditional's branch.
     let end = contents
         .top_level()
         .find(|indexed| {
@@ -1081,7 +1054,8 @@ fn structural_view_at<'lex, 'source>(
                     TokenKind::Symbol(symbol) if *symbol == separator
                 )
         })
-        .map_or(close, |indexed| indexed.index());
+        .map_or(close, |indexed| indexed.index())
+        .min(view.range().end());
     TokenView::new(
         view.source(),
         TokenRange::new(head_index, end).expect("structural group member is an ordered range"),
