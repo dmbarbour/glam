@@ -80,10 +80,11 @@ gen minimal 'language g0
 asm.result = "ok"'
 
 # Front end only: the nested or large definition is never demanded.
+# `depth` levels of `open` and `close` around `inner`, default 1.
 nest() {
-  local depth=$1 open=$2 close=$3 opens='' closes='' i
+  local depth=$1 open=$2 close=$3 inner=${4:-1} opens='' closes='' i
   for ((i = 0; i < depth; i++)); do opens+=$open; closes+=$close; done
-  printf '%s1%s' "$opens" "$closes"
+  printf '%s%s%s' "$opens" "$inner" "$closes"
 }
 parse_parens() { printf 'language g0\nx = %s\nasm.result = "ok"' "$(nest "$1" '(' ')')"; }
 parse_lists() { printf 'language g0\nx = %s\nasm.result = "ok"' "$(nest "$1" '[' ']')"; }
@@ -91,11 +92,22 @@ parse_ifs() {
   printf 'language g0\nc = 1 == 1\nx = %s\nasm.result = "ok"' \
     "$(nest "$1" '(if c then ' ' else 0)')"
 }
+# A nested pattern, and nested `op -> P` statements; see the parser
+# backtracking plan.
+parse_patterns() {
+  printf 'language g0\nx = do\n  %s <- .r 1\n  .r p\nasm.result = "ok"' \
+    "$(nest "$1" '(' ' as _)' '(p)')"
+}
+parse_binds() {
+  printf 'language g0\nx = %s\nasm.result = "ok"' "$(nest "$1" '(do { ' ' -> z; .r z })' '.r 1')"
+}
 list_literal() { printf 'language g0\nxs = [%s]\nasm.result = "ok"' "$(seq -s ', ' 1 "$1")"; }
 family parse_parens 100
 family parse_lists 100
-# Exponential in depth today; see the structural overheads plan.
+# Once exponential in depth; see the parser backtracking plan.
 family parse_ifs 4
+family parse_patterns 32
+family parse_binds 4
 family list_literal 1000
 
 # Recursion: in tail position, not in tail position, and through a chain

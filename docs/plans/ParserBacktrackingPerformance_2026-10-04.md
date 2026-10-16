@@ -2,9 +2,10 @@
 
 Status: design agreed with the maintainer on 2026-10-06. `parser-term-parser`
 is in production since 2026-10-07 (see [Production switch](#production-switch-2026-10-07));
-`parser-patterns`, `parser-keyword-frames` and `parser-grammar-retirement`
-remain, and `parser-cover-ir` is done only for expressions (see
-[Steps](#steps)). Rechecked 2026-10-15 (`01ec2fbc`): no parser step had
+`parser-keyword-frames` and `parser-grammar-retirement` remain
+(see [Steps](#steps)); `parser-patterns`, with what remained of
+`parser-cover-ir`, was done on 2026-10-16
+([Patterns 2026-10-16](#patterns-2026-10-16)). Rechecked 2026-10-15 (`01ec2fbc`): no parser step had
 landed since `adcd994b` (2026-10-07), and a keyword form in parentheses
 nested in another was exponential ([Measures 2026-10-15](#measures-2026-10-15)).
 Keyword regions, the first part of `parser-keyword-frames`, merged
@@ -308,8 +309,9 @@ production keeps the old parser until the oracle agrees.
 - `parser-term-parser`: done; in production since 2026-10-07
   (`parser-term-parser-first`, `eb84587c`; `parser-keyword-delegation`,
   `adcd994b`).
-- `parser-patterns`: started 2026-10-16; `parser-patterns-cover` and
-  `parser-patterns-bindings` done.
+- `parser-patterns`: done 2026-10-16, in three slices, absorbing what
+  remained of `parser-cover-ir`. See
+  [Patterns 2026-10-16](#patterns-2026-10-16).
   See [Patterns 2026-10-16](#patterns-2026-10-16).
 - `parser-keyword-frames`: first part merged 2026-10-15: keyword regions,
   the lexer's token tables, a lazy keyword search, and one key test for
@@ -619,10 +621,13 @@ region checks repeated by the pattern parser's trial parses, which
   same. A deterministic split needs to know which top-level `->` belongs to
   a lambda head, a guard or a layout arm; `parser-patterns` does that by
   parsing one cover term and converting by role, as the design says. A
-  lexical pre-check would be the rejected option A.
+  lexical pre-check would be the rejected option A. *Fixed 2026-10-16* by
+  `parser-patterns-bindings`: `parse_binds_16` costs 27.3 M against
+  2,176 M.
 - **Patterns are quadratic** in nesting (`((p) as q)`, `(p) ++ [q]`):
   n^1.9–2.0 at depths 32–128, on `main` and with keyword regions alike.
-  `parser-patterns`.
+  `parser-patterns`. *Fixed 2026-10-16* by `parser-patterns-cover`:
+  `parse_patterns` grows with k 1.01.
 - **Keyword nesting rescans.** Each keyword level still parses its own view
   afresh, so nested keyword forms cost O(n·d) (n^1.77 for a parenthesized
   `if` at depths 32–128) and recurse on the Rust stack per level: parse
@@ -805,6 +810,28 @@ pattern view, where tails end at `->`:
   parses after a continuation line's first `->`, once per line, to word a
   diagnostic.
 
+**`parser-patterns-retirement` as built (2026-10-16).** The legacy pattern
+parser and its oracle are gone. Both oracle sweeps found no unintended
+difference across the library tests and samples. The agreement lists
+became pinned readings in `pattern/tests.rs`, each matching the legacy
+parser when both existed. `scripts/profile.sh` gains two families. User-space
+instructions, `main` (`1277dfdb`) against the branch, with `minimal` at
+24.2 M:
+
+| Family | Depths | `main` M | Branch M | k, `main` → branch |
+| --- | --- | --- | --- | --- |
+| `parse_patterns`: `((p) as _)` bound in a `do` | 32/64/128 | 27.4 / 33.5 / 56.4 | 25.1 / 25.4 / 26.1 | 1.89 → 1.01 |
+| `parse_binds`: `(do { … -> z; .r z })` | 4/8/16 | 25.5 / 33.8 / 2,176.2 | 25.2 / 25.8 / 27.3 | >8 → 1.12 |
+| `parse_ifs`, a check that keyword forms did not slow | 4/8/16 | — | 26.4 / 28.0 / 31.4 | 1.06 |
+
+Expression parses pay up to 3% on synthetic literals for the term wrapping
+(see `parser-patterns-cover` above). What `parser-patterns` leaves:
+- A keyword form directly inside a pattern view's expression ends its tail
+  at `->` only: `(if c then a else b as x)` is an error, as it was.
+- Conversion recurses on a term's nesting, as the later passes over
+  patterns do (`perf-pre-eval-stack-depth`).
+- The standing documentation question below now covers cover mode too.
+
 ## Verification
 
 - The differential oracle above, while both parsers exist.
@@ -817,7 +844,9 @@ pattern view, where tails end at `->`:
   seconds, and `long_flat_chains_parse_without_recursion` parses 100k-term
   chains. Survey constructs outside the term parser, such as patterns, `do`
   blocks and keyword forms, have no depth regression in the parser
-  tests yet.
+  tests yet. As built 2026-10-16, `PATTERN_NESTING_SHAPES` counts group
+  interpretations for ten pattern shapes, and `KEYWORD_NESTING_SHAPES`
+  gains `op -> P`, a guard arrow and a view in a match arm.
   `NESTING_SHAPES` in the term parser's tests holds no keyword form, which
   is how the exponential above went unnoticed: `parser-keyword-frames` adds
   parenthesized `if`, `match`, `try` and `let` shapes to it.
@@ -844,8 +873,9 @@ performance phase begins:
 
 As of 2026-10-15, the first is resolved in production: Chumsky runs only
 for views the term parser reports as unsupported, and as the test oracle.
-`parser-patterns` owns the second. The third is resolved by keyword
-regions (2026-10-15): the lexer records each token's enclosing group.
+`parser-patterns` resolved the second on 2026-10-16: each statement is
+parsed once. The third is resolved by keyword regions (2026-10-15): the
+lexer records each token's enclosing group.
 
 Stack-overflow aborts on very deep nesting are a separate concern, tracked
 in the panic-safety plan, because an overflow crashes the process.

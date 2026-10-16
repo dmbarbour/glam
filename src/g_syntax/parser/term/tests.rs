@@ -783,12 +783,10 @@ fn pattern_nesting_interprets_each_group_once() {
             .count();
         super::INTERPRETED_GROUPS.with(|count| count.set(0));
         let parsed = suspended(|| {
-            super::super::pattern::oracle::suspended(|| {
-                super::super::input::parse_expression_fragment(
-                    text.as_bytes(),
-                    super::super::pattern::parse_pattern,
-                )
-            })
+            super::super::input::parse_expression_fragment(
+                text.as_bytes(),
+                super::super::pattern::parse_pattern,
+            )
         });
         let interpreted = super::INTERPRETED_GROUPS.with(std::cell::Cell::get);
         let preview: String = text.chars().take(24).collect();

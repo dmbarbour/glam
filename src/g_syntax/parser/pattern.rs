@@ -18,8 +18,6 @@ use super::structural::{
 use super::term::{self, Fail, Position};
 
 #[cfg(test)]
-mod legacy;
-#[cfg(test)]
 mod tests;
 
 type ParseResult<T> = Result<T, Vec<Diagnostic>>;
@@ -47,16 +45,13 @@ fn parse_pattern_in(view: TokenView<'_, '_>, position: Position) -> ParseResult<
     let view = trim_layout(view);
     // A keyword form's tail in a view's expression ends at the view's arrow.
     let context = ExpressionContext::for_owner(view).ending_at_arrow();
-    let pattern = term::parse_pattern_term(view, context, position).map_err(|fail| match fail {
+    term::parse_pattern_term(view, context, position).map_err(|fail| match fail {
         Fail::Error { at, message } => vec![term::diagnostic(view, at, message)],
         Fail::Reported(diagnostics) => diagnostics,
         Fail::Unsupported(construct) => {
             error_at_view(view, format!("a pattern cannot contain {construct}"))
         }
-    });
-    #[cfg(test)]
-    oracle::check(view, position, &pattern);
-    pattern
+    })
 }
 
 pub(in crate::g_syntax::parser) fn parse_guard_clauses(
@@ -294,106 +289,4 @@ fn view_between<'lex, 'source>(
 ) -> TokenView<'lex, 'source> {
     view.subview(TokenRange::new(start, end).expect("ordered token indices form a range"))
         .expect("pattern range remains within its source view")
-}
-
-/// The pattern oracle: while a test enables it, every pattern cover mode
-/// parses is parsed again by the legacy split-and-retry parser, and any
-/// disagreement is recorded. Setting `GLAM_PATTERN_ORACLE` prints every
-/// disagreement any test meets instead, since some are intended:
-///
-/// ```sh
-/// GLAM_PATTERN_ORACLE=1 cargo test --lib 2>&1 | grep -A3 'pattern oracle'
-/// ```
-#[cfg(test)]
-pub(in crate::g_syntax::parser) mod oracle {
-    use std::cell::{Cell, RefCell};
-
-    use super::{ParseResult, Position, SyntaxPattern, TokenView, legacy};
-
-    #[derive(Debug, Default)]
-    pub(in crate::g_syntax::parser) struct Report {
-        pub(in crate::g_syntax::parser) compared: usize,
-        /// Compared patterns that both parsers accept.
-        pub(in crate::g_syntax::parser) accepted: usize,
-        pub(in crate::g_syntax::parser) disagreements: Vec<String>,
-    }
-
-    thread_local! {
-        static ACTIVE: RefCell<Option<Report>> = const { RefCell::new(None) };
-        static SUSPENDED: Cell<bool> = const { Cell::new(false) };
-    }
-
-    fn sweeping() -> bool {
-        static SWEEPING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *SWEEPING.get_or_init(|| std::env::var_os("GLAM_PATTERN_ORACLE").is_some())
-    }
-
-    /// Runs `work` with the oracle enabled on this thread and returns its
-    /// report.
-    pub(in crate::g_syntax::parser) fn observe(work: impl FnOnce()) -> Report {
-        ACTIVE.with(|active| *active.borrow_mut() = Some(Report::default()));
-        work();
-        ACTIVE.with(|active| {
-            active
-                .borrow_mut()
-                .take()
-                .expect("the oracle stays enabled")
-        })
-    }
-
-    /// Runs `work` with the oracle off on this thread, as it is while the
-    /// legacy parser runs. A test that counts cover mode's work suspends it.
-    pub(in crate::g_syntax::parser) fn suspended<R>(work: impl FnOnce() -> R) -> R {
-        let was = SUSPENDED.with(|suspended| suspended.replace(true));
-        let result = work();
-        SUSPENDED.with(|suspended| suspended.set(was));
-        result
-    }
-
-    /// The legacy parser's reading of `view`, without comparing the patterns
-    /// its expressions parse in turn.
-    fn reference(view: TokenView<'_, '_>, position: Position) -> ParseResult<SyntaxPattern> {
-        suspended(|| match position {
-            Position::Complete => legacy::parse_complete_pattern(view),
-            Position::Nested => legacy::parse_pattern(view),
-        })
-    }
-
-    pub(super) fn check(
-        view: TokenView<'_, '_>,
-        position: Position,
-        new: &ParseResult<SyntaxPattern>,
-    ) {
-        let active = ACTIVE.with(|active| active.borrow().is_some());
-        if SUSPENDED.with(Cell::get) || !active && !sweeping() {
-            return;
-        }
-        let old = reference(view, position);
-        let agree = match (new, &old) {
-            (Ok(new), Ok(old)) => new == old,
-            (Err(_), Err(_)) => true,
-            _ => false,
-        };
-        let describe = || {
-            format!(
-                "source: {:?} ({position:?})\n  legacy: {old:?}\n  cover: {new:?}",
-                view.source_text().unwrap_or("<no text>")
-            )
-        };
-        if !active {
-            if !agree {
-                eprintln!("pattern oracle disagreement\n  {}", describe());
-            }
-            return;
-        }
-        ACTIVE.with(|active| {
-            let mut active = active.borrow_mut();
-            let report = active.as_mut().expect("checked as enabled");
-            report.compared += 1;
-            report.accepted += usize::from(matches!((new, &old), (Ok(_), Ok(_))));
-            if !agree {
-                report.disagreements.push(describe());
-            }
-        });
-    }
 }

@@ -40,7 +40,7 @@ not define language semantics or collect subsystem invariants.
 | `g_syntax/parser/input.rs` | Checked token views and Chumsky input over the authoritative lexical structure |
 | `g_syntax/parser/layout.rs`, `expression_context.rs` | Layout ownership, floors, and expression boundaries |
 | `g_syntax/parser/expression.rs`, `structural.rs`, `do_expr.rs`, `conditional.rs` | Expression and structural syntax |
-| `g_syntax/parser/pattern.rs` | Pattern grammar shared by pattern-bearing syntax |
+| `g_syntax/parser/pattern.rs` | Pattern positions, parsed in the term parser's cover mode, and the binding rule for do statements and guard clauses |
 | `g_syntax/parser/declaration.rs`, `declaration/` | Top-level and recursive declarations |
 | `g_syntax/keywords.rs` | Language-version keyword ownership |
 | `g_syntax/ast.rs` | Parsed syntax tree and non-evaluating inspection summaries |

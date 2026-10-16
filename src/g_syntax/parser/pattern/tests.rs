@@ -1,9 +1,5 @@
-use std::path::{Path, PathBuf};
-
 use super::super::input::parse_expression_fragment;
-use super::super::parse_source;
-use super::oracle::{Report, observe};
-use super::{legacy, parse_complete_pattern, parse_pattern};
+use super::{parse_complete_pattern, parse_pattern};
 use crate::g_syntax::{
     Diagnostic, SyntaxExpr, SyntaxKeyExpr, SyntaxPattern, SyntaxPatternKind, SyntaxPatternLiteral,
 };
@@ -16,14 +12,6 @@ fn nested(text: &str) -> Parsed {
 
 fn complete(text: &str) -> Parsed {
     parse_expression_fragment(text.as_bytes(), parse_complete_pattern)
-}
-
-fn legacy_nested(text: &str) -> Parsed {
-    parse_expression_fragment(text.as_bytes(), legacy::parse_pattern)
-}
-
-fn legacy_complete(text: &str) -> Parsed {
-    parse_expression_fragment(text.as_bytes(), legacy::parse_complete_pattern)
 }
 
 /// A compact reading of a pattern: operators as S-expressions, data as
@@ -107,136 +95,134 @@ fn expr(expression: &SyntaxExpr) -> String {
 }
 
 /// The pattern forms of the syntax reference and their edge cases, valid
-/// and invalid alike: in a nested position the two parsers must agree on
-/// each, accepting the same patterns as the same syntax.
-const NESTED_AGREEMENT: &[&str] = &[
-    "x",
-    "_x",
-    "_",
-    "x as y",
-    "x as y as z",
-    "(x)",
-    "((x))",
-    "()",
-    "{}",
-    "{d}",
-    "{x: p, y: q, rem}",
-    "{x:p,y:q}",
-    "{x: p, {y: q}}",
-    "{x?: p, rem}",
-    "{x?: {}}",
-    "{:x, :y, :z}",
-    "{:_x}",
-    "{foo.bar.baz: p, _}",
-    "{selector: key, [key]: p}",
-    "{selector: key, root.[key]: p}",
-    "{(e): p, _}",
-    "{a.(e).[k]: p}",
-    "{, a: p,}",
-    "tag:p",
-    "tag:(p)",
-    "a:b:c",
-    "[k]:p",
-    "[a, b]:p",
-    "(path):p",
-    "'name",
-    "'.a.b",
-    "'.foo.[e].(path)",
-    "'.[1].['x]",
-    "[]",
-    "[a, b, c]",
-    "[,a]",
-    "[x] ++ xs",
-    "xs ++ [x]",
-    "[x0] ++ xs ++ [xn]",
-    "[x0] ++ ([y] ++ ys) ++ [xn]",
-    "\"foo\"",
-    "\"foo\" ++ xs",
-    "(,)",
-    "(p,)",
-    "(p1, p2, p3)",
-    "(a as b, c)",
-    "42",
-    "_1.23",
-    "(view -> p)",
-    "(p <- view)",
-    "(f x -> [a, b])",
-    "(.get -> p)",
-    "(\\x -> x -> p)",
-    "(Nat n)",
-    "(Prefix \"foo-\" text)",
-    "(Nat (Even n))",
-    "(p when x > 0)",
-    "(p when q <- .op and r = 1)",
-    "(p when _)",
-    "(a:Nat n)",
-    "((Nat n) as m)",
-    "{a: [x] ++ y}",
-    "[x] ++ xs as all",
-    // Rejected by both.
-    "",
-    "x y",
-    "x + y",
-    "f -> p",
-    "Nat n",
-    "if",
-    "self",
-    "x.y",
-    ".op",
-    ":x",
-    "{x: p, x: q}",
-    "{rest, x: p}",
-    "{a, b}",
-    "[x] ++ ys ++ zs",
-    "x as",
-    "as x",
-    "(p when)",
-    "(f -> g -> p)",
-    "(\\x -> x)",
-    "{: x}",
-    "{:x y}",
-    "{x ?: p}",
-    "tag: p",
+/// and invalid alike, with their reading in a nested position. Each reading
+/// matched the split-and-retry parser that cover mode replaced, when both
+/// existed (2026-10-16).
+const NESTED_READINGS: &[(&str, &str)] = &[
+    ("x", "x"),
+    ("_x", "_x"),
+    ("_", "_"),
+    ("x as y", "(as x y)"),
+    ("x as y as z", "(as (as x y) z)"),
+    ("(x)", "(group x)"),
+    ("((x))", "(group (group x))"),
+    ("()", "()"),
+    ("{}", "{}"),
+    ("{d}", "{d}"),
+    ("{x: p, y: q, rem}", "{x: p, y: q, rem}"),
+    ("{x:p,y:q}", "{x: p, y: q}"),
+    ("{x: p, {y: q}}", "{x: p, {y: q}}"),
+    ("{x?: p, rem}", "{x?: p, rem}"),
+    ("{x?: {}}", "{x?: {}}"),
+    ("{:x, :y, :z}", "{x: x, y: y, z: z}"),
+    ("{:_x}", "{x: _x}"),
+    ("{foo.bar.baz: p, _}", "{foo.bar.baz: p, _}"),
+    ("{selector: key, [key]: p}", "{selector: key, [key]: p}"),
+    (
+        "{selector: key, root.[key]: p}",
+        "{selector: key, root.[key]: p}",
+    ),
+    ("{(e): p, _}", "{(e): p, _}"),
+    ("{a.(e).[k]: p}", "{a.(e).[k]: p}"),
+    ("{, a: p,}", "{a: p}"),
+    ("tag:p", "{tag: p}"),
+    ("tag:(p)", "{tag: (group p)}"),
+    ("a:b:c", "{a: {b: c}}"),
+    ("[k]:p", "{[k]: p}"),
+    ("[a, b]:p", "{[a].[b]: p}"),
+    ("(path):p", "{(path): p}"),
+    ("'name", "'name"),
+    ("'.a.b", "['a, 'b]"),
+    ("'.foo.[e].(path)", "'.foo.[e].(path)"),
+    ("'.[1].['x]", "[#, 'x]"),
+    ("[]", "[]"),
+    ("[a, b, c]", "[a, b, c]"),
+    ("[,a]", "[a]"),
+    ("[x] ++ xs", "[x] ++ xs ++ []"),
+    ("xs ++ [x]", "[] ++ xs ++ [x]"),
+    ("[x0] ++ xs ++ [xn]", "[x0] ++ xs ++ [xn]"),
+    (
+        "[x0] ++ ([y] ++ ys) ++ [xn]",
+        "[x0] ++ (group [y] ++ ys ++ []) ++ [xn]",
+    ),
+    ("\"foo\"", "\"foo\""),
+    ("\"foo\" ++ xs", "[#, #, #] ++ xs ++ []"),
+    ("(,)", "{tuple: []}"),
+    ("(p,)", "{tuple: [p]}"),
+    ("(p1, p2, p3)", "{tuple: [p1, p2, p3]}"),
+    ("(a as b, c)", "{tuple: [(as a b), c]}"),
+    ("42", "#"),
+    ("_1.23", "#"),
+    ("(view -> p)", "(view view p)"),
+    ("(p <- view)", "(view view p)"),
+    ("(f x -> [a, b])", "(view (f x) [a, b])"),
+    ("(.get -> p)", "(view .get p)"),
+    ("(\\x -> x -> p)", "(view (\\x -> x) p)"),
+    ("(Nat n)", "(pred Nat n)"),
+    ("(Prefix \"foo-\" text)", "(pred (Prefix \"foo-\") text)"),
+    ("(Nat (Even n))", "(pred Nat (pred Even n))"),
+    ("(p when x > 0)", "(when p 1)"),
+    ("(p when q <- .op and r = 1)", "(when p 2)"),
+    ("(p when _)", "(when p 1)"),
+    ("(a:Nat n)", "(pred a:Nat n)"),
+    ("((Nat n) as m)", "(group (as (pred Nat n) m))"),
+    ("{a: [x] ++ y}", "{a: [x] ++ y ++ []}"),
+    ("[x] ++ xs as all", "(as [x] ++ xs ++ [] all)"),
+    ("", "error"),
+    ("x y", "error"),
+    ("x + y", "error"),
+    ("f -> p", "error"),
+    ("Nat n", "error"),
+    ("if", "error"),
+    ("self", "error"),
+    ("x.y", "error"),
+    (".op", "error"),
+    (":x", "error"),
+    ("{x: p, x: q}", "error"),
+    ("{rest, x: p}", "error"),
+    ("{a, b}", "error"),
+    ("[x] ++ ys ++ zs", "error"),
+    ("x as", "error"),
+    ("as x", "error"),
+    ("(p when)", "error"),
+    ("(f -> g -> p)", "error"),
+    ("(\\x -> x)", "error"),
+    ("{: x}", "error"),
+    ("{:x y}", "error"),
+    ("{x ?: p}", "error"),
+    ("tag: p", "error"),
 ];
 
 /// Complete positions: a match arm's head, which views and predicates may
 /// fill without parentheses.
-const COMPLETE_AGREEMENT: &[&str] = &[
-    "x",
-    "Nat n",
-    "Prefix \"foo-\" text",
-    "f x -> [a]",
-    "view -> p as q",
-    "p <- f x",
-    "(x)",
-    "{x: Nat n}",
-    "Nat",
+const COMPLETE_READINGS: &[(&str, &str)] = &[
+    ("x", "x"),
+    ("Nat n", "(pred Nat n)"),
+    ("Prefix \"foo-\" text", "(pred (Prefix \"foo-\") text)"),
+    ("f x -> [a]", "(view (f x) [a])"),
+    ("view -> p as q", "(view view (as p q))"),
+    ("p <- f x", "(view (f x) p)"),
+    ("(x)", "(group x)"),
+    ("{x: Nat n}", "error"),
+    ("Nat", "Nat"),
 ];
 
-#[track_caller]
-fn assert_same(text: &str, new: &Parsed, old: &Parsed) {
-    match (new, old) {
-        (Ok(new), Ok(old)) => assert_eq!(new, old, "{text:?}"),
-        (Err(_), Err(_)) => {}
-        _ => panic!("{text:?}: legacy {old:?}, cover {new:?}"),
-    }
-}
-
 #[test]
-fn cover_mode_agrees_with_the_legacy_parser() {
-    for text in NESTED_AGREEMENT {
-        assert_same(text, &nested(text), &legacy_nested(text));
+fn cover_mode_reads_every_pattern_form() {
+    for (text, expected) in NESTED_READINGS {
+        assert_eq!(reading(&nested(text)), *expected, "nested {text:?}");
     }
-    for text in COMPLETE_AGREEMENT {
-        assert_same(text, &complete(text), &legacy_complete(text));
+    for (text, expected) in COMPLETE_READINGS {
+        assert_eq!(reading(&complete(text)), *expected, "complete {text:?}");
     }
 }
 
-/// Where the legacy parser's trial order decided precedence, cover mode
-/// follows the expression grammar instead: juxtaposition binds tighter than
+/// Where the split-and-retry parser's trial order decided precedence, cover
+/// mode follows the expression grammar: juxtaposition binds tighter than
 /// `++`, `as` is looser than both, and completeness passes through `as`, a
-/// view's pattern and a guarded pattern. Each case shows both readings.
-const INTENDED_DIFFERENCES: &[(&str, &str, &str)] = &[
+/// view's pattern and a guarded pattern. Each case shows the old reading,
+/// then the new (`patterns-parse-as-cover-terms` in the decisions log).
+const PRECEDENCE_CHANGES: &[(&str, &str, &str)] = &[
     // The predicate passes its input on, so both bind the same.
     (
         "(Nat n as m)",
@@ -260,9 +246,8 @@ fn reading(parsed: &Parsed) -> String {
 
 #[test]
 fn cover_mode_resolves_precedence_by_the_expression_grammar() {
-    for (text, old, new) in INTENDED_DIFFERENCES {
-        assert_eq!(reading(&legacy_nested(text)), *old, "legacy {text:?}");
-        assert_eq!(reading(&nested(text)), *new, "cover {text:?}");
+    for (text, _, new) in PRECEDENCE_CHANGES {
+        assert_eq!(reading(&nested(text)), *new, "{text:?}");
     }
     assert_eq!(
         reading(&complete("Nat n as m")),
@@ -324,51 +309,4 @@ fn cover_mode_reports_what_a_pattern_cannot_hold() {
             "{text:?}: {diagnostics:?}"
         );
     }
-}
-
-fn sample_files() -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let mut pending = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("samples")];
-    while let Some(directory) = pending.pop() {
-        for entry in std::fs::read_dir(&directory).expect("sample directories are readable") {
-            let path = entry.expect("sample entries are readable").path();
-            if path.is_dir() {
-                pending.push(path);
-            } else if path.extension().is_some_and(|extension| extension == "g") {
-                files.push(path);
-            }
-        }
-    }
-    files.sort();
-    files
-}
-
-#[track_caller]
-fn assert_agrees(report: &Report, minimum_compared: usize) {
-    assert!(
-        report.disagreements.is_empty(),
-        "cover mode disagrees with the legacy pattern parser:\n{}",
-        report.disagreements.join("\n")
-    );
-    assert!(
-        report.compared >= minimum_compared,
-        "the oracle compared only {} patterns",
-        report.compared
-    );
-    eprintln!(
-        "pattern oracle: {} compared ({} accepted)",
-        report.compared, report.accepted
-    );
-}
-
-#[test]
-fn cover_mode_agrees_on_every_sample() {
-    let files = sample_files();
-    assert!(!files.is_empty());
-    let report = observe(|| {
-        for path in &files {
-            let _ = parse_source(&std::fs::read(path).expect("samples are readable"));
-        }
-    });
-    assert_agrees(&report, 100);
 }
