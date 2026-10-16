@@ -73,6 +73,7 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
     if !floor_diagnostics.is_empty() {
         return Err(floor_diagnostics);
     }
+    let mut leading_match = false;
     let parsed = if let Some(result) = parse_parenthesized_structural(view, context) {
         ParsedExpression::new(result?, view.range().end())
     } else if let Some(result) = parse_let(view, context) {
@@ -83,9 +84,18 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
         // A conditional is a frame of the term parser, which takes the
         // whole view: its `else` branch owns any `where` or `with` in it.
         parse_expression_chain_view(view, context)?
+    } else if (keyword_head(view, "match").is_some() || keyword_head(view, "try_match").is_some())
+        && contextual_keywords(view, "where").next().is_none()
+    {
+        // A match is a frame of the term parser, and an atom like any form:
+        // what follows its arms reads as the expression grammar reads it.
+        // Only a `where` after them suffixes the whole view here.
+        parse_expression_chain_view(view, context)?
     } else if let Some(match_index) = keyword_head(view, "match") {
+        leading_match = true;
         parse_match_expression(view, match_index, context.may_yield())?
     } else if let Some(try_match_index) = keyword_head(view, "try_match") {
+        leading_match = true;
         parse_try_match_expression(view, try_match_index, context.may_yield())?
     } else if let Some(result) = parse_with(view, context) {
         result?
@@ -115,6 +125,11 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
         && !context.permits_yield()
         && !stops_at_arrow(view, context, parsed.end())
     {
+        // What follows a match's arms before its `where` reads as the
+        // expression grammar reads it.
+        if leading_match {
+            return parse_expression_chain_view(view, context);
+        }
         let tail = trim_layout(view_between(view, parsed.end(), view.range().end()));
         let found = tail
             .source_text()
@@ -194,7 +209,7 @@ fn parse_parenthesized_structural(
         return None;
     }
     let context = context.complete();
-    let starts_structural = ["let", "using", "match", "try_match", "try", "object"]
+    let starts_structural = ["let", "using", "try", "object"]
         .into_iter()
         .any(|head| keyword_head(contents, head).is_some())
         || contextual_keywords(contents, "where").next().is_some()

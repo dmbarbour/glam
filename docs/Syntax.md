@@ -1581,14 +1581,17 @@ I borrow a lot of inspiration from Haskell's syntax for `match`. Common use case
             _ => Result3
 
 The first ungrouped `with` after `match` ends the subject expression and begins
-the arms. Parenthesize a dictionary or object update used as the subject:
+the arms; a match nested in the subject takes the first `with` after its own
+head, as nested `if`s take their `then`s. Parenthesize a dictionary or object
+update used as the subject:
 
         match (Dict with { value := 42 }) with
             {value:x} => x
             _ => {}
 
-A leading brace group belongs to an anchored arm when it participates in one
-complete arm; otherwise it delimits the semicolon-separated arm body.
+A leading brace group begins an anchored arm when an arm's `=>`, `=>?` or
+`when` follows it on its line; otherwise it delimits the semicolon-separated
+arm body.
 Consequently, dictionary patterns remain ordinary layout-arm heads while the
 compact braced form stays available:
 
@@ -1597,6 +1600,10 @@ compact braced form stays available:
             _ => {}
 
         match Value with { {value:x} => x; _ => {}; }
+
+A match is an atom wherever it stands, as a `do` block is: whatever follows its
+arms, such as an argument after a braced body, reads as the expression grammar
+reads it.
 
 We also support branching guard clauses. We use `when` to separate the pattern from the a branching clause. base case, we have only one branch. But we'll need another `when` for hierarchical branching.
 
@@ -1610,6 +1617,9 @@ We also support branching guard clauses. We use `when` to separate the pattern f
                     C3_a_a => R3_a_a
                     C3_a_b => R3_a_b
                 C3_b => R3_b
+
+Nested arms end their arm: nothing may follow them in it, on a shallower line or
+after a braced block.
 
 If users don't need the pattern, they may just write `match when` instead. 
 

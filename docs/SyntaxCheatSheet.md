@@ -439,6 +439,7 @@ match* Expr with ...                # lazy list of every successful result
 match* Expr with {}                 # []
 
 # The first ungrouped `with` belongs to `match`; group an updated subject.
+# A match is an atom: `match X with {...} y` applies it, as `do {...} y` does.
 match (Dict with { x := 1 }) with { {x:value} => value; _ => {}; }
 
 match when                          # no scrutinee: guard-only dispatch

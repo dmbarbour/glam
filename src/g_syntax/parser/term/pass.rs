@@ -27,18 +27,30 @@
 //! owner (a group, a layout block, or the view), which every frame records,
 //! so judging costs nothing per enclosing conditional.
 //!
+//! A match (`match`, `try_match`, with or without `*`) is a frame: its
+//! subject reads as an expression up to a `with`, which belongs to the
+//! innermost match reading its subject at its level, and its arms are a
+//! block, braced or layout. While an arm reads its head or guards, its `=>`,
+//! `=>?` and `when` close the frames opened in it: an arrow begins its
+//! result, and a `when` its guards, or nested arms when no mark follows it
+//! on its line. Each frame records the match and the arms block whose
+//! keywords it may meet, as it records its layout owner. An arm's pieces are
+//! read when its block closes (`binding`).
+//!
 //! Other keyword forms open a keyword region, whose groups are deferred for
 //! the form's structural parser. Inside a region conditionals are only
 //! counted, so that a `then` or `else` still reaches its own, and inside a
 //! deferred group nothing is interpreted.
 //!
 //! A branch holding a form that view-level dispatch parses (`let`, `object`,
-//! `where` or `with` at its level, or a leading `match` or `try_match`) is
-//! parsed from its view, as the structural parser did, until those forms
-//! are frames too: view-level dispatch reads them differently from the item
-//! interpreter.
+//! `where`, or a `with` that no match takes, at its level) is parsed from its
+//! view, as the structural parser did, until those forms are frames too:
+//! view-level dispatch reads them differently from the item interpreter.
 
-use crate::g_syntax::{ConditionalMode, ConditionalResultMode, IfExpr, SyntaxExpr};
+use crate::g_syntax::{
+    ConditionalMode, ConditionalResultMode, IfExpr, MatchArm, MatchCommitment, MatchExpr,
+    MatchWhenExpr, SyntaxExpr, WhenArm,
+};
 
 use super::super::do_expr::{empty_do_expr, finish_do_statements, line_begins_do_statement};
 use super::super::expression::structural_view_at;
@@ -49,7 +61,7 @@ use super::super::lexical::{Delimiter, GroupId, LeadingTrivia, TokenKind};
 use super::super::structural::{
     in_keyword_position, is_layout_empty, parse_expression_in_context, parse_open_tail, trim_layout,
 };
-use super::binding::{self, needs_view_dispatch};
+use super::binding::{self, NestedArms, needs_view_dispatch};
 use super::{
     Cover, Deferred, Fail, GroupBody, Items, Mode, Parse, Piece, Scope, interpret_group,
     may_head_keyword_form, opens_keyword_region, piece_token, regions_enabled, token, trim_padding,
@@ -82,17 +94,26 @@ struct Frame {
     /// included, so a frame without any skips checking its floors.
     line_starts: usize,
     /// Whether a form that view-level dispatch parses stands at a group's
-    /// level: `let`, `object`, `where` or `with`, or a leading `match` or
-    /// `try_match`.
+    /// level: `let`, `object`, `where`, or a `with` no match takes.
     view_level: bool,
-    /// Whether its next significant token starts a guard clause or a
-    /// statement, which takes its own context.
+    /// Whether its next significant token starts a member: a guard clause,
+    /// a statement, or an arm or its result, which takes its own context.
     member_start: bool,
-    /// A `do` whose `{` comes next, opening a block frame.
-    pending_do: Option<usize>,
+    /// A block whose `{` comes next.
+    pending: Option<Pending>,
     /// The stack index of its nearest layout owner: itself for a group, a
-    /// layout block or the view, its parent's for a conditional.
+    /// layout block or the view, its parent's for a conditional or a match.
     layout_owner: usize,
+    /// The stack index of the match whose `with` it may meet: the innermost
+    /// match reading its subject, unless a group or arms block lies between.
+    match_owner: Option<usize>,
+    /// The stack index of the arms block whose arms' marks it may meet: the
+    /// innermost, unless a group lies between.
+    arms_owner: Option<usize>,
+    /// The stack index of the group or view whose depth its tokens are at.
+    level: usize,
+    /// For a group or the view, the last scan along a line for arm marks.
+    mark_scan: Option<MarkScan>,
 }
 
 enum FrameKind {
@@ -104,13 +125,16 @@ enum FrameKind {
         block: Option<Box<Block>>,
     },
     Conditional(Box<Conditional>),
-    Layout(Box<LayoutDo>),
+    Layout(Box<LayoutBlock>),
+    Match(Box<Match>),
 }
 
-/// A layout `do` block.
-struct LayoutDo {
+/// A layout block: a `do` block's statements, or a match's arms.
+struct LayoutBlock {
+    /// The `do`, or the `with` or `when` its arms follow.
     head: usize,
-    /// The `do` form's context, floored at its head's line.
+    /// The block's context: a `do` form's, floored at its head's line, or
+    /// its arms'.
     context: ExpressionContext,
     /// The indentation its statements align at, once its first sets it.
     anchor: Option<usize>,
@@ -122,12 +146,213 @@ struct LayoutDo {
     /// The line where a hanging block ended, which must not either.
     boundary: Option<usize>,
     failure: Option<Fail>,
+    /// Its arms, or none for a `do` block.
+    arms: Option<Box<Arms>>,
 }
 
-/// A braced `do` block: its head and its own context.
+/// A braced block: a `do` block's head and its own context, or a match's
+/// arms.
 struct Block {
     head: usize,
     context: ExpressionContext,
+    arms: Option<Box<Arms>>,
+}
+
+/// A block whose `{` comes next.
+enum Pending {
+    /// A `do`'s statements, after the `do` at this index.
+    Do(usize),
+    Arms(Box<Arms>),
+}
+
+/// A `match` or `try_match` form.
+struct Match {
+    head: usize,
+    keyword: &'static str,
+    /// Whether it is `match*` or `try_match*`.
+    open: bool,
+    phase: MatchPhase,
+    /// The form's own context, floored at its head's line.
+    context: ExpressionContext,
+    /// Its subject, once its `with` ends it; a `match when` has none.
+    subject: Option<Parse<SyntaxExpr>>,
+    failure: Option<Fail>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MatchPhase {
+    /// Before its first significant token, which a `match when` begins.
+    Head,
+    Subject,
+    /// After its `with` or `when`: its arms are a block above it, or a
+    /// braced block that comes next.
+    Arms,
+}
+
+/// A block of arms: a match's, a `match when`'s, or those nested under an
+/// arm's trailing `when`. Each arm's pieces are read when the block closes.
+struct Arms {
+    /// The match's head, or the trailing `when` that heads nested arms.
+    head: usize,
+    kind: ArmsKind,
+    /// The context the arms are read with.
+    context: ExpressionContext,
+    /// Where the pass stands in the current arm.
+    phase: ArmPhase,
+    arms: Vec<ArmRecord>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArmsKind {
+    /// A match's arms: a pattern, an optional guard, and an outcome.
+    Match { keyword: &'static str, open: bool },
+    /// A `match when`'s arms: a guard and an outcome.
+    When { keyword: &'static str, open: bool },
+    /// Arms nested under a trailing `when`, read as `match when`'s.
+    Nested,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArmPhase {
+    Head,
+    /// After the `when` that guards a match arm's pattern.
+    Guards,
+    /// After the arm's `=>` or `=>?`.
+    Result,
+}
+
+struct ArmRecord {
+    /// The piece position where the arm begins.
+    start: usize,
+    /// Its first significant token.
+    first: Option<usize>,
+    nested: Option<NestedArms>,
+    failure: Option<Fail>,
+}
+
+/// A block's arms, read.
+enum ArmList {
+    Match(Vec<MatchArm>),
+    When(Vec<WhenArm>),
+}
+
+/// A scan along a line for arm marks (see `Pass::line_mark`): from `from`,
+/// the first mark or end of the line at the scan's depth is at `to`.
+#[derive(Clone, Copy)]
+struct MarkScan {
+    from: usize,
+    to: usize,
+    mark: bool,
+}
+
+impl Arms {
+    fn new(head: usize, kind: ArmsKind, context: ExpressionContext) -> Self {
+        Self {
+            head,
+            kind,
+            context,
+            phase: ArmPhase::Head,
+            arms: Vec::new(),
+        }
+    }
+
+    fn begin(&mut self, start: usize) {
+        self.phase = ArmPhase::Head;
+        self.arms.push(ArmRecord {
+            start,
+            first: None,
+            nested: None,
+            failure: None,
+        });
+    }
+
+    /// The context of a member starting at `index`: an arm's head and its
+    /// result take the arms' context, and a guard clause its own.
+    fn member_context(&mut self, view: TokenView<'_, '_>, index: usize) -> ExpressionContext {
+        match self.phase {
+            ArmPhase::Guards => ExpressionContext::for_owner_at(view, index).validated(),
+            phase => {
+                if phase == ArmPhase::Head
+                    && let Some(arm) = self.arms.last_mut()
+                {
+                    arm.first.get_or_insert(index);
+                }
+                self.context.child_owner_at(view, index).validated()
+            }
+        }
+    }
+
+    /// Whether a `{` may begin the first arm, as a dict pattern does; nested
+    /// arms after a `{` are always braced.
+    fn brace_may_begin_arm(&self) -> bool {
+        self.kind != ArmsKind::Nested
+    }
+
+    fn arm_label(&self) -> &'static str {
+        match self.kind {
+            ArmsKind::Match { .. } => "match arm",
+            _ => "match-when arm",
+        }
+    }
+
+    fn body_label(&self) -> String {
+        match self.kind {
+            ArmsKind::Match { keyword, open } => format!("{} body", display(keyword, open)),
+            ArmsKind::When { keyword, open } => format!("{}-when body", display(keyword, open)),
+            ArmsKind::Nested => "nested match-when body".to_owned(),
+        }
+    }
+
+    /// The error for a block without arms.
+    fn missing(&self) -> Fail {
+        let message = match self.kind {
+            ArmsKind::Match { keyword, open } => format!(
+                "layout {} expression requires at least one arm",
+                display(keyword, open)
+            ),
+            ArmsKind::When { keyword, open } => format!(
+                "layout `{} when` requires at least one arm",
+                display(keyword, open)
+            ),
+            ArmsKind::Nested => "nested `when` requires at least one child arm".to_owned(),
+        };
+        Fail::error(message).or_at(Some(self.head))
+    }
+
+    /// Records that a trailing `when` heads no block, if `pending` holds
+    /// its nested arms.
+    fn unfinished_nested(&mut self, pending: Option<Pending>) {
+        if let Some(Pending::Arms(nested)) = pending
+            && let Some(arm) = self.arms.last_mut()
+        {
+            arm.nested = Some(NestedArms {
+                when: nested.head,
+                arms: Err(nested.missing()),
+            });
+        }
+    }
+}
+
+/// A match keyword as written, with its `*`.
+fn display(keyword: &str, open: bool) -> String {
+    if open {
+        format!("{keyword}*")
+    } else {
+        keyword.to_owned()
+    }
+}
+
+/// A keyword form's context: the enclosing one, floored at its head's line.
+fn form_context(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+    head: usize,
+) -> ExpressionContext {
+    view.line_indentation_at(head)
+        .map_or(context, |indentation| {
+            context.with_physical_line_floor(indentation)
+        })
+        .may_yield()
 }
 
 impl Frame {
@@ -154,8 +379,12 @@ impl Frame {
             line_starts: 0,
             view_level: false,
             member_start: false,
-            pending_do: None,
+            pending: None,
             layout_owner: 0,
+            match_owner: None,
+            arms_owner: None,
+            level: 0,
+            mark_scan: None,
         }
     }
 
@@ -163,10 +392,44 @@ impl Frame {
         self.inherited_region || self.region
     }
 
+    fn arms(&self) -> Option<&Arms> {
+        match &self.kind {
+            FrameKind::Layout(layout) => layout.arms.as_deref(),
+            FrameKind::Group {
+                block: Some(block), ..
+            } => block.arms.as_deref(),
+            _ => None,
+        }
+    }
+
+    fn arms_mut(&mut self) -> Option<&mut Arms> {
+        match &mut self.kind {
+            FrameKind::Layout(layout) => layout.arms.as_deref_mut(),
+            FrameKind::Group {
+                block: Some(block), ..
+            } => block.arms.as_deref_mut(),
+            _ => None,
+        }
+    }
+
+    /// Whether it reads guards, whose clauses an `and` separates.
+    fn in_guards(&self) -> bool {
+        match &self.kind {
+            FrameKind::Conditional(conditional) => conditional.phase == Phase::Guards,
+            _ => self
+                .arms()
+                .is_some_and(|arms| arms.phase == ArmPhase::Guards),
+        }
+    }
+
     /// Whether a `->` ends the open tails of frames opened inside this one:
-    /// in guards and statements it does, in a `then` branch it does not, and
-    /// an `else` branch ends where the conditional itself does.
+    /// in guards and statements it does, in a `then` branch or an arm's
+    /// result it does not, and an `else` branch ends where the conditional
+    /// itself does.
     fn nested_arrow(&self) -> bool {
+        if let Some(arms) = self.arms() {
+            return arms.phase != ArmPhase::Result;
+        }
         match &self.kind {
             FrameKind::Conditional(conditional) => match conditional.phase {
                 Phase::Guards => true,
@@ -259,8 +522,8 @@ struct Branch {
     line_starts: usize,
 }
 
-/// A conditional's or a `do` block's interpretation, held in the arena
-/// until consumed.
+/// A conditional's, a `do` block's or a match's interpretation, held in the
+/// arena until consumed.
 pub(super) struct Form {
     pub(super) head: usize,
     pub(super) keyword: &'static str,
@@ -271,7 +534,7 @@ pub(super) struct Form {
 /// How a form reads, which its place among the pieces confirms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FormShape {
-    /// `if Guards then A else B`, or a `do` block: an atom.
+    /// `if Guards then A else B`, a `do` block or a match: an atom.
     Prefix,
     /// `if Guards else B`: a postfix conditional on the operand before it.
     Postfix,
@@ -347,32 +610,36 @@ impl Pass<'_, '_, '_> {
             .and_then(|group| group.close_token())
             .filter(|close| *close < view.range().end())
             .ok_or(Fail::Unsupported("a delimiter group crossing the view"))?;
-        let pending = self.top().pending_do.take();
+        let pending = self.top().pending.take();
         self.significant(index);
         let parent = self.top();
         parent.lambda_head = false;
         let (mode, context, inherited) = (parent.mode, parent.context, parent.in_region());
         // A `do` block's statements may bind patterns, and end their tails
-        // at `->`; its context is the `do` form's, floored at its head.
-        let block = pending
-            .filter(|_| delimiter == Delimiter::Brace)
-            .map(|head| {
-                Box::new(Block {
-                    head,
-                    context: view
-                        .line_indentation_at(head)
-                        .map_or(context, |indentation| {
-                            context.with_physical_line_floor(indentation)
-                        })
-                        .may_yield(),
-                })
-            });
+        // at `->`; its context is the `do` form's, floored at its head. So
+        // may a match's arms, with their own context.
+        let block = match pending.filter(|_| delimiter == Delimiter::Brace) {
+            Some(Pending::Do(head)) => Some(Box::new(Block {
+                head,
+                context: form_context(view, context, head),
+                arms: None,
+            })),
+            Some(Pending::Arms(mut arms)) => {
+                arms.begin(0);
+                Some(Box::new(Block {
+                    head: arms.head,
+                    context: arms.context,
+                    arms: Some(arms),
+                }))
+            }
+            None => None,
+        };
         let (mode, arrow) = if block.is_some() {
             (Mode::Cover, true)
         } else {
             (mode, mode == Mode::Cover)
         };
-        let mut frame = Frame::new(
+        self.push(Frame::new(
             FrameKind::Group {
                 delimiter,
                 group,
@@ -383,10 +650,46 @@ impl Pass<'_, '_, '_> {
             Some(group_separator(view.source(), delimiter, index)),
             arrow,
             inherited,
-        );
-        frame.layout_owner = self.stack.len();
-        self.stack.push(frame);
+        ));
         Ok(())
+    }
+
+    /// Pushes `frame` with its owners: the layout owner that judges its
+    /// lines, the match whose `with` and the arms block whose marks it may
+    /// meet, and the group or view whose depth its tokens are at.
+    fn push(&mut self, mut frame: Frame) {
+        let at = self.stack.len();
+        let (layout, matches, arms, level) =
+            self.stack.last().map_or((0, None, None, 0), |parent| {
+                (
+                    parent.layout_owner,
+                    parent.match_owner,
+                    parent.arms_owner,
+                    parent.level,
+                )
+            });
+        (
+            frame.layout_owner,
+            frame.match_owner,
+            frame.arms_owner,
+            frame.level,
+        ) = match &frame.kind {
+            FrameKind::View => (at, None, None, at),
+            FrameKind::Group { block, .. } => (
+                at,
+                None,
+                block
+                    .as_ref()
+                    .and_then(|block| block.arms.as_ref())
+                    .map(|_| at),
+                at,
+            ),
+            FrameKind::Layout(layout) if layout.arms.is_some() => (at, None, Some(at), level),
+            FrameKind::Layout(_) => (at, matches, arms, level),
+            FrameKind::Conditional(_) => (layout, matches, arms, level),
+            FrameKind::Match(_) => (layout, Some(at), arms, level),
+        };
+        self.stack.push(frame);
     }
 
     fn close_group(&mut self, index: usize) {
@@ -407,7 +710,15 @@ impl Pass<'_, '_, '_> {
             .open_token();
         let view_level = frame.view_level;
         let line_starts = frame.line_starts;
-        if let Some(block) = block {
+        if let Some(mut block) = block {
+            if let Some(arms) = block.arms.take() {
+                let (kind, head) = (arms.kind, arms.head);
+                let result =
+                    self.finish_braced_arms(*arms, &frame.pieces, frame.pending, open, index);
+                self.top().line_starts += line_starts;
+                self.deliver_arms(kind, head, result, index + 1);
+                return;
+            }
             let result = self.finish_block(&block, &frame.pieces, open, index);
             let covers = self.scope.covers;
             let parent = self.top();
@@ -480,6 +791,12 @@ impl Pass<'_, '_, '_> {
         }
         top.member_start = false;
         match &mut top.kind {
+            FrameKind::Match(found) => {
+                if found.phase == MatchPhase::Head {
+                    found.phase = MatchPhase::Subject;
+                }
+                top.context = found.context.child_owner_at(view, index).validated();
+            }
             FrameKind::Conditional(conditional) => match conditional.phase {
                 Phase::Guards => {
                     top.context = ExpressionContext::for_owner_at(view, index).validated()
@@ -497,7 +814,12 @@ impl Pass<'_, '_, '_> {
             },
             FrameKind::Group {
                 block: Some(block), ..
-            } => top.context = block.context.child_owner_at(view, index).validated(),
+            } => {
+                top.context = match &mut block.arms {
+                    Some(arms) => arms.member_context(view, index),
+                    None => block.context.child_owner_at(view, index).validated(),
+                }
+            }
             FrameKind::Layout(layout) => {
                 if layout.anchor.is_none() {
                     // The first statement sets the anchor: hanging on the
@@ -514,7 +836,8 @@ impl Pass<'_, '_, '_> {
                             .unwrap_or(indentation);
                         layout.anchor = Some(column);
                         layout.hanging = column > indentation;
-                        if index == layout.head + 1
+                        if layout.arms.is_none()
+                            && index == layout.head + 1
                             && view
                                 .token_at(index)
                                 .is_some_and(|token| token.leading() == LeadingTrivia::Joint)
@@ -528,8 +851,14 @@ impl Pass<'_, '_, '_> {
                         layout.anchor = Some(indentation);
                     }
                     layout.statements.push(top.pieces.len());
+                    if let Some(arms) = &mut layout.arms {
+                        arms.begin(top.pieces.len());
+                    }
                 }
-                top.context = layout.context.child_owner_at(view, index).validated();
+                top.context = match &mut layout.arms {
+                    Some(arms) => arms.member_context(view, index),
+                    None => layout.context.child_owner_at(view, index).validated(),
+                };
             }
             _ => {}
         }
@@ -547,16 +876,23 @@ impl Pass<'_, '_, '_> {
                 }
                 top.pieces.push(Piece::Token(index));
                 if starts_statement {
-                    // A `do` before this line heads no braced block: the
-                    // line starts the next statement, as the structural
-                    // parser split them.
-                    top.pending_do = None;
+                    // A `do` or a trailing `when` before this line heads no
+                    // braced block: the line starts the next statement or
+                    // arm, as the structural parser split them.
+                    let pending = top.pending.take();
+                    if let Some(arms) = top.arms_mut() {
+                        arms.unfinished_nested(pending);
+                    }
                     top.region = false;
                     top.region_conditionals.clear();
                     top.lambda_head = false;
                     top.member_start = true;
                     if let FrameKind::Layout(layout) = &mut top.kind {
                         layout.statements.push(top.pieces.len());
+                        if let Some(arms) = &mut layout.arms {
+                            arms.begin(top.pieces.len());
+                            top.mode = Mode::Cover;
+                        }
                     }
                 }
                 return Step::Next;
@@ -577,6 +913,16 @@ impl Pass<'_, '_, '_> {
                 top.lambda_head = false;
                 top.member_start = true;
                 top.pieces.push(Piece::Token(index));
+                // In a braced block of arms, the next arm begins.
+                let start = top.pieces.len();
+                if let FrameKind::Group {
+                    block: Some(block), ..
+                } = &mut top.kind
+                    && let Some(arms) = &mut block.arms
+                {
+                    arms.begin(start);
+                    top.mode = Mode::Cover;
+                }
                 return Step::Next;
             }
             _ => {}
@@ -587,6 +933,24 @@ impl Pass<'_, '_, '_> {
         if top.inherited_region {
             top.first.get_or_insert(index);
             top.pieces.push(Piece::Token(index));
+            return Step::Next;
+        }
+        // A `when` first after a match's head makes it a `match when`.
+        if let FrameKind::Match(found) = &mut top.kind
+            && found.phase == MatchPhase::Head
+            && matches!(kind, TokenKind::Name("when"))
+            && in_keyword_position(view, index)
+        {
+            found.phase = MatchPhase::Arms;
+            let arms = Arms::new(
+                found.head,
+                ArmsKind::When {
+                    keyword: found.keyword,
+                    open: found.open,
+                },
+                found.context,
+            );
+            self.begin_arms(index, arms);
             return Step::Next;
         }
         self.significant(index);
@@ -608,7 +972,7 @@ impl Pass<'_, '_, '_> {
                 "do" if may_head_keyword_form(view, index) => {
                     if self.braced_do(index) {
                         let top = self.top();
-                        top.pending_do = Some(index);
+                        top.pending = Some(Pending::Do(index));
                         top.lambda_head = false;
                         top.pieces.push(Piece::Token(index));
                     } else {
@@ -616,31 +980,33 @@ impl Pass<'_, '_, '_> {
                     }
                     return Step::Next;
                 }
+                "match" | "try_match" if may_head_keyword_form(view, index) => {
+                    return self.open_match(index);
+                }
+                // The first ungrouped `with` after a match's head is its own.
+                "with" if in_keyword_position(view, index) => {
+                    if self.claim_with(index) {
+                        return Step::Next;
+                    }
+                    self.top().view_level = true;
+                }
+                "when" if in_keyword_position(view, index) && self.arm_mark(index) => {
+                    return Step::Next;
+                }
                 // An `and` in guards ends a clause.
-                "and"
-                    if in_keyword_position(view, index)
-                        && matches!(
-                            &self.top().kind,
-                            FrameKind::Conditional(conditional)
-                                if conditional.phase == Phase::Guards
-                        ) =>
-                {
+                "and" if in_keyword_position(view, index) && self.top().in_guards() => {
                     let top = self.top();
                     top.lambda_head = false;
                     top.member_start = true;
                     top.pieces.push(Piece::Token(index));
                     return Step::Next;
                 }
-                "let" | "object" | "where" | "with" if in_keyword_position(view, index) => {
-                    self.top().view_level = true;
-                }
-                "match" | "try_match"
-                    if self.top().first == Some(index) && in_keyword_position(view, index) =>
-                {
+                "let" | "object" | "where" if in_keyword_position(view, index) => {
                     self.top().view_level = true;
                 }
                 _ => {}
             },
+            TokenKind::Symbol("=>" | "=>?") if self.arm_mark(index) => return Step::Next,
             TokenKind::Symbol("->") if !self.top().lambda_head => {
                 // With regions off, a keyword form's own arrows are not hidden.
                 if regions_enabled() {
@@ -669,14 +1035,8 @@ impl Pass<'_, '_, '_> {
     /// token is a `{`, separated from it as the `do` form requires.
     fn braced_do(&self, index: usize) -> bool {
         let view = self.scope.view;
-        let mut next = index + 1;
-        while view
-            .token_at(next)
-            .is_some_and(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
-        {
-            next += 1;
-        }
-        view.token_at(next).is_some_and(|token| {
+        self.next_significant(index + 1).is_some_and(|next| {
+            let token = token(view, next);
             matches!(
                 token.kind(),
                 TokenKind::Open {
@@ -687,11 +1047,34 @@ impl Pass<'_, '_, '_> {
         })
     }
 
+    /// The first token from `index` on that is not a line start.
+    fn next_significant(&self, mut index: usize) -> Option<usize> {
+        let view = self.scope.view;
+        while index < view.range().end() {
+            if !matches!(token(view, index).kind(), TokenKind::LineStart { .. }) {
+                return Some(index);
+            }
+            index += 1;
+        }
+        None
+    }
+
     /// A token inside the top frame's keyword region: only its end, and the
     /// conditionals counted inside it, matter. Separators are handled before.
     fn region_token(&mut self, index: usize) -> Step {
         let view = self.scope.view;
         let kind = token(view, index).kind();
+        // A match's `with` and an arm's marks end the region, as they ended
+        // the view its form was parsed from.
+        let taken = match kind {
+            TokenKind::Name("with") => in_keyword_position(view, index) && self.claim_with(index),
+            TokenKind::Name("when") => in_keyword_position(view, index) && self.arm_mark(index),
+            TokenKind::Symbol("=>" | "=>?") => self.arm_mark(index),
+            _ => false,
+        };
+        if taken {
+            return Step::Next;
+        }
         let top = self.top();
         let is_conditional = matches!(top.kind, FrameKind::Conditional(_));
         match kind {
@@ -756,8 +1139,7 @@ impl Pass<'_, '_, '_> {
         );
         frame.first = Some(index);
         frame.member_start = true;
-        frame.layout_owner = self.stack[self.stack.len() - 1].layout_owner;
-        self.stack.push(frame);
+        self.push(frame);
     }
 
     /// A `then` or `else` in keyword position, for the innermost conditional
@@ -767,9 +1149,10 @@ impl Pass<'_, '_, '_> {
         let is_then = matches!(token(view, index).kind(), TokenKind::Name("then"));
         loop {
             let top = self.top();
-            if matches!(top.kind, FrameKind::Layout(_)) {
-                // A layout block is an open tail too.
-                self.close_layout(index);
+            if matches!(top.kind, FrameKind::Layout(_) | FrameKind::Match(_)) {
+                // A layout block is an open tail too, and a match without
+                // its arms ends unfinished.
+                self.close_top(index);
                 continue;
             }
             let top = self.top();
@@ -844,15 +1227,25 @@ impl Pass<'_, '_, '_> {
         }
     }
 
-    /// Closes every conditional and layout block above the innermost group
-    /// or the view.
+    /// Closes every conditional, layout block and match above the innermost
+    /// group or the view.
     fn close_open_frames(&mut self, index: usize) {
-        loop {
-            match self.stack.last().map(|frame| &frame.kind) {
-                Some(FrameKind::Conditional(_)) => self.close_conditional(index),
-                Some(FrameKind::Layout(_)) => self.close_layout(index),
-                _ => return,
-            }
+        while matches!(
+            self.stack.last().map(|frame| &frame.kind),
+            Some(FrameKind::Conditional(_) | FrameKind::Layout(_) | FrameKind::Match(_))
+        ) {
+            self.close_top(index);
+        }
+    }
+
+    /// Closes the conditional, layout block or match on top, which ends
+    /// before `index`.
+    fn close_top(&mut self, index: usize) {
+        match self.stack.last().map(|frame| &frame.kind) {
+            Some(FrameKind::Conditional(_)) => self.close_conditional(index),
+            Some(FrameKind::Layout(_)) => self.close_layout(index),
+            Some(FrameKind::Match(_)) => self.close_match(index, None),
+            _ => unreachable!("only open tails close before their group"),
         }
     }
 
@@ -882,7 +1275,7 @@ impl Pass<'_, '_, '_> {
                     return false;
                 }
                 while self.stack.len() > owner + 1 {
-                    self.close_conditional(index);
+                    self.close_top(index);
                 }
                 self.close_layout(index);
                 continue;
@@ -894,7 +1287,7 @@ impl Pass<'_, '_, '_> {
                 return false;
             }
             while self.stack.len() > owner + 1 {
-                self.close_conditional(index);
+                self.close_top(index);
             }
             if indentation == anchor {
                 return true;
@@ -927,15 +1320,10 @@ impl Pass<'_, '_, '_> {
         let view = self.scope.view;
         let parent = self.top();
         parent.lambda_head = false;
-        let context = view
-            .line_indentation_at(index)
-            .map_or(parent.context, |indentation| {
-                parent.context.with_physical_line_floor(indentation)
-            })
-            .may_yield();
+        let context = form_context(view, parent.context, index);
         let separator = parent.separator;
-        let mut frame = Frame::new(
-            FrameKind::Layout(Box::new(LayoutDo {
+        self.push(Frame::new(
+            FrameKind::Layout(Box::new(LayoutBlock {
                 head: index,
                 context,
                 anchor: None,
@@ -944,6 +1332,7 @@ impl Pass<'_, '_, '_> {
                 hanging_lines: Vec::new(),
                 boundary: None,
                 failure: None,
+                arms: None,
             })),
             // Statements may bind patterns, and end their tails at `->`.
             Mode::Cover,
@@ -951,9 +1340,7 @@ impl Pass<'_, '_, '_> {
             separator,
             true,
             false,
-        );
-        frame.layout_owner = self.stack.len();
-        self.stack.push(frame);
+        ));
     }
 
     /// Closes the layout block on top, which ends before `index`, into a
@@ -961,9 +1348,17 @@ impl Pass<'_, '_, '_> {
     fn close_layout(&mut self, index: usize) {
         let frame = self.stack.pop().expect("a layout block is open");
         let line_starts = frame.line_starts;
-        let FrameKind::Layout(layout) = frame.kind else {
+        let FrameKind::Layout(mut layout) = frame.kind else {
             unreachable!("only layout blocks close here");
         };
+        if let Some(arms) = layout.arms.take() {
+            let (kind, head) = (arms.kind, arms.head);
+            let result =
+                self.finish_layout_arms(&layout, *arms, &frame.pieces, frame.pending, index);
+            self.top().line_starts += line_starts;
+            self.deliver_arms(kind, head, result, index);
+            return;
+        }
         let head = layout.head;
         let result = self.finish_layout(&layout, &frame.pieces, index);
         let covers = self.scope.covers;
@@ -984,7 +1379,12 @@ impl Pass<'_, '_, '_> {
 
     /// A layout `do` block's statements, checked as the structural parser
     /// checked them.
-    fn finish_layout(&self, layout: &LayoutDo, pieces: &[Piece], end: usize) -> Parse<SyntaxExpr> {
+    fn finish_layout(
+        &self,
+        layout: &LayoutBlock,
+        pieces: &[Piece],
+        end: usize,
+    ) -> Parse<SyntaxExpr> {
         let view = self.scope.view;
         let head = layout.head;
         if let Some(failure) = layout.failure.clone() {
@@ -1053,6 +1453,499 @@ impl Pass<'_, '_, '_> {
             );
         }
         finish_do_statements(parsed).map_err(|message| Fail::error(message).or_at(Some(head)))
+    }
+
+    /// Opens a match at its head, skipping a joint `*`.
+    fn open_match(&mut self, index: usize) -> Step {
+        let view = self.scope.view;
+        let keyword = match token(view, index).kind() {
+            TokenKind::Name("try_match") => "try_match",
+            _ => "match",
+        };
+        let star = (index + 1 < view.range().end())
+            .then(|| token(view, index + 1))
+            .filter(|star| matches!(star.kind(), TokenKind::Symbol("*")));
+        let open = star.is_some_and(|star| star.leading() == LeadingTrivia::Joint);
+        let failure = star.filter(|_| !open).map(|_| {
+            Fail::error(format!(
+                "the open form is spelled `{keyword}*` without intervening whitespace"
+            ))
+            .or_at(Some(index + 1))
+        });
+        let parent = self.top();
+        parent.lambda_head = false;
+        let context = form_context(view, parent.context, index);
+        let separator = parent.separator;
+        let mut frame = Frame::new(
+            FrameKind::Match(Box::new(Match {
+                head: index,
+                keyword,
+                open,
+                phase: MatchPhase::Head,
+                context,
+                subject: None,
+                failure,
+            })),
+            Mode::Expression,
+            context,
+            separator,
+            false,
+            false,
+        );
+        frame.first = Some(index);
+        frame.member_start = true;
+        self.push(frame);
+        if open { Step::Skip } else { Step::Next }
+    }
+
+    /// Takes the `with` at `index` for the innermost match reading its
+    /// subject at this level, if any: the frames open in its subject close
+    /// before it, and its subject is read. Returns whether it took it.
+    fn claim_with(&mut self, index: usize) -> bool {
+        let Some(owner) = self.stack.last().and_then(|frame| frame.match_owner) else {
+            return false;
+        };
+        if !matches!(&self.stack[owner].kind,
+            FrameKind::Match(found) if found.phase == MatchPhase::Subject)
+        {
+            return false;
+        }
+        while self.stack.len() > owner + 1 {
+            self.close_top(index);
+        }
+        let scope = self.scope;
+        let view = scope.view;
+        let frame = self.top();
+        frame.region = false;
+        frame.region_conditionals.clear();
+        frame.lambda_head = false;
+        let pieces = std::mem::take(&mut frame.pieces);
+        let FrameKind::Match(found) = &mut frame.kind else {
+            unreachable!("a match owns the `with`");
+        };
+        found.phase = MatchPhase::Arms;
+        let subject = trim_padding(view, &pieces);
+        found.subject = Some(match subject.first().map(piece_token) {
+            None => Err(Fail::error(format!(
+                "{} expression requires a subject before `with`",
+                display(found.keyword, found.open)
+            ))
+            .or_at(Some(found.head))),
+            Some(first) => {
+                let scope = Scope {
+                    view: subview(view, first, index),
+                    mode: Mode::Expression,
+                    ..scope
+                };
+                let context = found.context.child_owner_at(view, first);
+                binding::expression(scope, subject, context, false)
+                    .map(|(expression, _)| expression)
+            }
+        });
+        let arms = Arms::new(
+            found.head,
+            ArmsKind::Match {
+                keyword: found.keyword,
+                open: found.open,
+            },
+            found.context,
+        );
+        self.begin_arms(index, arms);
+        true
+    }
+
+    /// Starts arms after the `with` or `when` at `keyword`: a braced block
+    /// if a `{` comes next, unless that group begins the first arm's
+    /// pattern, as a mark after it on its line shows; otherwise a layout
+    /// block. The marks on a line where an enclosing arm reads its head or
+    /// guards are that arm's, as the structural parser split it first.
+    fn begin_arms(&mut self, keyword: usize, arms: Arms) {
+        let view = self.scope.view;
+        let enclosing_head = self
+            .stack
+            .last()
+            .and_then(|frame| frame.arms_owner)
+            .and_then(|owner| self.stack[owner].arms())
+            .is_some_and(|enclosing| enclosing.phase != ArmPhase::Result);
+        let brace =
+            self.next_significant(keyword + 1)
+                .and_then(|next| match token(view, next).kind() {
+                    TokenKind::Open {
+                        group,
+                        delimiter: Delimiter::Brace,
+                    } => view.group(*group).and_then(|group| group.close_token()),
+                    _ => None,
+                });
+        if let Some(close) = brace
+            && !(arms.brace_may_begin_arm()
+                && !enclosing_head
+                && self.line_mark(close + 1).is_some())
+        {
+            self.top().pending = Some(Pending::Arms(Box::new(arms)));
+            return;
+        }
+        let parent = self.top();
+        parent.lambda_head = false;
+        let separator = parent.separator;
+        let context = arms.context;
+        self.push(Frame::new(
+            FrameKind::Layout(Box::new(LayoutBlock {
+                head: keyword,
+                context,
+                anchor: None,
+                hanging: false,
+                statements: Vec::new(),
+                hanging_lines: Vec::new(),
+                boundary: None,
+                failure: None,
+                arms: Some(Box::new(arms)),
+            })),
+            // An arm's head and guards may bind patterns.
+            Mode::Cover,
+            context,
+            separator,
+            true,
+            false,
+        ));
+    }
+
+    /// Takes the `=>`, `=>?` or `when` at `index` for the innermost arms
+    /// block at this level whose arm reads its head or guards, if any: the
+    /// frames open in the arm close before it. An arrow begins the arm's
+    /// result; a `when` begins its guards, or heads nested arms when no mark
+    /// follows it on its line. Returns whether it took the mark.
+    fn arm_mark(&mut self, index: usize) -> bool {
+        let Some(owner) = self.stack.last().and_then(|frame| frame.arms_owner) else {
+            return false;
+        };
+        if self.stack[owner]
+            .arms()
+            .is_none_or(|arms| arms.phase == ArmPhase::Result)
+        {
+            return false;
+        }
+        while self.stack.len() > owner + 1 {
+            self.close_top(index);
+        }
+        let view = self.scope.view;
+        let when = matches!(token(view, index).kind(), TokenKind::Name("when"));
+        let next = self.line_mark(index + 1);
+        // An arm's line holds one arrow, as the structural parser counted
+        // the arrows on its first line.
+        let mut later = next;
+        let second_arrow = loop {
+            match later {
+                Some(mark) if !matches!(token(view, mark).kind(), TokenKind::Name("when")) => {
+                    break !when;
+                }
+                Some(mark) => later = self.line_mark(mark + 1),
+                None => break false,
+            }
+        };
+        let frame = self.top();
+        frame.region = false;
+        frame.region_conditionals.clear();
+        frame.lambda_head = false;
+        frame.pieces.push(Piece::Token(index));
+        if !when || next.is_some() {
+            frame.member_start = true;
+            if !when {
+                frame.mode = Mode::Expression;
+            }
+        }
+        let arms = frame.arms_mut().expect("an arms owner holds arms");
+        if !when {
+            if second_arrow {
+                let message = format!(
+                    "{} permits exactly one top-level `=>` or `=>?`",
+                    arms.arm_label()
+                );
+                if let Some(arm) = arms.arms.last_mut() {
+                    arm.failure
+                        .get_or_insert(Fail::error(message).or_at(Some(index)));
+                }
+            }
+            arms.phase = ArmPhase::Result;
+            return true;
+        }
+        if next.is_some() {
+            arms.phase = ArmPhase::Guards;
+            return true;
+        }
+        // A trailing `when`: its nested arms lie deeper than its arm's
+        // first line.
+        let first = arms.arms.last().and_then(|arm| arm.first).unwrap_or(index);
+        let floor = view.line_indentation_at(first).unwrap_or(0);
+        let nested = Arms::new(
+            index,
+            ArmsKind::Nested,
+            arms.context.with_continuation_floor(floor),
+        );
+        self.begin_arms(index, nested);
+        true
+    }
+
+    /// The first arm mark from `from` on its line, at the top frame's
+    /// depth: an `=>`, `=>?` or `when` in keyword position, before a line
+    /// start, a close, the depth's separator, or the end of the view. A
+    /// scan resumes where the last one at its depth stopped, so a line
+    /// costs one walk however many marks and braces it holds.
+    fn line_mark(&mut self, from: usize) -> Option<usize> {
+        let view = self.scope.view;
+        let level = self.stack.last().map_or(0, |frame| frame.level);
+        let frame = &mut self.stack[level];
+        if let Some(scan) = frame.mark_scan
+            && scan.from <= from
+            && from <= scan.to
+        {
+            return scan.mark.then_some(scan.to);
+        }
+        let separator = frame.separator;
+        let end = view.range().end();
+        let mut index = from;
+        let (to, mark) = loop {
+            if index >= end {
+                break (end, false);
+            }
+            match token(view, index).kind() {
+                TokenKind::LineStart { .. } | TokenKind::Close { .. } => break (index, false),
+                TokenKind::Symbol("=>" | "=>?") => break (index, true),
+                TokenKind::Symbol(symbol) if separator == Some(*symbol) => break (index, false),
+                TokenKind::Name("when") if in_keyword_position(view, index) => break (index, true),
+                TokenKind::Open { group, .. } => {
+                    if let Some(close) = view.group(*group).and_then(|group| group.close_token()) {
+                        index = close;
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+        };
+        frame.mark_scan = Some(MarkScan { from, to, mark });
+        mark.then_some(to)
+    }
+
+    /// Hands a closed block's arms to their owner: nested arms to the arm
+    /// whose trailing `when` heads them, and a match's arms to the match,
+    /// which closes at `end` with them.
+    fn deliver_arms(&mut self, kind: ArmsKind, head: usize, result: Parse<ArmList>, end: usize) {
+        if kind != ArmsKind::Nested {
+            self.close_match(end, Some(result));
+            return;
+        }
+        let arms = result.map(|list| match list {
+            ArmList::When(arms) => arms,
+            ArmList::Match(_) => unreachable!("nested arms are read as guards"),
+        });
+        let arm = self
+            .top()
+            .arms_mut()
+            .and_then(|parent| parent.arms.last_mut())
+            .expect("nested arms close into the arm that heads them");
+        arm.nested = Some(NestedArms { when: head, arms });
+    }
+
+    /// Closes the match on top, which ends before `end`, into a form piece
+    /// of its parent: with its arms, or unfinished without them.
+    fn close_match(&mut self, end: usize, arms: Option<Parse<ArmList>>) {
+        let frame = self.stack.pop().expect("a match is open");
+        let line_starts = frame.line_starts;
+        let FrameKind::Match(found) = frame.kind else {
+            unreachable!("only matches close here");
+        };
+        let (head, keyword) = (found.head, found.keyword);
+        let result = self.finish_match(*found, frame.pending, arms);
+        let covers = self.scope.covers;
+        let parent = self.top();
+        parent.line_starts += line_starts;
+        parent.lambda_head = false;
+        parent.pieces.push(Piece::Form {
+            head,
+            end,
+            form: covers.form(Form {
+                head,
+                keyword,
+                shape: FormShape::Prefix,
+                result,
+            }),
+        });
+    }
+
+    fn finish_match(
+        &self,
+        found: Match,
+        pending: Option<Pending>,
+        arms: Option<Parse<ArmList>>,
+    ) -> Parse<SyntaxExpr> {
+        let view = self.scope.view;
+        let head = found.head;
+        if let Some(failure) = found.failure {
+            return Err(failure);
+        }
+        let Some(arms) = arms else {
+            return Err(match pending {
+                // Its braced arms never came.
+                Some(Pending::Arms(arms)) => arms.missing(),
+                _ => Fail::error(format!(
+                    "{} expression requires `with` and at least one layout arm or an explicit `{{}}` body",
+                    display(found.keyword, found.open)
+                ))
+                .or_at(Some(head)),
+            });
+        };
+        let line = view
+            .token_at(head)
+            .and_then(|token| view.line_at_span(token.span()))
+            .unwrap_or(1);
+        let mode = if found.keyword == "try_match" {
+            ConditionalMode::Host
+        } else {
+            ConditionalMode::Pure
+        };
+        let commitment = if found.open {
+            MatchCommitment::Open
+        } else {
+            MatchCommitment::Cut
+        };
+        Ok(match (found.subject, arms?) {
+            (Some(subject), ArmList::Match(arms)) => SyntaxExpr::Match(MatchExpr {
+                line,
+                mode,
+                commitment,
+                subject: Box::new(subject?),
+                arms,
+            }),
+            (None, ArmList::When(arms)) => SyntaxExpr::MatchWhen(MatchWhenExpr {
+                line,
+                mode,
+                commitment,
+                arms,
+            }),
+            _ => unreachable!("a match with a subject reads match arms"),
+        })
+    }
+
+    /// A layout block's arms, checked as the structural parser checked them.
+    fn finish_layout_arms(
+        &self,
+        layout: &LayoutBlock,
+        mut arms: Arms,
+        pieces: &[Piece],
+        pending: Option<Pending>,
+        end: usize,
+    ) -> Parse<ArmList> {
+        let view = self.scope.view;
+        arms.unfinished_nested(pending);
+        let Some(anchor) = layout.anchor else {
+            return Err(arms.missing());
+        };
+        if !layout.context.accepts_layout_anchor(anchor) {
+            let first = arms.arms.first().and_then(|arm| arm.first);
+            return Err(Fail::error(format!(
+                "{} begins at indentation {anchor}; expected more than continuation floor {}",
+                arms.body_label(),
+                layout.context.continuation_floor()
+            ))
+            .or_at(first));
+        }
+        let ends = arms
+            .arms
+            .iter()
+            .skip(1)
+            .map(|arm| arm.start)
+            .chain(std::iter::once(pieces.len()))
+            .collect::<Vec<_>>();
+        let members = arms
+            .arms
+            .iter()
+            .zip(ends)
+            .map(|(arm, end)| &pieces[arm.start..end])
+            .collect::<Vec<_>>();
+        let scope = Scope {
+            view: subview(view, layout.head + 1, end),
+            mode: Mode::Cover,
+            ..self.scope
+        };
+        let missing = arms.missing();
+        let list = self.read_arms(scope, arms, members)?;
+        let empty = match &list {
+            ArmList::Match(list) => list.is_empty(),
+            ArmList::When(list) => list.is_empty(),
+        };
+        if empty { Err(missing) } else { Ok(list) }
+    }
+
+    /// A braced block's arms, split at its `;`s: one leading and one
+    /// trailing `;` are allowed, and `{}` holds none.
+    fn finish_braced_arms(
+        &self,
+        mut arms: Arms,
+        pieces: &[Piece],
+        pending: Option<Pending>,
+        open: usize,
+        close: usize,
+    ) -> Parse<ArmList> {
+        let view = self.scope.view;
+        arms.unfinished_nested(pending);
+        let fail = |message: String| Err(Fail::error(message).or_at(Some(open)));
+        let is_semicolon = |piece: &Piece| {
+            matches!(piece, Piece::Token(index)
+                if matches!(token(view, *index).kind(), TokenKind::Symbol(";")))
+        };
+        let members = pieces.split(is_semicolon).collect::<Vec<_>>();
+        debug_assert_eq!(members.len(), arms.arms.len(), "each member begins an arm");
+        let empty = |member: &[Piece]| trim_padding(view, member).is_empty();
+        if members.iter().all(|member| empty(member)) && members.len() > 1 {
+            return fail(format!(
+                "{} cannot contain only semicolons; use `{{}}` for an empty body",
+                arms.body_label()
+            ));
+        }
+        let last = members.len() - 1;
+        if (1..last).any(|position| empty(members[position])) {
+            return fail(format!(
+                "{} contains an empty member between semicolons",
+                arms.body_label()
+            ));
+        }
+        let scope = Scope {
+            view: subview(view, open + 1, close),
+            mode: Mode::Cover,
+            ..self.scope
+        };
+        self.read_arms(scope, arms, members)
+    }
+
+    /// Reads each arm from its pieces, skipping empty members.
+    fn read_arms(
+        &self,
+        scope: Scope<'_, '_, '_>,
+        arms: Arms,
+        members: Vec<&[Piece]>,
+    ) -> Parse<ArmList> {
+        let view = self.scope.view;
+        let mut list = match arms.kind {
+            ArmsKind::Match { .. } => ArmList::Match(Vec::new()),
+            _ => ArmList::When(Vec::new()),
+        };
+        for (member, arm) in members.into_iter().zip(arms.arms) {
+            let member = trim_padding(view, member);
+            if member.is_empty() {
+                continue;
+            }
+            if let Some(failure) = arm.failure {
+                return Err(failure);
+            }
+            match &mut list {
+                ArmList::Match(list) => {
+                    list.push(binding::match_arm(scope, member, arm.nested, arms.context)?);
+                }
+                ArmList::When(list) => {
+                    list.push(binding::when_arm(scope, member, arm.nested, arms.context)?);
+                }
+            }
+        }
+        Ok(list)
     }
 
     /// Closes the conditional on top, which ends before `index`, into a

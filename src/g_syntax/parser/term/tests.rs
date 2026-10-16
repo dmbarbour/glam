@@ -700,8 +700,10 @@ fn deep_nesting_parses_in_linear_time_without_recursion() {
 /// conditionals a group, an `else` branch, a `then` group, an argument, a
 /// postfix fallback, a lambda body and a guard; for braced `do` blocks a
 /// statement's operation and value; for layout `do` blocks a hanging first
-/// statement, bare and in a group. Frames cost heap, not Rust stack, so each
-/// shape parses 2,000 deep.
+/// statement, bare and in a group; for matches a subject, an arm's result
+/// and guard, a `match when` arm's result, nested arms, and a statement's
+/// operation. Frames cost heap, not Rust stack, so each shape parses 2,000
+/// deep.
 const KEYWORD_FRAME_NESTING_SHAPES: &[(&str, &str, &str)] = &[
     ("(if c then ", " else 0)", "1"),
     ("if c then 1 else ", "", "0"),
@@ -716,7 +718,27 @@ const KEYWORD_FRAME_NESTING_SHAPES: &[(&str, &str, &str)] = &[
     ("do { x = ", "; .r x }", "1"),
     ("do ", "", ".r 1"),
     ("(do ", ")", ".r 1"),
+    ("match ", " with {_ => 1}", "x"),
+    ("match x with {_ => ", "}", "1"),
+    ("match x with {_ when ", " => 1}", "c"),
+    ("match when {c => ", "}", "1"),
+    ("match x with {_ when {c => ", "}}", "1"),
+    ("do { x <- match y with {_ => ", "}; .r x }", ".r 1"),
 ];
+
+/// Layout arms nested in arms' results, each a line deeper.
+#[test]
+fn layout_arms_nest_in_linear_time_without_recursion() {
+    let depth = 1_000;
+    let mut text = String::new();
+    for level in 0..depth {
+        text.push_str("match x with\n");
+        text.push_str(&"  ".repeat(level + 1));
+        text.push_str("_ => ");
+    }
+    text.push('1');
+    assert_term_parses_quickly(&text, std::time::Duration::from_secs(2));
+}
 
 #[test]
 fn keyword_frame_nesting_parses_in_linear_time_without_recursion() {

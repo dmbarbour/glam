@@ -30,16 +30,17 @@
 //!
 //! **Errors are deferred to use.** A group whose contents are invalid as an
 //! expression keeps its error in its cover, and the error surfaces only if a
-//! role consumes the cover. A keyword form's own groups, such as a `do` or
-//! `match` body, are never consumed here, so they raise nothing.
+//! role consumes the cover. A delegated keyword form's own groups, such as a
+//! `using` body, are never consumed here, so they raise nothing.
 //!
-//! **Conditionals** (`if`, `try`, and postfix `if`) are frames of the token
-//! pass (`pass`), interpreted when they close into form pieces. A postfix
-//! `if`, on the same line or a continuation line, ends the innermost open
-//! lambda's body: `\x -> b if c else d` is `\x -> (b if c else d)`.
+//! **Keyword frames**: conditionals (`if`, `try`, and postfix `if`), `do`
+//! blocks and matches are frames of the token pass (`pass`), interpreted
+//! when they close into form pieces, atoms of the item they stand in. A
+//! postfix `if`, on the same line or a continuation line, ends the innermost
+//! open lambda's body: `\x -> b if c else d` is `\x -> (b if c else d)`.
 //!
-//! **Other keyword forms** (`match`, `try_match`, `do` and `using`) are
-//! delegated to the structural parsers through the same entry points the
+//! **Other keyword forms** (`using`, and any form inside another's region)
+//! are delegated to the structural parsers through the same entry points the
 //! Chumsky grammar uses. The cursor then skips to the end the structural
 //! parser reports. A keyword head opens a region to its group member's end,
 //! and groups closing inside it are deferred, not interpreted: the form's

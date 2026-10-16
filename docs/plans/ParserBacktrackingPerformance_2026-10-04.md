@@ -331,8 +331,8 @@ production keeps the old parser until the oracle agrees.
   keywords ([Keyword regions 2026-10-15](#keyword-regions-2026-10-15)).
   Native keyword frames started 2026-10-16
   ([Native keyword frames 2026-10-16](#native-keyword-frames-2026-10-16)):
-  `parser-keyword-frames-conditionals` and `parser-keyword-frames-bindings`
-  done.
+  `parser-keyword-frames-conditionals`, `parser-keyword-frames-bindings`
+  and `parser-keyword-frames-layout` done.
 - `parser-scope-analysis`: added 2026-10-15; not started.
 - `parser-constant-factors`: added 2026-10-16; not started.
 - `parser-grammar-retirement`: not started. Chumsky still parses the
@@ -906,7 +906,8 @@ beside group frames:
    blocks. (`let … in` and `using` moved to the suffix slice on
    2026-10-16: their multi-line forms need layout blocks first.)
 3. `parser-keyword-frames-layout`: block frames; layout `do`, `match` and
-   `try_match` arms, braced and layout; multi-line `let`.
+   `try_match` arms, braced and layout. (Multi-line `let` moved to the
+   suffix slice on 2026-10-16, with the rest of `let`.)
 4. `parser-keyword-frames-suffixes`: `let`, `using`, `where`, `with` and
    `object`.
 5. The structural parsers' expression paths then serve only the oracle,
@@ -1022,6 +1023,84 @@ of the layout slice; `match` arms and multi-line `let` remain.
 - **Found by the oracle and generated sources:** a hanging-alignment check
   read a line past the `do`'s group member (a panic), and a pending braced
   `do` outlived a statement start (stale statement positions).
+
+**`parser-keyword-frames-layout`, matches (2026-10-16).** The rest of the
+layout slice. Multi-line `let` moves to the suffix slice, with `let`.
+- **The frame.** A `match` or `try_match`, with or without `*`, is a frame:
+  its head, its subject read as an expression, then its arms. A `when`
+  first after the head makes it a `match when`, whose arms follow at once.
+- **`with`.** A `with` in keyword position belongs to the innermost match
+  reading its subject at its level. Conditionals, layout blocks and matches
+  opened in the subject close before it. Each frame records that match's
+  stack index, as it records its layout owner, so finding it costs nothing
+  per enclosing frame. A `with` that no match takes is a `with` suffix,
+  parsed from its view as before.
+- **Arms** are a block, closed as `do` blocks close:
+  - braced, split at `;`, or layout, judged line by line;
+  - after `with`, a `{` begins a layout block when an `=>`, `=>?` or `when`
+    follows the group on its line, so the group is the first arm's
+    pattern; otherwise the block is braced. This is the outcome of the
+    structural parser's trial of the layout reading, decided once.
+  - Nested arms after a `{` are always braced.
+- **Marks.** An arm's `=>`, `=>?` and `when` belong to the innermost arms
+  block at their level while its arm reads its head or guards.
+  - Frames opened in the arm close before a mark, as the structural parser
+    split an arm lexically before parsing its parts.
+  - The arrow begins the result, read as an expression.
+  - A `when` begins the guards, or heads nested arms when no mark follows
+    it on its line. Nested arms are a block of their own, floored at their
+    arm's first line, and hand their arms to that arm when they close.
+  - A scan for the next mark on a line resumes where the last one at its
+    depth stopped, so a line costs one walk.
+  - While an enclosing arm reads its head or guards, the marks later on its
+    line are that arm's, so a `{` after a nested match's `with` there is
+    braced.
+- **Routing.** `parse_expression_extent` sends a view led by `match` or
+  `try_match` to the term parser, unless a `where` stands at its level, as
+  it sends conditionals. A parenthesized group led by one is an ordinary
+  group. View-level dispatch's suffix resumption read what followed a
+  leading match differently from the item interpreter: it rejected a
+  section such as `(match x with {…} +)`, and checked an operand's lines
+  inside groups against the resumed operator's indentation. The generated
+  expressions at 200 times their usual count found both.
+- **Reading.** An arm's pieces are split and read when its block closes
+  (`binding::match_arm`, `binding::when_arm`), with the structural parser's
+  messages. The structural parser counted every `=>` on an arm's first
+  line, so the pass reports a second one, even one inside a nested hanging
+  match.
+- **Intended changes**, with the structural parser changed to agree, so the
+  oracle still compares like with like:
+  - **A match is an atom wherever it stands.** View-level dispatch let
+    only an operator, `where` or a postfix `if` follow a leading match's
+    arms. So `match x with {…} y` failed while `f match x with {…} y`
+    applied the match, as `do {…} y` applies a `do` block. A view led by a
+    match now parses as the item interpreter reads it, and the structural
+    parser hands it the views it still reads, when what follows the arms
+    stops its resumption. This settles the question left by
+    `parser-keyword-frames-conditionals`.
+  - **A match in a subject takes the first `with` after its own head**, as
+    nested `if`s take their `then`s, so `match match a with {…} with {…}`
+    parses. It was rejected: the outer match took every `with`.
+  - **Nested `when` arms end their arm.** Lines after them at a shallower
+    indentation were silently dropped, and so was anything after a braced
+    block on its line; both are errors now.
+- **Measures** in user-space instructions against `main` at `34224e46`,
+  with a new family, `parse_matches`: braced matches nested in arms'
+  results, in parentheses.
+  - `parse_matches`: 72.2 M against 74.0 M at 128 deep, k 1.06 → 1.03.
+    Callgrind puts parsing at 3% of it (2.1 M in `top_pieces`, about 17 K
+    instructions a level); lowering takes most of the 380 K a level
+    (`net_lowering::lower_resolved_expr_in`, 66%), as for nested `if`s.
+  - Elsewhere level: `hello_elf`, `do_chain_800`, `dict_lookup_2000`,
+    `chain_where_800` and `list_literal_4000` within ±0.06%.
+- **Depth:** matches nested through a subject, an arm's result and guard, a
+  `match when` arm, nested arms and a statement's operation parse 2,000
+  deep, and layout arms nested in arms' results 1,000 deep, each a line
+  deeper (`layout_arms_nest_in_linear_time_without_recursion`).
+- **Found by the depth test:** the lookahead for a first arm's `{` read an
+  enclosing arm's `=>` as the mark after a dict pattern. A match nested in a
+  guard then sent its braced arms to the cover interpreter, which recursed
+  through the structural parsers to a stack overflow at 2,000 deep.
 
 ## Verification
 

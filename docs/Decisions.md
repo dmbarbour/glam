@@ -483,6 +483,32 @@ maps the short names used here to file names.
   Do Notation".
 - **Recorded in:** parser backtracking plan, "Patterns 2026-10-16".
 
+### A match is an atom, and nests in its subject
+`match-is-an-atom` · 2026-10-16 · agent · accepted
+- **Context:** making `match` a frame of the term parser's token pass, which
+  reads every form as an atom of the item it stands in. View-level dispatch
+  let only an operator, `where` or a postfix `if` follow a match that led
+  its view, so `match x with {…} y` failed while `f match x with {…} y` and
+  `do {…} y` applied the form. The outer match took every ungrouped `with`,
+  so a match in a subject never had one. Lines after an arm's nested `when`
+  arms, at a shallower indentation or after a braced block, were silently
+  dropped.
+- **Decision:** a match reads alike wherever it stands: whatever follows
+  its arms reads as the expression grammar reads it. A match nested in a
+  subject takes the first `with` after its own head, as nested `if`s take
+  their `then`s. Nested arms end their arm, and anything after them in it
+  is an error. The structural parser changed to agree while it remains the
+  oracle.
+- **Consequences:**
+  - `match x with {…} y` applies the match, and so does a layout match
+    followed by a continuation line, as after a layout `do`.
+  - `match match a with {…} with {…}` parses.
+  - Text after nested arms is an error, no longer lost.
+- **Rule lives in:** `Syntax.md` "Match"; `SyntaxCheatSheet.md`, the match
+  lines.
+- **Recorded in:** parser backtracking plan, "Native keyword frames
+  2026-10-16".
+
 ### Only a lone quoted name is an atom key in a key path
 `lone-quoted-name-is-an-atom-key` · 2026-10-06 · maintainer · superseded
 - **Context:** the grammar committed to a leading `'name` as the whole key.

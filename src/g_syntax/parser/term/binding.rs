@@ -8,7 +8,10 @@
 //! holding a form that view-level dispatch parses is parsed from its view.
 
 use crate::g_syntax::keywords::{canonical_keyword, g0_keyword, reserved_keyword_message};
-use crate::g_syntax::{SyntaxExpr, SyntaxGuardClause, SyntaxPattern};
+use crate::g_syntax::{
+    ConditionalResultMode, MatchArm, MatchOutcome, SyntaxExpr, SyntaxGuardClause, SyntaxPattern,
+    WhenArm,
+};
 
 use super::super::do_expr::ParsedDoStatement;
 use super::super::expression_context::{ExpressionContext, validate_expression_floor};
@@ -137,7 +140,7 @@ fn binding(
         if left.is_empty() {
             return missing(missing_pattern);
         }
-        let pattern = pattern(scope, left)?;
+        let pattern = pattern(scope, left, Position::Nested)?;
         if right.is_empty() {
             return missing(missing_right);
         }
@@ -169,9 +172,176 @@ fn binding(
         return missing(Missing::ForwardPattern);
     }
     Ok(Binding::Effect {
-        pattern: pattern(scope, rest)?,
+        pattern: pattern(scope, rest, Position::Nested)?,
         operation,
     })
+}
+
+/// The arms nested under an arm's trailing `when`, which the pass read as
+/// their own block.
+pub(super) struct NestedArms {
+    pub(super) when: usize,
+    pub(super) arms: Parse<Vec<WhenArm>>,
+}
+
+/// A match arm: a complete pattern, an optional `when` guard, and its
+/// outcome.
+pub(super) fn match_arm(
+    scope: Scope<'_, '_, '_>,
+    pieces: &[Piece],
+    nested: Option<NestedArms>,
+    context: ExpressionContext,
+) -> Parse<MatchArm> {
+    let view = scope.view;
+    let line = line_of(view, pieces);
+    let (head, outcome) = choice_arm(scope, pieces, nested, context, "match arm", "a pattern")?;
+    let at = head.first().map(piece_token);
+    let whens = head
+        .iter()
+        .enumerate()
+        .filter(|(_, piece)| is_keyword(view, piece, "when"))
+        .map(|(position, _)| position)
+        .collect::<Vec<_>>();
+    let (pattern, guards) = match whens[..] {
+        [] => (pattern(scope, head, Position::Complete)?, Vec::new()),
+        [when] => {
+            let pattern_pieces = trim_padding(view, &head[..when]);
+            let guards = trim_padding(view, &head[when + 1..]);
+            if pattern_pieces.is_empty() {
+                return Err(Fail::error("match arm requires a pattern before `when`").or_at(at));
+            }
+            if guards.is_empty() {
+                return Err(Fail::error("match arm requires guards after `when`").or_at(at));
+            }
+            (
+                pattern(scope, pattern_pieces, Position::Complete)?,
+                guard_clauses(scope, guards, "match arm guard")?,
+            )
+        }
+        _ => {
+            return Err(
+                Fail::error("match arm permits one top-level `when` guard boundary").or_at(at),
+            );
+        }
+    };
+    Ok(MatchArm {
+        line,
+        pattern,
+        guards,
+        outcome,
+    })
+}
+
+/// A `match when` arm: guards and their outcome.
+pub(super) fn when_arm(
+    scope: Scope<'_, '_, '_>,
+    pieces: &[Piece],
+    nested: Option<NestedArms>,
+    context: ExpressionContext,
+) -> Parse<WhenArm> {
+    let line = line_of(scope.view, pieces);
+    let (guards, outcome) = choice_arm(scope, pieces, nested, context, "match-when arm", "guards")?;
+    Ok(WhenArm {
+        line,
+        guards: guard_clauses(scope, guards, "match-when arm guard")?,
+        outcome,
+    })
+}
+
+/// An arm split at the `=>` or `=>?` on its first line, or at the trailing
+/// `when` that heads its nested arms.
+fn choice_arm<'p>(
+    scope: Scope<'_, '_, '_>,
+    pieces: &'p [Piece],
+    nested: Option<NestedArms>,
+    context: ExpressionContext,
+    label: &str,
+    required_head: &str,
+) -> Parse<(&'p [Piece], MatchOutcome)> {
+    let view = scope.view;
+    let pieces = trim_padding(view, pieces);
+    let at = pieces.first().map(piece_token);
+    let fail = |message: String| Err(Fail::error(message).or_at(at));
+    if pieces.is_empty() {
+        return fail(format!("{label} cannot be empty"));
+    }
+    let first_line = pieces
+        .iter()
+        .position(|piece| is_line_start(view, piece))
+        .unwrap_or(pieces.len());
+    let arrows = pieces[..first_line]
+        .iter()
+        .enumerate()
+        .filter_map(|(position, piece)| {
+            if is_symbol(view, piece, "=>") {
+                Some((position, ConditionalResultMode::Ordinary))
+            } else if is_symbol(view, piece, "=>?") {
+                Some((position, ConditionalResultMode::Tentative))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    if arrows.len() > 1 {
+        return fail(format!(
+            "{label} permits exactly one top-level `=>` or `=>?`"
+        ));
+    }
+    if let Some((arrow, mode)) = arrows.first().copied() {
+        let head = trim_padding(view, &pieces[..arrow]);
+        let result = trim_padding(view, &pieces[arrow + 1..]);
+        if head.is_empty() {
+            return fail(format!("{label} requires {required_head} before `=>`"));
+        }
+        if result.is_empty() {
+            return fail(format!("{label} requires a result after `=>`"));
+        }
+        let first = piece_token(&result[0]);
+        let line = line_of(view, result);
+        let (expression, _) =
+            expression(scope, result, context.child_owner_at(view, first), false)?;
+        return Ok((
+            head,
+            MatchOutcome::Result {
+                line,
+                mode,
+                expression,
+            },
+        ));
+    }
+    let Some(nested) = nested else {
+        return fail(format!(
+            "{label} requires `=>`, `=>?`, or a trailing `when` child block"
+        ));
+    };
+    let when = pieces
+        .iter()
+        .rposition(|piece| piece_token(piece) == nested.when)
+        .expect("a trailing `when` stands among its arm's pieces");
+    let head = trim_padding(view, &pieces[..when]);
+    if head.is_empty() {
+        return fail(format!(
+            "{label} requires {required_head} before nested `when`"
+        ));
+    }
+    if !trim_padding(view, &pieces[when + 1..]).is_empty() {
+        return fail(format!("{label} continues after its nested `when` block"));
+    }
+    Ok((head, MatchOutcome::Nested(nested.arms?)))
+}
+
+/// The line of pieces' first token.
+fn line_of(view: TokenView<'_, '_>, pieces: &[Piece]) -> usize {
+    pieces
+        .first()
+        .and_then(|piece| view.token_at(piece_token(piece)))
+        .and_then(|token| view.line_at_span(token.span()))
+        .unwrap_or(1)
+}
+
+fn is_line_start(view: TokenView<'_, '_>, piece: &Piece) -> bool {
+    matches!(piece, Piece::Token(index)
+        if matches!(token(view, *index).kind(), TokenKind::LineStart { .. }))
 }
 
 /// The `<-` or `=` that makes a clause a binding, by position.
@@ -198,8 +368,8 @@ fn pattern_binder(view: TokenView<'_, '_>, pieces: &[Piece]) -> Option<usize> {
     None
 }
 
-/// A pattern in a nested position.
-fn pattern(scope: Scope<'_, '_, '_>, pieces: &[Piece]) -> Parse<SyntaxPattern> {
+/// A pattern in `position`.
+fn pattern(scope: Scope<'_, '_, '_>, pieces: &[Piece], position: Position) -> Parse<SyntaxPattern> {
     let view = scope.view;
     let first = piece_token(&pieces[0]);
     let scope = Scope {
@@ -210,13 +380,13 @@ fn pattern(scope: Scope<'_, '_, '_>, pieces: &[Piece]) -> Parse<SyntaxPattern> {
     };
     Items::new(scope, pieces)
         .pattern_item()?
-        .into_pattern(Position::Nested)
+        .into_pattern(position)
         .map_err(|message| Fail::error(message).or_at(Some(first)))
 }
 
 /// An expression side, returning the position of the `->` it stopped at
 /// when `ends_at_arrow`.
-fn expression(
+pub(super) fn expression(
     scope: Scope<'_, '_, '_>,
     pieces: &[Piece],
     context: ExpressionContext,
@@ -266,8 +436,8 @@ fn expression(
 }
 
 /// Whether pieces hold a form that view-level dispatch parses: `let`,
-/// `object`, `where` or `with` at their level, a leading `match` or
-/// `try_match`, or one parenthesized group holding such a form.
+/// `object`, `where` or `with` at their level, or one parenthesized group
+/// holding such a form.
 pub(super) fn needs_view_dispatch(view: TokenView<'_, '_>, pieces: &[Piece]) -> bool {
     let pieces = trim_padding(view, pieces);
     if let [
@@ -285,13 +455,11 @@ pub(super) fn needs_view_dispatch(view: TokenView<'_, '_>, pieces: &[Piece]) -> 
                 }
             );
     }
-    let leading = leads_with(view, pieces, "match") || leads_with(view, pieces, "try_match");
-    leading
-        || pieces.iter().any(|piece| {
-            ["let", "object", "where", "with"]
-                .into_iter()
-                .any(|name| is_keyword(view, piece, name))
-        })
+    pieces.iter().any(|piece| {
+        ["let", "object", "where", "with"]
+            .into_iter()
+            .any(|name| is_keyword(view, piece, name))
+    })
 }
 
 /// The view from the first piece to the end of the last.

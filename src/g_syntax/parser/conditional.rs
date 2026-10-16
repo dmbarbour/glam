@@ -18,6 +18,7 @@ use super::structural::{
     in_keyword_position, is_layout_empty, parse_expression_in_context, parse_open_tail,
     split_braced_members, trim_layout,
 };
+use super::term::may_head_keyword_form;
 
 type ParseResult<T> = Result<T, Vec<Diagnostic>>;
 
@@ -322,12 +323,28 @@ fn parse_match_like_expression(
         ));
     }
 
+    // A match nested in the subject takes the first `with` after its own
+    // head, as the term parser's match frames nest.
+    let mut nested = 0usize;
     let with_index = view
         .top_level()
+        .filter(|indexed| indexed.index() > head_index)
         .find(|indexed| {
-            indexed.index() > head_index
-                && in_keyword_position(view, indexed.index())
-                && token_is_name(indexed.token(), "with")
+            let index = indexed.index();
+            let token = indexed.token();
+            if (token_is_name(token, "match") || token_is_name(token, "try_match"))
+                && may_head_keyword_form(view, index)
+                && !heads_match_when(view, index)
+            {
+                nested += 1;
+                return false;
+            }
+            if !token_is_name(token, "with") || !in_keyword_position(view, index) {
+                return false;
+            }
+            let ours = nested == 0;
+            nested = nested.saturating_sub(1);
+            ours
         })
         .map(|indexed| indexed.index())
         .ok_or_else(|| {
@@ -504,7 +521,7 @@ fn split_choice_arm<'lex, 'source>(
     }
     let nested_body = view_between(view, nested_when + 1, view.range().end());
     let nested_context = context.with_continuation_floor(first_line.indentation());
-    let (arms, _) = choice_members(
+    let (arms, end) = choice_members(
         nested_body,
         nested_context,
         "nested match-when body",
@@ -512,6 +529,18 @@ fn split_choice_arm<'lex, 'source>(
         false,
         parse_when_arm,
     )?;
+    // Nested arms end their arm; anything after them would be lost.
+    let rest = trim_layout(view_between(
+        view,
+        end.min(view.range().end()),
+        view.range().end(),
+    ));
+    if !is_layout_empty(rest) {
+        return Err(error_at_view(
+            rest,
+            format!("{label} continues after its nested `when` block"),
+        ));
+    }
     Ok((head, MatchOutcome::Nested(arms)))
 }
 
@@ -624,6 +653,22 @@ where
         .map(|member| parse_member(member, context))
         .collect::<ParseResult<Vec<_>>>()?;
     Ok((parsed, close + 1))
+}
+
+/// Whether the match head at `index` begins a `match when`, which takes no
+/// `with`.
+fn heads_match_when(view: TokenView<'_, '_>, index: usize) -> bool {
+    let star = view.token_at(index + 1).is_some_and(|token| {
+        matches!(token.kind(), TokenKind::Symbol("*")) && token.leading() == LeadingTrivia::Joint
+    });
+    let after = trim_layout(view_between(
+        view,
+        (index + 1 + usize::from(star)).min(view.range().end()),
+        view.range().end(),
+    ));
+    after.first_significant().is_some_and(|(when, token)| {
+        token_is_name(token, "when") && in_keyword_position(after, when)
+    })
 }
 
 fn top_level_contextual_names(view: TokenView<'_, '_>, expected: &str) -> Vec<usize> {
@@ -1385,8 +1430,46 @@ mod tests {
     }
 
     #[test]
+    fn a_match_is_an_atom_wherever_it_stands() {
+        // What follows its arms reads as the expression grammar reads it,
+        // as after a `do` block or a match in an argument.
+        for source in ["match a with {z => 1} b", "match a with\n    z => 1\n  b"] {
+            let SyntaxExpr::Apply(function, argument) = parse(source) else {
+                panic!("`{source}` should apply the match");
+            };
+            assert!(matches!(*function, SyntaxExpr::Match(_)), "{source}");
+            assert_eq!(*argument, SyntaxExpr::Name("b".to_owned()), "{source}");
+        }
+    }
+
+    #[test]
+    fn a_match_in_a_subject_takes_the_first_with_after_its_head() {
+        for source in [
+            "match match a with {z => z} with {_ => 1}",
+            "match match a with\n    z => z\n  with {_ => 1}",
+        ] {
+            let SyntaxExpr::Match(outer) = parse(source) else {
+                panic!("`{source}` should parse as a match");
+            };
+            assert!(
+                matches!(outer.subject.as_ref(), SyntaxExpr::Match(inner) if inner.arms.len() == 1),
+                "{source}"
+            );
+            assert_eq!(outer.arms.len(), 1, "{source}");
+        }
+    }
+
+    #[test]
     fn malformed_hierarchical_match_reports_missing_prefixes_and_children() {
         for (source, expected) in [
+            (
+                "match x with\n  _ when\n      c => 1\n    d",
+                "continues after its nested `when` block",
+            ),
+            (
+                "match x with\n  _ when {c => 1} d",
+                "continues after its nested `when` block",
+            ),
             (
                 "match when",
                 "layout `match when` requires at least one arm",

@@ -101,6 +101,9 @@ parse_patterns() {
 parse_binds() {
   printf 'language g0\nx = %s\nasm.result = "ok"' "$(nest "$1" '(do { ' ' -> z; .r z })' '.r 1')"
 }
+parse_matches() {
+  printf 'language g0\nc = 1\nx = %s\nasm.result = "ok"' "$(nest "$1" '(match c with {_ => ' '})')"
+}
 list_literal() { printf 'language g0\nxs = [%s]\nasm.result = "ok"' "$(seq -s ', ' 1 "$1")"; }
 family parse_parens 100
 family parse_lists 100
@@ -108,6 +111,7 @@ family parse_lists 100
 family parse_ifs 4
 family parse_patterns 32
 family parse_binds 4
+family parse_matches 4
 family list_literal 1000
 
 # Recursion: in tail position, not in tail position, and through a chain
