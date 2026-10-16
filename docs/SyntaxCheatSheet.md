@@ -514,6 +514,9 @@ View -> P => Result # whole match-arm view may omit outer parentheses
 (Prefix "x-" rest)  # last arg is the pattern
 Prefix "x-" rest => Result # complete match arm may omit outer parentheses
 (P when Guard)      # local guard
+(P as Nat n)  (f -> Nat n)  (Nat n when G)  # also after `as`, `->`, before `when`
+# Loosest first: `when`, one view arrow, `as`; then as in expressions:
+# `[x] ++ Nat n` is an error (predicate needs parens), a:Nat n ≡ (a:Nat) n
 ```
 
 ## Objects

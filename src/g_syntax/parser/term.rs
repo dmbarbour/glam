@@ -44,13 +44,23 @@
 //! parser only. A group the term parser consumes after a form that ended
 //! early is interpreted when it is consumed.
 //!
+//! **Cover mode** parses a pattern position. Groups are interpreted into
+//! role-neutral cover terms (`cover::Term`) instead of expressions, and the
+//! item grammar adds what patterns need: `_`, quoted paths kept as keys,
+//! `path?:` and `:_name` dict members, and the pattern operators. Loosest
+//! first, these are `when`, one view arrow (`->` or `<-`) and `as`, above
+//! the expression grammar, whose precedence is otherwise unchanged. A `when`
+//! opens a keyword region, and the guard-clause parser reads its clauses. A
+//! term converts by role once the role is known; ordinary expression parses
+//! never build terms that are not expressions.
+//!
 //! **Coverage.** Constructs not yet covered report `Fail::Unsupported`:
 //! keywords as lambda parameters, and invalid tokens.
 
 use std::cell::RefCell;
 
 use crate::g_syntax::keywords::{canonical_keyword, g0_keyword, reserved_keyword_message};
-use crate::g_syntax::{PathSuffix, SyntaxExpr, SyntaxKeyExpr, SyntaxOperator};
+use crate::g_syntax::{PathSuffix, SyntaxExpr, SyntaxKeyExpr, SyntaxOperator, SyntaxPattern};
 
 use super::conditional::is_postfix_if_candidate;
 use super::expression::{
@@ -59,10 +69,16 @@ use super::expression::{
     validate_dict_colon_members, validate_expr_name,
 };
 use super::expression_context::ExpressionContext;
-use super::input::TokenView;
+use super::input::{TokenRange, TokenView};
 use super::layout::group_separator;
 use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
-use super::structural::before_key_mark;
+use super::pattern::parse_guard_clauses;
+use super::structural::{before_key_mark, in_keyword_position};
+
+pub(super) use self::cover::Position;
+use self::cover::Term;
+
+mod cover;
 
 /// Why the term parser produced no syntax tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,13 +140,48 @@ pub(super) fn parse_term_chain(
     view: TokenView<'_, '_>,
     context: ExpressionContext,
 ) -> Parse<InfixChain> {
-    prescan(view)?;
     let covers = Covers::default();
     let scope = Scope {
         view,
         context,
         covers: &covers,
+        mode: Mode::Expression,
     };
+    let pieces = top_pieces(scope)?;
+    // Trailing layout ends the expression; leading layout does not start one.
+    Items::new(scope, trim_trailing_padding(view, &pieces)).item()
+}
+
+/// Parses `view` as one pattern in `position`, in cover mode.
+pub(super) fn parse_pattern_term(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+    position: Position,
+) -> Parse<SyntaxPattern> {
+    let covers = Covers::default();
+    let scope = Scope {
+        view,
+        context,
+        covers: &covers,
+        mode: Mode::Cover,
+    };
+    let pieces = top_pieces(scope)?;
+    let pieces = trim_padding(view, &pieces);
+    if pieces.is_empty() {
+        return error("expected a pattern");
+    }
+    Items::new(scope, pieces)
+        .pattern_item()?
+        .into_pattern(position)
+        .map_err(Fail::error)
+}
+
+/// The token pass: the view's top-level pieces, with every group closing in
+/// it interpreted into its cover, or deferred in a keyword region.
+fn top_pieces(scope: Scope<'_, '_, '_>) -> Parse<Vec<Piece>> {
+    let view = scope.view;
+    prescan(view)?;
+    let covers = scope.covers;
     let mut stack = vec![Frame {
         delimiter: None,
         group: None,
@@ -202,7 +253,7 @@ pub(super) fn parse_term_chain(
                     }) {
                         frame.region = false;
                     }
-                } else if opens_keyword_region(view, index) {
+                } else if opens_keyword_region(view, index, scope.mode) {
                     frame.region = true;
                 }
                 frame.pieces.push(Piece::Token(index));
@@ -212,8 +263,7 @@ pub(super) fn parse_term_chain(
     }
     let top = stack.pop().expect("the view frame remains");
     debug_assert!(stack.is_empty(), "every group closes inside the view");
-    // Trailing layout ends the expression; leading layout does not start one.
-    Items::new(scope, trim_trailing_padding(view, &top.pieces)).item()
+    Ok(top.pieces)
 }
 
 /// Rejects, before any group is interpreted, constructs this parser does not
@@ -244,6 +294,16 @@ struct Scope<'s, 'lex, 'source> {
     view: TokenView<'lex, 'source>,
     context: ExpressionContext,
     covers: &'s Covers,
+    mode: Mode,
+}
+
+/// Which grammar a parse reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// An ordinary expression: every term is an expression.
+    Expression,
+    /// A position that may hold a pattern: terms are role-neutral.
+    Cover,
 }
 
 struct Frame {
@@ -272,12 +332,19 @@ impl Frame {
 /// reads the region from its tokens, so groups closing inside it are
 /// deferred rather than interpreted, and every group is interpreted by one
 /// parser.
-fn opens_keyword_region(view: TokenView<'_, '_>, index: usize) -> bool {
+/// In cover mode, a `when` opens one too: the guard-clause parser reads its
+/// clauses.
+fn opens_keyword_region(view: TokenView<'_, '_>, index: usize, mode: Mode) -> bool {
     #[cfg(test)]
     if REGIONS_OFF.with(std::cell::Cell::get) {
         return false;
     }
-    may_head_keyword_form(view, index)
+    may_head_keyword_form(view, index) || mode == Mode::Cover && is_pattern_when(view, index)
+}
+
+/// Whether the token at `index` is a `when` that guards a pattern.
+fn is_pattern_when(view: TokenView<'_, '_>, index: usize) -> bool {
+    matches!(token(view, index).kind(), TokenKind::Name("when")) && in_keyword_position(view, index)
 }
 
 /// Whether the token at `index` may head a keyword form, judged from it and
@@ -398,6 +465,7 @@ impl Covers {
                 empty: items.is_empty(),
             },
             Slot::Ready(Cover::Paren(ParenCover::Grouped(_))) => Shape::Grouped,
+            Slot::Ready(Cover::Paren(ParenCover::Unit)) => Shape::Unit,
             Slot::Ready(Cover::Paren(_) | Cover::Brace(_) | Cover::Invalid(_)) => Shape::Other,
             Slot::Deferred(_) | Slot::Taken => {
                 unreachable!("a cover is inspected before it is consumed")
@@ -448,26 +516,31 @@ impl Covers {
 /// What a cover can become without consuming it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Shape {
-    Bracket { empty: bool },
+    Bracket {
+        empty: bool,
+    },
     Grouped,
+    /// `()`, which cannot be a path splice.
+    Unit,
     Other,
 }
 
 /// A group's contents, interpreted once and converted by the parent's role.
+/// In expression mode every term in it is an expression.
 enum Cover {
     Paren(ParenCover),
     /// A list, or a key path whose items convert by `SyntaxKeyExpr::from_item`.
-    Bracket(Vec<SyntaxExpr>),
-    Brace(Vec<SyntaxExpr>),
-    /// Contents that are not a valid expression group; the failure surfaces
-    /// only if a role consumes the group.
+    Bracket(Vec<Term>),
+    Brace(Vec<Term>),
+    /// Contents that are not a valid group in the parse's mode; the failure
+    /// surfaces only if a role consumes the group.
     Invalid(Fail),
 }
 
 enum ParenCover {
     Unit,
-    Grouped(SyntaxExpr),
-    Tuple(Vec<SyntaxExpr>),
+    Grouped(Term),
+    Tuple(Vec<Term>),
     Section(SyntaxExpr),
 }
 
@@ -604,7 +677,9 @@ fn interpret_group(scope: Scope<'_, '_, '_>, frame: &Frame, close: usize) -> Par
         }
         Delimiter::Brace => {
             let group = frame.group.expect("a brace frame records its group");
-            validate_dict_colon_members(view, group).map_err(Fail::error)?;
+            // A pun's name is checked by role in cover mode.
+            validate_dict_colon_members(view, group, scope.mode == Mode::Expression)
+                .map_err(Fail::error)?;
             let segments = segments(view, &frame.pieces);
             let items = separated_items(&segments, true, true)?;
             items
@@ -669,7 +744,7 @@ fn interpret_paren(scope: Scope<'_, '_, '_>, frame: &Frame, close: usize) -> Par
                 right: None,
             }));
         }
-        return resolved(scope, contents).map(ParenCover::Grouped);
+        return resolved_term(scope, contents).map(ParenCover::Grouped);
     }
     // A trailing tuple: `(a, b)`, `(a,)`.
     if segments[0].is_empty() {
@@ -692,57 +767,97 @@ fn absorbs_operator_name(view: TokenView<'_, '_>, before: &[Piece], last: &Piece
         })
 }
 
-fn resolved_items(scope: Scope<'_, '_, '_>, items: Vec<&[Piece]>) -> Parse<Vec<SyntaxExpr>> {
+fn resolved_items(scope: Scope<'_, '_, '_>, items: Vec<&[Piece]>) -> Parse<Vec<Term>> {
     items
         .into_iter()
-        .map(|item| resolved(scope, item))
+        .map(|item| resolved_term(scope, item))
         .collect()
 }
 
+/// One group member: an expression, or in cover mode a pattern item.
+fn resolved_term(scope: Scope<'_, '_, '_>, pieces: &[Piece]) -> Parse<Term> {
+    match scope.mode {
+        Mode::Expression => Items::new(scope, pieces)
+            .item()?
+            .resolve()
+            .map(Term::Expr)
+            .map_err(Fail::error),
+        Mode::Cover => Items::new(scope, pieces).pattern_item(),
+    }
+}
+
+/// One group member that only an expression may fill.
 fn resolved(scope: Scope<'_, '_, '_>, pieces: &[Piece]) -> Parse<SyntaxExpr> {
-    Items::new(scope, pieces)
-        .item()?
-        .resolve()
-        .map_err(Fail::error)
+    resolved_term(scope, pieces)?
+        .into_expr()
+        .map_err(|message| Fail::error(message).or_at(pieces.first().map(piece_token)))
 }
 
 /// A dict member: a pun `:name`, a path member `path: value`, or an
 /// expression. A path member is recognized before anything is consumed: the
 /// path's extent is measured by shape, and only a `:` joint to it commits.
-/// A space or line break may follow the colon.
-fn dict_member(scope: Scope<'_, '_, '_>, member: &[Piece]) -> Parse<SyntaxExpr> {
+/// A space or line break may follow the colon. In cover mode a `?` joint
+/// between the path and its colon marks an optional pattern entry.
+fn dict_member(scope: Scope<'_, '_, '_>, member: &[Piece]) -> Parse<Term> {
     let view = scope.view;
     if is_symbol(view, &member[0], ":") {
         let Some(TokenKind::Name(name)) = member.get(1).and_then(|piece| piece_kind(view, piece))
         else {
             return error("dictionary shorthand `:name` requires a bare value name after `:`");
         };
-        return Ok(SyntaxExpr::PathDict(
-            vec![SyntaxKeyExpr::Atom((*name).to_owned())],
-            Box::new(SyntaxExpr::Name((*name).to_owned())),
-        ));
+        return Ok(match scope.mode {
+            Mode::Expression => Term::Expr(SyntaxExpr::PathDict(
+                vec![SyntaxKeyExpr::Atom((*name).to_owned())],
+                Box::new(SyntaxExpr::Name((*name).to_owned())),
+            )),
+            Mode::Cover => Term::Pun((*name).to_owned()),
+        });
+    }
+    if scope.mode == Mode::Cover && is_symbol(view, &member[0], "?") {
+        return error("optional dictionary entry pattern requires a path before `?:`");
     }
     // A path member's colon is joint to its path, and its value runs to the
     // member's end; any other member, such as `f :tag`, is an expression.
     let mut cursor = Items::new(scope, member);
-    if let Some(end) = cursor.data_path_end()
-        && member
-            .get(end)
-            .is_some_and(|piece| is_symbol(view, piece, ":"))
-        && cursor.joint_at(end)
-    {
-        let path = cursor.data_path()?;
-        debug_assert_eq!(cursor.position, end);
-        let value = trim_padding(view, &member[end + 1..]);
-        if value.is_empty() {
-            return error("a dictionary path member requires a value");
+    if let Some(end) = cursor.data_path_end() {
+        let optional = scope.mode == Mode::Cover
+            && member
+                .get(end)
+                .is_some_and(|piece| is_symbol(view, piece, "?"));
+        if optional && !cursor.joint_at(end) {
+            return error("optional dictionary entry marker `?` must be joint with its path");
         }
-        return Ok(SyntaxExpr::PathDict(
-            path,
-            Box::new(resolved(scope, value)?),
-        ));
+        if optional && !cursor.joint_at(end + 1) {
+            return error("optional dictionary entry marker must be written as joint `?:`");
+        }
+        let colon = end + usize::from(optional);
+        if member
+            .get(colon)
+            .is_some_and(|piece| is_symbol(view, piece, ":"))
+            && cursor.joint_at(colon)
+        {
+            let path = cursor.data_path()?;
+            debug_assert_eq!(cursor.position, end);
+            let value = trim_padding(view, &member[colon + 1..]);
+            if value.is_empty() {
+                return error(if optional {
+                    "optional dictionary entry pattern requires a payload after `?:`"
+                } else {
+                    "a dictionary path member requires a value"
+                });
+            }
+            let value = resolved_term(scope, value)?;
+            return Ok(match scope.mode {
+                Mode::Expression => Term::Expr(SyntaxExpr::PathDict(
+                    path,
+                    Box::new(value.into_expr().map_err(Fail::error)?),
+                )),
+                Mode::Cover if optional => Term::OptionalTag(path, Box::new(value)),
+                Mode::Cover => Term::Tag(path, Box::new(value)),
+            });
+        }
     }
-    resolved(scope, member)
+    resolved_term(scope, member)
 }
 
 fn is_glam_name(name: &str) -> bool {
@@ -764,15 +879,15 @@ struct Level {
 
 #[derive(Default)]
 struct Chain {
-    first: Option<SyntaxExpr>,
-    rest: Vec<(SyntaxOperator, SyntaxExpr)>,
+    first: Option<Term>,
+    rest: Vec<(SyntaxOperator, Term)>,
     pending: Option<SyntaxOperator>,
     /// The indentation and token of each line-led operator, in order.
     anchors: Vec<(usize, usize)>,
 }
 
 impl Chain {
-    fn push_operand(&mut self, operand: SyntaxExpr) {
+    fn push_operand(&mut self, operand: Term) {
         match self.pending.take() {
             Some(operator) => self.rest.push((operator, operand)),
             None => {
@@ -782,15 +897,32 @@ impl Chain {
         }
     }
 
-    fn finish(self, context: ExpressionContext) -> Parse<InfixChain> {
+    fn operands(&self) -> Parse<()> {
         if self.pending.is_some() {
             return error("an infix operator requires a right operand");
         }
+        if self.first.is_none() {
+            return error("expected an expression");
+        }
+        Ok(())
+    }
+
+    /// The chain as an expression chain, its operands converted.
+    fn finish(self, context: ExpressionContext) -> Parse<InfixChain> {
+        self.operands()?;
         let first = self
             .first
-            .ok_or_else(|| Fail::error("expected an expression"))?;
+            .expect("checked")
+            .into_expr()
+            .map_err(Fail::error)?;
+        let rest = self
+            .rest
+            .into_iter()
+            .map(|(operator, operand)| operand.into_expr().map(|operand| (operator, operand)))
+            .collect::<Result<_, _>>()
+            .map_err(Fail::error)?;
         self.anchors.into_iter().try_fold(
-            InfixChain::from_parts(first, self.rest),
+            InfixChain::from_parts(first, rest),
             |chain, (indentation, operator)| {
                 chain
                     .with_resumption_anchor(indentation, context)
@@ -801,6 +933,27 @@ impl Chain {
             },
         )
     }
+
+    /// The chain as a cover term, resolved only once its role is known.
+    fn finish_term(self, context: ExpressionContext) -> Parse<Term> {
+        self.operands()?;
+        self.anchors
+            .into_iter()
+            .try_fold(None, |anchor, (indentation, operator)| {
+                InfixChain::check_resumption_anchor(anchor, indentation, context)
+                    .map(Some)
+                    .map_err(|message| Fail::Error {
+                        at: Some(operator),
+                        message,
+                    })
+            })?;
+        let first = self.first.expect("checked");
+        Ok(if self.rest.is_empty() {
+            first
+        } else {
+            Term::Chain(Box::new(first), self.rest)
+        })
+    }
 }
 
 /// How a finished lambda joins the level that opened it.
@@ -809,6 +962,17 @@ enum Attach {
     Operand,
     /// As the final argument of an application head.
     TailArgument(SyntaxExpr),
+}
+
+/// An operator of the pattern grammar, above the expression grammar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PatternOperator {
+    As,
+    /// `View -> Pattern`.
+    Forward,
+    /// `Pattern <- View`.
+    Backward,
+    When,
 }
 
 impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
@@ -827,7 +991,6 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         }
     }
 
-    /// Takes the cover at the cursor and advances past it.
     /// Takes the cover at the cursor and advances past it, surfacing a
     /// deferred error.
     fn take_group(&mut self) -> Parse<Cover> {
@@ -841,16 +1004,26 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         }
     }
 
-    fn take_grouped(&mut self) -> SyntaxExpr {
+    /// Takes a grouped cover as an expression: a path index or an escape
+    /// target.
+    fn take_grouped(&mut self) -> Parse<SyntaxExpr> {
+        let at = self.here();
         match self.take_group() {
-            Ok(Cover::Paren(ParenCover::Grouped(expr))) => expr,
+            Ok(Cover::Paren(ParenCover::Grouped(term))) => term
+                .into_expr()
+                .map_err(|message| Fail::error(message).or_at(at)),
             _ => unreachable!("the shape was checked as grouped"),
         }
     }
 
-    fn take_keys(&mut self) -> Vec<SyntaxKeyExpr> {
+    fn take_keys(&mut self) -> Parse<Vec<SyntaxKeyExpr>> {
+        let at = self.here();
         match self.take_group() {
-            Ok(Cover::Bracket(items)) => items.into_iter().map(SyntaxKeyExpr::from_item).collect(),
+            Ok(Cover::Bracket(items)) => items
+                .into_iter()
+                .map(|item| item.into_expr().map(SyntaxKeyExpr::from_item))
+                .collect::<Result<_, _>>()
+                .map_err(|message| Fail::error(message).or_at(at)),
             _ => unreachable!("the shape was checked as a bracket"),
         }
     }
@@ -969,9 +1142,142 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         self.error_here(format!("expected {expected}, found {found}"))
     }
 
-    /// Parses the whole item: an infix chain of applications, where a lambda
-    /// takes the rest of the item as its body.
+    /// The pattern operator at `offset`, in cover mode.
+    fn pattern_operator_at(&self, offset: usize) -> Option<PatternOperator> {
+        if self.scope.mode != Mode::Cover {
+            return None;
+        }
+        let Some(Piece::Token(index)) = self.peek_at(offset) else {
+            return None;
+        };
+        let view = self.scope.view;
+        match token(view, *index).kind() {
+            TokenKind::Symbol("->") => Some(PatternOperator::Forward),
+            TokenKind::Symbol("<-") => Some(PatternOperator::Backward),
+            TokenKind::Name("as") if in_keyword_position(view, *index) => Some(PatternOperator::As),
+            TokenKind::Name("when") if is_pattern_when(view, *index) => Some(PatternOperator::When),
+            _ => None,
+        }
+    }
+
+    /// Parses the whole item as an expression: an infix chain of
+    /// applications, where a lambda takes the rest of the item as its body.
     fn item(mut self) -> Parse<InfixChain> {
+        let (chain, tail) = self.chain()?;
+        debug_assert!(self.peek().is_none(), "an expression chain ends its item");
+        self.infix_chain(chain).map(|chain| chain.with_tail(tail))
+    }
+
+    /// A pattern position's item, in cover mode: an `as` chain, at most one
+    /// view arrow, and a `when` guard, each looser than the last.
+    fn pattern_item(mut self) -> Parse<Term> {
+        const FORWARD: &str = "view pattern requires a view before `->` and a pattern after it";
+        const BACKWARD: &str = "view pattern requires a pattern before `<-` and a view after it";
+        let at = self.here();
+        match self.pattern_operator_at(0) {
+            Some(PatternOperator::Forward) => return self.error_here(FORWARD),
+            Some(PatternOperator::Backward) => return self.error_here(BACKWARD),
+            _ => {}
+        }
+        let mut term = self.as_chain()?;
+        match self.pattern_operator_at(0) {
+            Some(PatternOperator::Forward) => {
+                self.position += 1;
+                self.skip_line_starts();
+                if self.peek().is_none() {
+                    return self.error_here(FORWARD);
+                }
+                let view = term
+                    .into_expr()
+                    .map_err(|message| Fail::error(message).or_at(at))?;
+                let pattern = self.as_chain()?;
+                term = Term::View {
+                    view: Box::new(view),
+                    pattern: Box::new(pattern),
+                };
+            }
+            Some(PatternOperator::Backward) => {
+                self.position += 1;
+                self.skip_line_starts();
+                if self.peek().is_none() {
+                    return self.error_here(BACKWARD);
+                }
+                let at = self.here();
+                let view = self
+                    .operand_term()?
+                    .into_expr()
+                    .map_err(|message| Fail::error(message).or_at(at))?;
+                term = Term::View {
+                    view: Box::new(view),
+                    pattern: Box::new(term),
+                };
+            }
+            _ => {}
+        }
+        match self.pattern_operator_at(0) {
+            None => Ok(term),
+            Some(PatternOperator::When) => Ok(Term::Guarded {
+                pattern: Box::new(term),
+                guards: self.guards()?,
+            }),
+            Some(PatternOperator::Forward | PatternOperator::Backward) => self
+                .error_here("a pattern takes one view arrow; parenthesize a view inside another"),
+            Some(PatternOperator::As) => {
+                self.error_here("`as` cannot follow a view's expression; parenthesize the view")
+            }
+        }
+    }
+
+    /// Operand chains joined by `as`, which is left-associative.
+    fn as_chain(&mut self) -> Parse<Term> {
+        let mut term = self.operand_term()?;
+        while self.pattern_operator_at(0) == Some(PatternOperator::As) {
+            self.position += 1;
+            self.skip_line_starts();
+            let right = self.operand_term()?;
+            term = Term::As(Box::new(term), Box::new(right));
+        }
+        Ok(term)
+    }
+
+    /// One operand chain, up to the item's end or a pattern operator.
+    fn operand_term(&mut self) -> Parse<Term> {
+        if self.peek().is_none() || self.pattern_operator_at(0).is_some() {
+            return self.expected("a pattern");
+        }
+        let (chain, _) = self.chain()?;
+        chain
+            .finish_term(self.scope.context)
+            .map_err(|fail| fail.or_at(self.here()))
+    }
+
+    /// A pattern's `when` guard: the clauses after it, to the item's end,
+    /// parsed from their tokens, since `when` opened a keyword region.
+    fn guards(&mut self) -> Parse<Vec<crate::g_syntax::SyntaxGuardClause>> {
+        let when = self.here().expect("a `when` is a piece");
+        let end = match self.pieces.last().expect("the item holds its `when`") {
+            Piece::Token(index) => index + 1,
+            Piece::Group { close, .. } => close + 1,
+        };
+        self.position = self.pieces.len();
+        if end == when + 1 {
+            return Err(
+                Fail::error("local pattern guard requires a guard after `when`").or_at(Some(when)),
+            );
+        }
+        let guards = self
+            .scope
+            .view
+            .subview(TokenRange::new(when + 1, end).expect("a guard follows its `when`"))
+            .expect("a pattern's guard lies in its view");
+        parse_guard_clauses(guards, "local pattern guard").map_err(Fail::Reported)
+    }
+
+    /// Parses operands and infix operators up to the item's end, or in
+    /// cover mode up to a pattern operator. A lambda takes the rest as its
+    /// body. Returns the item level's chain, its lambdas closed, and how it
+    /// ends.
+    fn chain(&mut self) -> Parse<(Chain, ChainTail)> {
         let mut levels = vec![Level {
             chain: Chain::default(),
             lambda: None,
@@ -988,6 +1294,10 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             }
             let head = self.application_head()?;
             if let Some(breaks) = self.tail_lambda_layout() {
+                let at = self.here();
+                let head = head
+                    .into_expr()
+                    .map_err(|message| Fail::error(message).or_at(at))?;
                 self.position += breaks;
                 let params = self.lambda_head()?;
                 levels.push(Level {
@@ -1001,22 +1311,34 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                 .expect("an item always has a level")
                 .chain
                 .push_operand(head);
-            // After an operand: the end of the item, a postfix `if`, or an
-            // infix operator, which resumes the chain at its indentation when
-            // line-led.
+            // After an operand: the end of the item, a postfix `if`, a
+            // pattern operator in cover mode, or an infix operator, which
+            // resumes the chain at its indentation when line-led.
             let (breaks, indentation) = self.line_starts_at(0);
             let Some(piece) = self.peek_at(breaks) else {
                 break 'operand;
             };
             if self.postfix_if_at(breaks) {
                 self.position += breaks;
-                return self.postfix_if(levels);
+                self.postfix_if(&mut levels)?;
+                break 'operand;
+            }
+            if self.pattern_operator_at(breaks).is_some() {
+                self.position += breaks;
+                break 'operand;
             }
             let Some(operator) = piece_operator(self.scope.view, piece) else {
                 self.position += breaks;
                 if self.symbol_at(0, ",") {
                     return self
                         .error_here("unexpected `,` in an expression; parenthesize a tuple");
+                }
+                if self.symbol_at(0, ".")
+                    && self.joint_at(1)
+                    && self.shape_at(1) == Some(Shape::Unit)
+                {
+                    self.position += 1;
+                    return self.error_here("a path splice requires an expression");
                 }
                 // A path or tag separated from its continuation by a space.
                 if self.symbol_at(0, ".") && !self.joint_at(1) {
@@ -1044,9 +1366,16 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         self.close_levels(levels)
     }
 
+    /// The chain as an expression chain, located at the cursor.
+    fn infix_chain(&self, chain: Chain) -> Parse<InfixChain> {
+        chain
+            .finish(self.scope.context)
+            .map_err(|fail| fail.or_at(self.here()))
+    }
+
     /// Closes lambdas innermost first. Each one ends with the item, so the
     /// item's chain then ends in an open lambda.
-    fn close_levels(&self, mut levels: Vec<Level>) -> Parse<InfixChain> {
+    fn close_levels(&self, mut levels: Vec<Level>) -> Parse<(Chain, ChainTail)> {
         let tail = if levels.len() > 1 {
             ChainTail::OpenLambda
         } else {
@@ -1056,17 +1385,12 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             let level = levels.pop().expect("levels remain while closing");
             let Some((params, attach)) = level.lambda else {
                 debug_assert!(levels.is_empty(), "only the item level has no lambda");
-                return level
-                    .chain
-                    .finish(self.scope.context)
-                    .map(|chain| chain.with_tail(tail))
-                    .map_err(|fail| fail.or_at(self.here()));
+                return Ok((level.chain, tail));
             };
-            let body = level
-                .chain
-                .finish(self.scope.context)
-                .and_then(|chain| chain.resolve().map_err(Fail::error))
-                .map_err(|fail| fail.or_at(self.here()))?;
+            let body = self
+                .infix_chain(level.chain)?
+                .resolve()
+                .map_err(|message| Fail::error(message).or_at(self.here()))?;
             let lambda = SyntaxExpr::Lambda(params, Box::new(body));
             let operand = match attach {
                 Attach::Operand => lambda,
@@ -1076,7 +1400,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                 .last_mut()
                 .expect("a lambda's opening level remains")
                 .chain
-                .push_operand(operand);
+                .push_operand(Term::Expr(operand));
         }
     }
 
@@ -1095,17 +1419,20 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     /// A postfix `if` after the innermost level's chain, which becomes that
     /// level's result. An open lambda binds a maximal trailing expression, so
     /// the conditional is the innermost lambda's body, or the whole item when
-    /// no lambda is open. Nothing may follow it in the item.
-    fn postfix_if(mut self, mut levels: Vec<Level>) -> Parse<InfixChain> {
+    /// no lambda is open. Nothing but a pattern operator in cover mode may
+    /// follow it in the item.
+    fn postfix_if(&mut self, levels: &mut [Level]) -> Parse<()> {
         let if_index = self.here().expect("a postfix `if` is a piece");
         let parsed = parse_postfix_if_tail(self.scope.view, if_index, self.scope.context)
             .map_err(Fail::Reported)?;
         self.position += 1;
         self.skip_to_token(parsed.end())?;
-        self.skip_line_starts();
-        if self.peek().is_some() {
+        let (breaks, _) = self.line_starts_at(0);
+        if self.peek_at(breaks).is_some() && self.pattern_operator_at(breaks).is_none() {
+            self.position += breaks;
             return self.expected("the end of the expression after a postfix `if`");
         }
+        self.position += breaks;
         let level = levels.last_mut().expect("an item always has a level");
         let left = std::mem::take(&mut level.chain)
             .finish(self.scope.context)
@@ -1118,8 +1445,10 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             unreachable!("a postfix conditional parses to an if expression");
         };
         postfix.then_result = Box::new(left);
-        level.chain.push_operand(SyntaxExpr::If(postfix));
-        self.close_levels(levels)
+        level
+            .chain
+            .push_operand(Term::Expr(SyntaxExpr::If(postfix)));
+        Ok(())
     }
 
     /// Advances past every piece that starts before token `end`, where a
@@ -1257,7 +1586,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
 
     /// An atom followed by argument atoms, each after a space or after line
     /// breaks.
-    fn application_head(&mut self) -> Parse<SyntaxExpr> {
+    fn application_head(&mut self) -> Parse<Term> {
         let mut function = self.atom()?;
         loop {
             let (breaks, _) = self.line_starts_at(0);
@@ -1266,6 +1595,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             if !(spaced && self.starts_atom_at(breaks)) || self.postfix_if_at(breaks) {
                 break;
             }
+            let at = self.here();
             self.position += breaks;
             if self.symbol_at(0, ".") {
                 return self.error_here(
@@ -1273,19 +1603,31 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                 );
             }
             let argument = self.atom()?;
-            function = SyntaxExpr::Apply(Box::new(function), Box::new(argument));
+            // A function is an expression in both roles.
+            let function_expr = function
+                .into_expr()
+                .map_err(|message| Fail::error(message).or_at(at))?;
+            function = match self.scope.mode {
+                Mode::Expression => Term::Expr(SyntaxExpr::Apply(
+                    Box::new(function_expr),
+                    Box::new(argument.into_expr().map_err(Fail::error)?),
+                )),
+                Mode::Cover => Term::Apply(Box::new(function_expr), Box::new(argument)),
+            };
         }
         Ok(function)
     }
 
     /// Whether an argument atom starts at `offset`. The operator names `and`
-    /// and `or` start one only as a tag's key, as in `and:x`.
+    /// and `or` start one only as a tag's key, as in `and:x`, and in cover
+    /// mode a pattern operator starts none.
     fn starts_atom_at(&self, offset: usize) -> bool {
         match self.peek_at(offset) {
             Some(Piece::Group { .. }) => true,
             Some(piece @ Piece::Token(_)) => match piece_kind(self.scope.view, piece) {
                 Some(TokenKind::Name(name)) => {
-                    !matches!(*name, "and" | "or") || self.named_tag_at(offset)
+                    (!matches!(*name, "and" | "or") || self.named_tag_at(offset))
+                        && self.pattern_operator_at(offset).is_none()
                 }
                 Some(TokenKind::Number(_) | TokenKind::Text(_) | TokenKind::Embedded(_)) => true,
                 Some(TokenKind::Symbol(symbol)) => matches!(*symbol, ":" | "'" | "." | "^"),
@@ -1310,7 +1652,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
 
     /// One atom, with any tag prefixes (`a:`, `[k]:`, `(p):`) applied to its
     /// payload. The prefixes are a loop, not recursion.
-    fn atom(&mut self) -> Parse<SyntaxExpr> {
+    fn atom(&mut self) -> Parse<Term> {
         let mut tags: Vec<Vec<SyntaxKeyExpr>> = Vec::new();
         let base = loop {
             let tagged = self.symbol_at(1, ":") && self.joint_at(1) && self.joint_at(2);
@@ -1318,33 +1660,36 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                 None => return self.expected("an expression"),
                 Some(Piece::Group { .. }) => match self.shape_at(0) {
                     Some(Shape::Bracket { empty: false }) if tagged => {
-                        tags.push(self.take_keys());
+                        tags.push(self.take_keys()?);
                         self.position += 1;
                     }
                     Some(Shape::Bracket { empty: true }) if tagged => {
                         return self.error_here("dictionary paths cannot be empty");
                     }
+                    Some(Shape::Unit) if tagged => {
+                        return self.error_here("a path splice requires an expression");
+                    }
                     Some(Shape::Grouped) if tagged => {
-                        let index = self.take_grouped();
+                        let index = self.take_grouped()?;
                         tags.push(vec![SyntaxKeyExpr::PathIndex(Box::new(index))]);
                         self.position += 1;
                     }
                     _ => break self.literal_group()?,
                 },
                 Some(Piece::Token(_)) => match self.kind() {
-                    Some(TokenKind::Symbol(":")) => break self.constructor()?,
+                    Some(TokenKind::Symbol(":")) => break Term::Expr(self.constructor()?),
                     Some(TokenKind::Name(name)) if is_glam_name(name) => {
                         // A keyword heads a form unless it is a tag's key.
                         if !self.named_tag_at(0) {
                             if *name == "abstract_global_path" {
-                                break self.abstract_global_path()?;
+                                break Term::Expr(self.abstract_global_path()?);
                             }
                             if let Some(parse) = structural_atom_parser(name)
                                 && self.here().is_some_and(|head| {
                                     may_head_keyword_form(self.scope.view, head)
                                 })
                             {
-                                break self.structural_atom(parse)?;
+                                break Term::Expr(self.structural_atom(parse)?);
                             }
                         }
                         let path = self.named_path(name)?;
@@ -1353,15 +1698,21 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                             self.position += 1;
                             continue;
                         }
-                        break name_with_path(path)?;
+                        break self.name_with_path(path)?;
                     }
                     _ => break self.base_atom()?,
                 },
             }
         };
-        Ok(tags.into_iter().rev().fold(base, |payload, path| {
-            SyntaxExpr::PathDict(path, Box::new(payload))
-        }))
+        tags.into_iter()
+            .rev()
+            .try_fold(base, |payload, path| match self.scope.mode {
+                Mode::Expression => Ok(Term::Expr(SyntaxExpr::PathDict(
+                    path,
+                    Box::new(payload.into_expr().map_err(Fail::error)?),
+                ))),
+                Mode::Cover => Ok(Term::Tag(path, Box::new(payload))),
+            })
     }
 
     /// `:path`, a tag constructor.
@@ -1389,14 +1740,31 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         Ok(path)
     }
 
+    /// A named path that is not a tag: a name, then an access. In cover
+    /// mode a bare name is checked by role.
+    fn name_with_path(&self, mut path: Vec<SyntaxKeyExpr>) -> Parse<Term> {
+        let SyntaxKeyExpr::Atom(name) = path.remove(0) else {
+            unreachable!("named paths begin with an atom key");
+        };
+        if self.scope.mode == Mode::Cover && path.is_empty() {
+            return Ok(Term::Name(name));
+        }
+        let base = SyntaxExpr::Name(validate_expr_name(&name).map_err(Fail::error)?);
+        Ok(Term::Expr(if path.is_empty() {
+            base
+        } else {
+            SyntaxExpr::Access(Box::new(base), path)
+        }))
+    }
+
     /// Consumes the data path at the cursor, whose extent `data_path_end`
     /// has accepted: a named path, a bracket key path, or a parenthesized
     /// path index.
     fn data_path(&mut self) -> Parse<Vec<SyntaxKeyExpr>> {
         match self.shape_at(0) {
-            Some(Shape::Bracket { empty: false }) => Ok(self.take_keys()),
+            Some(Shape::Bracket { empty: false }) => self.take_keys(),
             Some(Shape::Grouped) => Ok(vec![SyntaxKeyExpr::PathIndex(Box::new(
-                self.take_grouped(),
+                self.take_grouped()?,
             ))]),
             Some(_) => self.expected("a dictionary path"),
             None => match self.kind() {
@@ -1412,11 +1780,13 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         while self.path_suffix_width().is_some() {
             self.position += 1;
             let suffix = match self.shape_at(0) {
-                Some(Shape::Bracket { .. }) => PathSuffix::Expand(self.take_keys()),
+                Some(Shape::Bracket { .. }) => PathSuffix::Expand(self.take_keys()?),
                 Some(Shape::Grouped) => {
-                    PathSuffix::Single(SyntaxKeyExpr::PathIndex(Box::new(self.take_grouped())))
+                    PathSuffix::Single(SyntaxKeyExpr::PathIndex(Box::new(self.take_grouped()?)))
                 }
-                Some(Shape::Other) => unreachable!("path_suffix_width accepts no other group"),
+                Some(Shape::Unit | Shape::Other) => {
+                    unreachable!("path_suffix_width accepts no other group")
+                }
                 None => {
                     let Some(TokenKind::Name(name)) = self.kind() else {
                         unreachable!("path_suffix_width accepts a name");
@@ -1431,21 +1801,29 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     }
 
     /// A group used as a literal: list, dict, unit, grouping, tuple or
-    /// section, with path suffixes.
-    fn literal_group(&mut self) -> Parse<SyntaxExpr> {
+    /// section, with path suffixes, which make it an expression.
+    fn literal_group(&mut self) -> Parse<Term> {
+        let at = self.here();
         let base = match self.take_group()? {
-            Cover::Bracket(items) => SyntaxExpr::List(items),
-            Cover::Brace(members) => SyntaxExpr::DictUnion(members),
-            Cover::Paren(ParenCover::Unit) => SyntaxExpr::Unit,
-            Cover::Paren(ParenCover::Grouped(expr) | ParenCover::Section(expr)) => expr,
-            Cover::Paren(ParenCover::Tuple(items)) => SyntaxExpr::Tuple(items),
+            Cover::Bracket(items) => Term::List(items),
+            Cover::Brace(members) => Term::Dict(members),
+            Cover::Paren(ParenCover::Unit) => Term::Expr(SyntaxExpr::Unit),
+            Cover::Paren(ParenCover::Grouped(term)) => Term::Group(Box::new(term)),
+            Cover::Paren(ParenCover::Section(expr)) => Term::Expr(expr),
+            Cover::Paren(ParenCover::Tuple(items)) => Term::Tuple(items),
             Cover::Invalid(_) => unreachable!("take_group surfaces invalid covers"),
         };
         let suffixes = self.path_suffixes()?;
-        Ok(access_if_path(base, suffixes))
+        if self.scope.mode == Mode::Cover && suffixes.is_empty() {
+            return Ok(base);
+        }
+        let base = base
+            .into_expr()
+            .map_err(|message| Fail::error(message).or_at(at))?;
+        Ok(Term::Expr(access_if_path(base, suffixes)))
     }
 
-    fn base_atom(&mut self) -> Parse<SyntaxExpr> {
+    fn base_atom(&mut self) -> Parse<Term> {
         let Some(kind) = self.kind() else {
             return self.expected("an expression");
         };
@@ -1482,17 +1860,18 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                 )
             }
             TokenKind::Symbol("'") => return self.quoted(),
-            TokenKind::Symbol(".") => return self.effect(),
-            TokenKind::Symbol("^") => return self.escape(),
+            TokenKind::Symbol(".") => return self.effect().map(Term::Expr),
+            TokenKind::Symbol("^") => return self.escape().map(Term::Expr),
             TokenKind::Name(name) => return self.rooted_name(name),
             _ => return self.expected("an expression"),
         };
         let suffixes = self.path_suffixes()?;
-        Ok(access_if_path(base, suffixes))
+        Ok(Term::Expr(access_if_path(base, suffixes)))
     }
 
-    /// `'name` or `'.path`, with path suffixes.
-    fn quoted(&mut self) -> Parse<SyntaxExpr> {
+    /// `'name` or `'.path`, with path suffixes. In cover mode a quoted path
+    /// keeps its keys.
+    fn quoted(&mut self) -> Parse<Term> {
         self.position += 1;
         if !self.joint_at(0) {
             return self.expected("a quoted name or path after `'`");
@@ -1502,7 +1881,11 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             if suffixes.is_empty() {
                 return self.expected("a quoted path after `'`");
             }
-            quoted_path(suffixes)
+            // The suffixes take every joint path segment, so none follow.
+            return Ok(match self.scope.mode {
+                Mode::Expression => Term::Expr(quoted_path(suffixes)),
+                Mode::Cover => Term::Quoted(crate::g_syntax::flatten_path_suffixes(suffixes)),
+            });
         } else {
             match self.kind() {
                 Some(TokenKind::Name(name)) if is_glam_name(name) => {
@@ -1513,7 +1896,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             }
         };
         let suffixes = self.path_suffixes()?;
-        Ok(access_if_path(base, suffixes))
+        Ok(Term::Expr(access_if_path(base, suffixes)))
     }
 
     /// `.name.name`, an effect.
@@ -1548,7 +1931,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         }
         let target = match self.peek() {
             Some(Piece::Group { .. }) if self.shape_at(0) == Some(Shape::Grouped) => {
-                self.take_grouped()
+                self.take_grouped()?
             }
             Some(Piece::Token(_)) => match self.kind() {
                 Some(TokenKind::Name(name)) => {
@@ -1569,11 +1952,22 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         ))
     }
 
-    /// A prior name `_name`, with path suffixes.
-    fn rooted_name(&mut self, name: &str) -> Parse<SyntaxExpr> {
+    /// A prior name `_name`, with path suffixes. In cover mode `_` is a
+    /// wildcard, and a bare `_name` is checked by role.
+    fn rooted_name(&mut self, name: &str) -> Parse<Term> {
         let Some(prior) = name.strip_prefix('_') else {
             return self.expected("a name");
         };
+        if self.scope.mode == Mode::Cover && !self.next_is_path_suffix() {
+            if prior.is_empty() {
+                self.position += 1;
+                return Ok(Term::Wildcard);
+            }
+            if is_glam_name(prior) {
+                self.position += 1;
+                return Ok(Term::Name(name.to_owned()));
+            }
+        }
         if !is_glam_name(prior) {
             return self.expected("a name after `_`");
         }
@@ -1584,21 +1978,21 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             validate_expr_name(prior).map_err(|message| Fail::error(message).or_at(self.here()))?;
         self.position += 1;
         let suffixes = self.path_suffixes()?;
-        Ok(access_if_path(SyntaxExpr::PriorName(prior), suffixes))
+        Ok(Term::Expr(access_if_path(
+            SyntaxExpr::PriorName(prior),
+            suffixes,
+        )))
     }
-}
 
-/// A named path that is not a tag: a validated name, then an access.
-fn name_with_path(mut path: Vec<SyntaxKeyExpr>) -> Parse<SyntaxExpr> {
-    let SyntaxKeyExpr::Atom(name) = path.remove(0) else {
-        unreachable!("named paths begin with an atom key");
-    };
-    let base = SyntaxExpr::Name(validate_expr_name(&name).map_err(Fail::error)?);
-    Ok(if path.is_empty() {
-        base
-    } else {
-        SyntaxExpr::Access(Box::new(base), path)
-    })
+    /// Whether a path suffix follows the name at the cursor.
+    fn next_is_path_suffix(&self) -> bool {
+        let cursor = Items {
+            scope: self.scope,
+            pieces: self.pieces,
+            position: self.position + 1,
+        };
+        cursor.path_suffix_width().is_some()
+    }
 }
 
 #[cfg(test)]

@@ -308,7 +308,8 @@ production keeps the old parser until the oracle agrees.
 - `parser-term-parser`: done; in production since 2026-10-07
   (`parser-term-parser-first`, `eb84587c`; `parser-keyword-delegation`,
   `adcd994b`).
-- `parser-patterns`: not started.
+- `parser-patterns`: started 2026-10-16; `parser-patterns-cover` done.
+  See [Patterns 2026-10-16](#patterns-2026-10-16).
 - `parser-keyword-frames`: first part merged 2026-10-15: keyword regions,
   the lexer's token tables, a lazy keyword search, and one key test for
   keywords ([Keyword regions 2026-10-15](#keyword-regions-2026-10-15)).
@@ -674,6 +675,111 @@ cost time where a keyword is mispredicted but never changes a parse.
    not the common case; it fits with `parser-grammar-retirement`.
 4. **`parser-scope-analysis`** is independent and small: one marking pass
    with a scope stack instead of a walk per binding group.
+
+## Patterns 2026-10-16
+
+*Agreed (maintainer, 2026-10-16):* `parser-patterns` follows the cover
+design: a pattern is parsed once into a role-neutral term and converted by
+role. A `->` ends an open tail, so `if c then .a else .b -> x` binds without
+parentheses. The details below were settled while building it.
+
+**Cover mode.** The term parser gains a mode for pattern views. In it, groups
+are interpreted into cover terms, which convert to a `SyntaxPattern` or a
+`SyntaxExpr`. Ordinary expression parses keep building expressions directly,
+so they pay nothing for patterns. Cover mode adds what patterns need: `_`,
+quoted paths kept as key paths, `x?:` and `:_x` dict members, and the
+pattern operators. Loosest first, these are `when`, one view arrow (`->` or
+`<-`), and `as`, all above the expression grammar. Below them, precedence is
+the expression grammar's: juxtaposition binds tighter than `++`, and a tag
+tighter than juxtaposition.
+
+**Positions.** A pattern position is *complete* (a match-arm head, or a
+parenthesized pattern's contents) or *nested* (a do or guard binding, a
+list, tuple or dict item, a tag payload, an operand of `++`). Views,
+predicates and local guards need a complete position, as today. Completeness
+passes through `as`, a view's pattern and a guarded pattern, so
+`(Nat n when n > 0)`, `(f -> Nat n)` and `(p as Nat n)` become valid.
+
+**Bindings.** A do statement or guard clause binds with `<-` or `=` only
+when that token is at its top level, before any `\` and before any keyword
+other than `as` and `when`. A pattern's top level holds no lambda and no
+keyword form, so a keyword form owns every `<-` or `=` after its head: `if
+(a, b) = e then ...` is an operation, and `x = if ...` a binding. The left
+side is parsed as a pattern and the right as an expression, each once.
+Otherwise the clause is an operation, parsed by the full expression parser.
+It may end at a top-level `->`, and a pattern follows. Nothing is tried and
+abandoned. The expression side keeps the full parser because `let`, `with`
+and `where` are parsed only where they head a whole view, which the term
+parser does not do.
+
+**Open tails end at `->`, in binding positions only.** These are an `else`
+branch, a `let` or `using` body, a postfix `if`'s fallback, and a lambda
+body. A lambda head keeps its own `->`. Layout blocks keep their lines,
+since their own parsers delimit them. Elsewhere `->` is an error where it
+was, so other expressions parse as before.
+
+**Local guards.** In a pattern, `when` opens a keyword region, and the
+guard-clause parser reads its clauses from their tokens, so a guard is
+parsed once whether it heads an arm or sits in a pattern.
+
+**Grouping.** Conversion keeps `SyntaxPatternKind::Group` where the old
+parser produced it, so lowering is untouched.
+
+**Slices:**
+1. `parser-patterns-cover`: cover terms, the cover mode, and conversion.
+   Pattern positions switch to it. The old pattern parser stays as a test
+   reference for a differential test that lists the intended differences.
+2. `parser-patterns-bindings`: statement and guard splitting as above,
+   tails ending at `->`, and tests for the statement bugs below.
+3. `parser-patterns-retirement`: delete the old pattern parser and the trial
+   splits, and measure `((p) as q)` nesting and `op -> P`.
+
+**Bugs on `main` this fixes**, found while surveying (2026-10-15). Each is
+rejected today:
+- `do { if (a, b) = .r 1 then .r a else .r 0 }`: split at the `if`'s `=`;
+- `do { if a <- .op then .r a else .r 0 }`: split at the `if`'s `<-`;
+- `do { let x = 1 in .r x }`: split at the `let`'s `=`;
+- `do { let z = 1 in .r z -> y; .r y }`: the `let` body runs over `->`.
+
+**Precedence decided by trial order today**, each resolved by the rules
+above:
+- `(Nat n as m)` is a predicate over `n as m`; it becomes
+  `(Nat n) as m`, which binds the same, since a predicate passes its input
+  on.
+- `(p as Nat n)` is rejected; it becomes `p as (Nat n)`.
+- `(f <| g x)` is a predicate `f <| g` over `x`; `<|` becomes an error in a
+  pattern.
+- `(Prefix "x" rest ++ [y])` is a predicate over `rest ++ [y]`; it becomes
+  an append whose first operand is an unparenthesized predicate, an error.
+- `(a:Nat n)` is a predicate `a:Nat` over `n`, and stays one, since a tag
+  binds tighter than juxtaposition in expressions too.
+
+No `.g` file in the repository uses the shapes whose meaning changes.
+
+**`parser-patterns-cover` as built (2026-10-16).** Cover mode lives in
+`parser/term.rs`, and the terms and their conversions in
+`parser/term/cover.rs`. A dict member is a term too: a tag is an entry, as
+`{a: x}` is the union of `a:x`. `pattern.rs` parses both pattern positions
+in cover mode. The old parser stays as `pattern/legacy.rs`, the reference
+for a pattern oracle (`GLAM_PATTERN_ORACLE=1 cargo test --lib -- --nocapture`
+prints every disagreement):
+- Every pattern the library tests and samples parse agrees with the legacy
+  parser, except the six intended differences, which
+  `pattern/tests.rs` pins with both readings.
+- Each group is interpreted once: `pattern_nesting_interprets_each_group_once`
+  covers ten self-nesting shapes, `((p) as q)` among them.
+- Errors come from the shared grammar, so some messages changed: an empty
+  list item reads "expected an item between separators", and a bare `if`
+  in a pattern reports the `if` form's error. The precise messages for view
+  arrows, `?:` markers and empty path splices are kept, so the
+  invalid-syntax samples are unchanged.
+- Expression parses pay for wrapping each operand in a term: user-space
+  instructions against `main`, `list_literal_4000` +3.2%,
+  `dict_lookup_2000` +1.3%, `do_chain_800` +0.5%, `hello_elf` +0.1%, and
+  nested parens and lists under +0.8%. Chains generic over their operand
+  would reclaim it if it matters.
+- Not yet: tails ending at `->`, so `(if c then f else g -> p)` is still an
+  error, as are the statement bugs, which are slice 2.
 
 ## Verification
 

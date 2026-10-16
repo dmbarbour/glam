@@ -755,6 +755,48 @@ fn assert_each_group_interpreted_once(shapes: &[(&str, &str, &str)]) {
     }
 }
 
+/// Self-nesting pattern shapes, as open, close and innermost text. The
+/// legacy pattern parser's split-and-retry was quadratic in most of them.
+const PATTERN_NESTING_SHAPES: &[(&str, &str, &str)] = &[
+    ("(", " as q)", "(p)"),
+    ("(", " ++ [q])", "[p]"),
+    ("[", ", q]", "p"),
+    ("(", ", q)", "p"),
+    ("{a: ", ", r}", "p"),
+    ("t:(", ")", "p"),
+    ("(Nat ", ")", "n"),
+    ("(f -> ", ")", "p"),
+    ("(", " <- f)", "p"),
+    ("(", " when g)", "p"),
+];
+
+#[test]
+fn pattern_nesting_interprets_each_group_once() {
+    for shape in PATTERN_NESTING_SHAPES {
+        let text = nested(12, *shape);
+        let groups = text
+            .chars()
+            .filter(|c| matches!(c, '(' | '[' | '{'))
+            .count();
+        super::INTERPRETED_GROUPS.with(|count| count.set(0));
+        let parsed = suspended(|| {
+            super::super::pattern::oracle::suspended(|| {
+                super::super::input::parse_expression_fragment(
+                    text.as_bytes(),
+                    super::super::pattern::parse_pattern,
+                )
+            })
+        });
+        let interpreted = super::INTERPRETED_GROUPS.with(std::cell::Cell::get);
+        let preview: String = text.chars().take(24).collect();
+        assert!(parsed.is_ok(), "{preview}…: {parsed:?}");
+        assert!(
+            interpreted <= groups,
+            "{preview}… interpreted {interpreted} groups of {groups}"
+        );
+    }
+}
+
 #[test]
 fn keyword_forms_in_groups_interpret_each_group_once() {
     assert_each_group_interpreted_once(KEYWORD_NESTING_SHAPES);

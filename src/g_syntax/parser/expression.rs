@@ -118,22 +118,34 @@ impl InfixChain {
         indentation: usize,
         context: ExpressionContext,
     ) -> Result<(), String> {
+        self.resumption_anchor = Some(Self::check_resumption_anchor(
+            self.resumption_anchor,
+            indentation,
+            context,
+        )?);
+        Ok(())
+    }
+
+    /// Checks a line-led operator's indentation against the continuation
+    /// floor and against `anchor`, the chain's earlier line-led operators,
+    /// returning the chain's anchor.
+    pub(in crate::g_syntax::parser) fn check_resumption_anchor(
+        anchor: Option<usize>,
+        indentation: usize,
+        context: ExpressionContext,
+    ) -> Result<usize, String> {
         if !context.accepts_layout_anchor(indentation) {
             return Err(format!(
                 "leading infix operator is indented {indentation} spaces; expected more than continuation floor {}",
                 context.continuation_floor()
             ));
         }
-        if let Some(anchor) = self.resumption_anchor {
-            if indentation != anchor {
-                return Err(format!(
-                    "leading infix operators must align at indentation {anchor}; found indentation {indentation}"
-                ));
-            }
-        } else {
-            self.resumption_anchor = Some(indentation);
+        match anchor {
+            Some(anchor) if indentation != anchor => Err(format!(
+                "leading infix operators must align at indentation {anchor}; found indentation {indentation}"
+            )),
+            _ => Ok(indentation),
         }
-        Ok(())
     }
 
     pub(in crate::g_syntax::parser) fn resolve(self) -> Result<SyntaxExpr, String> {
@@ -450,7 +462,7 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
         ));
         let dict = open(Delimiter::Brace)
             .try_map(move |group, span| {
-                validate_dict_colon_members(view, group)
+                validate_dict_colon_members(view, group, true)
                     .map(|()| group)
                     .map_err(|message| Rich::custom(span, message))
             })
@@ -743,9 +755,13 @@ pub(in crate::g_syntax::parser) fn syntax_expr_parser<'lex, 'source: 'lex>(
     })
 }
 
+/// Checks a dict literal's `:` members: a pun is `:name`, and a tag
+/// constructor member is parenthesized. `check_names` also checks each pun's
+/// name as an expression's, which a pattern checks by its own rules.
 pub(super) fn validate_dict_colon_members(
     view: TokenView<'_, '_>,
     group: GroupId,
+    check_names: bool,
 ) -> Result<(), String> {
     let contents = view
         .group_contents(group)
@@ -780,7 +796,9 @@ pub(super) fn validate_dict_colon_members(
         let TokenKind::Name(name) = name.token().kind() else {
             unreachable!("a dictionary pun has already selected a name token");
         };
-        validate_expr_name(name)?;
+        if check_names {
+            validate_expr_name(name)?;
+        }
     }
     Ok(())
 }

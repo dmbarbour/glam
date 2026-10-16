@@ -430,6 +430,32 @@ maps the short names used here to file names.
   "Names and Scope".
 - **Recorded in:** parser backtracking plan, "Keyword regions 2026-10-15".
 
+`patterns-parse-as-cover-terms` · 2026-10-16 · maintainer · accepted
+- **Context:** the pattern parser split views, predicates and guards at
+  each candidate token and retried, so trial order decided precedence and
+  nested patterns cost quadratic time. `(Nat n as m)` was a predicate over
+  `n as m`, `(p as Nat n)` was rejected, and `(f <| g x)` was a predicate
+  `f <| g` over `x`.
+- **Decision:** the term parser reads a pattern once in cover mode, into a
+  role-neutral term that converts to a pattern or an expression by role.
+  Loosest first, `when`, one view arrow and `as` sit above the expression
+  grammar, whose precedence holds below them. Views, predicates and local
+  guards need a complete position, a parenthesized pattern or a whole
+  match-arm head. Completeness passes through `as`, a view's pattern and a
+  guarded pattern.
+- **Consequences:**
+  - `(Nat n as m)` is `(Nat n) as m`, which binds the same, since a
+    predicate passes its input on. `(p as Nat n)`, `(f -> Nat n)` and
+    `(Nat n when n > 0)` become valid.
+  - `(f <| g x)` and `(Prefix "x" rest ++ [y])` become errors: only `++`
+    joins patterns, and a predicate inside `++` needs its own parentheses.
+  - No `.g` source used a shape whose meaning changed.
+  - Pattern errors come from the shared grammar, so some messages changed;
+    the precise ones for view arrows, `?:` markers and path splices remain.
+- **Rule lives in:** `Syntax.md` "Pattern Matching"; `SyntaxCheatSheet.md`
+  "Patterns".
+- **Recorded in:** parser backtracking plan, "Patterns 2026-10-16".
+
 ### Only a lone quoted name is an atom key in a key path
 `lone-quoted-name-is-an-atom-key` · 2026-10-06 · maintainer · superseded
 - **Context:** the grammar committed to a leading `'name` as the whole key.

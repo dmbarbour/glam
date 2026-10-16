@@ -1686,6 +1686,15 @@ Patterns offer a concise way of extracting data from similar structure. I'm borr
         Predicate Pattern => Result # whole match-arm predicate may omit parens
         (Pattern when Guard)        # local guards
 
+Within a pattern, `when` binds loosest, then one view arrow (`->` or `<-`),
+then `as`. Below them a pattern reads as the same tokens would as an
+expression: juxtaposition binds tighter than `++`, and a tag tighter than
+juxtaposition. So `a:Nat n` is a predicate `a:Nat` over `n`, while
+`a:(Nat n)` tags a predicate. Views, predicates and local guards fill a
+parenthesized pattern or a whole match-arm head. There they may also follow
+`as` or a view's arrow, or precede `when`, as in `(p as Nat n)`,
+`(f -> Nat n)` and `(Nat n when n > 0)`.
+
 ### View Patterns
 
 View patterns have an opportunity to filter, rewrite, and search (branch) on data before we match on it. In the effectful `try` variants, they may also inspect the environment, e.g. `(.get -> Pattern)` would view a 'key' in terms of associated state.

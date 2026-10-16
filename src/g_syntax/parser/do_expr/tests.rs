@@ -521,11 +521,9 @@ fn braced_do_semicolons_currently_separate_unparenthesized_where_expressions() {
         let diagnostics = parse_compound_expression_fragment(source.as_bytes())
             .expect_err("an unparenthesized inline `where` is currently misclassified");
         assert!(
-            diagnostics.iter().any(|diagnostic| {
-                diagnostic
-                    .message
-                    .contains("expected a capture, literal, list pattern")
-            }),
+            diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.message.contains("`where` is a reserved keyword") }),
             "unexpected diagnostics for `{source}`: {diagnostics:#?}"
         );
     }
@@ -573,19 +571,19 @@ fn token_do_reports_structural_statement_errors() {
         ("do { value <- .r 1; }", "cannot end with a binding"),
         (
             "do\n[first,,second] <- .read\n.r first",
-            "empty item between commas",
+            "expected an item between separators",
         ),
         (
             "do\n.read -> first second\n.r ()",
-            "expected a capture, literal, list pattern",
+            "a predicate pattern must be parenthesized",
         ),
         (
             "do\n.r 1 -> left as\n.r left",
-            "pattern `as` requires a pattern on both sides",
+            "expected a pattern, found the end",
         ),
         (
             "do\nas right <- .r 1\n.r right",
-            "pattern `as` requires a pattern on both sides",
+            "expected a pattern, found `as`",
         ),
         (
             "do\n-> result\n.r result",
@@ -620,7 +618,7 @@ fn token_do_reports_structural_statement_errors() {
         ),
         (
             "do\n.r {} -> []:value\n.r value",
-            "requires at least one path component",
+            "dictionary paths cannot be empty",
         ),
         (
             "do\n.r {} -> ():value\n.r value",
@@ -628,7 +626,7 @@ fn token_do_reports_structural_statement_errors() {
         ),
         (
             "do\n.r {} -> {[first,,second]:value}\n.r value",
-            "contains an empty key between commas",
+            "expected an item between separators",
         ),
         (
             "do\n.r {} -> {foo:value, rest, bar:other}\n.r value",
@@ -658,10 +656,7 @@ fn token_do_reports_structural_statement_errors() {
             "do\n.r {} -> {foo?:}\n.r ()",
             "requires a payload after `?:`",
         ),
-        (
-            "do\n.r {} -> :42\n.r ()",
-            "dictionary shorthand is valid only inside braces",
-        ),
+        ("do\n.r {} -> :42\n.r ()", "expected a path after `:`"),
         (
             "do\n.r {} -> :value\n.r ()",
             "dictionary shorthand is valid only inside braces",
