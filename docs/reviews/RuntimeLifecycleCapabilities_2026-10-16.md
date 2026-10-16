@@ -1,7 +1,9 @@
 # Runtime Lifecycle and Capabilities Review — 2026-10-16
 
 Status: review complete. No code changed. This records findings and a
-recommended remediation; it does not authorize a plan.
+recommended remediation; it does not authorize a plan. The maintainer
+accepted the recommendation and settled a target model on 2026-10-16 (see
+[Target Model](#target-model-maintainer-2026-10-16)); five decisions remain.
 
 Revision reviewed: `776bec6d` (clean `main`).
 
@@ -237,38 +239,102 @@ reasons callbacks hold anything, and O3's handles give the rest a
 non-owning route. O2 becomes optional, since a captured handle is harmless;
 a thread-affine owner is the stronger and simpler form of it.
 
-Suggested steps, each a plan step once a plan exists:
-1. `lifecycle-cli-logger`: stop running the CLI's rendering on workers
-   (L2, L8). Tasks publish data; the client delivers and renders on its own
-   threads. Small, and independent of the rest.
-2. `lifecycle-owner`: the affine owner and its handles; explicit retirement
-   that closes sessions and records (L1, L5, L6, L10); `Assembler`, the
-   readiness results and `EffectRun` hold or borrow handles; the CLI keeps
-   one owner in `main`.
-3. `lifecycle-leases`: capabilities per call for hosts, specializations,
-   decoders, converters, adapters and subscribers (L7, L8), retiring stored
-   owners such as `LoggerTaskHost`'s `RuntimeTaskCapability` where the
-   context can supply them.
-4. `lifecycle-host-calls`: module and binary loaders receive a non-owning
-   session factory and a diagnostic sink with the host call, instead of
-   upgrading `DeferredAssembler` (L3, L9).
-5. `lifecycle-audits`: a source audit like the managed-boundary audit, or
-   compile-fail tests, showing callbacks cannot name or capture an owner;
-   ordering tests for retirement during publication and import (L3, L4).
-6. Check L11.
+*Accepted (maintainer, 2026-10-16):* O1 and O3, with a thread-affine owner,
+and the value domain retiring with the owner. Discussion then settled the
+target model below, which reshapes the steps.
 
-## Maintainer Decisions Needed
+## Target Model (maintainer, 2026-10-16)
 
-1. **The owner (O3):** affine with explicit retirement? Movable (`Send`) or
-   thread-affine (`!Send`)?
-2. **Value-domain retirement:** at the owner's drop, making values inert
-   then, rather than at the last holder's drop.
-3. **Where client callbacks run:** subscribers and adapters only on client
-   threads, with the client pumping delivery, or anywhere, with leases.
-4. **Evaluation in callbacks:** if subscribers may render on workers, what
-   an evaluation lease means inside a quantum; or forbid it and render on
-   the client.
-5. **Readiness results:** borrow the owner (`RuntimeReadiness<'rt>`) or carry
-   handles.
-6. **Timing:** step 1 now, and the rest before or after the grammar review
+**Three layers.**
+- **Workers run only runtime code:** evaluation and the logic of reflection
+  tasks, in quanta the evaluator's step budgets bound, so divergence and
+  utilization stay measurable. A worker never calls client code. Workers
+  still evaluate most of each reflection task; only the interactions with
+  the outside world cross to the client layer.
+- **The client layer** is the owner thread and any number of client
+  threads. The owner is affine and thread-affine (`!Send`) and alone retires
+  the runtime, together with its value domain. Other threads hold `Send`
+  handles that do everything but retire: evaluate, pump, deliver, answer
+  requests, feed inputs, read readiness. Logging, assembly output and an IDE
+  serving concurrent requests are client threads. A client thread may
+  evaluate, and may help pump, as client time.
+- **Effects cross between them as messages, never as callbacks.** A task's
+  reflection effects are data in and data out:
+  - **Buffered writes:** output journaled in the task's transaction,
+    published on commit, delivered by a client thread. `.write_stderr`
+    already journals this way; hosts delivering inside their commit is what
+    must go.
+  - **Asynchronous requests:** a transaction posts a request paired with a
+    promise resolver, and the pair becomes visible on commit, so an aborted
+    transaction sends nothing. The task never waits inside a transaction: it
+    either observes the request's status (uncommitted, sent, broken,
+    fulfilled) and awaits a change with the ordinary `.cut` retry, or takes
+    the result at once as a promised value. A client thread answers by
+    resolving; dropping the resolver breaks the promise, as
+    `PromiseResolver` already does. A synchronous effect is an asynchronous
+    one followed by a wait, more expensive but expressible.
+  - **Shared transactional state:** host-visible state lives in the
+    reflection store, which tasks and clients read and commit to
+    transactionally.
+
+**Scope.** Transactions are not extended to Rust code: client adapters run
+outside them, behind messages. Transactional persistent state, such as a
+database behind the store, is the one likely extension, so the store's
+interface should stay open to it.
+
+**Consequences for the findings.** Subscribers and output adapters run only
+on client threads (L2, L8), consuming outputs that client threads drain.
+Rendering evaluates through a client thread's handle, never inside a
+worker's quantum. Readiness results carry data and a handle, since client
+threads read them. Handles need no weak routes, because only the owner
+retires, and explicit retirement tears down sessions, work records and
+stored client objects on the owner's thread, which breaks the remaining
+cycles (L1, L3, L4, L10).
+
+Steps, each a plan step once a plan exists:
+1. `lifecycle-cli-logger`: the CLI's diagnostics become an output that a
+   client thread drains and renders (L2, L8), the first instance of the
+   message boundary. Small, and independent of the rest.
+2. `lifecycle-owner`: the thread-affine owner and `Send` handles; explicit
+   retirement that stops and joins the workers, waits for client threads'
+   quanta, fails pending client operations as retired, closes sessions and
+   records, and retires the value domain (L1, L5, L6, L10). `Assembler`,
+   the readiness results and `EffectRun` hold handles; the CLI keeps its one
+   owner in `main`.
+3. `lifecycle-host-messages`: effects as messages: the request primitive
+   (request and resolver, published on commit, observable status, promised
+   result); host state in the store; hosts reduced to endpoints, retiring
+   `TaskHost`'s `snapshot`, `commit` and `validate` hooks (L7, L8).
+4. `lifecycle-leases`: what remains of per-call capabilities: decoders and
+   converters receive `&Values`, specializations use
+   `RequestContext::values()`, and stored capabilities such as
+   `LoggerTaskHost`'s go where the context supplies them.
+5. `lifecycle-host-calls`: a forced import's file load becomes a request
+   whose promised value is the import (L3, L9), so workers neither call the
+   client's `SourceSystem` nor upgrade `DeferredAssembler`.
+6. `lifecycle-audits`: a source audit or compile-fail tests showing workers'
+   code cannot name an owner or call client code; ordering tests for
+   retirement during pumping, publication and import (L3, L4).
+7. Check L11.
+
+## Maintainer Decisions
+
+Settled 2026-10-16:
+1. **The owner:** affine with explicit retirement, thread-affine.
+2. **Value domain:** retires with the owner.
+3. **Client callbacks:** only on client threads; effects cross as messages.
+4. **Evaluation in callbacks:** through client threads' handles, never
+   inside a worker's quantum.
+
+Proposed, not yet confirmed:
+5. **Readiness results** carry data and a handle.
+6. **`TaskHost` hooks** retire, host state moving into the store.
+7. **Lazy-import I/O** becomes a request answered by a client thread, rather
+   than trusted runtime-side I/O.
+
+Open:
+8. **The request primitive's API:** the status values, how a task observes
+   and awaits them, and how a client thread receives requests and their
+   resolvers.
+9. **Timing:** step 1 now, and the rest before or after the grammar review
    resumes.

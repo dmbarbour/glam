@@ -89,9 +89,9 @@ flags a step for discussion when work reaches it, not a decision.
   it cannot retire yet.
 - [`RuntimeLifecycleCapabilities_2026-10-16.md`](../reviews/RuntimeLifecycleCapabilities_2026-10-16.md)
   reviews who owns the evaluation runtime and how code the runtime calls
-  gets its capabilities. It recommends an affine owner that retires the
-  runtime explicitly, with capabilities lent per call; six maintainer
-  decisions are open.
+  gets its capabilities. Accepted 2026-10-16: a thread-affine owner that
+  retires the runtime explicitly, effects crossing to client threads as
+  messages; five decisions remain.
 
 ## Completed, Awaiting Retirement
 
