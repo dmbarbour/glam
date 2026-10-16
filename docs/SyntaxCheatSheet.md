@@ -329,13 +329,17 @@ f x                 # application; ad hoc polymorphism:
                     #   functions; {apply:f,_} x = f x; (eff:f) x
                     #   raw interaction-net values are not applicable
 f x \y -> body       # a trailing lambda is the final application argument
-# Tail forms (prefix if/try, match, do, lambdas, let, using, object) stand
-# alone only in tail position: on their line, only a closer or separator may
-# follow them; after their `}` or dedent, only an operator or an enclosing
-# form's keyword. Parenthesize them anywhere else:
+# Tail forms (prefix if/try, match, do, lambdas, let, using, object) run to
+# the end of their region: a closer, `,` `;`, a line end, or a separator
+# keyword (then else in where => =>? and a binding's `->`). Never to a token
+# that could continue them; after their `}` or dedent, only an operator or a
+# keyword may follow, never an argument or path. Parenthesize them elsewhere:
 f (match x with {_ => 1}) y        # `f match x with {...} y` is an ERROR
 if c then do { a } else do { b }   # `}` ends the block, as a dedent does
-if a then (if b then c else d) else e
+if a then if b then c else d else e # each `if` has an `else`: they pair
+if x <- (if a then b else c) and d then e else f  # `and` could continue c
+f (if c then a else b)             # after an operand, `if` is postfix: ERROR
+                                   #   without parentheses, as for `try`
 foo.bar             # member access
 foo (.bar)          # apply foo to effect path .bar; `foo .bar` is an ERROR
 foo <| .bar         # equivalent alternative without parentheses
@@ -383,9 +387,9 @@ nested = f [do { .r 1 }, do {; .r 2; }]
 # - `P <- op` and `P = value` bind only when the `<-` or `=` comes before any
 #   keyword form or `\` in the statement: `if (a, b) = e then ...` is an
 #   operation, `x = if ...` a binding. Guard clauses follow the same rule.
-# - In `op -> P`, the `->` ends a postfix `if` fallback (`a if c else b -> x`)
-#   or a tail ended by a block; parenthesize other tail forms before it:
-#   `(if c then .a else .b) -> x`, `f (\a -> e) -> x`.
+# - In `op -> P`, the `->` is a separator keyword: it ends op's open tails
+#   (`else` branch, `let`/`using` body, postfix `if` fallback, lambda body):
+#   `if c then .a else .b -> x`.
 # - Do bindings currently support irrefutable names, `_`, grouping, irrefutable
 #   `P as Q`, scalar literals, fixed quoted paths, list patterns with at most
 #   one potentially refutable variable-length segment, computed-path dictionary
@@ -428,6 +432,7 @@ do
 if C then A else B
 A if C else B
 if (a,b) = Expr and a > b then A else B     # C is guard: patterns + effects + 'and'
+if (a or b) and c then A else B     # guards are an `and` chain: `or` needs parens
 value if (value, rest) = split input else fallback
 \x -> b if C else d                  # \x -> (b if C else d): an open lambda's
                                      #   body takes the trailing postfix if
@@ -437,12 +442,16 @@ value if (value, rest) = split input else fallback
 match Expr with
     Pattern1 => Result1
     P2 when C2 => R2               # guard clause
-    P3 when                        # branching guards share P3's successful prefix
-        C3a => R3a
+    P3 when                        # a `when` ending its line heads nested
+        C3a => R3a                 #   choices sharing P3's successful prefix
         C3b => R3b
+    P4 when C4a
+         and C4b => R4             # guards may continue before the `=>`
     _ => Default
 
-match Expr with { Pattern1 => Result1; _ => Default; }
+match Expr with { Pattern1 => Result1; _ => Default; }  # `{` on `with`'s line
+match Expr with                     # a dict pattern first: on the next line
+    {x:value} => value
 match Expr with {}                 # error: match exhausted on its source line
 match* Expr with ...                # lazy list of every successful result
 match* Expr with {}                 # []

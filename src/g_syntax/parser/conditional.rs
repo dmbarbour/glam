@@ -824,10 +824,9 @@ mod tests {
         .unwrap_or_else(|diagnostics| panic!("`{source}` reported {diagnostics:#?}"))
     }
 
-    /// Asserts that `source` fails because a tail form in it stands outside
-    /// tail position (Syntax.md "Tail position").
+    /// Asserts that `source` fails with an error containing `expected`.
     #[track_caller]
-    fn assert_outside_tail_position(source: &str) {
+    fn assert_rejected(source: &str, expected: &str) {
         let diagnostics =
             super::super::input::parse_expression_fragment(source.as_bytes(), |view| {
                 super::super::structural::parse_expression_in_context(
@@ -835,13 +834,20 @@ mod tests {
                     ExpressionContext::for_fragment(view),
                 )
             })
-            .expect_err("a tail form outside tail position fails");
+            .expect_err("the source is invalid");
         assert!(
             diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.message.contains("not in tail position")),
-            "`{source}` reported {diagnostics:#?}"
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "`{source}` reported {diagnostics:#?} instead of `{expected}`"
         );
+    }
+
+    /// Asserts that `source` fails because a tail form in it stands outside
+    /// tail position (Syntax.md "Tail Position").
+    #[track_caller]
+    fn assert_outside_tail_position(source: &str) {
+        assert_rejected(source, "not in tail position");
     }
 
     #[test]
@@ -914,19 +920,27 @@ mod tests {
         ));
     }
 
+    /// Every prefix `if` has an `else`, so an inner one takes the first, as
+    /// brackets pair; `else` separates, so the inner `if` ends there.
     #[test]
-    fn an_if_in_an_inline_then_branch_is_parenthesized() {
-        // The inner `if` would end at an `else`, which it could take too.
-        assert_outside_tail_position("if _ then if _ then 1 else 2 else 3");
-        assert_outside_tail_position(
-            "if _ then if _ then 1 else 2
-else 3",
-        );
-        let SyntaxExpr::If(outer) = parse("if _ then (if _ then 1 else 2) else 3") else {
-            panic!("source should produce an outer if expression");
-        };
-        assert!(matches!(outer.then_result.as_ref(), SyntaxExpr::If(_)));
-        assert!(matches!(outer.else_result.as_ref(), SyntaxExpr::Number(_)));
+    fn nested_if_keywords_do_not_escape_to_the_outer_conditional() {
+        for source in [
+            "if _ then if _ then 1 else 2 else 3",
+            "if _ then if _ then 1 else 2\nelse 3",
+            "if _ then (if _ then 1 else 2) else 3",
+        ] {
+            let SyntaxExpr::If(outer) = parse(source) else {
+                panic!("`{source}` should produce an outer if expression");
+            };
+            assert!(
+                matches!(outer.then_result.as_ref(), SyntaxExpr::If(_)),
+                "{source}"
+            );
+            assert!(
+                matches!(outer.else_result.as_ref(), SyntaxExpr::Number(_)),
+                "{source}"
+            );
+        }
     }
 
     #[test]
@@ -988,12 +1002,26 @@ else 3",
         assert!(matches!(outer.else_result.as_ref(), SyntaxExpr::If(_)));
     }
 
+    /// After an operand an `if` is postfix, so a prefix conditional there
+    /// is parenthesized, `try` alike; elsewhere it stands in tail position.
     #[test]
-    fn prefix_if_remains_a_structural_application_argument() {
-        let SyntaxExpr::Apply(_, argument) = parse("f if _ then 1 else 2") else {
-            panic!("a prefix conditional after a function should remain its argument");
+    fn prefix_conditionals_are_parenthesized_after_an_operand() {
+        for source in [
+            "f if _ then 1 else 2",
+            "f a try _ then 1 else 2",
+            "f a\n  if _ then 1 else 2",
+        ] {
+            assert_rejected(source, "a prefix conditional cannot follow an operand");
+        }
+        let SyntaxExpr::Apply(_, argument) = parse("f (if _ then 1 else 2)") else {
+            panic!("a parenthesized conditional is an argument");
         };
         assert!(matches!(argument.as_ref(), SyntaxExpr::If(_)));
+        assert!(matches!(parse("f a if _ else 2"), SyntaxExpr::If(_)));
+        assert!(matches!(
+            parse("1 + if _ then 1 else 2"),
+            SyntaxExpr::Add(_, right) if matches!(right.as_ref(), SyntaxExpr::If(_))
+        ));
     }
 
     #[test]
@@ -1256,9 +1284,7 @@ else 3",
 
     #[test]
     fn nested_if_and_try_boundaries_remain_owned_by_their_heads() {
-        assert_outside_tail_position("try _ then if _ then 1 else 2 else 3");
-        assert_outside_tail_position("if _ then try _ then 1 else 2 else 3");
-        let SyntaxExpr::If(outer_try) = parse("try _ then (if _ then 1 else 2) else 3") else {
+        let SyntaxExpr::If(outer_try) = parse("try _ then if _ then 1 else 2 else 3") else {
             panic!("source should produce an outer try expression");
         };
         assert_eq!(outer_try.mode, ConditionalMode::Host);
@@ -1270,7 +1296,7 @@ else 3",
             })
         ));
 
-        let SyntaxExpr::If(outer_if) = parse("if _ then (try _ then 1 else 2) else 3") else {
+        let SyntaxExpr::If(outer_if) = parse("if _ then try _ then 1 else 2 else 3") else {
             panic!("source should produce an outer if expression");
         };
         assert_eq!(outer_if.mode, ConditionalMode::Pure);
@@ -1471,6 +1497,58 @@ else 3",
         };
         assert!(matches!(*function, SyntaxExpr::Match(_)));
         assert_eq!(*argument, SyntaxExpr::Name("b".to_owned()));
+    }
+
+    /// A `{` on the line of a match's `with` delimits its arms, so a first
+    /// arm with a dictionary pattern begins on the next line.
+    #[test]
+    fn a_brace_after_with_delimits_the_arms() {
+        let SyntaxExpr::Match(braced) = parse("match v with {1 => 2; _ => 3}") else {
+            panic!("braced arms should parse");
+        };
+        assert_eq!(braced.arms.len(), 2);
+        let SyntaxExpr::Match(layout) = parse("match v with\n  {a:z} => z\n  _ => 0") else {
+            panic!("a dictionary pattern may begin a layout arm");
+        };
+        assert!(matches!(
+            layout.arms[0].pattern.kind,
+            SyntaxPatternKind::Dict { .. }
+        ));
+        for source in [
+            "match v with {a:z} => z",
+            "match v with\n  {1 => 2; _ => 3}",
+        ] {
+            assert_rejected(source, "requires `=>`");
+        }
+    }
+
+    /// A `when` ending its line heads nested arms; any other begins guards,
+    /// which may continue onto later lines before the arm's arrow.
+    #[test]
+    fn a_when_ending_its_line_heads_nested_arms() {
+        let SyntaxExpr::Match(nested) = parse("match v with\n  p when\n    c => 1\n  _ => 2")
+        else {
+            panic!("nested arms should parse");
+        };
+        assert!(matches!(nested.arms[0].outcome, MatchOutcome::Nested(_)));
+        for source in [
+            "match v with\n  p when c\n      => 1\n  _ => 2",
+            "match v with\n  p when c\n      and d => 1\n  _ => 2",
+            "match v with\n  p when {} <- e => 1\n  _ => 2",
+        ] {
+            let SyntaxExpr::Match(guarded) = parse(source) else {
+                panic!("`{source}` should parse");
+            };
+            assert!(
+                matches!(guarded.arms[0].outcome, MatchOutcome::Result { .. }),
+                "{source}"
+            );
+            assert!(!guarded.arms[0].guards.is_empty(), "{source}");
+        }
+        let SyntaxExpr::Match(braced) = parse("match v with\n  p when {c => 1}\n  _ => 2") else {
+            panic!("braced nested arms should parse");
+        };
+        assert!(matches!(braced.arms[0].outcome, MatchOutcome::Nested(_)));
     }
 
     #[test]

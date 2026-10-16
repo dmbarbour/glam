@@ -1049,10 +1049,11 @@ fn long_flat_chains_parse_without_recursion() {
         .expect("the trees drop");
 }
 
-/// The tail rule (Syntax.md "Tail position"): a tail form stands without
-/// parentheses only where its statement or group ends after it, or, after
-/// its `}` or a dedent, where an operator or an enclosing form's keyword
-/// resumes. The oracle compares each rejected source as read without it.
+/// The tail rule (Syntax.md "Tail Position"): a tail form runs to the end of
+/// its region, which a closer, a separator, a line end or a separator
+/// keyword ends, and only an operator or a keyword resumes after its `}` or
+/// a dedent. The oracle compares each source as the legacy grammar reads
+/// it.
 #[test]
 fn tail_forms_stand_alone_only_in_tail_position() {
     const OUTSIDE: &[&str] = &[
@@ -1062,16 +1063,10 @@ fn tail_forms_stand_alone_only_in_tail_position() {
         "f do\n    a\n  y",
         "f match a with\n    _ => 1\n  y",
         "do { .r 1 }.x",
-        "do\n    if c then .a else .b -> p\n    .r p",
-        "do\n    f \\a -> a -> p\n    .r p",
-        "do\n    a if c else \\z -> z -> p\n    .r p",
         "if y <- if a then b else c and d then 1 else 2",
-        "if a then if b then c else d else e",
-        "if a then \\z -> z else b",
-        "if any \\z -> z then 1 else 2",
-        "if c then do a else b",
+        "match v with {p when x <- \\z -> z and d => 1}",
         "match \\z -> z with {_ => 1}",
-        "match v with {p when any \\z -> z => 1}",
+        "match if a then b else c with {_ => 1}",
     ];
     const INSIDE: &[&str] = &[
         "f (match a with {_ => 1}) y",
@@ -1080,6 +1075,15 @@ fn tail_forms_stand_alone_only_in_tail_position() {
         "(do { .r 1 }).x",
         "do { .r 1 } >>= k",
         "do\n    (if c then .a else .b) -> p\n    .r p",
+        "do\n    if c then .a else .b -> p\n    .r p",
+        "do\n    f \\a -> a -> p\n    .r p",
+        "do\n    a if c else \\z -> z -> p\n    .r p",
+        "if a then if b then c else d else e",
+        "if a then if b then c else d\n  else e",
+        "if a then \\z -> z else b",
+        "if any \\z -> z then 1 else 2",
+        "if c then do a else b",
+        "match v with {p when any \\z -> z => 1}",
         "do\n    a if c else b -> p\n    .r p",
         "do\n    p <- f \\a -> a\n    .r p",
         "if y <- (if a then b else c) and d then 1 else 2",
@@ -1088,7 +1092,6 @@ fn tail_forms_stand_alone_only_in_tail_position() {
         "if c then do\n      a\n  else do\n      b",
         "match match a with {_ => 1} with {_ => 2}",
         "1 + if a then b else c",
-        "f if a then b else c",
         "map xs \\z -> z",
         "if a then b else c where c = 1",
         "[if a then b else c, \\z -> z]",

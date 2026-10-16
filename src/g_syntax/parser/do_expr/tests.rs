@@ -135,20 +135,21 @@ fn keyword_forms_own_their_binders() {
     ));
 }
 
-/// In a binding, a postfix `if`'s fallback and a tail ended by a block
-/// end at a top-level `->`, which a pattern follows. A tail form that ends
-/// on its line must end its statement, and elsewhere `->` after a tail is
-/// an error, as it was. (`let` and `using` follow the tail rule once they
-/// are frames, in `parser-keyword-frames-suffixes`.)
+/// In a binding, an open tail ends at a top-level `->`, a separator that a
+/// pattern follows; elsewhere `->` after a tail is an error, as it was.
 #[test]
 fn open_tails_end_at_a_forward_binding() {
     for (source, form) in [
+        ("do { if c then .a else .b -> y; .r y }", "if"),
         ("do { (if c then .a else .b) -> y; .r y }", "if"),
         ("do { .r 1 if c else .r 2 -> y; .r y }", "if"),
+        ("do { let z = 1 in .r z -> y; .r y }", "let"),
+        ("do { using m in .r 1 -> y; .r y }", "using"),
         (
             "do { if c then .a else do { .b -> z; .r z } -> y; .r y }",
             "if",
         ),
+        ("do { .r 1 |> \\v -> v -> y; .r y }", "pipe"),
         ("do { .r 1 |> (\\v -> v) -> y; .r y }", "pipe"),
         ("do { .r d with { a := 1 } -> y; .r y }", "with"),
     ] {
@@ -183,9 +184,27 @@ fn open_tails_end_at_a_forward_binding() {
     );
 
     assert!(parse_compound_expression_fragment(b"if c then a else b -> y").is_err());
-    assert_outside_tail_position("do { if c then .a else .b -> y; .r y }");
-    assert_outside_tail_position("do { .r 1 |> \\v -> v -> y; .r y }");
-    assert_outside_tail_position("do { .r 1 if c else \\v -> v -> y; .r y }");
+}
+
+/// Guards are an `and` chain whose operands may bind, so an `or` among
+/// them is parenthesized, as in any `and` chain.
+#[test]
+fn guards_mix_or_and_and_only_in_parentheses() {
+    let diagnostics = parse_compound_expression_fragment(b"if a or b and c then 1 else 2")
+        .expect_err("`or` and `and` have no precedence relationship");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("no precedence relationship")),
+        "{diagnostics:#?}"
+    );
+    for source in [
+        "if a or b then 1 else 2",
+        "if (a or b) and c then 1 else 2",
+        "if x <- (a or b) and c then 1 else 2",
+    ] {
+        parse_do_expression(source);
+    }
 }
 
 /// Guard clauses bind by the same rule as statements, split at `and`

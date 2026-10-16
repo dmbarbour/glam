@@ -40,9 +40,9 @@
 //! open lambda's body: `\x -> b if c else d` is `\x -> (b if c else d)`.
 //!
 //! **Tail position** (Syntax.md): a conditional, `do` block, match or
-//! lambda that a keyword or arrow on its line would end, or that an argument
-//! or path follows, fails its view. Only rejecting, the rule is off while
-//! the oracle compares such a view with the grammar.
+//! lambda that a token able to continue it would end on its line, or that
+//! an argument or path follows, fails its view. The grammar review's rules
+//! are off while the oracle compares a view with the legacy grammar.
 //!
 //! **Other keyword forms** (`using`, and any form inside another's region)
 //! are delegated to the structural parsers through the same entry points the
@@ -249,15 +249,16 @@ fn opens_keyword_region(view: TokenView<'_, '_>, index: usize, mode: Mode) -> bo
             || mode == Mode::Cover && is_pattern_when(view, index))
 }
 
-/// Whether the tail rule is on (Syntax.md "Tail position"), as it is
-/// outside the oracle: the structural parsers predate the rule, which only
-/// rejects, so the oracle compares a rejected expression's parse without it.
-fn tail_rule_enabled() -> bool {
+/// Whether the term parser reads the grammar the structural parsers know,
+/// before the grammar review's rules (Syntax.md "Tail Position" and the
+/// review's decisions): only while the oracle compares the two, since the
+/// structural parsers retire before they would learn the rules.
+fn legacy_grammar() -> bool {
     #[cfg(test)]
-    if TAIL_RULE_OFF.with(std::cell::Cell::get) {
-        return false;
+    if LEGACY_GRAMMAR.with(std::cell::Cell::get) {
+        return true;
     }
-    true
+    false
 }
 
 /// The error for a tail form at `head` that `follower` follows, so that it
@@ -267,6 +268,29 @@ fn misplaced_tail(head: usize, label: &str, follower: &str) -> Fail {
         "parenthesize this {label}: {follower} follows it, so it is not in tail position"
     ))
     .or_at(Some(head))
+}
+
+/// The error for a prefix conditional at `head` that follows an operand,
+/// where an `if` reads as postfix and a `try` would be an argument.
+fn conditional_argument(head: usize, keyword: &str) -> Fail {
+    Fail::error(format!(
+        "parenthesize this `{keyword}` expression: a prefix conditional cannot follow an operand"
+    ))
+    .or_at(Some(head))
+}
+
+/// Whether the token at `index` ends an operand: a literal, a special
+/// reference such as `self`, or a name that is no keyword where it stands.
+fn ends_operand(view: TokenView<'_, '_>, index: usize) -> bool {
+    match token(view, index).kind() {
+        TokenKind::Name(name) => {
+            matches!(*name, "self" | "module" | "module_origin")
+                || g0_keyword(name).is_none()
+                || !in_keyword_position(view, index)
+        }
+        TokenKind::Number(_) | TokenKind::Text(_) | TokenKind::Embedded(_) => true,
+        _ => false,
+    }
 }
 
 /// A form's name in errors.
@@ -649,15 +673,15 @@ thread_local! {
     /// check no group is interpreted twice.
     static INTERPRETED_GROUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static REGIONS_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static TAIL_RULE_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static LEGACY_GRAMMAR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Runs `work` without the tail rule on this thread, for the oracle.
+/// Runs `work` reading the legacy grammar on this thread, for the oracle.
 #[cfg(test)]
-pub(super) fn without_tail_rule<R>(work: impl FnOnce() -> R) -> R {
-    let was = TAIL_RULE_OFF.with(|off| off.replace(true));
+pub(super) fn with_legacy_grammar<R>(work: impl FnOnce() -> R) -> R {
+    let was = LEGACY_GRAMMAR.with(|legacy| legacy.replace(true));
     let result = work();
-    TAIL_RULE_OFF.with(|off| off.set(was));
+    LEGACY_GRAMMAR.with(|legacy| legacy.set(was));
     result
 }
 
@@ -1661,7 +1685,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             // A tail form stands only where nothing but an operator or a
             // keyword follows it.
             if let Some((head, keyword)) = form
-                && tail_rule_enabled()
+                && !legacy_grammar()
             {
                 return Err(misplaced_tail(head, &form_label(keyword), "an argument"));
             }
@@ -1823,7 +1847,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             }
         };
         let suffixes = self.path_suffixes()?;
-        if !suffixes.is_empty() && tail_rule_enabled() {
+        if !suffixes.is_empty() && !legacy_grammar() {
             return Err(misplaced_tail(
                 form.head,
                 &form_label(form.keyword),

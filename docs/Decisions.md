@@ -483,8 +483,100 @@ maps the short names used here to file names.
   Do Notation".
 - **Recorded in:** parser backtracking plan, "Patterns 2026-10-16".
 
+### Tail forms run to the end of their region, which separators end
+`tail-forms-end-at-separators` · 2026-10-16 · maintainer · accepted
+- **Context:** `tail-position` let only a closer, a separator or a line end
+  follow a tail form that ends on its line. That rejected
+  `if a then if b then c else d else e`, `if c then .a else .b -> P` and
+  `if any xs \x -> x > 0 then …`, though each has only one valid reading:
+  every prefix `if` and `try` has an `else`, so their keywords pair as
+  brackets do, and nothing in an expression continues with `then`, `else`
+  or a binding's `->`.
+- **Decision:** a tail form runs to the end of its region. A region ends at
+  a closer, `,` or `;`, a line end, or a separator keyword: one that no
+  expression continues with, which are `then`, `else`, `in`, `where`, `=>`,
+  `=>?`, and a binding's or view's `->`. A tail form never ends at a token
+  that could continue it: an `and` between guard clauses, which could be a
+  boolean `and`, or a `with` after a match's subject, which could begin an
+  update. After a tail form's `}` or dedent only an operator or a keyword
+  may follow, never an argument or a path; postfix `if` is an operator.
+- **Alternatives rejected:** keeping `tail-position`, which needs
+  parentheses where no reader could misread the form; and a parse error
+  for a lambda before a binding's `->` (`f \a -> E -> P`), whose only
+  reading a linter can flag instead.
+- **Consequences:**
+  - Legal again: nested inline `if`s, a conditional or lambda before a
+    binding's `->`, a lambda in guards before `then` or `=>`, and
+    `if c then do a else b`. A linter may flag deep inline nesting and the
+    lambda before `->`.
+  - Still parenthesized: a conditional bound in a guard that `and`
+    follows, a match subject that `with` ends inline, and an argument or a
+    path after any tail form.
+  - Supersedes `tail-position`, and restores the reading of a binding's
+    `->` in `bindings-split-before-keyword-forms`.
+- **Rule lives in:** `Syntax.md` "Tail Position"; `SyntaxCheatSheet.md`
+  "Operators, Pipes, Application".
+- **Recorded in:** grammar review, `grammar-tail-position`.
+
+### A `{` on the line of a match's `with` delimits its arms
+`brace-after-with-delimits-arms` · 2026-10-16 · maintainer · accepted
+- **Context:** after `with`, a `{` began braced arms or a first layout
+  arm's dictionary pattern, depending on whether an arm mark followed the
+  group's closing `}` on its line: a reader had to find the group's end
+  and look past it.
+- **Decision:** a `{` on the line of `with`, or of a match's `when`,
+  delimits the arms; a line break begins layout arms, and anything else a
+  hanging arm. A first arm with a dictionary pattern begins on the next
+  line.
+- **Consequences:** `match v with {a:x} => x` and arms in braces on the
+  line after `with` are errors.
+- **Rule lives in:** `Syntax.md` "Match"; `SyntaxCheatSheet.md`
+  "Conditionals & Patterns".
+- **Recorded in:** grammar review, item 1.
+
+### A `when` that ends its line heads nested arms
+`when-ending-its-line-heads-nested-arms` · 2026-10-16 · maintainer · accepted
+- **Context:** an arm's `when` began guards when an arm mark followed later
+  on its line, and nested arms otherwise, so its role depended on the rest
+  of the line, and guards could not continue onto another line.
+- **Decision:** a `when` that ends its line heads nested arms, and any
+  other begins guards, which may continue onto later lines before the
+  arm's arrow. A `when` before a `{` still heads braced nested arms only
+  when no mark follows the group on its line, since a guard may bind a
+  dictionary pattern (`p when {} <- e => r`); that case is open in the
+  review.
+- **Consequences:** multi-line guards parse.
+- **Rule lives in:** `Syntax.md` "Match".
+- **Recorded in:** grammar review, item 2.
+
+### After an operand, an `if` is postfix
+`conditional-after-an-operand-is-postfix` · 2026-10-16 · maintainer · accepted
+- **Context:** `f a if b then c else d` and `f a if b else c` differed
+  only at the `then` or `else` after a condition of any length.
+- **Decision:** an `if` after an operand is postfix, so a prefix `if` as an
+  argument is parenthesized; so is a prefix `try`, since `if` and `try`
+  follow the same rules, as `match` and `try_match` do.
+- **Consequences:** `f if c then a else b` is an error;
+  `f (if c then a else b)`, `x + if c then a else b` and `f a if c else b`
+  parse.
+- **Rule lives in:** `Syntax.md` "If Then Else"; `SyntaxCheatSheet.md`
+  "Operators, Pipes, Application".
+- **Recorded in:** grammar review, item 3.
+
+### Guards are an `and` chain
+`guards-are-an-and-chain` · 2026-10-16 · maintainer · accepted
+- **Context:** guards split at every `and`, so `if a or b and c then …`
+  read as `(a or b) and c`, while the expression `a or b and c` is an error
+  because `and` and `or` have no precedence relationship.
+- **Decision:** guards are an `and` chain whose operands may bind; an `or`
+  among them is parenthesized, as in any `and` chain.
+- **Consequences:** `if a or b and c then …` is an error; `if a or b then`
+  and `if (a or b) and c then` parse.
+- **Rule lives in:** `Syntax.md` "Guard Clauses".
+- **Recorded in:** grammar review, item 4.
+
 ### Keyword forms and lambdas stand alone only in tail position
-`tail-position` · 2026-10-16 · maintainer · accepted
+`tail-position` · 2026-10-16 · maintainer · superseded
 - **Context:** the grammar review's first item. Forms whose last part
   extends to the right read as atoms wherever they stood:
   `f match x with {…} y` applied the match, `if x <- if a then b else c
@@ -529,6 +621,7 @@ maps the short names used here to file names.
 - **Rule lives in:** `Syntax.md` "Tail Position"; `SyntaxCheatSheet.md`
   "Operators, Pipes, Application".
 - **Recorded in:** grammar review, `grammar-tail-position`.
+- **Superseded by:** `tail-forms-end-at-separators`.
 
 ### A match is an atom, and nests in its subject
 `match-is-an-atom` · 2026-10-16 · agent · superseded

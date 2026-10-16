@@ -63,9 +63,9 @@ use super::super::structural::{
 };
 use super::binding::{self, NestedArms, needs_view_dispatch};
 use super::{
-    Cover, Deferred, Fail, GroupBody, Items, Mode, Parse, Piece, Scope, form_label,
-    interpret_group, may_head_keyword_form, misplaced_tail, opens_keyword_region, piece_token,
-    regions_enabled, tail_rule_enabled, token, trim_padding,
+    Cover, Deferred, Fail, GroupBody, Items, Mode, Parse, Piece, Scope, conditional_argument,
+    ends_operand, form_label, interpret_group, legacy_grammar, may_head_keyword_form,
+    misplaced_tail, opens_keyword_region, piece_token, regions_enabled, token, trim_padding,
 };
 
 /// One frame on the pass's stack.
@@ -483,6 +483,9 @@ enum Phase {
 struct Conditional {
     head: usize,
     keyword: &'static str,
+    /// Whether it follows an operand in its item, where an `if` reads as
+    /// postfix and a `try` has no reading.
+    after_operand: bool,
     phase: Phase,
     /// The `then`, and whether it is `then?`.
     then: Option<(usize, bool)>,
@@ -590,7 +593,7 @@ pub(super) fn top_pieces(scope: Scope<'_, '_, '_>) -> Parse<(Vec<Piece>, usize)>
         stops_at_arrow: scope.mode == Mode::Expression
             && scope.context.arrow_ends_tail()
             && regions_enabled(),
-        misplaced: None,
+        violation: None,
     };
     let range = view.range();
     let mut index = range.start();
@@ -607,7 +610,7 @@ pub(super) fn top_pieces(scope: Scope<'_, '_, '_>) -> Parse<(Vec<Piece>, usize)>
         index += 1;
     }
     pass.close_open_frames(index);
-    if let Some(fail) = pass.misplaced {
+    if let Some(fail) = pass.violation {
         return Err(fail);
     }
     let top = pass.stack.pop().expect("the view frame remains");
@@ -619,9 +622,8 @@ struct Pass<'s, 'lex, 'source> {
     scope: Scope<'s, 'lex, 'source>,
     stack: Vec<Frame>,
     stops_at_arrow: bool,
-    /// The first tail form found outside tail position, which fails the
-    /// view.
-    misplaced: Option<Fail>,
+    /// The first break of the grammar review's rules, which fails the view.
+    violation: Option<Fail>,
 }
 
 impl Pass<'_, '_, '_> {
@@ -983,6 +985,7 @@ impl Pass<'_, '_, '_> {
             self.begin_arms(index, arms);
             return Step::Next;
         }
+        let after_operand = matches!(kind, TokenKind::Name("if" | "try")) && self.follows_operand();
         self.significant(index);
         if self.top().region {
             return self.region_token(index);
@@ -996,7 +999,7 @@ impl Pass<'_, '_, '_> {
                 // A form opens where the term parser always delegated one,
                 // a tag's payload included.
                 "if" | "try" if may_head_keyword_form(view, index) => {
-                    self.open_conditional(index);
+                    self.open_conditional(index, after_operand);
                     return Step::Next;
                 }
                 "do" if may_head_keyword_form(view, index) => {
@@ -1047,9 +1050,6 @@ impl Pass<'_, '_, '_> {
                 // With regions off, a keyword form's own arrows are not hidden.
                 if regions_enabled() {
                     self.close_tails_at_arrow(index);
-                }
-                if self.top().arrow_ends_tails {
-                    self.lambda_ends_at(index);
                 }
                 if self.stops_at_arrow && self.stack.len() == 1 && !self.stack[0].region {
                     return Step::Stop;
@@ -1149,12 +1149,15 @@ impl Pass<'_, '_, '_> {
         Step::Next
     }
 
-    fn open_conditional(&mut self, index: usize) {
+    fn open_conditional(&mut self, index: usize, after_operand: bool) {
         let view = self.scope.view;
         let keyword = match token(view, index).kind() {
             TokenKind::Name("try") => "try",
             _ => "if",
         };
+        if after_operand && keyword == "try" {
+            self.violate(conditional_argument(index, keyword));
+        }
         let parent = self.top();
         parent.lambda_head = false;
         let (context, separator, arrow) = (parent.context, parent.separator, parent.nested_arrow());
@@ -1162,6 +1165,7 @@ impl Pass<'_, '_, '_> {
             FrameKind::Conditional(Box::new(Conditional {
                 head: index,
                 keyword,
+                after_operand,
                 phase: Phase::Guards,
                 then: None,
                 else_keyword: None,
@@ -1197,10 +1201,16 @@ impl Pass<'_, '_, '_> {
                 self.close_top(index);
                 continue;
             }
-            if matches!(&self.top().kind,
-                FrameKind::Conditional(conditional) if conditional.phase != Phase::Else)
+            // After an operand, an `if` reads as postfix, so a `then` there
+            // makes it an argument (see `open_conditional`).
+            if let Some(FrameKind::Conditional(conditional)) =
+                self.stack.last().map(|top| &top.kind)
+                && is_then
+                && conditional.phase == Phase::Guards
+                && conditional.after_operand
             {
-                self.lambda_ends_at(index);
+                let fail = conditional_argument(conditional.head, conditional.keyword);
+                self.violate(fail);
             }
             let top = self.top();
             let FrameKind::Conditional(conditional) = &mut top.kind else {
@@ -1277,20 +1287,28 @@ impl Pass<'_, '_, '_> {
     }
 
     /// Notes a tail form at `head` whose last part ends on its line before
-    /// the token at `end`, returning whether it ends inside its member. Only
-    /// the end of its member may follow such a form (Syntax.md "Tail
-    /// position"); the first one that does not is the pass's error.
+    /// the token at `end`, returning whether a token that could continue it
+    /// ends it there. Only the end of its region may follow such a form
+    /// (Syntax.md "Tail Position").
     fn ends_inline(&mut self, label: &str, head: usize, end: usize) -> bool {
         let view = self.scope.view;
-        let inside = continues_member(view, end);
-        if inside && self.misplaced.is_none() && tail_rule_enabled() {
+        let inside = continues_tail(view, end);
+        if inside {
             let follower = view
                 .token_at(end)
                 .and_then(|token| view.source().source_slice(token.span()))
                 .unwrap_or("?");
-            self.misplaced = Some(misplaced_tail(head, label, &format!("`{follower}`")));
+            self.violate(misplaced_tail(head, label, &format!("`{follower}`")));
         }
         inside
+    }
+
+    /// Records a break of the grammar review's rules, unless the oracle
+    /// reads the legacy grammar; the first one fails the view.
+    fn violate(&mut self, fail: Fail) {
+        if self.violation.is_none() && !legacy_grammar() {
+            self.violation = Some(fail);
+        }
     }
 
     /// Notes a lambda open in the top frame's member, whose body the keyword
@@ -1298,6 +1316,27 @@ impl Pass<'_, '_, '_> {
     fn lambda_ends_at(&mut self, index: usize) {
         if let Some(lambda) = self.stack.last().and_then(|frame| frame.lambda) {
             self.ends_inline("lambda", lambda, index);
+        }
+    }
+
+    /// Whether the top frame's current member ends with an operand, which
+    /// an `if` or `try` here would follow.
+    fn follows_operand(&self) -> bool {
+        let view = self.scope.view;
+        let Some(top) = self.stack.last() else {
+            return false;
+        };
+        if top.member_start || top.first.is_none() {
+            return false;
+        }
+        let last = top.pieces.iter().rev().find(|piece| {
+            !matches!(piece, Piece::Token(index)
+                if matches!(token(view, *index).kind(), TokenKind::LineStart { .. }))
+        });
+        match last {
+            Some(Piece::Group { .. } | Piece::Form { .. }) => true,
+            Some(Piece::Token(index)) => ends_operand(view, *index),
+            None => false,
         }
     }
 
@@ -1664,24 +1703,27 @@ impl Pass<'_, '_, '_> {
     /// guards are that arm's, as the structural parser split it first.
     fn begin_arms(&mut self, keyword: usize, arms: Arms) {
         let view = self.scope.view;
-        let enclosing_head = self
-            .stack
-            .last()
-            .and_then(|frame| frame.arms_owner)
-            .and_then(|owner| self.stack[owner].arms())
-            .is_some_and(|enclosing| enclosing.phase != ArmPhase::Result);
-        let brace =
+        // A `{` on the keyword's line delimits the arms. The legacy grammar
+        // skipped line breaks to find it, and read it as a first arm's
+        // dictionary pattern when a mark followed the group on its line,
+        // unless an enclosing arm read its head or guards there.
+        let legacy = legacy_grammar();
+        let next = if legacy {
             self.next_significant(keyword + 1)
-                .and_then(|next| match token(view, next).kind() {
-                    TokenKind::Open {
-                        group,
-                        delimiter: Delimiter::Brace,
-                    } => view.group(*group).and_then(|group| group.close_token()),
-                    _ => None,
-                });
+        } else {
+            Some(keyword + 1).filter(|next| view.range().contains(*next))
+        };
+        let brace = next.and_then(|next| match token(view, next).kind() {
+            TokenKind::Open {
+                group,
+                delimiter: Delimiter::Brace,
+            } => view.group(*group).and_then(|group| group.close_token()),
+            _ => None,
+        });
         if let Some(close) = brace
-            && !(arms.brace_may_begin_arm()
-                && !enclosing_head
+            && !(legacy
+                && arms.brace_may_begin_arm()
+                && !self.enclosing_head()
                 && self.line_mark(close + 1).is_some())
         {
             self.top().pending = Some(Pending::Arms(Box::new(arms)));
@@ -1712,11 +1754,21 @@ impl Pass<'_, '_, '_> {
         ));
     }
 
+    /// Whether an arm enclosing the top frame reads its head or guards.
+    fn enclosing_head(&self) -> bool {
+        self.stack
+            .last()
+            .and_then(|frame| frame.arms_owner)
+            .and_then(|owner| self.stack[owner].arms())
+            .is_some_and(|enclosing| enclosing.phase != ArmPhase::Result)
+    }
+
     /// Takes the `=>`, `=>?` or `when` at `index` for the innermost arms
     /// block at this level whose arm reads its head or guards, if any: the
     /// frames open in the arm close before it. An arrow begins the arm's
-    /// result; a `when` begins its guards, or heads nested arms when no mark
-    /// follows it on its line. Returns whether it took the mark.
+    /// result; a `when` heads nested arms when it ends its line, or before a
+    /// `{` that no mark follows on its line, and otherwise begins its
+    /// guards. Returns whether it took the mark.
     fn arm_mark(&mut self, index: usize) -> bool {
         let Some(owner) = self.stack.last().and_then(|frame| frame.arms_owner) else {
             return false;
@@ -1734,6 +1786,25 @@ impl Pass<'_, '_, '_> {
         let view = self.scope.view;
         let when = matches!(token(view, index).kind(), TokenKind::Name("when"));
         let next = self.line_mark(index + 1);
+        // A `when` ending its line heads nested arms, and any other begins
+        // guards; the legacy grammar read nested arms wherever no mark
+        // followed it on its line. A `{` after it still begins braced
+        // nested arms only when no mark follows the group on its line,
+        // since a guard may bind a dictionary pattern.
+        let nested = when
+            && match view
+                .token_at(index + 1)
+                .filter(|_| view.range().contains(index + 1))
+                .map(|token| token.kind())
+            {
+                _ if legacy_grammar() => next.is_none(),
+                None | Some(TokenKind::LineStart { .. }) => true,
+                Some(TokenKind::Open {
+                    delimiter: Delimiter::Brace,
+                    ..
+                }) => next.is_none(),
+                Some(_) => false,
+            };
         // An arm's line holds one arrow, as the structural parser counted
         // the arrows on its first line.
         let mut later = next;
@@ -1752,7 +1823,7 @@ impl Pass<'_, '_, '_> {
         frame.lambda_head = false;
         frame.lambda = None;
         frame.pieces.push(Piece::Token(index));
-        if !when || next.is_some() {
+        if !nested {
             frame.member_start = true;
             if !when {
                 frame.mode = Mode::Expression;
@@ -1773,7 +1844,7 @@ impl Pass<'_, '_, '_> {
             arms.phase = ArmPhase::Result;
             return true;
         }
-        if next.is_some() {
+        if !nested {
             arms.phase = ArmPhase::Guards;
             return true;
         }
@@ -2399,16 +2470,19 @@ impl Pass<'_, '_, '_> {
     }
 }
 
-/// Whether the token at `index` continues a member: anything but a line
-/// start, a closer, a separator or the view's end.
-fn continues_member(view: TokenView<'_, '_>, index: usize) -> bool {
+/// Whether the token at `index`, where a tail ended, could continue it: it
+/// is no line start, closer or separator, nor a keyword that no expression
+/// continues with (`then`, `else`, `in`, `where`, `=>`, `=>?`, or a
+/// binding's or view's `->`), and the view has not ended.
+fn continues_tail(view: TokenView<'_, '_>, index: usize) -> bool {
     view.range().contains(index)
         && view.token_at(index).is_some_and(|token| {
             !matches!(
                 token.kind(),
                 TokenKind::LineStart { .. }
                     | TokenKind::Close { .. }
-                    | TokenKind::Symbol("," | ";")
+                    | TokenKind::Symbol("," | ";" | "=>" | "=>?" | "->")
+                    | TokenKind::Name("then" | "else" | "in" | "where")
             )
         })
 }

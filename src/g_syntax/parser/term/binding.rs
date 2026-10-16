@@ -21,7 +21,10 @@ use super::super::pattern::{Binding, BindingSite, Missing};
 use super::super::structural::{
     before_key_mark, in_keyword_position, parse_expression_extent, trim_layout,
 };
-use super::{Fail, Items, Mode, Parse, Piece, Position, Scope, piece_token, token, trim_padding};
+use super::{
+    Fail, Items, Mode, Parse, Piece, Position, Scope, legacy_grammar, piece_token, token,
+    trim_padding,
+};
 
 /// A guard's clauses, split at each `and` in keyword position.
 pub(super) fn guard_clauses(
@@ -31,6 +34,17 @@ pub(super) fn guard_clauses(
 ) -> Parse<Vec<SyntaxGuardClause>> {
     let view = scope.view;
     let at = pieces.first().map(piece_token);
+    // Guards are an `and` chain whose operands may bind, so an `or` among
+    // them needs parentheses, as it does in any `and` chain.
+    if !legacy_grammar()
+        && pieces.iter().any(|piece| is_keyword(view, piece, "and"))
+        && let Some(or) = pieces.iter().find(|piece| is_keyword(view, piece, "or"))
+    {
+        return Err(Fail::error(
+            "operators `or` and `and` have no precedence relationship; parenthesize to disambiguate",
+        )
+        .or_at(Some(piece_token(or))));
+    }
     let mut clauses = Vec::new();
     for clause in pieces.split(|piece| is_keyword(view, piece, "and")) {
         let clause = trim_padding(view, clause);
@@ -265,11 +279,17 @@ fn choice_arm<'p>(
     if pieces.is_empty() {
         return fail(format!("{label} cannot be empty"));
     }
-    let first_line = pieces
-        .iter()
-        .position(|piece| is_line_start(view, piece))
-        .unwrap_or(pieces.len());
-    let arrows = pieces[..first_line]
+    // An arm's guards may continue onto later lines before its arrow; the
+    // legacy grammar looked for the arrow on its first line only.
+    let searched = if legacy_grammar() {
+        pieces
+            .iter()
+            .position(|piece| is_line_start(view, piece))
+            .unwrap_or(pieces.len())
+    } else {
+        pieces.len()
+    };
+    let arrows = pieces[..searched]
         .iter()
         .enumerate()
         .filter_map(|(position, piece)| {

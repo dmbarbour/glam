@@ -912,8 +912,10 @@ beside group frames:
    `object`. Paused on 2026-10-16 for the
    [grammar review](GrammarReview_2026-10-16.md), which may change these
    forms; its sequencing section says how the remaining steps follow it.
-   The pass checks the review's tail rule (`tail-position`) since
-   2026-10-16, and the oracle compares what it rejects as read without it.
+   The pass checks the review's rules since 2026-10-16
+   (`tail-forms-end-at-separators` and the review's items 1–4), and the
+   oracle compares the term parser's legacy-grammar reading where they
+   change whether an expression parses.
 5. The structural parsers' expression paths then serve only the oracle,
    and go with the Chumsky grammar in `parser-grammar-retirement`.
 

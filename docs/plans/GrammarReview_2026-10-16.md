@@ -2,8 +2,9 @@
 
 Status: started 2026-10-16 at the maintainer's request. The first item,
 [`grammar-tail-position`](#grammar-tail-position), was decided and built on
-2026-10-16 (`tail-position` in `Decisions.md`); the others are listed for
-review. `parser-keyword-frames-suffixes` in the
+2026-10-16 and refined the same day with separator keywords
+(`tail-forms-end-at-separators` in `Decisions.md`). Further items 1–4 were
+decided and built on 2026-10-16; the others are listed for review. `parser-keyword-frames-suffixes` in the
 [parser backtracking plan](ParserBacktrackingPerformance_2026-10-04.md) is
 paused until this review settles the forms it covers.
 
@@ -67,7 +68,8 @@ position (the final argument or right-hand operand), and its layout section
 speaks of "a final child that owns the remainder of its host expression".
 This item extends that to every tail form.
 
-**The rule:**
+**The rule**, as first decided; [Separators](#separators-2026-10-16)
+refines it:
 - A tail form stands without parentheses only in tail position.
 - A braced body's `{` and `}` stand for an indent and a dedent.
 - **Inline end:** a tail form whose last part ends on its line, not at its
@@ -176,25 +178,59 @@ Forms the term parser still delegates are not covered: `let`, `using` and
   parenthesized forms; `tail_forms_stand_alone_only_in_tail_position`
   states the rule in one table.
 
+#### Separators (2026-10-16)
+
+*Proposed by the maintainer after the first version; decided the same day
+(`tail-forms-end-at-separators`).* The first version rejected
+`if a then if b then c else d else e`, `if c then .a else .b -> P` and
+`if any xs \x -> x > 0 then …`, though each has one valid reading. Every
+prefix `if` and `try` has an `else`, so their keywords pair as brackets do,
+and nothing in an expression continues with `then`, `else` or a binding's
+`->`.
+- **The test.** A keyword ends an open tail when no expression continues
+  with it: `then`, `else`, `in`, `where`, `=>`, `=>?`, and a binding's or
+  view's `->` are *separator keywords*, like `,` and `;`. `and` between
+  guard clauses (a boolean `and` could continue the tail), `with` after a
+  match's subject (an update could), and `when` and `as` (patterns
+  continue with them) are not.
+- **The rule.** A tail form runs to the end of its region, which closers,
+  separators, line ends and separator keywords end. After its `}` or a
+  dedent only an operator or a keyword may follow, never an argument or a
+  path.
+- **To the linter:** deeply nested inline `if`s, and a lambda before a
+  binding's `->` (`f \a -> E -> P`), which reads like a curried lambda
+  but has only one reading.
+- **As built.** A token ends a tail without error unless it could continue
+  it (`continues_tail` in the pass), so the lambda checks remain only at
+  `and`, `with` and an arm's `when`.
+
 ### Further items
 
-Each needs options, a recommendation and the maintainer's decision.
-1. **`{` after `with`.** Whether it begins a layout arm (a dict pattern) or
-   braced arms depends on what follows its matching `}` on its line.
-   Candidate: a line break begins layout arms, `{` braced arms, anything
-   else a hanging block; a dict-pattern first arm moves to the next line.
-2. **`when` in an arm.** A guard or nested arms, depending on whether an
-   arm mark follows later on its line. Candidate: a `when` that ends its
-   line heads nested arms.
-3. **Prefix or postfix `if`.** `f a if b then c else d` and `f a if b else c`
-   differ only at the `then` or `else` after a condition of any length. The
-   tail rule leaves this open, since a prefix `if` may be a final argument.
-   Candidate: an `if` after an operand is postfix, so a prefix `if` as an
-   argument is parenthesized.
-4. **`and` in guards.** `if a or b and c then …` reads as `(a or b) and c`,
-   while `x = a or b and c` is an error, since `and` and `or` have no
-   precedence relationship. Candidate: a guard is an ordinary `and` chain
-   whose operands may be bindings, so the same error applies.
+Each needs options, a recommendation and the maintainer's decision. Items
+1–4 were decided as proposed and built on 2026-10-16, each with an entry in
+`Decisions.md`.
+1. **`{` after `with`** (`brace-after-with-delimits-arms`). Whether it began
+   a layout arm (a dict pattern) or braced arms depended on what followed
+   its matching `}` on its line. Decided: a `{` on the line of `with`
+   delimits the arms, a line break begins layout arms, and anything else a
+   hanging arm; a dict-pattern first arm moves to the next line.
+2. **`when` in an arm** (`when-ending-its-line-heads-nested-arms`). A guard
+   or nested arms, depending on whether an arm mark followed later on its
+   line. Decided: a `when` that ends its line heads nested arms; any other
+   begins guards, which may now continue onto later lines before the arm's
+   arrow, so this item also accepts more. A `when` before a `{` keeps the
+   old reading; see item 12.
+3. **Prefix or postfix `if`** (`conditional-after-an-operand-is-postfix`).
+   `f a if b then c else d` and `f a if b else c` differed only at the
+   `then` or `else` after a condition of any length. Decided: an `if` after
+   an operand is postfix, so a prefix `if` as an argument is parenthesized,
+   and a prefix `try` too, since `if` and `try` follow the same rules, as
+   `match` and `try_match` do.
+4. **`and` in guards** (`guards-are-an-and-chain`). `if a or b and c then …`
+   read as `(a or b) and c`, while `x = a or b and c` is an error, since
+   `and` and `or` have no precedence relationship. Decided: a guard is an
+   ordinary `and` chain whose operands may be bindings, so the same error
+   applies.
 5. **One `=>` per arm's first line**, kept from the structural parser,
    which split arms by scanning. With item 1, a second arrow belongs to a
    nested match's hanging arms.
@@ -207,7 +243,30 @@ Each needs options, a recommendation and the maintainer's decision.
 9. **Resumption after a dedent.** Check that the layout pass decides it
    without the parser.
 10. **The trailing bind `E -> P`**, the one place a pattern follows its
-    expression, against the lambda arrow.
+    expression, against the lambda arrow. With separators, `->` ends any
+    open tail, and a lambda before it is a lint.
+11. **`match Expr as Arms`** (maintainer, under consideration). `as` would
+    replace a match's `with`, leaving `with` one meaning, "with these
+    definitions" (object bodies, `extend`, updates). After `as` come pattern
+    arms, as `P as Q` views a value through a pattern, and after `when`
+    guard arms, as in `match when` and an arm's trailing `when`. But
+    `Dict as Name with …` (an update naming its base) lets an `as` continue
+    an expression, so `as` would not be a separator keyword, and an aliased
+    update in a subject would still need parentheses, as an update does
+    today. Options: accept that; change the alias spelling so no expression
+    continues with `as`; or choose another keyword.
+12. **`when` before `{`.** `p when {c => r}` heads braced nested arms and
+    `p when {} <- e => r` begins a guard binding a dictionary pattern; both
+    occur. They are still told apart by whether an arm mark follows the
+    group on its line. Options: braced nested arms after `when {`, with a
+    parenthesized dictionary pattern in a guard; or guards, with nested arms
+    only in layout.
+13. **`do` and a `{` on the next line.** `do` still skips line breaks to
+    find its `{`, so a first statement binding a dictionary pattern on the
+    next line reads as a braced block. Item 1's rule for arms would apply
+    to `do` too.
+14. **Errors for item 1.** `match v with {a:x} => x` reports that a match
+    arm requires `=>`; a hint naming the rule would help.
 
 ## Method
 
@@ -227,3 +286,8 @@ Each needs options, a recommendation and the maintainer's decision.
   examples and a round-trip test (generate trees, print them with the
   fewest parentheses, parse, compare) replace it. The printer is a start on
   the formatter.
+- Until the legacy parsers retire, the term parser can read the legacy
+  grammar (a test-only switch, `with_legacy_grammar`). Where it and the
+  legacy parsers disagree on whether an expression parses, the oracle
+  compares that reading instead, and the reference parse always uses it,
+  since the structural parsers call back into the term parser.

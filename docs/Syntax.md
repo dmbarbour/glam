@@ -386,22 +386,25 @@ an expression; `foo <| .bar` is the punctuation-light alternative.
 
 Some forms end with a part that extends to the right: prefix `if` and `try`,
 `match` and `try_match`, `do`, lambdas, `let`, `using` and `object`. These
-*tail forms* stand without parentheses only in *tail position*, where nothing
-follows them that a reader could take as part of them:
+*tail forms* run to the end of their region, and stand without parentheses
+only where that end is visible:
 
-- A tail form whose last part ends on its line may be followed only by the
-  end of its statement, definition or group: a closing bracket or a
-  separator.
+- A region ends at a closing bracket, a separator (`,` or `;`), the end of
+  its statement or definition, or a *separator keyword*: `then`, `else`,
+  `in`, `where`, `=>`, `=>?`, or a binding's or view's `->`. No expression
+  continues with these, so a reader sees where the form before them ends.
+- A tail form never ends at a token that could continue it, such as an
+  `and` between guard clauses, which could be a boolean `and`, or the
+  `with` after a match's subject, which could begin an update.
 - A braced body's `{` and `}` stand for an indent and a dedent. After a tail
-  form's `}` or dedent, only an infix operator or a keyword of an enclosing
-  form may follow, such as `else`, `with`, `then`, `and` or a bind's `->`.
-  An argument or a path may not.
-- `where` ends the expression it follows, so any tail form may precede it.
-- Postfix `if` is an operator, not a tail form.
+  form's `}` or dedent, only an infix operator or a keyword may follow: an
+  argument or a path may not.
+- Postfix `if` is an operator, not a tail form. After an operand, an `if` is
+  postfix, so a prefix `if` or `try` there is parenthesized.
 
 So a tail form may be a definition's whole right-hand side, the final
-argument of an application or the right-hand operand of an infix
-expression:
+argument of an application, the right-hand operand of an infix expression,
+or any part a separator keyword ends:
 
         mapped = map values \value -> transform value
         bound = operation >>= \value -> continue value
@@ -414,24 +417,29 @@ expression:
             .r (transform input)
           |> finish
         both = if ready then do { .go } else do { .wait }
+        inner = if a then if b then c else d else e
+        found = if any items \item -> item > 0 then 1 else 0
 
-Parentheses make a tail form an ordinary atom, which anything may follow:
+Every prefix `if` and `try` has an `else`, so their keywords pair as
+brackets do: an inner `if` takes the first `else`. Parentheses make a tail
+form an ordinary atom, which anything may follow:
 
         applied = f (match x with {_ => 1}) y
         field = (do { .r value }).result
-        inner = if a then (if b then c else d) else e
-        found = if any items (\item -> item > 0) then 1 else 0
+        guarded = if x <- (if a then b else c) and d then x else 0
+        argument = f (if a then b else c)
 
-The rule keeps a form's extent visible: a reader never has to decide whether
-an `else`, `and`, `->` or argument belongs to the form before it. The lambda
-body has rightward extent, so `map values \value -> transform value |> finish`
-places `|> finish` inside the lambda body. Parenthesize the application to
-pipe its result instead:
+The lambda body has rightward extent, so `map values \value -> transform
+value |> finish` places `|> finish` inside the lambda body. Parenthesize the
+application to pipe its result instead:
 
         (map values \value -> transform value) |> finish
 
-The current Rust bootstrap enforces the rule for conditionals, `do` blocks,
-matches and lambdas; `let`, `using` and `object` follow.
+What parses may still read poorly, such as deeply nested inline `if`s or a
+lambda before a binding's `->` (`f \a -> e -> p`); a linter, rather than
+the grammar, is to flag those. The current Rust bootstrap enforces the rule
+for conditionals, `do` blocks, matches and lambdas; `let`, `using` and
+`object` follow.
 
 ## Effects
 
@@ -474,11 +482,10 @@ A statement binds with `<-` or `=` only when that token comes before every
 keyword form and lambda in it, since a pattern holds neither: a keyword form
 owns any `<-` or `=` after its head. So `if (a, b) = e then A else B` is an
 operation whose guard binds, while `x = if C then A else B` binds `x`. In
-`Operation -> Pattern`, the `->` ends a postfix `if`'s fallback, so
-`A if C else B -> x` binds the conditional's result. Another tail form
-before it is parenthesized unless a block ends it (see *Tail Position*):
-`(if C then .a else .b) -> x`. A layout block keeps its own lines, arrows
-included. Guard clauses follow the same rules.
+`Operation -> Pattern`, the `->` is a separator keyword (see *Tail
+Position*): it ends any open tail of the operation before it, so
+`if C then .a else .b -> x` binds the conditional's result. A layout block
+keeps its own lines, arrows included. Guard clauses follow the same rules.
 
 A non-final bare operation uses the existing `=>>` behavior, including its
 requirement that the discarded result be unit. The final statement should
@@ -1549,6 +1556,11 @@ Note that conditions are not expressions. Instead, they're guard clauses, i.e. a
 
         if (a,b) = Expr and a > b then A else B
 
+After an operand, an `if` is the postfix form, so a prefix `if` or `try` as
+an argument is parenthesized: `f (if C then A else B)`, while `f if C then A
+else B` is an error. Elsewhere either form stands in tail position (see
+*Tail Position*).
+
 The postfix form has the same binding scope as the prefix form. Its guards
 run first, and names introduced by those guards are visible in the
 textually-earlier successful result:
@@ -1625,11 +1637,9 @@ update used as the subject:
             {value:x} => x
             _ => {}
 
-A leading brace group begins an anchored arm when an arm's `=>`, `=>?` or
-`when` follows it on its line; otherwise it delimits the semicolon-separated
-arm body.
-Consequently, dictionary patterns remain ordinary layout-arm heads while the
-compact braced form stays available:
+A `{` on the line of `with` delimits the semicolon-separated arms. A first
+arm with a dictionary pattern therefore begins on the next line, where it is
+an ordinary layout-arm head:
 
         match Value with
             {value:x} as whole => whole
@@ -1652,6 +1662,14 @@ We also support branching guard clauses. We use `when` to separate the pattern f
                     C3_a_a => R3_a_a
                     C3_a_b => R3_a_b
                 C3_b => R3_b
+
+A `when` that ends its line heads nested arms, as does one before a braced
+block that no `=>`, `=>?` or `when` follows on its line. Any other `when`
+begins guards, which may continue onto later lines before the arm's `=>`:
+
+        match Expr with
+            P1 when C1
+                 and C2 => R1
 
 Nested arms end their arm: nothing may follow them in it, on a shallower line or
 after a braced block.
@@ -1681,7 +1699,7 @@ Several forms of guard clauses:
   lowers as a direct value binding without an actual `.r` request
 - `_` - pass, eqv. to `.r ()`
 
-Guard clauses compose sequentially via 'and': `Guard (and Guard)*`. This is essentially the same as boolean 'and'.
+Guard clauses compose sequentially via 'and': `Guard (and Guard)*`. This is essentially the same as boolean 'and', and guards are an `and` chain whose operands may bind: as in any `and` chain, an `or` among them is parenthesized, as in `if (a or b) and c then …`.
 
 ### Pattern Matching
 

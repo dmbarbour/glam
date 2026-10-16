@@ -1264,9 +1264,10 @@ fn parse_grammar_chain_view(
 /// GLAM_TERM_ORACLE=1 cargo test --lib
 /// ```
 ///
-/// The tail rule (Syntax.md "Tail position") only rejects, and the grammar
-/// predates it, so an expression the term parser rejects is compared as the
-/// term parser reads it without the rule.
+/// The grammar predates the grammar review's rules (Syntax.md "Tail
+/// Position" and the review's decisions), so where the term parser and the
+/// grammar disagree on whether an expression parses, the term parser's
+/// reading of the legacy grammar is compared instead.
 ///
 /// Expressions the grammar's keyword forms parse while the oracle runs it
 /// are not compared again. The term parser's own parse reaches the same
@@ -1276,7 +1277,7 @@ fn parse_grammar_chain_view(
 pub(in crate::g_syntax::parser) mod term_oracle {
     use std::cell::{Cell, RefCell};
 
-    use super::super::term::{Fail, parse_term_chain, without_tail_rule};
+    use super::super::term::{Fail, parse_term_chain, with_legacy_grammar};
     use super::{
         Diagnostic, ExpressionContext, InfixChain, TokenRange, TokenView, parse_grammar_chain_view,
     };
@@ -1287,8 +1288,9 @@ pub(in crate::g_syntax::parser) mod term_oracle {
         /// Compared expressions that both parsers accept.
         pub(in crate::g_syntax::parser) accepted: usize,
         pub(in crate::g_syntax::parser) unsupported: usize,
-        /// Compared expressions that only the tail rule rejects.
-        pub(in crate::g_syntax::parser) tail_rule: usize,
+        /// Compared expressions whose acceptance the grammar review's rules
+        /// change.
+        pub(in crate::g_syntax::parser) review_rules: usize,
         pub(in crate::g_syntax::parser) unsupported_reasons:
             std::collections::BTreeMap<&'static str, usize>,
         pub(in crate::g_syntax::parser) disagreements: Vec<String>,
@@ -1311,12 +1313,12 @@ pub(in crate::g_syntax::parser) mod term_oracle {
     }
 
     /// The grammar's parse of `view`, without comparing the expressions it
-    /// parses through the term parser, nor applying the tail rule there.
+    /// parses through the term parser, which reads the legacy grammar there.
     fn reference(
         view: TokenView<'_, '_>,
         context: ExpressionContext,
     ) -> Result<InfixChain, Vec<Diagnostic>> {
-        suspended(|| without_tail_rule(|| parse_grammar_chain_view(view, context)))
+        suspended(|| with_legacy_grammar(|| parse_grammar_chain_view(view, context)))
     }
 
     fn sweeping() -> bool {
@@ -1348,13 +1350,25 @@ pub(in crate::g_syntax::parser) mod term_oracle {
         if SUSPENDED.with(Cell::get) {
             return;
         }
-        let unrestricted;
-        let (new, tail_rule) = match new {
+        let whole = view;
+        let legacy_reading =
+            || suspended(|| with_legacy_grammar(|| parse_term_chain(whole, context)));
+        // A rejection the review's rules may make, compared as the legacy
+        // grammar reads it.
+        let legacy;
+        let (new, mut review_rules) = match new {
             Err(Fail::Error { .. }) => {
-                unrestricted = suspended(|| without_tail_rule(|| parse_term_chain(view, context)));
-                (&unrestricted, unrestricted.is_ok())
+                legacy = legacy_reading();
+                (&legacy, legacy.is_ok())
             }
             _ => (new, false),
+        };
+        // An acceptance the review's rules may make, which the legacy
+        // grammar rejects too.
+        let mut accepted_by_review = || {
+            let accepted = legacy_reading().is_err();
+            review_rules |= accepted;
+            accepted
         };
         let view = match new {
             Ok((_, end)) if *end < view.range().end() => view
@@ -1372,6 +1386,7 @@ pub(in crate::g_syntax::parser) mod term_oracle {
                 let agree = match (new, &old) {
                     (Ok(new), Ok(old)) => *new == old,
                     (Err(Fail::Error { .. } | Fail::Reported(_)), Err(_)) => true,
+                    (Ok(_), Err(_)) => accepted_by_review(),
                     _ => false,
                 };
                 assert!(
@@ -1392,18 +1407,17 @@ pub(in crate::g_syntax::parser) mod term_oracle {
             return;
         }
         let old = reference(view, context);
+        let agree = match (new, &old) {
+            (Ok(new), Ok(old)) => *new == old,
+            (Err(Fail::Error { .. } | Fail::Reported(_)), Err(_)) => true,
+            (Ok(_), Err(_)) => accepted_by_review(),
+            _ => false,
+        };
         ACTIVE.with(|active| {
             let mut active = active.borrow_mut();
             let report = active.as_mut().expect("checked as enabled");
-            report.tail_rule += usize::from(tail_rule);
-            let agree = match (new, &old) {
-                (Ok(new), Ok(old)) => {
-                    report.accepted += 1;
-                    *new == old
-                }
-                (Err(Fail::Error { .. } | Fail::Reported(_)), Err(_)) => true,
-                _ => false,
-            };
+            report.review_rules += usize::from(review_rules);
+            report.accepted += usize::from(new.is_ok() && old.is_ok());
             report.compared += 1;
             if !agree {
                 report.disagreements.push(format!(
