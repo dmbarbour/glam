@@ -1024,7 +1024,7 @@ fn structural_atom_after_head<'lex, 'source: 'lex>(
     })
 }
 
-fn structural_view_at<'lex, 'source>(
+pub(in crate::g_syntax::parser) fn structural_view_at<'lex, 'source>(
     view: TokenView<'lex, 'source>,
     head_index: usize,
 ) -> TokenView<'lex, 'source> {

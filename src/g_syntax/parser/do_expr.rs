@@ -195,7 +195,7 @@ fn hanging_statement_alignment_error(
 /// `declare`, a binding by `<-` or `=`, or an operation bound by `->` to a
 /// pattern. The last is judged by whether a pattern follows the line's
 /// first top-level `->`, which only diagnoses misaligned layout.
-fn line_begins_do_statement(view: TokenView<'_, '_>) -> bool {
+pub(in crate::g_syntax::parser) fn line_begins_do_statement(view: TokenView<'_, '_>) -> bool {
     keyword_head(view, "declare").is_some()
         || pattern_binder(view).is_some()
         || top_level_symbols(view, "->")

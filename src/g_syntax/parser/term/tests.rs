@@ -699,8 +699,9 @@ fn deep_nesting_parses_in_linear_time_without_recursion() {
 /// Keyword frames nested in each position a frame closes from: for
 /// conditionals a group, an `else` branch, a `then` group, an argument, a
 /// postfix fallback, a lambda body and a guard; for braced `do` blocks a
-/// statement's operation and value. Frames cost heap, not Rust stack, so
-/// each shape parses 2,000 deep.
+/// statement's operation and value; for layout `do` blocks a hanging first
+/// statement, bare and in a group. Frames cost heap, not Rust stack, so each
+/// shape parses 2,000 deep.
 const KEYWORD_FRAME_NESTING_SHAPES: &[(&str, &str, &str)] = &[
     ("(if c then ", " else 0)", "1"),
     ("if c then 1 else ", "", "0"),
@@ -713,6 +714,8 @@ const KEYWORD_FRAME_NESTING_SHAPES: &[(&str, &str, &str)] = &[
     ("(do { ", " -> z; .r z })", ".r 1"),
     ("do { x <- ", "; .r x }", ".r 1"),
     ("do { x = ", "; .r x }", "1"),
+    ("do ", "", ".r 1"),
+    ("(do ", ")", ".r 1"),
 ];
 
 #[test]

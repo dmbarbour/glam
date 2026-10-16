@@ -994,6 +994,35 @@ beside group frames:
   parser did not count its line breaks, so its branch skipped its floor
   check (`deferred_group_lines_count_for_the_enclosing_floor`).
 
+**`parser-keyword-frames-layout`, layout `do` (2026-10-16).** The first part
+of the layout slice; `match` arms and multi-line `let` remain.
+- A layout `do` block is a frame, judged line by line as `LayoutView::block`
+  judged its view. Its first statement sets the anchor: that token's column
+  on the `do`'s line for a hanging block, or its line's indentation.
+- Each frame records its nearest layout owner (a group, a layout block or
+  the view), so a line start is judged without walking the conditionals
+  above it. A line at the anchor starts a statement, after closing the
+  conditionals inside the block. A deeper line, or one of closing
+  delimiters only, continues. A shallower one closes the block and is
+  judged again by the next owner.
+- A block whose first statement has not started defers to the layout
+  around it, whose statement it lies in. So `do do` with its body below the
+  outer anchor leaves the inner block empty, as before.
+- Separators, a group's close, the view's end, and a `then` or `else` that
+  an enclosing conditional takes close a layout block, as they close any
+  open tail. A `->` does not: a block's statements own their arrows.
+- The structural parser's checks are kept: the anchor against the floor,
+  empty blocks, the separation of `do` from its body, and a hanging block's
+  alignment. Lines are judged within the `do` form's own extent, as before.
+  A braced `do` whose `{` begins a statement line of the enclosing block is
+  not braced, as the structural parser split it.
+- **Measures** against `main`: `do_chain` is level (+0.04%; it was +0.6%),
+  since statements are no longer parsed from views; `hello_elf` +0.03%.
+  Hanging layout blocks nest 2,000 deep in the depth test.
+- **Found by the oracle and generated sources:** a hanging-alignment check
+  read a line past the `do`'s group member (a panic), and a pending braced
+  `do` outlived a statement start (stale statement positions).
+
 ## Verification
 
 - The differential oracle above, while both parsers exist.

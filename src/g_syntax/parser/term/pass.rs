@@ -17,6 +17,16 @@
 //! whose members, separated by `;`, are statements read from their pieces.
 //! Each guard clause and statement takes its own context at its first token.
 //!
+//! A layout `do` block is a frame whose lines the pass judges as the lexer
+//! records them, after Haskell's layout algorithm. Its first statement sets
+//! its anchor: that token's column on the `do`'s own line (a hanging block),
+//! or its line's indentation. A line at the anchor starts a statement, a
+//! deeper one continues it, and a shallower one closes the block, as does
+//! anything that ends an open tail. A line holding only closing delimiters
+//! stays with its statement. Each line start is judged by its nearest layout
+//! owner (a group, a layout block, or the view), which every frame records,
+//! so judging costs nothing per enclosing conditional.
+//!
 //! Other keyword forms open a keyword region, whose groups are deferred for
 //! the form's structural parser. Inside a region conditionals are only
 //! counted, so that a `then` or `else` still reaches its own, and inside a
@@ -30,7 +40,8 @@
 
 use crate::g_syntax::{ConditionalMode, ConditionalResultMode, IfExpr, SyntaxExpr};
 
-use super::super::do_expr::{empty_do_expr, finish_do_statements};
+use super::super::do_expr::{empty_do_expr, finish_do_statements, line_begins_do_statement};
+use super::super::expression::structural_view_at;
 use super::super::expression_context::{ExpressionContext, validate_expression_floor};
 use super::super::input::{TokenRange, TokenView};
 use super::super::layout::group_separator;
@@ -79,6 +90,9 @@ struct Frame {
     member_start: bool,
     /// A `do` whose `{` comes next, opening a block frame.
     pending_do: Option<usize>,
+    /// The stack index of its nearest layout owner: itself for a group, a
+    /// layout block or the view, its parent's for a conditional.
+    layout_owner: usize,
 }
 
 enum FrameKind {
@@ -90,6 +104,24 @@ enum FrameKind {
         block: Option<Box<Block>>,
     },
     Conditional(Box<Conditional>),
+    Layout(Box<LayoutDo>),
+}
+
+/// A layout `do` block.
+struct LayoutDo {
+    head: usize,
+    /// The `do` form's context, floored at its head's line.
+    context: ExpressionContext,
+    /// The indentation its statements align at, once its first sets it.
+    anchor: Option<usize>,
+    hanging: bool,
+    /// The piece positions where its statements begin.
+    statements: Vec<usize>,
+    /// A hanging block's deeper lines, which must not begin a statement.
+    hanging_lines: Vec<usize>,
+    /// The line where a hanging block ended, which must not either.
+    boundary: Option<usize>,
+    failure: Option<Fail>,
 }
 
 /// A braced `do` block: its head and its own context.
@@ -123,6 +155,7 @@ impl Frame {
             view_level: false,
             member_start: false,
             pending_do: None,
+            layout_owner: 0,
         }
     }
 
@@ -289,7 +322,7 @@ pub(super) fn top_pieces(scope: Scope<'_, '_, '_>) -> Parse<(Vec<Piece>, usize)>
         }
         index += 1;
     }
-    pass.close_conditionals(index);
+    pass.close_open_frames(index);
     let top = pass.stack.pop().expect("the view frame remains");
     debug_assert!(pass.stack.is_empty(), "every group closes inside the view");
     Ok((top.pieces, index))
@@ -339,7 +372,7 @@ impl Pass<'_, '_, '_> {
         } else {
             (mode, mode == Mode::Cover)
         };
-        self.stack.push(Frame::new(
+        let mut frame = Frame::new(
             FrameKind::Group {
                 delimiter,
                 group,
@@ -350,12 +383,14 @@ impl Pass<'_, '_, '_> {
             Some(group_separator(view.source(), delimiter, index)),
             arrow,
             inherited,
-        ));
+        );
+        frame.layout_owner = self.stack.len();
+        self.stack.push(frame);
         Ok(())
     }
 
     fn close_group(&mut self, index: usize) {
-        self.close_conditionals(index);
+        self.close_open_frames(index);
         let frame = self.stack.pop().expect("a close token ends an open frame");
         let FrameKind::Group {
             delimiter,
@@ -463,6 +498,39 @@ impl Pass<'_, '_, '_> {
             FrameKind::Group {
                 block: Some(block), ..
             } => top.context = block.context.child_owner_at(view, index).validated(),
+            FrameKind::Layout(layout) => {
+                if layout.anchor.is_none() {
+                    // The first statement sets the anchor: hanging on the
+                    // `do`'s own line, else at its line's indentation.
+                    let line = |at: usize| {
+                        view.token_at(at)
+                            .and_then(|token| view.line_at_span(token.span()))
+                    };
+                    let indentation = view.line_indentation_at(index).unwrap_or(0);
+                    if line(index) == line(layout.head) {
+                        let column = view
+                            .token_at(index)
+                            .and_then(|token| view.column_at_span(token.span()))
+                            .unwrap_or(indentation);
+                        layout.anchor = Some(column);
+                        layout.hanging = column > indentation;
+                        if index == layout.head + 1
+                            && view
+                                .token_at(index)
+                                .is_some_and(|token| token.leading() == LeadingTrivia::Joint)
+                        {
+                            layout.failure.get_or_insert(
+                                Fail::error("`do` must be separated from its body")
+                                    .or_at(Some(layout.head)),
+                            );
+                        }
+                    } else {
+                        layout.anchor = Some(indentation);
+                    }
+                    layout.statements.push(top.pieces.len());
+                }
+                top.context = layout.context.child_owner_at(view, index).validated();
+            }
             _ => {}
         }
     }
@@ -471,12 +539,26 @@ impl Pass<'_, '_, '_> {
         let view = self.scope.view;
         let kind = token(view, index).kind();
         match kind {
-            TokenKind::LineStart { .. } => {
+            TokenKind::LineStart { indentation } => {
+                let starts_statement = self.judge_line(index, *indentation);
                 let top = self.top();
                 if top.first.is_some() {
                     top.line_starts += 1;
                 }
                 top.pieces.push(Piece::Token(index));
+                if starts_statement {
+                    // A `do` before this line heads no braced block: the
+                    // line starts the next statement, as the structural
+                    // parser split them.
+                    top.pending_do = None;
+                    top.region = false;
+                    top.region_conditionals.clear();
+                    top.lambda_head = false;
+                    top.member_start = true;
+                    if let FrameKind::Layout(layout) = &mut top.kind {
+                        layout.statements.push(top.pieces.len());
+                    }
+                }
                 return Step::Next;
             }
             TokenKind::Symbol(symbol)
@@ -485,9 +567,9 @@ impl Pass<'_, '_, '_> {
                     .separator
                     .is_some_and(|separator| separator == *symbol) =>
             {
-                // A separator ends the conditionals and the region before it,
+                // A separator ends the open frames and the region before it,
                 // and the next member starts its own context.
-                self.close_conditionals(index);
+                self.close_open_frames(index);
                 self.significant(index);
                 let top = self.top();
                 top.region = false;
@@ -523,11 +605,15 @@ impl Pass<'_, '_, '_> {
                     self.open_conditional(index);
                     return Step::Next;
                 }
-                "do" if may_head_keyword_form(view, index) && self.braced_do(index) => {
-                    let top = self.top();
-                    top.pending_do = Some(index);
-                    top.lambda_head = false;
-                    top.pieces.push(Piece::Token(index));
+                "do" if may_head_keyword_form(view, index) => {
+                    if self.braced_do(index) {
+                        let top = self.top();
+                        top.pending_do = Some(index);
+                        top.lambda_head = false;
+                        top.pieces.push(Piece::Token(index));
+                    } else {
+                        self.open_layout_do(index);
+                    }
                     return Step::Next;
                 }
                 // An `and` in guards ends a clause.
@@ -670,6 +756,7 @@ impl Pass<'_, '_, '_> {
         );
         frame.first = Some(index);
         frame.member_start = true;
+        frame.layout_owner = self.stack[self.stack.len() - 1].layout_owner;
         self.stack.push(frame);
     }
 
@@ -679,6 +766,12 @@ impl Pass<'_, '_, '_> {
         let view = self.scope.view;
         let is_then = matches!(token(view, index).kind(), TokenKind::Name("then"));
         loop {
+            let top = self.top();
+            if matches!(top.kind, FrameKind::Layout(_)) {
+                // A layout block is an open tail too.
+                self.close_layout(index);
+                continue;
+            }
             let top = self.top();
             let FrameKind::Conditional(conditional) = &mut top.kind else {
                 // A stray keyword, which the item reports.
@@ -751,14 +844,215 @@ impl Pass<'_, '_, '_> {
         }
     }
 
-    /// Closes every conditional above the innermost group or the view.
-    fn close_conditionals(&mut self, index: usize) {
-        while matches!(
-            self.stack.last().map(|frame| &frame.kind),
-            Some(FrameKind::Conditional(_))
-        ) {
-            self.close_conditional(index);
+    /// Closes every conditional and layout block above the innermost group
+    /// or the view.
+    fn close_open_frames(&mut self, index: usize) {
+        loop {
+            match self.stack.last().map(|frame| &frame.kind) {
+                Some(FrameKind::Conditional(_)) => self.close_conditional(index),
+                Some(FrameKind::Layout(_)) => self.close_layout(index),
+                _ => return,
+            }
         }
+    }
+
+    /// Judges a line start by its layout owner. A shallower line closes a
+    /// layout block, and is judged again by the next owner; returns whether
+    /// the line starts a statement of the block now on top.
+    fn judge_line(&mut self, index: usize, indentation: usize) -> bool {
+        loop {
+            let owner = self.stack.last().map_or(0, |frame| frame.layout_owner);
+            let FrameKind::Layout(layout) = &self.stack[owner].kind else {
+                return false;
+            };
+            let (Some(anchor), hanging) = (layout.anchor, layout.hanging) else {
+                // A block yet to start lies in a statement of the layout
+                // around it, which judges the line: one that ends that
+                // statement leaves the block empty.
+                let outer = owner
+                    .checked_sub(1)
+                    .map_or(0, |parent| self.stack[parent].layout_owner);
+                let FrameKind::Layout(outer_layout) = &self.stack[outer].kind else {
+                    return false;
+                };
+                let Some(outer_anchor) = outer_layout.anchor else {
+                    return false;
+                };
+                if self.closer_only_line(index) || indentation > outer_anchor {
+                    return false;
+                }
+                while self.stack.len() > owner + 1 {
+                    self.close_conditional(index);
+                }
+                self.close_layout(index);
+                continue;
+            };
+            if self.closer_only_line(index) || indentation > anchor {
+                if hanging && let FrameKind::Layout(layout) = &mut self.stack[owner].kind {
+                    layout.hanging_lines.push(index);
+                }
+                return false;
+            }
+            while self.stack.len() > owner + 1 {
+                self.close_conditional(index);
+            }
+            if indentation == anchor {
+                return true;
+            }
+            if let FrameKind::Layout(layout) = &mut self.stack[owner].kind {
+                layout.boundary = Some(index);
+            }
+            self.close_layout(index);
+        }
+    }
+
+    /// Whether the line after the line start at `index` holds only closing
+    /// delimiters.
+    fn closer_only_line(&self, index: usize) -> bool {
+        let view = self.scope.view;
+        let mut next = index + 1;
+        let mut closers = 0;
+        while let Some(token) = view.token_at(next) {
+            match token.kind() {
+                TokenKind::Close { .. } => closers += 1,
+                TokenKind::LineStart { .. } => break,
+                _ => return false,
+            }
+            next += 1;
+        }
+        closers > 0
+    }
+
+    fn open_layout_do(&mut self, index: usize) {
+        let view = self.scope.view;
+        let parent = self.top();
+        parent.lambda_head = false;
+        let context = view
+            .line_indentation_at(index)
+            .map_or(parent.context, |indentation| {
+                parent.context.with_physical_line_floor(indentation)
+            })
+            .may_yield();
+        let separator = parent.separator;
+        let mut frame = Frame::new(
+            FrameKind::Layout(Box::new(LayoutDo {
+                head: index,
+                context,
+                anchor: None,
+                hanging: false,
+                statements: Vec::new(),
+                hanging_lines: Vec::new(),
+                boundary: None,
+                failure: None,
+            })),
+            // Statements may bind patterns, and end their tails at `->`.
+            Mode::Cover,
+            context,
+            separator,
+            true,
+            false,
+        );
+        frame.layout_owner = self.stack.len();
+        self.stack.push(frame);
+    }
+
+    /// Closes the layout block on top, which ends before `index`, into a
+    /// form piece of its parent.
+    fn close_layout(&mut self, index: usize) {
+        let frame = self.stack.pop().expect("a layout block is open");
+        let line_starts = frame.line_starts;
+        let FrameKind::Layout(layout) = frame.kind else {
+            unreachable!("only layout blocks close here");
+        };
+        let head = layout.head;
+        let result = self.finish_layout(&layout, &frame.pieces, index);
+        let covers = self.scope.covers;
+        let parent = self.top();
+        parent.line_starts += line_starts;
+        parent.lambda_head = false;
+        parent.pieces.push(Piece::Form {
+            head,
+            end: index,
+            form: covers.form(Form {
+                head,
+                keyword: "do",
+                shape: FormShape::Prefix,
+                result,
+            }),
+        });
+    }
+
+    /// A layout `do` block's statements, checked as the structural parser
+    /// checked them.
+    fn finish_layout(&self, layout: &LayoutDo, pieces: &[Piece], end: usize) -> Parse<SyntaxExpr> {
+        let view = self.scope.view;
+        let head = layout.head;
+        if let Some(failure) = layout.failure.clone() {
+            return Err(failure);
+        }
+        let Some(anchor) = layout.anchor else {
+            return Err(
+                Fail::error("layout do expression requires a newline-delimited block")
+                    .or_at(Some(head)),
+            );
+        };
+        let first = layout.statements[0];
+        let first_token = pieces.get(first).map(piece_token);
+        if !layout.context.accepts_layout_anchor(anchor) {
+            return Err(Fail::error(format!(
+                "do layout begins at indentation {anchor}; expected more than continuation floor {}",
+                layout.context.continuation_floor()
+            ))
+            .or_at(first_token));
+        }
+        if layout.hanging {
+            // A line is judged within the `do` form's own extent, its group
+            // member, as the structural parser judged it.
+            let extent = structural_view_at(view, head);
+            for line in layout.boundary.iter().chain(&layout.hanging_lines) {
+                if line_begins_do_statement(line_view(extent, *line)) {
+                    let indentation = match token(view, *line).kind() {
+                        TokenKind::LineStart { indentation } => *indentation,
+                        _ => 0,
+                    };
+                    return Err(Fail::error(format!(
+                        "hanging do statement is indented {indentation} spaces; expected sibling indentation {anchor}"
+                    ))
+                    .or_at(Some(*line)));
+                }
+            }
+        }
+        let scope = Scope {
+            view: subview(view, head + 1, end),
+            mode: Mode::Cover,
+            ..self.scope
+        };
+        let bounds = layout
+            .statements
+            .iter()
+            .copied()
+            .chain(std::iter::once(pieces.len()))
+            .collect::<Vec<_>>();
+        let mut parsed = Vec::with_capacity(layout.statements.len());
+        for pair in bounds.windows(2) {
+            let statement = trim_padding(view, &pieces[pair[0]..pair[1]]);
+            let Some(first) = statement.first().map(piece_token) else {
+                continue;
+            };
+            let line = view
+                .token_at(first)
+                .and_then(|token| view.line_at_span(token.span()))
+                .unwrap_or(1);
+            let context = layout.context.child_owner_at(view, first);
+            parsed.push((line, binding::statement(scope, statement, context)?));
+        }
+        if parsed.is_empty() {
+            return Err(
+                Fail::error("layout do expression requires at least one statement")
+                    .or_at(Some(head)),
+            );
+        }
+        finish_do_statements(parsed).map_err(|message| Fail::error(message).or_at(Some(head)))
     }
 
     /// Closes the conditional on top, which ends before `index`, into a
@@ -1086,6 +1380,31 @@ fn leading_trimmed<'a>(view: TokenView<'_, '_>, mut pieces: &'a [Piece]) -> &'a 
         pieces = rest;
     }
     pieces
+}
+
+/// The line after the line start at `index`, to the next line start at the
+/// same delimiter depth or the end of `view`.
+fn line_view<'lex, 'source>(
+    view: TokenView<'lex, 'source>,
+    index: usize,
+) -> TokenView<'lex, 'source> {
+    let mut end = index + 1;
+    while end < view.range().end()
+        && let Some(token) = view.token_at(end)
+    {
+        match token.kind() {
+            TokenKind::LineStart { .. } => break,
+            TokenKind::Open { group, .. } => {
+                end = view
+                    .group(*group)
+                    .and_then(|group| group.close_token())
+                    .map_or(end, |close| close.min(view.range().end() - 1));
+            }
+            _ => {}
+        }
+        end += 1;
+    }
+    subview(view, index + 1, end.min(view.range().end()))
 }
 
 fn subview<'lex, 'source>(
