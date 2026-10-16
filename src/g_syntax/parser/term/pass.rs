@@ -742,6 +742,25 @@ impl Pass<'_, '_, '_> {
         if let Some(mut block) = block {
             if let Some(arms) = block.arms.take() {
                 let (kind, head) = (arms.kind, arms.head);
+                // Nested arms end their arm, so what follows a braced block
+                // without arm marks on its line was meant as a guard binding
+                // a dictionary.
+                let marks = frame.pieces.iter().any(|piece| {
+                    matches!(piece, Piece::Token(at)
+                        if matches!(token(view, *at).kind(), TokenKind::Symbol("=>" | "=>?")))
+                });
+                if kind == ArmsKind::Nested
+                    && !marks
+                    && continues_tail(view, index + 1)
+                    && !matches!(token(view, index + 1).kind(), TokenKind::Symbol(";"))
+                {
+                    self.violate(
+                        Fail::error(
+                            "a `{` after `when` begins nested arms; parenthesize a dictionary pattern that begins a guard",
+                        )
+                        .or_at(Some(open)),
+                    );
+                }
                 let result =
                     self.finish_braced_arms(*arms, &frame.pieces, frame.pending, open, index);
                 self.top().line_starts += line_starts;
@@ -1073,11 +1092,17 @@ impl Pass<'_, '_, '_> {
         Step::Next
     }
 
-    /// Whether the `do` at `index` heads a braced block: its next significant
-    /// token is a `{`, separated from it as the `do` form requires.
+    /// Whether the `do` at `index` heads a braced block: a `{` follows it on
+    /// its line, separated from it as the `do` form requires. The legacy
+    /// grammar also took a `{` on the next line.
     fn braced_do(&self, index: usize) -> bool {
         let view = self.scope.view;
-        self.next_significant(index + 1).is_some_and(|next| {
+        let next = if legacy_grammar() {
+            self.next_significant(index + 1)
+        } else {
+            Some(index + 1).filter(|next| view.range().contains(*next))
+        };
+        next.is_some_and(|next| {
             let token = token(view, next);
             matches!(
                 token.kind(),
@@ -1766,9 +1791,9 @@ impl Pass<'_, '_, '_> {
     /// Takes the `=>`, `=>?` or `when` at `index` for the innermost arms
     /// block at this level whose arm reads its head or guards, if any: the
     /// frames open in the arm close before it. An arrow begins the arm's
-    /// result; a `when` heads nested arms when it ends its line, or before a
-    /// `{` that no mark follows on its line, and otherwise begins its
-    /// guards. Returns whether it took the mark.
+    /// result; a `when` heads nested arms when it ends its line or a `{`
+    /// follows it, and otherwise begins its guards. Returns whether it took
+    /// the mark.
     fn arm_mark(&mut self, index: usize) -> bool {
         let Some(owner) = self.stack.last().and_then(|frame| frame.arms_owner) else {
             return false;
@@ -1786,11 +1811,9 @@ impl Pass<'_, '_, '_> {
         let view = self.scope.view;
         let when = matches!(token(view, index).kind(), TokenKind::Name("when"));
         let next = self.line_mark(index + 1);
-        // A `when` ending its line heads nested arms, and any other begins
-        // guards; the legacy grammar read nested arms wherever no mark
-        // followed it on its line. A `{` after it still begins braced
-        // nested arms only when no mark follows the group on its line,
-        // since a guard may bind a dictionary pattern.
+        // A `when` ending its line, or before a `{` on its line, heads
+        // nested arms, and any other begins guards; the legacy grammar read
+        // nested arms wherever no mark followed it on its line.
         let nested = when
             && match view
                 .token_at(index + 1)
@@ -1798,11 +1821,14 @@ impl Pass<'_, '_, '_> {
                 .map(|token| token.kind())
             {
                 _ if legacy_grammar() => next.is_none(),
-                None | Some(TokenKind::LineStart { .. }) => true,
-                Some(TokenKind::Open {
-                    delimiter: Delimiter::Brace,
-                    ..
-                }) => next.is_none(),
+                None
+                | Some(
+                    TokenKind::LineStart { .. }
+                    | TokenKind::Open {
+                        delimiter: Delimiter::Brace,
+                        ..
+                    },
+                ) => true,
                 Some(_) => false,
             };
         // An arm's line holds one arrow, as the structural parser counted
@@ -2051,7 +2077,24 @@ impl Pass<'_, '_, '_> {
             ..self.scope
         };
         let missing = arms.missing();
-        let list = self.read_arms(scope, arms, members)?;
+        // A first arm that is only a brace group was meant as braced arms,
+        // which a `{` delimits only on its keyword's line.
+        let braces = members.first().is_some_and(|member| {
+            matches!(trim_padding(view, member), [Piece::Group { open, .. }]
+                if matches!(token(view, *open).kind(),
+                    TokenKind::Open { delimiter: Delimiter::Brace, .. }))
+        });
+        let keyword = keyword_text(view, layout.head);
+        let list = self.read_arms(scope, arms, members).map_err(|fail| {
+            if braces && !legacy_grammar() {
+                Fail::error(format!(
+                    "a `{{` delimits arms only on the line of its `{keyword}`; on a later line it begins a dictionary pattern"
+                ))
+                .or_at(Some(layout.head))
+            } else {
+                fail
+            }
+        })?;
         let empty = match &list {
             ArmList::Match(list) => list.is_empty(),
             ArmList::When(list) => list.is_empty(),
@@ -2097,7 +2140,20 @@ impl Pass<'_, '_, '_> {
             mode: Mode::Cover,
             ..self.scope
         };
-        self.read_arms(scope, arms, members)
+        // An arm mark after the group on its line shows a first arm's
+        // dictionary pattern, which begins on the next line instead.
+        let first_arms = arms.brace_may_begin_arm();
+        self.read_arms(scope, arms, members).map_err(|fail| {
+            if first_arms && !legacy_grammar() && mark_follows_on_line(view, close + 1) {
+                let keyword = keyword_text(view, open.saturating_sub(1));
+                Fail::error(format!(
+                    "a `{{` on the line of `{keyword}` delimits the arms; begin a dictionary pattern on the next line"
+                ))
+                .or_at(Some(open))
+            } else {
+                fail
+            }
+        })
     }
 
     /// Reads each arm from its pieces, skipping empty members.
@@ -2485,6 +2541,33 @@ fn continues_tail(view: TokenView<'_, '_>, index: usize) -> bool {
                     | TokenKind::Name("then" | "else" | "in" | "where")
             )
         })
+}
+
+/// The text of the token at `index`.
+fn keyword_text<'source>(view: TokenView<'_, 'source>, index: usize) -> &'source str {
+    view.token_at(index)
+        .and_then(|token| view.source().source_slice(token.span()))
+        .unwrap_or("?")
+}
+
+/// Whether an `=>` or `=>?` follows `from` on its line, outside groups.
+fn mark_follows_on_line(view: TokenView<'_, '_>, from: usize) -> bool {
+    let mut index = from;
+    while view.range().contains(index) {
+        match token(view, index).kind() {
+            TokenKind::LineStart { .. } | TokenKind::Close { .. } => return false,
+            TokenKind::Symbol("=>" | "=>?") => return true,
+            TokenKind::Open { group, .. } => {
+                match view.group(*group).and_then(|group| group.close_token()) {
+                    Some(close) => index = close,
+                    None => return false,
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    false
 }
 
 /// The pieces after any leading line starts.

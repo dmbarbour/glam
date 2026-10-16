@@ -1266,8 +1266,8 @@ fn parse_grammar_chain_view(
 ///
 /// The grammar predates the grammar review's rules (Syntax.md "Tail
 /// Position" and the review's decisions), so where the term parser and the
-/// grammar disagree on whether an expression parses, the term parser's
-/// reading of the legacy grammar is compared instead.
+/// grammar disagree, the term parser's reading of the legacy grammar is
+/// compared instead.
 ///
 /// Expressions the grammar's keyword forms parse while the oracle runs it
 /// are not compared again. The term parser's own parse reaches the same
@@ -1363,12 +1363,16 @@ pub(in crate::g_syntax::parser) mod term_oracle {
             }
             _ => (new, false),
         };
-        // An acceptance the review's rules may make, which the legacy
-        // grammar rejects too.
-        let mut accepted_by_review = || {
-            let accepted = legacy_reading().is_err();
-            review_rules |= accepted;
-            accepted
+        // Any other difference the review's rules may make: an expression
+        // they accept or read anew agrees when the legacy reading does.
+        let mut agrees_by_review = |old: &Result<InfixChain, Vec<Diagnostic>>| {
+            let agrees = match (legacy_reading(), old) {
+                (Ok((legacy, _)), Ok(old)) => legacy == *old,
+                (Err(_), Err(_)) => true,
+                _ => false,
+            };
+            review_rules |= agrees;
+            agrees
         };
         let view = match new {
             Ok((_, end)) if *end < view.range().end() => view
@@ -1384,9 +1388,9 @@ pub(in crate::g_syntax::parser) mod term_oracle {
             if sweeping() && !matches!(new, Err(Fail::Unsupported(_))) {
                 let old = reference(view, context);
                 let agree = match (new, &old) {
-                    (Ok(new), Ok(old)) => *new == old,
+                    (Ok(new), Ok(old)) if *new == old => true,
                     (Err(Fail::Error { .. } | Fail::Reported(_)), Err(_)) => true,
-                    (Ok(_), Err(_)) => accepted_by_review(),
+                    (Ok(_), _) => agrees_by_review(&old),
                     _ => false,
                 };
                 assert!(
@@ -1408,9 +1412,9 @@ pub(in crate::g_syntax::parser) mod term_oracle {
         }
         let old = reference(view, context);
         let agree = match (new, &old) {
-            (Ok(new), Ok(old)) => *new == old,
+            (Ok(new), Ok(old)) if *new == old => true,
             (Err(Fail::Error { .. } | Fail::Reported(_)), Err(_)) => true,
-            (Ok(_), Err(_)) => accepted_by_review(),
+            (Ok(_), _) => agrees_by_review(&old),
             _ => false,
         };
         ACTIVE.with(|active| {

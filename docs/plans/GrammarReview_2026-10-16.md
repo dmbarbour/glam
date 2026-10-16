@@ -245,7 +245,8 @@ Each needs options, a recommendation and the maintainer's decision. Items
 10. **The trailing bind `E -> P`**, the one place a pattern follows its
     expression, against the lambda arrow. With separators, `->` ends any
     open tail, and a lambda before it is a lint.
-11. **`match Expr as Arms`** (maintainer, under consideration). `as` would
+11. **`match Expr as Arms`** (decided by the maintainer 2026-10-16, not yet
+    built; the maintainer may revisit `Dict as Name with Defs`). `as` would
     replace a match's `with`, leaving `with` one meaning, "with these
     definitions" (object bodies, `extend`, updates). After `as` come pattern
     arms, as `P as Q` views a value through a pattern, and after `when`
@@ -254,19 +255,28 @@ Each needs options, a recommendation and the maintainer's decision. Items
     an expression, so `as` would not be a separator keyword, and an aliased
     update in a subject would still need parentheses, as an update does
     today. Options: accept that; change the alias spelling so no expression
-    continues with `as`; or choose another keyword.
-12. **`when` before `{`.** `p when {c => r}` heads braced nested arms and
-    `p when {} <- e => r` begins a guard binding a dictionary pattern; both
-    occur. They are still told apart by whether an arm mark follows the
-    group on its line. Options: braced nested arms after `when {`, with a
-    parenthesized dictionary pattern in a guard; or guards, with nested arms
-    only in layout.
-13. **`do` and a `{` on the next line.** `do` still skips line breaks to
-    find its `{`, so a first statement binding a dictionary pattern on the
-    next line reads as a braced block. Item 1's rule for arms would apply
-    to `do` too.
-14. **Errors for item 1.** `match v with {a:x} => x` reports that a match
-    arm requires `=>`; a hint naming the rule would help.
+    continues with `as`; or choose another keyword. Decided: accept it.
+    **Found while building it:** the lexer's layout check picks a `{`
+    group's separator from the token before it, and `as {` would need `;`
+    for braced arms but `,` for an as-pattern such as `p as {a:x, b:y}`.
+    Only scope tells them apart: the first `as` after a match head at its
+    depth is the match's. Options: give the layout check that scope (a
+    stack of open match heads per depth, as the parser keeps owners);
+    separate braced arms after `as` with `,`; or choose a keyword with no
+    other role, such as `of`.
+12. **`when` before `{`** (`braces-open-blocks-on-their-keywords-line`).
+    `p when {c => r}` headed braced nested arms and `p when {} <- e => r`
+    began a guard binding a dictionary pattern, told apart by whether an arm
+    mark followed the group on its line. Decided and built: braced nested
+    arms after `when {`, with a parenthesized dictionary pattern in a guard.
+13. **`do` and a `{` on the next line** (the same decision). `do` skipped
+    line breaks to find its `{`. Decided and built: item 1's rule applies to
+    `do`, and a formatter is expected to favor a `{` on its keyword's line.
+    `do` followed by `{}` alone on the next line changes meaning, from an
+    empty braced block to a layout block holding an empty dictionary, so
+    the oracle now compares the legacy reading wherever the readings differ.
+14. **Errors for item 1.** Built: a misplaced `{` after `with`, `when` or a
+    nested `when` reports the rule.
 
 ## Method
 

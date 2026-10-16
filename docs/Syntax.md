@@ -505,7 +505,9 @@ chooses its first statement's indentation above the enclosing expression
 floor. Blank and comment-only lines establish neither form's anchor.
 
 Braces delimit do notation and use semicolons as statement separators. The
-closing brace ends the block as a dedent would (see *Tail Position*):
+`{` must stand on the `do`'s line; on a later line it begins a statement,
+such as a binding of a dictionary pattern. The closing brace ends the block
+as a dedent would (see *Tail Position*):
 
         inline = do { left <- .read 'left; .write left; .r left }
         nested = consume [do { .r first }, do { .r second }]
@@ -1663,9 +1665,10 @@ We also support branching guard clauses. We use `when` to separate the pattern f
                     C3_a_b => R3_a_b
                 C3_b => R3_b
 
-A `when` that ends its line heads nested arms, as does one before a braced
-block that no `=>`, `=>?` or `when` follows on its line. Any other `when`
-begins guards, which may continue onto later lines before the arm's `=>`:
+A `when` that ends its line heads nested arms, as does one that a `{`
+follows on its line, so a guard that begins with a dictionary pattern is
+parenthesized: `P when ({}) <- Op => R`. Any other `when` begins guards,
+which may continue onto later lines before the arm's `=>`:
 
         match Expr with
             P1 when C1

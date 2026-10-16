@@ -4218,7 +4218,7 @@ refl.try_access = .heap.set ['visible] 42 =>> (try 42 <- .heap.get ['visible] th
 refl.try_rollback = (try (.heap.set ['try_rolled_back] "bad" =>> .fail) then 1 / 0 else ()) =>> (.heap.get ['try_rolled_back] >>= (\value -> (value == {}) =>> .r ()))
 refl.try_match_rollback = try_match 42 with {
   42 when (.heap.set ['rolled_back] "bad" =>> .fail) => ();
-  42 when {} <- .heap.get ['rolled_back] => ();
+  42 when ({}) <- .heap.get ['rolled_back] => ();
 }
 refl.try_match_when = try_match when { 42 <- .heap.get ['visible] => (); }
 refl.try_match_exhaustion = try (try_match 1 with {}) then 1 / 0 else ()

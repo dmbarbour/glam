@@ -673,6 +673,26 @@ fn wildcard_pattern_guard_is_a_pass_clause() {
     assert_eq!(guards, &[SyntaxGuardClause::Pass]);
 }
 
+/// A `{` delimits a `do` block only on the `do`'s line; on the next line it
+/// begins a statement, such as a binding of a dictionary pattern.
+#[test]
+fn a_brace_delimits_a_do_block_only_on_its_line() {
+    let SyntaxExpr::Do(DoExpr { steps, .. }) =
+        parse_do_expression("do\n  {a:y, b:z} <- .r v\n  .r y")
+    else {
+        panic!("expected a do expression");
+    };
+    assert!(matches!(
+        &steps[0].kind,
+        DoStepKind::Bind { pattern, .. } if pattern.captures() == ["y", "z"]
+    ));
+    let SyntaxExpr::Do(DoExpr { steps, .. }) = parse_do_expression("do {\n  x <- .r v;\n  .r x }")
+    else {
+        panic!("expected a do expression");
+    };
+    assert_eq!(steps.len(), 1);
+}
+
 /// A braced `do` block stands where its braces end it, as a dedent would:
 /// only an operator or a keyword may follow it, not an argument or a path.
 #[test]

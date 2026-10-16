@@ -575,6 +575,31 @@ maps the short names used here to file names.
 - **Rule lives in:** `Syntax.md` "Guard Clauses".
 - **Recorded in:** grammar review, item 4.
 
+### A `{` opens a block only on its keyword's line
+`braces-open-blocks-on-their-keywords-line` · 2026-10-16 · maintainer · accepted
+- **Context:** after `brace-after-with-delimits-arms`, a `{` after a `when`
+  still headed nested arms or began a guard binding a dictionary pattern
+  depending on whether an arm mark followed the group on its line, and a
+  `do` still looked past line breaks for its `{`, so a statement binding a
+  dictionary pattern on the next line read as a braced block.
+- **Decision:** a `{` on the line of `with`, `when` (heading arms) or `do`
+  delimits that block; on a later line it begins an arm's pattern or a
+  statement. After `when`, a `{` on its line always heads nested arms, so a
+  guard that begins with a dictionary pattern is parenthesized:
+  `p when ({}) <- e => r`. Settles the case
+  `when-ending-its-line-heads-nested-arms` left open.
+- **Consequences:**
+  - `do` followed by `{a:x} <- op` on the next line binds; `do` followed by
+    `{}` alone on the next line is no longer an empty braced block but a
+    layout block holding an empty dictionary, the one change in the review
+    so far that alters a meaning instead of rejecting it. A formatter is
+    expected to favor a `{` on its keyword's line wherever braces are used.
+  - Errors for a misplaced `{` name the rule.
+- **Rule lives in:** `Syntax.md` "Effects" and "Match";
+  `SyntaxCheatSheet.md` "Effects & Do Notation" and "Conditionals &
+  Patterns".
+- **Recorded in:** grammar review, items 12–14.
+
 ### Keyword forms and lambdas stand alone only in tail position
 `tail-position` · 2026-10-16 · maintainer · superseded
 - **Context:** the grammar review's first item. Forms whose last part

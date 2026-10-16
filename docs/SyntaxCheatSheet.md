@@ -381,9 +381,10 @@ nested = f [do { .r 1 }, do {; .r 2; }]
 # - A layout do may yield to an aligned leading infix operator after its block.
 #   Otherwise it owns the trailing part of its containing expression; in an
 #   application it can therefore only be the final argument.
-# - Braced do ends at `}` as at a dedent: an operator or keyword may follow
-#   it, not an argument. One leading/trailing `;` is ignored; interior empty
-#   statements and `do {;}` are invalid.
+# - Braced do opens with `{` on the `do`'s line (on a later line, `{` begins
+#   a statement) and ends at `}` as at a dedent: an operator or keyword may
+#   follow it, not an argument. One leading/trailing `;` is ignored; interior
+#   empty statements and `do {;}` are invalid.
 # - `P <- op` and `P = value` bind only when the `<-` or `=` comes before any
 #   keyword form or `\` in the statement: `if (a, b) = e then ...` is an
 #   operation, `x = if ...` a binding. Guard clauses follow the same rule.
@@ -447,6 +448,8 @@ match Expr with
         C3b => R3b
     P4 when C4a
          and C4b => R4             # guards may continue before the `=>`
+    P5 when { C5a => R5a; _ => R5b } # `{` after `when`: nested arms, so
+    P6 when ({}) <- Op => R6        #   a dict-pattern guard is parenthesized
     _ => Default
 
 match Expr with { Pattern1 => Result1; _ => Default; }  # `{` on `with`'s line

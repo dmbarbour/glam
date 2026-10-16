@@ -1514,16 +1514,19 @@ mod tests {
             layout.arms[0].pattern.kind,
             SyntaxPatternKind::Dict { .. }
         ));
-        for source in [
+        assert_rejected(
             "match v with {a:z} => z",
+            "a `{` on the line of `with` delimits the arms",
+        );
+        assert_rejected(
             "match v with\n  {1 => 2; _ => 3}",
-        ] {
-            assert_rejected(source, "requires `=>`");
-        }
+            "a `{` delimits arms only on the line of its `with`",
+        );
     }
 
-    /// A `when` ending its line heads nested arms; any other begins guards,
-    /// which may continue onto later lines before the arm's arrow.
+    /// A `when` ending its line, or before a `{`, heads nested arms; any
+    /// other begins guards, which may continue onto later lines before the
+    /// arm's arrow.
     #[test]
     fn a_when_ending_its_line_heads_nested_arms() {
         let SyntaxExpr::Match(nested) = parse("match v with\n  p when\n    c => 1\n  _ => 2")
@@ -1534,7 +1537,7 @@ mod tests {
         for source in [
             "match v with\n  p when c\n      => 1\n  _ => 2",
             "match v with\n  p when c\n      and d => 1\n  _ => 2",
-            "match v with\n  p when {} <- e => 1\n  _ => 2",
+            "match v with\n  p when ({}) <- e => 1\n  _ => 2",
         ] {
             let SyntaxExpr::Match(guarded) = parse(source) else {
                 panic!("`{source}` should parse");
@@ -1549,6 +1552,10 @@ mod tests {
             panic!("braced nested arms should parse");
         };
         assert!(matches!(braced.arms[0].outcome, MatchOutcome::Nested(_)));
+        assert_rejected(
+            "match v with\n  p when {} <- e => 1\n  _ => 2",
+            "parenthesize a dictionary pattern that begins a guard",
+        );
     }
 
     #[test]
