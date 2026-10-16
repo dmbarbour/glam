@@ -116,8 +116,9 @@ disagree.
     a joint `:` or `.` is a tag's key or a path's root.
   - `term::may_head_keyword_form` decides whether one heads a keyword form
     inside an expression. It refuses keys, but accepts a tag's payload, as in
-    `(k):match x with {…}`. The term parser's frames and regions use it, as
-    does `find_structural_body` to tell which `match` owns a `with`.
+    `(k):match x as {…}`. The term parser's frames and regions use it, as
+    do `find_structural_body`, to tell where a `match` owns what follows,
+    and `layout::match_arms_keywords`, to tell which `as` ends a subject.
 
   The grammar's `form_keyword` mirrors them while the grammar lives.
 - A source local may not shadow another active local or a global introduced or

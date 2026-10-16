@@ -245,8 +245,8 @@ Each needs options, a recommendation and the maintainer's decision. Items
 10. **The trailing bind `E -> P`**, the one place a pattern follows its
     expression, against the lambda arrow. With separators, `->` ends any
     open tail, and a lambda before it is a lint.
-11. **`match Expr as Arms`** (decided by the maintainer 2026-10-16, not yet
-    built; the maintainer may revisit `Dict as Name with Defs`). `as` would
+11. **`match Expr as Arms`** (`match-arms-follow-as`; decided and built
+    2026-10-16; the maintainer may revisit `Dict as Name with Defs`). `as` would
     replace a match's `with`, leaving `with` one meaning, "with these
     definitions" (object bodies, `extend`, updates). After `as` come pattern
     arms, as `P as Q` views a value through a pattern, and after `when`
@@ -263,7 +263,15 @@ Each needs options, a recommendation and the maintainer's decision. Items
     depth is the match's. Options: give the layout check that scope (a
     stack of open match heads per depth, as the parser keeps owners);
     separate braced arms after `as` with `,`; or choose a keyword with no
-    other role, such as `of`.
+    other role, such as `of`. Decided: give the layout check that scope.
+    **As built:** the lexer records each match's `as` in one pass, beside
+    each token's enclosing group (`layout::match_arms_keywords`), and the
+    `{` separator check consults it. The term parser claims `as` as it
+    claimed `with`; in a subject `as` is a separator keyword, since nothing
+    there continues with it, so `match if a then b else c as …` parses.
+    A script renamed the samples, tests and standing docs, replacing the
+    first `with` after each match head at its depth; history docs keep the
+    syntax of their time.
 12. **`when` before `{`** (`braces-open-blocks-on-their-keywords-line`).
     `p when {c => r}` headed braced nested arms and `p when {} <- e => r`
     began a guard binding a dictionary pattern, told apart by whether an arm

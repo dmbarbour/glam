@@ -7,8 +7,11 @@
 
 use crate::g_syntax::Diagnostic;
 
+use super::conditional::heads_match_when;
 use super::input::{TokenRange, TokenView};
 use super::lexical::{Delimiter, LeadingTrivia, LexedSource, TokenKind};
+use super::structural::in_keyword_position;
+use super::term::may_head_keyword_form;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct LayoutLine {
@@ -308,6 +311,43 @@ pub(super) fn validate_delimited_layouts(source: &LexedSource<'_>) -> Vec<Diagno
     diagnostics
 }
 
+/// The `as` tokens that end a match's subject, in order: in each group's
+/// contents, the first `as` in keyword position after a match head belongs
+/// to the innermost head still reading its subject, as in the parser. A
+/// braced block after one holds arms, separated by `;`, where a `{` after
+/// any other `as` begins an as-pattern's dictionary, separated by `,`. The
+/// lexer records them once, as it records each token's enclosing group.
+pub(super) fn match_arms_keywords(source: &LexedSource<'_>) -> Vec<usize> {
+    let view = TokenView::whole(source);
+    // Per open group, the match heads still reading their subjects.
+    let mut pending = vec![0usize];
+    let mut found = Vec::new();
+    for (index, token) in source.tokens().iter().enumerate() {
+        match token.kind() {
+            TokenKind::Open { .. } => pending.push(0),
+            TokenKind::Close { .. } if pending.len() > 1 => {
+                pending.pop();
+            }
+            // A declaration ends any subject left without its `as`.
+            TokenKind::LineStart { indentation: 0 } if pending.len() == 1 => pending[0] = 0,
+            TokenKind::Name("match" | "try_match")
+                if may_head_keyword_form(view, index) && !heads_match_when(view, index) =>
+            {
+                *pending.last_mut().expect("the source level stays") += 1;
+            }
+            TokenKind::Name("as") if in_keyword_position(view, index) => {
+                let heads = pending.last_mut().expect("the source level stays");
+                if *heads > 0 {
+                    *heads -= 1;
+                    found.push(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
 pub(super) fn group_separator(
     source: &LexedSource<'_>,
     delimiter: Delimiter,
@@ -331,6 +371,12 @@ fn brace_has_compound_introducer(source: &LexedSource<'_>, open_index: usize) ->
     let TokenKind::Name(name) = prior.kind() else {
         return false;
     };
+    if *name == "as" {
+        return source
+            .match_arms_keywords()
+            .binary_search(&prior_index)
+            .is_ok();
+    }
     if !matches!(*name, "do" | "let" | "when" | "where" | "with") {
         return false;
     }

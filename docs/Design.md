@@ -251,7 +251,7 @@ Conditional syntax itself never leaks multiple results.
 An intriguing opportunity is to mix choice with other effects. For example, a pattern reads from a queue and matches only some read values. Ideally, such operations are reverted when the match fails, implicitly checkpointing state. Generic integration is feasible by introducing a `(Cut altOps)` effect as a standard delimiter for backtracking of Alt branches.
 
         -- a pure pattern matching handler
-        runAlt (Yield rq k) = match rq with
+        runAlt (Yield rq k) = match rq as
             Fail -> []
             (Alt a b) -> List.flatMap (runAlt . k) [a,b]
             (Cut op) -> runAlt (k (runCut op))
@@ -261,7 +261,7 @@ An intriguing opportunity is to mix choice with other effects. For example, a pa
 
         runCut = head . runAlt
 
-        fixListFn f = match (fix (f . head)) with
+        fixListFn f = match (fix (f . head)) as
             x:_ -> x:(fixListFn (tail . f))
             [] -> []
 
@@ -281,19 +281,19 @@ We can express extarbitrary data flow via indexed state, and arbitrary control f
         --   State (Get, Set)
         --   Fixpoint (Fix)
         -- Result is list of outcomes as `(r,s')` pairs.
-        run s (Yield rq k) = match rq with
+        run s (Yield rq k) = match rq as
             Get -> run s (k s)
             (Set s') -> run s' (k ())
             (Alt a b) -> a' ++ b'
                 a' = run s (a >>= k)
                 b' = run s (b >>= k)
-            (Cut op) -> match (run s op) with
+            (Cut op) -> match (run s op) as
                 (r,s'):_ -> run s' (k r)
                 [] -> [] -- promote failure
             Fail -> []
             (Reset ix op) -> run s' op where
                 s' = s with { .[CC] = ((ix,k):(s.[CC])) }
-            (Shift ix fn) -> match s.[CC] with
+            (Shift ix fn) -> match s.[CC] as
                 (ix',k'):cc' -> 
                     -- 'Shift' pops matched 'Reset', 'fn' may reinsert
                     let s' = s with { .[CC] := cc' }
@@ -303,7 +303,7 @@ We can express extarbitrary data flow via indexed state, and arbitrary control f
             (Fix f) -> List.flatMap cont rs' where
                 rs' = fixListFn (run (s with { .[CC] := [] }) . f) 
                 cont (r,s') = run (s' with { .[CC] := s.[CC] }) (k r)
-        run s (Return r) = match s.[CC] with
+        run s (Return r) = match s.[CC] as
             ((_,k):cc') -> run (s with { .[CC] := cc' }) (k r)
             [] -> [(r,s)]
 

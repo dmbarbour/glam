@@ -53,19 +53,19 @@ object direct_standard_effects as effects with
       }
 
   updated_state path value state =
-    match path with
+    match path as
       [] => value
       _ => (state with { .(path) ::= \_prior -> value })
 
   trace_outcome event outcome =
     match (
       anno meta_pure:(\priors ->
-          match priors with
+          match priors as
             [prior] => [
               outcome.state.handler.trace_policy.update event prior
             ])
         [outcome.state.handler.trace]
-    ) with
+    ) as
       [updated_trace] => {
         result:outcome.result,
         state:
@@ -158,7 +158,7 @@ object direct_x86_64 as x86 extends direct_standard_effects with
 
   trace_full_update event prior = {
     events:(
-      match prior with
+      match prior as
         {events:events, _} => events
         _ => []
     ) ++ [event]
@@ -173,7 +173,7 @@ object direct_x86_64 as x86 extends direct_standard_effects with
   }
 
   trace_prior_summary prior =
-    match prior with
+    match prior as
       {summary:summary, _} => summary
       _ => x86.trace_empty_summary
 
@@ -330,7 +330,7 @@ object direct_x86_64 as x86 extends direct_standard_effects with
       state
 
   split_known_cursor kind prior_cursor_id cursor_id prior_cursor state =
-    match prior_cursor with
+    match prior_cursor as
       {} =>
         x86.handler_error "cannot split an unknown direct-assembly cursor"
       _ =>
@@ -379,7 +379,7 @@ object direct_x86_64 as x86 extends direct_standard_effects with
         )
 
   instruction_effect_name instruction =
-    match instruction with
+    match instruction as
       mov_u32:{register:_, immediate:_} => ".mov_u32"
       mov_label_u32:{register:_, label:_} => ".mov_label_u32"
       xor_u32:{destination:_, source:_} => ".xor_u32"
@@ -551,7 +551,7 @@ object direct_x86_64 as x86 extends direct_standard_effects with
     }
 
   register_index register =
-    match register with
+    match register as
       'eax => 0
       'ecx => 1
       'edx => 2
@@ -569,7 +569,7 @@ object direct_x86_64 as x86 extends direct_standard_effects with
         x86.little_endian (width - 1) (math.floor (value / 256))
 
   instruction_size instruction =
-    match instruction with
+    match instruction as
       mov_u32:{register:_, immediate:_} => 5
       mov_label_u32:{register:_, label:_} => 5
       xor_u32:{destination:_, source:_} => 2
@@ -578,9 +578,9 @@ object direct_x86_64 as x86 extends direct_standard_effects with
       bytes:payload => list.len payload
 
   label_offset wanted_label instructions offset =
-    match instructions with
+    match instructions as
       [instruction] ++ remaining =>
-        match instruction with
+        match instruction as
           label:{handle:actual_label} when actual_label == wanted_label => offset
           _ =>
             x86.label_offset
@@ -589,14 +589,14 @@ object direct_x86_64 as x86 extends direct_standard_effects with
               (offset + x86.instruction_size instruction)
 
   encode instructions all_instructions code_address =
-    match instructions with
+    match instructions as
       [] => []
       [instruction] ++ remaining =>
         x86.encode_instruction instruction all_instructions code_address ++
           x86.encode remaining all_instructions code_address
 
   encode_instruction instruction all_instructions code_address =
-    match instruction with
+    match instruction as
       mov_u32:{register:register, immediate:immediate} =>
         [0xb8 + x86.register_index register] ++
           x86.little_endian 4 immediate
@@ -646,7 +646,7 @@ object direct_x86_64 as x86 extends direct_standard_effects with
           completed_state.handler.trace_policy.report evaluated_metadata
           .r [evaluated_metadata])
         [completed_state.handler.trace]
-    ) with
+    ) as
       [reported_trace] =>
         seq
           reported_trace
@@ -671,7 +671,7 @@ object direct_x86_64 as x86 extends direct_standard_effects with
     }
 
   flatten_roots cursor_ids cursors =
-    match cursor_ids with
+    match cursor_ids as
       [] => []
       [cursor_id] ++ remaining =>
         x86.flatten_cursor cursor_id cursors ++
@@ -679,7 +679,7 @@ object direct_x86_64 as x86 extends direct_standard_effects with
 
   flatten_cursor cursor_id cursors =
     cursors.[cursor_id].content ++ (
-      match cursors.[cursor_id].following with
+      match cursors.[cursor_id].following as
         {} => []
         next_cursor_id => x86.flatten_cursor next_cursor_id cursors
     )

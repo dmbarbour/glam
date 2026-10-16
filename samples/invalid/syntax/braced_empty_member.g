@@ -19,7 +19,7 @@ dict = { x:1 }
 with_across_lines = dict with { x := 2;
   ; z = 3 }
 
-match_across_lines = match 1 with { 1 => 2;
+match_across_lines = match 1 as { 1 => 2;
   ; _ => 3 }
 
 object object_across_lines with { a = 1;

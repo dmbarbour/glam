@@ -237,7 +237,7 @@ fn guard_clauses_bind_by_the_statement_rule() {
 #[test]
 fn a_conditional_bound_in_guards_is_parenthesized() {
     assert_outside_tail_position("if x <- if a then b else c and y then 1 else 2");
-    assert_outside_tail_position("match v with {p when x <- if a then b else c and y => 1}");
+    assert_outside_tail_position("match v as {p when x <- if a then b else c and y => 1}");
     let SyntaxExpr::If(conditional) =
         parse_do_expression("if x <- (if a then b else c) and y then 1 else 2")
     else {
@@ -251,7 +251,7 @@ fn a_conditional_bound_in_guards_is_parenthesized() {
         ] if *inner.else_result == SyntaxExpr::Name("c".to_owned()) && y == "y"
     ));
     let SyntaxExpr::Match(found) =
-        parse_do_expression("match v with {p when x <- (if a then b else c) and y => 1}")
+        parse_do_expression("match v as {p when x <- (if a then b else c) and y => 1}")
     else {
         panic!("expected a match expression");
     };

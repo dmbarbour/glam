@@ -334,7 +334,7 @@ f x \y -> body       # a trailing lambda is the final application argument
 # keyword (then else in where => =>? and a binding's `->`). Never to a token
 # that could continue them; after their `}` or dedent, only an operator or a
 # keyword may follow, never an argument or path. Parenthesize them elsewhere:
-f (match x with {_ => 1}) y        # `f match x with {...} y` is an ERROR
+f (match x as {_ => 1}) y          # `f match x as {...} y` is an ERROR
 if c then do { a } else do { b }   # `}` ends the block, as a dedent does
 if a then if b then c else d else e # each `if` has an `else`: they pair
 if x <- (if a then b else c) and d then e else f  # `and` could continue c
@@ -440,7 +440,7 @@ value if (value, rest) = split input else fallback
 (\x -> b) if C else d                # a conditional function
 # Postfix guards bind within the preceding success value, not the else branch.
 
-match Expr with
+match Expr as
     Pattern1 => Result1
     P2 when C2 => R2               # guard clause
     P3 when                        # a `when` ending its line heads nested
@@ -452,16 +452,18 @@ match Expr with
     P6 when ({}) <- Op => R6        #   a dict-pattern guard is parenthesized
     _ => Default
 
-match Expr with { Pattern1 => Result1; _ => Default; }  # `{` on `with`'s line
-match Expr with                     # a dict pattern first: on the next line
+match Expr as { Pattern1 => Result1; _ => Default; }  # `{` on `as`'s line
+match Expr as                       # a dict pattern first: on the next line
     {x:value} => value
-match Expr with {}                 # error: match exhausted on its source line
-match* Expr with ...                # lazy list of every successful result
-match* Expr with {}                 # []
+match Expr as {}                   # error: match exhausted on its source line
+match* Expr as ...                  # lazy list of every successful result
+match* Expr as {}                   # []
 
-# The first ungrouped `with` belongs to `match`; group an updated subject.
-# A match is a tail form: `(match X with {...}) y` applies it.
-match (Dict with { x := 1 }) with { {x:value} => value; _ => {}; }
+# The first ungrouped `as` belongs to `match`, so group an update that names
+# its base (`Dict as d with ...`) in a subject. Pattern arms follow `as`, as
+# in `P as Q`; guard arms follow `when`.
+# A match is a tail form: `(match X as {...}) y` applies it.
+match Dict with { x := 1 } as { {x:value} => value; _ => {}; }
 
 match when                          # no scrutinee: guard-only dispatch
     C1 => R1
@@ -470,14 +472,14 @@ match when                          # no scrutinee: guard-only dispatch
         _ => R2b
 
 try C then A else B                 # effectful variants: return one root .cut
-try_match Expr with ...             #    to the host for rollback/state access
+try_match Expr as ...               #    to the host for rollback/state access
 try_match when ...                  # guard-only host search
-try_match* Expr with ...            # no root cut; ambient handler owns choice
+try_match* Expr as ...              # no root cut; ambient handler owns choice
 try_match* when ...                 # exhaustion remains .fail
 
 if C then? .r A else B              # tentative choice: branch must
 if C then? .fail else B             #   explicitly .r Result or .fail
-match Expr with P =>? .r Result     # tentative arrow: direct effect result
+match Expr as P =>? .r Result       # tentative arrow: direct effect result
 try C then? HostOperation else B    # host effects share the same root cut
 ```
 
@@ -656,11 +658,11 @@ abstract_global_path module.foo.bar  # explicit module scope
 ## Idiomatic Loops (no loop keywords)
 
 ```
-foreach L Action = match L with
+foreach L Action = match L as
     [x]++xs => Action x >>= foreach xs Action
     [] => .r ()
 
-untilDone s0 Action = match s0 with
+untilDone s0 Action = match s0 as
     done:R => .r R
     _ => Action s0 >>= \ s1 -> untilDone s1 Action
 ```

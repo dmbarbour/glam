@@ -1503,14 +1503,14 @@ fn layout_with_bodies_preserve_nested_dictionary_match_arms() {
     let parsed = parse(concat!(
         "language g0\n",
         "object matcher with\n",
-        "  classify = match {} with\n",
+        "  classify = match {} as\n",
         "    {} => \"empty\"\n",
         "    {x:item} as _whole => item\n",
         "    _ => \"other\"\n",
-        "  braced = match {} with { {} => \"empty\"; _ => \"other\"; }\n",
+        "  braced = match {} as { {} => \"empty\"; _ => \"other\"; }\n",
         "  neighbor = 1\n",
         "updated = base with\n",
-        "  classify = match {} with\n",
+        "  classify = match {} as\n",
         "    {x:item} => item\n",
         "    _ => \"other\"\n",
         "  neighbor = 2\n",
@@ -1560,7 +1560,7 @@ fn malformed_nested_dictionary_match_reports_the_arm_not_the_object_header() {
     let parsed = parse(concat!(
         "language g0\n",
         "object matcher with\n",
-        "  classify = match {} with\n",
+        "  classify = match {} as\n",
         "    {x:item} as => item\n",
         "    _ => \"other\"\n",
         "  neighbor = 1\n",
@@ -3982,8 +3982,8 @@ fn tentative_conditional_results_return_explicitly_or_fall_through() {
         "language g0\n",
         "asm.if_fallback = if _ then? .fail else \"if fallback\"\n",
         "asm.if_return = if _ then? .r \"if return\" else \"bad\"\n",
-        "asm.match_fallback = match 1 with { 1 =>? .fail; _ => \"match fallback\"; }\n",
-        "asm.match_return = match 1 with { 1 =>? .r \"match return\"; _ => \"bad\"; }\n",
+        "asm.match_fallback = match 1 as { 1 =>? .fail; _ => \"match fallback\"; }\n",
+        "asm.match_return = match 1 as { 1 =>? .r \"match return\"; _ => \"bad\"; }\n",
         "asm.nested = match when { _ when { _ =>? .fail; _ => \"nested fallback\"; }; _ => \"bad\"; }\n",
         "asm.non_effect = if _ then? 42 else \"bad\"\n",
     ));
@@ -4027,30 +4027,30 @@ fn flat_match_supports_patterns_guards_and_ordered_fallback() {
         "import 'std\n",
         "increment value = .r (value + 1)\n",
         "equals expected actual = expected == actual\n",
-        "asm.literal = match 42 with\n",
+        "asm.literal = match 42 as\n",
         "  41 => \"bad\"\n",
         "  42 => \"literal\"\n",
         "  _ => \"fallback\"\n",
-        "asm.binary = match \"ABCD\" with\n",
+        "asm.binary = match \"ABCD\" as\n",
         "  [65] ++ middle ++ [68] => middle\n",
         "  _ => \"bad\"\n",
-        "asm.dict = match {selector:'target,target:68} with\n",
+        "asm.dict = match {selector:'target,target:68} as\n",
         "  {selector:key,{[key]:value}} when value == 68 => \"dict\"\n",
         "  _ => \"bad\"\n",
-        "asm.view = match 64 with\n",
+        "asm.view = match 64 as\n",
         "  increment -> value when value == 65 => \"view\"\n",
         "  _ => \"bad\"\n",
-        "asm.predicate = match 66 with\n",
+        "asm.predicate = match 66 as\n",
         "  equals 66 value => value\n",
         "  _ => 0\n",
-        "asm.guards = match 65 with\n",
+        "asm.guards = match 65 as\n",
         "  value when next = value + 1 and checked <- .r next and .r checked -> final and final == 66 => \"guards\"\n",
         "  _ => \"bad\"\n",
-        "asm.siblings = match 2 with\n",
+        "asm.siblings = match 2 as\n",
         "  value when value == 1 => \"bad\"\n",
         "  value when value == 2 => \"siblings\"\n",
         "  _ => \"bad\"\n",
-        "asm.braced = match 0 with {; 1 => \"bad\"; _ => \"braced\";}\n",
+        "asm.braced = match 0 as {; 1 => \"bad\"; _ => \"braced\";}\n",
     ));
     assert_eq!(parsed.diagnostics, []);
     let context = CompileContext::default();
@@ -4087,10 +4087,10 @@ fn flat_match_exhaustion_and_selected_result_errors_are_distinct() {
     let parsed = parse(concat!(
         "language g0\n",
         "asm.exhausted =\n",
-        "  match 1 with {}\n",
+        "  match 1 as {}\n",
         "asm.exhausted_when =\n",
         "  match when {}\n",
-        "asm.selected_error = match 1 with { 1 => 1 / 0; _ => \"fallback\"; }\n",
+        "asm.selected_error = match 1 as { 1 => 1 / 0; _ => \"fallback\"; }\n",
     ));
     assert_eq!(parsed.diagnostics, []);
     let context = CompileContext::default();
@@ -4125,11 +4125,11 @@ fn open_match_forms_preserve_all_results_and_ordinary_exhaustion() {
     let parsed = parse(concat!(
         "language g0\n",
         "import 'std\n",
-        "asm.pure = match* 1 with { 1 => \"A\"; _ => \"B\"; }\n",
-        "asm.pure_empty = match* 1 with {}\n",
-        "host = try_match* 1 with { 1 => \"C\"; _ => \"D\"; }\n",
-        "host_empty = try_match* 1 with {}\n",
-        "host_cut = try_match* 1 with { 1 => \"E\"; _ => \"bad\"; }\n",
+        "asm.pure = match* 1 as { 1 => \"A\"; _ => \"B\"; }\n",
+        "asm.pure_empty = match* 1 as {}\n",
+        "host = try_match* 1 as { 1 => \"C\"; _ => \"D\"; }\n",
+        "host_empty = try_match* 1 as {}\n",
+        "host_cut = try_match* 1 as { 1 => \"E\"; _ => \"bad\"; }\n",
         "asm.host = list.pure host\n",
         "asm.host_empty = list.pure host_empty\n",
         "asm.host_cut = list.pure (.cut host_cut)\n",
@@ -4165,12 +4165,12 @@ fn hierarchical_match_shares_prefixes_and_falls_back_at_each_level() {
     let parsed = parse(concat!(
         "language g0\n",
         "import 'std\n",
-        "asm.child = match [65,66] with\n",
+        "asm.child = match [65,66] as\n",
         "  [first] ++ rest when first == 65 when\n",
         "    second = list.head rest and second == 66 => [first,second]\n",
         "    _ => \"bad child\"\n",
         "  _ => \"bad outer\"\n",
-        "asm.outer = match 1 with\n",
+        "asm.outer = match 1 as\n",
         "  value when\n",
         "    value == 2 => \"bad child\"\n",
         "  1 => \"outer fallback\"\n",
@@ -4216,12 +4216,12 @@ fn host_try_variants_use_reflection_state_and_rollback_failed_branches() {
 import 'std
 refl.try_access = .heap.set ['visible] 42 =>> (try 42 <- .heap.get ['visible] then () else 1 / 0)
 refl.try_rollback = (try (.heap.set ['try_rolled_back] "bad" =>> .fail) then 1 / 0 else ()) =>> (.heap.get ['try_rolled_back] >>= (\value -> (value == {}) =>> .r ()))
-refl.try_match_rollback = try_match 42 with {
+refl.try_match_rollback = try_match 42 as {
   42 when (.heap.set ['rolled_back] "bad" =>> .fail) => ();
   42 when ({}) <- .heap.get ['rolled_back] => ();
 }
 refl.try_match_when = try_match when { 42 <- .heap.get ['visible] => (); }
-refl.try_match_exhaustion = try (try_match 1 with {}) then 1 / 0 else ()
+refl.try_match_exhaustion = try (try_match 1 as {}) then 1 / 0 else ()
 refl.try_tentative_rollback = (try _ then? (.heap.set ['tentative_try] "bad" =>> .fail) else ()) =>> (.heap.get ['tentative_try] >>= (\value -> (value == {}) =>> .r ()))
 refl.try_match_tentative_rollback = (try_match when {
   _ =>? (.heap.set ['tentative_match] "bad" =>> .fail);

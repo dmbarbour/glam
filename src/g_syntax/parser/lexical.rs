@@ -232,6 +232,9 @@ pub(super) struct LexedSource<'source> {
     line_starts: Vec<usize>,
     diagnostics: Vec<Diagnostic>,
     has_errors: bool,
+    /// The `as` tokens that end a match's subject, in order
+    /// (`layout::match_arms_keywords`).
+    match_arms_keywords: Vec<usize>,
 }
 
 /// Each token's innermost enclosing group and line indentation, computed
@@ -268,6 +271,10 @@ fn token_tables(tokens: &[SpannedToken<'_>]) -> (Vec<Option<GroupId>>, Vec<Optio
 impl<'source> LexedSource<'source> {
     pub(super) fn source(&self) -> &'source str {
         self.source
+    }
+
+    pub(super) fn match_arms_keywords(&self) -> &[usize] {
+        &self.match_arms_keywords
     }
 
     pub(super) fn tokens(&self) -> &[SpannedToken<'source>] {
@@ -505,6 +512,7 @@ pub(super) fn embedded_source(value: RuntimeValueRoot) -> LexedSource<'static> {
         line_starts: vec![0],
         diagnostics: Vec::new(),
         has_errors: false,
+        match_arms_keywords: Vec::new(),
     }
 }
 
@@ -635,7 +643,7 @@ impl<'source> Lexer<'source> {
         diagnostics.sort_by_key(|diagnostic| diagnostic.line);
 
         let (enclosing_groups, line_indentations) = token_tables(&self.tokens);
-        LexedSource {
+        let mut lexed = LexedSource {
             source: self.source,
             tokens: self.tokens,
             numbers: self.numbers,
@@ -648,7 +656,10 @@ impl<'source> Lexer<'source> {
             line_starts: self.line_starts,
             diagnostics,
             has_errors,
-        }
+            match_arms_keywords: Vec::new(),
+        };
+        lexed.match_arms_keywords = super::layout::match_arms_keywords(&lexed);
+        lexed
     }
 
     fn current_char(&self) -> char {

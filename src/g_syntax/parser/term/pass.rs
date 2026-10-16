@@ -28,7 +28,7 @@
 //! so judging costs nothing per enclosing conditional.
 //!
 //! A match (`match`, `try_match`, with or without `*`) is a frame: its
-//! subject reads as an expression up to a `with`, which belongs to the
+//! subject reads as an expression up to an `as`, which belongs to the
 //! innermost match reading its subject at its level, and its arms are a
 //! block, braced or layout. While an arm reads its head or guards, its `=>`,
 //! `=>?` and `when` close the frames opened in it: an arrow begins its
@@ -108,7 +108,7 @@ struct Frame {
     /// The stack index of its nearest layout owner: itself for a group, a
     /// layout block or the view, its parent's for a conditional or a match.
     layout_owner: usize,
-    /// The stack index of the match whose `with` it may meet: the innermost
+    /// The stack index of the match whose `as` it may meet: the innermost
     /// match reading its subject, unless a group or arms block lies between.
     match_owner: Option<usize>,
     /// The stack index of the arms block whose arms' marks it may meet: the
@@ -135,7 +135,7 @@ enum FrameKind {
 
 /// A layout block: a `do` block's statements, or a match's arms.
 struct LayoutBlock {
-    /// The `do`, or the `with` or `when` its arms follow.
+    /// The `do`, or the `as` or `when` its arms follow.
     head: usize,
     /// The block's context: a `do` form's, floored at its head's line, or
     /// its arms'.
@@ -178,7 +178,7 @@ struct Match {
     phase: MatchPhase,
     /// The form's own context, floored at its head's line.
     context: ExpressionContext,
-    /// Its subject, once its `with` ends it; a `match when` has none.
+    /// Its subject, once its `as` ends it; a `match when` has none.
     subject: Option<Parse<SyntaxExpr>>,
     failure: Option<Fail>,
 }
@@ -188,7 +188,7 @@ enum MatchPhase {
     /// Before its first significant token, which a `match when` begins.
     Head,
     Subject,
-    /// After its `with` or `when`: its arms are a block above it, or a
+    /// After its `as` or `when`: its arms are a block above it, or a
     /// braced block that comes next.
     Arms,
 }
@@ -684,7 +684,7 @@ impl Pass<'_, '_, '_> {
     }
 
     /// Pushes `frame` with its owners: the layout owner that judges its
-    /// lines, the match whose `with` and the arms block whose marks it may
+    /// lines, the match whose `as` and the arms block whose marks it may
     /// meet, and the group or view whose depth its tokens are at.
     fn push(&mut self, mut frame: Frame) {
         let at = self.stack.len();
@@ -1035,11 +1035,11 @@ impl Pass<'_, '_, '_> {
                 "match" | "try_match" if may_head_keyword_form(view, index) => {
                     return self.open_match(index);
                 }
-                // The first ungrouped `with` after a match's head is its own.
+                // The first ungrouped `as` after a match's head is its own.
+                "as" if in_keyword_position(view, index) && self.claim_as(index) => {
+                    return Step::Next;
+                }
                 "with" if in_keyword_position(view, index) => {
-                    if self.claim_with(index) {
-                        return Step::Next;
-                    }
                     self.top().view_level = true;
                 }
                 "when" if in_keyword_position(view, index) && self.arm_mark(index) => {
@@ -1131,10 +1131,10 @@ impl Pass<'_, '_, '_> {
     fn region_token(&mut self, index: usize) -> Step {
         let view = self.scope.view;
         let kind = token(view, index).kind();
-        // A match's `with` and an arm's marks end the region, as they ended
+        // A match's `as` and an arm's marks end the region, as they ended
         // the view its form was parsed from.
         let taken = match kind {
-            TokenKind::Name("with") => in_keyword_position(view, index) && self.claim_with(index),
+            TokenKind::Name("as") => in_keyword_position(view, index) && self.claim_as(index),
             TokenKind::Name("when") => in_keyword_position(view, index) && self.arm_mark(index),
             TokenKind::Symbol("=>" | "=>?") => self.arm_mark(index),
             _ => false,
@@ -1663,10 +1663,12 @@ impl Pass<'_, '_, '_> {
         if open { Step::Skip } else { Step::Next }
     }
 
-    /// Takes the `with` at `index` for the innermost match reading its
+    /// Takes the `as` at `index` for the innermost match reading its
     /// subject at this level, if any: the frames open in its subject close
-    /// before it, and its subject is read. Returns whether it took it.
-    fn claim_with(&mut self, index: usize) -> bool {
+    /// before it, and its subject is read. Returns whether it took it. So an
+    /// `as` in a subject, as in `Dict as Name with Defs`, is parenthesized,
+    /// as `layout::match_arms_keywords` also reads it.
+    fn claim_as(&mut self, index: usize) -> bool {
         let Some(owner) = self.stack.last().and_then(|frame| frame.match_owner) else {
             return false;
         };
@@ -1688,13 +1690,13 @@ impl Pass<'_, '_, '_> {
         frame.lambda = None;
         let pieces = std::mem::take(&mut frame.pieces);
         let FrameKind::Match(found) = &mut frame.kind else {
-            unreachable!("a match owns the `with`");
+            unreachable!("a match owns the `as`");
         };
         found.phase = MatchPhase::Arms;
         let subject = trim_padding(view, &pieces);
         found.subject = Some(match subject.first().map(piece_token) {
             None => Err(Fail::error(format!(
-                "{} expression requires a subject before `with`",
+                "{} expression requires a subject before `as`",
                 display(found.keyword, found.open)
             ))
             .or_at(Some(found.head))),
@@ -1721,7 +1723,7 @@ impl Pass<'_, '_, '_> {
         true
     }
 
-    /// Starts arms after the `with` or `when` at `keyword`: a braced block
+    /// Starts arms after the `as` or `when` at `keyword`: a braced block
     /// if a `{` comes next, unless that group begins the first arm's
     /// pattern, as a mark after it on its line shows; otherwise a layout
     /// block. The marks on a line where an enclosing arm reads its head or
@@ -1997,7 +1999,7 @@ impl Pass<'_, '_, '_> {
                 // Its braced arms never came.
                 Some(Pending::Arms(arms)) => arms.missing(),
                 _ => Fail::error(format!(
-                    "{} expression requires `with` and at least one layout arm or an explicit `{{}}` body",
+                    "{} expression requires `as` and at least one layout arm or an explicit `{{}}` body",
                     display(found.keyword, found.open)
                 ))
                 .or_at(Some(head)),
@@ -2529,7 +2531,8 @@ impl Pass<'_, '_, '_> {
 /// Whether the token at `index`, where a tail ended, could continue it: it
 /// is no line start, closer or separator, nor a keyword that no expression
 /// continues with (`then`, `else`, `in`, `where`, `=>`, `=>?`, or a
-/// binding's or view's `->`), and the view has not ended.
+/// binding's or view's `->`, and a match's `as`, which no expression in its
+/// subject continues with), and the view has not ended.
 fn continues_tail(view: TokenView<'_, '_>, index: usize) -> bool {
     view.range().contains(index)
         && view.token_at(index).is_some_and(|token| {
@@ -2538,7 +2541,7 @@ fn continues_tail(view: TokenView<'_, '_>, index: usize) -> bool {
                 TokenKind::LineStart { .. }
                     | TokenKind::Close { .. }
                     | TokenKind::Symbol("," | ";" | "=>" | "=>?" | "->")
-                    | TokenKind::Name("then" | "else" | "in" | "where")
+                    | TokenKind::Name("then" | "else" | "in" | "where" | "as")
             )
         })
 }

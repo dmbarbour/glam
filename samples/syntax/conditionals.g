@@ -3,12 +3,12 @@ language g0
 pure = if _ then "first" else "fallback"
 postfix = "first" if _ else "fallback"
 
-selected = match 1 with {
+selected = match 1 as {
   1 => "one";
   _ => "other";
 }
 
-allResults = match* 1 with {
+allResults = match* 1 as {
   1 => "one";
   _ => "other";
 }

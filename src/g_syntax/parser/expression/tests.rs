@@ -188,7 +188,7 @@ fn every_g0_keyword_is_reserved_as_an_ordinary_name() {
     assert!(match_diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("match expression requires `with`")
+            .contains("match expression requires `as`")
     }));
 
     let try_diagnostics = parse_expression_fragment(b"try")
@@ -204,7 +204,7 @@ fn every_g0_keyword_is_reserved_as_an_ordinary_name() {
     assert!(try_match_diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("try_match expression requires `with`")
+            .contains("try_match expression requires `as`")
     }));
 
     let using_diagnostics = parse_expression_fragment(b"using")

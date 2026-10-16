@@ -248,10 +248,10 @@ const SNIPPETS: &[&str] = &[
     "do { .r 1 }",
     "f do { .r 1 }",
     "do { .r 1 }.x",
-    "match y with { z => z }",
-    "match y with\n  z => z\n  _ => 1",
-    "[match y with { z => z }, 1]",
-    "(1, match y with { z => z })",
+    "match y as { z => z }",
+    "match y as\n  z => z\n  _ => 1",
+    "[match y as { z => z }, 1]",
+    "(1, match y as { z => z })",
     "using d in x",
     "abstract_global_path foo.bar",
     "abstract_global_path module.foo",
@@ -463,7 +463,7 @@ impl Generator {
         const TOKENS: &[&str] = &[
             "a", "b", "f", "1", "\"s\"", "_p", "'", ":", ".", "^", "\\", "->", ",", "+", "*", "-",
             "==", "and", "|>", "'a", ":a", ".e", "^a", "x.y", "a:b", "if", "then", "else", "match",
-            "with", "do", "=>", ";",
+            "with", "as", "do", "=>", ";",
         ];
         for index in 0..1 + self.below(5) {
             if index > 0 {
@@ -613,7 +613,7 @@ impl Generator {
                 let grouped = self.chance(2);
                 out.push_str(if grouped { "(match " } else { "match " });
                 self.atom(depth, out);
-                out.push_str(" with { z => ");
+                out.push_str(" as { z => ");
                 self.expression(depth, out);
                 out.push_str("; _ => ");
                 self.atom(depth, out);
@@ -718,12 +718,12 @@ const KEYWORD_FRAME_NESTING_SHAPES: &[(&str, &str, &str)] = &[
     ("do { x = ", "; .r x }", "1"),
     ("do ", "", ".r 1"),
     ("(do ", ")", ".r 1"),
-    ("match ", " with {_ => 1}", "x"),
-    ("match x with {_ => ", "}", "1"),
-    ("match x with {_ when ", " => 1}", "c"),
+    ("match ", " as {_ => 1}", "x"),
+    ("match x as {_ => ", "}", "1"),
+    ("match x as {_ when ", " => 1}", "c"),
     ("match when {c => ", "}", "1"),
-    ("match x with {_ when {c => ", "}}", "1"),
-    ("do { x <- match y with {_ => ", "}; .r x }", ".r 1"),
+    ("match x as {_ when {c => ", "}}", "1"),
+    ("do { x <- match y as {_ => ", "}; .r x }", ".r 1"),
 ];
 
 /// Layout arms nested in arms' results, each a line deeper.
@@ -732,7 +732,7 @@ fn layout_arms_nest_in_linear_time_without_recursion() {
     let depth = 1_000;
     let mut text = String::new();
     for level in 0..depth {
-        text.push_str("match x with\n");
+        text.push_str("match x as\n");
         text.push_str(&"  ".repeat(level + 1));
         text.push_str("_ => ");
     }
@@ -772,8 +772,8 @@ fn conditional_frames_read_branches_as_expressions() {
     // A `with` after a tag's `match` payload is the match's own, not an
     // update's, in a branch as at the head of a view.
     for text in [
-        "f (k):match s with { z => 1 }",
-        "if c then 1 else f (k):match s with { z => 1 }",
+        "f (k):match s as { z => 1 }",
+        "if c then 1 else f (k):match s as { z => 1 }",
     ] {
         parse(text);
     }
@@ -800,7 +800,7 @@ fn conditional_guard_lines_count_for_the_enclosing_floor() {
 #[test]
 fn deferred_group_lines_count_for_the_enclosing_floor() {
     let parsed = parse_source(
-        b"language g0\nx = f if g\n  - h else (match b with { z => y\n  y; _ => y; })\n",
+        b"language g0\nx = f if g\n  - h else (match b as { z => y\n  y; _ => y; })\n",
     );
     assert!(
         parsed.diagnostics.iter().any(|diagnostic| diagnostic
@@ -819,13 +819,13 @@ const KEYWORD_NESTING_SHAPES: &[(&str, &str, &str)] = &[
     ("(if c then ", " else 0)", "1"),
     ("f (if c then ", " else 0)", "1"),
     ("(try c then ", " else 0)", "1"),
-    ("(match x with {_ => ", "})", "1"),
+    ("(match x as {_ => ", "})", "1"),
     ("(let a = 1 in ", ")", "a"),
     ("(do { .r ", " })", "1"),
     ("(\\z -> if c then ", " else z)", "1"),
     ("(do { ", " -> z; .r z })", ".r 1"),
     ("(if f -> z then ", " else 0)", "1"),
-    ("(match x with {(f -> p) => ", "})", "1"),
+    ("(match x as {(f -> p) => ", "})", "1"),
 ];
 
 /// Keywords nested where they head no form: as path keys, quoted atoms, tag
@@ -1057,21 +1057,19 @@ fn long_flat_chains_parse_without_recursion() {
 #[test]
 fn tail_forms_stand_alone_only_in_tail_position() {
     const OUTSIDE: &[&str] = &[
-        "f match a with {_ => 1} y",
-        "match a with {_ => 1} y",
+        "f match a as {_ => 1} y",
+        "match a as {_ => 1} y",
         "f do { a } y",
         "f do\n    a\n  y",
-        "f match a with\n    _ => 1\n  y",
+        "f match a as\n    _ => 1\n  y",
         "do { .r 1 }.x",
         "if y <- if a then b else c and d then 1 else 2",
-        "match v with {p when x <- \\z -> z and d => 1}",
-        "match \\z -> z with {_ => 1}",
-        "match if a then b else c with {_ => 1}",
+        "match v as {p when x <- \\z -> z and d => 1}",
     ];
     const INSIDE: &[&str] = &[
-        "f (match a with {_ => 1}) y",
-        "f match a with\n    _ => 1",
-        "f match a with\n    _ => 1\n  |> g",
+        "f (match a as {_ => 1}) y",
+        "f match a as\n    _ => 1",
+        "f match a as\n    _ => 1\n  |> g",
         "(do { .r 1 }).x",
         "do { .r 1 } >>= k",
         "do\n    (if c then .a else .b) -> p\n    .r p",
@@ -1083,14 +1081,17 @@ fn tail_forms_stand_alone_only_in_tail_position() {
         "if a then \\z -> z else b",
         "if any \\z -> z then 1 else 2",
         "if c then do a else b",
-        "match v with {p when any \\z -> z => 1}",
+        "match v as {p when any \\z -> z => 1}",
+        "match \\z -> z as {_ => 1}",
+        "match if a then b else c as {_ => 1}",
+        "match (d as e with { a := 1 }) as {_ => 1}",
         "do\n    a if c else b -> p\n    .r p",
         "do\n    p <- f \\a -> a\n    .r p",
         "if y <- (if a then b else c) and d then 1 else 2",
         "if a then (if b then c else d) else e",
         "if c then do { a } else do { b }",
         "if c then do\n      a\n  else do\n      b",
-        "match match a with {_ => 1} with {_ => 2}",
+        "match match a as {_ => 1} as {_ => 2}",
         "1 + if a then b else c",
         "map xs \\z -> z",
         "if a then b else c where c = 1",

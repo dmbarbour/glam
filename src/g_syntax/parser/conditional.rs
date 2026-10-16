@@ -323,10 +323,10 @@ fn parse_match_like_expression(
         ));
     }
 
-    // A match nested in the subject takes the first `with` after its own
+    // A match nested in the subject takes the first `as` after its own
     // head, as the term parser's match frames nest.
     let mut nested = 0usize;
-    let with_index = view
+    let as_index = view
         .top_level()
         .filter(|indexed| indexed.index() > head_index)
         .find(|indexed| {
@@ -339,7 +339,7 @@ fn parse_match_like_expression(
                 nested += 1;
                 return false;
             }
-            if !token_is_name(token, "with") || !in_keyword_position(view, index) {
+            if !token_is_name(token, "as") || !in_keyword_position(view, index) {
                 return false;
             }
             let ours = nested == 0;
@@ -352,23 +352,23 @@ fn parse_match_like_expression(
                 view,
                 head_token,
                 format!(
-                    "{display_head} expression requires `with` and at least one layout arm or an explicit `{{}}` body"
+                    "{display_head} expression requires `as` and at least one layout arm or an explicit `{{}}` body"
                 ),
             )
         })?;
-    let subject = trim_layout(view_between(view, body_start, with_index));
+    let subject = trim_layout(view_between(view, body_start, as_index));
     if is_layout_empty(subject) {
         return Err(error_at_token(
             view,
             head_token,
-            format!("{display_head} expression requires a subject before `with`"),
+            format!("{display_head} expression requires a subject before `as`"),
         ));
     }
     let subject = parse_expression_in_context(subject, context.child_owner(subject))?;
 
-    let after_with = view_between(view, with_index + 1, view.range().end());
+    let after_as = view_between(view, as_index + 1, view.range().end());
     let (arms, end) = choice_members(
-        after_with,
+        after_as,
         context,
         &format!("{display_head} body"),
         &format!("layout {display_head} expression requires at least one arm"),
@@ -656,8 +656,8 @@ where
 }
 
 /// Whether the match head at `index` begins a `match when`, which takes no
-/// `with`.
-fn heads_match_when(view: TokenView<'_, '_>, index: usize) -> bool {
+/// `as`.
+pub(in crate::g_syntax::parser) fn heads_match_when(view: TokenView<'_, '_>, index: usize) -> bool {
     let star = view.token_at(index + 1).is_some_and(|token| {
         matches!(token.kind(), TokenKind::Symbol("*")) && token.leading() == LeadingTrivia::Joint
     });
@@ -885,7 +885,7 @@ mod tests {
             SyntaxExpr::Apply(_, _)
         ));
 
-        let SyntaxExpr::Match(subject) = parse("match value with { 1 =>? .fail; _ => 2; }") else {
+        let SyntaxExpr::Match(subject) = parse("match value as { 1 =>? .fail; _ => 2; }") else {
             panic!("tentative arrow syntax should produce a match expression");
         };
         assert!(matches!(
@@ -1093,9 +1093,9 @@ mod tests {
                 "try _ then 1",
                 "try expression requires `else` and a fallback result",
             ),
-            ("try_match value", "try_match expression requires `with`"),
+            ("try_match value", "try_match expression requires `as`"),
             (
-                "try_match value with",
+                "try_match value as",
                 "layout try_match expression requires at least one arm",
             ),
         ] {
@@ -1119,7 +1119,7 @@ mod tests {
     #[test]
     fn flat_match_parses_layout_and_braced_arms() {
         let SyntaxExpr::Match(layout) = parse(
-            "match subject with\n  1 => \"one\"\n  value when value == 2 => \"two\"\n  _ => \"other\"",
+            "match subject as\n  1 => \"one\"\n  value when value == 2 => \"two\"\n  _ => \"other\"",
         ) else {
             panic!("layout syntax should produce a match expression");
         };
@@ -1136,7 +1136,7 @@ mod tests {
         ));
 
         let SyntaxExpr::Match(dict_pattern) =
-            parse("match subject with\n  {} => \"empty\"\n  _ => \"other\"")
+            parse("match subject as\n  {} => \"empty\"\n  _ => \"other\"")
         else {
             panic!("a dictionary pattern must not become the braced match body");
         };
@@ -1147,7 +1147,7 @@ mod tests {
         ));
 
         let SyntaxExpr::Match(dict_as_pattern) =
-            parse("match subject with\n  {x:item} as whole => whole\n  _ => {}")
+            parse("match subject as\n  {x:item} as whole => whole\n  _ => {}")
         else {
             panic!("a complete dictionary `as` pattern should establish layout");
         };
@@ -1158,42 +1158,38 @@ mod tests {
         ));
 
         let SyntaxExpr::Match(braced) =
-            parse("match subject with {; [head] ++ tail => head; _ => 0;}")
+            parse("match subject as {; [head] ++ tail => head; _ => 0;}")
         else {
             panic!("braced syntax should produce a match expression");
         };
         assert_eq!(braced.arms.len(), 2);
 
-        let SyntaxExpr::Match(empty) = parse("match subject with {}") else {
+        let SyntaxExpr::Match(empty) = parse("match subject as {}") else {
             panic!("an explicit empty match should remain a match expression");
         };
         assert!(empty.arms.is_empty());
     }
 
+    /// A subject's `as` is its match's, so an update in a subject needs no
+    /// parentheses unless it names its base with `as`.
     #[test]
-    fn match_subject_with_expression_requires_explicit_grouping() {
-        let SyntaxExpr::Match(grouped) =
-            parse("match (base with { x := 1 }) with { {x:item} => item; _ => 0; }")
-        else {
-            panic!("a grouped `with` expression should remain the match subject");
-        };
-        assert!(matches!(grouped.subject.as_ref(), SyntaxExpr::With { .. }));
-
-        let diagnostics = super::super::input::parse_expression_fragment(
-            b"match base with { x := 1 } with { {x:item} => item; _ => 0; }",
-            |view| {
-                super::super::structural::parse_expression_in_context(
-                    view,
-                    ExpressionContext::for_fragment(view),
-                )
-            },
-        )
-        .expect_err("an ungrouped first `with` must belong to the match");
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message.contains("match arm")),
-            "ungrouped subject update reported {diagnostics:#?}"
+    fn a_subject_update_is_grouped_only_when_it_names_its_base() {
+        for source in [
+            "match base with { x := 1 } as { {x:item} => item; _ => 0; }",
+            "match (base with { x := 1 }) as { {x:item} => item; _ => 0; }",
+            "match (base as b with { x := 1 }) as { {x:item} => item; _ => 0; }",
+        ] {
+            let SyntaxExpr::Match(found) = parse(source) else {
+                panic!("`{source}` should parse as a match");
+            };
+            assert!(
+                matches!(found.subject.as_ref(), SyntaxExpr::With { .. }),
+                "{source}"
+            );
+        }
+        assert_rejected(
+            "match base as b with { x := 1 } as { {x:item} => item; _ => 0; }",
+            "match arm",
         );
     }
 
@@ -1206,7 +1202,7 @@ mod tests {
         assert_eq!(try_expr.guards.len(), 2);
 
         let SyntaxExpr::Match(subject) =
-            parse("try_match value with { 42 => \"yes\"; _ => \"no\"; }")
+            parse("try_match value as { 42 => \"yes\"; _ => \"no\"; }")
         else {
             panic!("try_match subject syntax should produce the shared match expression");
         };
@@ -1236,7 +1232,7 @@ mod tests {
 
     #[test]
     fn starred_match_forms_are_joint_open_choices() {
-        let SyntaxExpr::Match(subject) = parse("match* value with { 42 => \"yes\"; _ => \"no\"; }")
+        let SyntaxExpr::Match(subject) = parse("match* value as { 42 => \"yes\"; _ => \"no\"; }")
         else {
             panic!("match* subject syntax should produce a match expression");
         };
@@ -1257,7 +1253,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            parse("(try_match* value with { _ => value; })"),
+            parse("(try_match* value as { _ => value; })"),
             SyntaxExpr::Match(MatchExpr {
                 mode: ConditionalMode::Host,
                 commitment: MatchCommitment::Open,
@@ -1266,7 +1262,7 @@ mod tests {
         ));
 
         let diagnostics = super::super::input::parse_expression_fragment(
-            b"match * value with { _ => 1; }",
+            b"match * value as { _ => 1; }",
             |view| {
                 super::super::structural::parse_expression_in_context(
                     view,
@@ -1323,7 +1319,7 @@ mod tests {
         assert_eq!(children.len(), 2);
 
         let SyntaxExpr::Match(subject) = parse(
-            "match subject with\n  value when value == 1 when\n    next = value + 1 => next\n    _ => value\n  _ => 0",
+            "match subject as\n  value when value == 1 when\n    next = value + 1 => next\n    _ => value\n  _ => 0",
         ) else {
             panic!("source should produce a subject match");
         };
@@ -1381,9 +1377,9 @@ mod tests {
     #[test]
     fn a_match_owns_its_with_inside_a_lambda_or_a_tuple() {
         for source in [
-            "\\w -> match w with { z => w }",
-            "(\\w -> match w with { z => w })",
-            "\\w -> match w with\n  z => d with { x := 1 }",
+            "\\w -> match w as { z => w }",
+            "(\\w -> match w as { z => w })",
+            "\\w -> match w as\n  z => d with { x := 1 }",
         ] {
             let SyntaxExpr::Lambda(_, body) = parse(source) else {
                 panic!("`{source}` should produce a lambda");
@@ -1394,9 +1390,9 @@ mod tests {
             );
         }
         for source in [
-            "(1, match y with { z => z })",
-            "(match y with { z => z }, 1)",
-            "(match y with\n  z => z, 1)",
+            "(1, match y as { z => z })",
+            "(match y as { z => z }, 1)",
+            "(match y as\n  z => z, 1)",
         ] {
             let SyntaxExpr::Tuple(items) = parse(source) else {
                 panic!("`{source}` should produce a tuple");
@@ -1413,7 +1409,7 @@ mod tests {
 
     #[test]
     fn complete_match_patterns_accept_unparenthesized_views_and_predicates() {
-        let SyntaxExpr::Match(forward) = parse("match subject with { inspect -> value => value; }")
+        let SyntaxExpr::Match(forward) = parse("match subject as { inspect -> value => value; }")
         else {
             panic!("source should produce a match expression");
         };
@@ -1422,8 +1418,7 @@ mod tests {
             SyntaxPatternKind::View { .. }
         ));
 
-        let SyntaxExpr::Match(backward) =
-            parse("match subject with { value <- inspect => value; }")
+        let SyntaxExpr::Match(backward) = parse("match subject as { value <- inspect => value; }")
         else {
             panic!("source should produce a match expression");
         };
@@ -1432,8 +1427,7 @@ mod tests {
             SyntaxPatternKind::View { .. }
         ));
 
-        let SyntaxExpr::Match(predicate) =
-            parse("match subject with { equals 42 value => value; }")
+        let SyntaxExpr::Match(predicate) = parse("match subject as { equals 42 value => value; }")
         else {
             panic!("source should produce a match expression");
         };
@@ -1446,23 +1440,20 @@ mod tests {
     #[test]
     fn malformed_match_reports_its_missing_boundary_or_arm_part() {
         for (source, expected) in [
-            ("match value", "requires `with`"),
+            ("match value", "requires `as`"),
             (
-                "match value with",
+                "match value as",
                 "layout match expression requires at least one arm",
             ),
-            ("match value with { 1 }", "requires `=>`"),
+            ("match value as { 1 }", "requires `=>`"),
+            ("match value as { => 1 }", "requires a pattern before `=>`"),
+            ("match value as { 1 => }", "requires a result after `=>`"),
             (
-                "match value with { => 1 }",
-                "requires a pattern before `=>`",
-            ),
-            ("match value with { 1 => }", "requires a result after `=>`"),
-            (
-                "match value with { value when => value }",
+                "match value as { value when => value }",
                 "requires guards after `when`",
             ),
             (
-                "match value with { _ => 1 => 2 }",
+                "match value as { _ => 1 => 2 }",
                 "exactly one top-level `=>`",
             ),
         ] {
@@ -1486,28 +1477,50 @@ mod tests {
     #[test]
     fn an_argument_cannot_follow_a_match() {
         for source in [
-            "match a with {z => 1} b",
-            "match a with\n    z => 1\n  b",
-            "f match a with {z => 1} b",
+            "match a as {z => 1} b",
+            "match a as\n    z => 1\n  b",
+            "f match a as {z => 1} b",
         ] {
             assert_outside_tail_position(source);
         }
-        let SyntaxExpr::Apply(function, argument) = parse("(match a with {z => 1}) b") else {
+        let SyntaxExpr::Apply(function, argument) = parse("(match a as {z => 1}) b") else {
             panic!("a parenthesized match applies");
         };
         assert!(matches!(*function, SyntaxExpr::Match(_)));
         assert_eq!(*argument, SyntaxExpr::Name("b".to_owned()));
     }
 
-    /// A `{` on the line of a match's `with` delimits its arms, so a first
-    /// arm with a dictionary pattern begins on the next line.
+    /// The first `as` after a match's head ends its subject, so braces after
+    /// it hold `;`-separated arms while an as-pattern's braces hold a
+    /// `,`-separated dictionary, and an update that names its base is
+    /// parenthesized in a subject.
     #[test]
-    fn a_brace_after_with_delimits_the_arms() {
-        let SyntaxExpr::Match(braced) = parse("match v with {1 => 2; _ => 3}") else {
+    fn a_subjects_as_begins_the_arms() {
+        let SyntaxExpr::Match(braced) = parse("match v as { p as {a:y, b:z} => y; _ => 0 }") else {
             panic!("braced arms should parse");
         };
         assert_eq!(braced.arms.len(), 2);
-        let SyntaxExpr::Match(layout) = parse("match v with\n  {a:z} => z\n  _ => 0") else {
+        for source in [
+            "match v as p as {a:y, b:z} => y",
+            "match v as\n  p as {a:y, b:z} => y\n  _ => 0",
+            "match d with { a := 1 } as { {a:y} => y; _ => 0 }",
+            "match (d as e with { a := 1 }) as { _ => 0 }",
+            "match if a then b else c as { _ => 0 }",
+        ] {
+            assert!(matches!(parse(source), SyntaxExpr::Match(_)), "{source}");
+        }
+        assert_rejected("match d as e with { a := 1 }", "requires `=>`");
+    }
+
+    /// A `{` on the line of a match's `as` delimits its arms, so a first
+    /// arm with a dictionary pattern begins on the next line.
+    #[test]
+    fn a_brace_after_as_delimits_the_arms() {
+        let SyntaxExpr::Match(braced) = parse("match v as {1 => 2; _ => 3}") else {
+            panic!("braced arms should parse");
+        };
+        assert_eq!(braced.arms.len(), 2);
+        let SyntaxExpr::Match(layout) = parse("match v as\n  {a:z} => z\n  _ => 0") else {
             panic!("a dictionary pattern may begin a layout arm");
         };
         assert!(matches!(
@@ -1515,12 +1528,12 @@ mod tests {
             SyntaxPatternKind::Dict { .. }
         ));
         assert_rejected(
-            "match v with {a:z} => z",
-            "a `{` on the line of `with` delimits the arms",
+            "match v as {a:z} => z",
+            "a `{` on the line of `as` delimits the arms",
         );
         assert_rejected(
-            "match v with\n  {1 => 2; _ => 3}",
-            "a `{` delimits arms only on the line of its `with`",
+            "match v as\n  {1 => 2; _ => 3}",
+            "a `{` delimits arms only on the line of its `as`",
         );
     }
 
@@ -1529,15 +1542,14 @@ mod tests {
     /// arm's arrow.
     #[test]
     fn a_when_ending_its_line_heads_nested_arms() {
-        let SyntaxExpr::Match(nested) = parse("match v with\n  p when\n    c => 1\n  _ => 2")
-        else {
+        let SyntaxExpr::Match(nested) = parse("match v as\n  p when\n    c => 1\n  _ => 2") else {
             panic!("nested arms should parse");
         };
         assert!(matches!(nested.arms[0].outcome, MatchOutcome::Nested(_)));
         for source in [
-            "match v with\n  p when c\n      => 1\n  _ => 2",
-            "match v with\n  p when c\n      and d => 1\n  _ => 2",
-            "match v with\n  p when ({}) <- e => 1\n  _ => 2",
+            "match v as\n  p when c\n      => 1\n  _ => 2",
+            "match v as\n  p when c\n      and d => 1\n  _ => 2",
+            "match v as\n  p when ({}) <- e => 1\n  _ => 2",
         ] {
             let SyntaxExpr::Match(guarded) = parse(source) else {
                 panic!("`{source}` should parse");
@@ -1548,21 +1560,21 @@ mod tests {
             );
             assert!(!guarded.arms[0].guards.is_empty(), "{source}");
         }
-        let SyntaxExpr::Match(braced) = parse("match v with\n  p when {c => 1}\n  _ => 2") else {
+        let SyntaxExpr::Match(braced) = parse("match v as\n  p when {c => 1}\n  _ => 2") else {
             panic!("braced nested arms should parse");
         };
         assert!(matches!(braced.arms[0].outcome, MatchOutcome::Nested(_)));
         assert_rejected(
-            "match v with\n  p when {} <- e => 1\n  _ => 2",
+            "match v as\n  p when {} <- e => 1\n  _ => 2",
             "parenthesize a dictionary pattern that begins a guard",
         );
     }
 
     #[test]
-    fn a_match_in_a_subject_takes_the_first_with_after_its_head() {
+    fn a_match_in_a_subject_takes_the_first_as_after_its_head() {
         for source in [
-            "match match a with {z => z} with {_ => 1}",
-            "match match a with\n    z => z\n  with {_ => 1}",
+            "match match a as {z => z} as {_ => 1}",
+            "match match a as\n    z => z\n  as {_ => 1}",
         ] {
             let SyntaxExpr::Match(outer) = parse(source) else {
                 panic!("`{source}` should parse as a match");
@@ -1579,11 +1591,11 @@ mod tests {
     fn malformed_hierarchical_match_reports_missing_prefixes_and_children() {
         for (source, expected) in [
             (
-                "match x with\n  _ when\n      c => 1\n    d",
+                "match x as\n  _ when\n      c => 1\n    d",
                 "continues after its nested `when` block",
             ),
             (
-                "match x with\n  _ when {c => 1} d",
+                "match x as\n  _ when {c => 1} d",
                 "continues after its nested `when` block",
             ),
             (
@@ -1595,7 +1607,7 @@ mod tests {
                 "nested `when` requires at least one child arm",
             ),
             (
-                "match value with\n  when\n    _ => 1",
+                "match value as\n  when\n    _ => 1",
                 "requires a pattern before nested `when`",
             ),
             ("match when\n  => 1", "requires guards before `=>`"),

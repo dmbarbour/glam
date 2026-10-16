@@ -5,7 +5,7 @@ meta.macro.env = {}
 
 object logic as logic_object with
   facts logic_items =
-    match logic_items with
+    match logic_items as
       [] => []
       [fact:{arguments:[logic_left, logic_right], _}] ++ logic_rest =>
         [[logic_left, logic_right]] ++ logic_object.facts logic_rest
@@ -13,14 +13,14 @@ object logic as logic_object with
         logic_object.facts logic_rest
 
   query logic_items =
-    match logic_items with
+    match logic_items as
       [query:{from:logic_from, _}] ++ _ =>
         logic_from
       [_] ++ logic_rest =>
         logic_object.query logic_rest
 
   descendants logic_facts logic_current =
-    match logic_facts with
+    match logic_facts as
       [] => []
       [[logic_parent, logic_child]] ++ _ when logic_parent == logic_current =>
         [logic_child] ++ logic_object.descendants logic_facts logic_child

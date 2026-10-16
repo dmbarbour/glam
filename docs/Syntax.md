@@ -391,8 +391,9 @@ only where that end is visible:
 
 - A region ends at a closing bracket, a separator (`,` or `;`), the end of
   its statement or definition, or a *separator keyword*: `then`, `else`,
-  `in`, `where`, `=>`, `=>?`, or a binding's or view's `->`. No expression
-  continues with these, so a reader sees where the form before them ends.
+  `in`, `where`, `=>`, `=>?`, a binding's or view's `->`, or the `as` after
+  a match's subject. No expression continues with these where they stand,
+  so a reader sees where the form before them ends.
 - A tail form never ends at a token that could continue it, such as an
   `and` between guard clauses, which could be a boolean `and`, or the
   `with` after a match's subject, which could begin an update.
@@ -408,7 +409,7 @@ or any part a separator keyword ends:
 
         mapped = map values \value -> transform value
         bound = operation >>= \value -> continue value
-        chosen = describe match value with
+        chosen = describe match value as
             1 => "one"
             _ => "other"
         resumed = source
@@ -424,7 +425,7 @@ Every prefix `if` and `try` has an `else`, so their keywords pair as
 brackets do: an inner `if` takes the first `else`. Parentheses make a tail
 form an ordinary atom, which anything may follow:
 
-        applied = f (match x with {_ => 1}) y
+        applied = f (match x as {_ => 1}) y
         field = (do { .r value }).result
         guarded = if x <- (if a then b else c) and d then x else 0
         argument = f (if a then b else c)
@@ -1625,36 +1626,41 @@ conditional's root `.cut`.
 
 I borrow a lot of inspiration from Haskell's syntax for `match`. Common use cases are basically the same.
 
-        match Expr with
+        match Expr as
             Pattern1 => Result1
             Pattern2 => Result2
             _ => Result3
 
-The first ungrouped `with` after `match` ends the subject expression and begins
-the arms; a match nested in the subject takes the first `with` after its own
-head, as nested `if`s take their `then`s. Parenthesize a dictionary or object
-update used as the subject:
+The first ungrouped `as` after `match` ends the subject expression and begins
+the arms; a match nested in the subject takes the first `as` after its own
+head, as nested `if`s take their `then`s. After `as` come pattern arms, as
+`P as Q` views a value through a pattern, and after `when` come guard arms.
+Since a subject's `as` is its match's, an update that names its base is
+parenthesized there; any other update need not be:
 
-        match (Dict with { value := 42 }) with
+        match Dict with { value := 42 } as
+            {value:x} => x
+            _ => {}
+        match (Dict as d with { value := 42 }) as
             {value:x} => x
             _ => {}
 
-A `{` on the line of `with` delimits the semicolon-separated arms. A first
+A `{` on the line of `as` delimits the semicolon-separated arms. A first
 arm with a dictionary pattern therefore begins on the next line, where it is
 an ordinary layout-arm head:
 
-        match Value with
+        match Value as
             {value:x} as whole => whole
             _ => {}
 
-        match Value with { {value:x} => x; _ => {}; }
+        match Value as { {value:x} => x; _ => {}; }
 
 A match is a tail form (see *Tail Position*): an operator or an enclosing
 form's keyword may follow its arms, but an argument may not.
 
 We also support branching guard clauses. We use `when` to separate the pattern from the a branching clause. base case, we have only one branch. But we'll need another `when` for hierarchical branching.
 
-        match Expr with
+        match Expr as
             P1 when C1 => R1        # basic
             P2 when                 # multiline
                 C2_a => R2_a
@@ -1670,7 +1676,7 @@ follows on its line, so a guard that begins with a dictionary pattern is
 parenthesized: `P when ({}) <- Op => R`. Any other `when` begins guards,
 which may continue onto later lines before the arm's `=>`:
 
-        match Expr with
+        match Expr as
             P1 when C1
                  and C2 => R1
 
@@ -1781,7 +1787,7 @@ View patterns have an opportunity to filter, rewrite, and search (branch) on dat
 Parentheses are required where the view arrow would be lexically or visually ambiguous with another `->` or `<-` owner, e.g. inside a `do` binding, or when chaining views. A view occupying the complete pattern head of a match arm may omit them because `=>` marks the distinct result boundary:
 
 ```g
-match Subject with
+match Subject as
   View -> Pattern => Result
 ```
 
@@ -1803,7 +1809,7 @@ Predicate patterns are a specialized case of view patterns. The predicate is pas
         (Prefix "foo-" text)    # only last arg is pattern
 
         # complete match-arm patterns may omit the outer parentheses
-        match Value with
+        match Value as
             Prefix "foo-" text => text
 
         # as a view pattern
@@ -1839,7 +1845,7 @@ The starred match forms omit the complete match's implicit `.cut`.
 
 Both subject and guard-only forms are supported:
 
-        matches = match* Value with
+        matches = match* Value as
             PatternA => ResultA
             PatternB => ResultB
 
@@ -1861,11 +1867,11 @@ As with Haskell, we don't need keywords to support loops. Using *objects*, we ca
             EndLoop = .r (.r s0)
 
         # foreach [1,2,3] \item-> do Body
-        foreach L Action = match L with
+        foreach L Action = match L as
             [x]++xs => (Action x) >>= foreach xs Action
             [] => .r ()
 
-        untilDone s0 Action = match s0 with
+        untilDone s0 Action = match s0 as
             done:R => .r R
             _ => Action s0 >>= \ s1 -> untilDone s1 Action
 

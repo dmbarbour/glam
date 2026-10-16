@@ -199,7 +199,7 @@ fn parse_parenthesized_structural(
     }
 
     let contents = trim_layout(view.group_contents(*group)?);
-    // A match leading a tuple, as in `(match y with {…}, 1)`, ends at its
+    // A match leading a tuple, as in `(match y as {…}, 1)`, ends at its
     // comma, since its arms cannot hold an unparenthesized one. The
     // expression grammar parses the tuple and delimits the member.
     let leads_with_match = ["match", "try_match"]
@@ -946,11 +946,11 @@ fn find_structural_body(view: TokenView<'_, '_>) -> Option<StructuralBody> {
     let where_boundary = contextual_keywords(view, "where")
         .next()
         .unwrap_or(view.range().end());
-    // The first ungrouped `with` after a `match` or `try_match` head is the
-    // match's own, and the match owns what follows it, so no later `with`
-    // opens an update or object body here. A head is judged as the term
-    // parser judges it, so a match that is a tag's payload, as in
-    // `(k):match x with {…}`, owns its `with` too.
+    // A `match` or `try_match` head owns what follows it, so no later `with`
+    // opens an update or object body here: an update in its subject or arms
+    // is its own. A head is judged as the term parser judges it, so a match
+    // that is a tag's payload, as in `(k):match x as {…}`, owns what follows
+    // it too.
     let match_head = view
         .top_level()
         .find(|indexed| {

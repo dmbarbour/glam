@@ -575,6 +575,32 @@ maps the short names used here to file names.
 - **Rule lives in:** `Syntax.md` "Guard Clauses".
 - **Recorded in:** grammar review, item 4.
 
+### A match's arms follow `as`
+`match-arms-follow-as` · 2026-10-16 · maintainer · accepted
+- **Context:** `with` began a match's arms, an object or `extend` body, and
+  an update. After a subject it could also begin an update, so an updated
+  subject was parenthesized and the parsers needed rules for which match
+  claims a `with`. Guard arms already follow `when`.
+- **Decision:** a match's arms follow `as`: `match Expr as Arms`, likewise
+  for `try_match` and the starred forms. The first ungrouped `as` after a
+  match head, innermost first, ends its subject, and is a separator keyword
+  there. `Dict as Name with Defs` lets an `as` continue an expression
+  elsewhere, so such an update is parenthesized in a subject. The lexer
+  records which `as` ends a subject (the match heads still reading their
+  subjects, per group), so a `{` after it opens `;`-separated arms while an
+  as-pattern's `{` stays a `,`-separated dictionary.
+- **Alternatives rejected:** keeping `with`; separating braced arms after
+  `as` with `,`; and a keyword with no other role, such as `of`, which
+  loses the pairing of pattern arms with `as` and guard arms with `when`.
+- **Consequences:**
+  - `with` has one meaning, "with these definitions", and an update needs
+    no parentheses in a subject.
+  - `brace-after-with-delimits-arms` applies to `as`.
+  - The maintainer may revisit `Dict as Name with Defs`.
+- **Rule lives in:** `Syntax.md` "Match"; `SyntaxCheatSheet.md`
+  "Conditionals & Patterns".
+- **Recorded in:** grammar review, item 11.
+
 ### A `{` opens a block only on its keyword's line
 `braces-open-blocks-on-their-keywords-line` · 2026-10-16 · maintainer · accepted
 - **Context:** after `brace-after-with-delimits-arms`, a `{` after a `when`
