@@ -67,6 +67,9 @@ verify current bootstrap acceptance against tests and samples.
 
 - Prefer narrow, testable slices and focused regression tests.
 - Treat valid and invalid samples as executable syntax specifications.
+- Fenced `g` blocks in the standing docs are examples that must parse, whole
+  or item by item (`tests/doc_examples.rs`). Elide code with `...`, and put
+  pseudocode or grammar notation in indented blocks.
 - A panic is a bug. Code that observes user input must detect invalid states
   before they can panic: evaluation reports an `EvaluationFailure`, and parsing
   backtracks while preserving closest-match diagnostics. A panic must still not

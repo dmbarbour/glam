@@ -79,7 +79,7 @@ The compiler constructs the immutable invocation environment as if it applied:
 
 ```g
 _module.meta.macro.env with
-  language = DeclaredLanguage
+  .['language] = DeclaredLanguage
 ```
 
 An undefined `meta.macro.env` behaves as `{}`. `DeclaredLanguage` reflects the
@@ -234,6 +234,7 @@ macro object, always spell that parent `_name`, never `name`:
 ```g
 object specialized_words extends _words with
   # additions and overrides
+  ...
 ```
 
 `_words` selects the prior definition. Unescaped `words` denotes the final
