@@ -91,7 +91,8 @@ flags a step for discussion when work reaches it, not a decision.
   reviews who owns the evaluation runtime and how code the runtime calls
   gets its capabilities. Accepted 2026-10-16: a thread-affine owner that
   retires the runtime explicitly, effects crossing to client threads as
-  messages; five decisions remain.
+  messages through request queues. Its decisions are settled; the rest
+  becomes a plan after `lifecycle-cli-logger`.
 
 ## Completed, Awaiting Retirement
 

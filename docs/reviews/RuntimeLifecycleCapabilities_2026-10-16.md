@@ -2,8 +2,9 @@
 
 Status: review complete. No code changed. This records findings and a
 recommended remediation; it does not authorize a plan. The maintainer
-accepted the recommendation and settled a target model on 2026-10-16 (see
-[Target Model](#target-model-maintainer-2026-10-16)); five decisions remain.
+accepted the recommendation and settled a target model and every decision
+on 2026-10-16 (see [Target Model](#target-model-maintainer-2026-10-16) and
+[Maintainer Decisions](#maintainer-decisions)).
 
 Revision reviewed: `776bec6d` (clean `main`).
 
@@ -265,7 +266,8 @@ target model below, which reshapes the steps.
     already journals this way; hosts delivering inside their commit is what
     must go.
   - **Asynchronous requests:** a transaction posts a request paired with a
-    promise resolver, and the pair becomes visible on commit, so an aborted
+    promise resolver onto a queue (see decision 8), and the pair becomes
+    visible on commit, so an aborted
     transaction sends nothing. The task never waits inside a transaction: it
     either observes the request's status (uncommitted, sent, broken,
     fulfilled) and awaits a change with the ordinary `.cut` retry, or takes
@@ -326,15 +328,17 @@ Settled 2026-10-16:
 4. **Evaluation in callbacks:** through client threads' handles, never
    inside a worker's quantum.
 
-Proposed, not yet confirmed:
 5. **Readiness results** carry data and a handle.
 6. **`TaskHost` hooks** retire, host state moving into the store.
 7. **Lazy-import I/O** becomes a request answered by a client thread, rather
    than trusted runtime-side I/O.
-
-Open:
-8. **The request primitive's API:** the status values, how a task observes
-   and awaits them, and how a client thread receives requests and their
-   resolvers.
-9. **Timing:** step 1 now, and the rest before or after the grammar review
-   resumes.
+8. **The request primitive (maintainer):** *queues*, each a capability
+   stored apart from the user heap, whose elements are pairs of a value and
+   an optional promise handle, in whatever form. One queue mixes writes and
+   queries, and one element may be both, in an order consistent with its
+   isolated transactions. Independent queues promise no order among
+   themselves, and resolvers need not be resolved in the order read. A
+   request's status is a further capability on shared state outside the
+   main heap, as spawned tasks' status already is.
+9. **Timing:** step 1 now; the rest becomes a plan, whose order against the
+   grammar review is chosen when it is written.
