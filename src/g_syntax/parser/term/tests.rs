@@ -676,7 +676,7 @@ fn assert_term_parses_quickly(text: &str, limit: std::time::Duration) -> SyntaxE
     let started = std::time::Instant::now();
     let result = super::super::input::parse_expression_fragment(text.as_bytes(), |view| {
         super::parse_term_chain(view, ExpressionContext::for_owner(view))
-            .and_then(|chain| {
+            .and_then(|(chain, _)| {
                 chain
                     .resolve()
                     .map_err(|message| super::Fail::Error { at: None, message })
@@ -708,6 +708,9 @@ const KEYWORD_NESTING_SHAPES: &[(&str, &str, &str)] = &[
     ("(let a = 1 in ", ")", "a"),
     ("(do { .r ", " })", "1"),
     ("(\\z -> if c then ", " else z)", "1"),
+    ("(do { ", " -> z; .r z })", ".r 1"),
+    ("(if f -> z then ", " else 0)", "1"),
+    ("(match x with {(f -> p) => ", "})", "1"),
 ];
 
 /// Keywords nested where they head no form: as path keys, quoted atoms, tag

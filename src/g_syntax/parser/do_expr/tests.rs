@@ -80,6 +80,121 @@ fn token_statement_classification_leaves_lambda_arrows_inside_expressions() {
     ));
 }
 
+/// A keyword form owns every `<-` and `=` after its head, since a pattern
+/// holds no keyword form; each of these statements was once split at one.
+#[test]
+fn keyword_forms_own_their_binders() {
+    for (source, form) in [
+        ("do { if (a, b) = .r 1 then .r a else .r 0 }", "if"),
+        ("do { if a <- .op then .r a else .r 0 }", "if"),
+        ("do { let x = 1 in .r x }", "let"),
+    ] {
+        let SyntaxExpr::Do(DoExpr { steps, result, .. }) = parse_do_expression(source) else {
+            panic!("expected a do expression");
+        };
+        assert!(steps.is_empty(), "{source}: {steps:?}");
+        let parsed = match result.as_ref() {
+            SyntaxExpr::If(_) => "if",
+            SyntaxExpr::Let { .. } => "let",
+            _ => "other",
+        };
+        assert_eq!(parsed, form, "{source}");
+    }
+
+    // A binder before the keyword's head binds, and `as` belongs to patterns.
+    let SyntaxExpr::Do(DoExpr { steps, .. }) = parse_do_expression(
+        "do { x = if (a, b) = .r 1 then a else 0; y <- if c then .a else .b; p as q <- .op; .r [x, y, p, q] }",
+    ) else {
+        panic!("expected a do expression");
+    };
+    assert!(matches!(
+        &steps[0].kind,
+        DoStepKind::ValueBind { pattern, value: SyntaxExpr::If(_) } if pattern.captures() == ["x"]
+    ));
+    assert!(matches!(
+        &steps[1].kind,
+        DoStepKind::Bind { pattern, operation: SyntaxExpr::If(_) } if pattern.captures() == ["y"]
+    ));
+    assert!(matches!(
+        &steps[2].kind,
+        DoStepKind::Bind { pattern, .. } if pattern.captures() == ["p", "q"]
+    ));
+}
+
+/// In a binding, an open tail ends at a top-level `->`, which a pattern
+/// follows; elsewhere `->` after a tail is an error, as it was.
+#[test]
+fn open_tails_end_at_a_forward_binding() {
+    for (source, form) in [
+        ("do { if c then .a else .b -> y; .r y }", "if"),
+        ("do { .r 1 if c else .r 2 -> y; .r y }", "if"),
+        ("do { let z = 1 in .r z -> y; .r y }", "let"),
+        ("do { using m in .r 1 -> y; .r y }", "using"),
+        (
+            "do { if c then .a else do { .b -> z; .r z } -> y; .r y }",
+            "if",
+        ),
+        ("do { .r 1 |> \\v -> v -> y; .r y }", "pipe"),
+        ("do { .r d with { a := 1 } -> y; .r y }", "with"),
+    ] {
+        let SyntaxExpr::Do(DoExpr { steps, .. }) = parse_do_expression(source) else {
+            panic!("expected a do expression");
+        };
+        let DoStepKind::Bind { pattern, operation } = &steps[0].kind else {
+            panic!("{source}: {:?}", steps[0].kind);
+        };
+        assert_eq!(pattern.captures(), ["y"], "{source}");
+        let parsed = match operation {
+            SyntaxExpr::If(_) => "if",
+            SyntaxExpr::Let { .. } => "let",
+            SyntaxExpr::Using { .. } => "using",
+            SyntaxExpr::OperatorApply { .. } => "pipe",
+            SyntaxExpr::With { .. } => "with",
+            _ => "other",
+        };
+        assert_eq!(parsed, form, "{source}");
+    }
+
+    // A layout block in an `else` keeps its own arrows.
+    let SyntaxExpr::Do(DoExpr { steps, .. }) =
+        parse_do_expression("do\n  if c then .a else do\n      .b -> z\n      .r z\n  .r 1")
+    else {
+        panic!("expected a do expression");
+    };
+    assert!(
+        matches!(&steps[0].kind, DoStepKind::Then(SyntaxExpr::If(_))),
+        "{:?}",
+        steps[0].kind
+    );
+
+    assert!(parse_compound_expression_fragment(b"if c then a else b -> y").is_err());
+}
+
+/// Guard clauses bind by the same rule as statements, split at `and`
+/// wherever it stands as a keyword, but not as a tag's key.
+#[test]
+fn guard_clauses_bind_by_the_statement_rule() {
+    let SyntaxExpr::If(conditional) = parse_do_expression(
+        "if (a, b) = e and a > b and .op -> c and d <- .op and _ and f and:x then a else b",
+    ) else {
+        panic!("expected an if expression");
+    };
+    let clauses = conditional
+        .guards
+        .iter()
+        .map(|guard| match guard {
+            SyntaxGuardClause::ValueBind { .. } => "value",
+            SyntaxGuardClause::EffectBind { .. } => "bind",
+            SyntaxGuardClause::Effect(_) => "effect",
+            SyntaxGuardClause::Pass => "pass",
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        clauses,
+        ["value", "effect", "bind", "bind", "pass", "effect"]
+    );
+}
+
 #[test]
 fn initial_patterns_are_shared_by_all_do_binding_directions() {
     let expr = parse_do_expression(
@@ -512,35 +627,37 @@ fn braced_do_is_a_structural_atom_in_containers_and_other_do_blocks() {
     }
 }
 
+/// A `where` heads no pattern, so a statement holding one before any `=` is
+/// an operation, and the semicolon ends its bindings, parenthesized or not.
 #[test]
-fn braced_do_semicolons_currently_separate_unparenthesized_where_expressions() {
-    for source in [
-        "do { result where x = 1; y = 2 }",
-        "do { result where x = 1; y = 2; .r y }",
-    ] {
-        let diagnostics = parse_compound_expression_fragment(source.as_bytes())
-            .expect_err("an unparenthesized inline `where` is currently misclassified");
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| { diagnostic.message.contains("`where` is a reserved keyword") }),
-            "unexpected diagnostics for `{source}`: {diagnostics:#?}"
-        );
-    }
+fn braced_do_semicolons_separate_unparenthesized_where_expressions() {
+    let diagnostics = parse_compound_expression_fragment(b"do { result where x = 1; y = 2 }")
+        .expect_err("a do block cannot end with a binding");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("cannot end with a binding")),
+        "{diagnostics:#?}"
+    );
 
-    let parsed = parse_do_expression("do { (result where x = 1); y = 2; .r y }");
-    let SyntaxExpr::Do(DoExpr { steps, .. }) = parsed else {
-        panic!("expected a do expression");
-    };
-    assert!(matches!(
-        &steps[0].kind,
-        DoStepKind::Then(SyntaxExpr::Let { bindings, .. })
-            if bindings.iter().map(|(name, _)| name.as_str()).eq(["x"])
-    ));
-    assert!(matches!(
-        &steps[1].kind,
-        DoStepKind::ValueBind { pattern, .. } if pattern.captures() == ["y"]
-    ));
+    for source in [
+        "do { result where x = 1; y = 2; .r y }",
+        "do { (result where x = 1); y = 2; .r y }",
+    ] {
+        let parsed = parse_do_expression(source);
+        let SyntaxExpr::Do(DoExpr { steps, .. }) = parsed else {
+            panic!("expected a do expression");
+        };
+        assert!(matches!(
+            &steps[0].kind,
+            DoStepKind::Then(SyntaxExpr::Let { bindings, .. })
+                if bindings.iter().map(|(name, _)| name.as_str()).eq(["x"])
+        ));
+        assert!(matches!(
+            &steps[1].kind,
+            DoStepKind::ValueBind { pattern, .. } if pattern.captures() == ["y"]
+        ));
+    }
 
     let parenthesized = parse_do_expression("do { (result where { x = 1; y = 2 }) }");
     let SyntaxExpr::Do(DoExpr { result, .. }) = parenthesized else {

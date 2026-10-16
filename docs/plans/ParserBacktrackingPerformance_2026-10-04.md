@@ -308,7 +308,8 @@ production keeps the old parser until the oracle agrees.
 - `parser-term-parser`: done; in production since 2026-10-07
   (`parser-term-parser-first`, `eb84587c`; `parser-keyword-delegation`,
   `adcd994b`).
-- `parser-patterns`: started 2026-10-16; `parser-patterns-cover` done.
+- `parser-patterns`: started 2026-10-16; `parser-patterns-cover` and
+  `parser-patterns-bindings` done.
   See [Patterns 2026-10-16](#patterns-2026-10-16).
 - `parser-keyword-frames`: first part merged 2026-10-15: keyword regions,
   the lexer's token tables, a lazy keyword search, and one key test for
@@ -780,6 +781,29 @@ prints every disagreement):
   would reclaim it if it matters.
 - Not yet: tails ending at `->`, so `(if c then f else g -> p)` is still an
   error, as are the statement bugs, which are slice 2.
+
+**`parser-patterns-bindings` as built (2026-10-16).** `pattern::parse_binding`
+parses do statements and guard clauses by the binding rule above, and
+`pattern_binder` is the rule itself; the hanging-layout check uses it too.
+An `ExpressionContext` flag, `arrow_ends_tail`, marks an operation or a
+pattern view, where tails end at `->`:
+- The term parser stops at a top-level `->` after an operand. Its token pass
+  stops there as well, so groups after the arrow are not interpreted twice,
+  unless a lambda head or a keyword region owns the arrow. The pass's stop
+  needs keyword regions, so it is off when a test turns regions off.
+- `parse_open_tail` parses `else` branches, postfix fallbacks and `let`
+  bodies; a `using` body already reported its end. `parse_expression_extent`
+  accepts ending at such a `->`, and a `where` whose body ends at one belongs
+  to what follows the arrow.
+- Groups and `complete()` contexts clear the flag, so a parenthesized
+  operation is unaffected.
+- The four statement bugs, tails in each form, a layout block keeping its
+  arrows in an `else`, and guard clauses are tested in `do_expr/tests.rs`;
+  `KEYWORD_NESTING_SHAPES` gains `op -> P`, a guard arrow and a view in an
+  arm, each interpreting every group once.
+- Remaining trial: the hanging-layout check still asks whether a pattern
+  parses after a continuation line's first `->`, once per line, to word a
+  diagnostic.
 
 ## Verification
 

@@ -15,8 +15,8 @@ use super::layout::LayoutView;
 use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
 use super::pattern::{parse_complete_pattern, parse_guard_clauses};
 use super::structural::{
-    in_keyword_position, is_layout_empty, parse_expression_in_context, split_braced_members,
-    trim_layout,
+    in_keyword_position, is_layout_empty, parse_expression_in_context, parse_open_tail,
+    split_braced_members, trim_layout,
 };
 
 type ParseResult<T> = Result<T, Vec<Diagnostic>>;
@@ -108,7 +108,7 @@ pub(in crate::g_syntax::parser) fn parse_postfix_if_suffix(
     }
 
     let guards = parse_guard_clauses(guards, "if guard")?;
-    let else_result = parse_expression_in_context(else_result, context.child_owner(else_result))?;
+    let (else_result, end) = parse_open_tail(else_result, context.child_owner(else_result), end)?;
     Ok(ParsedExpression::new(
         SyntaxExpr::If(IfExpr {
             mode: ConditionalMode::Pure,
@@ -183,7 +183,7 @@ fn parse_if_like_expression(
 
     let guards = parse_guard_clauses(guards, &format!("{head} guard"))?;
     let then_result = parse_expression_in_context(then_result, context.child_owner(then_result))?;
-    let else_result = parse_expression_in_context(else_result, context.child_owner(else_result))?;
+    let (else_result, end) = parse_open_tail(else_result, context.child_owner(else_result), end)?;
 
     Ok(ParsedExpression::new(
         SyntaxExpr::If(IfExpr {

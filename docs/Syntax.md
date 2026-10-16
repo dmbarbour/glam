@@ -434,6 +434,16 @@ unused-local warning and `Operation -> _` explicitly discards any result. A
 producing expression is resolved before its new names enter scope, and active
 source locals cannot be shadowed.
 
+A statement binds with `<-` or `=` only when that token comes before every
+keyword form and lambda in it, since a pattern holds neither: a keyword form
+owns any `<-` or `=` after its head. So `if (a, b) = e then A else B` is an
+operation whose guard binds, while `x = if C then A else B` binds `x`. In
+`Operation -> Pattern`, the `->` ends any open tail of the operation before
+it: an `else` branch, a `let` or `using` body, a postfix `if`'s fallback,
+or a lambda body. So `if C then .a else .b -> x` binds the conditional's
+result. A layout block keeps its own lines, arrows included. Guard clauses
+follow the same rules.
+
 A non-final bare operation uses the existing `=>>` behavior, including its
 requirement that the discarded result be unit. The final statement should
 express an effect and is not implicitly wrapped with `.r`. A layout block must

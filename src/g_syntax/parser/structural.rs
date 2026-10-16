@@ -75,7 +75,7 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
     let parsed = if let Some(result) = parse_parenthesized_structural(view, context) {
         ParsedExpression::new(result?, view.range().end())
     } else if let Some(result) = parse_let(view, context) {
-        ParsedExpression::new(result?, view.range().end())
+        result?
     } else if let Some(result) = parse_object(view, context) {
         result?
     } else if let Some(if_index) = keyword_head(view, "if") {
@@ -102,15 +102,17 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
                 "where expression requires a body",
             ));
         }
-        parse_expression_extent(body, context.complete())?
+        // A body that ends at a `->` ends this expression there, and the
+        // `where` belongs to what follows the arrow.
+        parse_expression_extent(body, context.complete_keeping_arrow())?
     } else {
-        ParsedExpression::from_chain(
-            parse_expression_chain_view(view, context)?,
-            view.range().end(),
-        )
+        parse_expression_chain_view(view, context)?
     };
     let parsed = resume_expression_suffixes(view, context, parsed)?;
-    if parsed.end() < view.range().end() && !context.permits_yield() {
+    if parsed.end() < view.range().end()
+        && !context.permits_yield()
+        && !stops_at_arrow(view, context, parsed.end())
+    {
         let tail = trim_layout(view_between(view, parsed.end(), view.range().end()));
         let found = tail
             .source_text()
@@ -124,6 +126,39 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
         ));
     }
     Ok(parsed)
+}
+
+/// Whether an expression ending at `end` stops at a `->` that ends its open
+/// tails.
+fn stops_at_arrow(view: TokenView<'_, '_>, context: ExpressionContext, end: usize) -> bool {
+    context.arrow_ends_tail()
+        && trim_layout(view_between(view, end, view.range().end()))
+            .first_significant()
+            .is_some_and(|(_, token)| matches!(token.kind(), TokenKind::Symbol("->")))
+}
+
+/// Parses an open tail: an `else` branch, a postfix `if`'s fallback, or a
+/// `let` body. It runs to `form_end`, its form's end, unless `context` ends
+/// tails at a `->`. Returns the tail and where its form ends.
+pub(in crate::g_syntax::parser) fn parse_open_tail(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+    form_end: usize,
+) -> ParseResult<(SyntaxExpr, usize)> {
+    if !context.arrow_ends_tail() {
+        return parse_expression_in_context(view, context).map(|tail| (tail, form_end));
+    }
+    let view = trim_layout(view);
+    let parsed = parse_expression_extent(view, context.complete_keeping_arrow())?;
+    let end = if parsed.end() < view.range().end() {
+        parsed.end()
+    } else {
+        form_end
+    };
+    let tail = parsed
+        .into_expression()
+        .map_err(|message| error_at_view(view, message))?;
+    Ok((tail, end))
 }
 
 fn parse_parenthesized_structural(
@@ -256,7 +291,7 @@ fn structural_expression_hard_end(view: TokenView<'_, '_>, head_index: usize) ->
 fn parse_let(
     view: TokenView<'_, '_>,
     context: ExpressionContext,
-) -> Option<ParseResult<SyntaxExpr>> {
+) -> Option<ParseResult<ParsedExpression>> {
     let (let_index, let_token) = view.first_significant()?;
     if !token_is_name(let_token, "let") {
         return None;
@@ -332,15 +367,18 @@ fn parse_let(
             "let expression requires a body",
         )));
     }
-    let body = match parse_expression_in_context(body, context) {
+    let (body, end) = match parse_open_tail(body, context, view.range().end()) {
         Ok(body) => body,
         Err(diagnostics) => return Some(Err(diagnostics)),
     };
 
-    Some(Ok(SyntaxExpr::Let {
-        bindings,
-        body: Box::new(body),
-    }))
+    Some(Ok(ParsedExpression::new(
+        SyntaxExpr::Let {
+            bindings,
+            body: Box::new(body),
+        },
+        end,
+    )))
 }
 
 fn parse_where_suffix(

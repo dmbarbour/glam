@@ -456,6 +456,33 @@ maps the short names used here to file names.
   "Patterns".
 - **Recorded in:** parser backtracking plan, "Patterns 2026-10-16".
 
+`bindings-split-before-keyword-forms` · 2026-10-16 · maintainer · accepted
+- **Context:** a do statement split at its first top-level `<-` or `=`,
+  else tried the whole statement as an expression, else tried each `->`
+  from the right; guard clauses did the same. So `do { if (a, b) = .r 1
+  then .r a else .r 0 }` and `do { let x = 1 in .r x }` were split inside
+  their keyword form and rejected, and an operation holding a parenthesized
+  keyword form was parsed again at every level, exponential in nesting.
+- **Decision:** a statement or guard clause binds with `<-` or `=` only when
+  that token is at its top level before any `\` and any keyword but `as`
+  and `when`; a pattern holds no lambda or keyword form, so a keyword form
+  owns every binder after its head. Otherwise the clause is an operation
+  parsed once, in a context where a top-level `->` ends its open tails: an
+  `else` branch, a `let` or `using` body, a postfix `if`'s fallback and a
+  lambda body. A pattern follows that `->`.
+- **Consequences:**
+  - The four statement shapes above parse, and `if c then .a else .b -> x`
+    binds without parentheses, as the trial split happened to allow.
+  - Outside bindings and views, `->` after a tail is still an error.
+  - `and` splits guard clauses only in keyword position, so `f and:x` is one
+    clause, as `keyword-before-key-mark-is-a-key` requires.
+  - Expression sides keep the full expression parser, so `y = z where
+    z = 1` and `.r d with {...} -> y` parse as before; an inline `where`
+    statement in braces is now an operation, no longer a pattern error.
+- **Rule lives in:** `Syntax.md` "Effects"; `SyntaxCheatSheet.md` "Effects &
+  Do Notation".
+- **Recorded in:** parser backtracking plan, "Patterns 2026-10-16".
+
 ### Only a lone quoted name is an atom key in a key path
 `lone-quoted-name-is-an-atom-key` · 2026-10-06 · maintainer · superseded
 - **Context:** the grammar committed to a leading `'name` as the whole key.

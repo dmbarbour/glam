@@ -134,12 +134,13 @@ pub(super) fn diagnostic(
 }
 
 /// Parses `view` as one ordinary expression, returning its unresolved infix
-/// chain, as `parse_expression_chain_view` does. `context` checks the
-/// indentation of line-led infix operators.
+/// chain and the token where it ends, as `parse_expression_chain_view` does.
+/// `context` checks the indentation of line-led infix operators, and may end
+/// the expression at a top-level `->`.
 pub(super) fn parse_term_chain(
     view: TokenView<'_, '_>,
     context: ExpressionContext,
-) -> Parse<InfixChain> {
+) -> Parse<(InfixChain, usize)> {
     let covers = Covers::default();
     let scope = Scope {
         view,
@@ -147,9 +148,12 @@ pub(super) fn parse_term_chain(
         covers: &covers,
         mode: Mode::Expression,
     };
-    let pieces = top_pieces(scope)?;
+    let (pieces, end) = top_pieces(scope)?;
     // Trailing layout ends the expression; leading layout does not start one.
-    Items::new(scope, trim_trailing_padding(view, &pieces)).item()
+    let mut items = Items::new(scope, trim_trailing_padding(view, &pieces));
+    items.stop_at_arrow = context.arrow_ends_tail();
+    let (chain, stop) = items.expression()?;
+    Ok((chain, stop.unwrap_or(end)))
 }
 
 /// Parses `view` as one pattern in `position`, in cover mode.
@@ -165,7 +169,7 @@ pub(super) fn parse_pattern_term(
         covers: &covers,
         mode: Mode::Cover,
     };
-    let pieces = top_pieces(scope)?;
+    let (pieces, _) = top_pieces(scope)?;
     let pieces = trim_padding(view, &pieces);
     if pieces.is_empty() {
         return error("expected a pattern");
@@ -177,11 +181,19 @@ pub(super) fn parse_pattern_term(
 }
 
 /// The token pass: the view's top-level pieces, with every group closing in
-/// it interpreted into its cover, or deferred in a keyword region.
-fn top_pieces(scope: Scope<'_, '_, '_>) -> Parse<Vec<Piece>> {
+/// it interpreted into its cover, or deferred in a keyword region, and the
+/// token where the pass ended. An expression whose tails end at `->` ends at
+/// a top-level one, unless a lambda head or a keyword form owns it; the form
+/// reports where it ended.
+fn top_pieces(scope: Scope<'_, '_, '_>) -> Parse<(Vec<Piece>, usize)> {
     let view = scope.view;
     prescan(view)?;
     let covers = scope.covers;
+    // Only regions mark keyword forms, so the pass stops early only with
+    // them; the item stops at the same `->` regardless.
+    let stops_at_arrow =
+        scope.mode == Mode::Expression && scope.context.arrow_ends_tail() && regions_enabled();
+    let mut lambda_head = false;
     let mut stack = vec![Frame {
         delimiter: None,
         group: None,
@@ -245,6 +257,14 @@ fn top_pieces(scope: Scope<'_, '_, '_>) -> Parse<Vec<Piece>> {
                 });
             }
             _ => {
+                if stops_at_arrow && stack.len() == 1 && !stack[0].region {
+                    match token.kind() {
+                        TokenKind::Symbol("->") if !lambda_head => break,
+                        TokenKind::Symbol("\\") => lambda_head = true,
+                        TokenKind::Name(_) | TokenKind::LineStart { .. } => {}
+                        _ => lambda_head = false,
+                    }
+                }
                 let frame = stack.last_mut().expect("the view frame is never popped");
                 if frame.region {
                     // Only an open region needs its end found.
@@ -263,7 +283,7 @@ fn top_pieces(scope: Scope<'_, '_, '_>) -> Parse<Vec<Piece>> {
     }
     let top = stack.pop().expect("the view frame remains");
     debug_assert!(stack.is_empty(), "every group closes inside the view");
-    Ok(top.pieces)
+    Ok((top.pieces, index))
 }
 
 /// Rejects, before any group is interpreted, constructs this parser does not
@@ -335,11 +355,19 @@ impl Frame {
 /// In cover mode, a `when` opens one too: the guard-clause parser reads its
 /// clauses.
 fn opens_keyword_region(view: TokenView<'_, '_>, index: usize, mode: Mode) -> bool {
+    regions_enabled()
+        && (may_head_keyword_form(view, index)
+            || mode == Mode::Cover && is_pattern_when(view, index))
+}
+
+/// Whether keyword regions are on, as they are outside tests that check
+/// regions never change a parse.
+fn regions_enabled() -> bool {
     #[cfg(test)]
     if REGIONS_OFF.with(std::cell::Cell::get) {
         return false;
     }
-    may_head_keyword_form(view, index) || mode == Mode::Cover && is_pattern_when(view, index)
+    true
 }
 
 /// Whether the token at `index` is a `when` that guards a pattern.
@@ -869,6 +897,9 @@ struct Items<'p, 'lex, 'source> {
     scope: Scope<'p, 'lex, 'source>,
     pieces: &'p [Piece],
     position: usize,
+    /// Whether the item ends at a `->` after an operand: an expression whose
+    /// tails end at `->`, after a keyword form that ended there.
+    stop_at_arrow: bool,
 }
 
 /// One open lambda in an item. Its body runs to the end of the item.
@@ -981,7 +1012,18 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             scope,
             pieces,
             position: 0,
+            stop_at_arrow: false,
         }
+    }
+
+    /// A cursor over the same pieces at `position`, for measuring by shape.
+    fn at(&self, position: usize) -> Self {
+        Self::new(self.scope, self.pieces).moved_to(position)
+    }
+
+    fn moved_to(mut self, position: usize) -> Self {
+        self.position = position;
+        self
     }
 
     fn shape_at(&self, offset: usize) -> Option<Shape> {
@@ -1043,11 +1085,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             },
             None => return None,
         }
-        let mut cursor = Items {
-            scope: self.scope,
-            pieces: self.pieces,
-            position,
-        };
+        let mut cursor = self.at(position);
         while let Some(width) = cursor.path_suffix_width() {
             cursor.position += width;
         }
@@ -1162,10 +1200,28 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
 
     /// Parses the whole item as an expression: an infix chain of
     /// applications, where a lambda takes the rest of the item as its body.
-    fn item(mut self) -> Parse<InfixChain> {
+    fn item(self) -> Parse<InfixChain> {
+        self.expression().map(|(chain, _)| chain)
+    }
+
+    /// Parses the item as an expression, returning the `->` it stopped at,
+    /// if any.
+    fn expression(mut self) -> Parse<(InfixChain, Option<usize>)> {
         let (chain, tail) = self.chain()?;
-        debug_assert!(self.peek().is_none(), "an expression chain ends its item");
-        self.infix_chain(chain).map(|chain| chain.with_tail(tail))
+        let stop = self.peek().map(piece_token);
+        debug_assert!(
+            stop.is_none() || self.stop_at_arrow,
+            "an expression chain ends its item"
+        );
+        let chain = self.infix_chain(chain)?.with_tail(tail);
+        Ok((chain, stop))
+    }
+
+    /// Whether the item ends at the piece at `offset`: a pattern operator in
+    /// cover mode, or a `->` ending an open tail.
+    fn stops_at(&self, offset: usize) -> bool {
+        self.pattern_operator_at(offset).is_some()
+            || self.stop_at_arrow && self.symbol_at(offset, "->")
     }
 
     /// A pattern position's item, in cover mode: an `as` chain, at most one
@@ -1323,7 +1379,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                 self.postfix_if(&mut levels)?;
                 break 'operand;
             }
-            if self.pattern_operator_at(breaks).is_some() {
+            if self.stops_at(breaks) {
                 self.position += breaks;
                 break 'operand;
             }
@@ -1419,8 +1475,8 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     /// A postfix `if` after the innermost level's chain, which becomes that
     /// level's result. An open lambda binds a maximal trailing expression, so
     /// the conditional is the innermost lambda's body, or the whole item when
-    /// no lambda is open. Nothing but a pattern operator in cover mode may
-    /// follow it in the item.
+    /// no lambda is open. Nothing but a stop (see `stops_at`) may follow it
+    /// in the item.
     fn postfix_if(&mut self, levels: &mut [Level]) -> Parse<()> {
         let if_index = self.here().expect("a postfix `if` is a piece");
         let parsed = parse_postfix_if_tail(self.scope.view, if_index, self.scope.context)
@@ -1428,7 +1484,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         self.position += 1;
         self.skip_to_token(parsed.end())?;
         let (breaks, _) = self.line_starts_at(0);
-        if self.peek_at(breaks).is_some() && self.pattern_operator_at(breaks).is_none() {
+        if self.peek_at(breaks).is_some() && !self.stops_at(breaks) {
             self.position += breaks;
             return self.expected("the end of the expression after a postfix `if`");
         }
@@ -1639,11 +1695,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
 
     /// Whether a named tag, `name.path:payload`, starts at `offset`.
     fn named_tag_at(&self, offset: usize) -> bool {
-        let cursor = Items {
-            scope: self.scope,
-            pieces: self.pieces,
-            position: self.position + offset,
-        };
+        let cursor = self.at(self.position + offset);
         cursor.data_path_end().is_some_and(|end| {
             let colon = end - self.position;
             self.symbol_at(colon, ":") && self.joint_at(colon) && self.joint_at(colon + 1)
@@ -1986,11 +2038,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
 
     /// Whether a path suffix follows the name at the cursor.
     fn next_is_path_suffix(&self) -> bool {
-        let cursor = Items {
-            scope: self.scope,
-            pieces: self.pieces,
-            position: self.position + 1,
-        };
+        let cursor = self.at(self.position + 1);
         cursor.path_suffix_width().is_some()
     }
 }

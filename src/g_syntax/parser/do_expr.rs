@@ -11,11 +11,8 @@ use super::expression_context::{ExpressionContext, ParsedExpression};
 use super::input::{TokenRange, TokenView};
 use super::layout::LayoutView;
 use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
-use super::pattern::parse_pattern;
-use super::structural::{
-    is_layout_empty, keyword_head, parse_expression_in_context, single_reserved_keyword,
-    trim_layout,
-};
+use super::pattern::{Binding, BindingSite, parse_binding, parse_pattern, pattern_binder};
+use super::structural::{is_layout_empty, keyword_head, single_reserved_keyword, trim_layout};
 
 type ParseResult<T> = Result<T, Vec<Diagnostic>>;
 
@@ -194,25 +191,13 @@ fn hanging_statement_alignment_error(
     )]
 }
 
+/// Whether a continuation line reads as a statement of its own: a
+/// `declare`, a binding by `<-` or `=`, or an operation bound by `->` to a
+/// pattern. The last is judged by whether a pattern follows the line's
+/// first top-level `->`, which only diagnoses misaligned layout.
 fn line_begins_do_statement(view: TokenView<'_, '_>) -> bool {
     keyword_head(view, "declare").is_some()
-        || top_level_symbols(view, "<-")
-            .into_iter()
-            .next()
-            .is_some_and(|arrow| {
-                parse_pattern(trim_layout(view_between(view, view.range().start(), arrow))).is_ok()
-            })
-        || top_level_symbols(view, "=")
-            .into_iter()
-            .next()
-            .is_some_and(|equals| {
-                parse_pattern(trim_layout(view_between(
-                    view,
-                    view.range().start(),
-                    equals,
-                )))
-                .is_ok()
-            })
+        || pattern_binder(view).is_some()
         || top_level_symbols(view, "->")
             .into_iter()
             .next()
@@ -336,77 +321,15 @@ fn parse_statement(
     if keyword_head(view, "declare").is_some() {
         return parse_declare(view);
     }
-
-    if let Some(arrow) = top_level_symbols(view, "<-").into_iter().next() {
-        let pattern = trim_layout(view_between(view, view.range().start(), arrow));
-        let operation = trim_layout(view_between(view, arrow + 1, view.range().end()));
-        if is_layout_empty(pattern) {
-            return Err(error_at_view(
-                view,
-                "a do backward binding requires a pattern before `<-`",
-            ));
-        }
-        let pattern = parse_pattern(pattern)?;
-        if is_layout_empty(operation) {
-            return Err(error_at_view(
-                view,
-                "a do backward binding requires an operation after `<-`",
-            ));
-        }
-        return parse_expression_in_context(operation, context)
-            .map(|operation| ParsedDoStatement::Bind { pattern, operation });
-    }
-
-    if let Some(equal) = top_level_symbols(view, "=").into_iter().next() {
-        let pattern = trim_layout(view_between(view, view.range().start(), equal));
-        let value = trim_layout(view_between(view, equal + 1, view.range().end()));
-        if is_layout_empty(pattern) {
-            return Err(error_at_view(
-                view,
-                "a do value binding requires a pattern before `=`",
-            ));
-        }
-        let pattern = parse_pattern(pattern)?;
-        if is_layout_empty(value) {
-            return Err(error_at_view(
-                view,
-                "a do value binding requires a value after `=`",
-            ));
-        }
-        return parse_expression_in_context(value, context)
-            .map(|value| ParsedDoStatement::ValueBind { pattern, value });
-    }
-
-    if let Ok(expr) = parse_expression_in_context(view, context) {
-        return Ok(ParsedDoStatement::Expr(expr));
-    }
-
-    let arrows = top_level_symbols(view, "->");
-    if let Some(first) = arrows.first().copied()
-        && is_layout_empty(trim_layout(view_between(view, view.range().start(), first)))
-    {
-        return Err(error_at_view(
-            view,
-            "a do forward binding requires an operation before `->`",
-        ));
-    }
-    for arrow in arrows.into_iter().rev() {
-        let operation = trim_layout(view_between(view, view.range().start(), arrow));
-        let Ok(operation) = parse_expression_in_context(operation, context) else {
-            continue;
-        };
-        let pattern = trim_layout(view_between(view, arrow + 1, view.range().end()));
-        if is_layout_empty(pattern) {
-            return Err(error_at_view(
-                view,
-                "a do forward binding requires a pattern after `->`",
-            ));
-        }
-        let pattern = parse_pattern(pattern)?;
-        return Ok(ParsedDoStatement::Bind { pattern, operation });
-    }
-
-    parse_expression_in_context(view, context).map(ParsedDoStatement::Expr)
+    Ok(
+        match parse_binding(view, context, BindingSite::DoStatement)? {
+            Binding::Effect { pattern, operation } => {
+                ParsedDoStatement::Bind { pattern, operation }
+            }
+            Binding::Value { pattern, value } => ParsedDoStatement::ValueBind { pattern, value },
+            Binding::Operation(expr) => ParsedDoStatement::Expr(expr),
+        },
+    )
 }
 
 fn parse_declare(view: TokenView<'_, '_>) -> ParseResult<ParsedDoStatement> {

@@ -5,12 +5,16 @@
 //! computed components remain affine syntax-owned expressions until their
 //! matching step.
 
+use crate::g_syntax::keywords::g0_keyword;
 use crate::g_syntax::{Diagnostic, SyntaxExpr, SyntaxGuardClause, SyntaxPattern};
 
 use super::expression_context::ExpressionContext;
 use super::input::{TokenRange, TokenView};
-use super::lexical::{LeadingTrivia, TokenKind};
-use super::structural::{is_layout_empty, parse_expression_in_context, trim_layout};
+use super::lexical::TokenKind;
+use super::structural::{
+    in_keyword_position, is_layout_empty, parse_expression_extent, parse_expression_in_context,
+    trim_layout,
+};
 use super::term::{self, Fail, Position};
 
 #[cfg(test)]
@@ -41,14 +45,15 @@ pub(in crate::g_syntax::parser) fn parse_complete_pattern(
 
 fn parse_pattern_in(view: TokenView<'_, '_>, position: Position) -> ParseResult<SyntaxPattern> {
     let view = trim_layout(view);
-    let pattern = term::parse_pattern_term(view, ExpressionContext::for_owner(view), position)
-        .map_err(|fail| match fail {
-            Fail::Error { at, message } => vec![term::diagnostic(view, at, message)],
-            Fail::Reported(diagnostics) => diagnostics,
-            Fail::Unsupported(construct) => {
-                error_at_view(view, format!("a pattern cannot contain {construct}"))
-            }
-        });
+    // A keyword form's tail in a view's expression ends at the view's arrow.
+    let context = ExpressionContext::for_owner(view).ending_at_arrow();
+    let pattern = term::parse_pattern_term(view, context, position).map_err(|fail| match fail {
+        Fail::Error { at, message } => vec![term::diagnostic(view, at, message)],
+        Fail::Reported(diagnostics) => diagnostics,
+        Fail::Unsupported(construct) => {
+            error_at_view(view, format!("a pattern cannot contain {construct}"))
+        }
+    });
     #[cfg(test)]
     oracle::check(view, position, &pattern);
     pattern
@@ -77,61 +82,173 @@ fn parse_guard_clause(view: TokenView<'_, '_>) -> ParseResult<SyntaxGuardClause>
     if is_wildcard_guard(view) {
         return Ok(SyntaxGuardClause::Pass);
     }
-
-    if let Some(arrow) = top_level_symbols(view, "<-").into_iter().next() {
-        let pattern = trim_layout(view_between(view, view.range().start(), arrow));
-        let operation = trim_layout(view_between(view, arrow + 1, view.range().end()));
-        if is_layout_empty(pattern) || is_layout_empty(operation) {
-            return Err(error_at_view(
-                view,
-                "guard binding requires a pattern before `<-` and an operation after it",
-            ));
-        }
-        return Ok(SyntaxGuardClause::EffectBind {
-            pattern: parse_pattern(pattern)?,
-            operation: parse_pattern_expression(operation)?,
-        });
-    }
-
-    if let Some(equal) = top_level_symbols(view, "=").into_iter().next() {
-        let pattern = trim_layout(view_between(view, view.range().start(), equal));
-        let value = trim_layout(view_between(view, equal + 1, view.range().end()));
-        if is_layout_empty(pattern) || is_layout_empty(value) {
-            return Err(error_at_view(
-                view,
-                "guard value binding requires a pattern before `=` and a value after it",
-            ));
-        }
-        return Ok(SyntaxGuardClause::ValueBind {
-            pattern: parse_pattern(pattern)?,
-            value: parse_pattern_expression(value)?,
-        });
-    }
-
-    if let Ok(effect) = parse_pattern_expression(view) {
-        return Ok(SyntaxGuardClause::Effect(effect));
-    }
-
-    for arrow in top_level_symbols(view, "->").into_iter().rev() {
-        let operation = trim_layout(view_between(view, view.range().start(), arrow));
-        let pattern = trim_layout(view_between(view, arrow + 1, view.range().end()));
-        let Ok(operation) = parse_pattern_expression(operation) else {
-            continue;
-        };
-        let Ok(pattern) = parse_pattern(pattern) else {
-            continue;
-        };
-        return Ok(SyntaxGuardClause::EffectBind { pattern, operation });
-    }
-
-    Err(error_at_view(
-        view,
-        "expected an effect, effect-pattern binding, or value-pattern binding guard",
-    ))
+    Ok(
+        match parse_binding(view, ExpressionContext::for_owner(view), BindingSite::Guard)? {
+            Binding::Effect { pattern, operation } => {
+                SyntaxGuardClause::EffectBind { pattern, operation }
+            }
+            Binding::Value { pattern, value } => SyntaxGuardClause::ValueBind { pattern, value },
+            Binding::Operation(effect) => SyntaxGuardClause::Effect(effect),
+        },
+    )
 }
 
-fn parse_pattern_expression(view: TokenView<'_, '_>) -> ParseResult<SyntaxExpr> {
-    parse_expression_in_context(view, ExpressionContext::for_owner(view))
+/// A do statement or guard clause, split at its binder.
+pub(in crate::g_syntax::parser) enum Binding {
+    /// `Pattern <- Operation` or `Operation -> Pattern`.
+    Effect {
+        pattern: SyntaxPattern,
+        operation: SyntaxExpr,
+    },
+    /// `Pattern = Value`.
+    Value {
+        pattern: SyntaxPattern,
+        value: SyntaxExpr,
+    },
+    /// An operation alone.
+    Operation(SyntaxExpr),
+}
+
+/// Where a binding stands, which words its errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::g_syntax::parser) enum BindingSite {
+    DoStatement,
+    Guard,
+}
+
+/// The part a binding lacks.
+#[derive(Clone, Copy)]
+enum Missing {
+    BackwardPattern,
+    BackwardOperation,
+    ValuePattern,
+    Value,
+    ForwardOperation,
+    ForwardPattern,
+}
+
+impl BindingSite {
+    fn missing(self, part: Missing) -> &'static str {
+        match (self, part) {
+            (Self::DoStatement, Missing::BackwardPattern) => {
+                "a do backward binding requires a pattern before `<-`"
+            }
+            (Self::DoStatement, Missing::BackwardOperation) => {
+                "a do backward binding requires an operation after `<-`"
+            }
+            (Self::DoStatement, Missing::ValuePattern) => {
+                "a do value binding requires a pattern before `=`"
+            }
+            (Self::DoStatement, Missing::Value) => "a do value binding requires a value after `=`",
+            (Self::DoStatement, Missing::ForwardOperation) => {
+                "a do forward binding requires an operation before `->`"
+            }
+            (Self::DoStatement, Missing::ForwardPattern) => {
+                "a do forward binding requires a pattern after `->`"
+            }
+            (Self::Guard, Missing::BackwardPattern | Missing::BackwardOperation) => {
+                "guard binding requires a pattern before `<-` and an operation after it"
+            }
+            (Self::Guard, Missing::ValuePattern | Missing::Value) => {
+                "guard value binding requires a pattern before `=` and a value after it"
+            }
+            (Self::Guard, Missing::ForwardOperation | Missing::ForwardPattern) => {
+                "guard binding requires an operation before `->` and a pattern after it"
+            }
+        }
+    }
+}
+
+/// Parses a do statement or guard clause once, with no split tried and
+/// abandoned.
+///
+/// It binds with `<-` or `=` when that token stands at its top level before
+/// any `\` and any keyword but `as` and `when`. A pattern's top level holds
+/// no lambda and no keyword form, so a keyword form owns every `<-` or `=`
+/// after its head: `if (a, b) = e then ...` is an operation, and
+/// `x = if ...` a binding. The left side is then a pattern and the right an
+/// expression. Otherwise the clause is an operation, which may end at a
+/// top-level `->` that a pattern follows: an open tail before it, such as
+/// an `else` branch, ends there too.
+pub(in crate::g_syntax::parser) fn parse_binding(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+    site: BindingSite,
+) -> ParseResult<Binding> {
+    let view = trim_layout(view);
+    if let Some(binder) = pattern_binder(view) {
+        let backward = view
+            .token_at(binder)
+            .is_some_and(|token| matches!(token.kind(), TokenKind::Symbol("<-")));
+        let (missing_pattern, missing_right) = if backward {
+            (Missing::BackwardPattern, Missing::BackwardOperation)
+        } else {
+            (Missing::ValuePattern, Missing::Value)
+        };
+        let pattern = trim_layout(view_between(view, view.range().start(), binder));
+        let right = trim_layout(view_between(view, binder + 1, view.range().end()));
+        if is_layout_empty(pattern) {
+            return Err(error_at_view(view, site.missing(missing_pattern)));
+        }
+        let pattern = parse_pattern(pattern)?;
+        if is_layout_empty(right) {
+            return Err(error_at_view(view, site.missing(missing_right)));
+        }
+        let right = parse_expression_in_context(right, context)?;
+        return Ok(if backward {
+            Binding::Effect {
+                pattern,
+                operation: right,
+            }
+        } else {
+            Binding::Value {
+                pattern,
+                value: right,
+            }
+        });
+    }
+    if view
+        .first_significant()
+        .is_some_and(|(_, token)| matches!(token.kind(), TokenKind::Symbol("->")))
+    {
+        return Err(error_at_view(view, site.missing(Missing::ForwardOperation)));
+    }
+    let operation = parse_expression_extent(view, context.ending_at_arrow())?;
+    let rest = trim_layout(view_between(view, operation.end(), view.range().end()));
+    let operation = operation
+        .into_expression()
+        .map_err(|message| error_at_view(view, message))?;
+    let Some((arrow, _)) = rest.first_significant() else {
+        return Ok(Binding::Operation(operation));
+    };
+    let pattern = trim_layout(view_between(view, arrow + 1, view.range().end()));
+    if is_layout_empty(pattern) {
+        return Err(error_at_view(view, site.missing(Missing::ForwardPattern)));
+    }
+    Ok(Binding::Effect {
+        pattern: parse_pattern(pattern)?,
+        operation,
+    })
+}
+
+/// The `<-` or `=` that makes a clause a binding: the first at its top
+/// level, before any `\` and any keyword but `as` and `when`.
+pub(in crate::g_syntax::parser) fn pattern_binder(view: TokenView<'_, '_>) -> Option<usize> {
+    for indexed in view.top_level() {
+        match indexed.token().kind() {
+            TokenKind::Symbol("<-" | "=") => return Some(indexed.index()),
+            TokenKind::Symbol("\\") => return None,
+            TokenKind::Name(name)
+                if !matches!(*name, "as" | "when")
+                    && g0_keyword(name).is_some()
+                    && in_keyword_position(view, indexed.index()) =>
+            {
+                return None;
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn is_wildcard_guard(view: TokenView<'_, '_>) -> bool {
@@ -144,39 +261,19 @@ fn is_wildcard_guard(view: TokenView<'_, '_>) -> bool {
     )
 }
 
-fn top_level_symbols(view: TokenView<'_, '_>, expected: &str) -> Vec<usize> {
-    view.top_level()
-        .filter(|indexed| {
-            matches!(indexed.token().kind(), TokenKind::Symbol(symbol) if *symbol == expected)
-        })
-        .map(|indexed| indexed.index())
-        .collect()
-}
-
-fn top_level_names(view: TokenView<'_, '_>, expected: &str) -> Vec<usize> {
-    view.top_level()
-        .filter(|indexed| {
-            (indexed.index() == view.range().start()
-                || indexed.token().leading() != LeadingTrivia::Joint
-                || indexed.index().checked_sub(1).is_some_and(|previous| {
-                    view.token_at(previous)
-                        .is_some_and(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
-                }))
-                && matches!(indexed.token().kind(), TokenKind::Name(name) if *name == expected)
-        })
-        .map(|indexed| indexed.index())
-        .collect()
-}
-
 fn split_top_level_names<'lex, 'source>(
     view: TokenView<'lex, 'source>,
     separator: &str,
 ) -> Vec<TokenView<'lex, 'source>> {
     let mut start = view.range().start();
     let mut parts = Vec::new();
-    for index in top_level_names(view, separator) {
-        parts.push(view_between(view, start, index));
-        start = index + 1;
+    for indexed in view.top_level() {
+        if matches!(indexed.token().kind(), TokenKind::Name(name) if *name == separator)
+            && in_keyword_position(view, indexed.index())
+        {
+            parts.push(view_between(view, start, indexed.index()));
+            start = indexed.index() + 1;
+        }
     }
     parts.push(view_between(view, start, view.range().end()));
     parts

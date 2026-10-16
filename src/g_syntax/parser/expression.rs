@@ -1224,8 +1224,8 @@ pub(in crate::g_syntax::parser) fn parse_expression_view(
     view: TokenView<'_, '_>,
     context: ExpressionContext,
 ) -> Result<SyntaxExpr, Vec<Diagnostic>> {
-    parse_expression_chain_view(view, context).and_then(|chain| {
-        chain.resolve().map_err(|message| {
+    parse_expression_chain_view(view, context).and_then(|parsed| {
+        parsed.into_expression().map_err(|message| {
             let line = view
                 .first_significant()
                 .and_then(|(_, token)| view.line_at_span(token.span()))
@@ -1236,22 +1236,25 @@ pub(in crate::g_syntax::parser) fn parse_expression_view(
 }
 
 /// Parses `view` as one ordinary expression, returning its unresolved infix
-/// chain. The prefix-shared term parser handles every construct it covers;
-/// the Chumsky grammar handles the rest until keyword forms move over.
+/// chain and where it ends: at the view's end, or where `context` ends tails
+/// at a `->`. The prefix-shared term parser handles every construct it
+/// covers; the Chumsky grammar handles the rest until keyword forms move
+/// over, and reads the whole view.
 pub(in crate::g_syntax::parser) fn parse_expression_chain_view(
     view: TokenView<'_, '_>,
     context: ExpressionContext,
-) -> Result<InfixChain, Vec<Diagnostic>> {
+) -> Result<ParsedExpression, Vec<Diagnostic>> {
     let term = super::term::parse_term_chain(view, context);
     #[cfg(test)]
     term_oracle::check(view, context, &term);
     match term {
-        Ok(chain) => Ok(chain),
+        Ok((chain, end)) => Ok(ParsedExpression::from_chain(chain, end)),
         Err(super::term::Fail::Error { at, message }) => {
             Err(vec![super::term::diagnostic(view, at, message)])
         }
         Err(super::term::Fail::Reported(diagnostics)) => Err(diagnostics),
-        Err(super::term::Fail::Unsupported(_)) => parse_grammar_chain_view(view, context),
+        Err(super::term::Fail::Unsupported(_)) => parse_grammar_chain_view(view, context)
+            .map(|chain| ParsedExpression::from_chain(chain, view.range().end())),
     }
 }
 
@@ -1296,7 +1299,9 @@ pub(in crate::g_syntax::parser) mod term_oracle {
     use std::cell::{Cell, RefCell};
 
     use super::super::term::Fail;
-    use super::{Diagnostic, ExpressionContext, InfixChain, TokenView, parse_grammar_chain_view};
+    use super::{
+        Diagnostic, ExpressionContext, InfixChain, TokenRange, TokenView, parse_grammar_chain_view,
+    };
 
     #[derive(Debug, Default)]
     pub(in crate::g_syntax::parser) struct Report {
@@ -1352,19 +1357,32 @@ pub(in crate::g_syntax::parser) mod term_oracle {
         })
     }
 
+    /// Compares the term parser's reading of `view` with the grammar's, over
+    /// the part the term parser consumed: it may end at a `->` that ends an
+    /// open tail, which the grammar reads as an error.
     pub(super) fn check(
         view: TokenView<'_, '_>,
         context: ExpressionContext,
-        new: &Result<InfixChain, Fail>,
+        new: &Result<(InfixChain, usize), Fail>,
     ) {
         if SUSPENDED.with(Cell::get) {
             return;
         }
+        let view = match new {
+            Ok((_, end)) if *end < view.range().end() => view
+                .subview(
+                    TokenRange::new(view.range().start(), *end)
+                        .expect("an expression ends inside its view"),
+                )
+                .expect("an expression's part lies in its view"),
+            _ => view,
+        };
+        let new = &new.as_ref().map(|(chain, _)| chain);
         if !ACTIVE.with(|active| active.borrow().is_some()) {
             if sweeping() && !matches!(new, Err(Fail::Unsupported(_))) {
                 let old = reference(view, context);
                 let agree = match (new, &old) {
-                    (Ok(new), Ok(old)) => new == old,
+                    (Ok(new), Ok(old)) => *new == old,
                     (Err(Fail::Error { .. } | Fail::Reported(_)), Err(_)) => true,
                     _ => false,
                 };
@@ -1392,7 +1410,7 @@ pub(in crate::g_syntax::parser) mod term_oracle {
             let agree = match (new, &old) {
                 (Ok(new), Ok(old)) => {
                     report.accepted += 1;
-                    new == old
+                    *new == old
                 }
                 (Err(Fail::Error { .. } | Fail::Reported(_)), Err(_)) => true,
                 _ => false,

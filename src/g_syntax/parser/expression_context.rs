@@ -4,6 +4,8 @@
 //! Nested owners validate only their newly stricter interval. `MayYield`
 //! permits a structural expression to return an exact dedent boundary for an
 //! enclosing postfix or infix parser; a complete hard range rejects that tail.
+//! Where a pattern follows an operation after `->`, as in a binding or a
+//! view, an open tail ends at a top-level `->` instead of running over it.
 
 use super::super::Diagnostic;
 use super::super::SyntaxExpr;
@@ -23,6 +25,9 @@ pub(super) struct ExpressionContext {
     validated_through: Option<usize>,
     floor_enforced: bool,
     extent: ExpressionExtent,
+    /// Whether an open tail ends at a top-level `->`: an `else` branch, a
+    /// `let` or `using` body, a postfix `if`'s fallback, or a lambda body.
+    arrow_ends_tail: bool,
 }
 
 impl ExpressionContext {
@@ -32,6 +37,7 @@ impl ExpressionContext {
             validated_through: None,
             floor_enforced: true,
             extent: ExpressionExtent::CompleteHardRange,
+            arrow_ends_tail: false,
         }
     }
 
@@ -44,6 +50,7 @@ impl ExpressionContext {
             validated_through: Some(usize::MAX),
             floor_enforced: false,
             extent: ExpressionExtent::CompleteHardRange,
+            arrow_ends_tail: false,
         }
     }
 
@@ -58,14 +65,39 @@ impl ExpressionContext {
             ),
             floor_enforced: true,
             extent: ExpressionExtent::CompleteHardRange,
+            arrow_ends_tail: self.arrow_ends_tail,
         }
     }
 
+    /// A complete hard range, such as a group's contents, which no `->`
+    /// ends.
     pub(super) fn complete(self) -> Self {
+        Self {
+            extent: ExpressionExtent::CompleteHardRange,
+            arrow_ends_tail: false,
+            ..self
+        }
+    }
+
+    /// A complete hard range that still ends at a `->` where this context
+    /// does: the body of a tail or of a suffix form.
+    pub(super) fn complete_keeping_arrow(self) -> Self {
         Self {
             extent: ExpressionExtent::CompleteHardRange,
             ..self
         }
+    }
+
+    /// Ends open tails at a top-level `->`, which a pattern follows.
+    pub(super) fn ending_at_arrow(self) -> Self {
+        Self {
+            arrow_ends_tail: true,
+            ..self
+        }
+    }
+
+    pub(super) fn arrow_ends_tail(self) -> bool {
+        self.arrow_ends_tail
     }
 
     pub(super) fn may_yield(self) -> Self {

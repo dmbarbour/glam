@@ -372,6 +372,11 @@ nested = f [do { .r 1 }, do {; .r 2; }]
 #   application it can therefore only be the final argument.
 # - Braced do is an expression atom. One leading/trailing `;` is ignored;
 #   interior empty statements and `do {;}` are invalid.
+# - `P <- op` and `P = value` bind only when the `<-` or `=` comes before any
+#   keyword form or `\` in the statement: `if (a, b) = e then ...` is an
+#   operation, `x = if ...` a binding. Guard clauses follow the same rule.
+# - In `op -> P`, the `->` ends op's open tails (`else` branch, `let`/`using`
+#   body, postfix `if` fallback, lambda body): `if c then .a else .b -> x`.
 # - Do bindings currently support irrefutable names, `_`, grouping, irrefutable
 #   `P as Q`, scalar literals, fixed quoted paths, list patterns with at most
 #   one potentially refutable variable-length segment, computed-path dictionary
