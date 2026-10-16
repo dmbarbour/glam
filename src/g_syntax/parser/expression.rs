@@ -1357,7 +1357,7 @@ pub(in crate::g_syntax::parser) mod term_oracle {
         // grammar reads it.
         let legacy;
         let (new, mut review_rules) = match new {
-            Err(Fail::Error { .. }) => {
+            Err(Fail::Error { .. } | Fail::Reported(_)) => {
                 legacy = legacy_reading();
                 (&legacy, legacy.is_ok())
             }
