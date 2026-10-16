@@ -909,7 +909,9 @@ beside group frames:
    `try_match` arms, braced and layout. (Multi-line `let` moved to the
    suffix slice on 2026-10-16, with the rest of `let`.)
 4. `parser-keyword-frames-suffixes`: `let`, `using`, `where`, `with` and
-   `object`.
+   `object`. Paused on 2026-10-16 for the
+   [grammar review](GrammarReview_2026-10-16.md), which may change these
+   forms; its sequencing section says how the remaining steps follow it.
 5. The structural parsers' expression paths then serve only the oracle,
    and go with the Chumsky grammar in `parser-grammar-retirement`.
 

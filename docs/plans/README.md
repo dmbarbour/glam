@@ -49,6 +49,11 @@ flags a step for discussion when work reaches it, not a decision.
   removed the keyword-form exponential (2026-10-15). Native keyword frames
   are next, then `parser-grammar-retirement`; `parser-scope-analysis`
   (name analysis over nested `where`) is independent.
+- [`GrammarReview_2026-10-16.md`](GrammarReview_2026-10-16.md): the
+  grammar reviewed for clarity when read (Green's cognitive dimensions) and
+  ease of parsing, and what belongs in the parser, a linter or a formatter.
+  Started 2026-10-16; `grammar-tail-position` has a survey. Pauses
+  `parser-keyword-frames-suffixes`.
 - [`TagPrefixSyntax_2026-10-16.md`](TagPrefixSyntax_2026-10-16.md):
   `path:` becomes a prefix operator and `:name` a pun everywhere, so braces
   lose their member grammar. Agreed 2026-10-16; follows the performance
