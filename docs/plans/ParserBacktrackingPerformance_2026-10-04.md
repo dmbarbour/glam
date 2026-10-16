@@ -295,6 +295,20 @@ Steps are referred to by name; see the plans README, "Step names".
    scans 245 M (`parser-keyword-frames`), `mark_used_locals` and
    `NestedLocals::bind` about 160 M, name comparisons 71 M, and binding-view
    parsing the rest. Make analysis linear in nesting depth.
+7. **Constant factors** (`parser-constant-factors`; added 2026-10-16, the
+   maintainer placing it toward the end of the parser plan). Once the
+   front end is linear, look for constant-factor reductions. Candidates
+   from measurement so far:
+   - allocation: `malloc` and `free` take about a quarter of the
+     instructions parsing nested binds 128 deep (callgrind, 2026-10-16);
+   - expression mode's term wrapping, up to 3% on literal workloads
+     (`parser-patterns-cover`);
+   - the lexer (`Lexer::run`, `Lexer::current_char`) and number parsing,
+     which lead a list literal's profile.
+
+   Attribute with callgrind (`valgrind` is installed): `perf record`
+   sampling is throttled here to about a hundred samples a run, too
+   coarse to compare.
 
 `parser-cover-ir` and `parser-term-parser` are additive and low-risk:
 production keeps the old parser until the oracle agrees.
@@ -312,12 +326,13 @@ production keeps the old parser until the oracle agrees.
 - `parser-patterns`: done 2026-10-16, in three slices, absorbing what
   remained of `parser-cover-ir`. See
   [Patterns 2026-10-16](#patterns-2026-10-16).
-  See [Patterns 2026-10-16](#patterns-2026-10-16).
 - `parser-keyword-frames`: first part merged 2026-10-15: keyword regions,
   the lexer's token tables, a lazy keyword search, and one key test for
   keywords ([Keyword regions 2026-10-15](#keyword-regions-2026-10-15)).
-  Native keyword frames remain.
+  Native keyword frames started 2026-10-16
+  ([Native keyword frames 2026-10-16](#native-keyword-frames-2026-10-16)).
 - `parser-scope-analysis`: added 2026-10-15; not started.
+- `parser-constant-factors`: added 2026-10-16; not started.
 - `parser-grammar-retirement`: not started. Chumsky still parses the
   views the term parser reports as unsupported, and runs as the oracle in
   tests.
@@ -831,6 +846,67 @@ Expression parses pay up to 3% on synthetic literals for the term wrapping
 - Conversion recurses on a term's nesting, as the later passes over
   patterns do (`perf-pre-eval-stack-depth`).
 - The standing documentation question below now covers cover mode too.
+
+## Native keyword frames 2026-10-16
+
+*Started (maintainer, 2026-10-16).* The rest of `parser-keyword-frames`.
+
+**Why, measured.** Nesting is still superlinear in keyword forms:
+`parse_binds` grows with k 1.59 and `parse_ifs` with k 1.23 at depths
+32–128, and `chain_where` with k 1.44. Callgrind at depth 128 puts the
+excess in `term::top_pieces` (7.2 M of 34.5 M instructions for nested
+binds, 4.0 M of 18.7 M for nested `if`s), with `may_head_keyword_form` and
+`validate_expression_floor` behind it. Each keyword level hands sub-views
+to a fresh term parse, whose token pass walks every token nested inside
+it, regions included, and checks every line's floor again. Each level also
+recurses on the Rust stack.
+
+**Design.** The term parser's token pass keeps keyword frames on its stack,
+beside group frames:
+- **Opening and phases.** A keyword head in keyword position opens a frame.
+  Its own contextual keywords (`then`, `else`, `in`, `with`, …) switch its
+  phase when the pass meets them at the frame's level. Prefix and postfix
+  `if` share a frame: its guard phase ends at `then` for a prefix `if`, or
+  at `else` for a postfix one.
+- **Closing.** A frame closes where its extent ends:
+  - its group member's separator or close;
+  - a keyword that only an enclosing frame accepts, such as an `else`
+    after an `else` branch;
+  - a `->` that ends tails, in binding positions;
+  - the end of the view;
+  - for a layout form, a line at or left of its block's anchor.
+
+  Closing interprets the frame's phases into one form piece, as a group's
+  close interprets its cover. So nesting costs heap frames, and each token
+  is walked once.
+- **Modes.** Each phase has a mode: guard phases and arm heads read in
+  cover mode, branches as expressions. A group takes its frame's mode when
+  it opens.
+- **Floors.** Each phase that owns a floor carries it on the stack, and the
+  pass checks each line start once against the stack: the same intervals
+  `validate_expression_floor` checks view by view, with the same messages.
+- **Layout blocks** become block frames with an anchor, in the manner of
+  Haskell's layout algorithm. A line at the anchor separates members, a
+  deeper line continues one, and a shallower line closes the block. A
+  hanging block anchors at its first member's column.
+- **Transition.** Forms not yet native keep their regions and delegation.
+  `parse_expression_extent` routes a native form's views to the term
+  parser, so the term oracle compares each native form with the structural
+  parser it replaces: the Chumsky grammar still delegates every keyword
+  form to those parsers.
+
+**Slices**, in order:
+1. `parser-keyword-frames-conditionals`: the frame machinery, `if`, `try`
+   and postfix `if`, and floors checked per line start. Guards stay a
+   region, read by the guard parser.
+2. `parser-keyword-frames-bindings`: guard clauses and do statements split
+   from pieces, with cover-mode groups in guard phases; `let … in` and
+   `using`.
+3. `parser-keyword-frames-layout`: block frames; `do`, `match` and
+   `try_match` arms, braced and layout; multi-line `let`.
+4. `parser-keyword-frames-suffixes`: `where`, `with` and `object`.
+5. The structural parsers' expression paths then serve only the oracle,
+   and go with the Chumsky grammar in `parser-grammar-retirement`.
 
 ## Verification
 
