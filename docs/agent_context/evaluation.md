@@ -470,9 +470,10 @@ control-flow overview.
   logger, and future IDE sessions and owns ready-session selection, fairness,
   its work generation, worker waiting, and stable spark records.
   `EvaluationExecutor` owns worker activation and shutdown; workers retain only
-  a weak coordinator attachment. Shutdown joins every worker but the calling
-  one, so it waits for their quanta in flight and must not run under a heap
-  mutator. Active reflection/deferred records and their
+  a weak coordinator attachment. Shutdown joins every worker, so it waits for
+  their quanta in flight and must not run under a heap mutator. Nothing a
+  worker runs may own the runtime, and shutdown asserts it is not running on
+  one of its workers. Active reflection/deferred records and their
   claimable machines, reporting policy, and failure ledgers are
   coordinator-owned. Machine contexts retain only `EvaluationDemandState`;
   serial pumping and reporting use its weak coordinator route and never

@@ -10,22 +10,25 @@ use glam::reflection::{
     TaskValidation, ValidationResult, reflection_request_specs,
 };
 use glam::{
-    Assembler, Diagnostic, DiagnosticBus, DiagnosticIngress, Error, RuntimeDeliveryOutcome,
+    Diagnostic, DiagnosticBus, DiagnosticIngress, Error, RuntimeDeliveryOutcome,
     RuntimeEventJournal, RuntimeEventSnapshot, RuntimeInputReader, RuntimeOutputDelivery,
-    RuntimeOutputWriter, RuntimeTaskCapability, Value,
+    RuntimeOutputWriter, RuntimeTaskCapability, Value, Values,
 };
 
 use super::supervisor::LogHost;
 use crate::DiagnosticBusLocal;
 
+/// The CLI's effect specialization. Every task it runs carries a copy, so
+/// it holds value construction only: anything a worker runs must not own
+/// the runtime (`runtime-retirement-joins-workers`).
 #[derive(Clone)]
 pub(crate) struct MainEffects {
-    assembler: Assembler,
+    values: Values,
 }
 
 impl MainEffects {
-    pub(crate) fn new(assembler: Assembler) -> Self {
-        Self { assembler }
+    pub(crate) fn new(values: Values) -> Self {
+        Self { values }
     }
 }
 
@@ -142,8 +145,7 @@ impl SpecializationRequestWork<MainEffects> for MainRequestWork {
                     TaskHalt::new("`.write_stderr` received the wrong number of arguments")
                 })?;
                 let binary = specialization
-                    .assembler
-                    .values()
+                    .values
                     .anno_binary(value)
                     .map_err(TaskHalt::from)?;
                 *self = Self::WriteStderrValue;
@@ -255,7 +257,6 @@ impl LoggerTaskHost {
         input: Arc<LogHost>,
         diagnostics: DiagnosticBus,
         reflection_environment: Value,
-        assembler: Assembler,
     ) -> Self {
         diagnostics
             .bind_runtime(&input.runtime)
@@ -273,14 +274,15 @@ impl LoggerTaskHost {
                 },
             )
             .expect("logger diagnostic output endpoint should be constructible");
+        let stderr_values = input.runtime.values();
         let stderr_output = input
             .runtime
             .output_endpoint(
-                move |value| {
-                    assembler
-                        .evaluator()
-                        .eval(&value)?
-                        .as_bytes()?
+                // `.write_stderr` writes only evaluated binary data, so the
+                // decoder needs no evaluation, nor the runtime it would own.
+                move |value: Value| {
+                    stderr_values
+                        .evaluated_bytes(&value)?
                         .ok_or_else(|| Error::new("stderr output requires binary data"))
                 },
                 |bytes: Bytes| {
@@ -526,7 +528,6 @@ mod tests {
             input.clone(),
             diagnostics.clone(),
             assembler.reflection_environment_for_role("logger"),
-            assembler.clone(),
         );
 
         <LoggerTaskHost as ReflectionServices>::emit_diagnostic(

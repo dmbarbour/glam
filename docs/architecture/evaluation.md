@@ -200,9 +200,12 @@ Workers retain a weak coordinator attachment and claim either an exact ready
 task or spark record from it. Shutdown stops them from claiming more and
 then joins them, waiting only for each worker's quantum in flight, which is
 bounded: a quantum that never ends is a bug. So no worker holds the runtime's
-value domain once retirement returns. A worker that retires the runtime
-itself is not joined; it returns after its own quantum. Retirement waits, so
-it must not happen under a heap mutator (`assert_outside_mutator`). Reflection and deferred claims need only their
+value domain once retirement returns. Only the runtime's clients own it:
+nothing a worker runs (a task's machine, specialization or host, or an
+output decoder it delivers through) may hold an `EvaluationRuntime` or an
+`Assembler`, and retirement asserts that it is not running on one of its own
+workers, which would have to join its peers. Retirement waits, so it must not
+happen under a heap mutator (`assert_outside_mutator`). Reflection and deferred claims need only their
 coordinator records; resident machine contexts may retain closed demand state,
 but no route recovers the owner lease. Final owner drop can therefore close
 queued and blocked work immediately while a worker safely finishes one

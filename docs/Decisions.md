@@ -1633,8 +1633,12 @@ maps the short names used here to file names.
   heap mutator, which `assert_outside_mutator` checks.
 - **Consequences:**
   - No worker holds the value domain once retirement returns.
-  - A worker that drops its runtime's last handle is not joined and
-    returns after its own quantum.
+  - Nothing a worker runs may own the runtime (maintainer, the same day):
+    workers are not owners equal to the library's clients, so retirement
+    asserts, in every build, that it is not running on one of its own
+    workers. The CLI's effect specialization holds `Values` instead of an
+    `Assembler`, and its stderr decoder reads evaluated bytes through
+    `Values::evaluated_bytes` instead of evaluating.
   - Tests that observed a detached worker after shutdown now shut down on
     another thread and observe it while shutdown waits.
 - **Rule lives in:** `architecture/evaluation.md`, the executor paragraph;

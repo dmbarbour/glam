@@ -589,6 +589,19 @@ impl Values {
         })
     }
 
+    /// The compact binary data `value` already holds, without demanding it:
+    /// `None` when it holds anything else, an unevaluated thunk included. An
+    /// output decoder can read evaluated data through it without owning an
+    /// evaluator, and so the runtime.
+    pub fn evaluated_bytes(&self, value: &Value) -> Result<Option<Bytes>, Error> {
+        self.with_access(|values| {
+            values.with_core(value, |value| match value {
+                CoreValue::Binary(bytes) => Some(bytes.clone()),
+                _ => None,
+            })
+        })
+    }
+
     /// Constructs `anno 'binary Value` without demanding `Value`.
     pub fn anno_binary(&self, value: Value) -> Result<Value, Error> {
         self.with_access(|values| {

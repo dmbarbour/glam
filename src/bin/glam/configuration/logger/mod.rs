@@ -33,9 +33,7 @@ pub(crate) fn start_logger(
         input.clone(),
         diagnostics.clone(),
         assembler.reflection_environment_for_role("logger"),
-        assembler.clone(),
     ));
-    let effect_assembler = assembler.clone();
     let values = assembler.values();
     let custom = match values
         .access_names(configuration, ["conf", "log"])
@@ -82,7 +80,7 @@ pub(crate) fn start_logger(
         let run = EffectRun::new(
             &evaluation_runtime,
             &custom,
-            MainEffects::new(effect_assembler),
+            MainEffects::new(values.clone()),
             host,
         )
         .contextualizing_failures(

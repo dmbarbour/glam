@@ -420,12 +420,11 @@ mod tests {
             input.clone(),
             diagnostics.clone(),
             assembler.reflection_environment_for_role("logger"),
-            assembler.clone(),
         ));
         let task = EffectRun::new(
             &input.runtime,
             &effect,
-            MainEffects::new(assembler.clone()),
+            MainEffects::new(assembler.values()),
             host.clone(),
         )
         .schedule_diagnostic_consumer(&installation.lifecycle, &input.diagnostic_ingress)
@@ -441,7 +440,7 @@ mod tests {
         let producer_task = EffectRun::new(
             &input.runtime,
             &producer,
-            MainEffects::new(assembler.clone()),
+            MainEffects::new(assembler.values()),
             host,
         )
         .schedule(&producer_lifecycle)
@@ -528,12 +527,11 @@ mod tests {
             input.clone(),
             DiagnosticBus::for_runtime(&input.runtime),
             assembler.reflection_environment_for_role("logger"),
-            assembler.clone(),
         ));
         let task = EffectRun::new(
             &input.runtime,
             &effect,
-            MainEffects::new(assembler.clone()),
+            MainEffects::new(assembler.values()),
             host,
         )
         .schedule_diagnostic_consumer(&installation.lifecycle, &input.diagnostic_ingress)
@@ -625,12 +623,11 @@ mod tests {
             input.clone(),
             diagnostics.clone(),
             assembler.reflection_environment_for_role("logger"),
-            assembler.clone(),
         ));
         let task = EffectRun::new(
             &input.runtime,
             &effect,
-            MainEffects::new(assembler.clone()),
+            MainEffects::new(assembler.values()),
             host.clone(),
         )
         .schedule_diagnostic_consumer(&installation.lifecycle, &input.diagnostic_ingress)
@@ -649,7 +646,7 @@ mod tests {
         let producer_task = EffectRun::new(
             &input.runtime,
             &producer,
-            MainEffects::new(assembler.clone()),
+            MainEffects::new(assembler.values()),
             host.clone(),
         )
         .schedule(&producer_lifecycle)
@@ -670,9 +667,14 @@ mod tests {
             "the barrier must release only after the diagnostic is admitted"
         );
         let release_lifecycle = EffectLifecycle::new(&input.runtime);
-        let release = EffectRun::new(&input.runtime, &start, MainEffects::new(assembler), host)
-            .schedule(&release_lifecycle)
-            .expect("logger release effect should schedule");
+        let release = EffectRun::new(
+            &input.runtime,
+            &start,
+            MainEffects::new(assembler.values()),
+            host,
+        )
+        .schedule(&release_lifecycle)
+        .expect("logger release effect should schedule");
         assert!(matches!(release.run().unwrap(), TaskOutcome::Complete(_)));
 
         input.runtime.pump_until_stable();
@@ -740,13 +742,12 @@ mod tests {
             input.clone(),
             logger_diagnostics.clone(),
             assembler.reflection_environment_for_role("logger"),
-            assembler.clone(),
         ));
         let lifecycle = EffectLifecycle::new(&input.runtime);
         let task = EffectRun::new(
             &input.runtime,
             &effect,
-            MainEffects::new(assembler.clone()),
+            MainEffects::new(assembler.values()),
             host,
         )
         .schedule(&lifecycle)
@@ -850,14 +851,13 @@ mod tests {
             input.clone(),
             DiagnosticBus::for_runtime(&input.runtime),
             assembler.reflection_environment_for_role("logger"),
-            assembler.clone(),
         ));
         let exit_lifecycle = EffectLifecycle::new(&input.runtime);
         let blocked_lifecycle = EffectLifecycle::new(&input.runtime);
         let _exit_task = EffectRun::new(
             &input.runtime,
             &exit,
-            MainEffects::new(assembler.clone()),
+            MainEffects::new(assembler.values()),
             host.clone(),
         )
         .schedule(&exit_lifecycle)
@@ -865,7 +865,7 @@ mod tests {
         let _blocked_task = EffectRun::new(
             &input.runtime,
             &blocked,
-            MainEffects::new(assembler.clone()),
+            MainEffects::new(assembler.values()),
             host,
         )
         .schedule(&blocked_lifecycle)
@@ -976,13 +976,12 @@ mod tests {
             input.clone(),
             DiagnosticBus::for_runtime(&input.runtime),
             assembler.reflection_environment_for_role("logger"),
-            assembler.clone(),
         ));
         let lifecycle = EffectLifecycle::new(&input.runtime);
         let task = EffectRun::new(
             &input.runtime,
             &effect,
-            MainEffects::new(assembler.clone()),
+            MainEffects::new(assembler.values()),
             host,
         )
         .schedule(&lifecycle)

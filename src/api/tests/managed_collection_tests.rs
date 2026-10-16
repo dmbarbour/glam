@@ -71,12 +71,13 @@ struct PausedManagedWorker {
     release: mpsc::Receiver<()>,
 }
 
-/// Drops the runtime handle it holds on its worker, once released.
+/// Drops the runtime handle it holds on its worker, once released, and
+/// reports the panic that retirement raised, if any.
 struct RetiringWorker {
     runtime: Option<EvaluationRuntime>,
     entered: Option<mpsc::Sender<()>>,
     release: mpsc::Receiver<()>,
-    retired: mpsc::Sender<()>,
+    retired: mpsc::Sender<Option<String>>,
 }
 
 impl EvaluationTaskMachine for RetiringWorker {
@@ -106,9 +107,13 @@ impl EvaluationTaskMachine for RetiringWorker {
                 1,
                 "the worker should hold the runtime's last handle"
             );
-            drop(runtime);
+            let retirement =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(runtime)));
+            let message = retirement
+                .err()
+                .map(|payload| crate::core::panic_payload_message(payload.as_ref()).to_string());
             retired
-                .send(())
+                .send(message)
                 .expect("retirement observer should remain live");
         });
         EvaluationMachinePoll::Complete(poll_context.root_unit())
@@ -670,11 +675,11 @@ fn runtime_retirement_waits_for_a_worker_holding_the_value_domain() {
     );
 }
 
-/// A worker that drops its runtime's last handle cannot wait for itself:
-/// retirement waits for the other workers only, and this one returns after
-/// its own quantum.
+/// Nothing a worker runs may own its runtime, so a runtime retired on one of
+/// its own workers is a bug, which retirement reports instead of having that
+/// worker join its peers.
 #[test]
-fn a_worker_that_retires_its_runtime_does_not_wait_for_itself() {
+fn a_runtime_retired_on_its_own_worker_is_reported() {
     let runtime = EvaluationRuntime::new(1).expect("worker runtime should build");
     let assembler = Assembler::builder()
         .evaluation_runtime(runtime.clone())
@@ -703,9 +708,15 @@ fn a_worker_that_retires_its_runtime_does_not_wait_for_itself() {
     release_tx
         .send(())
         .expect("the retiring worker should be releasable");
-    retired_rx
+    let message = retired_rx
         .recv_timeout(Duration::from_secs(2))
-        .expect("a worker retiring its own runtime must not wait for itself");
+        .expect("the worker should retire the runtime");
+    assert!(
+        message
+            .as_deref()
+            .is_some_and(|message| message.contains("retired on one of its own workers")),
+        "retirement on a worker should be reported, not {message:?}"
+    );
     drop(task);
     drop(context);
 }

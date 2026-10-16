@@ -248,24 +248,28 @@ impl Drop for EvaluationExecutor {
         // A stopped worker takes no new work, so it returns once its quantum
         // in flight ends, and a quantum is bounded: one that never ends is a
         // bug. Retirement waits for every worker, so none holds the value
-        // domain afterwards. A worker that retires the runtime itself cannot
-        // wait for itself; it returns after its own quantum.
+        // domain afterwards.
+        //
+        // Only the runtime's clients own it: nothing a worker runs may hold
+        // the runtime, so retirement never runs on one of its workers, which
+        // would have to join its peers.
         let current = thread::current().id();
         let workers = std::mem::take(
             self.workers
                 .get_mut()
                 .unwrap_or_else(PoisonError::into_inner),
         );
-        let others = workers
-            .into_iter()
-            .filter(|worker| worker.thread().id() != current)
-            .collect::<Vec<_>>();
-        if !others.is_empty() {
-            crate::core::assert_outside_mutator();
-            #[cfg(test)]
-            self.inner.notify_retirement_join();
+        assert!(
+            workers.iter().all(|worker| worker.thread().id() != current),
+            "a runtime retired on one of its own workers: something a worker runs owns the runtime"
+        );
+        if workers.is_empty() {
+            return;
         }
-        for worker in others {
+        crate::core::assert_outside_mutator();
+        #[cfg(test)]
+        self.inner.notify_retirement_join();
+        for worker in workers {
             // A worker's own panic has already poisoned the runtime.
             let _ = worker.join();
         }
