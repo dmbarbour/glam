@@ -1,8 +1,9 @@
 # Grammar Review — 2026-10-16
 
 Status: started 2026-10-16 at the maintainer's request. The first item,
-[`grammar-tail-position`](#grammar-tail-position), has a survey; the others
-are listed for review. `parser-keyword-frames-suffixes` in the
+[`grammar-tail-position`](#grammar-tail-position), was decided and built on
+2026-10-16 (`tail-position` in `Decisions.md`); the others are listed for
+review. `parser-keyword-frames-suffixes` in the
 [parser backtracking plan](ParserBacktrackingPerformance_2026-10-04.md) is
 paused until this review settles the forms it covers.
 
@@ -42,10 +43,11 @@ Some rules belong to tools that do not exist yet: `glam --lint` and
   differently, and what would make the grammar ambiguous or need unbounded
   lookahead. Its rules are few and uniform, one sentence per construct,
   because every exception is something a reader must know.
-- **A linter** flags what parses deterministically but reads poorly, such as
-  a match nested in a match's subject. Its rules may have exceptions,
-  severities and opt-outs, because a warning costs a reader nothing to
-  learn.
+- **A linter** flags what is easy for a machine to parse but confusing to
+  humans, such as a match nested in a match's subject: a refinement type on
+  the grammar, guided by clarity and intuition (maintainer, 2026-10-16). Its
+  rules may have exceptions, severities and opt-outs, because a warning
+  costs a reader nothing to learn.
 - **A formatter** owns secondary notation: indentation, alignment, braces
   versus layout, and parentheses the grammar allows but does not require.
   It must preserve the parse, which a round-trip test can check. Syntax.md
@@ -55,7 +57,8 @@ Some rules belong to tools that do not exist yet: `glam --lint` and
 
 ### `grammar-tail-position`
 
-*Proposed by the maintainer, 2026-10-16; under survey.*
+*Proposed by the maintainer and decided 2026-10-16, with the three
+recommendations under "Open questions"; built the same day.*
 
 **Tail forms** are the forms whose last part extends to the right: prefix
 `if` and `try`, `match` and `try_match`, `do`, lambdas, `let`, `using` and
@@ -139,16 +142,39 @@ Forms the term parser still delegates are not covered: `let`, `using` and
   dedent with `.`. Syntax.md calls braced `do` an atom, and three tests
   use the suffix.
 
-**Open questions.**
-1. **A path suffix after `}`.** Recommended: an error, for consistency;
+**Open questions**, each settled as recommended (maintainer, 2026-10-16):
+1. **A path suffix after `}`** is an error, for consistency;
    `(do { … }).result` remains.
 2. **`where` after an inline tail**, as in `f x = if x then a else b
-   where …`. `where` attaches to the whole definition, so recommended: it
-   ends the region, and an inline tail may precede it. The survey does not
-   see view-level `where`.
+   where …`, is allowed: `where` attaches to the whole definition, so it
+   ends the region.
 3. **`with`, `then` and `and` after a block end**, as in a match nested in
-   a subject: allowed by the parser; whether a linter flags them waits for
-   the linter.
+   a subject, are allowed by the parser; whether a linter flags them waits
+   for the linter.
+
+**As built (2026-10-16).**
+- The term parser's token pass checks a tail form where it closes: a
+  conditional, a hanging `do` block or hanging arms closed by a keyword or
+  arrow on their line fails, unless the conditional's `else` branch ends
+  with a block. Each frame records the first `\` of its current member, so
+  a lambda that a guard's `and`, a `then` or `else`, a match's `with`, an
+  arm mark or a bind's `->` would end fails too, as does one ending a
+  postfix `if`'s fallback.
+- The item interpreter rejects an argument or a path after a form piece.
+- The first violation fails the view: "parenthesize this `if` expression:
+  `->` follows it, so it is not in tail position".
+- `let`, `using` and `object` are still delegated to the structural
+  parsers, and follow the rule when they become frames in
+  `parser-keyword-frames-suffixes`. So does an inline `let` binding that
+  `in` ends, as in `let f = \x -> x in f 1`, which the rule rejects.
+- **The oracle.** The Chumsky grammar and the structural parsers predate
+  the rule, which only rejects. An expression the term parser rejects is
+  compared as the term parser reads it with the rule off (a test-only
+  switch), and the reference parse runs with it off too, since the
+  structural parsers call back into the term parser.
+- Tests that pinned the old readings now check the errors and the
+  parenthesized forms; `tail_forms_stand_alone_only_in_tail_position`
+  states the rule in one table.
 
 ### Further items
 
@@ -161,8 +187,10 @@ Each needs options, a recommendation and the maintainer's decision.
    arm mark follows later on its line. Candidate: a `when` that ends its
    line heads nested arms.
 3. **Prefix or postfix `if`.** `f a if b then c else d` and `f a if b else c`
-   differ only at the `then` or `else` after a condition of any length.
-   Resolved by the tail rule: an `if` after an operand is postfix.
+   differ only at the `then` or `else` after a condition of any length. The
+   tail rule leaves this open, since a prefix `if` may be a final argument.
+   Candidate: an `if` after an operand is postfix, so a prefix `if` as an
+   argument is parenthesized.
 4. **`and` in guards.** `if a or b and c then …` reads as `(a or b) and c`,
    while `x = a or b and c` is an error, since `and` and `or` have no
    precedence relationship. Candidate: a guard is an ordinary `and` chain

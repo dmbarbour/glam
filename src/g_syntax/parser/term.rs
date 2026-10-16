@@ -39,6 +39,11 @@
 //! postfix `if`, on the same line or a continuation line, ends the innermost
 //! open lambda's body: `\x -> b if c else d` is `\x -> (b if c else d)`.
 //!
+//! **Tail position** (Syntax.md): a conditional, `do` block, match or
+//! lambda that a keyword or arrow on its line would end, or that an argument
+//! or path follows, fails its view. Only rejecting, the rule is off while
+//! the oracle compares such a view with the grammar.
+//!
 //! **Other keyword forms** (`using`, and any form inside another's region)
 //! are delegated to the structural parsers through the same entry points the
 //! Chumsky grammar uses. The cursor then skips to the end the structural
@@ -244,6 +249,34 @@ fn opens_keyword_region(view: TokenView<'_, '_>, index: usize, mode: Mode) -> bo
             || mode == Mode::Cover && is_pattern_when(view, index))
 }
 
+/// Whether the tail rule is on (Syntax.md "Tail position"), as it is
+/// outside the oracle: the structural parsers predate the rule, which only
+/// rejects, so the oracle compares a rejected expression's parse without it.
+fn tail_rule_enabled() -> bool {
+    #[cfg(test)]
+    if TAIL_RULE_OFF.with(std::cell::Cell::get) {
+        return false;
+    }
+    true
+}
+
+/// The error for a tail form at `head` that `follower` follows, so that it
+/// stands outside tail position.
+fn misplaced_tail(head: usize, label: &str, follower: &str) -> Fail {
+    Fail::error(format!(
+        "parenthesize this {label}: {follower} follows it, so it is not in tail position"
+    ))
+    .or_at(Some(head))
+}
+
+/// A form's name in errors.
+fn form_label(keyword: &str) -> String {
+    match keyword {
+        "do" => "`do` block".to_string(),
+        keyword => format!("`{keyword}` expression"),
+    }
+}
+
 /// Whether keyword regions are on, as they are outside tests that check
 /// regions never change a parse.
 fn regions_enabled() -> bool {
@@ -384,6 +417,13 @@ impl Covers {
             .as_ref()
             .expect("a form is inspected before it is consumed");
         (form.shape, form.keyword)
+    }
+
+    /// Whether a form's last part ended at its own `}` or a dedent.
+    fn form_ends_with_block(&self, id: usize) -> bool {
+        self.forms.borrow()[id]
+            .as_ref()
+            .is_some_and(|form| form.ends_with_block)
     }
 
     fn take_form(&self, id: usize) -> Form {
@@ -609,6 +649,16 @@ thread_local! {
     /// check no group is interpreted twice.
     static INTERPRETED_GROUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static REGIONS_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TAIL_RULE_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `work` without the tail rule on this thread, for the oracle.
+#[cfg(test)]
+pub(super) fn without_tail_rule<R>(work: impl FnOnce() -> R) -> R {
+    let was = TAIL_RULE_OFF.with(|off| off.replace(true));
+    let result = work();
+    TAIL_RULE_OFF.with(|off| off.set(was));
+    result
 }
 
 /// Runs `work` with no keyword regions on this thread, for tests that check
@@ -1599,6 +1649,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     /// An atom followed by argument atoms, each after a space or after line
     /// breaks.
     fn application_head(&mut self) -> Parse<Term> {
+        let mut form = self.prefix_form_at(0);
         let mut function = self.atom()?;
         loop {
             let (breaks, _) = self.line_starts_at(0);
@@ -1607,6 +1658,14 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             if !(spaced && self.starts_atom_at(breaks)) || self.postfix_if_at(breaks) {
                 break;
             }
+            // A tail form stands only where nothing but an operator or a
+            // keyword follows it.
+            if let Some((head, keyword)) = form
+                && tail_rule_enabled()
+            {
+                return Err(misplaced_tail(head, &form_label(keyword), "an argument"));
+            }
+            form = self.prefix_form_at(breaks);
             let at = self.here();
             self.position += breaks;
             if self.symbol_at(0, ".") {
@@ -1628,6 +1687,17 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             };
         }
         Ok(function)
+    }
+
+    /// The head and keyword of the prefix form at `offset`, if one is there.
+    fn prefix_form_at(&self, offset: usize) -> Option<(usize, &'static str)> {
+        match self.peek_at(offset) {
+            Some(Piece::Form { head, form, .. }) => match self.scope.covers.form_shape(*form) {
+                (FormShape::Prefix, keyword) => Some((*head, keyword)),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// Whether an argument atom starts at `offset`. The operator names `and`
@@ -1753,6 +1823,13 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             }
         };
         let suffixes = self.path_suffixes()?;
+        if !suffixes.is_empty() && tail_rule_enabled() {
+            return Err(misplaced_tail(
+                form.head,
+                &form_label(form.keyword),
+                "a path",
+            ));
+        }
         Ok(access_if_path(expression, suffixes))
     }
 

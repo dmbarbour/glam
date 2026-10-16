@@ -483,8 +483,55 @@ maps the short names used here to file names.
   Do Notation".
 - **Recorded in:** parser backtracking plan, "Patterns 2026-10-16".
 
+### Keyword forms and lambdas stand alone only in tail position
+`tail-position` · 2026-10-16 · maintainer · accepted
+- **Context:** the grammar review's first item. Forms whose last part
+  extends to the right read as atoms wherever they stood:
+  `f match x with {…} y` applied the match, `if x <- if a then b else c
+  and y then …` ended the inner `else` at the `and`, and `if a then if b
+  then c else d else e` gave the second `else` to the outer `if`. The parser
+  resolved each, but a reader could not see where such a form ends without
+  its rules. A survey found no sample or doc example that relied on them,
+  only tests that pinned them.
+- **Decision:** prefix `if` and `try`, `match` and `try_match`, `do`,
+  lambdas, `let`, `using` and `object` are tail forms, which stand without
+  parentheses only in tail position:
+  - one whose last part ends on its line may be followed only by the end of
+    its statement, definition or group;
+  - a braced body's `{` and `}` stand for an indent and a dedent, and after
+    a tail form's `}` or dedent only an infix operator or a keyword of an
+    enclosing form may follow, never an argument or a path;
+  - `where` ends the expression it follows;
+  - postfix `if` is an operator, not a tail form.
+- **Alternatives rejected:** keyword forms only at the head of a region,
+  which loses a match or `do` block as a final argument; and treating `}` as
+  an inline end, which loses `if c then do { a } else do { b }`.
+- **Consequences:**
+  - Parenthesized now: `f (match …) y`, `f (do { a }) y`,
+    `(do { … }).x`, `(if c then a else b) -> P`, `f (\a -> E) -> P`,
+    `if y <- (if a then b else c) and d then …`, an inline
+    `if a then (if b then c else d) else e`, and
+    `if any xs (\x -> x > 0) then …`.
+  - Unchanged: a match or `do` block as a final argument, `P <- f \a -> E`,
+    an operator resuming after a layout block, `a if c else b -> P`, and
+    `match match a with {…} with {…}`, which a linter may flag.
+  - Every change is a restriction, so the term oracle compares an
+    expression the term parser rejects as it reads without the rule.
+  - Supersedes `match-is-an-atom`: a match is a tail form. A match nested
+    in a subject still takes the first `with` after its own head, and nested
+    arms still end their arm.
+  - Narrows `bindings-split-before-keyword-forms`: a bind's `->` ends a
+    postfix `if`'s fallback or a tail a block ends; another tail form before
+    it is parenthesized.
+  - The bootstrap enforces the rule for conditionals, `do` blocks, matches
+    and lambdas; `let`, `using` and `object` follow when they become frames
+    in `parser-keyword-frames-suffixes`.
+- **Rule lives in:** `Syntax.md` "Tail Position"; `SyntaxCheatSheet.md`
+  "Operators, Pipes, Application".
+- **Recorded in:** grammar review, `grammar-tail-position`.
+
 ### A match is an atom, and nests in its subject
-`match-is-an-atom` · 2026-10-16 · agent · accepted
+`match-is-an-atom` · 2026-10-16 · agent · superseded
 - **Context:** making `match` a frame of the term parser's token pass, which
   reads every form as an atom of the item it stands in. View-level dispatch
   let only an operator, `where` or a postfix `if` follow a match that led
@@ -508,6 +555,7 @@ maps the short names used here to file names.
   lines.
 - **Recorded in:** parser backtracking plan, "Native keyword frames
   2026-10-16".
+- **Superseded by:** `tail-position`.
 
 ### Only a lone quoted name is an atom key in a key path
 `lone-quoted-name-is-an-atom-key` · 2026-10-06 · maintainer · superseded
@@ -2598,6 +2646,7 @@ Short names used under **Recorded in**, with their files under `docs/`.
 | explicit heap holds plan | `plans/ExplicitHeapHolds_2026-10-09.md` |
 | lazy diagnostics plan | `plans/LazyDiagnostics_2026-10-15.md` |
 | parser backtracking plan | `plans/ParserBacktrackingPerformance_2026-10-04.md` |
+| grammar review | `plans/GrammarReview_2026-10-16.md` |
 | C2C review | `reviews/GarbageCollectorC2C_2026-08-22.md` |
 | C6 review | `reviews/GarbageCollectorC6_2026-08-24.md` |
 | C8 review | `reviews/GarbageCollectorC8_2026-10-03.md` |

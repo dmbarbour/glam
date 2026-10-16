@@ -10,6 +10,20 @@ fn parse_do_expression(source: &str) -> SyntaxExpr {
         .unwrap_or_else(|diagnostics| panic!("parser rejected `{source}`: {diagnostics:#?}"))
 }
 
+/// Asserts that `source` fails because a tail form in it stands outside
+/// tail position (Syntax.md "Tail position").
+#[track_caller]
+fn assert_outside_tail_position(source: &str) {
+    let diagnostics = parse_compound_expression_fragment(source.as_bytes())
+        .expect_err("a tail form outside tail position fails");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("not in tail position")),
+        "`{source}` reported {diagnostics:#?}"
+    );
+}
+
 #[test]
 fn layout_do_parses() {
     for source in [
@@ -121,20 +135,21 @@ fn keyword_forms_own_their_binders() {
     ));
 }
 
-/// In a binding, an open tail ends at a top-level `->`, which a pattern
-/// follows; elsewhere `->` after a tail is an error, as it was.
+/// In a binding, a postfix `if`'s fallback and a tail ended by a block
+/// end at a top-level `->`, which a pattern follows. A tail form that ends
+/// on its line must end its statement, and elsewhere `->` after a tail is
+/// an error, as it was. (`let` and `using` follow the tail rule once they
+/// are frames, in `parser-keyword-frames-suffixes`.)
 #[test]
 fn open_tails_end_at_a_forward_binding() {
     for (source, form) in [
-        ("do { if c then .a else .b -> y; .r y }", "if"),
+        ("do { (if c then .a else .b) -> y; .r y }", "if"),
         ("do { .r 1 if c else .r 2 -> y; .r y }", "if"),
-        ("do { let z = 1 in .r z -> y; .r y }", "let"),
-        ("do { using m in .r 1 -> y; .r y }", "using"),
         (
             "do { if c then .a else do { .b -> z; .r z } -> y; .r y }",
             "if",
         ),
-        ("do { .r 1 |> \\v -> v -> y; .r y }", "pipe"),
+        ("do { .r 1 |> (\\v -> v) -> y; .r y }", "pipe"),
         ("do { .r d with { a := 1 } -> y; .r y }", "with"),
     ] {
         let SyntaxExpr::Do(DoExpr { steps, .. }) = parse_do_expression(source) else {
@@ -168,6 +183,9 @@ fn open_tails_end_at_a_forward_binding() {
     );
 
     assert!(parse_compound_expression_fragment(b"if c then a else b -> y").is_err());
+    assert_outside_tail_position("do { if c then .a else .b -> y; .r y }");
+    assert_outside_tail_position("do { .r 1 |> \\v -> v -> y; .r y }");
+    assert_outside_tail_position("do { .r 1 if c else \\v -> v -> y; .r y }");
 }
 
 /// Guard clauses bind by the same rule as statements, split at `and`
@@ -195,12 +213,14 @@ fn guard_clauses_bind_by_the_statement_rule() {
     );
 }
 
-/// As a `->` ends them in a binding, an `and` ends the `else` tails open in
-/// guards, so a clause binding a conditional is followed by the next.
+/// A conditional bound in a guard clause that another follows is
+/// parenthesized: its `else` branch would end at the `and`.
 #[test]
-fn an_and_in_guards_ends_the_else_tails_open_in_them() {
+fn a_conditional_bound_in_guards_is_parenthesized() {
+    assert_outside_tail_position("if x <- if a then b else c and y then 1 else 2");
+    assert_outside_tail_position("match v with {p when x <- if a then b else c and y => 1}");
     let SyntaxExpr::If(conditional) =
-        parse_do_expression("if x <- if a then b else c and y then 1 else 2")
+        parse_do_expression("if x <- (if a then b else c) and y then 1 else 2")
     else {
         panic!("expected an if expression");
     };
@@ -212,7 +232,7 @@ fn an_and_in_guards_ends_the_else_tails_open_in_them() {
         ] if *inner.else_result == SyntaxExpr::Name("c".to_owned()) && y == "y"
     ));
     let SyntaxExpr::Match(found) =
-        parse_do_expression("match v with {p when x <- if a then b else c and y => 1}")
+        parse_do_expression("match v with {p when x <- (if a then b else c) and y => 1}")
     else {
         panic!("expected a match expression");
     };
@@ -634,13 +654,18 @@ fn wildcard_pattern_guard_is_a_pass_clause() {
     assert_eq!(guards, &[SyntaxGuardClause::Pass]);
 }
 
+/// A braced `do` block stands where its braces end it, as a dedent would:
+/// only an operator or a keyword may follow it, not an argument or a path.
 #[test]
-fn braced_do_is_a_structural_atom_in_containers_and_other_do_blocks() {
+fn braced_do_stands_in_containers_and_other_do_blocks() {
+    assert_outside_tail_position("consume do { .r 1 } next");
+    assert_outside_tail_position("do { .r {answer: 42} }.answer");
     for source in [
         "consume [do { .r 1 }, do { text = \"a;b\"; .r text }, do { x = do .r 2; .r x }]",
-        "consume do { .r 1 } next",
+        "consume (do { .r 1 }) next",
         "result:do { .r 1 }",
-        "do { .r {answer: 42} }.answer",
+        "(do { .r {answer: 42} }).answer",
+        "do { .r 1 } >>= next",
         "(do { .r 1 }, do { .r 2 })",
         "do { nested <- do { .r 1 }; .r nested }",
         "do {\n; text = \"\"\"\n  \" semicolon; remains text\n\"\"\"\n; .r text\n}",

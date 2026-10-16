@@ -65,7 +65,7 @@ fn assert_has_error(source: &str, line: usize, message: &str) {
 
 #[test]
 fn contextual_expression_reports_its_absolute_token_end() {
-    parse_expression_fragment(b"  do { .r value }.result", |view| {
+    parse_expression_fragment(b"  (do { .r value }).result", |view| {
         let expected_end = view.range().end();
         let parsed = parse_expression_extent(view, ExpressionContext::for_owner(view).may_yield())?;
         assert_eq!(parsed.end(), expected_end);

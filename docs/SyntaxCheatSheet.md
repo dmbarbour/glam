@@ -329,6 +329,13 @@ f x                 # application; ad hoc polymorphism:
                     #   functions; {apply:f,_} x = f x; (eff:f) x
                     #   raw interaction-net values are not applicable
 f x \y -> body       # a trailing lambda is the final application argument
+# Tail forms (prefix if/try, match, do, lambdas, let, using, object) stand
+# alone only in tail position: on their line, only a closer or separator may
+# follow them; after their `}` or dedent, only an operator or an enclosing
+# form's keyword. Parenthesize them anywhere else:
+f (match x with {_ => 1}) y        # `f match x with {...} y` is an ERROR
+if c then do { a } else do { b }   # `}` ends the block, as a dedent does
+if a then (if b then c else d) else e
 foo.bar             # member access
 foo (.bar)          # apply foo to effect path .bar; `foo .bar` is an ERROR
 foo <| .bar         # equivalent alternative without parentheses
@@ -370,13 +377,15 @@ nested = f [do { .r 1 }, do {; .r 2; }]
 # - A layout do may yield to an aligned leading infix operator after its block.
 #   Otherwise it owns the trailing part of its containing expression; in an
 #   application it can therefore only be the final argument.
-# - Braced do is an expression atom. One leading/trailing `;` is ignored;
-#   interior empty statements and `do {;}` are invalid.
+# - Braced do ends at `}` as at a dedent: an operator or keyword may follow
+#   it, not an argument. One leading/trailing `;` is ignored; interior empty
+#   statements and `do {;}` are invalid.
 # - `P <- op` and `P = value` bind only when the `<-` or `=` comes before any
 #   keyword form or `\` in the statement: `if (a, b) = e then ...` is an
 #   operation, `x = if ...` a binding. Guard clauses follow the same rule.
-# - In `op -> P`, the `->` ends op's open tails (`else` branch, `let`/`using`
-#   body, postfix `if` fallback, lambda body): `if c then .a else .b -> x`.
+# - In `op -> P`, the `->` ends a postfix `if` fallback (`a if c else b -> x`)
+#   or a tail ended by a block; parenthesize other tail forms before it:
+#   `(if c then .a else .b) -> x`, `f (\a -> e) -> x`.
 # - Do bindings currently support irrefutable names, `_`, grouping, irrefutable
 #   `P as Q`, scalar literals, fixed quoted paths, list patterns with at most
 #   one potentially refutable variable-length segment, computed-path dictionary
@@ -439,7 +448,7 @@ match* Expr with ...                # lazy list of every successful result
 match* Expr with {}                 # []
 
 # The first ungrouped `with` belongs to `match`; group an updated subject.
-# A match is an atom: `match X with {...} y` applies it, as `do {...} y` does.
+# A match is a tail form: `(match X with {...}) y` applies it.
 match (Dict with { x := 1 }) with { {x:value} => value; _ => {}; }
 
 match when                          # no scrutinee: guard-only dispatch

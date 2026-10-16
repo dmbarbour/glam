@@ -1264,6 +1264,10 @@ fn parse_grammar_chain_view(
 /// GLAM_TERM_ORACLE=1 cargo test --lib
 /// ```
 ///
+/// The tail rule (Syntax.md "Tail position") only rejects, and the grammar
+/// predates it, so an expression the term parser rejects is compared as the
+/// term parser reads it without the rule.
+///
 /// Expressions the grammar's keyword forms parse while the oracle runs it
 /// are not compared again. The term parser's own parse reaches the same
 /// expressions, and comparing them would run the grammar again at every
@@ -1272,7 +1276,7 @@ fn parse_grammar_chain_view(
 pub(in crate::g_syntax::parser) mod term_oracle {
     use std::cell::{Cell, RefCell};
 
-    use super::super::term::Fail;
+    use super::super::term::{Fail, parse_term_chain, without_tail_rule};
     use super::{
         Diagnostic, ExpressionContext, InfixChain, TokenRange, TokenView, parse_grammar_chain_view,
     };
@@ -1283,6 +1287,8 @@ pub(in crate::g_syntax::parser) mod term_oracle {
         /// Compared expressions that both parsers accept.
         pub(in crate::g_syntax::parser) accepted: usize,
         pub(in crate::g_syntax::parser) unsupported: usize,
+        /// Compared expressions that only the tail rule rejects.
+        pub(in crate::g_syntax::parser) tail_rule: usize,
         pub(in crate::g_syntax::parser) unsupported_reasons:
             std::collections::BTreeMap<&'static str, usize>,
         pub(in crate::g_syntax::parser) disagreements: Vec<String>,
@@ -1305,12 +1311,12 @@ pub(in crate::g_syntax::parser) mod term_oracle {
     }
 
     /// The grammar's parse of `view`, without comparing the expressions it
-    /// parses through the term parser.
+    /// parses through the term parser, nor applying the tail rule there.
     fn reference(
         view: TokenView<'_, '_>,
         context: ExpressionContext,
     ) -> Result<InfixChain, Vec<Diagnostic>> {
-        suspended(|| parse_grammar_chain_view(view, context))
+        suspended(|| without_tail_rule(|| parse_grammar_chain_view(view, context)))
     }
 
     fn sweeping() -> bool {
@@ -1342,6 +1348,14 @@ pub(in crate::g_syntax::parser) mod term_oracle {
         if SUSPENDED.with(Cell::get) {
             return;
         }
+        let unrestricted;
+        let (new, tail_rule) = match new {
+            Err(Fail::Error { .. }) => {
+                unrestricted = suspended(|| without_tail_rule(|| parse_term_chain(view, context)));
+                (&unrestricted, unrestricted.is_ok())
+            }
+            _ => (new, false),
+        };
         let view = match new {
             Ok((_, end)) if *end < view.range().end() => view
                 .subview(
@@ -1381,6 +1395,7 @@ pub(in crate::g_syntax::parser) mod term_oracle {
         ACTIVE.with(|active| {
             let mut active = active.borrow_mut();
             let report = active.as_mut().expect("checked as enabled");
+            report.tail_rule += usize::from(tail_rule);
             let agree = match (new, &old) {
                 (Ok(new), Ok(old)) => {
                     report.accepted += 1;

@@ -824,6 +824,26 @@ mod tests {
         .unwrap_or_else(|diagnostics| panic!("`{source}` reported {diagnostics:#?}"))
     }
 
+    /// Asserts that `source` fails because a tail form in it stands outside
+    /// tail position (Syntax.md "Tail position").
+    #[track_caller]
+    fn assert_outside_tail_position(source: &str) {
+        let diagnostics =
+            super::super::input::parse_expression_fragment(source.as_bytes(), |view| {
+                super::super::structural::parse_expression_in_context(
+                    view,
+                    ExpressionContext::for_fragment(view),
+                )
+            })
+            .expect_err("a tail form outside tail position fails");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("not in tail position")),
+            "`{source}` reported {diagnostics:#?}"
+        );
+    }
+
     #[test]
     fn prefix_if_owns_guards_and_both_results() {
         let SyntaxExpr::If(if_expr) = parse("if value = 42 and _ then value else 0") else {
@@ -895,8 +915,14 @@ mod tests {
     }
 
     #[test]
-    fn nested_if_keywords_do_not_escape_to_the_outer_conditional() {
-        let SyntaxExpr::If(outer) = parse("if _ then if _ then 1 else 2 else 3") else {
+    fn an_if_in_an_inline_then_branch_is_parenthesized() {
+        // The inner `if` would end at an `else`, which it could take too.
+        assert_outside_tail_position("if _ then if _ then 1 else 2 else 3");
+        assert_outside_tail_position(
+            "if _ then if _ then 1 else 2
+else 3",
+        );
+        let SyntaxExpr::If(outer) = parse("if _ then (if _ then 1 else 2) else 3") else {
             panic!("source should produce an outer if expression");
         };
         assert!(matches!(outer.then_result.as_ref(), SyntaxExpr::If(_)));
@@ -1230,7 +1256,9 @@ mod tests {
 
     #[test]
     fn nested_if_and_try_boundaries_remain_owned_by_their_heads() {
-        let SyntaxExpr::If(outer_try) = parse("try _ then if _ then 1 else 2 else 3") else {
+        assert_outside_tail_position("try _ then if _ then 1 else 2 else 3");
+        assert_outside_tail_position("if _ then try _ then 1 else 2 else 3");
+        let SyntaxExpr::If(outer_try) = parse("try _ then (if _ then 1 else 2) else 3") else {
             panic!("source should produce an outer try expression");
         };
         assert_eq!(outer_try.mode, ConditionalMode::Host);
@@ -1242,7 +1270,7 @@ mod tests {
             })
         ));
 
-        let SyntaxExpr::If(outer_if) = parse("if _ then try _ then 1 else 2 else 3") else {
+        let SyntaxExpr::If(outer_if) = parse("if _ then (try _ then 1 else 2) else 3") else {
             panic!("source should produce an outer if expression");
         };
         assert_eq!(outer_if.mode, ConditionalMode::Pure);
@@ -1430,16 +1458,19 @@ mod tests {
     }
 
     #[test]
-    fn a_match_is_an_atom_wherever_it_stands() {
-        // What follows its arms reads as the expression grammar reads it,
-        // as after a `do` block or a match in an argument.
-        for source in ["match a with {z => 1} b", "match a with\n    z => 1\n  b"] {
-            let SyntaxExpr::Apply(function, argument) = parse(source) else {
-                panic!("`{source}` should apply the match");
-            };
-            assert!(matches!(*function, SyntaxExpr::Match(_)), "{source}");
-            assert_eq!(*argument, SyntaxExpr::Name("b".to_owned()), "{source}");
+    fn an_argument_cannot_follow_a_match() {
+        for source in [
+            "match a with {z => 1} b",
+            "match a with\n    z => 1\n  b",
+            "f match a with {z => 1} b",
+        ] {
+            assert_outside_tail_position(source);
         }
+        let SyntaxExpr::Apply(function, argument) = parse("(match a with {z => 1}) b") else {
+            panic!("a parenthesized match applies");
+        };
+        assert!(matches!(*function, SyntaxExpr::Match(_)));
+        assert_eq!(*argument, SyntaxExpr::Name("b".to_owned()));
     }
 
     #[test]

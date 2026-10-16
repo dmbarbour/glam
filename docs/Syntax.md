@@ -382,20 +382,56 @@ effect path, and `foo .bar` is rejected rather than allowing one accidental
 space to change access into application. `.bar` remains valid at the head of
 an expression; `foo <| .bar` is the punctuation-light alternative.
 
-An unparenthesized lambda may be the final application argument or the
-right-hand tail operand of an infix expression:
+### Tail Position
+
+Some forms end with a part that extends to the right: prefix `if` and `try`,
+`match` and `try_match`, `do`, lambdas, `let`, `using` and `object`. These
+*tail forms* stand without parentheses only in *tail position*, where nothing
+follows them that a reader could take as part of them:
+
+- A tail form whose last part ends on its line may be followed only by the
+  end of its statement, definition or group: a closing bracket or a
+  separator.
+- A braced body's `{` and `}` stand for an indent and a dedent. After a tail
+  form's `}` or dedent, only an infix operator or a keyword of an enclosing
+  form may follow, such as `else`, `with`, `then`, `and` or a bind's `->`.
+  An argument or a path may not.
+- `where` ends the expression it follows, so any tail form may precede it.
+- Postfix `if` is an operator, not a tail form.
+
+So a tail form may be a definition's whole right-hand side, the final
+argument of an application or the right-hand operand of an infix
+expression:
 
         mapped = map values \value -> transform value
         bound = operation >>= \value -> continue value
+        chosen = describe match value with
+            1 => "one"
+            _ => "other"
+        resumed = source
+          |> process do
+            input <- .read
+            .r (transform input)
+          |> finish
+        both = if ready then do { .go } else do { .wait }
 
-The lambda body has rightward extent, so `map values \value -> transform value
-|> finish` places `|> finish` inside the lambda body. Parenthesize the
-application to pipe its result instead:
+Parentheses make a tail form an ordinary atom, which anything may follow:
+
+        applied = f (match x with {_ => 1}) y
+        field = (do { .r value }).result
+        inner = if a then (if b then c else d) else e
+        found = if any items (\item -> item > 0) then 1 else 0
+
+The rule keeps a form's extent visible: a reader never has to decide whether
+an `else`, `and`, `->` or argument belongs to the form before it. The lambda
+body has rightward extent, so `map values \value -> transform value |> finish`
+places `|> finish` inside the lambda body. Parenthesize the application to
+pipe its result instead:
 
         (map values \value -> transform value) |> finish
 
-An explicitly parenthesized lambda remains an ordinary atom and may therefore
-be followed by more arguments.
+The current Rust bootstrap enforces the rule for conditionals, `do` blocks,
+matches and lambdas; `let`, `using` and `object` follow.
 
 ## Effects
 
@@ -438,11 +474,11 @@ A statement binds with `<-` or `=` only when that token comes before every
 keyword form and lambda in it, since a pattern holds neither: a keyword form
 owns any `<-` or `=` after its head. So `if (a, b) = e then A else B` is an
 operation whose guard binds, while `x = if C then A else B` binds `x`. In
-`Operation -> Pattern`, the `->` ends any open tail of the operation before
-it: an `else` branch, a `let` or `using` body, a postfix `if`'s fallback,
-or a lambda body. So `if C then .a else .b -> x` binds the conditional's
-result. A layout block keeps its own lines, arrows included. Guard clauses
-follow the same rules.
+`Operation -> Pattern`, the `->` ends a postfix `if`'s fallback, so
+`A if C else B -> x` binds the conditional's result. Another tail form
+before it is parenthesized unless a block ends it (see *Tail Position*):
+`(if C then .a else .b) -> x`. A layout block keeps its own lines, arrows
+included. Guard clauses follow the same rules.
 
 A non-final bare operation uses the existing `=>>` behavior, including its
 requirement that the discarded result be unit. The final statement should
@@ -461,8 +497,8 @@ This differs from `run do` followed by a next-line body: the latter freely
 chooses its first statement's indentation above the enclosing expression
 floor. Blank and comment-only lines establish neither form's anchor.
 
-Braces make do notation an ordinary expression atom and use semicolons as
-statement separators:
+Braces delimit do notation and use semicolons as statement separators. The
+closing brace ends the block as a dedent would (see *Tail Position*):
 
         inline = do { left <- .read 'left; .write left; .r left }
         nested = consume [do { .r first }, do { .r second }]
@@ -1601,9 +1637,8 @@ compact braced form stays available:
 
         match Value with { {value:x} => x; _ => {}; }
 
-A match is an atom wherever it stands, as a `do` block is: whatever follows its
-arms, such as an argument after a braced body, reads as the expression grammar
-reads it.
+A match is a tail form (see *Tail Position*): an operator or an enclosing
+form's keyword may follow its arms, but an argument may not.
 
 We also support branching guard clauses. We use `when` to separate the pattern from the a branching clause. base case, we have only one branch. But we'll need another `when` for hierarchical branching.
 

@@ -157,7 +157,9 @@ const NESTED_READINGS: &[(&str, &str)] = &[
     ("(p <- view)", "(view view p)"),
     ("(f x -> [a, b])", "(view (f x) [a, b])"),
     ("(.get -> p)", "(view .get p)"),
-    ("(\\x -> x -> p)", "(view (\\x -> x) p)"),
+    ("((\\x -> x) -> p)", "(view (\\x -> x) p)"),
+    // A lambda's body would end at the view's arrow (tail position).
+    ("(\\x -> x -> p)", "error"),
     ("(Nat n)", "(pred Nat n)"),
     ("(Prefix \"foo-\" text)", "(pred (Prefix \"foo-\") text)"),
     ("(Nat (Even n))", "(pred Nat (pred Even n))"),

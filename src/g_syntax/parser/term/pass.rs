@@ -63,8 +63,9 @@ use super::super::structural::{
 };
 use super::binding::{self, NestedArms, needs_view_dispatch};
 use super::{
-    Cover, Deferred, Fail, GroupBody, Items, Mode, Parse, Piece, Scope, interpret_group,
-    may_head_keyword_form, opens_keyword_region, piece_token, regions_enabled, token, trim_padding,
+    Cover, Deferred, Fail, GroupBody, Items, Mode, Parse, Piece, Scope, form_label,
+    interpret_group, may_head_keyword_form, misplaced_tail, opens_keyword_region, piece_token,
+    regions_enabled, tail_rule_enabled, token, trim_padding,
 };
 
 /// One frame on the pass's stack.
@@ -88,6 +89,9 @@ struct Frame {
     /// Whether its pieces since the last `\` are a lambda's parameters, so
     /// that a `->` is the lambda's own.
     lambda_head: bool,
+    /// The first `\` among its current member's pieces: a lambda whose body
+    /// runs to the member's end.
+    lambda: Option<usize>,
     /// Its first significant token.
     first: Option<usize>,
     /// Line starts after its first significant token, nested frames
@@ -333,6 +337,17 @@ impl Arms {
     }
 }
 
+impl ArmsKind {
+    /// The match its arms belong to, as errors name it.
+    fn label(self) -> String {
+        match self {
+            Self::Match { keyword, open } => format!("`{}` expression", display(keyword, open)),
+            Self::When { keyword, open } => format!("`{} when` expression", display(keyword, open)),
+            Self::Nested => "nested `when` arms".to_string(),
+        }
+    }
+}
+
 /// A match keyword as written, with its `*`.
 fn display(keyword: &str, open: bool) -> String {
     if open {
@@ -375,6 +390,7 @@ impl Frame {
             region: false,
             region_conditionals: Vec::new(),
             lambda_head: false,
+            lambda: None,
             first: None,
             line_starts: 0,
             view_level: false,
@@ -449,6 +465,7 @@ impl Frame {
         self.region = false;
         self.region_conditionals.clear();
         self.lambda_head = false;
+        self.lambda = None;
         self.first = None;
         self.line_starts = 0;
         self.view_level = false;
@@ -529,6 +546,9 @@ pub(super) struct Form {
     pub(super) keyword: &'static str,
     pub(super) shape: FormShape,
     pub(super) result: Parse<SyntaxExpr>,
+    /// Whether its last part ended at its own `}` or a dedent, after which
+    /// what may resume after a dedent may follow it.
+    pub(super) ends_with_block: bool,
 }
 
 /// How a form reads, which its place among the pieces confirms.
@@ -570,6 +590,7 @@ pub(super) fn top_pieces(scope: Scope<'_, '_, '_>) -> Parse<(Vec<Piece>, usize)>
         stops_at_arrow: scope.mode == Mode::Expression
             && scope.context.arrow_ends_tail()
             && regions_enabled(),
+        misplaced: None,
     };
     let range = view.range();
     let mut index = range.start();
@@ -586,6 +607,9 @@ pub(super) fn top_pieces(scope: Scope<'_, '_, '_>) -> Parse<(Vec<Piece>, usize)>
         index += 1;
     }
     pass.close_open_frames(index);
+    if let Some(fail) = pass.misplaced {
+        return Err(fail);
+    }
     let top = pass.stack.pop().expect("the view frame remains");
     debug_assert!(pass.stack.is_empty(), "every group closes inside the view");
     Ok((top.pieces, index))
@@ -595,6 +619,9 @@ struct Pass<'s, 'lex, 'source> {
     scope: Scope<'s, 'lex, 'source>,
     stack: Vec<Frame>,
     stops_at_arrow: bool,
+    /// The first tail form found outside tail position, which fails the
+    /// view.
+    misplaced: Option<Fail>,
 }
 
 impl Pass<'_, '_, '_> {
@@ -716,7 +743,7 @@ impl Pass<'_, '_, '_> {
                 let result =
                     self.finish_braced_arms(*arms, &frame.pieces, frame.pending, open, index);
                 self.top().line_starts += line_starts;
-                self.deliver_arms(kind, head, result, index + 1);
+                self.deliver_arms(kind, head, result, index + 1, true);
                 return;
             }
             let result = self.finish_block(&block, &frame.pieces, open, index);
@@ -739,6 +766,7 @@ impl Pass<'_, '_, '_> {
                     keyword: "do",
                     shape: FormShape::Prefix,
                     result,
+                    ends_with_block: true,
                 }),
             });
             return;
@@ -886,6 +914,7 @@ impl Pass<'_, '_, '_> {
                     top.region = false;
                     top.region_conditionals.clear();
                     top.lambda_head = false;
+                    top.lambda = None;
                     top.member_start = true;
                     if let FrameKind::Layout(layout) = &mut top.kind {
                         layout.statements.push(top.pieces.len());
@@ -911,6 +940,7 @@ impl Pass<'_, '_, '_> {
                 top.region = false;
                 top.region_conditionals.clear();
                 top.lambda_head = false;
+                top.lambda = None;
                 top.member_start = true;
                 top.pieces.push(Piece::Token(index));
                 // In a braced block of arms, the next arm begins.
@@ -999,8 +1029,10 @@ impl Pass<'_, '_, '_> {
                     while !self.top().in_guards() {
                         self.close_conditional(index);
                     }
+                    self.lambda_ends_at(index);
                     let top = self.top();
                     top.lambda_head = false;
+                    top.lambda = None;
                     top.member_start = true;
                     top.pieces.push(Piece::Token(index));
                     return Step::Next;
@@ -1016,6 +1048,9 @@ impl Pass<'_, '_, '_> {
                 if regions_enabled() {
                     self.close_tails_at_arrow(index);
                 }
+                if self.top().arrow_ends_tails {
+                    self.lambda_ends_at(index);
+                }
                 if self.stops_at_arrow && self.stack.len() == 1 && !self.stack[0].region {
                     return Step::Stop;
                 }
@@ -1025,6 +1060,9 @@ impl Pass<'_, '_, '_> {
         let top = self.top();
         if matches!(kind, TokenKind::Name(_)) && opens_keyword_region(view, index, top.mode) {
             top.region = true;
+        }
+        if matches!(kind, TokenKind::Symbol("\\")) {
+            top.lambda.get_or_insert(index);
         }
         top.lambda_head = match kind {
             TokenKind::Symbol("\\") => true,
@@ -1159,6 +1197,11 @@ impl Pass<'_, '_, '_> {
                 self.close_top(index);
                 continue;
             }
+            if matches!(&self.top().kind,
+                FrameKind::Conditional(conditional) if conditional.phase != Phase::Else)
+            {
+                self.lambda_ends_at(index);
+            }
             let top = self.top();
             let FrameKind::Conditional(conditional) = &mut top.kind else {
                 // A stray keyword, which the item reports.
@@ -1233,6 +1276,43 @@ impl Pass<'_, '_, '_> {
             .is_some_and(Frame::in_guards)
     }
 
+    /// Notes a tail form at `head` whose last part ends on its line before
+    /// the token at `end`, returning whether it ends inside its member. Only
+    /// the end of its member may follow such a form (Syntax.md "Tail
+    /// position"); the first one that does not is the pass's error.
+    fn ends_inline(&mut self, label: &str, head: usize, end: usize) -> bool {
+        let view = self.scope.view;
+        let inside = continues_member(view, end);
+        if inside && self.misplaced.is_none() && tail_rule_enabled() {
+            let follower = view
+                .token_at(end)
+                .and_then(|token| view.source().source_slice(token.span()))
+                .unwrap_or("?");
+            self.misplaced = Some(misplaced_tail(head, label, &format!("`{follower}`")));
+        }
+        inside
+    }
+
+    /// Notes a lambda open in the top frame's member, whose body the keyword
+    /// or arrow at `index` would end.
+    fn lambda_ends_at(&mut self, index: usize) {
+        if let Some(lambda) = self.stack.last().and_then(|frame| frame.lambda) {
+            self.ends_inline("lambda", lambda, index);
+        }
+    }
+
+    /// Whether `pieces` end with a form whose last part ended at its own `}`
+    /// or a dedent.
+    fn ends_with_block(&self, pieces: &[Piece]) -> bool {
+        let view = self.scope.view;
+        let last = pieces.iter().rev().find(|piece| {
+            !matches!(piece, Piece::Token(index)
+                if matches!(token(view, *index).kind(), TokenKind::LineStart { .. }))
+        });
+        matches!(last, Some(Piece::Form { form, .. })
+            if self.scope.covers.form_ends_with_block(*form))
+    }
+
     /// Closes conditionals whose `else` branch ends at the `->` at `index`.
     fn close_tails_at_arrow(&mut self, index: usize) {
         while let Some(top) = self.stack.last()
@@ -1260,7 +1340,7 @@ impl Pass<'_, '_, '_> {
         match self.stack.last().map(|frame| &frame.kind) {
             Some(FrameKind::Conditional(_)) => self.close_conditional(index),
             Some(FrameKind::Layout(_)) => self.close_layout(index),
-            Some(FrameKind::Match(_)) => self.close_match(index, None),
+            Some(FrameKind::Match(_)) => self.close_match(index, None, false),
             _ => unreachable!("only open tails close before their group"),
         }
     }
@@ -1372,10 +1452,14 @@ impl Pass<'_, '_, '_> {
             let result =
                 self.finish_layout_arms(&layout, *arms, &frame.pieces, frame.pending, index);
             self.top().line_starts += line_starts;
-            self.deliver_arms(kind, head, result, index);
+            // Nested arms end with their match, which names the form.
+            let ends_with_block =
+                kind == ArmsKind::Nested || !self.ends_inline(&kind.label(), head, index);
+            self.deliver_arms(kind, head, result, index, ends_with_block);
             return;
         }
         let head = layout.head;
+        let ends_with_block = !self.ends_inline(&form_label("do"), head, index);
         let result = self.finish_layout(&layout, &frame.pieces, index);
         let covers = self.scope.covers;
         let parent = self.top();
@@ -1389,6 +1473,7 @@ impl Pass<'_, '_, '_> {
                 keyword: "do",
                 shape: FormShape::Prefix,
                 result,
+                ends_with_block,
             }),
         });
     }
@@ -1529,12 +1614,14 @@ impl Pass<'_, '_, '_> {
         while self.stack.len() > owner + 1 {
             self.close_top(index);
         }
+        self.lambda_ends_at(index);
         let scope = self.scope;
         let view = scope.view;
         let frame = self.top();
         frame.region = false;
         frame.region_conditionals.clear();
         frame.lambda_head = false;
+        frame.lambda = None;
         let pieces = std::mem::take(&mut frame.pieces);
         let FrameKind::Match(found) = &mut frame.kind else {
             unreachable!("a match owns the `with`");
@@ -1643,6 +1730,7 @@ impl Pass<'_, '_, '_> {
         while self.stack.len() > owner + 1 {
             self.close_top(index);
         }
+        self.lambda_ends_at(index);
         let view = self.scope.view;
         let when = matches!(token(view, index).kind(), TokenKind::Name("when"));
         let next = self.line_mark(index + 1);
@@ -1662,6 +1750,7 @@ impl Pass<'_, '_, '_> {
         frame.region = false;
         frame.region_conditionals.clear();
         frame.lambda_head = false;
+        frame.lambda = None;
         frame.pieces.push(Piece::Token(index));
         if !when || next.is_some() {
             frame.member_start = true;
@@ -1744,9 +1833,16 @@ impl Pass<'_, '_, '_> {
     /// Hands a closed block's arms to their owner: nested arms to the arm
     /// whose trailing `when` heads them, and a match's arms to the match,
     /// which closes at `end` with them.
-    fn deliver_arms(&mut self, kind: ArmsKind, head: usize, result: Parse<ArmList>, end: usize) {
+    fn deliver_arms(
+        &mut self,
+        kind: ArmsKind,
+        head: usize,
+        result: Parse<ArmList>,
+        end: usize,
+        ends_with_block: bool,
+    ) {
         if kind != ArmsKind::Nested {
-            self.close_match(end, Some(result));
+            self.close_match(end, Some(result), ends_with_block);
             return;
         }
         let arms = result.map(|list| match list {
@@ -1763,7 +1859,7 @@ impl Pass<'_, '_, '_> {
 
     /// Closes the match on top, which ends before `end`, into a form piece
     /// of its parent: with its arms, or unfinished without them.
-    fn close_match(&mut self, end: usize, arms: Option<Parse<ArmList>>) {
+    fn close_match(&mut self, end: usize, arms: Option<Parse<ArmList>>, ends_with_block: bool) {
         let frame = self.stack.pop().expect("a match is open");
         let line_starts = frame.line_starts;
         let FrameKind::Match(found) = frame.kind else {
@@ -1783,6 +1879,7 @@ impl Pass<'_, '_, '_> {
                 keyword,
                 shape: FormShape::Prefix,
                 result,
+                ends_with_block,
             }),
         });
     }
@@ -1973,9 +2070,29 @@ impl Pass<'_, '_, '_> {
                 FrameKind::Conditional(conditional) => conditional.line_starts,
                 _ => 0,
             };
-        let (form, rest) = self.finish(frame, index);
+        // A complete prefix conditional is a tail form, which only a block
+        // may end before the end of its member; a postfix one is an
+        // operator, but a lambda may end its fallback.
+        let (complete, postfix, lambda, block) = match &frame.kind {
+            FrameKind::Conditional(conditional) => (
+                conditional.phase == Phase::Else && !conditional.postfix(),
+                conditional.postfix(),
+                frame.lambda,
+                self.ends_with_block(&frame.pieces),
+            ),
+            _ => unreachable!("only conditionals close here"),
+        };
+        let (mut form, rest) = self.finish(frame, index);
         let head = form.head;
         let end = rest.first().map_or(index, piece_token);
+        if complete {
+            form.ends_with_block = block;
+            if !block {
+                self.ends_inline(&form_label(form.keyword), head, end);
+            }
+        } else if postfix && let Some(lambda) = lambda {
+            self.ends_inline("lambda", lambda, end);
+        }
         let covers = self.scope.covers;
         let parent = self.top();
         parent.line_starts += line_starts;
@@ -2012,6 +2129,7 @@ impl Pass<'_, '_, '_> {
             keyword: conditional.keyword,
             shape,
             result: Err(Fail::error("an unfinished conditional")),
+            ends_with_block: false,
         };
         let else_branch = Branch {
             pieces,
@@ -2279,6 +2397,20 @@ impl Pass<'_, '_, '_> {
             Err(Fail::Reported(diagnostics))
         }
     }
+}
+
+/// Whether the token at `index` continues a member: anything but a line
+/// start, a closer, a separator or the view's end.
+fn continues_member(view: TokenView<'_, '_>, index: usize) -> bool {
+    view.range().contains(index)
+        && view.token_at(index).is_some_and(|token| {
+            !matches!(
+                token.kind(),
+                TokenKind::LineStart { .. }
+                    | TokenKind::Close { .. }
+                    | TokenKind::Symbol("," | ";")
+            )
+        })
 }
 
 /// The pieces after any leading line starts.
