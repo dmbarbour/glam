@@ -87,6 +87,11 @@ flags a step for discussion when work reaches it, not a decision.
   lists the open findings and their owners; maintainer decision 6
   (reflection semantics) is open. About 30 findings have no other home, so
   it cannot retire yet.
+- [`RuntimeLifecycleCapabilities_2026-10-16.md`](../reviews/RuntimeLifecycleCapabilities_2026-10-16.md)
+  reviews who owns the evaluation runtime and how code the runtime calls
+  gets its capabilities. It recommends an affine owner that retires the
+  runtime explicitly, with capabilities lent per call; six maintainer
+  decisions are open.
 
 ## Completed, Awaiting Retirement
 
