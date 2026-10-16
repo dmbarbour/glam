@@ -2532,7 +2532,9 @@ mod tests {
         });
     }
 
+    // The heap validates access only in debug builds.
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "does not belong to this heap")]
     fn core_net_access_rejects_a_foreign_runtime() {
         let owner = CoreValueFactory::new(allocate_evaluation_runtime_id(), RuntimeIds::new());
