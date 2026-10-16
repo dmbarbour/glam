@@ -41,6 +41,17 @@ impl ExpressionContext {
         }
     }
 
+    /// `for_owner` for a view whose first significant token is `first`.
+    pub(super) fn for_owner_at(view: TokenView<'_, '_>, first: usize) -> Self {
+        Self {
+            continuation_floor: view.line_indentation_at(first).unwrap_or(0),
+            validated_through: None,
+            floor_enforced: true,
+            extent: ExpressionExtent::CompleteHardRange,
+            arrow_ends_tail: false,
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn for_fragment(view: TokenView<'_, '_>) -> Self {
         // Isolated grammar fragments have no source owner. Their construct

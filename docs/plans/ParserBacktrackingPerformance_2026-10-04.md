@@ -331,7 +331,8 @@ production keeps the old parser until the oracle agrees.
   keywords ([Keyword regions 2026-10-15](#keyword-regions-2026-10-15)).
   Native keyword frames started 2026-10-16
   ([Native keyword frames 2026-10-16](#native-keyword-frames-2026-10-16)):
-  `parser-keyword-frames-conditionals` done.
+  `parser-keyword-frames-conditionals` and `parser-keyword-frames-bindings`
+  done.
 - `parser-scope-analysis`: added 2026-10-15; not started.
 - `parser-constant-factors`: added 2026-10-16; not started.
 - `parser-grammar-retirement`: not started. Chumsky still parses the
@@ -901,11 +902,13 @@ beside group frames:
    and postfix `if`, and floors checked per line start. Guards stay a
    region, read by the guard parser.
 2. `parser-keyword-frames-bindings`: guard clauses and do statements split
-   from pieces, with cover-mode groups in guard phases; `let … in` and
-   `using`.
-3. `parser-keyword-frames-layout`: block frames; `do`, `match` and
+   from pieces, with cover-mode groups in guard phases, and braced `do`
+   blocks. (`let … in` and `using` moved to the suffix slice on
+   2026-10-16: their multi-line forms need layout blocks first.)
+3. `parser-keyword-frames-layout`: block frames; layout `do`, `match` and
    `try_match` arms, braced and layout; multi-line `let`.
-4. `parser-keyword-frames-suffixes`: `where`, `with` and `object`.
+4. `parser-keyword-frames-suffixes`: `let`, `using`, `where`, `with` and
+   `object`.
 5. The structural parsers' expression paths then serve only the oracle,
    and go with the Chumsky grammar in `parser-grammar-retirement`.
 
@@ -934,7 +937,7 @@ beside group frames:
 - **Measures**, in user-space instructions against `main` at `3264414d`:
   - `parse_ifs`: k 1.23 → 1.03, and 76.0 M against 89.9 M at 128 deep.
     Conditionals nested 2,000 deep in seven shapes parse within two seconds,
-    without recursion (`conditional_nesting_parses_in_linear_time_without_recursion`).
+    without recursion (`keyword_frame_nesting_parses_in_linear_time_without_recursion`).
   - `parse_binds`: 76.6 M against 71.9 M at 128 deep (k 1.65). Its `do`
     blocks are still delegated and re-walked at every level, and each walk
     costs a little more. This goes when `do` is a frame.
@@ -960,6 +963,36 @@ beside group frames:
 - **Not the parser:** `collection_interleaves_with_worker_quantum_without_lost_work`
   failed once under load, with the value domain outliving its runtime. It
   passed on four reruns.
+
+**`parser-keyword-frames-bindings` as built (2026-10-16).**
+- `parser/term/binding.rs` reads guard clauses and do statements from
+  their pieces, by `parse_binding`'s rule. A frame's form piece ends the
+  binder search, as a keyword token does. A side holding a form that
+  view-level dispatch parses is parsed from its view.
+- **Guards** are cover-mode frames, no longer regions. Each clause takes its
+  own context at its first token, after the guards begin or after an `and`,
+  as `for_owner` per clause did. A conditional nested in guards is a frame,
+  and its tail ends at `->`.
+- **Braced `do` blocks** are frames. A `do` whose next significant token is
+  a separated `{` marks that brace group as a block: cover mode, statements
+  split at `;`, each with the `do` form's context derived at its first
+  token. The block closes into a form piece in place of its `do`. A layout
+  `do` is still delegated.
+- Nothing inside a group deferred to a structural parser is interpreted:
+  its frames would be thrown away. Its line starts still count.
+- **Measures** against `main`: `parse_binds` 47.5 M against 71.9 M at 128
+  deep, k 1.65 → 1.25. The rest is probably name analysis over the nested
+  `do` scopes (`parser-scope-analysis`). Other workloads are as after
+  `parser-keyword-frames-conditionals`.
+- **Depth:** braced `do` blocks nested through a statement's operation or
+  value, and conditionals nested in guards, parse 2,000 deep, in the same
+  test as the conditionals.
+- **Error wording:** some invalid statements now report from the item
+  interpreter, such as `do { .r z where z = 1 -> y; .r y }`, which reports
+  the `->` rather than `where` as reserved.
+- **Found by the 200-times oracle:** a group deferred to a structural
+  parser did not count its line breaks, so its branch skipped its floor
+  check (`deferred_group_lines_count_for_the_enclosing_floor`).
 
 ## Verification
 

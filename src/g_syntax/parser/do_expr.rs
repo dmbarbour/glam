@@ -16,7 +16,7 @@ use super::structural::{is_layout_empty, keyword_head, single_reserved_keyword, 
 
 type ParseResult<T> = Result<T, Vec<Diagnostic>>;
 
-enum ParsedDoStatement {
+pub(in crate::g_syntax::parser) enum ParsedDoStatement {
     Declare(Vec<String>),
     Bind {
         pattern: SyntaxPattern,
@@ -260,7 +260,7 @@ fn parse_braced_body(
     finish_do_statements(statements).map_err(|message| error_at_token(body, do_token, message))
 }
 
-fn finish_do_statements(
+pub(in crate::g_syntax::parser) fn finish_do_statements(
     mut statements: Vec<(usize, ParsedDoStatement)>,
 ) -> Result<SyntaxExpr, String> {
     let (result_line, result_statement) = statements
@@ -301,7 +301,7 @@ fn finish_do_statements(
     }))
 }
 
-fn empty_do_expr(line: usize) -> SyntaxExpr {
+pub(in crate::g_syntax::parser) fn empty_do_expr(line: usize) -> SyntaxExpr {
     SyntaxExpr::Do(DoExpr {
         steps: Vec::new(),
         result_line: line,

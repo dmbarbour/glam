@@ -81,6 +81,7 @@ pub(super) use self::cover::Position;
 use self::cover::Term;
 use self::pass::{Form, FormShape, top_pieces};
 
+mod binding;
 mod cover;
 mod pass;
 

@@ -113,7 +113,7 @@ pub(in crate::g_syntax::parser) enum BindingSite {
 
 /// The part a binding lacks.
 #[derive(Clone, Copy)]
-enum Missing {
+pub(in crate::g_syntax::parser) enum Missing {
     BackwardPattern,
     BackwardOperation,
     ValuePattern,
@@ -123,7 +123,7 @@ enum Missing {
 }
 
 impl BindingSite {
-    fn missing(self, part: Missing) -> &'static str {
+    pub(in crate::g_syntax::parser) fn missing(self, part: Missing) -> &'static str {
         match (self, part) {
             (Self::DoStatement, Missing::BackwardPattern) => {
                 "a do backward binding requires a pattern before `<-`"

@@ -12,10 +12,15 @@
 //! as a group's close interprets its cover, so nested conditionals cost heap
 //! frames, and each token is walked once.
 //!
+//! A conditional's guards are read in cover mode, and its clauses from their
+//! pieces (`binding`). A braced `do` block is a frame too: a brace group
+//! whose members, separated by `;`, are statements read from their pieces.
+//! Each guard clause and statement takes its own context at its first token.
+//!
 //! Other keyword forms open a keyword region, whose groups are deferred for
-//! the form's structural parser. A conditional's guards are such a region,
-//! read by the guard-clause parser. Inside a region conditionals are only
-//! counted, so that a `then` or `else` still reaches its own.
+//! the form's structural parser. Inside a region conditionals are only
+//! counted, so that a `then` or `else` still reaches its own, and inside a
+//! deferred group nothing is interpreted.
 //!
 //! A branch holding a form that view-level dispatch parses (`let`, `object`,
 //! `where` or `with` at its level, or a leading `match` or `try_match`) is
@@ -25,14 +30,15 @@
 
 use crate::g_syntax::{ConditionalMode, ConditionalResultMode, IfExpr, SyntaxExpr};
 
+use super::super::do_expr::{empty_do_expr, finish_do_statements};
 use super::super::expression_context::{ExpressionContext, validate_expression_floor};
 use super::super::input::{TokenRange, TokenView};
 use super::super::layout::group_separator;
 use super::super::lexical::{Delimiter, GroupId, LeadingTrivia, TokenKind};
-use super::super::pattern::parse_guard_clauses;
 use super::super::structural::{
     in_keyword_position, is_layout_empty, parse_expression_in_context, parse_open_tail, trim_layout,
 };
+use super::binding::{self, needs_view_dispatch};
 use super::{
     Cover, Deferred, Fail, GroupBody, Items, Mode, Parse, Piece, Scope, interpret_group,
     may_head_keyword_form, opens_keyword_region, piece_token, regions_enabled, token, trim_padding,
@@ -64,10 +70,15 @@ struct Frame {
     /// Line starts after its first significant token, nested frames
     /// included, so a frame without any skips checking its floors.
     line_starts: usize,
-    /// Whether a form that view-level dispatch parses stands at its level:
-    /// `let`, `object`, `where` or `with`, or a leading `match` or
+    /// Whether a form that view-level dispatch parses stands at a group's
+    /// level: `let`, `object`, `where` or `with`, or a leading `match` or
     /// `try_match`.
     view_level: bool,
+    /// Whether its next significant token starts a guard clause or a
+    /// statement, which takes its own context.
+    member_start: bool,
+    /// A `do` whose `{` comes next, opening a block frame.
+    pending_do: Option<usize>,
 }
 
 enum FrameKind {
@@ -75,8 +86,16 @@ enum FrameKind {
     Group {
         delimiter: Delimiter,
         group: GroupId,
+        /// The `do` block this brace group is, if any.
+        block: Option<Box<Block>>,
     },
     Conditional(Box<Conditional>),
+}
+
+/// A braced `do` block: its head and its own context.
+struct Block {
+    head: usize,
+    context: ExpressionContext,
 }
 
 impl Frame {
@@ -102,6 +121,8 @@ impl Frame {
             first: None,
             line_starts: 0,
             view_level: false,
+            member_start: false,
+            pending_do: None,
         }
     }
 
@@ -109,9 +130,25 @@ impl Frame {
         self.inherited_region || self.region
     }
 
-    /// Starts a branch: its pieces, region and line facts begin afresh.
+    /// Whether a `->` ends the open tails of frames opened inside this one:
+    /// in guards and statements it does, in a `then` branch it does not, and
+    /// an `else` branch ends where the conditional itself does.
+    fn nested_arrow(&self) -> bool {
+        match &self.kind {
+            FrameKind::Conditional(conditional) => match conditional.phase {
+                Phase::Guards => true,
+                Phase::Then => false,
+                Phase::Else => self.arrow_ends_tails,
+            },
+            _ => self.arrow_ends_tails,
+        }
+    }
+
+    /// Starts a branch: its pieces, region and line facts begin afresh, and
+    /// it reads as an expression.
     fn begin_branch(&mut self, context: ExpressionContext) {
         self.pieces.clear();
+        self.mode = Mode::Expression;
         self.context = context;
         self.region = false;
         self.region_conditionals.clear();
@@ -140,6 +177,8 @@ struct Conditional {
     /// postfix one's guards.
     else_keyword: Option<usize>,
     then_branch: Option<Branch>,
+    /// The guards' pieces, once a `then` or `else` ends them.
+    guard_pieces: Vec<Piece>,
     /// The enclosing frame's context, from which the conditional's own
     /// derives.
     enclosing: ExpressionContext,
@@ -185,10 +224,10 @@ struct Branch {
     start: usize,
     end: usize,
     line_starts: usize,
-    view_level: bool,
 }
 
-/// A conditional's interpretation, held in the arena until consumed.
+/// A conditional's or a `do` block's interpretation, held in the arena
+/// until consumed.
 pub(super) struct Form {
     pub(super) head: usize,
     pub(super) keyword: &'static str,
@@ -196,10 +235,10 @@ pub(super) struct Form {
     pub(super) result: Parse<SyntaxExpr>,
 }
 
-/// How a conditional reads, which its place among the pieces confirms.
+/// How a form reads, which its place among the pieces confirms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FormShape {
-    /// `if Guards then A else B`: an atom.
+    /// `if Guards then A else B`, or a `do` block: an atom.
     Prefix,
     /// `if Guards else B`: a postfix conditional on the operand before it.
     Postfix,
@@ -275,16 +314,41 @@ impl Pass<'_, '_, '_> {
             .and_then(|group| group.close_token())
             .filter(|close| *close < view.range().end())
             .ok_or(Fail::Unsupported("a delimiter group crossing the view"))?;
+        let pending = self.top().pending_do.take();
         self.significant(index);
         let parent = self.top();
         parent.lambda_head = false;
         let (mode, context, inherited) = (parent.mode, parent.context, parent.in_region());
+        // A `do` block's statements may bind patterns, and end their tails
+        // at `->`; its context is the `do` form's, floored at its head.
+        let block = pending
+            .filter(|_| delimiter == Delimiter::Brace)
+            .map(|head| {
+                Box::new(Block {
+                    head,
+                    context: view
+                        .line_indentation_at(head)
+                        .map_or(context, |indentation| {
+                            context.with_physical_line_floor(indentation)
+                        })
+                        .may_yield(),
+                })
+            });
+        let (mode, arrow) = if block.is_some() {
+            (Mode::Cover, true)
+        } else {
+            (mode, mode == Mode::Cover)
+        };
         self.stack.push(Frame::new(
-            FrameKind::Group { delimiter, group },
+            FrameKind::Group {
+                delimiter,
+                group,
+                block,
+            },
             mode,
             context,
             Some(group_separator(view.source(), delimiter, index)),
-            mode == Mode::Cover,
+            arrow,
             inherited,
         ));
         Ok(())
@@ -293,22 +357,46 @@ impl Pass<'_, '_, '_> {
     fn close_group(&mut self, index: usize) {
         self.close_conditionals(index);
         let frame = self.stack.pop().expect("a close token ends an open frame");
-        let FrameKind::Group { group, .. } = &frame.kind else {
+        let FrameKind::Group {
+            delimiter,
+            group,
+            block,
+        } = frame.kind
+        else {
             unreachable!("conditionals close before their group");
         };
         let view = self.scope.view;
         let open = view
-            .group(*group)
+            .group(group)
             .expect("an open frame's group exists")
             .open_token();
         let view_level = frame.view_level;
         let line_starts = frame.line_starts;
-        let FrameKind::Group {
-            delimiter, group, ..
-        } = frame.kind
-        else {
-            unreachable!("checked as a group");
-        };
+        if let Some(block) = block {
+            let result = self.finish_block(&block, &frame.pieces, open, index);
+            let covers = self.scope.covers;
+            let parent = self.top();
+            parent.line_starts += line_starts;
+            parent.lambda_head = false;
+            // The form replaces its `do` and the line starts after it.
+            while let Some(Piece::Token(last)) = parent.pieces.last()
+                && *last != block.head
+            {
+                parent.pieces.pop();
+            }
+            parent.pieces.pop();
+            parent.pieces.push(Piece::Form {
+                head: block.head,
+                end: index + 1,
+                form: covers.form(Form {
+                    head: block.head,
+                    keyword: "do",
+                    shape: FormShape::Prefix,
+                    result,
+                }),
+            });
+            return;
+        }
         let body = GroupBody {
             delimiter,
             group,
@@ -345,29 +433,38 @@ impl Pass<'_, '_, '_> {
         });
     }
 
-    /// Notes a significant token in the top frame: its first one starts a
-    /// conditional branch's context.
+    /// Notes a significant token in the top frame. One that starts a branch,
+    /// a guard clause or a statement starts that member's context.
     fn significant(&mut self, index: usize) {
         let view = self.scope.view;
         let top = self.top();
-        if top.first.is_some() {
+        let starting = top.first.is_none() || top.member_start;
+        top.first.get_or_insert(index);
+        if !starting {
             return;
         }
-        top.first = Some(index);
-        let FrameKind::Conditional(conditional) = &mut top.kind else {
-            return;
-        };
-        if conditional.phase == Phase::Guards {
-            return;
+        top.member_start = false;
+        match &mut top.kind {
+            FrameKind::Conditional(conditional) => match conditional.phase {
+                Phase::Guards => {
+                    top.context = ExpressionContext::for_owner_at(view, index).validated()
+                }
+                phase => {
+                    let owner = conditional.context(view).child_owner_at(view, index);
+                    let owner = if phase == Phase::Else {
+                        owner.complete_keeping_arrow()
+                    } else {
+                        owner.complete()
+                    };
+                    conditional.branch_context = Some(owner);
+                    top.context = owner.validated();
+                }
+            },
+            FrameKind::Group {
+                block: Some(block), ..
+            } => top.context = block.context.child_owner_at(view, index).validated(),
+            _ => {}
         }
-        let owner = conditional.context(view).child_owner_at(view, index);
-        let owner = if conditional.phase == Phase::Else {
-            owner.complete_keeping_arrow()
-        } else {
-            owner.complete()
-        };
-        conditional.branch_context = Some(owner);
-        top.context = owner.validated();
     }
 
     fn token(&mut self, index: usize) -> Step {
@@ -388,9 +485,27 @@ impl Pass<'_, '_, '_> {
                     .separator
                     .is_some_and(|separator| separator == *symbol) =>
             {
+                // A separator ends the conditionals and the region before it,
+                // and the next member starts its own context.
                 self.close_conditionals(index);
+                self.significant(index);
+                let top = self.top();
+                top.region = false;
+                top.region_conditionals.clear();
+                top.lambda_head = false;
+                top.member_start = true;
+                top.pieces.push(Piece::Token(index));
+                return Step::Next;
             }
             _ => {}
+        }
+        // Nothing in a deferred group is interpreted here, but its line
+        // starts still count toward the floors around it.
+        let top = self.top();
+        if top.inherited_region {
+            top.first.get_or_insert(index);
+            top.pieces.push(Piece::Token(index));
+            return Step::Next;
         }
         self.significant(index);
         if self.top().region {
@@ -406,6 +521,28 @@ impl Pass<'_, '_, '_> {
                 // a tag's payload included.
                 "if" | "try" if may_head_keyword_form(view, index) => {
                     self.open_conditional(index);
+                    return Step::Next;
+                }
+                "do" if may_head_keyword_form(view, index) && self.braced_do(index) => {
+                    let top = self.top();
+                    top.pending_do = Some(index);
+                    top.lambda_head = false;
+                    top.pieces.push(Piece::Token(index));
+                    return Step::Next;
+                }
+                // An `and` in guards ends a clause.
+                "and"
+                    if in_keyword_position(view, index)
+                        && matches!(
+                            &self.top().kind,
+                            FrameKind::Conditional(conditional)
+                                if conditional.phase == Phase::Guards
+                        ) =>
+                {
+                    let top = self.top();
+                    top.lambda_head = false;
+                    top.member_start = true;
+                    top.pieces.push(Piece::Token(index));
                     return Step::Next;
                 }
                 "let" | "object" | "where" | "with" if in_keyword_position(view, index) => {
@@ -442,21 +579,36 @@ impl Pass<'_, '_, '_> {
         Step::Next
     }
 
+    /// Whether the `do` at `index` heads a braced block: its next significant
+    /// token is a `{`, separated from it as the `do` form requires.
+    fn braced_do(&self, index: usize) -> bool {
+        let view = self.scope.view;
+        let mut next = index + 1;
+        while view
+            .token_at(next)
+            .is_some_and(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
+        {
+            next += 1;
+        }
+        view.token_at(next).is_some_and(|token| {
+            matches!(
+                token.kind(),
+                TokenKind::Open {
+                    delimiter: Delimiter::Brace,
+                    ..
+                }
+            ) && (next > index + 1 || token.leading() != LeadingTrivia::Joint)
+        })
+    }
+
     /// A token inside the top frame's keyword region: only its end, and the
-    /// conditionals counted inside it, matter.
+    /// conditionals counted inside it, matter. Separators are handled before.
     fn region_token(&mut self, index: usize) -> Step {
         let view = self.scope.view;
         let kind = token(view, index).kind();
         let top = self.top();
         let is_conditional = matches!(top.kind, FrameKind::Conditional(_));
         match kind {
-            TokenKind::Symbol(symbol)
-                if !is_conditional
-                    && top.separator.is_some_and(|separator| separator == *symbol) =>
-            {
-                top.region = false;
-                top.region_conditionals.clear();
-            }
             TokenKind::Name("if" | "try") if may_head_keyword_form(view, index) => {
                 top.region_conditionals.push(Phase::Guards);
             }
@@ -494,8 +646,7 @@ impl Pass<'_, '_, '_> {
         };
         let parent = self.top();
         parent.lambda_head = false;
-        let (context, separator, arrow) =
-            (parent.context, parent.separator, parent.arrow_ends_tails);
+        let (context, separator, arrow) = (parent.context, parent.separator, parent.nested_arrow());
         let mut frame = Frame::new(
             FrameKind::Conditional(Box::new(Conditional {
                 head: index,
@@ -504,20 +655,21 @@ impl Pass<'_, '_, '_> {
                 then: None,
                 else_keyword: None,
                 then_branch: None,
+                guard_pieces: Vec::new(),
                 enclosing: context,
                 branch_context: None,
                 failure: None,
                 line_starts: 0,
             })),
-            Mode::Expression,
+            // Guards may bind patterns.
+            Mode::Cover,
             context,
             separator,
             arrow,
             false,
         );
-        // The guards are a region, which the guard-clause parser reads.
-        frame.region = true;
         frame.first = Some(index);
+        frame.member_start = true;
         self.stack.push(frame);
     }
 
@@ -543,6 +695,7 @@ impl Pass<'_, '_, '_> {
                     conditional.then = Some((index, tentative));
                     conditional.phase = Phase::Then;
                     conditional.line_starts += top.line_starts;
+                    conditional.guard_pieces = std::mem::take(&mut top.pieces);
                     let context = conditional.enclosing;
                     top.begin_branch(context);
                     return if tentative { Step::Skip } else { Step::Next };
@@ -554,6 +707,7 @@ impl Pass<'_, '_, '_> {
                     conditional.else_keyword = Some(index);
                     conditional.phase = Phase::Else;
                     conditional.line_starts += top.line_starts;
+                    conditional.guard_pieces = std::mem::take(&mut top.pieces);
                     let context = conditional.enclosing;
                     top.begin_branch(context);
                     return Step::Next;
@@ -566,7 +720,6 @@ impl Pass<'_, '_, '_> {
                         start: then + 1 + usize::from(tentative),
                         end: index,
                         line_starts: top.line_starts,
-                        view_level: top.view_level,
                     });
                     conditional.else_keyword = Some(index);
                     conditional.phase = Phase::Else;
@@ -639,7 +792,6 @@ impl Pass<'_, '_, '_> {
             kind: FrameKind::Conditional(mut conditional),
             pieces,
             line_starts,
-            view_level,
             ..
         } = frame
         else {
@@ -664,7 +816,6 @@ impl Pass<'_, '_, '_> {
             start: conditional.else_keyword.map_or(end, |keyword| keyword + 1),
             end,
             line_starts,
-            view_level,
         };
         match self.interpret(&mut conditional, else_branch) {
             Ok((expression, rest)) => {
@@ -738,8 +889,13 @@ impl Pass<'_, '_, '_> {
         } else {
             format!("{keyword} guard")
         };
-        let guards = parse_guard_clauses(guards, &construct)
-            .map_err(|diagnostics| Some(Fail::Reported(diagnostics)))?;
+        let scope = Scope {
+            view: subview(view, head + 1, guards_end),
+            mode: Mode::Cover,
+            ..self.scope
+        };
+        let guards =
+            binding::guard_clauses(scope, &conditional.guard_pieces, &construct).map_err(Some)?;
         let context = conditional.context(view);
         let then_result = conditional
             .then_branch
@@ -774,7 +930,7 @@ impl Pass<'_, '_, '_> {
         let view = self.scope.view;
         let whole = subview(view, branch.start, branch.end);
         let trimmed = trim_layout(whole);
-        if needs_view_dispatch(view, &branch) {
+        if needs_view_dispatch(view, &branch.pieces) {
             return parse_expression_in_context(trimmed, conditional.child_owner(trimmed))
                 .map_err(Fail::Reported);
         }
@@ -803,7 +959,7 @@ impl Pass<'_, '_, '_> {
         let whole = subview(view, branch.start, branch.end);
         let trimmed = trim_layout(whole);
         let mut pieces = branch.pieces;
-        if needs_view_dispatch_in(view, &pieces, branch.view_level) {
+        if needs_view_dispatch(view, &pieces) {
             let (expression, end) =
                 parse_open_tail(trimmed, conditional.child_owner(trimmed), branch.end)
                     .map_err(Fail::Reported)?;
@@ -843,6 +999,68 @@ impl Pass<'_, '_, '_> {
         Ok((expression, rest))
     }
 
+    /// A braced `do` block's statements, split at its `;`s: one leading and
+    /// one trailing `;` are allowed, and `do {}` is `.r ()`.
+    fn finish_block(
+        &self,
+        block: &Block,
+        pieces: &[Piece],
+        open: usize,
+        close: usize,
+    ) -> Parse<SyntaxExpr> {
+        let view = self.scope.view;
+        let head = block.head;
+        let fail = |message: String| Err(Fail::error(message).or_at(Some(head)));
+        if trim_padding(view, pieces).is_empty() {
+            let line = view
+                .token_at(head)
+                .and_then(|token| view.line_at_span(token.span()))
+                .unwrap_or(1);
+            return Ok(empty_do_expr(line));
+        }
+        let is_semicolon = |piece: &Piece| {
+            matches!(piece, Piece::Token(index)
+                if matches!(token(view, *index).kind(), TokenKind::Symbol(";")))
+        };
+        let mut statements = pieces.split(is_semicolon).collect::<Vec<_>>();
+        if statements
+            .first()
+            .is_some_and(|statement| trim_padding(view, statement).is_empty())
+        {
+            statements.remove(0);
+        }
+        if statements
+            .last()
+            .is_some_and(|statement| trim_padding(view, statement).is_empty())
+        {
+            statements.pop();
+        }
+        if statements.is_empty() {
+            return fail("`do {;}` is invalid; a semicolon is not an empty computation".to_owned());
+        }
+        let scope = Scope {
+            view: subview(view, open + 1, close),
+            mode: Mode::Cover,
+            ..self.scope
+        };
+        let mut parsed = Vec::with_capacity(statements.len());
+        for statement in statements {
+            let statement = trim_padding(view, statement);
+            let Some(first) = statement.first().map(piece_token) else {
+                return fail(
+                    "braced do block contains an empty statement between semicolons".to_owned(),
+                );
+            };
+            let line = view
+                .token_at(first)
+                .and_then(|token| view.line_at_span(token.span()))
+                .unwrap_or(1);
+            let context = block.context.child_owner_at(view, first);
+            parsed.push((line, binding::statement(scope, statement, context)?));
+        }
+        finish_do_statements(parsed).or_else(fail)
+    }
+
     /// A branch's context, its floors checked where it spans lines.
     fn checked(&self, view: TokenView<'_, '_>, branch: &Branch) -> Parse<ExpressionContext> {
         let owner = branch
@@ -858,24 +1076,6 @@ impl Pass<'_, '_, '_> {
             Err(Fail::Reported(diagnostics))
         }
     }
-}
-
-/// Whether a branch holds a form only view-level dispatch parses: at its
-/// own level, or as its whole contents in parentheses.
-fn needs_view_dispatch(view: TokenView<'_, '_>, branch: &Branch) -> bool {
-    needs_view_dispatch_in(view, &branch.pieces, branch.view_level)
-}
-
-fn needs_view_dispatch_in(view: TokenView<'_, '_>, pieces: &[Piece], view_level: bool) -> bool {
-    view_level
-        || matches!(
-            trim_padding(view, pieces),
-            [Piece::Group { open, view_level: true, .. }]
-                if matches!(
-                    token(view, *open).kind(),
-                    TokenKind::Open { delimiter: Delimiter::Parenthesis, .. }
-                )
-        )
 }
 
 /// The pieces after any leading line starts.
