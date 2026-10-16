@@ -994,6 +994,12 @@ beside group frames:
 - **Found by the 200-times oracle:** a group deferred to a structural
   parser did not count its line breaks, so its branch skipped its floor
   check (`deferred_group_lines_count_for_the_enclosing_floor`).
+- **Fixed later the same day:** an `and` in guards did not end an `else`
+  tail open in them, so `if x <- if a then b else c and y then …` read
+  `c and y` as the tail, where the structural parser split two clauses. An
+  `and` now ends those tails, as a `->` ends them in a binding
+  (`an_and_in_guards_ends_the_else_tails_open_in_them`). The generated
+  expressions hold no bindings in guards, so a probe found it.
 
 **`parser-keyword-frames-layout`, layout `do` (2026-10-16).** The first part
 of the layout slice; `match` arms and multi-line `let` remain.

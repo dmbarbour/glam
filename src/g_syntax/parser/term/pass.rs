@@ -993,8 +993,12 @@ impl Pass<'_, '_, '_> {
                 "when" if in_keyword_position(view, index) && self.arm_mark(index) => {
                     return Step::Next;
                 }
-                // An `and` in guards ends a clause.
-                "and" if in_keyword_position(view, index) && self.top().in_guards() => {
+                // An `and` in guards ends a clause, and the `else` tails
+                // open in it.
+                "and" if in_keyword_position(view, index) && self.guards_below_tails() => {
+                    while !self.top().in_guards() {
+                        self.close_conditional(index);
+                    }
                     let top = self.top();
                     top.lambda_head = false;
                     top.member_start = true;
@@ -1215,6 +1219,18 @@ impl Pass<'_, '_, '_> {
                 (Phase::Else, _) => self.close_conditional(index),
             }
         }
+    }
+
+    /// Whether the top frame reads guards, or `else` branches open in them.
+    fn guards_below_tails(&self) -> bool {
+        self.stack
+            .iter()
+            .rev()
+            .find(|frame| {
+                !matches!(&frame.kind,
+                    FrameKind::Conditional(conditional) if conditional.phase == Phase::Else)
+            })
+            .is_some_and(Frame::in_guards)
     }
 
     /// Closes conditionals whose `else` branch ends at the `->` at `index`.

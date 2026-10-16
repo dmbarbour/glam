@@ -195,6 +195,30 @@ fn guard_clauses_bind_by_the_statement_rule() {
     );
 }
 
+/// As a `->` ends them in a binding, an `and` ends the `else` tails open in
+/// guards, so a clause binding a conditional is followed by the next.
+#[test]
+fn an_and_in_guards_ends_the_else_tails_open_in_them() {
+    let SyntaxExpr::If(conditional) =
+        parse_do_expression("if x <- if a then b else c and y then 1 else 2")
+    else {
+        panic!("expected an if expression");
+    };
+    assert!(matches!(
+        conditional.guards.as_slice(),
+        [
+            SyntaxGuardClause::EffectBind { operation: SyntaxExpr::If(inner), .. },
+            SyntaxGuardClause::Effect(SyntaxExpr::Name(y)),
+        ] if *inner.else_result == SyntaxExpr::Name("c".to_owned()) && y == "y"
+    ));
+    let SyntaxExpr::Match(found) =
+        parse_do_expression("match v with {p when x <- if a then b else c and y => 1}")
+    else {
+        panic!("expected a match expression");
+    };
+    assert_eq!(found.arms[0].guards.len(), 2);
+}
+
 #[test]
 fn initial_patterns_are_shared_by_all_do_binding_directions() {
     let expr = parse_do_expression(
