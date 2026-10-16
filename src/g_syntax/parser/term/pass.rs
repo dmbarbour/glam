@@ -1683,6 +1683,22 @@ impl Pass<'_, '_, '_> {
         self.lambda_ends_at(index);
         let scope = self.scope;
         let view = scope.view;
+        // `Dict as Name with Defs` names an update's base, which an `as`
+        // that ends a subject cannot do.
+        let name_with = |at: usize| {
+            view.range().contains(at + 2)
+                && matches!(token(view, at + 1).kind(), TokenKind::Name(_))
+                && matches!(token(view, at + 2).kind(), TokenKind::Name("with"))
+                && in_keyword_position(view, at + 2)
+        };
+        if name_with(index) {
+            self.violate(
+                Fail::error(
+                    "a match's first `as` ends its subject; parenthesize an update that names its base, as in `match (d as n with {…}) as …`",
+                )
+                .or_at(Some(index)),
+            );
+        }
         let frame = self.top();
         frame.region = false;
         frame.region_conditionals.clear();
@@ -1965,7 +1981,15 @@ impl Pass<'_, '_, '_> {
             unreachable!("only matches close here");
         };
         let (head, keyword) = (found.head, found.keyword);
-        let result = self.finish_match(*found, frame.pending, arms);
+        // A subject that never met its `as` but holds a `with` was likely
+        // written with `with` before the arms.
+        let view = self.scope.view;
+        let with = frame.pieces.iter().any(|piece| {
+            matches!(piece, Piece::Token(index)
+                if matches!(token(view, *index).kind(), TokenKind::Name("with"))
+                    && in_keyword_position(view, *index))
+        });
+        let result = self.finish_match(*found, frame.pending, arms, with);
         let covers = self.scope.covers;
         let parent = self.top();
         parent.line_starts += line_starts;
@@ -1988,6 +2012,7 @@ impl Pass<'_, '_, '_> {
         found: Match,
         pending: Option<Pending>,
         arms: Option<Parse<ArmList>>,
+        subject_with: bool,
     ) -> Parse<SyntaxExpr> {
         let view = self.scope.view;
         let head = found.head;
@@ -1998,6 +2023,11 @@ impl Pass<'_, '_, '_> {
             return Err(match pending {
                 // Its braced arms never came.
                 Some(Pending::Arms(arms)) => arms.missing(),
+                _ if subject_with => Fail::error(format!(
+                    "{} expression requires `as` before its arms; a `with` in its subject begins an update",
+                    display(found.keyword, found.open)
+                ))
+                .or_at(Some(head)),
                 _ => Fail::error(format!(
                     "{} expression requires `as` and at least one layout arm or an explicit `{{}}` body",
                     display(found.keyword, found.open)

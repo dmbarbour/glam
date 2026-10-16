@@ -1189,7 +1189,7 @@ mod tests {
         }
         assert_rejected(
             "match base as b with { x := 1 } as { {x:item} => item; _ => 0; }",
-            "match arm",
+            "parenthesize an update that names its base",
         );
     }
 
@@ -1509,7 +1509,14 @@ mod tests {
         ] {
             assert!(matches!(parse(source), SyntaxExpr::Match(_)), "{source}");
         }
-        assert_rejected("match d as e with { a := 1 }", "requires `=>`");
+        assert_rejected(
+            "match d as e with { a := 1 }",
+            "parenthesize an update that names its base",
+        );
+        assert_rejected(
+            "match d with\n  1 => 2",
+            "a `with` in its subject begins an update",
+        );
     }
 
     /// A `{` on the line of a match's `as` delimits its arms, so a first
