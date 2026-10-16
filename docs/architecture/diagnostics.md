@@ -217,6 +217,13 @@ does not maintain an ever-growing set of previously seen failure identities.
 Fallback output is delivered through the ordinary outbox protocol, and work it
 admits causes another runtime pump before final exit.
 
+Delivery and rendering run only on client threads, never on an evaluation
+worker. The logger task only journals and commits its outputs, wherever it
+runs; the CLI's logger thread delivers them between pumps
+(`ScheduledEffectRun::run_with`), and its subscribers render there. When the
+logger ends, its unread input moves to the fallback output on whichever
+thread settles it, and a client thread delivers that output.
+
 A stable deadlock may be explicitly killed and settled. Task failures, output
 delivery failures, exit errors, killed work, and collector maintenance
 failures make the batch unsuccessful directly, even if their diagnostic

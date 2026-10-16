@@ -101,10 +101,10 @@ impl LoggerSupervisor {
         state.next_generation = generation
             .checked_add(1)
             .expect("logger lifecycle generations exhausted");
-        let fallback_delivery = self.fallback_delivery.clone();
-        let terminal = self.input.diagnostic_ingress.logger_terminal(move || {
-            let _ = deliver_fallback_output(&fallback_delivery);
-        });
+        // The terminal moves what the logger left unread to the fallback
+        // output, on whichever thread settles the logger; a client thread
+        // delivers it, since that thread may be a worker.
+        let terminal = self.input.diagnostic_ingress.logger_terminal(|| {});
         let installation = LoggerInstallation {
             generation,
             lifecycle: EffectLifecycle::new_with_terminal(&self.input.runtime, terminal),

@@ -81,7 +81,7 @@ pub(crate) fn start_logger(
             &evaluation_runtime,
             &custom,
             MainEffects::new(values.clone()),
-            host,
+            host.clone(),
         )
         .contextualizing_failures(
             entry_context(&task_values, "log").expect("configuration context is local"),
@@ -119,7 +119,10 @@ pub(crate) fn start_logger(
         .spawn(move || {
             let _subscription = subscription;
             if let Some((installation, task)) = scheduled {
-                match task.run() {
+                // This client thread delivers what the logger task commits,
+                // wherever the task runs, so rendering stays off the workers.
+                let outcome = task.run_with(|| host.deliver());
+                match outcome {
                     Ok(TaskOutcome::Complete(_)) => {}
                     Ok(TaskOutcome::Cancelled) => {
                         task_diagnostics.publish_local(
@@ -148,6 +151,8 @@ pub(crate) fn start_logger(
                     }
                 }
                 task_supervisor.finish(&installation);
+                // The logger's end moved what it left unread to the fallback.
+                let _ = task_supervisor.deliver_fallback();
             } else {
                 let _ = task_supervisor.fallback_and_deliver();
             }

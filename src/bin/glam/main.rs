@@ -441,18 +441,21 @@ mod tests {
             &input.runtime,
             &producer,
             MainEffects::new(assembler.values()),
-            host,
+            host.clone(),
         )
         .schedule(&producer_lifecycle)
         .expect("independent diagnostic producer should schedule");
         let report = input.runtime.pump_background(4096);
         assert_eq!(report.state, glam::BackgroundPumpState::Stable);
         assert!(matches!(
-            producer_task.run().unwrap(),
+            producer_task.run_with(|| host.deliver()).unwrap(),
             TaskOutcome::Complete(_)
         ));
 
-        assert!(matches!(task.run().unwrap(), TaskOutcome::Complete(_)));
+        assert!(matches!(
+            task.run_with(|| host.deliver()).unwrap(),
+            TaskOutcome::Complete(_)
+        ));
         assert!(matches!(
             installation.lifecycle.status(),
             glam::reflection::EffectLifecycleStatus::Complete(_)
@@ -532,7 +535,7 @@ mod tests {
             &input.runtime,
             &effect,
             MainEffects::new(assembler.values()),
-            host,
+            host.clone(),
         )
         .schedule_diagnostic_consumer(&installation.lifecycle, &input.diagnostic_ingress)
         .expect("logger demand fixture should schedule");
@@ -554,7 +557,10 @@ mod tests {
             .expect("logger stderr gate should resolve once");
 
         input.runtime.pump_until_stable();
-        assert!(matches!(task.run().unwrap(), TaskOutcome::Complete(_)));
+        assert!(matches!(
+            task.run_with(|| host.deliver()).unwrap(),
+            TaskOutcome::Complete(_)
+        ));
         let (_generation, _store, snapshot) = input.task_capability.transaction_snapshot();
         let mut remaining = RuntimeEventJournal::new(snapshot);
         assert!(
@@ -654,7 +660,7 @@ mod tests {
         let report = input.runtime.pump_background(4096);
         assert_eq!(report.state, glam::BackgroundPumpState::Stable);
         assert!(matches!(
-            producer_task.run().unwrap(),
+            producer_task.run_with(|| host.deliver()).unwrap(),
             TaskOutcome::Complete(_)
         ));
         let (_generation, _store, input_snapshot) = input.task_capability.transaction_snapshot();
@@ -671,11 +677,14 @@ mod tests {
             &input.runtime,
             &start,
             MainEffects::new(assembler.values()),
-            host,
+            host.clone(),
         )
         .schedule(&release_lifecycle)
         .expect("logger release effect should schedule");
-        assert!(matches!(release.run().unwrap(), TaskOutcome::Complete(_)));
+        assert!(matches!(
+            release.run_with(|| host.deliver()).unwrap(),
+            TaskOutcome::Complete(_)
+        ));
 
         input.runtime.pump_until_stable();
         let RuntimeReadiness::Ready(snapshot) = input.runtime.readiness() else {
@@ -685,7 +694,7 @@ mod tests {
         assert!(report.task_failures().is_empty());
         assert!(report.killed_work().is_empty());
         assert!(
-            task.run().is_err(),
+            task.run_with(|| host.deliver()).is_err(),
             "settlement should terminalize the exit vote"
         );
         supervisor.finish(&installation);
@@ -748,11 +757,11 @@ mod tests {
             &input.runtime,
             &effect,
             MainEffects::new(assembler.values()),
-            host,
+            host.clone(),
         )
         .schedule(&lifecycle)
         .expect("failure-report root should schedule");
-        assert!(task.run().is_err());
+        assert!(task.run_with(|| host.deliver()).is_err());
 
         let failed_output = input
             .runtime
@@ -866,7 +875,7 @@ mod tests {
             &input.runtime,
             &blocked,
             MainEffects::new(assembler.values()),
-            host,
+            host.clone(),
         )
         .schedule(&blocked_lifecycle)
         .expect("blocked effect should schedule");
@@ -982,11 +991,11 @@ mod tests {
             &input.runtime,
             &effect,
             MainEffects::new(assembler.values()),
-            host,
+            host.clone(),
         )
         .schedule(&lifecycle)
         .expect("reentrant reporting root should schedule");
-        assert!(task.run().is_err());
+        assert!(task.run_with(|| host.deliver()).is_err());
         input.runtime.pump_until_stable();
         let glam::RuntimeReadiness::Ready(snapshot) = input.runtime.readiness() else {
             panic!("retained task failure should be ready")

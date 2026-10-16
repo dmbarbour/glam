@@ -250,9 +250,18 @@ impl Drop for ScheduledEffectRun {
 
 impl ScheduledEffectRun {
     pub fn run(self) -> Result<TaskOutcome, TaskHalt> {
+        self.run_with(|| {})
+    }
+
+    /// Runs as [`ScheduledEffectRun::run`] does, calling `between` on this
+    /// thread after each pump and each wake, and once before returning: a
+    /// client delivers there what the task committed, since the workers that
+    /// may run the task never run client code.
+    pub fn run_with(self, mut between: impl FnMut()) -> Result<TaskOutcome, TaskHalt> {
         let values = self.context.values().clone();
         loop {
             let children = self.context.run_until_quiescent();
+            between();
             match self.context.poll_reflection_task(&self.task) {
                 EvaluationWaitPoll::Pending(_) => {
                     if self.context.has_ready_session_task() {

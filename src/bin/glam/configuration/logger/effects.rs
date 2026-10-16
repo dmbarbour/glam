@@ -1,5 +1,5 @@
 use std::io::{self, Write};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use bytes::Bytes;
 use glam::reflection::{
@@ -240,11 +240,19 @@ fn read_log(
     }
 }
 
+/// The logger task's host. A worker running the logger task only journals
+/// and commits its outputs: delivering them, and publishing to the logger's
+/// diagnostic bus, whose subscribers render, run on client threads through
+/// [`LoggerTaskHost::deliver`], since workers never run client code.
 pub(crate) struct LoggerTaskHost {
     resources: Arc<RuntimeTaskCapability>,
     _diagnostic_ingress: DiagnosticIngress,
     diagnostic_reader: RuntimeInputReader,
     diagnostics: DiagnosticBus,
+    /// Failures to journal or commit output, held for a client thread to
+    /// publish.
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
+    failures: Mutex<Vec<Error>>,
     reflection_environment: Value,
     diagnostic_writer: RuntimeOutputWriter,
     diagnostic_delivery: RuntimeOutputDelivery<Diagnostic>,
@@ -299,6 +307,7 @@ impl LoggerTaskHost {
             _diagnostic_ingress: input.diagnostic_ingress.clone(),
             diagnostic_reader: input.diagnostic_reader.clone(),
             diagnostics,
+            failures: Mutex::new(Vec::new()),
             reflection_environment,
             diagnostic_writer,
             diagnostic_delivery,
@@ -318,7 +327,7 @@ impl LoggerTaskHost {
             .resources
             .try_commit_transaction(&glam::reflection::StoreJournal::new(store), &events)
         {
-            glam::reflection::StoreCommitResult::Committed => self.deliver_outputs(),
+            glam::reflection::StoreCommitResult::Committed => Ok(()),
             glam::reflection::StoreCommitResult::Conflict => Err(Error::new(
                 "logger output conflicted during immediate commit",
             )),
@@ -337,7 +346,7 @@ impl LoggerTaskHost {
             .resources
             .try_commit_transaction(&glam::reflection::StoreJournal::new(store), &events)
         {
-            glam::reflection::StoreCommitResult::Committed => self.deliver_outputs(),
+            glam::reflection::StoreCommitResult::Committed => Ok(()),
             glam::reflection::StoreCommitResult::Conflict => Err(Error::new(
                 "stderr output conflicted during immediate commit",
             )),
@@ -345,6 +354,29 @@ impl LoggerTaskHost {
                 "reflection volume {} was revoked before stderr output committed",
                 volume.get()
             ))),
+        }
+    }
+
+    /// Holds a failure for a client thread to publish.
+    fn record_failure(&self, error: Error) {
+        self.failures
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(error);
+    }
+
+    /// Publishes held failures and delivers committed outputs, on the
+    /// calling client thread, where the bus's subscribers render them.
+    pub(crate) fn deliver(&self) {
+        let failures =
+            std::mem::take(&mut *self.failures.lock().unwrap_or_else(PoisonError::into_inner));
+        let delivery = self.deliver_outputs().err();
+        for error in failures.into_iter().chain(delivery) {
+            self.diagnostics.publish_local(
+                error
+                    .diagnostic(&self.resources.values())
+                    .expect("logger failures belong to the logger runtime"),
+            );
         }
     }
 
@@ -379,11 +411,7 @@ impl TaskEnvironment for LoggerTaskHost {
 impl ReflectionServices for LoggerTaskHost {
     fn emit_diagnostic(&self, diagnostic: Diagnostic) {
         if let Err(error) = self.write_diagnostic(diagnostic) {
-            self.diagnostics.publish_local(
-                error
-                    .diagnostic(&self.resources.values())
-                    .expect("logger failures belong to the logger runtime"),
-            );
+            self.record_failure(error);
         }
     }
 
@@ -432,11 +460,7 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
                 .transport_value(&self.resources.values())
                 .expect("logger task diagnostics belong to the logger runtime");
             if let Err(error) = events.write(&self.diagnostic_writer, transport) {
-                self.diagnostics.publish_local(
-                    error
-                        .diagnostic(&self.resources.values())
-                        .expect("logger failures belong to the logger runtime"),
-                );
+                self.record_failure(error);
                 return CommitResult::Closed;
             }
         }
@@ -450,13 +474,6 @@ impl TaskHost<MainEffects> for LoggerTaskHost {
             }
         }
         journal.reflection.commit_updates();
-        if let Err(error) = self.deliver_outputs() {
-            self.diagnostics.publish_local(
-                error
-                    .diagnostic(&self.resources.values())
-                    .expect("logger failures belong to the logger runtime"),
-            );
-        }
         CommitResult::Committed
     }
 
@@ -495,6 +512,7 @@ mod tests {
             _diagnostic_ingress: _,
             diagnostic_reader: _,
             diagnostics: _,
+            failures: _,
             reflection_environment,
             diagnostic_writer: _,
             diagnostic_delivery: _,
@@ -534,6 +552,16 @@ mod tests {
             &host,
             Diagnostic::new(&input.runtime.values(), Severity::Error, "session output"),
         );
+        // Emitting only commits the output: the task's thread may be a
+        // worker, so nothing renders until a client thread delivers it.
+        assert!(
+            output
+                .lock()
+                .expect("output capture should not be poisoned")
+                .is_empty(),
+            "emitting must not deliver on the task's thread"
+        );
+        host.deliver();
 
         let (_generation, _store, snapshot) = input.task_capability.transaction_snapshot();
         let mut events = RuntimeEventJournal::new(snapshot);

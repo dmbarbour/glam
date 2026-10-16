@@ -296,7 +296,11 @@ cycles (L1, L3, L4, L10).
 Steps, each a plan step once a plan exists:
 1. `lifecycle-cli-logger`: the CLI's diagnostics become an output that a
    client thread drains and renders (L2, L8), the first instance of the
-   message boundary. Small, and independent of the rest.
+   message boundary. Small, and independent of the rest. *Done
+   2026-10-16:* the logger task's host only commits, holding its failures
+   as data; the logger thread delivers between pumps
+   (`ScheduledEffectRun::run_with`) and after the task ends; the terminal
+   hook no longer renders.
 2. `lifecycle-owner`: the thread-affine owner and `Send` handles; explicit
    retirement that stops and joins the workers, waits for client threads'
    quanta, fails pending client operations as retired, closes sessions and
