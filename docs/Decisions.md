@@ -1619,6 +1619,27 @@ maps the short names used here to file names.
 
 ## Evaluation and scheduling
 
+### Retiring a runtime joins its workers
+`runtime-retirement-joins-workers` · 2026-10-16 · maintainer · accepted
+- **Context:** retiring a runtime detached its worker threads, on the view
+  that a worker might run divergent work. A worker holds the value domain
+  within a quantum, so the domain could outlive the last runtime handle,
+  and a collection test that expected it gone failed under load.
+- **Decision:** a worker is a weak holder of the runtime: once stopped it
+  takes no new work, and retirement joins every worker but the calling one,
+  waiting for each quantum in flight. A quantum is bounded, so one that
+  never ends, or a worker taking quanta after the stop, is a bug to debug,
+  not a case to tolerate. Retirement waits, so it must not happen under a
+  heap mutator, which `assert_outside_mutator` checks.
+- **Consequences:**
+  - No worker holds the value domain once retirement returns.
+  - A worker that drops its runtime's last handle is not joined and
+    returns after its own quantum.
+  - Tests that observed a detached worker after shutdown now shut down on
+    another thread and observe it while shutdown waits.
+- **Rule lives in:** `architecture/evaluation.md`, the executor paragraph;
+  `architecture/values.md` "Value Domain and Ownership".
+
 ### Resumable WHNF through bounded regional quanta and durable checkpoints
 `resumable-whnf-regional-quanta` · 2026-09-12 · agent · accepted
 - **Context:** the recursive evaluator replayed prefixes after retryable

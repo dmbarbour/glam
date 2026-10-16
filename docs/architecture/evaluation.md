@@ -197,7 +197,12 @@ Activation is all-or-nothing:
 - on success, the executor publishes the handles and worker count and
   notifies the coordinator, and only then releases the gate.
 Workers retain a weak coordinator attachment and claim either an exact ready
-task or spark record from it. Reflection and deferred claims need only their
+task or spark record from it. Shutdown stops them from claiming more and
+then joins them, waiting only for each worker's quantum in flight, which is
+bounded: a quantum that never ends is a bug. So no worker holds the runtime's
+value domain once retirement returns. A worker that retires the runtime
+itself is not joined; it returns after its own quantum. Retirement waits, so
+it must not happen under a heap mutator (`assert_outside_mutator`). Reflection and deferred claims need only their
 coordinator records; resident machine contexts may retain closed demand state,
 but no route recovers the owner lease. Final owner drop can therefore close
 queued and blocked work immediately while a worker safely finishes one

@@ -19,6 +19,9 @@ struct EvaluationExecutorInner {
     /// order runtime retirement against it.
     #[cfg(test)]
     value_hold_pause: Mutex<Option<WorkerValueHoldPause>>,
+    /// Told when retirement begins waiting for its workers.
+    #[cfg(test)]
+    retirement_join: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 #[cfg(test)]
@@ -47,6 +50,17 @@ impl WorkerValueHoldProbe {
 
 #[cfg(test)]
 impl EvaluationExecutorInner {
+    fn notify_retirement_join(&self) {
+        let probe = self
+            .retirement_join
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(probe) = probe {
+            let _ = probe.send(());
+        }
+    }
+
     /// Pauses here, once, if a test installed a pause.
     fn pause_while_holding_values(&self) {
         let pause = self
@@ -101,6 +115,8 @@ impl EvaluationExecutor {
                 worker_count: AtomicUsize::new(0),
                 #[cfg(test)]
                 value_hold_pause: Mutex::new(None),
+                #[cfg(test)]
+                retirement_join: Mutex::new(None),
             }),
             workers: Mutex::new(Vec::with_capacity(worker_count)),
             activated: Mutex::new(false),
@@ -199,15 +215,19 @@ impl EvaluationExecutor {
         }
     }
 
-    /// Takes the worker threads' handles, so a test can join them after the
-    /// runtime retires instead of leaving them detached.
+    /// Tells the returned receiver when retirement begins waiting for its
+    /// workers.
     #[cfg(test)]
-    pub(crate) fn take_workers_for_test(&self) -> Vec<thread::JoinHandle<()>> {
-        self.workers
+    pub(crate) fn install_retirement_join_probe_for_test(&self) -> std::sync::mpsc::Receiver<()> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let prior = self
+            .inner
+            .retirement_join
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .drain(..)
-            .collect()
+            .replace(sender);
+        assert!(prior.is_none(), "retirement-join probe already installed");
+        receiver
     }
 }
 
@@ -225,13 +245,30 @@ impl Drop for EvaluationExecutor {
             }
         }
 
-        // Dropping a JoinHandle detaches its thread. Idle workers observe the
-        // coordinator wake and exit promptly. A divergent worker retains its
-        // claimed record until it returns, preserving truthful busy state.
-        self.workers
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
+        // A stopped worker takes no new work, so it returns once its quantum
+        // in flight ends, and a quantum is bounded: one that never ends is a
+        // bug. Retirement waits for every worker, so none holds the value
+        // domain afterwards. A worker that retires the runtime itself cannot
+        // wait for itself; it returns after its own quantum.
+        let current = thread::current().id();
+        let workers = std::mem::take(
+            self.workers
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        let others = workers
+            .into_iter()
+            .filter(|worker| worker.thread().id() != current)
+            .collect::<Vec<_>>();
+        if !others.is_empty() {
+            crate::core::assert_outside_mutator();
+            #[cfg(test)]
+            self.inner.notify_retirement_join();
+        }
+        for worker in others {
+            // A worker's own panic has already poisoned the runtime.
+            let _ = worker.join();
+        }
     }
 }
 

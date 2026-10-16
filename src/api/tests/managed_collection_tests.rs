@@ -71,6 +71,50 @@ struct PausedManagedWorker {
     release: mpsc::Receiver<()>,
 }
 
+/// Drops the runtime handle it holds on its worker, once released.
+struct RetiringWorker {
+    runtime: Option<EvaluationRuntime>,
+    entered: Option<mpsc::Sender<()>>,
+    release: mpsc::Receiver<()>,
+    retired: mpsc::Sender<()>,
+}
+
+impl EvaluationTaskMachine for RetiringWorker {
+    fn poll(
+        &mut self,
+        poll_context: &mut crate::evaluation::EvaluationPollContext,
+        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> EvaluationMachinePoll {
+        self.entered
+            .take()
+            .expect("retiring worker fixture should run once")
+            .send(())
+            .expect("retiring-worker observer should remain live");
+        let runtime = self
+            .runtime
+            .take()
+            .expect("the fixture holds a runtime handle");
+        let (release, retired) = (&self.release, &self.retired);
+        // Retirement may wait for other workers, so it runs with the poll's
+        // mutator suspended.
+        poll_context.suspend(|| {
+            release
+                .recv()
+                .expect("retiring-worker release should remain live");
+            assert_eq!(
+                runtime.state_holders_for_test(),
+                1,
+                "the worker should hold the runtime's last handle"
+            );
+            drop(runtime);
+            retired
+                .send(())
+                .expect("retirement observer should remain live");
+        });
+        EvaluationMachinePoll::Complete(poll_context.root_unit())
+    }
+}
+
 struct CompletingWorker;
 
 impl EvaluationTaskMachine for CompletingWorker {
@@ -550,10 +594,6 @@ fn collection_interleaves_with_worker_quantum_without_lost_work() {
         "the post-worker explicit collection must be exactly one new pass"
     );
 
-    // Retirement detaches the workers, and a woken worker holds the domain
-    // until it observes the stop, so join them before observing retirement
-    // (`a_worker_holding_the_value_domain_outlives_runtime_retirement`).
-    let workers = runtime.take_evaluation_workers_for_test();
     let values = runtime.values();
     let domain = Arc::downgrade(values.core().value_domain());
     let escaped = values.empty_dict();
@@ -561,9 +601,6 @@ fn collection_interleaves_with_worker_quantum_without_lost_work() {
     drop(context);
     drop(assembler);
     drop(runtime);
-    for worker in workers {
-        worker.join().expect("a stopped worker should exit");
-    }
     assert!(domain.upgrade().is_none());
     assert!(
         escaped.clone_core_in_own_domain().is_err(),
@@ -571,12 +608,12 @@ fn collection_interleaves_with_worker_quantum_without_lost_work() {
     );
 }
 
-/// Retiring a runtime detaches its workers, and a worker holds the value
-/// domain while it runs, so the domain retires when the last worker lets go
-/// of it, not when the last handle drops: a worker woken just before
-/// retirement keeps it until it observes the stop.
+/// A worker holds the value domain only within a quantum, and retiring a
+/// runtime waits for every worker's quantum in flight, so no worker holds
+/// the domain once retirement returns: a worker woken just before
+/// retirement holds it until retirement has waited for it.
 #[test]
-fn a_worker_holding_the_value_domain_outlives_runtime_retirement() {
+fn runtime_retirement_waits_for_a_worker_holding_the_value_domain() {
     let runtime = EvaluationRuntime::new(1).expect("worker runtime should build");
     let assembler = Assembler::builder()
         .evaluation_runtime(runtime.clone())
@@ -584,6 +621,7 @@ fn a_worker_holding_the_value_domain_outlives_runtime_retirement() {
         .expect("assembler should build");
     let context = assembler.eval_context();
     let probe = runtime.install_worker_value_hold_probe_for_test();
+    let joining = runtime.install_retirement_join_probe_for_test();
     let task = context
         .schedule_task(|_| Ok(Box::new(CompletingWorker)))
         .expect("task should schedule");
@@ -591,7 +629,6 @@ fn a_worker_holding_the_value_domain_outlives_runtime_retirement() {
         probe.wait_until_reached(Duration::from_secs(2)),
         "the woken worker should hold the value domain"
     );
-    let workers = runtime.take_evaluation_workers_for_test();
     let values = runtime.values();
     let domain = Arc::downgrade(values.core().value_domain());
     let escaped = values.empty_dict();
@@ -599,20 +636,78 @@ fn a_worker_holding_the_value_domain_outlives_runtime_retirement() {
     drop(task);
     drop(context);
     drop(assembler);
-    drop(runtime);
-    assert!(
-        domain.upgrade().is_some(),
-        "the paused worker's hold keeps the domain past the last handle"
+    assert_eq!(
+        runtime.state_holders_for_test(),
+        1,
+        "this handle should be the runtime's last"
     );
+    let (retired_tx, retired_rx) = mpsc::channel();
+    let retiring = std::thread::spawn(move || {
+        drop(runtime);
+        retired_tx
+            .send(())
+            .expect("the test should observe retirement");
+    });
+    joining
+        .recv_timeout(Duration::from_secs(2))
+        .expect("retirement should wait for the worker");
+    assert!(
+        matches!(retired_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+        "retirement must not finish while a worker holds the value domain"
+    );
+    assert!(domain.upgrade().is_some());
     probe.release();
-    for worker in workers {
-        worker.join().expect("a stopped worker should exit");
-    }
+    retired_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("retirement should finish once the worker's quantum ends");
+    retiring
+        .join()
+        .expect("the retiring thread should not panic");
     assert!(domain.upgrade().is_none());
     assert!(
         escaped.clone_core_in_own_domain().is_err(),
-        "a public value becomes inert once the last worker lets go"
+        "a public value becomes inert once its runtime retires"
     );
+}
+
+/// A worker that drops its runtime's last handle cannot wait for itself:
+/// retirement waits for the other workers only, and this one returns after
+/// its own quantum.
+#[test]
+fn a_worker_that_retires_its_runtime_does_not_wait_for_itself() {
+    let runtime = EvaluationRuntime::new(1).expect("worker runtime should build");
+    let assembler = Assembler::builder()
+        .evaluation_runtime(runtime.clone())
+        .build()
+        .expect("assembler should build");
+    let context = assembler.eval_context();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (retired_tx, retired_rx) = mpsc::channel();
+    let worker_runtime = runtime.clone();
+    let task = context
+        .schedule_task(move |_| {
+            Ok(Box::new(RetiringWorker {
+                runtime: Some(worker_runtime),
+                entered: Some(entered_tx),
+                release: release_rx,
+                retired: retired_tx,
+            }))
+        })
+        .expect("task should schedule");
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the worker should run the task");
+    drop(assembler);
+    drop(runtime);
+    release_tx
+        .send(())
+        .expect("the retiring worker should be releasable");
+    retired_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("a worker retiring its own runtime must not wait for itself");
+    drop(task);
+    drop(context);
 }
 
 #[test]

@@ -977,10 +977,17 @@ impl EvaluationRuntime {
         self.state.executor.install_value_hold_probe_for_test()
     }
 
-    /// Takes the worker threads' handles, to join them after retirement.
+    /// Tells the returned receiver when retirement begins waiting for the
+    /// runtime's workers.
     #[cfg(test)]
-    pub(crate) fn take_evaluation_workers_for_test(&self) -> Vec<std::thread::JoinHandle<()>> {
-        self.state.executor.take_workers_for_test()
+    pub(crate) fn install_retirement_join_probe_for_test(&self) -> mpsc::Receiver<()> {
+        self.state.executor.install_retirement_join_probe_for_test()
+    }
+
+    /// The handles that keep the runtime's state alive.
+    #[cfg(test)]
+    pub(crate) fn state_holders_for_test(&self) -> usize {
+        Arc::strong_count(&self.state)
     }
 
     #[cfg(test)]

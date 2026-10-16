@@ -70,16 +70,15 @@ production heap constructor.
 | Holder | Domain ownership |
 | --- | --- |
 | runtime shared resources, `Values`, factories, `EvalContext`, compiler contexts, `ReflectionStore` | strong |
-| an evaluation worker, from its wake until it next waits or observes the stop | strong |
+| an evaluation worker, within a quantum | strong |
 | `Value`, `EvaluatedValue`, `RuntimeValueRoot`, `Root<T>` | weak |
 | managed nodes, opaque payloads, cache entries | none (would cycle through the domain) |
 
 The domain reaches the coordinator only weakly, so a retained factory keeps
 construction usable without keeping execution alive. When the last strong
 holder drops, the domain retires and its roots become inert. Retiring a
-runtime detaches its workers rather than joining them, since one may be
-running divergent work, so the domain may outlive the last runtime handle
-until each worker that held it observes the stop.
+runtime waits for each worker's quantum in flight, so no worker holds the
+domain once retirement returns.
 
 ## Access Regions and Publication
 

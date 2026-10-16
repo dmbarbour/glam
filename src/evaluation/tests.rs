@@ -7150,7 +7150,13 @@ fn executor_shutdown_preserves_worker_owned_cancellation_and_task_promise() {
         .expect("a real worker should claim the task");
 
     assert_eq!(task.cancel(), EvaluationTaskCancellation::Requested);
-    drop(executor);
+    // Shutdown waits for the worker's quantum in flight, which keeps its
+    // claimed machine meanwhile.
+    let joining = executor.install_retirement_join_probe_for_test();
+    let shutdown = std::thread::spawn(move || drop(executor));
+    joining
+        .recv_timeout(Duration::from_secs(2))
+        .expect("shutdown should wait for the worker");
     assert!(matches!(
         context.poll_reflection_task(&task),
         EvaluationWaitPoll::Pending(_)
@@ -7163,18 +7169,10 @@ fn executor_shutdown_preserves_worker_owned_cancellation_and_task_promise() {
 
     release_sender
         .send(())
-        .expect("the detached worker should finish its quantum");
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while matches!(
-        context.poll_reflection_task(&task),
-        EvaluationWaitPoll::Pending(_)
-    ) && Instant::now() < deadline
-    {
-        std::thread::yield_now();
-    }
-    while !cancelled.load(Ordering::Acquire) && Instant::now() < deadline {
-        std::thread::yield_now();
-    }
+        .expect("the worker should finish its quantum");
+    shutdown
+        .join()
+        .expect("shutdown should finish once the worker's quantum ends");
 
     assert!(cancelled.load(Ordering::Acquire));
     assert_eq!(
