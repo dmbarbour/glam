@@ -195,10 +195,9 @@ import as q from {          # remote: content-addressed
 \ x y z -> Expr             # lambda (no argument patterns)
 skip _ y = y                # '_' drops an argument
 f _unused y = y             # '_' prefix suppresses unused warning
-map xs (\x -> transform x)  # an argument is an atom: parenthesize a lambda
-map xs <| \x -> transform x # or apply it with <|, as a tail infix operand
+list.map (\x -> x + 1) xs   # an argument is an atom: parenthesize a lambda
 op >>= \x -> continue x     # a tail infix operand's body owns the right tail
-map xs (\x -> transform x) |> finish # parentheses end the lambda
+xs |> list.map (\x -> x + 1) |> finish  # parentheses end the lambda
 
 let x = 1 in x + x          # one-liner
 let { x = 1; y = 2 } in x + y # braced ';' group is mutually recursive

@@ -201,7 +201,7 @@ fn a_layout_do_is_applied_with_a_back_pipe() {
 fn a_back_piped_lambda_owns_the_host_tail() {
     let expression = definition_expr(concat!(
         "language g0\n",
-        "mapped = map values <| \\value -> transform value |> finish\n",
+        "result = run <| \\value -> transform value |> finish\n",
     ));
     let SyntaxExpr::OperatorApply {
         operator: crate::g_syntax::SyntaxOperator::PipeBackward,
@@ -211,12 +211,7 @@ fn a_back_piped_lambda_owns_the_host_tail() {
     else {
         panic!("a back-piped lambda should be `<|`'s operand");
     };
-    assert!(matches!(
-        *function,
-        SyntaxExpr::Apply(function, argument)
-            if matches!(*function, SyntaxExpr::Name(ref name) if name == "map")
-                && matches!(*argument, SyntaxExpr::Name(ref name) if name == "values")
-    ));
+    assert!(matches!(*function, SyntaxExpr::Name(ref name) if name == "run"));
     let SyntaxExpr::Lambda(parameters, body) = *argument else {
         panic!("the operand should remain a lambda");
     };
@@ -231,7 +226,7 @@ fn a_back_piped_lambda_owns_the_host_tail() {
 
     let parenthesized = definition_expr(concat!(
         "language g0\n",
-        "mapped = map values (\\value -> transform value) |> finish\n",
+        "mapped = values |> list.map (\\value -> transform value) |> finish\n",
     ));
     assert!(matches!(
         parenthesized,
@@ -239,11 +234,12 @@ fn a_back_piped_lambda_owns_the_host_tail() {
             operator: crate::g_syntax::SyntaxOperator::PipeForward,
             left,
             ..
-        } if matches!(&*left, SyntaxExpr::Apply(_, argument)
-            if matches!(argument.as_ref(), SyntaxExpr::Lambda(_, _)))
+        } if matches!(&*left, SyntaxExpr::OperatorApply { right, .. }
+            if matches!(right.as_ref(), SyntaxExpr::Apply(_, argument)
+                if matches!(argument.as_ref(), SyntaxExpr::Lambda(_, _))))
     ));
     assert_has_error(
-        "language g0\nmapped = map values \\value -> transform value\n",
+        "language g0\nmapped = list.map \\value -> transform value\n",
         2,
         "parenthesize this lambda, or apply it with `<|`",
     );

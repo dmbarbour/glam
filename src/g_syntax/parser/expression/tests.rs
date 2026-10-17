@@ -364,6 +364,27 @@ fn tag_prefixes_read_alike_in_braces_and_out() {
     }
 }
 
+/// Joint tags that end with no payload may mean a tag of a constructor or
+/// one path's constructor, and the error names both.
+#[test]
+fn joint_tags_without_a_payload_suggest_both_readings() {
+    for (source, tagged, joined) in [
+        ("a:b:", "`a:(b:)`", "`(a.b:)`"),
+        ("(a:b:)", "`a:(b:)`", "`(a.b:)`"),
+        ("a.b:c:d:", "`a.b:c:(d:)`", "`(a.b.c.d:)`"),
+        ("[k]:b:", "`outer:(inner:)`", "`(outer.inner:)`"),
+    ] {
+        let diagnostics = parse_expression_fragment(source.as_bytes())
+            .expect_err("joint tags without a payload are rejected");
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.message.contains(tagged) && diagnostic.message.contains(joined)
+            }),
+            "{source}: {diagnostics:?}"
+        );
+    }
+}
+
 /// A tag always takes a payload; only its section, `(path:)`, stands
 /// without one.
 #[test]
@@ -374,8 +395,6 @@ fn a_tag_without_a_payload_is_only_a_section() {
         "[a:, b:]",
         "{a:}",
         "f a:",
-        "a:b:",
-        "(a:b:)",
         "(a:) |> b:",
     ] {
         let diagnostics = parse_expression_fragment(source.as_bytes())

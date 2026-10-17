@@ -265,6 +265,35 @@ fn missing_payload(optional: bool) -> &'static str {
     }
 }
 
+/// The error for joint tags that end with no payload, as in `a:b:`, which
+/// may mean a tag of a constructor, `a:(b:)`, or one path's constructor,
+/// `(a.b:)`. The suggestions spell the paths when every key is a name.
+fn chain_missing_payload(outer: &[(Vec<SyntaxKeyExpr>, bool)], inner: &[SyntaxKeyExpr]) -> String {
+    let spelled = |path: &[SyntaxKeyExpr]| {
+        path.iter()
+            .map(|key| match key {
+                SyntaxKeyExpr::Atom(name) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(|names| names.join("."))
+    };
+    let paths = outer
+        .iter()
+        .map(|(path, optional)| (!optional).then(|| spelled(path)).flatten())
+        .collect::<Option<Vec<_>>>();
+    let (tagged, joined) = match (paths, spelled(inner)) {
+        (Some(outer), Some(inner)) => (
+            format!("{}:({inner}:)", outer.join(":")),
+            format!("({}.{inner}:)", outer.join(".")),
+        ),
+        _ => ("outer:(inner:)".to_owned(), "(outer.inner:)".to_owned()),
+    };
+    format!(
+        "a tag requires a payload after `:`; write `{tagged}` to tag a constructor, or `{joined}` for one path's constructor"
+    )
+}
+
 /// The error for a tail form at `head` that `follower` follows, so that it
 /// stands outside tail position.
 fn misplaced_tail(head: usize, label: &str, follower: &str) -> Fail {
@@ -1875,8 +1904,12 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                         tags.push((path, prefix.optional));
                         continue;
                     }
-                    TagPayload::Bare => {
+                    TagPayload::Bare if prefix.optional || tags.is_empty() => {
                         return Err(Fail::error(missing_payload(prefix.optional)).or_at(at));
+                    }
+                    TagPayload::Bare => {
+                        let path = self.data_path()?;
+                        return Err(Fail::error(chain_missing_payload(&tags, &path)).or_at(at));
                     }
                     TagPayload::Spaced => {
                         return self.error_here(

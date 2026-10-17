@@ -830,7 +830,9 @@ maps the short names used here to file names.
   section.
 - **Consequences:** `[foo:, bar:]` and `x |> foo:` become `[(foo:), (bar:)]`
   and `x |> (foo:)`. A tag before a stop such as `where` is an error rather
-  than its constructor.
+  than its constructor. Joint tags that end with no payload, `a:b:`, may
+  mean a tag of a constructor or one path's constructor, so the error names
+  both, `a:(b:)` and `(a.b:)` (maintainer, 2026-10-17).
 - **Rule lives in:** Syntax.md "Tagged Data".
 - **Recorded in:** tag prefix plan, `bare-tag-retirement`.
 
@@ -845,6 +847,11 @@ maps the short names used here to file names.
   a tag's constructor as a predicate or a view: `(foo:) p`, `{(foo:) p}`,
   `a:Nat n`, `(:a n)`, `((foo:) -> p)` and `((foo: f) -> p)`. The message
   names `path: Pattern`.
+- **Alternatives rejected:** exempting the keys that make a dict applicable
+  (maintainer, 2026-10-17). An `apply:` tag does not change what a view
+  means, applying the view as the view alone would, and an `eff:` one works
+  only for an effect that strips `eff:` to fit the case, so both are
+  rejected too.
 - **Consequences:** compilers lack the whole namespace, so they do not
   catch type errors in general, but they may reject those a pattern's
   syntax shows.

@@ -447,7 +447,6 @@ operand of an infix expression, a spaced tag's payload, or any part a
 separator keyword ends. It is never an application's argument, which is an
 atom; `<|` applies a function to one instead:
 
-        mapped = map values <| \value -> transform value
         bound = operation >>= \value -> continue value
         chosen = describe <| match value as
             1 => "one"
@@ -457,7 +456,6 @@ atom; `<|` applies a function to one instead:
             .r (transform input)
         both = if ready then do { .go } else do { .wait }
         inner = if a then if b then c else d else e
-        found = if any items (\item -> item > 0) then 1 else 0
 
 `|>` and `<|` do not mix, so a pipeline stage that takes a tail form
 parenthesizes it, or a `where` or `let` names it:
@@ -473,16 +471,16 @@ brackets do: an inner `if` takes the first `else`. Parentheses make a tail
 form an ordinary atom, which anything may follow:
 
         applied = f (match x as {_ => 1}) y
-        mapped = map values (\value -> transform value)
+        mapped = list.map (\value -> transform value) values
         field = (do { .r value }).result
         guarded = if x <- (if a then b else c) and d then x else 0
         argument = f (if a then b else c)
 
-The lambda body has rightward extent, so `map values <| \value -> transform
-value |> finish` places `|> finish` inside the lambda body. Parenthesize the
-lambda to pipe the application's result instead:
+The lambda body has rightward extent, so `operation >>= \value -> transform
+value |> finish` places `|> finish` inside the lambda body. Parentheses end
+a lambda, as they do for an argument in a pipeline:
 
-        map values (\value -> transform value) |> finish
+        values |> list.map (\value -> transform value) |> finish
 
 What parses may still read poorly, such as deeply nested inline `if`s or a
 lambda before a binding's `->` (`f \a -> e -> p`); a linter, rather than
@@ -624,7 +622,7 @@ retains warning suppression, but the inaccessible `_` cannot be declared.
 
 ### Applicatives
 
-I propose `!>` and `<!` to support applicative style programming. These correspond to Haskell's `<**>` and `<*>` respectively. I despise Haskell's choice of syntax here. Note that `!>` and `<!` correspond to `|>` and `<|` for pure functions. 
+`!>` and `<!` support applicative style programming. These correspond to Haskell's `<**>` and `<*>` respectively. I despise Haskell's choice of syntax here. Note that `!>` and `<!` correspond to `|>` and `<|` for pure functions. 
 
         (!>) : Eff a -> Eff (a -> b) -> Eff b   # right associative
         (<!) : Eff (a -> b) -> Eff a -> Eff b   # left associative
@@ -819,7 +817,9 @@ statement's `->`. Like a lambda, a spaced tag is never an argument:
 operand, so `tag: |> g` is an error. A tag always takes an operand. Its constructor is its section, `(tag:)`, as `(+ 1)` is an
 operator's: `map (tag:) xs`, `[(foo:), (bar:)]`, `x |> (tag:)`. Elsewhere a
 tag with nothing after it is an error, so a line break never turns a tag
-into its constructor.
+into its constructor. Joint tags that end with none, `a:b:`, may mean a tag
+of a constructor, `a:(b:)`, or one path's constructor, `(a.b:)`, and the
+error names both.
 
 Every non-empty dictionary path takes part. Multi-component paths construct
 one hierarchical dictionary.

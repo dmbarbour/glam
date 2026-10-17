@@ -18,7 +18,7 @@ final_do = begin_op_header <| do
 # An unparenthesized lambda may be the tail operand of an infix expression,
 # such as `<|`. Its body has ordinary rightward extent; as an argument, it is
 # parenthesized.
-mapped = map values (\value -> transform value) |> finish
+mapped = values |> list.map (\value -> transform value) |> finish
 
 bound = Operation1 >>= \r1 ->
   Operation2 r1 >>= \r2 ->
