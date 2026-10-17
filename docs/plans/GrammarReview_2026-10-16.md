@@ -210,7 +210,7 @@ and nothing in an expression continues with `then`, `else` or a binding's
 Each needed options, a recommendation and the maintainer's decision.
 Items 1–4 were decided as proposed and built on 2026-10-16, and items 5–10
 on 2026-10-17, those that change the grammar with an entry in
-`Decisions.md`.
+`Decisions.md`. Item 15 was decided on 2026-10-17 and waits for its step.
 1. **`{` after `with`** (`brace-after-with-delimits-arms`). Whether it began
    a layout arm (a dict pattern) or braced arms depended on what followed
    its matching `}` on its line. Decided: a `{` on the line of `with`
@@ -304,7 +304,34 @@ on 2026-10-17, those that change the grammar with an entry in
 14. **Errors for item 1.** Built: a misplaced `{` after `with`, `when` or a
     nested `when` reports the rule.
 
-**Item 7 as built (2026-10-17).**
+15. **Aliases and locals as body declarations**
+    (`aliases-and-locals-are-body-declarations`; proposed and decided by
+    the maintainer 2026-10-17, built in `grammar-body-declarations`).
+    `as Name` in object and `extend` headers and `Dict as Name with Defs`
+    named a body's alias outside the body, and the update form let an `as`
+    continue an expression (item 11). A helper that needed the alias had
+    to be a `where` on each member, a member leaking into the result, or a
+    `let … in` around the update, which cannot see the alias. Decided:
+    - **`alias Name`** is a declaration that may stand only as the first
+      member of a `with` body (object, `extend` or update), at most once.
+      It binds `Name` (the result) and `_Name` (the prior value); `alias
+      _Name` marks it as possibly unused, `alias self` localizes an
+      update's names, and `alias _` states that there is none. Defaults
+      are unchanged: `self` for objects, none for updates. `alias` is
+      reserved in `g0`. Headers lose `as Name`, so `as` no longer
+      continues an expression, and the error for an aliased update in a
+      match's subject retires.
+    - **`let` members** are body-private bindings, not members of the
+      result. A body's `let`s form one mutually recursive group, visible to
+      its members and each other, not to the base expression or the
+      `extends` list. Lowering wraps the update inside the mixin function:
+      `\prior instance -> let … in prior with …`. Like any local, a `let`
+      is never referenced as `_name`, and a name it shares with another
+      local, or with a member in scope, is a shadowing error.
+    - **Modules** take `let` declarations too, as file-private helpers;
+      a module's alias is implicitly `module`.
+
+**Item 7 as built (2026-10-17).
 - **Where a `where` ends.** The token pass closes the `else` tails before a
   `where` and stops the view there; a statement or arm holding one, and a
   parenthesized group, are parsed from their views. The structural parsers
@@ -351,6 +378,12 @@ on 2026-10-17, those that change the grammar with an entry in
 
 - `parser-keyword-frames-suffixes` waits for this review: `let`, `where`,
   `with`, `using` and `object` carry several items.
+- `grammar-body-declarations` builds item 15 after
+  `parser-keyword-frames-suffixes`, so the frames first replace the
+  structural parsers under the oracle with the syntax unchanged. It
+  changes the declaration vocabulary that module, object and `with`
+  bodies share, and resolution, lowering and name analysis with it; a
+  script moves each `as Name` into its body, as the `as` rename did.
 - Grammar changes go to the term parser only. The Chumsky grammar and the
   structural parsers are not updated to keep the oracle; the grammar's own
   examples and a round-trip test (generate trees, print them with the

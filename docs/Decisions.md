@@ -686,6 +686,40 @@ maps the short names used here to file names.
   and "Local Definitions"; `SyntaxCheatSheet.md` "Functions, Locals".
 - **Recorded in:** grammar review, item 7.
 
+### Aliases and locals are body declarations
+`aliases-and-locals-are-body-declarations` · 2026-10-17 · maintainer · accepted
+- **Context:** `as Name` in object and `extend` headers and
+  `Dict as Name with Defs` named a body's alias outside the body, and the
+  update form let an `as` continue an expression, so an aliased update was
+  parenthesized in a match's subject (`match-arms-follow-as`). A helper
+  that needed the alias was a `where` on each member, a member leaking into
+  the result, or a `let … in` around the update, which cannot see the
+  alias.
+- **Decision:**
+  - `alias Name` is a declaration that may stand only as the first member
+    of a `with` body (object, `extend` or update), at most once. It binds
+    `Name` and `_Name`; `alias _Name` marks it as possibly unused,
+    `alias self` localizes an update's names, and `alias _` states that
+    there is none. Defaults are unchanged: `self` for objects, none for
+    updates. `alias` is reserved in `g0`, and headers lose `as Name`.
+  - `let` members are body-private bindings, not members of the result:
+    one mutually recursive group per body, visible to its members and each
+    other, not to the base expression or the `extends` list. Like any
+    local, a `let` is never referenced as `_name`, and a name it shares
+    with another local or a member in scope is a shadowing error.
+  - Modules take `let` declarations as file-private helpers; a module's
+    alias is implicitly `module`.
+- **Alternatives rejected:** keeping `as Name` in headers; private helpers
+  as members or per-member `where`s.
+- **Consequences:**
+  - `as` no longer continues an expression, so an update needs no
+    parentheses in a match's subject.
+  - Lowering wraps a body's update in its `let` group inside the mixin
+    function: `\prior instance -> let … in prior with …`.
+  - Not built yet: `grammar-body-declarations` follows
+    `parser-keyword-frames-suffixes`, and the standing docs change with it.
+- **Recorded in:** grammar review, item 15.
+
 ### Keyword forms and lambdas stand alone only in tail position
 `tail-position` · 2026-10-16 · maintainer · superseded
 - **Context:** the grammar review's first item. Forms whose last part
