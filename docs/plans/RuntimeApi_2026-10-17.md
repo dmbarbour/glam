@@ -1,6 +1,7 @@
 # Runtime API Plan — 2026-10-17
 
-Status: drafted 2026-10-17 from the
+Status: `api-runtime-turns` built 2026-10-17 (see
+[As built](#as-built-2026-10-17)). Drafted 2026-10-17 from the
 [runtime API review](../reviews/RuntimeApi_2026-10-17.md), whose direction
 the maintainer agreed the same day (`runtime-api-turns-on-machines`). Names
 and communication's conventions are discussed as each step reaches them.
@@ -44,6 +45,9 @@ communicate only through the shared heap or volumes. The handle API goes.
      bytes, atoms), stack operations (`dup`, `swap`, `drop`, `depth`),
      `access`, `apply`, `eval`, `compile`, local state (`get`, `set`), and
      `clear`.
+   - A `stash` beside the stack (maintainer, 2026-10-17): `stash(n)` moves
+     the top `n` values there as a block, and `stash_pop(n)` moves them
+     back, so the pair leaves them as they were.
    - Tests: the Hello World sample's bytes through a turn; state across
      turns; `clear`; errors on underflow and on a pop of the wrong kind; a
      compile-fail test that `Runtime` is not `Send`.
@@ -85,8 +89,38 @@ For `api-runtime-turns`, a first proposal:
   `with_machine`.
 - **`Machine`** for the context of a turn, the `m`. Alternative: `Turn`,
   which names the visit rather than the thing visited.
-- **`RuntimeConfig`** for what opening takes: worker threads, the source
-  system, the conflict strategy, the reflection environment.
+- **`RuntimeConfig`** for what opening takes: the runtime's own settings,
+  worker threads and the conflict strategy. It is apart from the CLI's
+  `GLAM_CONF`, a CLI notion (maintainer, 2026-10-17); compilation's
+  settings travel with what is compiled.
+
+*Agreed (maintainer, 2026-10-17):* `Runtime` and `run`.
+
+## As built (2026-10-17)
+
+`api-runtime-turns`, in `src/api/turn.rs`:
+- `Runtime::open(RuntimeConfig)` builds an evaluation runtime and an
+  assembler on it, held privately; dropping the `Runtime` drops the
+  machines' values, then retires both through today's path. A
+  `PhantomData<MutexGuard<'static, ()>>` makes it `!Send` but `Sync`, which
+  doc tests check.
+- Machines live in a map from `Key` to a slot, idle with its state or in a
+  turn, under a leaf lock held only to take or return a state. A second
+  turn on a machine in a turn fails; a turn may take a turn on another
+  machine. An empty machine leaves no entry. The `Machine` returns its state
+  when it drops, so a turn's changes stay whether it succeeds, fails or
+  unwinds.
+- Text keys name atoms (`From<&str>` for `Key`), and `Key` is public.
+- Operations: `push_unit`, `push_int`, `push_text`, `push_bytes`,
+  `push_atom`; `pop_int`, `pop_bytes`, `pop_text`, which evaluate;
+  `depth`, `dup`, `swap`, `discard` (a method named `drop` would read as
+  `Drop`), `stash`, `stash_pop`, `stash_depth`; `access` (a dotted path),
+  `apply`, `eval` (to weak-head normal form); `compile`, which pushes the
+  module and returns its warnings; `get`, `set`, `clear`.
+- `pop_bytes` evaluates under the `binary` annotation, so a value that is
+  no binary fails as evaluation does, with its structured error.
+- Tests in `tests/runtime_api.rs`, including scoped threads taking turns
+  on one runtime.
 
 ## Verification
 

@@ -29,6 +29,7 @@ mod text_pattern;
 mod trusted_hash;
 mod walk_cycle;
 
+pub use crate::core::Key;
 pub use api::{
     Assembler, AssemblerBuilder, BackgroundPumpReport, BackgroundPumpState, BuiltModule,
     DeadlockSnapshot, Diagnostic, DiagnosticBus, DiagnosticCounts, DiagnosticEvent,
@@ -53,6 +54,7 @@ pub use api::{
     EvaluationReductionCounts, ExactRouteMutationProfileSnapshot, InteractionNetProfileSnapshot,
     NetDriverCounts, NetReductionCounts, PhaseTimes, RuntimeProfileSnapshot,
 };
+pub use api::{Machine, Runtime, RuntimeConfig};
 pub use diagnostic::Severity;
 pub use g_source::{
     GDeclarationKind, GDeclarationSummary, GSourceDiagnostic, GSourceInspection, inspect_g_source,

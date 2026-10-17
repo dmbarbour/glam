@@ -1202,6 +1202,19 @@ impl Key {
     }
 }
 
+/// Text names a key as glam names one: the atom `'text`.
+impl From<&str> for Key {
+    fn from(text: &str) -> Self {
+        Self::atom_from_text(text)
+    }
+}
+
+impl From<String> for Key {
+    fn from(text: String) -> Self {
+        Self::atom_from_text(text)
+    }
+}
+
 impl fmt::Debug for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
