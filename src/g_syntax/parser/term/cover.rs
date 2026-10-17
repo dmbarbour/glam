@@ -10,7 +10,8 @@
 //! parenthesized pattern's contents) or nested (any other). Views,
 //! predicates and local guards need a complete position. Completeness passes
 //! through `as`, a view's pattern and a guarded pattern; data constructors
-//! (tuples, lists, dicts, tags and `++`) make their parts nested.
+//! (tuples, lists, dicts, tags and `++`) make their parts nested, except a
+//! spaced tag's payload, `path: p`, which is complete.
 //!
 //! Conversion recurses on the term's nesting, which only cover mode builds:
 //! source nesting within one pattern view.
@@ -39,6 +40,9 @@ pub(in crate::g_syntax::parser) enum Term {
     Quoted(Vec<SyntaxKeyExpr>),
     /// A parenthesized term, whose contents are a complete position.
     Group(Box<Term>),
+    /// A spaced tag's payload: a complete position wherever it stands,
+    /// with no group of its own.
+    Complete(Box<Term>),
     Tuple(Vec<Term>),
     List(Vec<Term>),
     /// A dict, whose members are terms: a tag is an entry, as `{a: x}` is
@@ -48,7 +52,8 @@ pub(in crate::g_syntax::parser) enum Term {
     Tag(Vec<SyntaxKeyExpr>, Box<Term>),
     /// A dict pattern's optional entry, `path?: value`.
     OptionalTag(Vec<SyntaxKeyExpr>, Box<Term>),
-    /// A dict member `:name`.
+    /// A pun `:name`: `name:name`, which a pattern reads as capturing
+    /// `name` under its key.
     Pun(String),
     /// An application. Its function is an expression in both roles; in a
     /// pattern, the application is a predicate over its last argument.
@@ -83,7 +88,7 @@ impl Term {
             Self::Name(name) => name_expr(&name)?,
             Self::Wildcard => return Err("expected a name after `_`".to_owned()),
             Self::Quoted(path) => quoted_path(vec![PathSuffix::Expand(path)]),
-            Self::Group(term) => term.into_expr()?,
+            Self::Group(term) | Self::Complete(term) => term.into_expr()?,
             Self::Tuple(items) => SyntaxExpr::Tuple(exprs(items)?),
             Self::List(items) => SyntaxExpr::List(exprs(items)?),
             Self::Dict(members) => SyntaxExpr::DictUnion(exprs(members)?),
@@ -148,20 +153,22 @@ impl Term {
                     kind(SyntaxPatternKind::Group(Box::new(pattern)))
                 }
             }
+            Self::Complete(term) => term.into_pattern(Position::Complete)?,
             Self::Tuple(items) => tuple_pattern(patterns(items)?),
             Self::List(items) => fixed_list_pattern(patterns(items)?),
             Self::Dict(members) => dict_pattern_from(members)?,
-            Self::Tag(path, payload) => dict_pattern(
-                vec![dict_entry(
-                    path,
-                    false,
-                    payload.into_pattern(Position::Nested)?,
-                )],
-                None,
-            ),
-            Self::OptionalTag(..) | Self::Pun(_) => {
-                unreachable!("only a dict member is optional or punned")
+            // A tag, `path:p`, `path: p`, `(path:) p` or `:name`, is a dict
+            // pattern of one entry.
+            Self::Tag(..) | Self::Pun(_) | Self::Apply(..) if tag_entry(&self) => {
+                let (path, optional, pattern) = self.into_entry()?;
+                dict_pattern(vec![dict_entry(path, optional, pattern)], None)
             }
+            Self::OptionalTag(..) => {
+                return Err(
+                    "an optional entry `path?:` is valid only in a dictionary pattern".to_owned(),
+                );
+            }
+            Self::Tag(..) | Self::Pun(_) => unreachable!("a tag is an entry"),
             Self::Apply(predicate, pattern) if complete => kind(SyntaxPatternKind::Predicate {
                 predicate,
                 pattern: Box::new(pattern.into_pattern(Position::Nested)?),
@@ -198,6 +205,49 @@ impl Term {
                 );
             }
         })
+    }
+}
+
+impl Term {
+    /// A tag as a dict pattern entry: its path, whether it is optional, and
+    /// its payload's pattern. `tag_entry` has accepted the term.
+    fn into_entry(self) -> Result<(Vec<SyntaxKeyExpr>, bool, SyntaxPattern), String> {
+        Ok(match self {
+            Self::Tag(path, payload) => (path, false, payload.into_pattern(Position::Nested)?),
+            Self::OptionalTag(path, payload) => {
+                (path, true, payload.into_pattern(Position::Nested)?)
+            }
+            Self::Pun(name) => {
+                let pattern = name_pattern(name)?;
+                let SyntaxPatternKind::Capture(name) = &pattern.kind else {
+                    unreachable!("a pun's name converts to a capture");
+                };
+                let path = vec![SyntaxKeyExpr::Atom(
+                    name.strip_prefix('_').unwrap_or(name).to_owned(),
+                )];
+                (path, false, pattern)
+            }
+            Self::Apply(constructor, payload) => {
+                let SyntaxExpr::TaggedConstructor(path) = *constructor else {
+                    unreachable!("only a constructor's application is an entry");
+                };
+                (path, false, payload.into_pattern(Position::Nested)?)
+            }
+            Self::Group(term) => term.into_entry()?,
+            _ => unreachable!("only a tag is an entry"),
+        })
+    }
+}
+
+/// Whether a term is a tag, read as one dict pattern entry: `path:p`,
+/// `path?:p`, `:name`, a constructor applied, `(path:) p`, or one of these
+/// parenthesized.
+fn tag_entry(term: &Term) -> bool {
+    match term {
+        Term::Tag(..) | Term::OptionalTag(..) | Term::Pun(_) => true,
+        Term::Apply(function, _) => matches!(function.as_ref(), SyntaxExpr::TaggedConstructor(_)),
+        Term::Group(term) => tag_entry(term),
+        _ => false,
     }
 }
 
@@ -246,7 +296,7 @@ fn expr_pattern(expr: SyntaxExpr) -> Result<SyntaxPattern, String> {
         SyntaxExpr::Atom(name) => SyntaxPatternLiteral::Atom(name),
         SyntaxExpr::TaggedConstructor(_) => {
             return Err(
-                "dictionary shorthand is valid only inside braces; write `{:name}`".to_owned(),
+                "a tag's constructor `path:` is not a pattern; write `path: Pattern`".to_owned(),
             );
         }
         _ => return Err(EXPECTED_PATTERN.to_owned()),
@@ -260,18 +310,7 @@ fn dict_pattern_from(members: Vec<Term>) -> Result<SyntaxPattern, String> {
     let mut remainder = None;
     for (index, member) in members.into_iter().enumerate() {
         let (path, optional, pattern) = match member {
-            Term::Tag(path, value) => (path, false, value.into_pattern(Position::Nested)?),
-            Term::OptionalTag(path, value) => (path, true, value.into_pattern(Position::Nested)?),
-            Term::Pun(name) => {
-                let pattern = name_pattern(name)?;
-                let SyntaxPatternKind::Capture(name) = &pattern.kind else {
-                    unreachable!("a pun's name converts to a capture");
-                };
-                let path = vec![SyntaxKeyExpr::Atom(
-                    name.strip_prefix('_').unwrap_or(name).to_owned(),
-                )];
-                (path, false, pattern)
-            }
+            member if tag_entry(&member) => member.into_entry()?,
             term => {
                 if remainder.is_some() {
                     return Err("dictionary pattern permits only one remainder".to_owned());

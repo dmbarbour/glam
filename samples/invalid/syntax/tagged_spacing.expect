@@ -1,2 +1,3 @@
-error|3|adjacent to `:`|found `value`
+error|3|`:` must be joint to its key
 error|4|adjacent to `:`|found `tag`
+error|5|an operator cannot begin

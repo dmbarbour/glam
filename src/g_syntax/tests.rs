@@ -639,11 +639,11 @@ fn keyword_keys_are_data_in_every_expression_position() {
             format!("{{{spelling}.key: atom}}"),
             format!("'{spelling}"),
             format!("'.{spelling}"),
-            format!(":{spelling}"),
+            format!("({spelling}:)"),
             format!("atom.{spelling}"),
             format!("(.{spelling})"),
             format!("(\\x -> x) '{spelling}"),
-            format!("(\\x -> x) :{spelling}"),
+            format!("(\\x -> x) ({spelling}:)"),
             format!("(\\x -> x) atom.{spelling}"),
         ] {
             let parsed = parse(&format!("language g0\natom = 'a\nvalue = {expression}\n"));
@@ -667,7 +667,7 @@ fn keyword_atoms_explicit_key_paths_and_tags_remain_data() {
         "direct = module.where\n",
         "self_direct = object self with { .['where] = atom; copy = self.where }\n",
         "tagged = binary:atom\n",
-        "constructor = :binary\n",
+        "constructor = binary:\n",
         "selected = module.['where]\n",
         "direct_quoted = '.where\n",
         "quoted = '.['where]\n",
@@ -3547,14 +3547,15 @@ fn parses_dictionary_unions() {
 }
 
 #[test]
-fn dictionary_puns_are_brace_scoped_and_constructor_unions_are_parenthesized() {
+fn dictionary_puns_and_constructors_read_alike_everywhere() {
     let parsed = parse(concat!(
         "language g0\n",
         "left = \"L\"\n",
         "right = \"R\"\n",
         "punned = {:left,:right}\n",
-        "tagged = {(:tag left)}\n",
-        "asm.result = punned.left ++ punned.right ++ tagged.tag\n",
+        "tagged = {(tag:) left}\n",
+        "outside = :left\n",
+        "asm.result = punned.left ++ punned.right ++ tagged.tag ++ outside.left\n",
     ));
     assert_eq!(parsed.diagnostics, []);
     assert!(matches!(
@@ -3579,15 +3580,21 @@ fn dictionary_puns_are_brace_scoped_and_constructor_unions_are_parenthesized() {
     assert_eq!(lowered.diagnostics, []);
     let value = evaluated_module_value(&context, &lowered);
     let result = resolved_value_at_path(&value, &["asm", "result"]);
-    assert_eq!(output_bytes(&fully_evaluated_value(result)), b"LRL");
+    assert_eq!(output_bytes(&fully_evaluated_value(result)), b"LRLL");
 
-    let unparenthesized = parse("language g0\nbad = {:tag left}\n");
-    assert!(unparenthesized.diagnostics.iter().any(|diagnostic| {
-        diagnostic.severity == Severity::Error
-            && diagnostic
-                .message
-                .contains("tag-constructor dictionary members must be parenthesized")
-    }));
+    // A pun in braces is a pun as anywhere: `{:tag left}` applies `tag:tag`.
+    let applied = parse("language g0\napplied = {:tag left}\n");
+    assert!(matches!(
+        &applied.declarations[1].kind,
+        DeclarationKind::Definition(DefinitionDecl {
+            expr: Some(SyntaxExpr::DictUnion(items)),
+            ..
+        }) if matches!(
+            items.as_slice(),
+            [SyntaxExpr::Apply(function, _)]
+                if matches!(function.as_ref(), SyntaxExpr::PathDict(..))
+        )
+    ));
 }
 
 #[test]
@@ -5704,7 +5711,7 @@ fn effect_operators_evaluate_as_syntax_sugar() {
 fn applicative_operators_apply_and_sequence_in_source_order() {
     let parsed = parse(concat!(
         "language g0\n",
-        "api = { r:(\\value -> {value:value, trace:\"R\"}), seq:(\\operation continuation -> (\\first -> (\\second -> {value:second.value, trace:first.trace ++ second.trace}) ((continuation first.value).eff api)) (operation.eff api)) }\n",
+        "api = { r:(\\value -> {value:value, trace:\"R\"}), seq:(\\operation continuation -> (\\first -> (\\second -> {value:second.value, trace: first.trace ++ second.trace}) ((continuation first.value).eff api)) (operation.eff api)) }\n",
         "marked tag value = {eff:(\\_effect_api -> {value:value, trace:tag})}\n",
         "backward = (marked \"F\" (\\x -> x ++ \"!\") <! marked \"A\" \"Hello\").eff api\n",
         "forward = (marked \"A\" \"Hello\" !> marked \"F\" (\\x -> x ++ \"!\")).eff api\n",
@@ -5983,7 +5990,7 @@ fn lowers_suppressed_local_names_to_canonical_body_references() {
 #[test]
 fn lowers_dictionary_literals_to_lazy_values() {
     let parsed =
-        parse("language g0\nd = { hello:\"Hello\", world:other ++ \"!\" }\nother = \"World\"\n");
+        parse("language g0\nd = { hello:\"Hello\", world: other ++ \"!\" }\nother = \"World\"\n");
     let context = CompileContext::default();
     let lowered = lower_parsed_source(parsed, &context);
     assert_eq!(lowered.diagnostics, []);
@@ -6031,9 +6038,9 @@ fn lowers_general_tagged_paths_and_constructors() {
         "dotted = foo.bar:\"A\"\n",
         "indexed = ['left,'right]:\"B\"\n",
         "dynamic = (['deep] ++ tail):\"C\"\n",
-        "constructor = :made.nested\n",
+        "constructor = made.nested:\n",
         "constructed = constructor \"D\"\n",
-        "dynamic_constructor = :(['built] ++ tail)\n",
+        "dynamic_constructor = (['built] ++ tail):\n",
         "dynamic_constructed = dynamic_constructor \"E\"\n",
         "asm.result = dotted.foo.bar ++ indexed.left.right ++ ",
         "dynamic.deep.more ++ constructed.made.nested ++ dynamic_constructed.built.more\n",
@@ -6722,7 +6729,7 @@ fn interaction_net_construction_preserves_structured_effect_failures() {
         parse(concat!(
             "language g0\n",
             "import 'std\n",
-            "failed = interaction_net {eff:anno context:\"net effect\" (anno 'error {msg:{text:\"construction failed\"}, detail:7})}\n",
+            "failed = interaction_net {eff: anno context:\"net effect\" (anno 'error {msg:{text:\"construction failed\"}, detail:7})}\n",
         )),
         &context,
     );

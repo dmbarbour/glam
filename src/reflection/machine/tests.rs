@@ -6030,7 +6030,7 @@ fn reflection_eval_returns_a_tagged_whnf_result() {
         &Some(&Value::Number(Number::integer(3))),
     );
 
-    let (assembler, nested) = compile_effect(".eval { bad:1 / 0 }");
+    let (assembler, nested) = compile_effect(".eval { bad: 1 / 0 }");
     let (context, task) = schedule_composed_test_task(
         &assembler,
         &nested,
@@ -7600,7 +7600,7 @@ fn direct_effect_run_roots_a_failure_before_returning_to_its_caller() {
 #[test]
 fn effect_dispatch_preserves_structured_failure_and_adds_stage_context() {
     let (assembler, effect) = compile_effect(
-        "{eff:anno context:\"effect function\" (anno 'error {msg:{text:\"dispatch failed\"}, detail:7})}",
+        "{eff: anno context:\"effect function\" (anno 'error {msg:{text:\"dispatch failed\"}, detail:7})}",
     );
 
     let halt = run_standard_test(&assembler, &effect)
@@ -7645,7 +7645,7 @@ fn effect_dispatch_preserves_application_and_request_stage_contexts() {
     for (source, stage, message) in [
         ("{eff:42}", "application", "requires a function value"),
         (
-            "{eff:\\_api -> anno 'error {msg:{text:\"request failed\"}}}",
+            "{eff: \\_api -> anno 'error {msg:{text:\"request failed\"}}}",
             "request",
             "request failed",
         ),

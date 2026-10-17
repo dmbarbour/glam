@@ -1,6 +1,9 @@
 # Tag Prefix Syntax Plan — 2026-10-16
 
-Status: design agreed with the maintainer on 2026-10-16; not started. It
+Status: design agreed with the maintainer on 2026-10-16;
+`tags-prefix-operator` and `tags-prefix-migration` built 2026-10-17 (see
+[As built](#as-built-2026-10-17)); `tags-prefix-diagnostic-retirement`
+waits. It
 follows `parser-grammar-retirement` in the
 [parser backtracking plan](ParserBacktrackingPerformance_2026-10-04.md), so
 the syntax changes in one parser rather than in the term parser and the
@@ -99,6 +102,33 @@ catch anything the corpus sweep missed.
    braces. Record the decision in `Decisions.md`.
 3. `tags-prefix-diagnostic-retirement`: remove the transitional diagnostic
    once it has served.
+
+## As built (2026-10-17)
+
+- **One detector.** The term parser's item interpreter measures a tag
+  prefix (`tag_prefix_at`): a data path, an optional `?` in patterns, a
+  joint `:`, and what follows, joint, spaced or nothing (nothing including a
+  stop such as `where`). A joint prefix stays the atom-level loop it was; a
+  bare one is the constructor wherever an operand or argument stands.
+- **Spaced tags as levels.** In an expression a spaced tag opens a level of
+  its item, as a lambda does, at an operand's start or as a tail argument
+  (`g tag: f x`), so it ends where tails do. In a pattern its payload is the
+  rest of the item read as a pattern item and marked complete
+  (`cover::Term::Complete`), which converts as a complete position without
+  a group of its own; this recurses once per spaced tag after `as` or a
+  view's arrow, not per nesting of the tag itself.
+- **Puns and braces.** `:name` is an atom anywhere; a `:` starts an argument
+  only joint to a name. A brace item is an ordinary item, and the brace
+  member grammar and its validator are gone. Cover conversion reads a tag,
+  a pun, a constructor applied, or one of these grouped, as a dict entry.
+- **Transitional diagnostic.** A brace item whose tag prefix is joint yet
+  whose term is no tag (`{a:f x}`, `{a:x + 1}`, `{a:p as q}`) is an error
+  naming both spellings. The test printer parenthesizes such items.
+- **Migration.** 13 members in `samples/config/direct_assembly.g` (two of
+  them lambdas, which the joint form now rejects with a message naming the
+  spaced one), the constructors in `hello_tagged.g` and `hello_dict.g`,
+  `tagged_spacing.g`'s expectations, Rust test sources, and the docs. The
+  measured counts held.
 
 ## Open questions (2026-10-16)
 

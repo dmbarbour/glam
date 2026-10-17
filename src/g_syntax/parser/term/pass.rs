@@ -1043,7 +1043,6 @@ impl Pass<'_, '_, '_> {
         }
         let body = GroupBody {
             delimiter,
-            group,
             pieces: frame.pieces,
             mode: frame.mode,
             context: frame.context,

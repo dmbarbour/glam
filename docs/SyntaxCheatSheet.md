@@ -75,29 +75,35 @@ _42                 # NEGATIVE 42 — prefix '_' is part of the literal
 'eax                # atom: sugar for ["eax"]:()  (NB: 'tag ≠ tag:() )
 '.foo.[42]          # quoted path ≡ ['foo, 42]  (any Path)
 
-tag:Data            # tagged data: sugar for { tag:Data }
-:tag                # constructor: \ Data -> tag:Data
+# `path:` is a prefix, read alike everywhere, in braces or out:
+tag:Data            # joint: tags one atom; sugar for { tag:Data }
+tag: f x            # spaced: tags the rest of its item, tag:(f x)
+(tag:)              # nothing after it: constructor \ Data -> tag:Data
+:tag                # pun on one bare name: tag:tag
 foo.bar:Data        # path-tagged data: sugar for { foo.bar:Data }
-:foo.bar            # constructor: \ Data -> foo.bar:Data
+(foo.bar:)          # constructor: \ Data -> foo.bar:Data
 [KeyA,KeyB]:Data    # computed hierarchical path
 ['a, x]:Data        # keys are ordinary expressions; 'a evaluates to an atom
-:[KeyA,KeyB]        # corresponding constructor
+([KeyA,KeyB]:)      # corresponding constructor
 (PathExpr):Data     # splice a computed list-valued path
-:(PathExpr)         # corresponding constructor
-# Colons are tight; tag:f x ≡ (tag:f) x. Use tag:(f x) to tag the call.
+((PathExpr):)       # corresponding constructor
+# Joint binds tighter than application: g tag:f x ≡ g (tag:f) x. Spaced
+# runs to its item's end like a lambda body: g tag: f x ≡ g (tag:(f x)).
+# tag: |> g is an error; map (tag:) xs, [a:, b:] and x |> tag: construct.
 # A joint colon always tags, even after an operator name: (and:x) is a
 # tag; (and x), (x and) and (and) are sections.
 
 {}                  # empty dict; ALSO the 'undefined' value
-{foo:1, bar.baz:2}  # literal; paths ok; {foo:{}} ≡ {}
-{foo:f x}           # member value runs to the member's end: foo:(f x)
-{foo: 1, bar:       # a space or line break may follow a member's `:` ...
-    f x}            # ... but never precede it: {foo :x} applies foo to :x
-{:foo, :bar}        # entry puns: {foo:foo, bar:bar}
+{foo:1, bar.baz:2}  # literal: the union of its items; {foo:{}} ≡ {}
+{foo: f x}          # a spaced tag runs to its item's comma: foo:(f x)
+{foo:f x}           # joint, then more: reported while code migrates
+{foo: 1, bar:       # a space or line break may follow a tag's `:` ...
+    f x}            # ... but never precede it: {foo :x} applies foo to x:x
+{:foo, :bar}        # puns: {foo:foo, bar:bar}
 { [0]:'a, [1,2]:'b, ([1] ++ [3,4]):'c } # computed paths
 { D1, D2 }          # union; ERROR if defined keys overlap
-{(:tag Value), D}   # constructor application as a union member needs ()
-{:tag Value}        # invalid: ambiguous with the :tag entry pun
+{(tag:) Value, D}   # a constructor applied, as anywhere
+{:tag Value}        # applies the pun tag:tag to Value, as anywhere
 {                   # multi-line: leading commas
 , name1:Expr1
 , name2:Expr2
@@ -530,12 +536,14 @@ P1 as P2            # both views
 {x:P, {y:Q}}        # run a refutable pattern against the residual dictionary
 {x?:P, rem}         # absent/undefined x feeds {} to P; remainder unchanged
 {x?:{}}             # explicitly accept a missing x (`{x:{}}` remains required)
-{:x, :y}            # ≡ {x:x, y:y}; shorthand is brace-scoped
+{:x, :y}            # ≡ {x:x, y:y}; :x alone ≡ {x:x} too
 {a.b.c:P, _}        # deep path
 {selector:key, [key]:P, rem}       # prior capture selects a computed key
 {selector:key, root.[key]:P, rem}  # computed hierarchical component
 {path:p, (p):P, rem}               # splice a computed list-valued path
-tag:P    'name      # standalone :tag is not a pattern
+tag:P    'name      # tag:P ≡ tag: P ≡ (tag:) P; a bare tag: is no pattern
+{x: Nat n}          # a spaced payload is complete: tags a predicate,
+{x: f -> p}         #   a view, or {x: a as b} both captures
 [KeyExpr]:P       # computed singleton tag; prior captures are in scope
 [KeyA,KeyB]:P     # computed hierarchical singleton tag
 (PathExpr):P      # singleton tag from a computed list-valued path

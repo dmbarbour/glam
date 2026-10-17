@@ -11,8 +11,7 @@ use super::super::{
 use super::expression_context::{ExpressionContext, ParsedExpression};
 use super::input::{TokenRange, TokenView};
 use super::layout::group_separator;
-use super::lexical::{GroupId, LeadingTrivia, SpannedToken, TokenKind};
-use super::structural::{split_top_level, trim_layout};
+use super::lexical::{SpannedToken, TokenKind};
 
 mod infix;
 
@@ -158,54 +157,6 @@ pub(super) fn quoted_path(suffixes: Vec<PathSuffix>) -> SyntaxExpr {
         .into_iter()
         .reduce(|left, right| SyntaxExpr::Append(Box::new(left), Box::new(right)))
         .unwrap_or_else(|| SyntaxExpr::List(Vec::new()))
-}
-
-/// Checks a dict literal's `:` members: a pun is `:name`, and a tag
-/// constructor member is parenthesized. `check_names` also checks each pun's
-/// name as an expression's, which a pattern checks by its own rules.
-pub(super) fn validate_dict_colon_members(
-    view: TokenView<'_, '_>,
-    group: GroupId,
-    check_names: bool,
-) -> Result<(), String> {
-    let contents = view
-        .group_contents(group)
-        .ok_or_else(|| "dictionary literal refers to an unknown delimiter group".to_owned())?;
-
-    for member in split_top_level(contents, ",").into_iter().map(trim_layout) {
-        let mut tokens = member
-            .top_level()
-            .filter(|indexed| !matches!(indexed.token().kind(), TokenKind::LineStart { .. }));
-        let Some(first) = tokens.next() else {
-            continue;
-        };
-        if !matches!(first.token().kind(), TokenKind::Symbol(":")) {
-            continue;
-        }
-
-        let Some(name) = tokens.next() else {
-            return Err(
-                "dictionary shorthand `:name` requires a bare value name after `:`".to_owned(),
-            );
-        };
-        let only_bare_name = name.token().leading() == LeadingTrivia::Joint
-            && matches!(name.token().kind(), TokenKind::Name(_))
-            && tokens.next().is_none();
-        if !only_bare_name {
-            return Err(
-                "tag-constructor dictionary members must be parenthesized; write `{(:path value)}`"
-                    .to_owned(),
-            );
-        }
-
-        let TokenKind::Name(name) = name.token().kind() else {
-            unreachable!("a dictionary pun has already selected a name token");
-        };
-        if check_names {
-            validate_expr_name(name)?;
-        }
-    }
-    Ok(())
 }
 
 /// The view a keyword form headed at `head_index` lies in: its group

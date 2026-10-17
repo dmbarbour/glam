@@ -151,8 +151,8 @@ The policy is an ordinary object with two operations:
 
 ```g
 {
-  update:\Event PriorMetadata -> NextMetadata,
-  report:\Metadata -> ReflectionTask
+  update: \Event PriorMetadata -> NextMetadata,
+  report: \Metadata -> ReflectionTask
 }
 ```
 

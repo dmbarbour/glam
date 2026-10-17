@@ -179,7 +179,22 @@ const NESTED_READINGS: &[(&str, &str)] = &[
     ("self", "error"),
     ("x.y", "error"),
     (".op", "error"),
-    (":x", "error"),
+    (":x", "{x: x}"),
+    ("{:x, :_y}", "{x: x, y: _y}"),
+    ("tag: p", "{tag: p}"),
+    ("tag:\n  p", "{tag: p}"),
+    ("tag: p as q", "{tag: (as p q)}"),
+    ("{x: Nat n}", "{x: (pred Nat n)}"),
+    ("{x: f -> p}", "{x: (view f p)}"),
+    ("{x?: Nat n}", "{x?: (pred Nat n)}"),
+    ("(tag:) p", "{tag: p}"),
+    ("{(a:p), b: q}", "{a: p, b: q}"),
+    ("{(a:) p, b: q}", "{a: p, b: q}"),
+    ("[x] ++ tag: ys", "[x] ++ {tag: ys} ++ []"),
+    ("(tag:)", "error"),
+    ("x?:p", "error"),
+    ("{a:p as q}", "error"),
+    ("{a:Nat n}", "error"),
     ("{x: p, x: q}", "error"),
     ("{rest, x: p}", "error"),
     ("{a, b}", "error"),
@@ -192,7 +207,6 @@ const NESTED_READINGS: &[(&str, &str)] = &[
     ("{: x}", "error"),
     ("{:x y}", "error"),
     ("{x ?: p}", "error"),
-    ("tag: p", "error"),
 ];
 
 /// Complete positions: a match arm's head, which views and predicates may
@@ -205,7 +219,8 @@ const COMPLETE_READINGS: &[(&str, &str)] = &[
     ("view -> p as q", "(view view (as p q))"),
     ("p <- f x", "(view (f x) p)"),
     ("(x)", "(group x)"),
-    ("{x: Nat n}", "error"),
+    ("{x: Nat n}", "{x: (pred Nat n)}"),
+    ("tag: Nat n", "{tag: (pred Nat n)}"),
     ("Nat", "Nat"),
 ];
 
@@ -298,7 +313,10 @@ fn cover_mode_reports_what_a_pattern_cannot_hold() {
         ("(x as y -> z)", "`as` joins two patterns"),
         ("(_ x)", "expected a name after `_`"),
         ("then", "reserved keyword"),
-        (":x", "dictionary shorthand is valid only inside braces"),
+        ("(tag:)", "a tag's constructor `path:` is not a pattern"),
+        ("x?:p", "valid only in a dictionary pattern"),
+        ("{a:p as q}", "now tags only its atom"),
+        ("tag: |> p", "an operator cannot begin"),
         ("{x: p, x: q}", "repeats the same path"),
         ("[x] ++ ys ++ zs", "only one variable-length segment"),
     ];

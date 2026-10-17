@@ -72,8 +72,23 @@ fn ordinary_expressions_parse() {
         "{}",
         "{, first, second,}",
         "{foo: 1, foo.bar: 2, [0, 1]: 3}",
-        ":[tag]",
-        ":foo.bar",
+        "([tag]:)",
+        "(foo.bar:)",
+        "tag:",
+        "x |> tag:",
+        "[a:, b.c:, [k]:]",
+        "map (tag:) xs",
+        ":pun",
+        "f :pun",
+        "{a:1, b: f x, :c, d}",
+        "tag: f x",
+        "tag: a + b",
+        "tag:\n  f x",
+        "tag: \\x -> x",
+        "f tag: g x",
+        "a.b: x",
+        "[k]: x",
+        "(p): x",
         "tag:value",
         "foo.bar:value",
         "[first, second]:value",
@@ -260,7 +275,8 @@ fn keyword_data_escapes_remain_available() {
         assert_parses(&format!("root.{}", keyword.spelling()));
         assert_parses(&format!("root.['{}]", keyword.spelling()));
         assert_parses(&format!("{}:()", keyword.spelling()));
-        assert_parses(&format!(":{}", keyword.spelling()));
+        assert_parses(&format!("{}: ()", keyword.spelling()));
+        assert_parses(&format!("({}:)", keyword.spelling()));
     }
 }
 
@@ -284,36 +300,83 @@ fn key_path_items_are_ordinary_expressions() {
     );
 }
 
+fn tag(key: &str, payload: SyntaxExpr) -> SyntaxExpr {
+    SyntaxExpr::PathDict(vec![SyntaxKeyExpr::Atom(key.to_owned())], Box::new(payload))
+}
+
+fn name(name: &str) -> SyntaxExpr {
+    SyntaxExpr::Name(name.to_owned())
+}
+
+fn apply(function: SyntaxExpr, argument: SyntaxExpr) -> SyntaxExpr {
+    SyntaxExpr::Apply(Box::new(function), Box::new(argument))
+}
+
+/// `path:` is a prefix read alike everywhere: joint, it tags an atom; spaced,
+/// the rest of its item; with nothing after it, it is the constructor. A
+/// dict literal is the union of its items.
 #[test]
-fn dict_path_member_colons_are_joint_to_their_paths() {
-    assert_eq!(
-        parse_expression_fragment(b"{a:f x}").unwrap(),
-        SyntaxExpr::DictUnion(vec![SyntaxExpr::PathDict(
-            vec![SyntaxKeyExpr::Atom("a".to_owned())],
-            Box::new(SyntaxExpr::Apply(
-                Box::new(SyntaxExpr::Name("f".to_owned())),
-                Box::new(SyntaxExpr::Name("x".to_owned())),
-            )),
-        )])
-    );
-    // A space may follow the colon, never precede it.
+fn tag_prefixes_read_alike_in_braces_and_out() {
+    for (source, expected) in [
+        ("a:f x", apply(tag("a", name("f")), name("x"))),
+        ("a: f x", tag("a", apply(name("f"), name("x")))),
+        (
+            "{a: f x}",
+            SyntaxExpr::DictUnion(vec![tag("a", apply(name("f"), name("x")))]),
+        ),
+        (
+            "{(a:f) x}",
+            SyntaxExpr::DictUnion(vec![apply(tag("a", name("f")), name("x"))]),
+        ),
+        (
+            "g a: f x",
+            apply(name("g"), tag("a", apply(name("f"), name("x")))),
+        ),
+        (
+            "{f :a}",
+            SyntaxExpr::DictUnion(vec![apply(name("f"), tag("a", name("a")))]),
+        ),
+        (":a", tag("a", name("a"))),
+        (
+            "(a:)",
+            SyntaxExpr::TaggedConstructor(vec![SyntaxKeyExpr::Atom("a".to_owned())]),
+        ),
+        (
+            "{a:}",
+            SyntaxExpr::DictUnion(vec![SyntaxExpr::TaggedConstructor(vec![
+                SyntaxKeyExpr::Atom("a".to_owned()),
+            ])]),
+        ),
+    ] {
+        assert_eq!(
+            parse_expression_fragment(source.as_bytes()).unwrap(),
+            expected,
+            "{source}"
+        );
+    }
+    // A space or line break may follow the colon, never precede it.
     assert_eq!(
         parse_expression_fragment(b"{a: 1}").unwrap(),
         parse_expression_fragment(b"{a:\n  1}").unwrap(),
     );
-    // Colon joint to the name instead: an expression member applying `f`
-    // to a constructor.
-    assert_eq!(
-        parse_expression_fragment(b"{f :tag}").unwrap(),
-        SyntaxExpr::DictUnion(vec![SyntaxExpr::Apply(
-            Box::new(SyntaxExpr::Name("f".to_owned())),
-            Box::new(SyntaxExpr::TaggedConstructor(vec![SyntaxKeyExpr::Atom(
-                "tag".to_owned()
-            )])),
-        )])
-    );
-    for source in ["{a : 1}", "{a\n  :1}", "{a\n  : 1}", "{a:}"] {
+    for source in ["{a : 1}", "{a\n  :1}", "{a\n  : 1}"] {
         assert_rejects(source);
+    }
+}
+
+/// Transitional (`tags-prefix-migration`): a brace item that begins with a
+/// joint tag and goes on read as the whole item's tag before.
+#[test]
+fn a_joint_tag_that_goes_on_in_braces_is_reported() {
+    for source in ["{a:f x}", "{a:x + 1}", "{b:1, a:f x}"] {
+        let diagnostics = parse_expression_fragment(source.as_bytes())
+            .expect_err("a joint tag that goes on in braces is reported");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("now tags only its atom")),
+            "{source}: {diagnostics:?}"
+        );
     }
 }
 
@@ -336,8 +399,12 @@ fn a_joint_colon_after_an_operator_name_makes_a_tag() {
 fn ordinary_expression_rejections_are_preserved() {
     for source in [
         "and",
-        "tag: value",
         ": tag",
+        "tag: |> g",
+        ":foo.bar",
+        ":[tag]",
+        "{a:f x}",
+        "{a:x + 1}",
         "(,,)",
         "(first,,second)",
         "(,,first)",

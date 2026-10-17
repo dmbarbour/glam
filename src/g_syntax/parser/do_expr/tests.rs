@@ -861,10 +861,10 @@ fn token_do_reports_structural_statement_errors() {
             "do\n.r {} -> {foo?:}\n.r ()",
             "requires a payload after `?:`",
         ),
-        ("do\n.r {} -> :42\n.r ()", "expected a path after `:`"),
+        ("do\n.r {} -> :42\n.r ()", "expected a name adjacent to `:`"),
         (
-            "do\n.r {} -> :value\n.r ()",
-            "dictionary shorthand is valid only inside braces",
+            "do\n.r {} -> (value:)\n.r ()",
+            "a tag's constructor `path:` is not a pattern",
         ),
         (
             "do\ndeclare\n.r ()",

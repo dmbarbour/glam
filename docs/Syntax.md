@@ -793,38 +793,43 @@ Aside from `let` and `where`, locals can be introduced by pattern matching. See 
 
 ## Tagged Data
 
-Tagged data is modeled as singleton dictionaries. As a syntactic convenience, braces may be omitted.
+Tagged data is modeled as singleton dictionaries, built by the tag prefix
+`path:`, which reads alike everywhere, in braces or out:
 
-        tag:Data            # same as { tag:Data }
-        :tag                # same as (\ Data -> tag:Data)
+        tag:Data            # joint: tags one atom; same as { tag:Data }
+        tag: f x            # spaced: tags the rest of its item, tag:(f x)
+        tag:                # nothing after it: (\ Data -> tag:Data)
+        :tag                # a pun on one bare name: tag:tag
 
-Brace omission and constructor syntax extend to every non-empty dictionary
-path. Multi-component paths construct one hierarchical dictionary, just like
-one entry of a brace-delimited dictionary.
+Joint to its operand, a tag binds tighter than juxtaposition: `g tag:f x y`
+is `g (tag:f) x y`, and `g tag:(f x y)` couples the arguments. Followed by a
+space or line break, its operand is the rest of its item, as a lambda's body
+is: `tag: a + b` is `tag:(a + b)`, `g tag: f x` is `g (tag:(f x))`, and it
+ends where tails do, as at a `do` statement's `->`. An operator cannot begin
+a spaced tag's operand, so `tag: |> g` is an error. With nothing after it in
+its item, a tag is its constructor, and `(tag:)` its section, as `(+ 1)` is
+an operator's: `map (tag:) xs`, `[foo:, bar:]`, `x |> tag:`.
+
+Every non-empty dictionary path takes part. Multi-component paths construct
+one hierarchical dictionary.
 
         foo.bar:Data        # same as { foo.bar:Data }
-        :foo.bar            # same as (\ Data -> foo.bar:Data)
+        (foo.bar:)          # same as (\ Data -> foo.bar:Data)
 
         [KeyExpr]:Data      # one computed path component
         [KeyA,KeyB]:Data    # two computed path components
-        :[KeyA,KeyB]        # same as (\ Data -> [KeyA,KeyB]:Data)
+        ([KeyA,KeyB]:)      # same as (\ Data -> [KeyA,KeyB]:Data)
 
         (PathExpr):Data     # splice a computed list-valued path
-        :(PathExpr)         # corresponding constructor
+        ((PathExpr):)       # corresponding constructor
 
 For example, `[a,b]:Data` constructs `{[a]:{[b]:Data}}`. To use a list as one
 dictionary key instead, nest the brackets: `[[a,b]]:Data`.
 
-The colon in path-tagged data or a constructor is lexically tight. A tagged
-payload is one application atom; use parentheses when the payload is a compound
-expression.
-
-        g tag:f x y z       # parses as g (tag:f) x y z
-        g tag:(f x y) z     # clear coupling of arguments
-
-Outside a brace-delimited dictionary member, `:tag` always parses as a
-function expression. Within a dictionary, an exact `:name` member is instead
-entry punning syntax, described below.
+A pun, `:name`, is `name:name` everywhere, and a pattern reads it as
+capturing `name` under the key `name`. It takes one bare name: puns on paths,
+`:a.b`, wait for a consistent approach to capturing patterns, and perhaps
+locals generally, into structured dicts.
 
 ## Atoms
 
@@ -838,12 +843,12 @@ For access control and conflict avoidance, we can leverage the namespace as a st
 
 ## Dicts
 
-In expression contexts, `{}` is the empty dictionary, and `{ Path1:Expr1,
-Path2:Expr2, ...}` expresses a literal dictionary. Computed paths are expressed
-as list literals or parenthetical expressions of lists:
-`{ [0]:A, [1,2]:B, ([1] ++ [3,4]):C }`. An exact `:name` member is shorthand
-for `name:name`, so `{:key,:value}` constructs
-`{key:key,value:value}`. This shorthand is limited to one bare value name.
+In expression contexts, `{}` is the empty dictionary, and a dictionary
+literal is the union of its items, each an ordinary expression:
+`{a:1, b: f x, :c, D}`. Braces have no member grammar of their own, so a tag,
+a pun and a constructor read in them as anywhere. Computed paths are
+expressed as list literals or parenthetical expressions of lists:
+`{ [0]:A, [1,2]:B, ([1] ++ [3,4]):C }`.
 
 Within a dictionary, `{}` serves as the 'undefined' value. For example,
 `{foo:{}}` is equivalent to `{}`. Only a finite subset of dictionary elements
@@ -852,13 +857,12 @@ hierarchical union of three dictionaries. For example:
 `{{foo:{bar:0}}, {foo:{baz:1}}}` evaluates as
 `{foo:{bar:0, baz:1}}`.
 
-A tag-constructor application used as a dictionary-union member must be
-parenthesized, both to distinguish it visually from entry punning and to make
-the member boundary explicit:
+Since items are ordinary expressions:
 
         {:value}             # {value:value}
-        {(:foo Value), D}    # union of foo:Value and D
-        {:foo Value}         # invalid; parenthesize the constructor call
+        {foo: f x, D}        # union of foo:(f x) and D
+        {(foo:) Value, D}    # union of foo:Value and D
+        {:foo Value}         # applies the pun foo:foo to Value
 
 However, it is an error the dictionaries share any defined elements. Even `{foo:1, foo:1}` is an error: there is no generalized unification, and hierarchical union applies only to dictionaries. This error is lazy and only applies to the specific overlapping elements, thus in `D = {foo:1, {foo:1, bar:2}}`, we'd have an error when observing `D.foo` but not for `D.bar`. 
 
@@ -921,9 +925,15 @@ to rebuild the dictionary.
 
 Pattern matching on dictionaries generally has the form
 `{Path1:Pattern1, Path2:Pattern2, RemainingPattern}`. There is at most one
-remaining pattern, default `{}` thus requiring a full match. Users may write
-`{:x,:y,:z}` as shorthand for `{x:x, y:y, z:z}`. The shorthand belongs to
-dictionary members: standalone `:x` is not a pattern.
+remaining pattern, default `{}` thus requiring a full match. Patterns read as
+expressions do: `foo:p`, `foo: p` and `(foo:) p` are the same tag pattern, and
+`:x` captures `x` under the key `x`, so `{:x,:y,:z}` is `{x:x, y:y, z:z}`. A
+bare `foo:` is not a pattern. A spaced payload is a complete position: its
+item's comma or brace bounds it, and it runs to the end of its item, pattern
+operators included, so `{x: Nat n}` tags a predicate, `{x: f -> p}` a view,
+and `{x: a as b}` both captures. A joint payload stays nested, as in
+expressions: `x:Nat n` is the predicate `x:Nat` over `n`, and a spaced tag as
+a view's function needs parentheses: `((foo: f) -> p)`.
 
 ## Embedded Texts
 
@@ -1362,7 +1372,7 @@ Object syntax can and should be compact by default. I propose:
         foo = object_instance {
             , name:(anno 'scope_unique (abstract_global_path foo))
             , deps:[bar.spec, baz.spec]
-            , defs:\prior instance -> prior with
+            , defs: \prior instance -> prior with
                 def1 = ...
                 def2 := ...
             }

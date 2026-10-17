@@ -747,6 +747,39 @@ maps the short names used here to file names.
     module, as a global helper does.
 - **Recorded in:** grammar review, item 15.
 
+### Tags are prefix operators, read alike everywhere
+`tags-are-prefix-operators` · 2026-10-16 · maintainer · accepted
+- **Context:** tags and dict members read differently by context. `:foo`
+  constructed outside braces but punned as a whole member; `foo:f x` was
+  `(foo:f) x` outside braces but `foo:(f x)` as a member, whose value ran to
+  its comma; and `foo: x` was a member in braces and an error outside them.
+  Braces carried a member grammar of their own.
+- **Decision:**
+  - `path:` is a prefix operator building tagged data. Joint to its
+    operand, it binds tighter than juxtaposition. Followed by a space or
+    line break, its operand is the rest of its item, as a lambda's body is,
+    and an operator cannot begin it. With nothing after it in its item, it
+    is its constructor: `(foo:)`, `[foo:, bar:]`, `x |> foo:`. Every path
+    form takes part, and in patterns the optional `path?:`.
+  - `:name` is `name:name` everywhere, a pun on one bare name.
+  - A dict literal is the union of its items, each an ordinary expression;
+    braces lose their member grammar.
+  - Patterns read alike: `foo:p`, `foo: p` and `(foo:) p` are one tag
+    pattern, and `:x` captures `x` under its key. A spaced payload is a
+    complete position, pattern operators included; a joint one is nested.
+- **Alternatives rejected:** keeping the brace member grammar; path puns
+  (`:a.b`), deferred until capturing patterns into structured dicts has a
+  consistent approach.
+- **Consequences:**
+  - `{foo:f x}` changes from `foo:(f x)` to `(foo:f) x`, and `:foo` from a
+    constructor to a pun. The corpus moved; until it is retired
+    (`tags-prefix-diagnostic-retirement`), a brace item that begins with a
+    joint tag yet is no tag is an error, which catches what a sweep missed.
+  - A joint tag's payload is an atom, so a lambda after one needs the
+    spaced form: `update: \event -> …`.
+- **Rule lives in:** Syntax.md "Tagged Data" and "Dicts".
+- **Recorded in:** tag prefix plan.
+
 ### Keyword forms and lambdas stand alone only in tail position
 `tail-position` · 2026-10-16 · maintainer · superseded
 - **Context:** the grammar review's first item. Forms whose last part
@@ -2937,6 +2970,7 @@ Short names used under **Recorded in**, with their files under `docs/`.
 | lazy diagnostics plan | `plans/LazyDiagnostics_2026-10-15.md` |
 | parser backtracking plan | `plans/ParserBacktrackingPerformance_2026-10-04.md` |
 | grammar review | `plans/GrammarReview_2026-10-16.md` |
+| tag prefix plan | `plans/TagPrefixSyntax_2026-10-16.md` |
 | C2C review | `reviews/GarbageCollectorC2C_2026-08-22.md` |
 | C6 review | `reviews/GarbageCollectorC6_2026-08-24.md` |
 | C8 review | `reviews/GarbageCollectorC8_2026-10-03.md` |

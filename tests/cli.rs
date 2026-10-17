@@ -55,7 +55,7 @@ fn configured_completion_script_failure_is_reported_not_replaced() {
     let config = dir.join("conf.g");
     fs::write(
         &config,
-        "language g0\nimport 'std as std\nobject conf.env\nconf.completion_script = {bash:std.anno 'error \"completion script failed\"}\n",
+        "language g0\nimport 'std as std\nobject conf.env\nconf.completion_script = {bash: std.anno 'error \"completion script failed\"}\n",
     )
     .unwrap_or_else(|error| panic!("failed to write {}: {error}", config.display()));
 

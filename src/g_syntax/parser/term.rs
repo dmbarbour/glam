@@ -63,8 +63,7 @@ use crate::g_syntax::keywords::{canonical_keyword, g0_keyword, reserved_keyword_
 use crate::g_syntax::{PathSuffix, SyntaxExpr, SyntaxKeyExpr, SyntaxOperator, SyntaxPattern};
 
 use super::expression::{
-    InfixChain, access_if_path, quoted_path, syntax_operator, validate_dict_colon_members,
-    validate_expr_name,
+    InfixChain, access_if_path, quoted_path, syntax_operator, validate_expr_name,
 };
 use super::expression_context::ExpressionContext;
 use super::input::{TokenRange, TokenView};
@@ -404,7 +403,6 @@ enum Slot {
 /// What interpreting a closed group needs of its frame.
 struct GroupBody {
     delimiter: Delimiter,
-    group: super::lexical::GroupId,
     pieces: Vec<Piece>,
     mode: Mode,
     context: ExpressionContext,
@@ -682,7 +680,7 @@ fn interpret_group(scope: Scope<'_, '_, '_>, frame: &GroupBody, close: usize) ->
     #[cfg(test)]
     INTERPRETED_GROUPS.with(|count| count.set(count.get() + 1));
     let view = scope.view;
-    let (delimiter, group) = (&frame.delimiter, &frame.group);
+    let delimiter = &frame.delimiter;
     match *delimiter {
         Delimiter::Parenthesis => interpret_paren(scope, frame, close).map(Cover::Paren),
         Delimiter::Bracket => {
@@ -691,14 +689,11 @@ fn interpret_group(scope: Scope<'_, '_, '_>, frame: &GroupBody, close: usize) ->
             resolved_items(scope, items).map(Cover::Bracket)
         }
         Delimiter::Brace => {
-            // A pun's name is checked by role in cover mode.
-            validate_dict_colon_members(view, *group, scope.mode == Mode::Expression)
-                .map_err(Fail::error)?;
             let segments = segments(view, &frame.pieces);
             let items = separated_items(&segments, true, true)?;
             items
                 .into_iter()
-                .map(|member| dict_member(scope, member))
+                .map(|item| dict_item(scope, item))
                 .collect::<Parse<Vec<_>>>()
                 .map(Cover::Brace)
         }
@@ -832,75 +827,43 @@ fn resolved(scope: Scope<'_, '_, '_>, pieces: &[Piece]) -> Parse<SyntaxExpr> {
         .map_err(|message| Fail::error(message).or_at(pieces.first().map(piece_token)))
 }
 
-/// A dict member: a pun `:name`, a path member `path: value`, or an
-/// expression. A path member is recognized before anything is consumed: the
-/// path's extent is measured by shape, and only a `:` joint to it commits.
-/// A space or line break may follow the colon. In cover mode a `?` joint
-/// between the path and its colon marks an optional pattern entry.
-fn dict_member(scope: Scope<'_, '_, '_>, member: &[Piece]) -> Parse<Term> {
-    let view = scope.view;
-    if is_symbol(view, &member[0], ":") {
-        let Some(TokenKind::Name(name)) = member.get(1).and_then(|piece| piece_kind(view, piece))
-        else {
-            return error("dictionary shorthand `:name` requires a bare value name after `:`");
-        };
-        return Ok(match scope.mode {
-            Mode::Expression => Term::Expr(SyntaxExpr::PathDict(
-                vec![SyntaxKeyExpr::Atom((*name).to_owned())],
-                Box::new(SyntaxExpr::Name((*name).to_owned())),
-            )),
-            Mode::Cover => Term::Pun((*name).to_owned()),
-        });
+/// A dict literal's item: an ordinary expression, or in cover mode a pattern
+/// item; the literal is the union of its items.
+///
+/// Transitional (`tags-prefix-migration`): an item that begins with a joint
+/// tag yet is no tag, such as `{a:f x}`, read as `a:(f x)` before tags
+/// became prefixes, and is reported until the corpus has moved.
+fn dict_item(scope: Scope<'_, '_, '_>, item: &[Piece]) -> Parse<Term> {
+    let joint = Items::new(scope, item)
+        .tag_prefix_at(0)
+        .is_some_and(|prefix| prefix.payload == TagPayload::Joint);
+    let term = resolved_term(scope, item)?;
+    let tag = matches!(
+        term,
+        Term::Tag(..) | Term::OptionalTag(..) | Term::Expr(SyntaxExpr::PathDict(..))
+    );
+    if joint && !tag {
+        return Err(Fail::error(JOINT_ITEM).or_at(item.first().map(piece_token)));
     }
-    if scope.mode == Mode::Cover && is_symbol(view, &member[0], "?") {
-        return error("optional dictionary entry pattern requires a path before `?:`");
-    }
-    // A path member's colon is joint to its path, and its value runs to the
-    // member's end; any other member, such as `f :tag`, is an expression.
-    let mut cursor = Items::new(scope, member);
-    if let Some(end) = cursor.data_path_end() {
-        let optional = scope.mode == Mode::Cover
-            && member
-                .get(end)
-                .is_some_and(|piece| is_symbol(view, piece, "?"));
-        if optional && !cursor.joint_at(end) {
-            return error("optional dictionary entry marker `?` must be joint with its path");
-        }
-        if optional && !cursor.joint_at(end + 1) {
-            return error("optional dictionary entry marker must be written as joint `?:`");
-        }
-        let colon = end + usize::from(optional);
-        if member
-            .get(colon)
-            .is_some_and(|piece| is_symbol(view, piece, ":"))
-            && cursor.joint_at(colon)
-        {
-            let path = cursor.data_path()?;
-            debug_assert_eq!(cursor.position, end);
-            let value = trim_padding(view, &member[colon + 1..]);
-            if value.is_empty() {
-                return error(if optional {
-                    "optional dictionary entry pattern requires a payload after `?:`"
-                } else {
-                    "a dictionary path member requires a value"
-                });
-            }
-            let value = resolved_term(scope, value)?;
-            return Ok(match scope.mode {
-                Mode::Expression => Term::Expr(SyntaxExpr::PathDict(
-                    path,
-                    Box::new(value.into_expr().map_err(Fail::error)?),
-                )),
-                Mode::Cover if optional => Term::OptionalTag(path, Box::new(value)),
-                Mode::Cover => Term::Tag(path, Box::new(value)),
-            });
-        }
-    }
-    resolved_term(scope, member)
+    Ok(term)
 }
 
 fn is_glam_name(name: &str) -> bool {
     name.starts_with(|character: char| character.is_ascii_alphabetic())
+}
+
+/// A tag, or its constructor, joined as `attach` says.
+fn attach_tag(mode: Mode, attach: Attach, tag: Term) -> Term {
+    match attach {
+        Attach::Operand => tag,
+        Attach::TailArgument(head) => match mode {
+            Mode::Cover => Term::Apply(Box::new(head), Box::new(tag)),
+            Mode::Expression => Term::Expr(SyntaxExpr::Apply(
+                Box::new(head),
+                Box::new(tag.into_expr().expect("a tag expression converts")),
+            )),
+        },
+    }
 }
 
 /// The flat interpreter over one item's pieces.
@@ -913,11 +876,40 @@ struct Items<'p, 'lex, 'source> {
     stop_at_arrow: bool,
 }
 
-/// One open lambda in an item. Its body runs to the end of the item.
+/// One level of an item: the item's own, or an open lambda or spaced tag,
+/// whose body runs to the end of the item.
 struct Level {
     chain: Chain,
-    lambda: Option<(Vec<String>, Attach)>,
+    kind: LevelKind,
 }
+
+enum LevelKind {
+    Item,
+    Lambda(Vec<String>, Attach),
+    /// A spaced tag prefix, `path: payload`.
+    Tag(Vec<SyntaxKeyExpr>, Attach),
+}
+
+/// What follows a tag prefix's `:`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TagPayload {
+    /// A payload joint to the `:`, which binds tighter than juxtaposition.
+    Joint,
+    /// A space or line break, then the rest of the item.
+    Spaced,
+    /// Nothing in the item: the tag's constructor.
+    Bare,
+}
+
+/// A tag prefix, `path:`, or in a pattern the optional `path?:`.
+#[derive(Debug, Clone, Copy)]
+struct TagPrefix {
+    optional: bool,
+    payload: TagPayload,
+}
+
+/// A joint brace item that changed meaning with `tags-prefix-operator`.
+const JOINT_ITEM: &str = "a joint tag `path:Atom` now tags only its atom, in braces as elsewhere: write `path: …` with a space to tag the rest of the item, or parenthesize `(path:Atom) …`";
 
 #[derive(Default)]
 struct Chain {
@@ -1404,19 +1396,28 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     fn chain(&mut self) -> Parse<Chain> {
         let mut levels = vec![Level {
             chain: Chain::default(),
-            lambda: None,
+            kind: LevelKind::Item,
         }];
         'operand: loop {
-            // Expect an operand: a lambda or an application.
+            // Expect an operand: a lambda, a spaced tag or constructor, or
+            // an application.
             if self.symbol_at(0, "\\") {
                 let params = self.lambda_head()?;
                 levels.push(Level {
                     chain: Chain::default(),
-                    lambda: Some((params, Attach::Operand)),
+                    kind: LevelKind::Lambda(params, Attach::Operand),
                 });
                 continue 'operand;
             }
-            let head = self.application_head()?;
+            let head = match self.tag_prefix_at(0) {
+                Some(prefix) if prefix.payload != TagPayload::Joint => {
+                    match self.open_tag(prefix, Attach::Operand, &mut levels)? {
+                        Some(term) => term,
+                        None => continue 'operand,
+                    }
+                }
+                _ => self.application_head()?,
+            };
             if let Some(breaks) = self.tail_lambda_layout() {
                 let at = self.here();
                 let head = head
@@ -1426,15 +1427,34 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                 let params = self.lambda_head()?;
                 levels.push(Level {
                     chain: Chain::default(),
-                    lambda: Some((params, Attach::TailArgument(head))),
+                    kind: LevelKind::Lambda(params, Attach::TailArgument(head)),
                 });
                 continue 'operand;
             }
-            levels
-                .last_mut()
-                .expect("an item always has a level")
-                .chain
-                .push_operand(head);
+            // A spaced tag after a space or line breaks is the final
+            // argument, as a tail lambda is.
+            if let Some(breaks) = self.tail_tag_layout() {
+                let at = self.here();
+                let head = head
+                    .into_expr()
+                    .map_err(|message| Fail::error(message).or_at(at))?;
+                self.position += breaks;
+                let prefix = self.tag_prefix_at(0).expect("a tail tag was measured");
+                match self.open_tag(prefix, Attach::TailArgument(head), &mut levels)? {
+                    Some(term) => levels
+                        .last_mut()
+                        .expect("an item always has a level")
+                        .chain
+                        .push_operand(term),
+                    None => continue 'operand,
+                }
+            } else {
+                levels
+                    .last_mut()
+                    .expect("an item always has a level")
+                    .chain
+                    .push_operand(head);
+            }
             // After an operand: the end of the item, an update's body, a
             // postfix `if`, a pattern operator in cover mode, or an infix
             // operator, which resumes the chain at its indentation when
@@ -1475,9 +1495,9 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                     self.position += 1;
                     return self.expected("a name, bracket or parenthesis adjacent to `.`");
                 }
-                if self.symbol_at(0, ":") && !self.joint_at(1) {
-                    self.position += 1;
-                    return self.expected("a tag payload adjacent to `:`");
+                if self.symbol_at(0, ":") {
+                    return self
+                        .error_here("a tag's `:` must be joint to its key, as in `key: value`");
                 }
                 return self.expected("an infix operator or the end of the expression");
             };
@@ -1503,23 +1523,33 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             .map_err(|fail| fail.or_at(self.here()))
     }
 
-    /// Closes lambdas innermost first. Each one ends with the item, so the
-    /// item's chain then ends in an open lambda.
+    /// Closes lambdas and spaced tags innermost first. Each one ends with
+    /// the item, so the item's chain then ends in an open one.
     fn close_levels(&self, mut levels: Vec<Level>) -> Parse<Chain> {
         loop {
             let level = levels.pop().expect("levels remain while closing");
-            let Some((params, attach)) = level.lambda else {
-                debug_assert!(levels.is_empty(), "only the item level has no lambda");
-                return Ok(level.chain);
+            let body = |chain| {
+                self.infix_chain(chain)?
+                    .resolve()
+                    .map_err(|message| Fail::error(message).or_at(self.here()))
             };
-            let body = self
-                .infix_chain(level.chain)?
-                .resolve()
-                .map_err(|message| Fail::error(message).or_at(self.here()))?;
-            let lambda = SyntaxExpr::Lambda(params, Box::new(body));
+            let (form, attach) = match level.kind {
+                LevelKind::Item => {
+                    debug_assert!(levels.is_empty(), "only the first level is the item's");
+                    return Ok(level.chain);
+                }
+                LevelKind::Lambda(params, attach) => (
+                    SyntaxExpr::Lambda(params, Box::new(body(level.chain)?)),
+                    attach,
+                ),
+                LevelKind::Tag(path, attach) => (
+                    SyntaxExpr::PathDict(path, Box::new(body(level.chain)?)),
+                    attach,
+                ),
+            };
             let operand = match attach {
-                Attach::Operand => lambda,
-                Attach::TailArgument(head) => SyntaxExpr::Apply(Box::new(head), Box::new(lambda)),
+                Attach::Operand => form,
+                Attach::TailArgument(head) => SyntaxExpr::Apply(Box::new(head), Box::new(form)),
             };
             levels
                 .last_mut()
@@ -1627,6 +1657,107 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         })
     }
 
+    /// The line starts before a tail tag argument at the cursor: a spaced
+    /// tag prefix after a space or after line breaks.
+    fn tail_tag_layout(&self) -> Option<usize> {
+        let (breaks, _) = self.line_starts_at(0);
+        let spaced = breaks > 0 || self.leading_at(0) == Some(LeadingTrivia::Space);
+        (spaced
+            && self
+                .tag_prefix_at(breaks)
+                .is_some_and(|prefix| prefix.payload == TagPayload::Spaced))
+        .then_some(breaks)
+    }
+
+    /// The tag prefix at `offset`, if one is there: a data path, in a
+    /// pattern an optional `?`, and a `:` joint to it.
+    fn tag_prefix_at(&self, offset: usize) -> Option<TagPrefix> {
+        let start = self.position + offset;
+        let end = self.at(start).data_path_end()? - self.position;
+        let optional = self.symbol_at(end, "?") && self.joint_at(end);
+        let colon = end + usize::from(optional);
+        if !(self.symbol_at(colon, ":") && self.joint_at(colon)) {
+            return None;
+        }
+        let (breaks, _) = self.line_starts_at(colon + 1);
+        let payload =
+            if self.peek_at(colon + 1 + breaks).is_none() || self.stops_at(colon + 1 + breaks) {
+                TagPayload::Bare
+            } else if breaks == 0 && self.joint_at(colon + 1) {
+                TagPayload::Joint
+            } else {
+                TagPayload::Spaced
+            };
+        Some(TagPrefix { optional, payload })
+    }
+
+    /// Takes a spaced or bare tag prefix at the cursor. A bare one is its
+    /// constructor, the operand returned. A spaced one in an expression
+    /// opens a level, its payload the rest of the item; in a pattern its
+    /// payload is the rest of the item as a complete position, and the tag
+    /// is returned.
+    fn open_tag(
+        &mut self,
+        prefix: TagPrefix,
+        attach: Attach,
+        levels: &mut Vec<Level>,
+    ) -> Parse<Option<Term>> {
+        let at = self.here();
+        let path = self.data_path()?;
+        self.position += 1 + usize::from(prefix.optional);
+        let mode = self.scope.mode;
+        if prefix.optional && self.scope.mode == Mode::Expression {
+            return Err(Fail::error(
+                "an optional entry `path?:` is valid only in a dictionary pattern",
+            )
+            .or_at(at));
+        }
+        if prefix.payload == TagPayload::Bare {
+            if prefix.optional {
+                return Err(Fail::error(
+                    "an optional dictionary entry pattern requires a payload after `?:`",
+                )
+                .or_at(at));
+            }
+            return Ok(Some(attach_tag(
+                mode,
+                attach,
+                Term::Expr(SyntaxExpr::TaggedConstructor(path)),
+            )));
+        }
+        self.skip_line_starts();
+        if self
+            .peek()
+            .is_some_and(|piece| piece_operator(self.scope.view, piece).is_some())
+            && !self.named_tag_at(0)
+        {
+            return self.error_here(
+                "a spaced tag takes the rest of its item as its payload, which an operator cannot begin; write `(path:)` for the constructor",
+            );
+        }
+        match self.scope.mode {
+            Mode::Expression => {
+                levels.push(Level {
+                    chain: Chain::default(),
+                    kind: LevelKind::Tag(path, attach),
+                });
+                Ok(None)
+            }
+            Mode::Cover => {
+                let payload =
+                    Items::new(self.scope, &self.pieces[self.position..]).pattern_item()?;
+                self.position = self.pieces.len();
+                let payload = Box::new(Term::Complete(Box::new(payload)));
+                let tag = if prefix.optional {
+                    Term::OptionalTag(path, payload)
+                } else {
+                    Term::Tag(path, payload)
+                };
+                Ok(Some(attach_tag(mode, attach, tag)))
+            }
+        }
+    }
+
     /// The line starts before a tail lambda argument at the cursor: a `\`
     /// after a space or after line breaks.
     fn tail_lambda_layout(&self) -> Option<usize> {
@@ -1676,8 +1807,14 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         loop {
             let (breaks, _) = self.line_starts_at(0);
             let spaced = breaks > 0 || self.leading_at(0) == Some(LeadingTrivia::Space);
-            // A postfix `if` ends the application.
-            if !(spaced && self.starts_atom_at(breaks)) || self.postfix_if_at(breaks) {
+            // A postfix `if` ends the application, and a spaced tag is its
+            // tail argument.
+            if !(spaced && self.starts_atom_at(breaks))
+                || self.postfix_if_at(breaks)
+                || self
+                    .tag_prefix_at(breaks)
+                    .is_some_and(|prefix| prefix.payload == TagPayload::Spaced)
+            {
                 break;
             }
             // A tail form stands only where nothing but an operator or a
@@ -1736,63 +1873,99 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                         && !self.where_at(offset)
                 }
                 Some(TokenKind::Number(_) | TokenKind::Text(_) | TokenKind::Embedded(_)) => true,
-                Some(TokenKind::Symbol(symbol)) => matches!(*symbol, ":" | "'" | "." | "^"),
+                // A `:` starts a pun only joint to its name.
+                Some(TokenKind::Symbol(":")) => {
+                    self.joint_at(offset + 1)
+                        && matches!(
+                            self.peek_at(offset + 1)
+                                .and_then(|piece| piece_kind(self.scope.view, piece)),
+                            Some(TokenKind::Name(_))
+                        )
+                }
+                Some(TokenKind::Symbol(symbol)) => matches!(*symbol, "'" | "." | "^"),
                 _ => false,
             },
             None => false,
         }
     }
 
-    /// Whether a named tag, `name.path:payload`, starts at `offset`.
+    /// Whether a named tag prefix, `name.path:`, starts at `offset`.
     fn named_tag_at(&self, offset: usize) -> bool {
-        let cursor = self.at(self.position + offset);
-        cursor.data_path_end().is_some_and(|end| {
-            let colon = end - self.position;
-            self.symbol_at(colon, ":") && self.joint_at(colon) && self.joint_at(colon + 1)
-        })
+        matches!(
+            self.peek_at(offset)
+                .and_then(|piece| piece_kind(self.scope.view, piece)),
+            Some(TokenKind::Name(_))
+        ) && self.tag_prefix_at(offset).is_some()
     }
 
-    /// One atom, with any tag prefixes (`a:`, `[k]:`, `(p):`) applied to its
-    /// payload. The prefixes are a loop, not recursion.
+    /// One atom, with any joint tag prefixes (`a:`, `[k]:`, `(p):`, and in
+    /// a pattern `a?:`) applied to its payload, or a bare prefix as its
+    /// constructor. The prefixes are a loop, not recursion.
     fn atom(&mut self) -> Parse<Term> {
-        let mut tags: Vec<Vec<SyntaxKeyExpr>> = Vec::new();
+        let mut tags: Vec<(Vec<SyntaxKeyExpr>, bool)> = Vec::new();
         let base = loop {
-            let tagged = self.symbol_at(1, ":") && self.joint_at(1) && self.joint_at(2);
+            if let Some(prefix) = self.tag_prefix_at(0) {
+                let at = self.here();
+                if prefix.optional && self.scope.mode == Mode::Expression {
+                    return self.error_here(
+                        "an optional entry `path?:` is valid only in a dictionary pattern",
+                    );
+                }
+                match prefix.payload {
+                    TagPayload::Joint => {
+                        let path = self.data_path()?;
+                        self.position += 1 + usize::from(prefix.optional);
+                        tags.push((path, prefix.optional));
+                        continue;
+                    }
+                    TagPayload::Bare if !prefix.optional => {
+                        let path = self.data_path()?;
+                        self.position += 1;
+                        break Term::Expr(SyntaxExpr::TaggedConstructor(path));
+                    }
+                    TagPayload::Bare => {
+                        return Err(Fail::error(
+                            "an optional dictionary entry pattern requires a payload after `?:`",
+                        )
+                        .or_at(at));
+                    }
+                    TagPayload::Spaced => {
+                        return self.error_here(
+                            "a spaced tag takes the rest of its item; parenthesize `(path: …)` here",
+                        );
+                    }
+                }
+            }
+            if let Some(message) = self.misplaced_optional_marker() {
+                return self.error_here(message);
+            }
+            if !tags.is_empty() && self.symbol_at(0, "\\") {
+                return self.error_here(
+                    "a joint tag's payload is an atom; write `path: \\x -> …` with a space for a lambda",
+                );
+            }
+            let key_mark = self.symbol_at(1, ":") && self.joint_at(1);
             match self.peek() {
                 None => return self.expected("an expression"),
                 Some(Piece::Form { .. }) => break Term::Expr(self.conditional_atom()?),
                 Some(Piece::Group { .. }) => match self.shape_at(0) {
-                    Some(Shape::Bracket { empty: false }) if tagged => {
-                        tags.push(self.take_keys()?);
-                        self.position += 1;
-                    }
-                    Some(Shape::Bracket { empty: true }) if tagged => {
+                    Some(Shape::Bracket { empty: true }) if key_mark => {
                         return self.error_here("dictionary paths cannot be empty");
                     }
-                    Some(Shape::Unit) if tagged => {
+                    Some(Shape::Unit) if key_mark => {
                         return self.error_here("a path splice requires an expression");
-                    }
-                    Some(Shape::Grouped) if tagged => {
-                        let index = self.take_grouped()?;
-                        tags.push(vec![SyntaxKeyExpr::PathIndex(Box::new(index))]);
-                        self.position += 1;
                     }
                     _ => break self.literal_group()?,
                 },
                 Some(Piece::Token(_)) => match self.kind() {
-                    Some(TokenKind::Symbol(":")) => break Term::Expr(self.constructor()?),
+                    Some(TokenKind::Symbol(":")) => break self.pun()?,
                     Some(TokenKind::Name(name)) if is_glam_name(name) => {
                         // `abstract_global_path` heads its form unless it is
                         // a tag's key; the pass made every other form a piece.
-                        if *name == "abstract_global_path" && !self.named_tag_at(0) {
+                        if *name == "abstract_global_path" {
                             break Term::Expr(self.abstract_global_path()?);
                         }
                         let path = self.named_path(name)?;
-                        if self.symbol_at(0, ":") && self.joint_at(0) && self.joint_at(1) {
-                            tags.push(path);
-                            self.position += 1;
-                            continue;
-                        }
                         break self.name_with_path(path)?;
                     }
                     _ => break self.base_atom()?,
@@ -1801,11 +1974,12 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         };
         tags.into_iter()
             .rev()
-            .try_fold(base, |payload, path| match self.scope.mode {
+            .try_fold(base, |payload, (path, optional)| match self.scope.mode {
                 Mode::Expression => Ok(Term::Expr(SyntaxExpr::PathDict(
                     path,
                     Box::new(payload.into_expr().map_err(Fail::error)?),
                 ))),
+                Mode::Cover if optional => Ok(Term::OptionalTag(path, Box::new(payload))),
                 Mode::Cover => Ok(Term::Tag(path, Box::new(payload))),
             })
     }
@@ -1857,16 +2031,49 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         Ok(access_if_path(expression, suffixes))
     }
 
-    /// `:path`, a tag constructor.
-    fn constructor(&mut self) -> Parse<SyntaxExpr> {
+    /// What is wrong with an optional entry's marker at the cursor, in a
+    /// pattern, when it makes no tag prefix.
+    fn misplaced_optional_marker(&self) -> Option<&'static str> {
+        if self.scope.mode != Mode::Cover {
+            return None;
+        }
+        if self.symbol_at(0, "?") {
+            return Some("optional dictionary entry pattern requires a path before `?:`");
+        }
+        let end = self.data_path_end()? - self.position;
+        if !self.symbol_at(end, "?") {
+            return None;
+        }
+        Some(if !self.joint_at(end) {
+            "optional dictionary entry marker `?` must be joint with its path"
+        } else {
+            "optional dictionary entry marker must be written as joint `?:`"
+        })
+    }
+
+    /// `:name`, a pun: `name:name`, which in a pattern captures `name`
+    /// under its key. A pun takes one bare name.
+    fn pun(&mut self) -> Parse<Term> {
         self.position += 1;
-        if !self.joint_at(0) {
-            return self.expected("a path adjacent to `:`");
+        let name = match self.kind() {
+            Some(TokenKind::Name(name)) if self.joint_at(0) => *name,
+            _ => return self.expected("a name adjacent to `:`"),
+        };
+        self.position += 1;
+        if self.path_suffix_width().is_some() {
+            return self
+                .error_here("a pun `:name` takes one bare name; write `a.b:a.b` for a path");
         }
-        if self.data_path_end().is_none() {
-            return self.expected("a path after `:`");
-        }
-        self.data_path().map(SyntaxExpr::TaggedConstructor)
+        Ok(match self.scope.mode {
+            Mode::Expression => {
+                let name = validate_expr_name(name).map_err(Fail::error)?;
+                Term::Expr(SyntaxExpr::PathDict(
+                    vec![SyntaxKeyExpr::Atom(name.clone())],
+                    Box::new(SyntaxExpr::Name(name)),
+                ))
+            }
+            Mode::Cover => Term::Pun(name.to_owned()),
+        })
     }
 
     /// A key name with its path suffixes, as keys.

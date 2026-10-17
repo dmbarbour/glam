@@ -45,7 +45,7 @@ fn top_operator(expression: &SyntaxExpr) -> Option<SyntaxOperator> {
     })
 }
 
-/// Whether a form runs to the end of its region.
+/// Whether a form runs to the end of its region: a spaced tag among them.
 fn is_tail_form(expression: &SyntaxExpr) -> bool {
     matches!(
         expression,
@@ -53,7 +53,42 @@ fn is_tail_form(expression: &SyntaxExpr) -> bool {
             | SyntaxExpr::If(_)
             | SyntaxExpr::Let { .. }
             | SyntaxExpr::Using { .. }
-    )
+    ) || is_spaced_tag(expression)
+}
+
+/// Whether a tag prints spaced, `path: payload`: its payload is no atom.
+fn is_spaced_tag(expression: &SyntaxExpr) -> bool {
+    let SyntaxExpr::PathDict(_, payload) = expression else {
+        return false;
+    };
+    is_tail_form(payload)
+        || ends_with_block(payload)
+        || top_operator(payload).is_some()
+        || matches!(payload.as_ref(), SyntaxExpr::Apply(..))
+}
+
+/// Whether an expression prints beginning with a joint tag, which a dict
+/// literal's item may not: a transitional check reads `{a:x y}` as the old
+/// `a:(x y)`.
+fn begins_with_joint_tag(expression: &SyntaxExpr) -> bool {
+    match expression {
+        SyntaxExpr::PathDict(..) => !is_spaced_tag(expression),
+        SyntaxExpr::Apply(function, _) => begins_with_joint_tag(function),
+        SyntaxExpr::Access(base, _) => begins_with_joint_tag(base),
+        _ => match top_operator(expression) {
+            Some(_) => match expression {
+                SyntaxExpr::ComparisonChain { first, .. } => begins_with_joint_tag(first),
+                SyntaxExpr::OperatorApply { left, .. }
+                | SyntaxExpr::Add(left, _)
+                | SyntaxExpr::Subtract(left, _)
+                | SyntaxExpr::Multiply(left, _)
+                | SyntaxExpr::Divide(left, _)
+                | SyntaxExpr::Append(left, _) => begins_with_joint_tag(left),
+                _ => false,
+            },
+            None => false,
+        },
+    }
 }
 
 /// Whether a form ends at its own `}`.
@@ -204,7 +239,9 @@ impl Printer {
             | SyntaxExpr::Do(_)
             | SyntaxExpr::Match(_)
             | SyntaxExpr::With { .. } => self.group(expression),
-            _ if top_operator(expression).is_some() => self.group(expression),
+            _ if top_operator(expression).is_some() || is_spaced_tag(expression) => {
+                self.group(expression)
+            }
             _ => self.form(expression, false),
         }
     }
@@ -242,6 +279,13 @@ impl Printer {
                 self.atom(base);
                 self.keys(keys, ".");
             }
+            // A spaced tag's payload is the rest of its item; a joint one's
+            // is an atom.
+            SyntaxExpr::PathDict(keys, payload) if is_spaced_tag(expression) => {
+                self.path(keys);
+                self.text(": ");
+                self.expression(payload, true);
+            }
             SyntaxExpr::PathDict(keys, payload) => {
                 self.path(keys);
                 self.text(":");
@@ -251,8 +295,9 @@ impl Printer {
                 }
             }
             SyntaxExpr::TaggedConstructor(keys) => {
-                self.text(":");
+                self.text("(");
                 self.path(keys);
+                self.text(":)");
             }
             SyntaxExpr::DictUnion(items) => {
                 self.text("{");
@@ -261,12 +306,9 @@ impl Printer {
                         self.text(", ");
                     }
                     match item {
-                        // A member's value runs to its comma.
-                        SyntaxExpr::PathDict(keys, value) => {
-                            self.path(keys);
-                            self.text(": ");
-                            self.expression(value, true);
-                        }
+                        // An item is an expression to its comma.
+                        SyntaxExpr::PathDict(..) => self.expression(item, true),
+                        _ if begins_with_joint_tag(item) => self.group(item),
                         _ => self.expression(item, true),
                     }
                 }

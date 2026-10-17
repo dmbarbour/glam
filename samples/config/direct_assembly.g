@@ -10,15 +10,15 @@ object direct_standard_effects with
   initial_state = {
     handler:{
       initialized:(),
-      trace:anno 'meta_init (),
+      trace: anno 'meta_init (),
       trace_policy:effects.trace.drop
     }
   }
 
   object trace with
     drop = {
-      update:\_event _prior -> {},
-      report:\_metadata -> .r ()
+      update: \_event _prior -> {},
+      report: \_metadata -> .r ()
     }
 
   run operation = effects.run_from effects.initial_state operation
@@ -93,7 +93,7 @@ object direct_x86_64 extends direct_standard_effects with
       roots:[],
       cursors:{},
       symbols:{},
-      trace:anno 'meta_init (),
+      trace: anno 'meta_init (),
       trace_policy:x86.trace.drop
     }
   }
@@ -159,7 +159,7 @@ object direct_x86_64 extends direct_standard_effects with
   }
 
   trace_full_update event prior = {
-    events:(
+    events: (
       match prior as
         {events:events, _} => events
         _ => []
@@ -258,7 +258,7 @@ object direct_x86_64 extends direct_standard_effects with
             'root
             {
               kind:'cursor,
-              identity:x86.cursor_handle state.handler.next_cursor_id
+              identity: x86.cursor_handle state.handler.next_cursor_id
             }
             [
               x86.trace_change '.handler.roots 'append,
@@ -274,7 +274,7 @@ object direct_x86_64 extends direct_standard_effects with
 
   allocate_root_section kind cursor_id state =
     {
-      result:x86.cursor_handle cursor_id,
+      result: x86.cursor_handle cursor_id,
       state:
         x86.updated_state
           '.handler.next_cursor_id
@@ -301,7 +301,7 @@ object direct_x86_64 extends direct_standard_effects with
             'split
             {
               kind:'cursor,
-              identity:x86.cursor_handle state.handler.next_cursor_id
+              identity: x86.cursor_handle state.handler.next_cursor_id
             }
             [
               x86.trace_change '.handler.cursors 'insert,
@@ -345,7 +345,7 @@ object direct_x86_64 extends direct_standard_effects with
 
   insert_cursor_split kind prior_cursor_id cursor_id following state =
     {
-      result:x86.cursor_handle cursor_id,
+      result: x86.cursor_handle cursor_id,
       state:
         x86.updated_state
           '.handler.next_cursor_id
@@ -414,7 +414,7 @@ object direct_x86_64 extends direct_standard_effects with
             'label
             {
               kind:'label,
-              identity:x86.label_handle state.handler.next_label_id
+              identity: x86.label_handle state.handler.next_label_id
             }
             [x86.trace_change '.handler.cursors 'append]
         )
@@ -434,7 +434,7 @@ object direct_x86_64 extends direct_standard_effects with
             'label
             {
               kind:'label,
-              identity:x86.label_handle state.handler.next_label_id
+              identity: x86.label_handle state.handler.next_label_id
             }
             [x86.trace_change '.handler.cursors 'append]
         )
@@ -501,7 +501,7 @@ object direct_x86_64 extends direct_standard_effects with
             'global
             {
               kind:'label,
-              identity:x86.label_handle state.handler.next_label_id
+              identity: x86.label_handle state.handler.next_label_id
             }
             [
               x86.trace_change '.handler.cursors 'append,
@@ -666,7 +666,7 @@ object direct_x86_64 extends direct_standard_effects with
 
   compile_layout code_address instructions symbols =
     {
-      code:x86.encode instructions instructions code_address,
+      code: x86.encode instructions instructions code_address,
       code_address:code_address,
       instructions:instructions,
       symbols:symbols
