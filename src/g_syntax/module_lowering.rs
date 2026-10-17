@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
+use std::rc::Rc;
 
 use super::*;
 use crate::core::RuntimeValueMutator;
@@ -84,6 +85,9 @@ pub(in crate::g_syntax) struct ModuleLowerer<'context> {
     /// The file's `let` names in order, each bound to its share of its
     /// group's value: compiler state, which no module entry holds.
     file_environment: Vec<(String, RuntimeValueRoot)>,
+    /// The same names, in the same order, as each declaration's resolver
+    /// reads them.
+    file_lets: Rc<FileLets>,
     diagnostics: Vec<Diagnostic>,
     parsed_declarations: Vec<Declaration>,
 }
@@ -106,6 +110,7 @@ impl<'context> ModuleLowerer<'context> {
             declared_objects: BTreeSet::new(),
             journal: PendingJournal::default(),
             file_environment: Vec::new(),
+            file_lets: Rc::default(),
             diagnostics: Vec::new(),
             parsed_declarations: Vec::new(),
         }
@@ -167,7 +172,7 @@ impl<'context> ModuleLowerer<'context> {
                             demand: reflection.clone_core_with(&access),
                         },
                     );
-                    let (mut locals, environment) = self.file_locals(line);
+                    let mut locals = self.file_locals();
                     let resolved = match kind {
                         DeclarationKind::Definition(definition) => resolve_module_definition(
                             &access,
@@ -198,7 +203,7 @@ impl<'context> ModuleLowerer<'context> {
                         ),
                         _ => unreachable!("resolved declarations were matched above"),
                     }?;
-                    let resolved = self.bind_file_environment(&access, environment, resolved);
+                    let resolved = self.bind_file_environment(&access, resolved);
                     Ok(access.root_runtime_value(lower_resolved_expr_in(&access, resolved)))
                 });
                 match result {
@@ -224,40 +229,32 @@ impl<'context> ModuleLowerer<'context> {
         self.parsed_declarations.push(declaration);
     }
 
-    /// A resolver context holding the file's `let` names, and their
-    /// bindings.
-    fn file_locals(&self, line: usize) -> (ResolverContext, Vec<BindingId>) {
-        let mut locals = ResolverContext::default();
-        let bindings = locals
-            .extend_source_bindings(
-                self.file_environment.iter().map(|(name, _)| name.as_str()),
-                line,
-            )
-            .expect("a file's `let` names are distinct");
-        (locals, bindings)
+    /// A resolver context that reads the file's `let` names.
+    fn file_locals(&self) -> ResolverContext {
+        ResolverContext::with_file_lets(Rc::clone(&self.file_lets))
     }
 
     /// Binds the file's `let` names that `resolved` reads to their shared
-    /// values.
+    /// values. A file `let` takes the binding identity of its position.
     fn bind_file_environment(
         &self,
         access: &RuntimeValueAccess<'_>,
-        environment: Vec<BindingId>,
         resolved: ResolvedExpr<Value>,
     ) -> ResolvedExpr<Value> {
-        if environment.is_empty() {
+        if self.file_environment.is_empty() {
             return resolved;
         }
-        let free = resolved.free_bindings();
-        let (parameters, values): (Vec<_>, Vec<_>) = environment
+        let (parameters, values): (Vec<_>, Vec<_>) = resolved
+            .free_bindings()
             .into_iter()
-            .zip(&self.file_environment)
-            .filter(|(binding, _)| free.contains(binding))
-            .map(|(binding, (_, value))| {
-                (
+            .filter_map(|binding| {
+                let (_, value) = self
+                    .file_environment
+                    .get(usize::try_from(binding.local_index()).ok()?)?;
+                Some((
                     binding,
                     ResolvedExpr::Provided(value.clone_core_with(access)),
-                )
+                ))
             })
             .unzip();
         if parameters.is_empty() {
@@ -287,7 +284,7 @@ impl<'context> ModuleLowerer<'context> {
                 },
             )
             .resolved_in(&access);
-            let (mut locals, environment) = self.file_locals(line);
+            let mut locals = self.file_locals();
             let binders = lower_let_group_resolved(
                 &access,
                 bindings,
@@ -328,7 +325,7 @@ impl<'context> ModuleLowerer<'context> {
             for (parameters, values) in binders.into_iter().rev() {
                 record = ResolvedExpr::apply(ResolvedExpr::lambda(parameters, record), values);
             }
-            let record = self.bind_file_environment(&access, environment, record);
+            let record = self.bind_file_environment(&access, record);
             let record = access.root_runtime_value(lower_resolved_expr_in(&access, record));
             Ok::<_, Diagnostic>(
                 named
@@ -345,6 +342,7 @@ impl<'context> ModuleLowerer<'context> {
                     .collect::<Vec<_>>(),
             )
         })?;
+        Rc::make_mut(&mut self.file_lets).extend(entries.iter().map(|(name, _)| name.as_str()));
         self.file_environment.extend(entries);
         Ok(())
     }

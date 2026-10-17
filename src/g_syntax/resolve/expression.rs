@@ -455,6 +455,7 @@ pub(in crate::g_syntax) fn dict_with_body_scope(
         self_prior_defs,
         binds_self: localized,
         local_floor,
+        sees_file_lets: !localized && parent.sees_file_lets,
         reflection: None,
         parent: Some(Box::new(parent)),
     }
@@ -1075,6 +1076,7 @@ fn lower_abstract_global_path_resolved(
         .iter()
         .rev()
         .any(|candidate| candidate.canonical.as_deref() == Some(root))
+        || locals.file_let(root).is_some()
     {
         return Err(Diagnostic::error(
             line,
@@ -1333,6 +1335,11 @@ pub(in crate::g_syntax) fn lower_name_expr_resolved(
                 .expect("lowering locals must have stable binding identities"),
         );
     }
+    if scope.sees_file_lets
+        && let Some(binding) = locals.file_let(name)
+    {
+        return ResolvedExpr::Local(binding);
+    }
 
     if scope.object_alias.as_deref() == Some(name)
         && let Some(object_final_defs) = &scope.object_final_defs
@@ -1365,6 +1372,7 @@ pub(in crate::g_syntax) fn lower_prior_name_expr_resolved(
         .visible_locals(locals)
         .iter()
         .any(|local| local.canonical.as_deref() == Some(name))
+        || (scope.sees_file_lets && locals.file_let(name).is_some())
     {
         return Err(Diagnostic::error(
             line,

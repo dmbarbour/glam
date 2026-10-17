@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
 
 use super::super::analysis::GroupDependencies;
 use super::super::*;
@@ -13,18 +14,67 @@ pub(in crate::g_syntax) struct LocalName {
     pub(in crate::g_syntax) binding: Option<BindingId>,
 }
 
+/// The names a file's `let` declarations bind, which the declarations after
+/// them read where their scope sees them (`NameScope::sees_file_lets`). They
+/// take a resolver's first binding identities, one per name in order, so a
+/// declaration binds none of them until it reads one: a declaration costs
+/// nothing per file `let` it does not use.
+#[derive(Debug, Clone, Default)]
+pub(in crate::g_syntax) struct FileLets {
+    locals: Vec<LocalName>,
+    by_name: HashMap<String, usize>,
+}
+
+impl FileLets {
+    pub(in crate::g_syntax) fn extend<'a>(&mut self, names: impl IntoIterator<Item = &'a str>) {
+        for name in names {
+            let index = self.locals.len();
+            let mut local = local_name_metadata(name);
+            local.binding = Some(BindingId::from_local_index(index as u64));
+            if let Some(canonical) = &local.canonical {
+                self.by_name.insert(canonical.clone(), index);
+            }
+            self.locals.push(local);
+        }
+    }
+
+    fn get(&self, name: &str) -> Option<&LocalName> {
+        self.by_name.get(name).map(|&index| &self.locals[index])
+    }
+
+    fn len(&self) -> usize {
+        self.locals.len()
+    }
+}
+
 /// Per-lowering lexical state. Binding identities are meaningful only within
 /// one resolver and are never allocated from process-global state.
 #[derive(Debug, Default)]
 pub(in crate::g_syntax) struct ResolverContext {
     locals: Vec<LocalName>,
     next_binding_id: u64,
+    /// The file's `let` names, beneath every local.
+    file_lets: Rc<FileLets>,
     /// The dependency edges of `let` groups nested in a group already
     /// resolved, kept for when each is reached.
     group_dependencies: GroupDependencies,
 }
 
 impl ResolverContext {
+    /// A resolver for a declaration after a file's `let` declarations.
+    pub(in crate::g_syntax) fn with_file_lets(file_lets: Rc<FileLets>) -> Self {
+        Self {
+            next_binding_id: file_lets.len() as u64,
+            file_lets,
+            ..Self::default()
+        }
+    }
+
+    /// The binding of the file `let` that `name` names, if one does.
+    pub(in crate::g_syntax) fn file_let(&self, name: &str) -> Option<BindingId> {
+        self.file_lets.get(name).and_then(|local| local.binding)
+    }
+
     /// The locals bound before `boundary`, as a context of their own that
     /// continues this one's binding identities: what an escape's target
     /// sees lexically. `resume_after` takes the identities back.
@@ -32,6 +82,7 @@ impl ResolverContext {
         Self {
             locals: self.locals[..boundary.min(self.locals.len())].to_vec(),
             next_binding_id: self.next_binding_id,
+            file_lets: Rc::clone(&self.file_lets),
             group_dependencies: GroupDependencies::default(),
         }
     }
@@ -68,20 +119,33 @@ impl ResolverContext {
         binding
     }
 
-    /// The first of `pending` whose name a local or an earlier pending name
-    /// already binds, with that binder. One name scans the locals; more are
-    /// indexed, so a group of k names costs O(L + k), not O(k·(L + k)).
+    /// The first of `pending` whose name a file `let`, a local or an earlier
+    /// pending name already binds, with that binder. A few names scan the
+    /// locals, since indexing them hashes every local; more are indexed, so
+    /// a group of k names costs O(L + k), not O(k·(L + k)).
     fn first_shadowing<'a>(
         &'a self,
         pending: &'a [LocalName],
     ) -> Option<(&'a LocalName, &'a LocalName)> {
-        if let [local] = pending {
-            let canonical = local.canonical.as_deref()?;
-            return self
-                .locals
-                .iter()
-                .find(|existing| existing.canonical.as_deref() == Some(canonical))
-                .map(|existing| (local, existing));
+        /// Up to this many names, or this many comparisons, a scan beats
+        /// building an index.
+        const SCAN_NAMES: usize = 8;
+        const SCAN_COMPARISONS: usize = 256;
+        if pending.len() <= SCAN_NAMES
+            || pending.len() * (self.locals.len() + pending.len()) <= SCAN_COMPARISONS
+        {
+            return pending.iter().enumerate().find_map(|(index, local)| {
+                let canonical = local.canonical.as_deref()?;
+                self.file_lets
+                    .get(canonical)
+                    .or_else(|| {
+                        self.locals
+                            .iter()
+                            .chain(&pending[..index])
+                            .find(|existing| existing.canonical.as_deref() == Some(canonical))
+                    })
+                    .map(|existing| (local, existing))
+            });
         }
         let mut binders = HashMap::<&str, &LocalName>::new();
         for existing in &self.locals {
@@ -91,6 +155,9 @@ impl ResolverContext {
         }
         pending.iter().find_map(|local| {
             let canonical = local.canonical.as_deref()?;
+            if let Some(existing) = self.file_lets.get(canonical) {
+                return Some((local, existing));
+            }
             match binders.entry(canonical) {
                 Entry::Occupied(existing) => Some((local, *existing.get())),
                 Entry::Vacant(vacant) => {
@@ -604,6 +671,10 @@ pub(in crate::g_syntax) struct NameScope<V = Value> {
     /// Where the locals a bare name may read begin: a localized body's own,
     /// so the locals outside it take `^`, as its host's names do.
     pub(in crate::g_syntax) local_floor: usize,
+    /// Whether a bare name may read the file's `let` names, which lie
+    /// beneath every local: at module scope and in the bodies transparent to
+    /// it, but not past a localized body.
+    pub(in crate::g_syntax) sees_file_lets: bool,
     /// Final namespace and private heap key used by compiler-generated
     /// reflection demand boundaries. Expression-local objects deliberately
     /// leave this unset.
@@ -675,6 +746,7 @@ impl NameScope<ResolvedRoot> {
             module_prior_defs: self.module_prior_defs.duplicate_in(access),
             object_alias: self.object_alias.clone(),
             local_floor: self.local_floor,
+            sees_file_lets: self.sees_file_lets,
             object_final_defs: self
                 .object_final_defs
                 .as_ref()
@@ -777,6 +849,7 @@ impl NameScope<Value> {
             self_prior_defs: visible_definitions,
             binds_self: true,
             local_floor: 0,
+            sees_file_lets: true,
             reflection: Some(reflection),
             parent: None,
         }
@@ -797,6 +870,7 @@ impl NameScope<Value> {
             ),
             object_alias: self.object_alias.clone(),
             local_floor: self.local_floor,
+            sees_file_lets: self.sees_file_lets,
             object_final_defs: self
                 .object_final_defs
                 .as_ref()

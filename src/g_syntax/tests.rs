@@ -7974,6 +7974,8 @@ fn localized_scopes_shadow_outer_locals() {
         "language g0\nf = \\v -> {} with\n  alias self\n  v = \"own\"\n  text = v ++ ^v\nasm.result = (f \"outer\").text\n",
         "language g0\nobject o with\n  let v = \"outer\"\n  object inner with\n    v = \"own\"\n    text = v ++ ^v\nasm.result = o.inner.text\n",
         "language g0\nf = let v = \"outer\" in using {v:\"own\"} in v ++ ^v\nasm.result = f\n",
+        "language g0\nlet v = \"outer\"\nobject o with\n  v = \"own\"\n  text = v ++ ^v\nasm.result = o.text\n",
+        "language g0\nlet v = \"outer\"\nf = using {v:\"own\"} in v ++ ^v\nasm.result = f\n",
     ] {
         assert_eq!(assembly_result_text(source), b"ownouter", "{source}");
         assert_eq!(parse(source).diagnostics, [], "{source}");

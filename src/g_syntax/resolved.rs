@@ -15,6 +15,11 @@ impl BindingId {
             .expect("g-syntax binding ID space exhausted");
         Self(NonZeroU64::new(encoded).expect("encoded binding ID is always nonzero"))
     }
+
+    /// The index `from_local_index` took.
+    pub(super) fn local_index(self) -> u64 {
+        self.0.get() - 1
+    }
 }
 
 /// Affine semantic expressions resolved and owned by the g-syntax front end.

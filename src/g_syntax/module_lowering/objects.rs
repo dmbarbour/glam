@@ -548,6 +548,7 @@ pub(in crate::g_syntax) fn object_body_scope_resolved(
         self_prior_defs,
         binds_self: localized,
         local_floor,
+        sees_file_lets: !localized && parent.sees_file_lets,
         reflection: reflection_boundary.map(|demand| ReflectionBoundary { demand }),
         parent: Some(Box::new(parent)),
     }
