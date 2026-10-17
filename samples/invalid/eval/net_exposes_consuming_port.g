@@ -3,7 +3,7 @@ import 'std
 
 # A net's exposed port must provide a value; an application's argument port
 # consumes one.
-bad = interaction_net do
+bad = interaction_net <| do
     .bind -> [call, argument, result]
     .data 1 -> [value]
     .copy 0 -> [drop]

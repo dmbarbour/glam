@@ -21,8 +21,7 @@
 //! **Line breaks** follow the grammar's layout rules:
 //! - padding inside groups and around separators, lambda parameters and
 //!   arrows is skipped;
-//! - a line-led atom continues an application, and a line-led `\` is its
-//!   tail lambda;
+//! - a line-led atom continues an application;
 //! - a line-led infix operator resumes the chain at its indentation, which is
 //!   checked against the caller's `ExpressionContext`.
 //!
@@ -39,8 +38,8 @@
 //! `\x -> b if c else d` is `\x -> (b if c else d)`.
 //!
 //! **Tail position** (Syntax.md): a tail form that a token able to continue
-//! it would end on its line, or that an argument or path follows, fails its
-//! view.
+//! it would end on its line, that an argument or path follows, or that
+//! stands as an argument, fails its view.
 //!
 //! **Regions:** a pattern's `when` opens a region to its group member's
 //! end, whose groups are deferred, not interpreted: the guard-clause parser
@@ -273,6 +272,15 @@ fn misplaced_tail(head: usize, label: &str, follower: &str) -> Fail {
         "parenthesize this {label}: {follower} follows it, so it is not in tail position"
     ))
     .or_at(Some(head))
+}
+
+/// The error for a tail form at `at` that stands as an application's
+/// argument, which is an atom.
+fn tail_argument(at: Option<usize>, label: &str) -> Fail {
+    Fail::error(format!(
+        "parenthesize this {label}, or apply it with `<|`: an application's arguments are atoms"
+    ))
+    .or_at(at)
 }
 
 /// The error for a prefix conditional at `head` that follows an operand,
@@ -865,20 +873,6 @@ fn is_glam_name(name: &str) -> bool {
     name.starts_with(|character: char| character.is_ascii_alphabetic())
 }
 
-/// A tag, or its constructor, joined as `attach` says.
-fn attach_tag(mode: Mode, attach: Attach, tag: Term) -> Term {
-    match attach {
-        Attach::Operand => tag,
-        Attach::TailArgument(head) => match mode {
-            Mode::Cover => Term::Apply(Box::new(head), Box::new(tag)),
-            Mode::Expression => Term::Expr(SyntaxExpr::Apply(
-                Box::new(head),
-                Box::new(tag.into_expr().expect("a tag expression converts")),
-            )),
-        },
-    }
-}
-
 /// The flat interpreter over one item's pieces.
 struct Items<'p, 'lex, 'source> {
     scope: Scope<'p, 'lex, 'source>,
@@ -898,9 +892,9 @@ struct Level {
 
 enum LevelKind {
     Item,
-    Lambda(Vec<String>, Attach),
+    Lambda(Vec<String>),
     /// A spaced tag prefix, `path: payload`.
-    Tag(Vec<SyntaxKeyExpr>, Attach),
+    Tag(Vec<SyntaxKeyExpr>),
 }
 
 /// What follows a tag prefix's `:`.
@@ -1001,14 +995,6 @@ impl Chain {
             Term::Chain(Box::new(first), self.rest)
         })
     }
-}
-
-/// How a finished lambda joins the level that opened it.
-enum Attach {
-    /// As the next operand.
-    Operand,
-    /// As the final argument of an application head.
-    TailArgument(SyntaxExpr),
 }
 
 /// An operator of the pattern grammar, above the expression grammar.
@@ -1418,56 +1404,27 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                 let params = self.lambda_head()?;
                 levels.push(Level {
                     chain: Chain::default(),
-                    kind: LevelKind::Lambda(params, Attach::Operand),
+                    kind: LevelKind::Lambda(params),
                 });
                 continue 'operand;
             }
             let head = match self.tag_prefix_at(0) {
                 Some(prefix) if prefix.payload != TagPayload::Joint => {
-                    match self.open_tag(prefix, Attach::Operand, &mut levels)? {
+                    match self.open_tag(prefix, &mut levels)? {
                         Some(term) => term,
                         None => continue 'operand,
                     }
                 }
                 _ => self.application_head()?,
             };
-            if let Some(breaks) = self.tail_lambda_layout() {
-                let at = self.here();
-                let head = head
-                    .into_expr()
-                    .map_err(|message| Fail::error(message).or_at(at))?;
-                self.position += breaks;
-                let params = self.lambda_head()?;
-                levels.push(Level {
-                    chain: Chain::default(),
-                    kind: LevelKind::Lambda(params, Attach::TailArgument(head)),
-                });
-                continue 'operand;
+            if let Some(fail) = self.tail_argument() {
+                return Err(fail);
             }
-            // A spaced tag after a space or line breaks is the final
-            // argument, as a tail lambda is.
-            if let Some(breaks) = self.tail_tag_layout() {
-                let at = self.here();
-                let head = head
-                    .into_expr()
-                    .map_err(|message| Fail::error(message).or_at(at))?;
-                self.position += breaks;
-                let prefix = self.tag_prefix_at(0).expect("a tail tag was measured");
-                match self.open_tag(prefix, Attach::TailArgument(head), &mut levels)? {
-                    Some(term) => levels
-                        .last_mut()
-                        .expect("an item always has a level")
-                        .chain
-                        .push_operand(term),
-                    None => continue 'operand,
-                }
-            } else {
-                levels
-                    .last_mut()
-                    .expect("an item always has a level")
-                    .chain
-                    .push_operand(head);
-            }
+            levels
+                .last_mut()
+                .expect("an item always has a level")
+                .chain
+                .push_operand(head);
             // After an operand: the end of the item, an update's body, a
             // postfix `if`, a pattern operator in cover mode, or an infix
             // operator, which resumes the chain at its indentation when
@@ -1546,23 +1503,15 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                     .resolve()
                     .map_err(|message| Fail::error(message).or_at(self.here()))
             };
-            let (form, attach) = match level.kind {
+            let operand = match level.kind {
                 LevelKind::Item => {
                     debug_assert!(levels.is_empty(), "only the first level is the item's");
                     return Ok(level.chain);
                 }
-                LevelKind::Lambda(params, attach) => (
-                    SyntaxExpr::Lambda(params, Box::new(body(level.chain)?)),
-                    attach,
-                ),
-                LevelKind::Tag(path, attach) => (
-                    SyntaxExpr::PathDict(path, Box::new(body(level.chain)?)),
-                    attach,
-                ),
-            };
-            let operand = match attach {
-                Attach::Operand => form,
-                Attach::TailArgument(head) => SyntaxExpr::Apply(Box::new(head), Box::new(form)),
+                LevelKind::Lambda(params) => {
+                    SyntaxExpr::Lambda(params, Box::new(body(level.chain)?))
+                }
+                LevelKind::Tag(path) => SyntaxExpr::PathDict(path, Box::new(body(level.chain)?)),
             };
             levels
                 .last_mut()
@@ -1679,16 +1628,25 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             .then(|| self.data_path())
     }
 
-    /// The line starts before a tail tag argument at the cursor: a spaced
-    /// tag prefix after a space or after line breaks.
-    fn tail_tag_layout(&self) -> Option<usize> {
+    /// The error for a lambda or a spaced tag after an application, after a
+    /// space or line breaks at the cursor, which would stand as its
+    /// argument.
+    fn tail_argument(&self) -> Option<Fail> {
         let (breaks, _) = self.line_starts_at(0);
-        let spaced = breaks > 0 || self.leading_at(0) == Some(LeadingTrivia::Space);
-        (spaced
-            && self
-                .tag_prefix_at(breaks)
-                .is_some_and(|prefix| prefix.payload == TagPayload::Spaced))
-        .then_some(breaks)
+        if breaks == 0 && self.leading_at(0) != Some(LeadingTrivia::Space) {
+            return None;
+        }
+        let label = if self.symbol_at(breaks, "\\") {
+            "lambda"
+        } else if self
+            .tag_prefix_at(breaks)
+            .is_some_and(|prefix| prefix.payload == TagPayload::Spaced)
+        {
+            "spaced tag"
+        } else {
+            return None;
+        };
+        Some(tail_argument(self.at(self.position + breaks).here(), label))
     }
 
     /// The tag prefix at `offset`, if one is there: a data path, in a
@@ -1713,21 +1671,14 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         Some(TagPrefix { optional, payload })
     }
 
-    /// Takes a spaced or bare tag prefix at the cursor. A bare one is its
-    /// constructor, the operand returned. A spaced one in an expression
-    /// opens a level, its payload the rest of the item; in a pattern its
-    /// payload is the rest of the item as a complete position, and the tag
-    /// is returned.
-    fn open_tag(
-        &mut self,
-        prefix: TagPrefix,
-        attach: Attach,
-        levels: &mut Vec<Level>,
-    ) -> Parse<Option<Term>> {
+    /// Takes a spaced tag prefix at the cursor; a bare one, with no
+    /// payload, is an error. In an expression it opens a level, its payload
+    /// the rest of the item; in a pattern its payload is the rest of the
+    /// item as a complete position, and the tag is returned.
+    fn open_tag(&mut self, prefix: TagPrefix, levels: &mut Vec<Level>) -> Parse<Option<Term>> {
         let at = self.here();
         let path = self.data_path()?;
         self.position += 1 + usize::from(prefix.optional);
-        let mode = self.scope.mode;
         if prefix.optional && self.scope.mode == Mode::Expression {
             return Err(Fail::error(
                 "an optional entry `path?:` is valid only in a dictionary pattern",
@@ -1751,7 +1702,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             Mode::Expression => {
                 levels.push(Level {
                     chain: Chain::default(),
-                    kind: LevelKind::Tag(path, attach),
+                    kind: LevelKind::Tag(path),
                 });
                 Ok(None)
             }
@@ -1760,22 +1711,13 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                     Items::new(self.scope, &self.pieces[self.position..]).pattern_item()?;
                 self.position = self.pieces.len();
                 let payload = Box::new(Term::Complete(Box::new(payload)));
-                let tag = if prefix.optional {
+                Ok(Some(if prefix.optional {
                     Term::OptionalTag(path, payload)
                 } else {
                     Term::Tag(path, payload)
-                };
-                Ok(Some(attach_tag(mode, attach, tag)))
+                }))
             }
         }
-    }
-
-    /// The line starts before a tail lambda argument at the cursor: a `\`
-    /// after a space or after line breaks.
-    fn tail_lambda_layout(&self) -> Option<usize> {
-        let (breaks, _) = self.line_starts_at(0);
-        let spaced = breaks > 0 || self.leading_at(0) == Some(LeadingTrivia::Space);
-        (spaced && self.symbol_at(breaks, "\\")).then_some(breaks)
     }
 
     /// `\ name+ ->`, returning the parameters. Line breaks may pad each part.
@@ -1814,13 +1756,13 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     /// An atom followed by argument atoms, each after a space or after line
     /// breaks.
     fn application_head(&mut self) -> Parse<Term> {
-        let mut form = self.prefix_form_at(0);
+        let form = self.prefix_form_at(0);
         let mut function = self.atom()?;
         loop {
             let (breaks, _) = self.line_starts_at(0);
             let spaced = breaks > 0 || self.leading_at(0) == Some(LeadingTrivia::Space);
-            // A postfix `if` ends the application, and a spaced tag is its
-            // tail argument.
+            // A postfix `if` ends the application, and a spaced tag would
+            // be its argument, which `chain` reports.
             if !(spaced && self.starts_atom_at(breaks))
                 || self.postfix_if_at(breaks)
                 || self
@@ -1834,7 +1776,10 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             if let Some((head, keyword)) = form {
                 return Err(misplaced_tail(head, &form_label(keyword), "an argument"));
             }
-            form = self.prefix_form_at(breaks);
+            // An argument is an atom, never a tail form.
+            if let Some((head, keyword)) = self.prefix_form_at(breaks) {
+                return Err(tail_argument(Some(head), &form_label(keyword)));
+            }
             let at = self.here();
             self.position += breaks;
             if self.symbol_at(0, ".") {

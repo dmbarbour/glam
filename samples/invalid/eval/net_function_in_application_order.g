@@ -3,7 +3,7 @@ import 'std
 
 # A constant function written with the application port order: the bind's
 # second port provides, so wiring data into it joins two providers.
-bad = interaction_net do
+bad = interaction_net <| do
     .bind -> [function, argument, result]
     .data 42 -> [value]
     .copy 0 -> [drop]

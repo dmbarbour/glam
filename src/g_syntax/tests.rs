@@ -2233,7 +2233,7 @@ fn parameterized_definitions_parse_compound_bodies_before_lambda_wrapping() {
 }
 
 #[test]
-fn parses_layout_do_in_definition_lambda_and_application_positions() {
+fn parses_layout_do_in_definition_lambda_and_back_pipe_positions() {
     let parsed = parse(concat!(
         "language g0\n",
         "main api = do\n",
@@ -2241,7 +2241,7 @@ fn parses_layout_do_in_definition_lambda_and_application_positions() {
         "  .r api\n",
         "wrapped = \\api -> do\n",
         "  .r api\n",
-        "identity_net = interaction_net do\n",
+        "identity_net = interaction_net <| do\n",
         "  .bind -> ports\n",
         "  .r ports\n",
     ));
@@ -2271,20 +2271,23 @@ fn parses_layout_do_in_definition_lambda_and_application_positions() {
     };
     assert!(matches!(
         &identity_net.expr,
-        Some(SyntaxExpr::Apply(_, argument))
-            if matches!(argument.as_ref(), SyntaxExpr::Do(_))
+        Some(SyntaxExpr::OperatorApply {
+            operator: SyntaxOperator::PipeBackward,
+            right,
+            ..
+        }) if matches!(right.as_ref(), SyntaxExpr::Do(_))
     ));
 }
 
 #[test]
-fn trailing_lambda_and_layout_do_arguments_evaluate() {
+fn back_piped_lambda_and_layout_do_arguments_evaluate() {
     let parsed = parse(concat!(
         "language g0\n",
         "import 'std\n",
         "invoke input transform = transform input\n",
         "run_effect operation = list.head (list.pure operation)\n",
-        "asm.lambda = invoke \"Hello\" \\value -> value ++ \", World!\"\n",
-        "asm.layout = run_effect do\n",
+        "asm.lambda = invoke \"Hello\" <| \\value -> value ++ \", World!\"\n",
+        "asm.layout = run_effect <| do\n",
         "  .r \"Hello, Do!\"\n",
     ));
     assert_eq!(parsed.diagnostics, []);
@@ -2747,22 +2750,22 @@ fn do_lowering_sequences_binds_value_guards_and_bare_operations() {
         "language g0\n",
         "import 'std\n",
         "source_value = 70\n",
-        "asm.backward = list.pure do\n",
+        "asm.backward = list.pure <| do\n",
         "  left <- .r \"A\"\n",
         "  right = \"B\"\n",
         "  .r ()\n",
         "  ((left == \"A\") and (right == \"B\")) =>> .r 65\n",
-        "asm.forward = list.pure do\n",
+        "asm.forward = list.pure <| do\n",
         "  .r \"C\" -> left\n",
         "  .r \"D\" -> right\n",
         "  ((left == \"C\") and (right == \"D\")) =>> .r 67\n",
-        "asm.drop = list.pure do\n",
+        "asm.drop = list.pure <| do\n",
         "  .r \"ignored\" -> _\n",
         "  .r 69\n",
-        "asm.alias = list.pure do\n",
+        "asm.alias = list.pure <| do\n",
         "  .r \"G\" -> first as second\n",
         "  ((first == \"G\") and (second == \"G\")) =>> .r 71\n",
-        "asm.scope = list.pure do\n",
+        "asm.scope = list.pure <| do\n",
         "  selected <- .r source_value\n",
         "  .r selected\n",
     ));
@@ -2795,17 +2798,17 @@ fn literal_and_list_patterns_match_or_fall_through() {
     let parsed = parse(concat!(
         "language g0\n",
         "import 'std\n",
-        "asm.literal = list.pure do { .r 42 -> 42; .r \"L\" }\n",
-        "asm.fixed = list.pure do { .r [65,66,67] -> [65,middle,67]; (middle == 66) =>> .r \"B\" }\n",
-        "asm.segment = list.pure do { .r \"ABCD\" -> [65] ++ middle ++ [68]; .r middle }\n",
-        "asm.text_segment = list.pure do { .r \"AB\" -> \"A\" ++ rest; .r rest }\n",
-        "asm.quoted = list.pure do { .r ['foo,42,'bar] -> '.foo.[42,'bar]; .r \"Q\" }\n",
-        "asm.backward_pattern = list.pure do { [65,last] <- .r \"AB\"; (last == 66) =>> .r \"W\" }\n",
-        "asm.pure_pattern = list.pure do { [65,last] = \"AB\"; (last == 66) =>> .r \"P\" }\n",
+        "asm.literal = list.pure <| do { .r 42 -> 42; .r \"L\" }\n",
+        "asm.fixed = list.pure <| do { .r [65,66,67] -> [65,middle,67]; (middle == 66) =>> .r \"B\" }\n",
+        "asm.segment = list.pure <| do { .r \"ABCD\" -> [65] ++ middle ++ [68]; .r middle }\n",
+        "asm.text_segment = list.pure <| do { .r \"AB\" -> \"A\" ++ rest; .r rest }\n",
+        "asm.quoted = list.pure <| do { .r ['foo,42,'bar] -> '.foo.[42,'bar]; .r \"Q\" }\n",
+        "asm.backward_pattern = list.pure <| do { [65,last] <- .r \"AB\"; (last == 66) =>> .r \"W\" }\n",
+        "asm.pure_pattern = list.pure <| do { [65,last] = \"AB\"; (last == 66) =>> .r \"P\" }\n",
         "asm.literal_fallback = list.pure (.alt (do { .r 41 -> 42; .r \"bad\" }) (.r \"F\"))\n",
         "asm.list_fallback = list.pure (.alt (do { .r [1] -> [1,2]; .r \"bad\" }) (.r \"S\"))\n",
         "asm.kind_fallback = list.pure (.alt (do { .r 1 -> []; .r \"bad\" }) (.r \"K\"))\n",
-        "asm.recursive = list.pure do { declare left, right; .r [65,66] -> [left,right]; ((left == 65) and (right == 66)) =>> .r \"AB\" }\n",
+        "asm.recursive = list.pure <| do { declare left, right; .r [65,66] -> [left,right]; ((left == 65) and (right == 66)) =>> .r \"AB\" }\n",
     ));
     assert_eq!(parsed.diagnostics, []);
     let context = CompileContext::default();
@@ -2836,37 +2839,37 @@ fn dictionary_tag_and_tuple_patterns_match_or_fall_through() {
     let parsed = parse(concat!(
         "language g0\n",
         "import 'std\n",
-        "asm.empty = list.pure do { .r {} -> {}; .r \"E\" }\n",
-        "asm.nested = list.pure do { .r {foo:{bar:65,baz:66},other:67} -> {foo.bar:value,rest}; ((value == 65) and (rest.foo.baz == 66) and (rest.other == 67)) =>> .r \"D\" }\n",
-        "asm.remainder = list.pure do { .r {foo:65,extra:66} -> {foo:value,rest}; ((value == 65) and (rest.extra == 66)) =>> .r \"R\" }\n",
-        "asm.whole = list.pure do { .r {foo:65} -> {whole}; (whole.foo == 65) =>> .r \"W\" }\n",
-        "asm.tag = list.pure do { .r tag:65 -> tag:value; (value == 65) =>> .r \"T\" }\n",
-        "asm.tag_short = list.pure do { .r tag:65 -> {:tag}; (tag == 65) =>> .r \"S\" }\n",
-        "asm.tuple = list.pure do { .r (65,66) -> (left,right); ((left == 65) and (right == 66)) =>> .r \"U\" }\n",
-        "asm.backward = list.pure do { {:value} <- .r {value:66}; (value == 66) =>> .r \"B\" }\n",
-        "asm.pure = list.pure do { {:value} = {value:67}; (value == 67) =>> .r \"C\" }\n",
+        "asm.empty = list.pure <| do { .r {} -> {}; .r \"E\" }\n",
+        "asm.nested = list.pure <| do { .r {foo:{bar:65,baz:66},other:67} -> {foo.bar:value,rest}; ((value == 65) and (rest.foo.baz == 66) and (rest.other == 67)) =>> .r \"D\" }\n",
+        "asm.remainder = list.pure <| do { .r {foo:65,extra:66} -> {foo:value,rest}; ((value == 65) and (rest.extra == 66)) =>> .r \"R\" }\n",
+        "asm.whole = list.pure <| do { .r {foo:65} -> {whole}; (whole.foo == 65) =>> .r \"W\" }\n",
+        "asm.tag = list.pure <| do { .r tag:65 -> tag:value; (value == 65) =>> .r \"T\" }\n",
+        "asm.tag_short = list.pure <| do { .r tag:65 -> {:tag}; (tag == 65) =>> .r \"S\" }\n",
+        "asm.tuple = list.pure <| do { .r (65,66) -> (left,right); ((left == 65) and (right == 66)) =>> .r \"U\" }\n",
+        "asm.backward = list.pure <| do { {:value} <- .r {value:66}; (value == 66) =>> .r \"B\" }\n",
+        "asm.pure = list.pure <| do { {:value} = {value:67}; (value == 67) =>> .r \"C\" }\n",
         "asm.extra_fallback = list.pure (.alt (do { .r {foo:1,extra:2} -> {foo:1}; .r \"bad\" }) (.r \"X\"))\n",
         "asm.tag_fallback = list.pure (.alt (do { .r {tag:1,extra:2} -> tag:1; .r \"bad\" }) (.r \"G\"))\n",
         "asm.tuple_fallback = list.pure (.alt (do { .r {tuple:[1],extra:2} -> (1,); .r \"bad\" }) (.r \"P\"))\n",
         "asm.kind_fallback = list.pure (.alt (do { .r 1 -> {}; .r \"bad\" }) (.r \"K\"))\n",
         "asm.required_missing = list.pure (.alt (do { .r {} -> {foo:{}}; .r \"bad\" }) (.r \"Q\"))\n",
-        "asm.optional_missing = list.pure do { .r {} -> {foo?:{}}; .r \"M\" }\n",
-        "asm.optional_capture = list.pure do { .r {} -> {foo?:value}; .r value -> {}; .r \"C\" }\n",
-        "asm.optional_present = list.pure do { .r {foo:65} -> {foo?:value}; (value == 65) =>> .r \"O\" }\n",
-        "asm.optional_remainder = list.pure do { .r {extra:66} -> {foo?:{},rest}; (rest.extra == 66) =>> .r \"A\" }\n",
-        "asm.optional_nested = list.pure do { .r {foo:{extra:67}} -> {foo.bar?:{},rest}; (rest.foo.extra == 67) =>> .r \"N\" }\n",
+        "asm.optional_missing = list.pure <| do { .r {} -> {foo?:{}}; .r \"M\" }\n",
+        "asm.optional_capture = list.pure <| do { .r {} -> {foo?:value}; .r value -> {}; .r \"C\" }\n",
+        "asm.optional_present = list.pure <| do { .r {foo:65} -> {foo?:value}; (value == 65) =>> .r \"O\" }\n",
+        "asm.optional_remainder = list.pure <| do { .r {extra:66} -> {foo?:{},rest}; (rest.extra == 66) =>> .r \"A\" }\n",
+        "asm.optional_nested = list.pure <| do { .r {foo:{extra:67}} -> {foo.bar?:{},rest}; (rest.foo.extra == 67) =>> .r \"N\" }\n",
         "asm.optional_literal_fallback = list.pure (.alt (do { .r {} -> {foo?:42}; .r \"bad\" }) (.r \"L\"))\n",
         "asm.optional_prefix_fallback = list.pure (.alt (do { .r {foo:1} -> {foo.bar?:{}}; .r \"bad\" }) (.r \"I\"))\n",
-        "asm.computed_entry = list.pure do { .r {selector:'target,target:65} -> {selector:key,[key]:value}; (value == 65) =>> .r \"J\" }\n",
-        "asm.computed_nested = list.pure do { .r {selector:'target,root:{target:66}} -> {selector:key,root.[key]:value}; (value == 66) =>> .r \"H\" }\n",
-        "asm.computed_splice = list.pure do { .r {path:['root,'target],root:{target:67}} -> {path:path,(path):value}; (value == 67) =>> .r \"V\" }\n",
-        "asm.computed_optional = list.pure do { .r {selector:'missing,keep:68} -> {selector:key,[key]?:{},rest}; (rest.keep == 68) =>> .r \"Y\" }\n",
-        "asm.computed_quoted = list.pure do { .r (42,['foo,42]) -> (index,'.foo.[index]); .r \"Z\" }\n",
-        "asm.spliced_quoted = list.pure do { .r (['foo,42],['foo,42]) -> (path,'.(path)); .r \"F\" }\n",
+        "asm.computed_entry = list.pure <| do { .r {selector:'target,target:65} -> {selector:key,[key]:value}; (value == 65) =>> .r \"J\" }\n",
+        "asm.computed_nested = list.pure <| do { .r {selector:'target,root:{target:66}} -> {selector:key,root.[key]:value}; (value == 66) =>> .r \"H\" }\n",
+        "asm.computed_splice = list.pure <| do { .r {path:['root,'target],root:{target:67}} -> {path:path,(path):value}; (value == 67) =>> .r \"V\" }\n",
+        "asm.computed_optional = list.pure <| do { .r {selector:'missing,keep:68} -> {selector:key,[key]?:{},rest}; (rest.keep == 68) =>> .r \"Y\" }\n",
+        "asm.computed_quoted = list.pure <| do { .r (42,['foo,42]) -> (index,'.foo.[index]); .r \"Z\" }\n",
+        "asm.spliced_quoted = list.pure <| do { .r (['foo,42],['foo,42]) -> (path,'.(path)); .r \"F\" }\n",
         "asm.computed_fallback = list.pure (.alt (do { .r {selector:'missing} -> {selector:key,[key]:_value}; .r \"bad\" }) (.r \"G\"))\n",
         "asm.quoted_fallback = list.pure (.alt (do { .r (43,['foo,42]) -> (index,'.foo.[index]); .r \"bad\" }) (.r \"P\"))\n",
-        "asm.computed_recursive = list.pure do { declare key,value; .r {selector:'target,target:65} -> {selector:key,[key]:value}; ((value == 65) and (key == 'target)) =>> .r \"X\" }\n",
-        "asm.recursive = list.pure do { declare left, right; .r {left:65,right:66} -> {:left,:right}; ((left == 65) and (right == 66)) =>> .r \"AB\" }\n",
+        "asm.computed_recursive = list.pure <| do { declare key,value; .r {selector:'target,target:65} -> {selector:key,[key]:value}; ((value == 65) and (key == 'target)) =>> .r \"X\" }\n",
+        "asm.recursive = list.pure <| do { declare left, right; .r {left:65,right:66} -> {:left,:right}; ((left == 65) and (right == 66)) =>> .r \"AB\" }\n",
     ));
     assert_eq!(parsed.diagnostics, []);
     let context = CompileContext::default();
@@ -2917,10 +2920,10 @@ fn computed_tag_patterns_use_prior_captures_and_match_singleton_dicts() {
     let parsed = parse(concat!(
         "language g0\n",
         "import 'std\n",
-        "asm.key = list.pure do { .r ('target,target:69) -> (tag,[tag]:value); (value == 69) =>> .r \"K\" }\n",
-        "asm.path = list.pure do { .r (['root,'target],root.target:70) -> (path,(path):value); (value == 70) =>> .r \"P\" }\n",
+        "asm.key = list.pure <| do { .r ('target,target:69) -> (tag,[tag]:value); (value == 69) =>> .r \"K\" }\n",
+        "asm.path = list.pure <| do { .r (['root,'target],root.target:70) -> (path,(path):value); (value == 70) =>> .r \"P\" }\n",
         "asm.fallback = list.pure (.alt (do { .r ('missing,target:71) -> (tag,[tag]:_value); .r \"bad\" }) (.r \"F\"))\n",
-        "asm.recursive = list.pure do { declare tag,value; .r ('target,target:72) -> (tag,[tag]:value); ((tag == 'target) and (value == 72)) =>> .r \"R\" }\n",
+        "asm.recursive = list.pure <| do { declare tag,value; .r ('target,target:72) -> (tag,[tag]:value); ((tag == 'target) and (value == 72)) =>> .r \"R\" }\n",
     ));
     assert_eq!(parsed.diagnostics, []);
     let context = CompileContext::default();
@@ -2944,11 +2947,11 @@ fn refutable_dictionary_remainders_match_the_residual_dictionary() {
     let parsed = parse(concat!(
         "language g0\n",
         "import 'std\n",
-        "asm.match = list.pure do { .r {selector:'target,target:73} -> {selector:key,{[key]:value}}; (value == 73) =>> .r \"M\" }\n",
-        "asm.empty = list.pure do { .r {selected:74} -> {selected:value,{}}; (value == 74) =>> .r \"E\" }\n",
+        "asm.match = list.pure <| do { .r {selector:'target,target:73} -> {selector:key,{[key]:value}}; (value == 73) =>> .r \"M\" }\n",
+        "asm.empty = list.pure <| do { .r {selected:74} -> {selected:value,{}}; (value == 74) =>> .r \"E\" }\n",
         "asm.missing = list.pure (.alt (do { .r {selected:75} -> {selected:_value,{required:other}}; .r other }) (.r \"A\"))\n",
         "asm.extra = list.pure (.alt (do { .r {selected:76,required:77,extra:78} -> {selected:_value,{required:other}}; .r other }) (.r \"X\"))\n",
-        "asm.recursive = list.pure do { declare key,value; .r {selector:'target,target:79} -> {selector:key,{[key]:value}}; ((key == 'target) and (value == 79)) =>> .r \"R\" }\n",
+        "asm.recursive = list.pure <| do { declare key,value; .r {selector:'target,target:79} -> {selector:key,{[key]:value}}; ((key == 'target) and (value == 79)) =>> .r \"R\" }\n",
     ));
     assert_eq!(parsed.diagnostics, []);
     let context = CompileContext::default();
@@ -2973,11 +2976,11 @@ fn refutable_variable_list_segments_match_the_middle_slice() {
     let parsed = parse(concat!(
         "language g0\n",
         "import 'std\n",
-        "asm.nested = list.pure do { .r [0,1,2,9] -> [0] ++ ([head] ++ tail) ++ [9]; ((head == 1) and (tail == [2])) =>> .r \"N\" }\n",
-        "asm.exact = list.pure do { .r [0,1,2,9] -> [0] ++ ([1,2]) ++ [9]; .r \"E\" }\n",
-        "asm.computed = list.pure do { .r [42,'foo,42,9] -> [key] ++ '.foo.[key] ++ [9]; .r \"C\" }\n",
+        "asm.nested = list.pure <| do { .r [0,1,2,9] -> [0] ++ ([head] ++ tail) ++ [9]; ((head == 1) and (tail == [2])) =>> .r \"N\" }\n",
+        "asm.exact = list.pure <| do { .r [0,1,2,9] -> [0] ++ ([1,2]) ++ [9]; .r \"E\" }\n",
+        "asm.computed = list.pure <| do { .r [42,'foo,42,9] -> [key] ++ '.foo.[key] ++ [9]; .r \"C\" }\n",
         "asm.fallback = list.pure (.alt (do { .r [0,1,3,9] -> [0] ++ ([1,2]) ++ [9]; .r \"bad\" }) (.r \"F\"))\n",
-        "asm.recursive = list.pure do { declare head,tail; .r [0,1,2,9] -> [0] ++ ([head] ++ tail) ++ [9]; ((head == 1) and (tail == [2])) =>> .r \"R\" }\n",
+        "asm.recursive = list.pure <| do { declare head,tail; .r [0,1,2,9] -> [0] ++ ([head] ++ tail) ++ [9]; ((head == 1) and (tail == [2])) =>> .r \"R\" }\n",
     ));
     assert_eq!(parsed.diagnostics, []);
     let context = CompileContext::default();
@@ -3005,18 +3008,18 @@ fn effectful_patterns_transform_filter_guard_and_preserve_the_subject() {
         "increment value = .r (value + 1)\n",
         "add delta value = .r (delta + value)\n",
         "equals expected actual = expected == actual\n",
-        "asm.view = list.pure do { .r 64 -> (increment -> viewed); (viewed == 65) =>> .r \"A\" }\n",
-        "asm.backward_view = list.pure do { .r 65 -> (viewed <- increment); (viewed == 66) =>> .r \"B\" }\n",
-        "asm.predicate = list.pure do { .r 67 -> (equals 67 kept); (kept == 67) =>> .r \"C\" }\n",
-        "asm.general_as = list.pure do { .r [68,69] -> [left,right] as whole; ((list.at 0 whole == left) and (right == 69)) =>> .r \"D\" }\n",
-        "asm.progressive_view = list.pure do { .r [1,71] -> [delta,(add delta -> sum)]; (sum == 72) =>> .r \"H\" }\n",
-        "asm.guard = list.pure do { .r 72 -> (value when .r (value + 1) -> next and doubled = next + next and doubled == 146); (next == 73) =>> .r \"I\" }\n",
-        "asm.backward_guard = list.pure do { .r 73 -> (value when next <- .r (value + 1) and next == 74); .r \"J\" }\n",
-        "asm.wildcard_guard = list.pure do { .r 1 -> (_ when _); .r \"W\" }\n",
+        "asm.view = list.pure <| do { .r 64 -> (increment -> viewed); (viewed == 65) =>> .r \"A\" }\n",
+        "asm.backward_view = list.pure <| do { .r 65 -> (viewed <- increment); (viewed == 66) =>> .r \"B\" }\n",
+        "asm.predicate = list.pure <| do { .r 67 -> (equals 67 kept); (kept == 67) =>> .r \"C\" }\n",
+        "asm.general_as = list.pure <| do { .r [68,69] -> [left,right] as whole; ((list.at 0 whole == left) and (right == 69)) =>> .r \"D\" }\n",
+        "asm.progressive_view = list.pure <| do { .r [1,71] -> [delta,(add delta -> sum)]; (sum == 72) =>> .r \"H\" }\n",
+        "asm.guard = list.pure <| do { .r 72 -> (value when .r (value + 1) -> next and doubled = next + next and doubled == 146); (next == 73) =>> .r \"I\" }\n",
+        "asm.backward_guard = list.pure <| do { .r 73 -> (value when next <- .r (value + 1) and next == 74); .r \"J\" }\n",
+        "asm.wildcard_guard = list.pure <| do { .r 1 -> (_ when _); .r \"W\" }\n",
         "asm.view_fallback = list.pure (.alt (do { .r 1 -> (increment -> 3); .r \"bad\" }) (.r \"V\"))\n",
         "asm.predicate_fallback = list.pure (.alt (do { .r 1 -> (equals 2 _); .r \"bad\" }) (.r \"P\"))\n",
         "asm.guard_fallback = list.pure (.alt (do { .r 1 -> (_ when 1 == 2); .r \"bad\" }) (.r \"G\"))\n",
-        "asm.recursive = list.pure do { declare viewed,next; .r 74 -> ((increment -> viewed) when .r (viewed + 1) -> next); ((viewed == 75) and (next == 76)) =>> .r \"R\" }\n",
+        "asm.recursive = list.pure <| do { declare viewed,next; .r 74 -> ((increment -> viewed) when .r (viewed + 1) -> next); ((viewed == 75) and (next == 76)) =>> .r \"R\" }\n",
     ));
     assert_eq!(parsed.diagnostics, []);
     let context = CompileContext::default();
@@ -3050,18 +3053,18 @@ fn effectful_patterns_support_every_do_binding_direction() {
         "import 'std\n",
         "increment value = .r (value + 1)\n",
         "equals expected actual = expected == actual\n",
-        "asm.forward_view = list.pure do { .r 64 -> (increment -> value); (value == 65) =>> .r \"A\" }\n",
-        "asm.backward_view = list.pure do { (increment -> value) <- .r 65; (value == 66) =>> .r \"B\" }\n",
-        "asm.value_view = list.pure do { (increment -> value) = 66; (value == 67) =>> .r \"C\" }\n",
-        "asm.forward_predicate = list.pure do { .r 68 -> (equals 68 value); (value == 68) =>> .r \"D\" }\n",
-        "asm.backward_predicate = list.pure do { (equals 69 value) <- .r 69; (value == 69) =>> .r \"E\" }\n",
-        "asm.value_predicate = list.pure do { (equals 70 value) = 70; (value == 70) =>> .r \"F\" }\n",
-        "asm.forward_as = list.pure do { .r [71] -> [value] as whole; (value == list.head whole) =>> .r \"G\" }\n",
-        "asm.backward_as = list.pure do { [value] as whole <- .r [72]; (value == list.head whole) =>> .r \"H\" }\n",
-        "asm.value_as = list.pure do { [value] as whole = [73]; (value == list.head whole) =>> .r \"I\" }\n",
-        "asm.forward_guard = list.pure do { .r 74 -> (value when value == 74); .r \"J\" }\n",
-        "asm.backward_guard = list.pure do { (value when value == 75) <- .r 75; .r \"K\" }\n",
-        "asm.value_guard = list.pure do { (value when value == 76) = 76; .r \"L\" }\n",
+        "asm.forward_view = list.pure <| do { .r 64 -> (increment -> value); (value == 65) =>> .r \"A\" }\n",
+        "asm.backward_view = list.pure <| do { (increment -> value) <- .r 65; (value == 66) =>> .r \"B\" }\n",
+        "asm.value_view = list.pure <| do { (increment -> value) = 66; (value == 67) =>> .r \"C\" }\n",
+        "asm.forward_predicate = list.pure <| do { .r 68 -> (equals 68 value); (value == 68) =>> .r \"D\" }\n",
+        "asm.backward_predicate = list.pure <| do { (equals 69 value) <- .r 69; (value == 69) =>> .r \"E\" }\n",
+        "asm.value_predicate = list.pure <| do { (equals 70 value) = 70; (value == 70) =>> .r \"F\" }\n",
+        "asm.forward_as = list.pure <| do { .r [71] -> [value] as whole; (value == list.head whole) =>> .r \"G\" }\n",
+        "asm.backward_as = list.pure <| do { [value] as whole <- .r [72]; (value == list.head whole) =>> .r \"H\" }\n",
+        "asm.value_as = list.pure <| do { [value] as whole = [73]; (value == list.head whole) =>> .r \"I\" }\n",
+        "asm.forward_guard = list.pure <| do { .r 74 -> (value when value == 74); .r \"J\" }\n",
+        "asm.backward_guard = list.pure <| do { (value when value == 75) <- .r 75; .r \"K\" }\n",
+        "asm.value_guard = list.pure <| do { (value when value == 76) = 76; .r \"L\" }\n",
     ));
     assert_eq!(parsed.diagnostics, []);
     let context = CompileContext::default();
@@ -3466,7 +3469,7 @@ fn using_scopes_bind_temporary_namespaces_and_preserve_outer_escapes() {
         "asm.namespace = using {copied:outer} in copied\n",
         "asm.short = list.pure (using namespace do emit \"D\")\n",
         "asm.explicit = list.pure (using namespace in do emit \"E\")\n",
-        "asm.prior = list.pure do { using namespace in (_self == {}); .r \"P\" }\n",
+        "asm.prior = list.pure <| do { using namespace in (_self == {}); .r \"P\" }\n",
     ));
     assert_eq!(parsed.diagnostics, []);
 
@@ -3982,7 +3985,7 @@ fn raw_or_still_enumerates_while_conditionals_own_a_root_cut() {
     let parsed = parse(concat!(
         "language g0\n",
         "import 'std\n",
-        "raw = list.pure do\n",
+        "raw = list.pure <| do\n",
         "  .r () or .r ()\n",
         "  .r \"R\"\n",
         "asm.raw = list.at 0 raw ++ list.at 1 raw\n",
@@ -6391,7 +6394,7 @@ fn constructs_and_observes_an_interaction_net_from_source_effects() {
         parse(concat!(
             "language g0\n",
             "import 'std\n",
-            "answer_net = interaction_net do\n",
+            "answer_net = interaction_net <| do\n",
             "  .data \"Hello, World!\" -> ports\n",
             "  .r (list.head ports)\n",
             "asm.result = net_arity 0 answer_net\n",
@@ -6434,7 +6437,7 @@ fn interaction_net_function_bind_lists_its_result_before_its_argument() {
         parse(concat!(
             "language g0\n",
             "import 'std\n",
-            "constant = interaction_net do\n",
+            "constant = interaction_net <| do\n",
             "  .bind -> function\n",
             "  .copy 0 -> drop\n",
             "  .data \"Hello, World!\" -> greeting\n",
@@ -6461,7 +6464,7 @@ fn interaction_net_applies_a_self_linked_identity_bind() {
         parse(concat!(
             "language g0\n",
             "import 'std\n",
-            "redex = interaction_net do\n",
+            "redex = interaction_net <| do\n",
             "  .bind -> app\n",
             "  .bind -> id\n",
             "  .data \"Hello, World!\" -> arg\n",
@@ -6488,7 +6491,7 @@ fn interaction_net_bind_calls_an_embedded_source_function() {
             "language g0\n",
             "import 'std\n",
             "increment value = value + 1\n",
-            "called = interaction_net do\n",
+            "called = interaction_net <| do\n",
             "  .bind -> application\n",
             "  .data increment -> function\n",
             "  .data 41 -> argument\n",
@@ -6514,7 +6517,7 @@ fn interaction_net_function_call_returns_an_ordinary_partial_function() {
             "language g0\n",
             "import 'std\n",
             "sum left right = left + right\n",
-            "partial_net = interaction_net do\n",
+            "partial_net = interaction_net <| do\n",
             "  .bind -> application\n",
             "  .data sum -> function\n",
             "  .data 19 -> argument\n",
@@ -6543,7 +6546,7 @@ fn interaction_net_function_calls_chain_through_explicit_binds() {
             "language g0\n",
             "import 'std\n",
             "sum left right = left + right\n",
-            "called = interaction_net do\n",
+            "called = interaction_net <| do\n",
             "  .bind -> first\n",
             "  .bind -> second\n",
             "  .data sum -> function\n",
@@ -6574,7 +6577,7 @@ fn interaction_net_function_call_preserves_captures() {
             "import 'std\n",
             "make_adder captured = \\value -> captured + value\n",
             "add_twenty = make_adder 20\n",
-            "called = interaction_net do\n",
+            "called = interaction_net <| do\n",
             "  .bind -> application\n",
             "  .data add_twenty -> function\n",
             "  .data 22 -> argument\n",

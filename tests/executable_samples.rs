@@ -100,7 +100,7 @@ fn direct_assembly_rejects_duplicate_symbol_publication() {
              import 'std\n\
              program = do\n\
              \x20\x20.section.root 'text -> root\n\
-             \x20\x20.cursor.on root do\n\
+             \x20\x20.cursor.on root <| do\n\
              \x20\x20\x20\x20.global \"_start\" -> _\n\
              \x20\x20\x20\x20.global \"_start\" -> _\n\
              \x20\x20\x20\x20.r ()\n\
@@ -132,7 +132,7 @@ fn direct_assembly_trace_policies_render_full_and_summary_reports() {
              import 'std\n\
              program = do\n\
              \x20\x20.section.root 'text -> root\n\
-             \x20\x20.cursor.on root do\n\
+             \x20\x20.cursor.on root <| do\n\
              \x20\x20\x20\x20.global \"_start\" -> _\n\
              \x20\x20\x20\x20.mov_u32 'eax 60\n\
              \x20\x20\x20\x20.xor_u32 'edi 'edi\n\
@@ -215,7 +215,7 @@ fn configured_logger_can_observe_the_structured_direct_assembly_trace() {
              import 'std\n\
              program = do\n\
              \x20\x20.section.root 'text -> root\n\
-             \x20\x20.cursor.on root do\n\
+             \x20\x20.cursor.on root <| do\n\
              \x20\x20\x20\x20.global \"_start\" -> _\n\
              \x20\x20\x20\x20.mov_u32 'eax 60\n\
              \x20\x20\x20\x20.xor_u32 'edi 'edi\n\

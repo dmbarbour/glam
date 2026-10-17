@@ -514,9 +514,44 @@ maps the short names used here to file names.
     path after any tail form.
   - Supersedes `tail-position`, and restores the reading of a binding's
     `->` in `bindings-split-before-keyword-forms`.
+- **Amended by:** `tail-forms-are-never-arguments` (2026-10-17): a tail form
+  no longer stands as an application's final argument.
 - **Rule lives in:** `Syntax.md` "Tail Position"; `SyntaxCheatSheet.md`
   "Operators, Pipes, Application".
 - **Recorded in:** grammar review, `grammar-tail-position`.
+
+### A tail form is never an application's argument
+`tail-forms-are-never-arguments` · 2026-10-17 · maintainer · accepted
+- **Context:** a tail form could stand as an application's final argument:
+  `f do …`, `map xs \x -> …`, `g tag: f x`, `describe match v as …`. The
+  maintainer found each hard to read, since nothing before the form shows
+  that the rest of the region is the argument. An inline one also takes the
+  operators after it: in `map values \value -> transform value |> finish`
+  the lambda's body takes `|> finish`. A parser probe over the valid samples
+  and the standing docs found 10 sample `f do` arguments and about a dozen in
+  the docs, one tail lambda (that one), and no tail tags or tail `match`
+  outside the rule's own examples.
+- **Decision:** an application's arguments are atoms. A tail form stands only
+  after an operator, a spaced tag's prefix included, after a separator
+  keyword, or where a region begins. `f <| do …`, `f (\x -> …)` and
+  `g (tag: f x)` replace the tail arguments; the error suggests parentheses
+  or `<|`.
+- **Alternatives rejected:** exempting `do`, whose block ends visibly at a
+  dedent or `}`, which would make one keyword a special case; and allowing
+  only forms closed by a block, which would keep `describe match v as`.
+- **Consequences:**
+  - `|>` and `<|` still do not mix, since no reader remembers a precedence
+    between them. A pipeline stage that takes a tail form parenthesizes it,
+    or a `let` or `where` names one fragment of the pipeline. A suggestion
+    fitted to the context would read better than the one-size-fits-all
+    parentheses, which suffice for the bootstrap.
+  - Pipeline stages read alike: `xs |> filter (\x -> …) |> map (\x -> …)`,
+    where before only the last stage could drop its parentheses.
+  - The term parser's tail-lambda and tail-tag layouts go, and the printer
+    parenthesizes every tail form in argument position.
+- **Rule lives in:** `Syntax.md` "Tail Position"; `SyntaxCheatSheet.md`
+  "Operators, Pipes, Application".
+- **Recorded in:** tag prefix plan, `tail-argument-retirement`.
 
 ### A `{` on the line of a match's `with` delimits its arms
 `brace-after-with-delimits-arms` · 2026-10-16 · maintainer · accepted

@@ -88,7 +88,8 @@ foo.bar:Data        # path-tagged data: sugar for { foo.bar:Data }
 (PathExpr):Data     # splice a computed list-valued path
 ((PathExpr):)       # corresponding constructor
 # Joint binds tighter than application: g tag:f x ≡ g (tag:f) x. Spaced
-# runs to its item's end like a lambda body: g tag: f x ≡ g (tag:(f x)).
+# runs to its item's end like a lambda body: tag: f x ≡ tag:(f x), and as an
+# argument it is parenthesized: g (tag: f x) or g <| tag: f x.
 # tag: |> g and a bare tag: are errors; the section (tag:) constructs.
 # A joint colon always tags, even after an operator name: (and:x) is a
 # tag; (and x), (x and) and (and) are sections.
@@ -194,9 +195,10 @@ import as q from {          # remote: content-addressed
 \ x y z -> Expr             # lambda (no argument patterns)
 skip _ y = y                # '_' drops an argument
 f _unused y = y             # '_' prefix suppresses unused warning
-map xs \x -> transform x    # unparenthesized lambda may be final argument
-op >>= \x -> continue x     # or tail infix operand; body owns the right tail
-(map xs \x -> transform x) |> finish # parentheses resume outside the lambda
+map xs (\x -> transform x)  # an argument is an atom: parenthesize a lambda
+map xs <| \x -> transform x # or apply it with <|, as a tail infix operand
+op >>= \x -> continue x     # a tail infix operand's body owns the right tail
+map xs (\x -> transform x) |> finish # parentheses end the lambda
 
 let x = 1 in x + x          # one-liner
 let { x = 1; y = 2 } in x + y # braced ';' group is mutually recursive
@@ -253,7 +255,7 @@ Body with
 # interaction_net constructs an opaque, closed graph with exactly ONE
 # exposed port. A raw net is already WHNF and is not directly applicable.
 
-id_net = interaction_net do
+id_net = interaction_net <| do
     .bind -> [fn, result, arg]      # function bind; principal port first
     .wire arg result                # identity: arg flows to result
     .r fn                           # return port wired implicitly
@@ -261,7 +263,7 @@ id_net = interaction_net do
 # Provisional arity bridge into ordinary application:
 id_fn = net_arity 1 id_net         # expect one Bind, then Data
 
-answer_net = interaction_net do
+answer_net = interaction_net <| do
     .data 42 -> [d]
     .r d
 answer = net_arity 0 answer_net    # expect Data immediately
@@ -270,7 +272,7 @@ answer = net_arity 0 answer_net    # expect Data immediately
 # function returns as ordinary Data and can be applied normally or by another
 # explicit Bind.
 add left right = left + right
-partial_net = interaction_net do
+partial_net = interaction_net <| do
     .bind -> [call, argument, result]
     .data add -> [function]
     .data 19 -> [value]
@@ -345,13 +347,16 @@ result = source |>
 f x                 # application; ad hoc polymorphism:
                     #   functions; {apply:f,_} x = f x; (eff:f) x
                     #   raw interaction-net values are not applicable
-f x \y -> body       # a trailing lambda is the final application argument
-# Tail forms (prefix if/try, match, do, lambdas, let, using, object) run to
-# the end of their region: a closer, `,` `;`, a line end, or a separator
-# keyword (then else in where => =>? and a binding's `->`). Never to a token
-# that could continue them; after their `}` or dedent, only an operator or a
-# keyword may follow, never an argument or path. Parenthesize them elsewhere:
+f x <| \y -> body    # an argument is an atom: a tail form follows <|
+# Tail forms (prefix if/try, match, do, lambdas, spaced tags, let, using,
+# object) run to the end of their region: a closer, `,` `;`, a line end, or a
+# separator keyword (then else in where => =>? and a binding's `->`). Never
+# to a token that could continue them; after their `}` or dedent, only an
+# operator or a keyword may follow, never an argument or path. They are
+# never arguments. Parenthesize them elsewhere:
 f (match x as {_ => 1}) y          # `f match x as {...} y` is an ERROR
+f <| do { a }                      # `f do { a }` is an ERROR
+source |> g (do { a }) |> h        # |> and <| do not mix: parenthesize
 if c then do { a } else do { b }   # `}` ends the block, as a dedent does
 if a then if b then c else d else e # each `if` has an `else`: they pair
 if x <- (if a then b else c) and d then e else f  # `and` could continue c
@@ -396,8 +401,8 @@ nested = f [do { .r 1 }, do {; .r 2; }]
 # - The final statement must express an effect, not a returned value (though
 #   it may express an effect to return a value)
 # - A layout do may yield to an aligned leading infix operator after its block.
-#   Otherwise it owns the trailing part of its containing expression; in an
-#   application it can therefore only be the final argument.
+#   Otherwise it owns the trailing part of its containing expression, and it
+#   is never an application's argument: write `f <| do` or `f (do …)`.
 # - Braced do opens with `{` on the `do`'s line (on a later line, `{` begins
 #   a statement) and ends at `}` as at a dedent: an operator or keyword may
 #   follow it, not an argument. One leading/trailing `;` is ignored; interior
@@ -505,12 +510,12 @@ X and Y                 # sequence: X must pass before Y
 X or Y                  # raw ordered choice, equivalent to .alt X Y
 
 # A branching handler may continue once per successful alternative:
-list.pure do
+list.pure <| do
     X or Y
     .r Result
 
 # Commit only after a complete path succeeds:
-.cut do
+.cut <| do
     X or Y
     LaterGuard
     .r Result

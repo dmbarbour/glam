@@ -1,7 +1,7 @@
 language g0
 import 'std
 
-bad = interaction_net do
+bad = interaction_net <| do
     .data 1 -> [left]
     .data 2 -> [right]
     .wire left right

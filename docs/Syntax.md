@@ -153,11 +153,11 @@ operator establishes a resumption anchor; later leading operators in that
 chain must align with it:
 
 ```g
-result = source
-  |> process do
+result = .r pair
+  <! do
     input <- .read
     .r (transform input)
-  |> finish
+  <! .read
 ```
 
 The recovered operators form one ordinary infix chain. Newlines do not change
@@ -442,38 +442,47 @@ only where that end is visible:
 - Postfix `if` is an operator, not a tail form. After an operand, an `if` is
   postfix, so a prefix `if` or `try` there is parenthesized.
 
-So a tail form may be a definition's whole right-hand side, the final
-argument of an application, the right-hand operand of an infix expression,
-or any part a separator keyword ends:
+So a tail form may be a definition's whole right-hand side, the right-hand
+operand of an infix expression, a spaced tag's payload, or any part a
+separator keyword ends. It is never an application's argument, which is an
+atom; `<|` applies a function to one instead:
 
-        mapped = map values \value -> transform value
+        mapped = map values <| \value -> transform value
         bound = operation >>= \value -> continue value
-        chosen = describe match value as
+        chosen = describe <| match value as
             1 => "one"
             _ => "other"
-        resumed = source
-          |> process do
+        resumed = .cut <| do
             input <- .read
             .r (transform input)
-          |> finish
         both = if ready then do { .go } else do { .wait }
         inner = if a then if b then c else d else e
-        found = if any items \item -> item > 0 then 1 else 0
+        found = if any items (\item -> item > 0) then 1 else 0
+
+`|>` and `<|` do not mix, so a pipeline stage that takes a tail form
+parenthesizes it, or a `where` or `let` names it:
+
+        processed = source
+          |> process (do
+            input <- .read
+            .r (transform input))
+          |> finish
 
 Every prefix `if` and `try` has an `else`, so their keywords pair as
 brackets do: an inner `if` takes the first `else`. Parentheses make a tail
 form an ordinary atom, which anything may follow:
 
         applied = f (match x as {_ => 1}) y
+        mapped = map values (\value -> transform value)
         field = (do { .r value }).result
         guarded = if x <- (if a then b else c) and d then x else 0
         argument = f (if a then b else c)
 
-The lambda body has rightward extent, so `map values \value -> transform
+The lambda body has rightward extent, so `map values <| \value -> transform
 value |> finish` places `|> finish` inside the lambda body. Parenthesize the
-application to pipe its result instead:
+lambda to pipe the application's result instead:
 
-        (map values \value -> transform value) |> finish
+        map values (\value -> transform value) |> finish
 
 What parses may still read poorly, such as deeply nested inline `if`s or a
 lambda before a binding's `->` (`f \a -> e -> p`); a linter, rather than
@@ -531,8 +540,8 @@ A non-final bare operation uses the existing `=>>` behavior, including its
 requirement that the discarded result be unit. The final statement should
 express an effect and is not implicitly wrapped with `.r`. A layout block must
 be non-empty and occupy the trailing position of its containing definition,
-lambda body, or enclosing do statement; in an application it can therefore
-only be the final argument. A singleton may be written inline as `do Effect`.
+lambda body, enclosing do statement, or operator operand such as `<|`'s; it
+is never an application's argument. A singleton may be written inline as `do Effect`.
 An inline first statement may also establish a hanging block. Later statements
 must align with that first statement's token column:
 
@@ -804,10 +813,10 @@ Tagged data is modeled as singleton dictionaries, built by the tag prefix
 Joint to its operand, a tag binds tighter than juxtaposition: `g tag:f x y`
 is `g (tag:f) x y`, and `g tag:(f x y)` couples the arguments. Followed by a
 space or line break, its operand is the rest of its item, as a lambda's body
-is: `tag: a + b` is `tag:(a + b)`, `g tag: f x` is `g (tag:(f x))`, and it
-ends where tails do, as at a `do` statement's `->`. An operator cannot begin
-a spaced tag's operand, so `tag: |> g` is an error. A tag always takes an
-operand. Its constructor is its section, `(tag:)`, as `(+ 1)` is an
+is: `tag: a + b` is `tag:(a + b)`, and it ends where tails do, as at a `do`
+statement's `->`. Like a lambda, a spaced tag is never an argument:
+`g (tag: f x)` or `g <| tag: f x`. An operator cannot begin a spaced tag's
+operand, so `tag: |> g` is an error. A tag always takes an operand. Its constructor is its section, `(tag:)`, as `(+ 1)` is an
 operator's: `map (tag:) xs`, `[(foo:), (bar:)]`, `x |> (tag:)`. Elsewhere a
 tag with nothing after it is an error, so a line break never turns a tag
 into its constructor.
@@ -1097,7 +1106,7 @@ We can update such tables manually.
 
 The above form is awkward, tedious, and error prone. Tables would benefit from dedicated syntax, but I'm unwilling to commit to any at this time. Instead, I recommend developing embedded DSLs. Perhaps something closer to:
 
-        @table.insert my_db/my_table do
+        @table.insert my_db/my_table <| do
           .h 'col1 'col2 'col3
           .r    42    53    f1
           .r    54    72    f2
@@ -1581,7 +1590,7 @@ In OO languages, a common pattern is method chaining where each method linearly 
 
 The ".g" syntax isn't optimized for direct use of this idiom. Consequently, a direct translation is much less ergonomic and somewhat more typing. What the ".g" syntax is optimized for is running effects. We can easily use effects handlers as a basis for method chaining. 
 
-        Obj.runWith s0 do 
+        Obj.runWith s0 <| do
             .method Arg1 Arg2
             .method2 Arg3 Arg4
 
@@ -1611,7 +1620,7 @@ branching handler, a continuation after `X or Y` may run once for each
 successful alternative. Parentheses only group that choice:
 
 ```g
-list.pure do
+list.pure <| do
   X or Y
   .r Result
 ```
@@ -1620,7 +1629,7 @@ To select one result manually, place `.cut` around the complete computation
 whose failure should permit reconsidering an alternative:
 
 ```g
-.cut do
+.cut <| do
   X or Y
   LaterGuard
   .r Result

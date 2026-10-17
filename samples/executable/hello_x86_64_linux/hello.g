@@ -12,7 +12,7 @@ prepare_message = do
 
 program = do
   .section.root 'text -> entry_cursor
-  .cursor.on entry_cursor do
+  .cursor.on entry_cursor <| do
     # If the ELF entry ignored the published label, this byte would trap.
     .bytes [0xcc]
     .global "_start" -> _
@@ -37,7 +37,7 @@ program = do
     .mov_u32 'edx message_length
     .syscall
 
-    .cursor.on exit_cursor do
+    .cursor.on exit_cursor <| do
       .mov_u32 'eax 60
       .xor_u32 'edi 'edi
       .syscall

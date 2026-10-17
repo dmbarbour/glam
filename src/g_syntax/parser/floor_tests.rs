@@ -171,30 +171,45 @@ fn continuation_lambdas_are_tail_infix_operands() {
 }
 
 #[test]
-fn layout_do_is_already_a_final_application_argument() {
+fn a_layout_do_is_applied_with_a_back_pipe() {
     let expression = definition_expr(concat!(
         "language g0\n",
-        "result = begin_op_header do\n",
+        "result = begin_op_header <| do\n",
         "  Operation1 -> r1\n",
         "  Operation2 -> r2\n",
         "  finish r1 r2\n",
     ));
 
-    let SyntaxExpr::Apply(function, argument) = expression else {
-        panic!("definition should apply `begin_op_header` to one structural argument");
+    let SyntaxExpr::OperatorApply {
+        operator: crate::g_syntax::SyntaxOperator::PipeBackward,
+        left,
+        right,
+    } = expression
+    else {
+        panic!("definition should apply `begin_op_header` with `<|`");
     };
-    assert!(matches!(*function, SyntaxExpr::Name(ref name) if name == "begin_op_header"));
-    assert!(matches!(*argument, SyntaxExpr::Do(_)));
+    assert!(matches!(*left, SyntaxExpr::Name(ref name) if name == "begin_op_header"));
+    assert!(matches!(*right, SyntaxExpr::Do(_)));
+    assert_has_error(
+        "language g0\nresult = begin_op_header do\n  finish\n",
+        2,
+        "parenthesize this `do` block, or apply it with `<|`",
+    );
 }
 
 #[test]
-fn trailing_lambda_application_argument_owns_the_host_tail() {
+fn a_back_piped_lambda_owns_the_host_tail() {
     let expression = definition_expr(concat!(
         "language g0\n",
-        "mapped = map values \\value -> transform value |> finish\n",
+        "mapped = map values <| \\value -> transform value |> finish\n",
     ));
-    let SyntaxExpr::Apply(function, argument) = expression else {
-        panic!("a trailing lambda should be the final application argument");
+    let SyntaxExpr::OperatorApply {
+        operator: crate::g_syntax::SyntaxOperator::PipeBackward,
+        left: function,
+        right: argument,
+    } = expression
+    else {
+        panic!("a back-piped lambda should be `<|`'s operand");
     };
     assert!(matches!(
         *function,
@@ -203,7 +218,7 @@ fn trailing_lambda_application_argument_owns_the_host_tail() {
                 && matches!(*argument, SyntaxExpr::Name(ref name) if name == "values")
     ));
     let SyntaxExpr::Lambda(parameters, body) = *argument else {
-        panic!("the trailing argument should remain a lambda");
+        panic!("the operand should remain a lambda");
     };
     assert_eq!(parameters, ["value"]);
     assert!(matches!(
@@ -216,7 +231,7 @@ fn trailing_lambda_application_argument_owns_the_host_tail() {
 
     let parenthesized = definition_expr(concat!(
         "language g0\n",
-        "mapped = (map values \\value -> transform value) |> finish\n",
+        "mapped = map values (\\value -> transform value) |> finish\n",
     ));
     assert!(matches!(
         parenthesized,
@@ -227,6 +242,11 @@ fn trailing_lambda_application_argument_owns_the_host_tail() {
         } if matches!(&*left, SyntaxExpr::Apply(_, argument)
             if matches!(argument.as_ref(), SyntaxExpr::Lambda(_, _)))
     ));
+    assert_has_error(
+        "language g0\nmapped = map values \\value -> transform value\n",
+        2,
+        "parenthesize this lambda, or apply it with `<|`",
+    );
 }
 
 #[test]
@@ -395,10 +415,40 @@ fn leading_infix_lines_preserve_single_line_grouping() {
 fn infix_resumption_after_layout_do_preserves_the_flat_operator_chain() {
     let layout = definition_expr(concat!(
         "language g0\n",
-        "result = source\n",
-        "  |> process do\n",
+        "result = .r combine\n",
+        "  <! do\n",
         "    input <- .read\n",
         "    .r (transform input)\n",
+        "  <! finish\n",
+    ));
+    let SyntaxExpr::OperatorApply {
+        operator: crate::g_syntax::SyntaxOperator::ApplicativeBackward,
+        left,
+        right,
+    } = layout
+    else {
+        panic!("the resumed operator should form the outer application");
+    };
+    assert!(matches!(*right, SyntaxExpr::Name(ref name) if name == "finish"));
+    let SyntaxExpr::OperatorApply {
+        operator: crate::g_syntax::SyntaxOperator::ApplicativeBackward,
+        right,
+        ..
+    } = *left
+    else {
+        panic!("the first leading operator should remain inside the outer one");
+    };
+    assert!(matches!(*right, SyntaxExpr::Do(_)));
+}
+
+#[test]
+fn a_pipeline_stage_takes_a_parenthesized_layout_do() {
+    let layout = definition_expr(concat!(
+        "language g0\n",
+        "result = source\n",
+        "  |> process (do\n",
+        "    input <- .read\n",
+        "    .r (transform input))\n",
         "  |> finish\n",
     ));
     let SyntaxExpr::OperatorApply {
@@ -407,20 +457,17 @@ fn infix_resumption_after_layout_do_preserves_the_flat_operator_chain() {
         right,
     } = layout
     else {
-        panic!("the resumed operator should form the outer pipe");
+        panic!("the last stage should form the outer pipe");
     };
     assert!(matches!(*right, SyntaxExpr::Name(ref name) if name == "finish"));
-    let SyntaxExpr::OperatorApply {
-        operator: crate::g_syntax::SyntaxOperator::PipeForward,
-        right,
-        ..
-    } = *left
-    else {
-        panic!("the first leading pipe should remain inside the outer pipe");
-    };
     assert!(matches!(
-        *right,
-        SyntaxExpr::Apply(_, argument) if matches!(*argument, SyntaxExpr::Do(_))
+        *left,
+        SyntaxExpr::OperatorApply {
+            operator: crate::g_syntax::SyntaxOperator::PipeForward,
+            right,
+            ..
+        } if matches!(&*right, SyntaxExpr::Apply(_, argument)
+            if matches!(argument.as_ref(), SyntaxExpr::Do(_)))
     ));
 }
 

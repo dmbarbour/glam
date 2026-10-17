@@ -3,7 +3,7 @@
 Status: design agreed with the maintainer on 2026-10-16;
 `tags-prefix-operator` and `tags-prefix-migration` built 2026-10-17 (see
 [As built](#as-built-2026-10-17)); `tags-prefix-diagnostic-retirement`
-waits. Three follow-up steps were agreed on 2026-10-17 (see
+waits. Three follow-up steps were agreed and built on 2026-10-17 (see
 [Follow-up](#follow-up-2026-10-17)). It
 follows `parser-grammar-retirement` in the
 [parser backtracking plan](ParserBacktrackingPerformance_2026-10-04.md), so
@@ -172,6 +172,27 @@ Steps:
 6. `tail-argument-retirement`: the parser and printer, the corpus, and
    `Syntax.md` "Tail Position"; a decision amending
    `tail-forms-end-at-separators`.
+
+As built (2026-10-17):
+- **Sections.** `interpret_paren` reads a group holding only a tag prefix
+  as the section `(path:)`; every other bare prefix reports the missing
+  payload (`tags-need-payloads`).
+- **Tags in predicate and view positions.** Pattern conversion rejects tagged
+  data or a constructor (`PathDict`, `TaggedConstructor`) as a predicate's
+  function or a view, before the predicate's own position check, so
+  `[(a:) p]` names the tag rather than the parentheses
+  (`tags-are-not-predicates-or-views`). A brace entry is a tag, a pun or an
+  optional tag, possibly grouped; a constructor applied is none.
+- **Arguments are atoms.** The application reader rejects a keyword form as
+  an argument, and the item interpreter a lambda or spaced tag after an
+  application; the tail-lambda and tail-tag layouts and the levels'
+  attachment went (`tail-forms-are-never-arguments`). The printer
+  parenthesizes every tail form in argument position. A layout `do` after an
+  infix operator still yields to an aligned leading operator; the floor test
+  for that resumption now uses `<!`, and pipeline stages parenthesize.
+- **Migration.** 12 `f do` and the tail lambda in the samples, about 80
+  `list.pure do` and similar in Rust test sources, and the docs. Bare
+  constructors in two samples and three tests.
 
 ## Open questions (2026-10-16)
 

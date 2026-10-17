@@ -9,15 +9,16 @@ next_line_lambda =
   \value ->
   finish value
 
-# A layout do is already accepted as the final application argument.
-final_do = begin_op_header do
+# An argument is an atom, so a layout do is applied with `<|`.
+final_do = begin_op_header <| do
   Operation1 -> r1
   Operation2 -> r2
   finish r1 r2
 
-# An unparenthesized lambda may be the final application argument or the tail
-# operand of an infix expression. Its body has ordinary rightward extent.
-mapped = map values \value -> transform value |> finish
+# An unparenthesized lambda may be the tail operand of an infix expression,
+# such as `<|`. Its body has ordinary rightward extent; as an argument, it is
+# parenthesized.
+mapped = map values (\value -> transform value) |> finish
 
 bound = Operation1 >>= \r1 ->
   Operation2 r1 >>= \r2 ->
@@ -49,10 +50,17 @@ pipeline = source
 
 # A leading operator at the established anchor may close a layout do and
 # resume the enclosing chain.
-processed = source
-  |> process do
+combined = .r combine
+  <! do
     input <- .read
     .r (transform input)
+  <! finish
+
+# `|>` and `<|` do not mix, so a pipeline stage takes a parenthesized do.
+processed = source
+  |> process (do
+    input <- .read
+    .r (transform input))
   |> finish
 
 # The same resumption closes a with body. A later where at that anchor wraps

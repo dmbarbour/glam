@@ -237,7 +237,7 @@ not merely the first guard that initially succeeds. Users requesting the same
 behavior manually should place the cut around the whole computation:
 
 ```g
-.cut do
+.cut <| do
   X or Y
   LaterGuard
   .r Result
@@ -376,7 +376,7 @@ For effects that accept arguments, we can generally leverage method objects to e
 In contrast to lambda calculus, interaction nets are graph-structured instead of tree-structured, with undirected wiring between polarized ports. This simplfies fine-grained, flexible dataflow and supports backpropagation without fixpoint. In this project, interaction nets are scoped to expressions, exposing only one port.
 
     # identity function as inet
-    interaction_net do
+    interaction_net <| do
         .bind -> [fn, result, arg]
         .wire arg result
         .r fn

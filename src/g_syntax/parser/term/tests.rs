@@ -1036,16 +1036,16 @@ fn long_flat_chains_parse_without_recursion() {
 
 /// The tail rule (Syntax.md "Tail Position"): a tail form runs to the end of
 /// its region, which a closer, a separator, a line end or a separator
-/// keyword ends, and only an operator or a keyword resumes after its `}` or
-/// a dedent.
+/// keyword ends, only an operator or a keyword resumes after its `}` or a
+/// dedent, and an application's argument is never one.
 #[test]
 fn tail_forms_stand_alone_only_in_tail_position() {
     const OUTSIDE: &[&str] = &[
-        "f match a as {_ => 1} y",
+        "f <| match a as {_ => 1} y",
         "match a as {_ => 1} y",
-        "f do { a } y",
-        "f do\n    a\n  y",
-        "f match a as\n    _ => 1\n  y",
+        "f <| do { a } y",
+        "f <| do\n    a\n  y",
+        "f <| match a as\n    _ => 1\n  y",
         "do { .r 1 }.x",
         "if y <- if a then b else c and d then 1 else 2",
         "match v as {p when x <- \\z -> z and d => 1}",
@@ -1053,40 +1053,64 @@ fn tail_forms_stand_alone_only_in_tail_position() {
     ];
     const INSIDE: &[&str] = &[
         "f (match a as {_ => 1}) y",
-        "f match a as\n    _ => 1",
-        "f match a as\n    _ => 1\n  |> g",
+        "f <| match a as\n    _ => 1",
+        "1 + match a as\n    _ => 1\n  + 2",
         "(do { .r 1 }).x",
         "do { .r 1 } >>= k",
         "do\n    (if c then .a else .b) -> p\n    .r p",
         "do\n    if c then .a else .b -> p\n    .r p",
-        "do\n    f \\a -> a -> p\n    .r p",
+        "do\n    f <| \\a -> a -> p\n    .r p",
         "do\n    a if c else \\z -> z -> p\n    .r p",
         "if a then if b then c else d else e",
         "if a then if b then c else d\n  else e",
         "if a then \\z -> z else b",
-        "if any \\z -> z then 1 else 2",
+        "if any <| \\z -> z then 1 else 2",
         "if c then do a else b",
-        "match v as {p when any \\z -> z => 1}",
+        "match v as {p when any <| \\z -> z => 1}",
         "match \\z -> z as {_ => 1}",
         "match if a then b else c as {_ => 1}",
         "match (d with { alias e; a := 1 }) as {_ => 1}",
         "do\n    a if c else b -> p\n    .r p",
-        "do\n    p <- f \\a -> a\n    .r p",
+        "do\n    p <- f <| \\a -> a\n    .r p",
         "if y <- (if a then b else c) and d then 1 else 2",
         "if a then (if b then c else d) else e",
         "if c then do { a } else do { b }",
         "if c then do\n      a\n  else do\n      b",
         "match match a as {_ => 1} as {_ => 2}",
         "1 + if a then b else c",
-        "map xs \\z -> z",
+        "map xs <| \\z -> z",
+        "map xs (\\z -> z)",
         "if a then b else c where c = 1",
         "[if a then b else c, \\z -> z]",
         "1 + let a = 1 in a",
-        "f let a = 1 in a",
+        "f <| let a = 1 in a",
         "if c then let a = 1 in a else b",
         "match let a = 1 in a as {_ => 1}",
         "do\n    let a = 1 in .r a -> p\n    .r p",
     ];
+    const ARGUMENT: &[&str] = &[
+        "f match a as {_ => 1}",
+        "f do { a }",
+        "f do\n    a",
+        "f x do\n    a",
+        "map xs \\z -> z",
+        "f x\n  \\y -> y",
+        "f let a = 1 in a",
+        "f using d in a",
+        "f tag: x",
+        "f x\n  tag: x",
+        "x |> f do { a }",
+    ];
+    for text in ARGUMENT {
+        let parsed = parse_source(&source(text));
+        assert!(
+            parsed.diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("an application's arguments are atoms")),
+            "{text:?} reported {:#?}",
+            parsed.diagnostics
+        );
+    }
     for text in OUTSIDE {
         let parsed = parse_source(&source(text));
         assert!(

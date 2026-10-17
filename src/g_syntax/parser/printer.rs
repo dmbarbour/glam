@@ -119,7 +119,7 @@ impl Printer {
         if let Some(operator) = top_operator(expression) {
             return self.chain(expression, operator, end, true);
         }
-        self.application(expression, end, true);
+        self.application(expression, true);
     }
 
     /// An operator chain whose top operator is `operator`. `leading` says
@@ -180,16 +180,15 @@ impl Printer {
             _ => true,
         };
         if bare {
-            self.application(expression, end && !left, leading);
+            self.application(expression, leading);
         } else {
             self.group(expression);
         }
     }
 
-    /// An application, or one of the forms that stand where it does. Only
-    /// its last argument may be a tail form or end at a `}`, where nothing
-    /// follows it.
-    fn application(&mut self, expression: &SyntaxExpr, end: bool, leading: bool) {
+    /// An application, or one of the forms that stand where it does. Its
+    /// arguments are atoms.
+    fn application(&mut self, expression: &SyntaxExpr, leading: bool) {
         let mut arguments = Vec::new();
         let mut head = expression;
         while let SyntaxExpr::Apply(function, argument) = head {
@@ -204,24 +203,13 @@ impl Printer {
         } else {
             self.form(head, leading);
         }
-        let last = arguments.len() - 1;
-        for (at, argument) in arguments.into_iter().rev().enumerate() {
+        for argument in arguments.into_iter().rev() {
             self.text(" ");
-            let final_tail = at == last && end;
             match argument {
-                // A path-led argument is parenthesized.
+                // A path-led argument, a tail form, and a form that ends at
+                // its `}` are parenthesized.
                 SyntaxExpr::Effect(_) => self.group(argument),
-                _ if is_tail_form(argument) || ends_with_block(argument) => {
-                    // After an operand an `if` reads as postfix, and a
-                    // prefix conditional is an error.
-                    if final_tail
-                        && !matches!(argument, SyntaxExpr::With { .. } | SyntaxExpr::If(_))
-                    {
-                        self.form(argument, false);
-                    } else {
-                        self.group(argument);
-                    }
-                }
+                _ if is_tail_form(argument) || ends_with_block(argument) => self.group(argument),
                 _ => self.atom(argument),
             }
         }
@@ -385,7 +373,7 @@ impl Printer {
                 }
                 self.text(" }");
             }
-            SyntaxExpr::Apply(..) => self.application(expression, true, leading),
+            SyntaxExpr::Apply(..) => self.application(expression, leading),
             _ if top_operator(expression).is_some() => self.group(expression),
             other => unimplemented!("the printer does not print {other:?} yet"),
         }

@@ -174,7 +174,7 @@ reported.
 ```g
 program = do
   .section.root 'text -> entry
-  .cursor.on entry do
+  .cursor.on entry <| do
     .global "_start" -> _
 
     # The second split is placed before the first split.
@@ -186,7 +186,7 @@ program = do
     .cursor.on message (.bytes ("Hello!" ++ [10]))
 
     .mov_label_u32 'esi message_label
-    .cursor.on exit do
+    .cursor.on exit <| do
       .mov_u32 'eax 60
       .xor_u32 'edi 'edi
       .syscall

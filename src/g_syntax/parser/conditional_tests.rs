@@ -540,7 +540,7 @@ fn an_open_lambda_body_takes_a_postfix_if() {
         "\\a -> b if c else d",
         "\\a -> b\n  if c else d",
         "x + \\a -> b if c else d",
-        "f \\a -> b if c else d",
+        "f <| \\a -> b if c else d",
         "[\\a -> b if c else d]",
     ] {
         assert!(
@@ -658,10 +658,14 @@ fn an_argument_cannot_follow_a_match() {
     for source in [
         "match a as {z => 1} b",
         "match a as\n    z => 1\n  b",
-        "f match a as {z => 1} b",
+        "f <| match a as {z => 1} b",
     ] {
         assert_outside_tail_position(source);
     }
+    assert_rejected(
+        "f match a as {z => 1}",
+        "parenthesize this `match` expression, or apply it with `<|`",
+    );
     let SyntaxExpr::Apply(function, argument) = parse("(match a as {z => 1}) b") else {
         panic!("a parenthesized match applies");
     };

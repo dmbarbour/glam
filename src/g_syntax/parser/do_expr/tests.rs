@@ -33,9 +33,9 @@ fn layout_do_parses() {
         "do\n.read 'left -> left\nright <- .read 'right\ntotal = left + right\n.write total\n.r total",
         "do\ndeclare left, _right\n.r (\\_ -> left) -> use_left\nleft = 1\nright <- .r 2\n.r (use_left ())",
         "do\nvalue <- do\n  input <- source\n  .r input\nwritten <- write\n  value\n.r written",
-        "interaction_net do\n.bind -> ports\n.r ports",
+        "interaction_net <| do\n.bind -> ports\n.r ports",
         "\\api -> do\n.r api",
-        "\\api -> interaction_net do\n.bind -> ports\n.r ports",
+        "\\api -> interaction_net <| do\n.bind -> ports\n.r ports",
         "(do .r 1)",
         "(do .r ()\n    .r 1)",
         "consume (do .r ()\n            .r 1)",
@@ -697,7 +697,7 @@ fn a_brace_delimits_a_do_block_only_on_its_line() {
 /// only an operator or a keyword may follow it, not an argument or a path.
 #[test]
 fn braced_do_stands_in_containers_and_other_do_blocks() {
-    assert_outside_tail_position("consume do { .r 1 } next");
+    assert_outside_tail_position("consume <| do { .r 1 } next");
     assert_outside_tail_position("do { .r {answer: 42} }.answer");
     for source in [
         "consume [do { .r 1 }, do { text = \"a;b\"; .r text }, do { x = do .r 2; .r x }]",

@@ -84,7 +84,8 @@ fn ordinary_expressions_parse() {
         "tag: a + b",
         "tag:\n  f x",
         "tag: \\x -> x",
-        "f tag: g x",
+        "f (tag: g x)",
+        "f <| tag: g x",
         "a.b: x",
         "[k]: x",
         "(p): x",
@@ -328,7 +329,7 @@ fn tag_prefixes_read_alike_in_braces_and_out() {
             SyntaxExpr::DictUnion(vec![apply(tag("a", name("f")), name("x"))]),
         ),
         (
-            "g a: f x",
+            "g (a: f x)",
             apply(name("g"), tag("a", apply(name("f"), name("x")))),
         ),
         (
