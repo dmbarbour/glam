@@ -51,11 +51,11 @@ flags a step for discussion when work reaches it, not a decision.
   `grammar-body-declarations` (item 15: `alias` and `let` in bodies) was
   built 2026-10-17.
 - [`RuntimeOwnership_2026-10-17.md`](RuntimeOwnership_2026-10-17.md):
-  `lifecycle-` steps, a sketch from the lifecycle review: a thread-affine
-  owner that retires the runtime, handles for everything else, request
-  queues, and hosts reduced to message endpoints. `lifecycle-cli-logger` is
-  done; the rest waits for the grammar work, through the tag prefix
-  syntax plan.
+  `lifecycle-` steps, a sketch from the lifecycle review.
+  `lifecycle-cli-logger` is done. Its owner-and-handles design is replaced
+  by the [runtime API review](../reviews/RuntimeApi_2026-10-17.md)
+  (2026-10-17), from which its remaining steps are to be re-planned;
+  `lifecycle-audits` and `lifecycle-external-owners` still apply.
 - [`TagPrefixSyntax_2026-10-16.md`](TagPrefixSyntax_2026-10-16.md):
   `path:` is a prefix operator and `:name` a pun everywhere, so braces lost
   their member grammar; follow-ups retired bare tags, rejected tags as
@@ -98,6 +98,13 @@ flags a step for discussion when work reaches it, not a decision.
   messages through request queues. Its decisions are settled, and
   [`RuntimeOwnership_2026-10-17.md`](RuntimeOwnership_2026-10-17.md) holds
   the remediation.
+- [`RuntimeApi_2026-10-17.md`](../reviews/RuntimeApi_2026-10-17.md)
+  re-envisions the public API from user stories (maintainer, 2026-10-17): a
+  thread-affine runtime in which Rust threads run turns on keyed machines
+  with a stack and local state, transactions as nested steps, fork-join
+  through scoped threads, and communication only through the shared heap or
+  volumes. It replaces the ownership plan's owner and handles. Direction
+  agreed; communication's conventions remain open.
 - [`SyntaxTypeErrors_2026-10-17.md`](../reviews/SyntaxTypeErrors_2026-10-17.md)
   reviews which type errors the front end could report from syntax alone:
   applying data, data as a predicate, view or effect, member access on
@@ -155,6 +162,22 @@ Each is done; what keeps it under the retention rule is listed.
 - [`GarbageCollectorScopedPointerSafety_2026-09-09.md`](GarbageCollectorScopedPointerSafety_2026-09-09.md):
   likely deprecated. Its branded views landed as `GcRef`
   (`owned-mutator-views`, 2026-10-12).
+
+## Tentative Plans
+
+Ideas the maintainer means to pursue, short of a plan.
+
+- **Branded abstract global paths** (maintainer, 2026-10-17). An abstract
+  global path would carry, besides its components, the `TypeId` of a
+  private Rust marker type as its authority, and two paths would be equal
+  only when both match. The bootstrap compiler would brand its paths with a
+  marker of its own, so neither Glam code nor other Rust code could forge
+  them; `Values::abstract_global_path` would go or take a capability, and
+  Rust clients could brand domains of their own. The `TypeId` is only the
+  brand: Rust privacy around the marker is the authority, so no API may
+  accept a raw `TypeId`. This also gives the
+  [runtime API review](../reviews/RuntimeApi_2026-10-17.md)'s machine keys
+  and heap capabilities private namespaces.
 
 ## Open Items Without a Plan
 

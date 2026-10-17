@@ -1,6 +1,15 @@
 # Runtime Ownership and Host Messaging Plan — 2026-10-17
 
-Status: sketch. The design was agreed with the maintainer on 2026-10-16 in
+Status: sketch, design superseded. The
+[runtime API review](../reviews/RuntimeApi_2026-10-17.md) (2026-10-17)
+replaces the owner-and-handles design below with a thread-affine runtime in
+which Rust threads run turns on keyed machines; the remaining steps are to
+be re-planned from it, and `lifecycle-audits` and
+`lifecycle-external-owners` still apply. A survey for `lifecycle-owner` at
+`fd97593e` found, against the design below: assemblers create their own
+runtimes, the drop order releases the background demand before joining the
+workers, and the logger thread still holds owners. The design was agreed
+with the maintainer on 2026-10-16 in
 the [lifecycle review](../reviews/RuntimeLifecycleCapabilities_2026-10-16.md)
 ("Target Model" and "Maintainer Decisions"); this plan orders the work.
 `lifecycle-cli-logger` is done (2026-10-16, `988e887d`). The rest waits for

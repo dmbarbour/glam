@@ -1931,6 +1931,37 @@ maps the short names used here to file names.
 - **Rule lives in:** `architecture/evaluation.md`, the executor paragraph;
   `architecture/values.md` "Value Domain and Ownership".
 
+### The public API runs turns on keyed machines, not handles
+`runtime-api-turns-on-machines` · 2026-10-17 · maintainer · accepted
+- **Context:** the lifecycle review's target model kept the API's shape: a
+  thread-affine owner, with `Send` handles for everything else. A survey for
+  `lifecycle-owner` found owners in every handle, and assemblers that
+  create their own runtimes. The maintainer took the step as an occasion to
+  re-envision the public API from user stories: a heap of handles, pointers
+  through which code asks the runtime to act, is not necessarily the best
+  interface.
+- **Decision:** the runtime is an environment in which Rust threads act.
+  - It is thread-affine: `!Send`, so it stays and retires on the thread
+    that opened it, but `Sync`, so scoped threads may borrow it.
+  - A thread runs a *turn* on a machine named by a user-chosen `Key`. A
+    machine has a stack and local state, as reflection tasks have; it
+    starts empty, and `clear` returns it there, so it has no lifecycle.
+  - Transactions are steps within a turn, and nest; `retry` waits for a
+    read to change.
+  - Fork-join comes from scoped threads.
+  - No communication is point-to-point: tasks and machines share state and
+    logs in the same heap or volume, and abstract global paths serve as
+    capabilities within it.
+- **Alternatives rejected:** an owner with `Send + Sync` handles, which
+  `lifecycle-owner` would have built; one transaction per turn, since
+  hierarchical transactions need steps anyway; runtime-allocated machine
+  IDs; and point-to-point channels, which hinder extension.
+- **Consequences:** handles go, and retirement is dropping the runtime on
+  its thread, scoped threads joined by construction. The ownership plan's
+  remaining steps are re-planned from the review. Communication's
+  conventions (retention, backpressure, discovery) remain open.
+- **Recorded in:** runtime API review.
+
 ### Resumable WHNF through bounded regional quanta and durable checkpoints
 `resumable-whnf-regional-quanta` · 2026-09-12 · agent · accepted
 - **Context:** the recursive evaluator replayed prefixes after retryable
@@ -3105,6 +3136,7 @@ Short names used under **Recorded in**, with their files under `docs/`.
 | grammar review | `plans/GrammarReview_2026-10-16.md` |
 | tag prefix plan | `plans/TagPrefixSyntax_2026-10-16.md` |
 | syntax type errors review | `reviews/SyntaxTypeErrors_2026-10-17.md` |
+| runtime API review | `reviews/RuntimeApi_2026-10-17.md` |
 | C2C review | `reviews/GarbageCollectorC2C_2026-08-22.md` |
 | C6 review | `reviews/GarbageCollectorC6_2026-08-24.md` |
 | C8 review | `reviews/GarbageCollectorC8_2026-10-03.md` |
