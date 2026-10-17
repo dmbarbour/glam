@@ -2,10 +2,11 @@
 
 Status: design agreed with the maintainer on 2026-10-06. `parser-term-parser`
 is in production since 2026-10-07 (see [Production switch](#production-switch-2026-10-07));
-`parser-keyword-frames` and `parser-grammar-retirement` remain
-(see [Steps](#steps)); `parser-patterns`, with what remained of
-`parser-cover-ir`, was done on 2026-10-16
-([Patterns 2026-10-16](#patterns-2026-10-16)). Rechecked 2026-10-15 (`01ec2fbc`): no parser step had
+`parser-patterns`, with what remained of `parser-cover-ir`, was done on
+2026-10-16 ([Patterns 2026-10-16](#patterns-2026-10-16)); the keyword frames
+and `parser-grammar-retirement` by 2026-10-17; `parser-scope-analysis` on
+2026-10-17 ([Scope analysis 2026-10-17](#scope-analysis-2026-10-17)).
+`parser-constant-factors` remains (see [Steps](#steps)). Rechecked 2026-10-15 (`01ec2fbc`): no parser step had
 landed since `adcd994b` (2026-10-07), and a keyword form in parentheses
 nested in another was exponential ([Measures 2026-10-15](#measures-2026-10-15)).
 Keyword regions, the first part of `parser-keyword-frames`, merged
@@ -317,6 +318,16 @@ Steps are referred to by name; see the plans README, "Step names".
    - the lexer (`Lexer::run`, `Lexer::current_char`) and number parsing,
      which lead a list literal's profile.
 
+   - hashing in the scope walk and the shadowing index: the single-pass
+     analysis and the resolver use `std` `HashMap` with SipHash on short
+     names, and `hello_elf` took 0.2% more instructions after
+     `parser-scope-analysis` (598.9 M to 600.1 M), its counters unchanged.
+     A faster hasher, which would be a new dependency, or a scan below a
+     scope size, would recover it;
+   - name lookup in the resolver scans the visible locals, and each `let`
+     scans them for shadowing: O(L) per lookup or group. Nested `let`s
+     still grow as n^1.17 at 800.
+
    Attribute with callgrind (`valgrind` is installed): `perf record`
    sampling is throttled here to about a hundred samples a run, too
    coarse to compare.
@@ -345,7 +356,8 @@ production keeps the old parser until the oracle agrees.
   `parser-keyword-frames-conditionals`, `parser-keyword-frames-bindings`
   and `parser-keyword-frames-layout` done, and
   `parser-keyword-frames-suffixes` on 2026-10-17.
-- `parser-scope-analysis`: added 2026-10-15; not started.
+- `parser-scope-analysis`: done 2026-10-17; see
+  [Scope analysis 2026-10-17](#scope-analysis-2026-10-17).
 - `parser-constant-factors`: added 2026-10-16; not started.
 - `parser-grammar-retirement`: done 2026-10-17 (see "as built" below).
   The term parser reads every expression and pattern; Chumsky reads only
@@ -1277,6 +1289,50 @@ review's sequencing planned (maintainer, 2026-10-17).
   only for a pattern's `when`.
 - **Checks:** `check.sh all`, the round trip at 50 times its count, and the
   generated sources at 200 times theirs.
+
+## Scope analysis 2026-10-17
+
+`parser-scope-analysis`, built in three commits. Callgrind attributed the
+excess: in `chain_where`, unused-local analysis and `let` group
+dependencies, each a walk per binder over its whole scope; in file `let`s,
+a resolver seeded with every file `let` name per declaration, through a
+shadowing check of O(k·(L+k)).
+
+- **Shadowing check** (`8a4ee53c`). A binding group of more than eight
+  names indexes the locals, O(L + k); fewer scan, where an index costs
+  more than it saves.
+- **One walk** (`8d38af19`). `analysis.rs` resolves each name to its
+  innermost binder through an index of the binders in scope, and records
+  a `let` group's dependency edges as it walks; the resolver keeps the
+  edges of groups nested in a group's values, keyed by their address in
+  the borrowed source, for when it reaches them. A binder that warned
+  before its scope's contents reserves its place, so warnings keep their
+  order. On 200,000 generated trees and every sample, warnings and edges
+  were unchanged wherever no name was bound twice; where one was (98
+  trees), the walk reads it as the innermost binder, as the resolver does,
+  where the old walks let a body's `let` miss an outer scope.
+- **File `let` names** (`6ad9a35a`) sit beneath the locals, shared by each
+  declaration's resolver and read on a lookup that misses the locals,
+  with the first binding identities. A scope sees them at module level
+  and in bodies transparent to it (`NameScope::sees_file_lets`), as the
+  floors gave when they were locals.
+
+The `let` families were added to `scripts/profile.sh` for this step
+(maintainer, 2026-10-17). Instructions at the largest size, and the
+growth exponent over 200/400/800:
+
+| Family | Before | After | k before | k after |
+| --- | ---: | ---: | ---: | ---: |
+| `chain_where` | 367.5 M | 187.2 M | 1.61 | 1.06 |
+| `chain_let` (nested `let … in`) | 319.3 M | 231.1 M | 1.46 | 1.17 |
+| `let_wide` (one group) | 244.8 M | 211.8 M | 1.31 | 1.09 |
+| `body_lets` (one per member) | 364.6 M | 310.2 M | 1.30 | 1.12 |
+| `file_lets` (n lets, then n definitions) | 11,290.5 M | 742.4 M | 2.96 | 1.17 |
+
+`file_lets` was the surprise the maintainer asked these to catch: cubic.
+Module definitions alone (`chain`) grow as n^1.20, so the `let` families'
+remaining excess is not the front end's alone; resolver lookups are
+listed under `parser-constant-factors`.
 
 ## Verification
 

@@ -44,11 +44,10 @@ flags a step for discussion when work reaches it, not a decision.
   measurements: Snapshot 2026-10-15.
 - [`ParserBacktrackingPerformance_2026-10-04.md`](ParserBacktrackingPerformance_2026-10-04.md):
   `perf-parser`, in progress. The prefix-shared term parser parses every
-  ordinary expression, and in cover mode every pattern (`parser-patterns`,
-  2026-10-16). Keyword regions, the first part of `parser-keyword-frames`,
-  removed the keyword-form exponential (2026-10-15). Native keyword frames
-  are next, then `parser-grammar-retirement`; `parser-scope-analysis`
-  (name analysis over nested `where`) is independent.
+  expression and pattern, Chumsky only declaration heads; the keyword
+  frames, `parser-grammar-retirement` and `parser-scope-analysis` (one
+  walk for local analysis, and file `let` names read through the
+  resolver) were done by 2026-10-17. `parser-constant-factors` remains.
 - [`GrammarReview_2026-10-16.md`](GrammarReview_2026-10-16.md): the
   grammar reviewed for clarity when read (Green's cognitive dimensions) and
   ease of parsing, and what belongs in the parser, a linter or a formatter.
