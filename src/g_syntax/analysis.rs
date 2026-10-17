@@ -12,7 +12,7 @@
 //! the locals around it here, so a name it reads as `self.name` still counts
 //! as a use of an outer local of that name.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use super::*;
 
@@ -111,7 +111,7 @@ pub(super) fn warn_unused_file_lets(
 /// parses, before it lowers, so nothing rebuilds the source meanwhile.
 #[derive(Debug, Default)]
 pub(in crate::g_syntax) struct GroupDependencies {
-    known: HashMap<GroupKey, Vec<Vec<usize>>>,
+    known: FxHashMap<GroupKey, Vec<Vec<usize>>>,
 }
 
 /// The groups one walk found, nested in the values of the group it walked.
@@ -131,7 +131,7 @@ impl GroupDependencies {
             return (edges, None);
         }
         let mut walk = Walk::quiet();
-        walk.dependencies = Some(HashMap::new());
+        walk.dependencies = Some(FxHashMap::default());
         let start = walk.groups.len();
         walk.open_group(bindings, 0, None);
         walk.group_values(bindings, 0);
@@ -225,21 +225,21 @@ enum Report {
 struct Walk<'a> {
     locals: Vec<Local<'a>>,
     /// The locals in scope by canonical name, innermost last.
-    by_name: HashMap<&'a str, Vec<usize>>,
+    by_name: FxHashMap<&'a str, Vec<usize>>,
     groups: Vec<Group>,
     out: Vec<Out>,
     /// Whether binders report their unused locals. A quiet walk reports only
     /// the binders it is asked about.
     reporting: bool,
     /// Each closed group's edges, when kept.
-    dependencies: Option<HashMap<GroupKey, Vec<Vec<usize>>>>,
+    dependencies: Option<FxHashMap<GroupKey, Vec<Vec<usize>>>>,
 }
 
 impl<'a> Walk<'a> {
     fn reporting() -> Self {
         Self {
             locals: Vec::new(),
-            by_name: HashMap::new(),
+            by_name: FxHashMap::default(),
             groups: Vec::new(),
             out: Vec::new(),
             reporting: true,

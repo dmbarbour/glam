@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::collections::hash_map::Entry;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
@@ -22,7 +22,7 @@ pub(in crate::g_syntax) struct LocalName {
 #[derive(Debug, Clone, Default)]
 pub(in crate::g_syntax) struct FileLets {
     locals: Vec<LocalName>,
-    by_name: HashMap<String, usize>,
+    by_name: FxHashMap<String, usize>,
 }
 
 impl FileLets {
@@ -153,7 +153,7 @@ impl ResolverContext {
                     .map(|existing| (local, existing))
             });
         }
-        let mut binders = HashMap::<&str, &LocalName>::new();
+        let mut binders = FxHashMap::<&str, &LocalName>::default();
         for existing in &self.locals {
             if let Some(canonical) = existing.canonical.as_deref() {
                 binders.entry(canonical).or_insert(existing);
