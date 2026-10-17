@@ -190,7 +190,9 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
         // A `let` is a frame of the term parser, which the legacy grammar's
         // structural parser read.
         parse_expression_chain_view(view, context)?
-    } else if let Some(result) = parse_object(view, context) {
+    } else if legacy_grammar()
+        && let Some(result) = parse_object(view, context)
+    {
         result?
     } else if keyword_head(view, "if").is_some() || keyword_head(view, "try").is_some() {
         // A conditional is a frame of the term parser, which takes the
@@ -210,7 +212,9 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
     } else if let Some(try_match_index) = keyword_head(view, "try_match") {
         leading_match = true;
         parse_try_match_expression(view, try_match_index, context.may_yield())?
-    } else if let Some(result) = parse_with(view, context) {
+    } else if legacy_grammar()
+        && let Some(result) = parse_with(view, context)
+    {
         result?
     } else if postfix_if_suffix(view).is_some() {
         // So does a postfix conditional, whose fallback owns any `where`.
@@ -1102,7 +1106,7 @@ fn has_compound_with_body(view: TokenView<'_, '_>) -> bool {
     find_structural_body(view).is_some()
 }
 
-fn line_begins_object_member(view: TokenView<'_, '_>) -> bool {
+pub(in crate::g_syntax::parser) fn line_begins_object_member(view: TokenView<'_, '_>) -> bool {
     ["object", "extend"]
         .into_iter()
         .any(|head| keyword_head(view, head).is_some())
@@ -1364,6 +1368,34 @@ fn parse_object_header(
         deps,
         has_with,
     }))
+}
+
+/// An object expression's header, `(abstract)? object (NameExpr|_) (as
+/// Name)? (extends ExpressionList)? with?`, read from its view: the object
+/// without its body.
+pub(in crate::g_syntax::parser) fn parse_object_expression_header(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+) -> ParseResult<ObjectExpr> {
+    let header = parse_object_header(view, context)
+        .expect("an object expression's header begins with its keyword")?;
+    Ok(ObjectExpr {
+        realization: header.realization,
+        name: header.name,
+        alias: header.alias,
+        deps: header.deps,
+        body: Vec::new(),
+    })
+}
+
+#[cfg(test)]
+/// Whether the view's dispatch reads a form the term parser reads as a
+/// frame but the legacy grammar's view-level dispatch read structurally: a
+/// `let` or an object leading it, or a `with` body at its level.
+pub(in crate::g_syntax::parser) fn dispatched_structurally(view: TokenView<'_, '_>) -> bool {
+    keyword_head(view, "let").is_some()
+        || object_expression_head(view).is_some()
+        || has_compound_with_body(view)
 }
 
 fn object_expression_head(view: TokenView<'_, '_>) -> Option<(ObjectRealization, usize)> {

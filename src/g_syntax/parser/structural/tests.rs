@@ -1,5 +1,5 @@
 use super::*;
-use crate::g_syntax::{ObjectExpr, SyntaxExpr};
+use crate::g_syntax::{ObjectBodyDefinition, ObjectBodyDefinitionKind, ObjectExpr, SyntaxExpr};
 
 fn parse_structural(source: &str) -> SyntaxExpr {
     parse_compound_expression_fragment(source.as_bytes())
@@ -342,6 +342,60 @@ fn where_scopes_its_definition_statement_or_arm() {
             "`{source}` reported {diagnostics:#?} instead of `{expected}`"
         );
     }
+}
+
+/// An update's base is the chain before its `with` at its level, so a
+/// `with` continues an open tail, as in a lambda's body or an `else`
+/// branch, and takes an application before it whole.
+#[test]
+fn an_update_takes_the_chain_before_it() {
+    let SyntaxExpr::Lambda(_, body) = parse_structural("\\y -> y with { a := 1 }") else {
+        panic!("the lambda should hold the update");
+    };
+    assert!(matches!(*body, SyntaxExpr::With { .. }));
+    let SyntaxExpr::If(conditional) = parse_structural("if c then d else d with { a := 1 }") else {
+        panic!("the conditional should hold the update");
+    };
+    assert!(matches!(*conditional.else_result, SyntaxExpr::With { .. }));
+    let SyntaxExpr::With { base, .. } = parse_structural("f d with { a := 1 }") else {
+        panic!("the update should take the application");
+    };
+    assert!(matches!(*base, SyntaxExpr::Apply(..)));
+    assert!(matches!(
+        parse_structural("f (d with { a := 1 }) 2"),
+        SyntaxExpr::Apply(..)
+    ));
+    let SyntaxExpr::OperatorApply { left, .. } =
+        parse_structural("source\n  |> configure with\n    A := 42\n  |> finish")
+    else {
+        panic!("an operator should resume after the body");
+    };
+    assert!(matches!(*left, SyntaxExpr::With { .. }));
+}
+
+/// Nested update bodies are read by the declaration parser from their views,
+/// one level of it per body.
+#[test]
+fn nested_update_bodies_parse() {
+    let depth = 200;
+    let source = format!("{}1{}", "d with { a := ".repeat(depth), " }".repeat(depth));
+    let started = std::time::Instant::now();
+    let mut parsed = parse_structural(&source);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    for _ in 0..depth {
+        let SyntaxExpr::With { mut body, .. } = parsed else {
+            panic!("each level should be an update");
+        };
+        let Some(ObjectBodyDefinition {
+            kind: ObjectBodyDefinitionKind::Definition(definition),
+            ..
+        }) = body.pop()
+        else {
+            panic!("each body should hold one definition");
+        };
+        parsed = definition.expr.expect("a definition's value parses");
+    }
+    assert!(matches!(parsed, SyntaxExpr::Number(_)));
 }
 
 #[test]

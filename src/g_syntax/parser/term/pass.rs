@@ -56,26 +56,31 @@
 //! are only counted, so that a `then` or `else` still reaches its own, and
 //! inside a deferred group nothing is interpreted.
 //!
-//! A branch holding a form that view-level dispatch parses (`object`, or a
-//! `with` that no match takes, at its level) is parsed from its view, as
-//! the structural parser did, until those forms are frames too: view-level
-//! dispatch reads them differently from the item interpreter. The legacy
-//! grammar parsed `let` and `where` that way too, except where a `let` led
-//! its view.
+//! An object is a frame whose header is an open tail until its `with`. A
+//! `with` body, an object's or an update's, is a block whose tokens are
+//! only kept and whose lines are judged: the declaration parser reads its
+//! members from their views. An update closes into a form piece whose base
+//! the item interpreter takes from the chain before it.
+//!
+//! The legacy grammar's view-level dispatch parsed `let`, `where`, `with`
+//! and `object` from a branch's view; a branch holding one of them where
+//! the legacy reading leaves it a token is still parsed that way.
 
 use crate::g_syntax::{
     ConditionalMode, ConditionalResultMode, IfExpr, MatchArm, MatchCommitment, MatchExpr,
-    MatchWhenExpr, SyntaxExpr, WhenArm,
+    MatchWhenExpr, ObjectBodyDefinition, Severity, SyntaxExpr, WhenArm,
 };
 
+use super::super::declaration::{parse_nonempty_object_body, parse_object_body};
 use super::super::do_expr::{empty_do_expr, finish_do_statements, line_begins_do_statement};
-use super::super::expression::structural_view_at;
+use super::super::expression::{structural_view_at, syntax_operator};
 use super::super::expression_context::{ExpressionContext, validate_expression_floor};
 use super::super::input::{TokenRange, TokenView};
 use super::super::layout::group_separator;
 use super::super::lexical::{Delimiter, GroupId, LeadingTrivia, TokenKind};
 use super::super::structural::{
-    in_keyword_position, is_layout_empty, keyword_head, parse_body, parse_expression_in_context,
+    in_keyword_position, is_layout_empty, keyword_head, line_begins_object_member,
+    object_alias_name, parse_body, parse_expression_in_context, parse_object_expression_header,
     parse_open_tail, trim_layout,
 };
 use super::binding::{self, NestedArms, needs_view_dispatch};
@@ -136,6 +141,10 @@ struct Frame {
     level: usize,
     /// For a group or the view, the last scan along a line for arm marks.
     mark_scan: Option<MarkScan>,
+    /// Whether it holds an object or update body, whose members the
+    /// declaration parser reads from their views: its tokens and groups are
+    /// only kept, and its lines judged.
+    raw: bool,
 }
 
 enum FrameKind {
@@ -150,6 +159,7 @@ enum FrameKind {
     Layout(Box<LayoutBlock>),
     Match(Box<Match>),
     Scoped(Box<Scoped>),
+    Object(Box<ObjectForm>),
 }
 
 /// A layout block: a `do` block's statements, or a match's arms.
@@ -173,6 +183,8 @@ struct LayoutBlock {
     arms: Option<Box<Arms>>,
     /// The local bindings it holds, a `let`'s or a `where`'s, if any.
     bindings: Option<BindingsKind>,
+    /// The object or update whose body it holds, if any.
+    members: Option<Members>,
 }
 
 /// A braced block: a `do` block's head and its own context, or a match's
@@ -183,6 +195,8 @@ struct Block {
     arms: Option<Box<Arms>>,
     /// The local bindings it holds, a `let`'s or a `where`'s, if any.
     bindings: Option<BindingsKind>,
+    /// The object or update whose body it holds, if any.
+    members: Option<Members>,
 }
 
 /// A block whose `{` comes next.
@@ -192,6 +206,30 @@ enum Pending {
     Arms(Box<Arms>),
     /// A `let`'s or `where`'s bindings, after its keyword at this index.
     Bindings(usize, BindingsKind),
+    /// An object's or update's body, after the `with` at this index.
+    Members(usize, Members),
+}
+
+/// Whose body a block of members holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Members {
+    /// An update, `Base (as Name)? with Body`, with its alias.
+    Update { alias: Option<String> },
+    /// The object frame below the block.
+    Object,
+}
+
+/// An object expression: its header, then its body after `with`, if any.
+/// Its header is an open tail until then.
+struct ObjectForm {
+    /// Its `object`, or the `abstract` before it.
+    head: usize,
+    /// The form's own context, floored at its head's line.
+    context: ExpressionContext,
+    /// Its body, once the block after its `with` closes.
+    body: Option<Parse<Vec<ObjectBodyDefinition>>>,
+    /// Where its header ends: its `with`, once one begins its body.
+    with: Option<usize>,
 }
 
 /// Whose local bindings a block holds.
@@ -458,6 +496,29 @@ fn display(keyword: &str, open: bool) -> String {
     }
 }
 
+/// The context of an object's or update's members after the `with` at
+/// `head`: the enclosing one, floored at the `with`'s line when an infix
+/// operator leads that line, as the structural parser floored it.
+fn members_context(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+    head: usize,
+) -> ExpressionContext {
+    let mut first = head;
+    while let Some(previous) = first.checked_sub(1)
+        && view.range().contains(previous)
+        && !matches!(token(view, previous).kind(), TokenKind::LineStart { .. })
+    {
+        first = previous;
+    }
+    match view.line_indentation_at(head) {
+        Some(indentation) if syntax_operator(token(view, first)).is_some() => {
+            context.with_continuation_floor(indentation)
+        }
+        _ => context,
+    }
+}
+
 /// A keyword form's context: the enclosing one, floored at its head's line.
 fn form_context(
     view: TokenView<'_, '_>,
@@ -502,19 +563,21 @@ impl Frame {
             arms_owner: None,
             level: 0,
             mark_scan: None,
+            raw: false,
         }
     }
 
     fn in_region(&self) -> bool {
-        self.inherited_region || self.region
+        self.inherited_region || self.region || self.raw
     }
 
     /// Whether it is an open tail: a conditional's `else` branch or fallback,
-    /// or a `let`'s or `using`'s body.
+    /// a `let`'s or `using`'s body, or an object's header before its body.
     fn open_tail(&self) -> bool {
         match &self.kind {
             FrameKind::Conditional(conditional) => conditional.phase == Phase::Else,
             FrameKind::Scoped(scoped) => scoped.phase == ScopedPhase::Body,
+            FrameKind::Object(_) => true,
             _ => false,
         }
     }
@@ -677,6 +740,8 @@ pub(super) enum FormShape {
     Unfinished,
     /// A `where`'s bindings, which end the body before them.
     Where,
+    /// An update's body, whose base is the chain before it.
+    With,
 }
 
 enum Step {
@@ -818,6 +883,7 @@ impl Pass<'_, '_, '_> {
                 context: form_context(view, context, head),
                 arms: None,
                 bindings: None,
+                members: None,
             })),
             Some(Pending::Arms(mut arms)) => {
                 arms.begin(0);
@@ -826,6 +892,7 @@ impl Pass<'_, '_, '_> {
                     context: arms.context,
                     arms: Some(arms),
                     bindings: None,
+                    members: None,
                 }))
             }
             // A `let`'s bindings read as expressions, and own their arrows.
@@ -834,15 +901,28 @@ impl Pass<'_, '_, '_> {
                 context,
                 arms: None,
                 bindings: Some(kind),
+                members: None,
+            })),
+            // An object's or update's members, which the declaration parser
+            // reads from their views.
+            Some(Pending::Members(head, members)) => Some(Box::new(Block {
+                head,
+                context: members_context(view, context, head),
+                arms: None,
+                bindings: None,
+                members: Some(members),
             })),
             None => None,
         };
+        let raw = block.as_ref().is_some_and(|block| block.members.is_some());
         let (mode, arrow) = match &block {
-            Some(block) if block.bindings.is_some() => (Mode::Expression, false),
+            Some(block) if block.bindings.is_some() || block.members.is_some() => {
+                (Mode::Expression, false)
+            }
             Some(_) => (Mode::Cover, true),
             None => (mode, mode == Mode::Cover),
         };
-        self.push(Frame::new(
+        let mut frame = Frame::new(
             FrameKind::Group {
                 delimiter,
                 group,
@@ -853,7 +933,9 @@ impl Pass<'_, '_, '_> {
             Some(group_separator(view.source(), delimiter, index)),
             arrow,
             inherited,
-        ));
+        );
+        frame.raw = raw;
+        self.push(frame);
         Ok(())
     }
 
@@ -890,6 +972,8 @@ impl Pass<'_, '_, '_> {
             FrameKind::Layout(layout) if layout.arms.is_some() => (at, None, Some(at), level),
             FrameKind::Layout(_) => (at, matches, arms, level),
             FrameKind::Conditional(_) | FrameKind::Scoped(_) => (layout, matches, arms, level),
+            // An object's header holds no match's `as` and no arm's marks.
+            FrameKind::Object(_) => (layout, None, None, level),
             FrameKind::Match(_) => (layout, Some(at), arms, level),
         };
         self.stack.push(frame);
@@ -939,6 +1023,12 @@ impl Pass<'_, '_, '_> {
                     self.finish_braced_arms(*arms, &frame.pieces, frame.pending, open, index);
                 self.top().line_starts += line_starts;
                 self.deliver_arms(kind, head, result, index + 1, true);
+                return;
+            }
+            if let Some(members) = block.members.take() {
+                let result = self.finish_braced_members(&block, open, index);
+                self.top().line_starts += line_starts;
+                self.deliver_members(block.head, members, result, index + 1, true);
                 return;
             }
             if let Some(kind) = block.bindings {
@@ -1203,6 +1293,11 @@ impl Pass<'_, '_, '_> {
             top.pieces.push(Piece::Token(index));
             return Step::Next;
         }
+        if top.raw {
+            self.significant(index);
+            self.top().pieces.push(Piece::Token(index));
+            return Step::Next;
+        }
         // A `when` first after a match's head makes it a `match when`.
         if let FrameKind::Match(found) = &mut top.kind
             && found.phase == MatchPhase::Head
@@ -1281,8 +1376,14 @@ impl Pass<'_, '_, '_> {
                 "as" if in_keyword_position(view, index) && self.claim_as(index) => {
                     return Step::Next;
                 }
-                "with" if in_keyword_position(view, index) => {
-                    self.top().view_level = true;
+                "with" if in_keyword_position(view, index) => return self.with_keyword(index),
+                "object" | "abstract"
+                    if heads_form(view, index)
+                        && in_keyword_position(view, index)
+                        && self.object_follows(index)
+                        && (!legacy_grammar() || self.legacy_let(begins_member)) =>
+                {
+                    return self.open_object(index);
                 }
                 "when" if in_keyword_position(view, index) && self.arm_mark(index) => {
                     return Step::Next;
@@ -1709,6 +1810,7 @@ impl Pass<'_, '_, '_> {
                     | FrameKind::Layout(_)
                     | FrameKind::Match(_)
                     | FrameKind::Scoped(_)
+                    | FrameKind::Object(_)
             )
         ) {
             self.close_top(index);
@@ -1723,6 +1825,7 @@ impl Pass<'_, '_, '_> {
             Some(FrameKind::Layout(_)) => self.close_layout(index),
             Some(FrameKind::Match(_)) => self.close_match(index, None, false),
             Some(FrameKind::Scoped(_)) => self.close_scoped(index),
+            Some(FrameKind::Object(_)) => self.close_object(index),
             _ => unreachable!("only open tails close before their group"),
         }
     }
@@ -1814,6 +1917,7 @@ impl Pass<'_, '_, '_> {
                 failure: None,
                 arms: None,
                 bindings: None,
+                members: None,
             })),
             // Statements may bind patterns, and end their tails at `->`.
             Mode::Cover,
@@ -1897,6 +2001,7 @@ impl Pass<'_, '_, '_> {
                 failure: None,
                 arms: None,
                 bindings: Some(BindingsKind::Let),
+                members: None,
             })),
             // A binding's value reads as an expression, and owns its arrows.
             Mode::Expression,
@@ -2038,6 +2143,388 @@ impl Pass<'_, '_, '_> {
         .map(|(expression, _)| expression)
     }
 
+    /// A `with` in keyword position: an object's body after its header, or
+    /// an update's after its base and any `as Name` alias. The legacy
+    /// grammar's base was everything before the `with`, so it ended the
+    /// open tails before it.
+    fn with_keyword(&mut self, index: usize) -> Step {
+        let view = self.scope.view;
+        if let FrameKind::Object(object) = &mut self.top().kind
+            && object.with.is_none()
+        {
+            object.with = Some(index);
+            self.open_members(index, Members::Object);
+            return Step::Next;
+        }
+        // A lone keyword reads as a name, which the item reports.
+        if !self.form_follows(index) {
+            let top = self.top();
+            top.lambda_head = false;
+            top.pieces.push(Piece::Token(index));
+            return Step::Next;
+        }
+        if legacy_grammar() && self.legacy_with(index) {
+            return Step::Next;
+        }
+        // `Dict as Name with Defs` names the update's base.
+        let top = self.top();
+        let pieces = &top.pieces;
+        let significant = pieces
+            .iter()
+            .rev()
+            .filter(|piece| {
+                !matches!(piece, Piece::Token(at)
+                    if matches!(token(view, *at).kind(), TokenKind::LineStart { .. }))
+            })
+            .take(2)
+            .collect::<Vec<_>>();
+        let alias = match significant.as_slice() {
+            [Piece::Token(name), Piece::Token(as_index)]
+                if matches!(token(view, *as_index).kind(), TokenKind::Name("as"))
+                    && in_keyword_position(view, *as_index) =>
+            {
+                let name_view = subview(view, *name, name + 1);
+                if object_alias_name(name_view) == Some("_") {
+                    Some(None)
+                } else {
+                    object_alias_name(name_view).map(|name| Some(name.to_owned()))
+                }
+            }
+            _ => None,
+        };
+        let alias = match alias {
+            Some(alias) => {
+                // The alias is the update's, not its base's.
+                while let Some(Piece::Token(last)) = top.pieces.last()
+                    && !matches!(token(view, *last).kind(), TokenKind::Name("as"))
+                {
+                    top.pieces.pop();
+                }
+                top.pieces.pop();
+                alias
+            }
+            None => None,
+        };
+        top.lambda_head = false;
+        self.open_members(index, Members::Update { alias });
+        Step::Next
+    }
+
+    /// Reads the `with` at `index` as the legacy grammar's view-level
+    /// dispatch did, returning whether it kept the `with` a token. That
+    /// dispatch searched a view's tokens outside groups, up to a match's
+    /// head, for its first `with`, which took everything before it as its
+    /// base, unless a form led the view that owned what followed it. A
+    /// `with` in a group was a reserved word, or the group's own view's.
+    fn legacy_with(&mut self, index: usize) -> bool {
+        let view = self.scope.view;
+        if self
+            .stack
+            .iter()
+            .skip(1)
+            .any(|frame| matches!(frame.kind, FrameKind::Group { block: None, .. }))
+        {
+            let top = self.top();
+            top.view_level = true;
+            top.lambda_head = false;
+            top.pieces.push(Piece::Token(index));
+            return true;
+        }
+        let owned = self.stack[0].first.is_some_and(|first| {
+            matches!(
+                token(view, first).kind(),
+                TokenKind::Name(
+                    "if" | "try" | "match" | "try_match" | "let" | "object" | "abstract"
+                )
+            )
+        });
+        let searched = !owned
+            && self.stack.iter().skip(1).all(|frame| {
+                !matches!(frame.kind, FrameKind::Match(_) | FrameKind::Group { .. })
+                    && frame.arms().is_none()
+            });
+        if searched {
+            while self.stack.len() > 1 {
+                self.close_top(index);
+            }
+        }
+        false
+    }
+
+    /// Opens the body after the `with` at `index`: braced when a `{`
+    /// follows on its line, otherwise a layout block, hanging when its first
+    /// member follows the `with` on its line. Its members are only kept for
+    /// the declaration parser, which reads them from their views.
+    fn open_members(&mut self, index: usize, members: Members) {
+        let view = self.scope.view;
+        // The legacy grammar skipped line breaks to find the `{`.
+        let next = if legacy_grammar() {
+            self.next_significant(index + 1)
+        } else {
+            Some(index + 1).filter(|next| view.range().contains(*next))
+        };
+        let parent = self.top();
+        if next.is_some_and(|next| {
+            matches!(
+                token(view, next).kind(),
+                TokenKind::Open {
+                    delimiter: Delimiter::Brace,
+                    ..
+                }
+            )
+        }) {
+            parent.pending = Some(Pending::Members(index, members));
+            return;
+        }
+        let context = members_context(view, parent.context, index);
+        let separator = parent.separator;
+        let mut frame = Frame::new(
+            FrameKind::Layout(Box::new(LayoutBlock {
+                head: index,
+                context,
+                anchor: None,
+                hanging: false,
+                statements: Vec::new(),
+                hanging_lines: Vec::new(),
+                boundary: None,
+                failure: None,
+                arms: None,
+                bindings: None,
+                members: Some(members),
+            })),
+            Mode::Expression,
+            context,
+            separator,
+            false,
+            false,
+        );
+        frame.raw = true;
+        self.push(frame);
+    }
+
+    /// A layout block's members, from the `with` at `head` to `end`, read
+    /// by the declaration parser, with the structural parser's checks.
+    fn finish_layout_members(
+        &self,
+        layout: &LayoutBlock,
+        members: &Members,
+        end: usize,
+    ) -> Parse<Vec<ObjectBodyDefinition>> {
+        let view = self.scope.view;
+        let head = layout.head;
+        if layout.anchor.is_none() && *members == Members::Object {
+            return Err(Fail::error(
+                "object `with` requires a body; use `with {}` for an explicit empty body",
+            )
+            .or_at(Some(head)));
+        }
+        if let Some(anchor) = layout.anchor {
+            if !layout.context.accepts_layout_anchor(anchor) {
+                let first = layout.statements.first().copied();
+                return Err(Fail::error(format!(
+                    "nested layout begins at indentation {anchor}; expected more than continuation floor {}",
+                    layout.context.continuation_floor()
+                ))
+                .or_at(first.map_or(Some(head + 1), |_| self.next_significant(head + 1))));
+            }
+            if layout.hanging
+                && let Some(line) = layout.boundary.filter(|line| *line == end)
+                && line_begins_object_member(line_view(structural_view_at(view, head), line))
+            {
+                let indentation = match token(view, line).kind() {
+                    TokenKind::LineStart { indentation } => *indentation,
+                    _ => 0,
+                };
+                return Err(Fail::error(format!(
+                    "hanging `with` member is indented {indentation} spaces; expected sibling indentation {anchor}"
+                ))
+                .or_at(Some(line)));
+            }
+        }
+        let line = view
+            .token_at(head)
+            .and_then(|token| view.line_at_span(token.span()))
+            .unwrap_or(1);
+        let empty = match members {
+            Members::Update { .. } => {
+                "`with` body cannot be empty; use `with {}` for an explicit empty body"
+            }
+            Members::Object => {
+                "object `with` body cannot be empty; use `with {}` for an explicit empty body"
+            }
+        };
+        let body = subview(view, head + 1, end.max(head + 1));
+        let mut diagnostics = Vec::new();
+        let parsed =
+            parse_nonempty_object_body(body, line, empty, layout.context, &mut diagnostics);
+        if diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == Severity::Error)
+        {
+            return Err(Fail::Reported(diagnostics));
+        }
+        Ok(parsed.unwrap_or_default())
+    }
+
+    /// A braced block's members, read by the declaration parser.
+    fn finish_braced_members(
+        &self,
+        block: &Block,
+        open: usize,
+        close: usize,
+    ) -> Parse<Vec<ObjectBodyDefinition>> {
+        let view = self.scope.view;
+        let mut diagnostics = Vec::new();
+        let body = parse_object_body(
+            subview(view, open, close + 1),
+            block.context,
+            &mut diagnostics,
+        );
+        if diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == Severity::Error)
+        {
+            return Err(Fail::Reported(diagnostics));
+        }
+        Ok(body)
+    }
+
+    /// Hands a closed block's members to their owner: an update becomes a
+    /// form piece whose base the item fills in, and an object closes.
+    fn deliver_members(
+        &mut self,
+        head: usize,
+        members: Members,
+        body: Parse<Vec<ObjectBodyDefinition>>,
+        end: usize,
+        ends_with_block: bool,
+    ) {
+        match members {
+            Members::Update { alias } => {
+                let covers = self.scope.covers;
+                let parent = self.top();
+                parent.lambda_head = false;
+                parent.pieces.push(Piece::Form {
+                    head,
+                    end,
+                    form: covers.form(Form {
+                        head,
+                        keyword: "with",
+                        shape: FormShape::With,
+                        result: body.map(|body| SyntaxExpr::With {
+                            base: Box::new(SyntaxExpr::Unit),
+                            alias,
+                            body,
+                        }),
+                        ends_with_block,
+                    }),
+                });
+            }
+            Members::Object => {
+                let FrameKind::Object(object) = &mut self.top().kind else {
+                    unreachable!("an object's members close into it");
+                };
+                object.body = Some(body);
+                self.close_object_ending(end, ends_with_block);
+            }
+        }
+    }
+
+    /// Whether an object follows the `object` or `abstract` at `index`: an
+    /// `abstract` heads one only before `object`, and a lone keyword reads
+    /// as a name.
+    fn object_follows(&self, index: usize) -> bool {
+        let view = self.scope.view;
+        match token(view, index).kind() {
+            TokenKind::Name("abstract") => self.next_significant(index + 1).is_some_and(|next| {
+                matches!(token(view, next).kind(), TokenKind::Name("object"))
+                    && in_keyword_position(view, next)
+            }),
+            _ => self.form_follows(index),
+        }
+    }
+
+    /// Opens an object expression at its `object`, or the `abstract` before
+    /// it.
+    fn open_object(&mut self, index: usize) -> Step {
+        let view = self.scope.view;
+        let parent = self.top();
+        parent.lambda_head = false;
+        let context = form_context(view, parent.context, index);
+        let (separator, arrow) = (parent.separator, parent.nested_arrow());
+        let mut frame = Frame::new(
+            FrameKind::Object(Box::new(ObjectForm {
+                head: index,
+                context,
+                body: None,
+                with: None,
+            })),
+            Mode::Expression,
+            context,
+            separator,
+            arrow,
+            false,
+        );
+        frame.first = Some(index);
+        frame.member_start = true;
+        self.push(frame);
+        // `abstract object` is one head.
+        match token(view, index).kind() {
+            TokenKind::Name("abstract") => match self.next_significant(index + 1) {
+                Some(object) if object == index + 1 => Step::Skip,
+                _ => Step::Next,
+            },
+            _ => Step::Next,
+        }
+    }
+
+    /// Closes the object on top, which ends before `index` without a body:
+    /// its header is an open tail.
+    fn close_object(&mut self, index: usize) {
+        let FrameKind::Object(object) = &self.stack.last().expect("an object is open").kind else {
+            unreachable!("only objects close here");
+        };
+        let head = object.head;
+        self.ends_inline(&form_label("object"), head, index);
+        self.close_object_ending(index, false);
+    }
+
+    /// Closes the object on top, which ends before `end`, into a form piece
+    /// of its parent: its header read from its view, with its body.
+    fn close_object_ending(&mut self, end: usize, ends_with_block: bool) {
+        let view = self.scope.view;
+        let frame = self.stack.pop().expect("an object is open");
+        let FrameKind::Object(object) = frame.kind else {
+            unreachable!("only objects close here");
+        };
+        let head = object.head;
+        let header_end = object.with.map_or(end, |with| with + 1);
+        let header = trim_layout(subview(view, head, header_end.max(head + 1)));
+        let result = parse_object_expression_header(header, object.context)
+            .map_err(Fail::Reported)
+            .and_then(|mut expression| {
+                if let Some(body) = object.body {
+                    expression.body = body?;
+                }
+                Ok(SyntaxExpr::Object(expression))
+            });
+        let covers = self.scope.covers;
+        let parent = self.top();
+        parent.line_starts += frame.line_starts;
+        parent.lambda_head = false;
+        parent.pieces.push(Piece::Form {
+            head,
+            end,
+            form: covers.form(Form {
+                head,
+                keyword: "object",
+                shape: FormShape::Prefix,
+                result,
+                ends_with_block,
+            }),
+        });
+    }
+
     /// Opens the bindings of the `where` at `index`, which ends the body on
     /// top: a braced block when a `{` follows it on its line, otherwise a
     /// layout block, hanging when its first binding follows it on its line.
@@ -2071,6 +2558,7 @@ impl Pass<'_, '_, '_> {
                 failure: None,
                 arms: None,
                 bindings: Some(BindingsKind::Where),
+                members: None,
             })),
             Mode::Expression,
             context,
@@ -2152,6 +2640,13 @@ impl Pass<'_, '_, '_> {
         let FrameKind::Layout(mut layout) = frame.kind else {
             unreachable!("only layout blocks close here");
         };
+        if let Some(members) = layout.members.take() {
+            let result = self.finish_layout_members(&layout, &members, index);
+            self.top().line_starts += line_starts;
+            let ends_with_block = !self.ends_inline(&form_label("with"), layout.head, index);
+            self.deliver_members(layout.head, members, result, index, ends_with_block);
+            return;
+        }
         if let Some(kind) = layout.bindings {
             let multiline = layout.anchor.is_some()
                 && (!layout.hanging
@@ -2700,6 +3195,7 @@ impl Pass<'_, '_, '_> {
                 failure: None,
                 arms: Some(Box::new(arms)),
                 bindings: None,
+                members: None,
             })),
             // An arm's head and guards may bind patterns.
             Mode::Cover,
@@ -2900,10 +3396,14 @@ impl Pass<'_, '_, '_> {
         // A subject that never met its `as` but holds a `with` was likely
         // written with `with` before the arms.
         let view = self.scope.view;
-        let with = frame.pieces.iter().any(|piece| {
-            matches!(piece, Piece::Token(index)
-                if matches!(token(view, *index).kind(), TokenKind::Name("with"))
-                    && in_keyword_position(view, *index))
+        let covers = self.scope.covers;
+        let with = frame.pieces.iter().any(|piece| match piece {
+            Piece::Token(index) => {
+                matches!(token(view, *index).kind(), TokenKind::Name("with"))
+                    && in_keyword_position(view, *index)
+            }
+            Piece::Form { form, .. } => covers.form_shape(*form).0 == FormShape::With,
+            Piece::Group { .. } => false,
         });
         let result = self.finish_match(*found, frame.pending, arms, with);
         let covers = self.scope.covers;

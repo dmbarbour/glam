@@ -332,7 +332,8 @@ production keeps the old parser until the oracle agrees.
   Native keyword frames started 2026-10-16
   ([Native keyword frames 2026-10-16](#native-keyword-frames-2026-10-16)):
   `parser-keyword-frames-conditionals`, `parser-keyword-frames-bindings`
-  and `parser-keyword-frames-layout` done.
+  and `parser-keyword-frames-layout` done, and
+  `parser-keyword-frames-suffixes` on 2026-10-17.
 - `parser-scope-analysis`: added 2026-10-15; not started.
 - `parser-constant-factors`: added 2026-10-16; not started.
 - `parser-grammar-retirement`: not started. Chumsky still parses the
@@ -914,7 +915,8 @@ beside group frames:
    `try_match` arms, braced and layout. (Multi-line `let` moved to the
    suffix slice on 2026-10-16, with the rest of `let`.)
 4. `parser-keyword-frames-suffixes`: `let`, `using`, `where`, `with` and
-   `object`. Paused on 2026-10-16 for the
+   `object`. Done 2026-10-17 in three parts; see the "as built" notes
+   below. Paused on 2026-10-16 for the
    [grammar review](GrammarReview_2026-10-16.md), whose current items were
    settled on 2026-10-17; its sequencing section says how the remaining
    steps follow it. The pass checks the review's rules
@@ -1176,6 +1178,45 @@ first part of the suffix slice; `where`, `with` and `object` remain.
   debug-build check.
 - **Depth:** `where`s nested through groups, `let` bindings and braced
   statements parse 2,000 deep without recursion.
+
+**`parser-keyword-frames-suffixes`, `with` and `object` (2026-10-17).** The
+last part.
+- **Bodies.** A `with` body, an object's or an update's, is a block,
+  braced or layout, whose tokens the pass only keeps and whose lines it
+  judges by the block's anchor; its groups are deferred and never
+  interpreted. When it closes, the declaration parser reads its members
+  from their views (`parse_object_body`), so the member grammar stays the
+  one module and object declarations share. The structural parser's checks
+  on the anchor and a hanging block's next line are kept.
+- **Updates.** A `with` that no object's header takes closes into a form
+  piece (`FormShape::With`). The item interpreter takes its base from the
+  chain before it at its level, as a postfix `if` takes its result, and
+  continues with what follows, so an operator resumes after the body. An
+  `as Name` before the `with` is the update's alias.
+- **Objects.** An object is a frame whose header is an open tail until its
+  `with`; its header is read from its view, as the structural parser read
+  it (`parse_object_expression_header`).
+- **Routing and the oracle.** `parse_expression_extent` sends every view
+  to the term parser but in the legacy grammar, whose view-level dispatch
+  still reads `with` and `object`; the oracle's reference reads a view
+  holding one that way (`dispatched_structurally`). The legacy reading
+  reads a `with` as that dispatch did (`legacy_with`): one in a plain group
+  stays a reserved word, and one that a view's search reached, with no
+  group or match between them and no form leading the view, closes every
+  frame before it and takes the whole item as its base. The generated
+  expressions found the search crossing a layout `do` (`do⏎ "s" with{}`).
+  Breaking the update frame on purpose fails ten tests under the oracle
+  sweep.
+- **Intended change** (`tail-forms-end-at-separators`, which makes `with`
+  no separator): a `with` continues an open tail, so `\y -> y with {…}`
+  updates `y`, and `if c then a else b with {…}` updates `b`.
+- **Retired:** a floor test that pinned the structural parser's yield at a
+  dedent, as in `outer with …⏎ tail`. The term parser reports what follows
+  the dedent, as the tail rule says.
+- **Not linear yet:** each nested body's members are walked again by their
+  own parse, one Rust stack level per body. Update bodies nested 200 deep
+  parse quickly (`nested_update_bodies_parse`); a pieces-based member
+  reader would remove the rest, if profiles ask for it.
 
 ## Verification
 

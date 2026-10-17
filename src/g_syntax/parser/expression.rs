@@ -57,11 +57,6 @@ impl InfixChain {
         }
     }
 
-    #[cfg(test)]
-    pub(in crate::g_syntax::parser) fn single_expression(&self) -> Option<&SyntaxExpr> {
-        self.rest.is_empty().then_some(&self.first)
-    }
-
     pub(in crate::g_syntax::parser) fn append(
         &mut self,
         operator: SyntaxOperator,
@@ -1278,7 +1273,7 @@ pub(in crate::g_syntax::parser) mod term_oracle {
     use std::cell::{Cell, RefCell};
 
     use super::super::expression_context::ParsedExpression;
-    use super::super::structural::{keyword_head, parse_expression_extent};
+    use super::super::structural::{dispatched_structurally, parse_expression_extent};
     use super::super::term::{Fail, parse_term_chain, with_legacy_grammar};
     use super::{
         Diagnostic, ExpressionContext, InfixChain, TokenRange, TokenView, parse_grammar_chain_view,
@@ -1316,16 +1311,16 @@ pub(in crate::g_syntax::parser) mod term_oracle {
 
     /// The grammar's parse of `view`, without comparing the expressions it
     /// parses through the term parser, which reads the legacy grammar there.
-    /// The grammar never read a `let`: view-level dispatch handed a view led
-    /// by one to its structural parser, as it still does in the legacy
-    /// grammar.
+    /// The grammar never read a `let`, an object or a `with` body:
+    /// view-level dispatch handed a view holding one to its structural
+    /// parser, as it still does in the legacy grammar.
     fn reference(
         view: TokenView<'_, '_>,
         context: ExpressionContext,
     ) -> Result<InfixChain, Vec<Diagnostic>> {
         suspended(|| {
             with_legacy_grammar(|| {
-                if keyword_head(view, "let").is_some() {
+                if dispatched_structurally(view) {
                     parse_expression_extent(view, context.complete())
                         .map(ParsedExpression::into_chain)
                 } else {

@@ -4,7 +4,7 @@ use crate::g_syntax::{
 };
 
 use super::expression_context::ExpressionContext;
-use super::input::{TokenRange, parse_expression_fragment};
+use super::input::parse_expression_fragment;
 use super::parse_source;
 use super::structural::parse_expression_extent;
 
@@ -79,21 +79,19 @@ fn contextual_expression_reports_its_absolute_token_end() {
 }
 
 #[test]
-fn contextual_expression_leaves_an_unrecognized_dedent_boundary_unconsumed() {
-    parse_expression_fragment(b"outer with\n  member = value\n tail", |view| {
-        let parsed =
-            parse_expression_extent(view, ExpressionContext::for_fragment(view).may_yield())?;
-        assert!(matches!(parsed.expression(), Some(SyntaxExpr::With { .. })));
-        let tail = view
-            .subview(
-                TokenRange::new(parsed.end(), view.range().end())
-                    .expect("the yielded tail is an ordered token range"),
-            )
-            .expect("the yielded tail remains inside the expression view");
-        assert_eq!(tail.source_text(), Some("tail"));
-        Ok(())
-    })
-    .unwrap();
+fn an_argument_cannot_follow_a_with_bodys_dedent() {
+    // After a body's dedent only an operator or a keyword may resume the
+    // expression (Syntax.md "Tail Position").
+    let diagnostics = super::structural::parse_compound_expression_fragment(
+        b"outer with\n  member = value\n tail",
+    )
+    .expect_err("an argument after the dedent is an error");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("`tail`")),
+        "{diagnostics:#?}"
+    );
 }
 
 #[test]

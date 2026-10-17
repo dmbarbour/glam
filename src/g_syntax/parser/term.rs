@@ -1284,6 +1284,50 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             || self.where_at(offset)
     }
 
+    /// Whether the piece at `offset` is an update's body.
+    fn with_at(&self, offset: usize) -> bool {
+        matches!(self.peek_at(offset), Some(Piece::Form { form, .. })
+            if self.scope.covers.form_shape(*form).0 == FormShape::With)
+    }
+
+    /// An update's body (`FormShape::With`), whose base is the chain before
+    /// it at its level; the legacy grammar's was the whole item before it.
+    /// The update is the operand that what follows continues.
+    fn with_update(&mut self, levels: &mut Vec<Level>) -> Parse<()> {
+        let Some(Piece::Form { form, .. }) = self.peek() else {
+            unreachable!("with_update is called on an update's form");
+        };
+        let form = self.scope.covers.take_form(*form);
+        self.position += 1;
+        if legacy_grammar() && levels.len() > 1 {
+            let chain = self.close_levels(std::mem::take(levels))?;
+            levels.push(Level {
+                chain,
+                lambda: None,
+            });
+        }
+        let level = levels.last_mut().expect("an item always has a level");
+        let chain = std::mem::take(&mut level.chain);
+        let anchors = chain.anchors.clone();
+        let base = chain
+            .finish(self.scope.context)
+            .and_then(|chain| chain.resolve().map_err(Fail::error))
+            .map_err(|fail| fail.or_at(Some(form.head)))?;
+        let SyntaxExpr::With { alias, body, .. } = form.result? else {
+            unreachable!("an update's form holds an update");
+        };
+        level.chain = Chain {
+            anchors,
+            ..Chain::default()
+        };
+        level.chain.push_operand(Term::Expr(SyntaxExpr::With {
+            base: Box::new(base),
+            alias,
+            body,
+        }));
+        Ok(())
+    }
+
     /// Whether the piece at `offset` is a `where` that the body around the
     /// expression takes; a pattern has none. The legacy grammar's view-level
     /// dispatch found every one.
@@ -1448,10 +1492,16 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                 .expect("an item always has a level")
                 .chain
                 .push_operand(head);
-            // After an operand: the end of the item, a postfix `if`, a
-            // pattern operator in cover mode, or an infix operator, which
-            // resumes the chain at its indentation when line-led.
-            let (breaks, indentation) = self.line_starts_at(0);
+            // After an operand: the end of the item, an update's body, a
+            // postfix `if`, a pattern operator in cover mode, or an infix
+            // operator, which resumes the chain at its indentation when
+            // line-led.
+            let (mut breaks, mut indentation) = self.line_starts_at(0);
+            while self.with_at(breaks) {
+                self.position += breaks;
+                self.with_update(&mut levels)?;
+                (breaks, indentation) = self.line_starts_at(0);
+            }
             let Some(piece) = self.peek_at(breaks) else {
                 break 'operand;
             };
@@ -1923,6 +1973,10 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                     form.keyword
                 ))
                 .or_at(Some(form.head)));
+            }
+            FormShape::With => {
+                return Err(Fail::error("with expression requires a base expression")
+                    .or_at(Some(form.head)));
             }
             // A body reads its `where` before its items do.
             FormShape::Where => {

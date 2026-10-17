@@ -206,11 +206,6 @@ impl ParsedExpression {
         self.end
     }
 
-    #[cfg(test)]
-    pub(super) fn expression(&self) -> Option<&SyntaxExpr> {
-        self.expression.single_expression()
-    }
-
     pub(super) fn into_chain(self) -> InfixChain {
         self.expression
     }
