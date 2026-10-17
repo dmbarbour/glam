@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::ops::{Deref, DerefMut};
 
 use super::super::*;
@@ -52,6 +54,39 @@ impl ResolverContext {
         binding
     }
 
+    /// The first of `pending` whose name a local or an earlier pending name
+    /// already binds, with that binder. One name scans the locals; more are
+    /// indexed, so a group of k names costs O(L + k), not O(k·(L + k)).
+    fn first_shadowing<'a>(
+        &'a self,
+        pending: &'a [LocalName],
+    ) -> Option<(&'a LocalName, &'a LocalName)> {
+        if let [local] = pending {
+            let canonical = local.canonical.as_deref()?;
+            return self
+                .locals
+                .iter()
+                .find(|existing| existing.canonical.as_deref() == Some(canonical))
+                .map(|existing| (local, existing));
+        }
+        let mut binders = HashMap::<&str, &LocalName>::new();
+        for existing in &self.locals {
+            if let Some(canonical) = existing.canonical.as_deref() {
+                binders.entry(canonical).or_insert(existing);
+            }
+        }
+        pending.iter().find_map(|local| {
+            let canonical = local.canonical.as_deref()?;
+            match binders.entry(canonical) {
+                Entry::Occupied(existing) => Some((local, *existing.get())),
+                Entry::Vacant(vacant) => {
+                    vacant.insert(local);
+                    None
+                }
+            }
+        })
+    }
+
     pub(in crate::g_syntax) fn extend_source_bindings<'a>(
         &mut self,
         names: impl IntoIterator<Item = &'a str>,
@@ -62,24 +97,14 @@ impl ResolverContext {
             .map(local_name_metadata)
             .collect::<Vec<_>>();
 
-        for (index, local) in pending.iter().enumerate() {
-            let Some(canonical) = local.canonical.as_deref() else {
-                continue;
-            };
-            let conflict = self
-                .locals
-                .iter()
-                .chain(&pending[..index])
-                .find(|existing| existing.canonical.as_deref() == Some(canonical));
-            if let Some(existing) = conflict {
-                return Err(Diagnostic::error(
-                    line,
-                    format!(
-                        "local `{}` shadows existing local `{}`; local name shadowing is not allowed",
-                        local.raw, existing.raw
-                    ),
-                ));
-            }
+        if let Some((local, existing)) = self.first_shadowing(&pending) {
+            return Err(Diagnostic::error(
+                line,
+                format!(
+                    "local `{}` shadows existing local `{}`; local name shadowing is not allowed",
+                    local.raw, existing.raw
+                ),
+            ));
         }
 
         Ok(pending

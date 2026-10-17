@@ -155,6 +155,40 @@ family chain 200
 family defs_unused 200
 family chain_refl 200
 family chain_where 200
+
+# `let` is no performance target, but many locals must not grow
+# superlinearly (`parser-scope-analysis`): nested `let` expressions, one
+# wide group, many body `let`s, and many file `let`s before as many
+# definitions.
+chain_let() {
+  local n=$1 i
+  printf 'language g0\nlast = let x1 = 1 in'
+  for ((i = 2; i <= n; i++)); do printf ' let x%d = x%d + 1 in' "$i" "$((i - 1))"; done
+  printf ' x%d\nasm.result = if last == %d then "ok" else "bad"' "$n" "$n"
+}
+let_wide() {
+  local n=$1 i
+  printf 'language g0\nlast = let { x1 = 1'
+  for ((i = 2; i <= n; i++)); do printf '; x%d = x%d + 1' "$i" "$((i - 1))"; done
+  printf ' } in x%d\nasm.result = if last == %d then "ok" else "bad"' "$n" "$n"
+}
+body_lets() {
+  local n=$1 i
+  printf 'language g0\nobject o with\n  let x1 = 1\n'
+  for ((i = 2; i <= n; i++)); do printf '  let x%d = x%d + 1\n' "$i" "$((i - 1))"; done
+  printf '  last = x%d\nasm.result = if o.last == %d then "ok" else "bad"' "$n" "$n"
+}
+file_lets() {
+  local n=$1 i
+  printf 'language g0\nlet x1 = 1\n'
+  for ((i = 2; i <= n; i++)); do printf 'let x%d = x%d + 1\n' "$i" "$((i - 1))"; done
+  for ((i = 1; i <= n; i++)); do printf 'y%d = x%d\n' "$i" "$i"; done
+  printf 'asm.result = if y%d == %d then "ok" else "bad"' "$n" "$n"
+}
+family chain_let 200
+family let_wide 200
+family body_lets 200
+family file_lets 200
 # Workers follow the same producer chain as the foreground, so a scheduling
 # defect shows as superlinear growth here (`perf-worker-scaling`).
 family chain 200 4
