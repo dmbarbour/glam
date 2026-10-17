@@ -522,6 +522,19 @@ pub(in crate::g_syntax) fn object_body_scope_resolved(
     } else {
         parent.local_floor
     };
+    // Only `alias self` makes the object `self`; otherwise `self` keeps its
+    // host's meaning.
+    let (self_final_defs, self_prior_defs) = if localized {
+        (
+            object_final_defs.duplicate_in(access),
+            object_prior_defs.duplicate_in(access),
+        )
+    } else {
+        (
+            parent.self_final_defs.duplicate_in(access),
+            parent.self_prior_defs.duplicate_in(access),
+        )
+    };
 
     NameScope {
         final_defs,
@@ -531,6 +544,8 @@ pub(in crate::g_syntax) fn object_body_scope_resolved(
         object_alias,
         object_final_defs: Some(object_final_defs.duplicate_in(access)),
         object_prior_defs: Some(object_prior_defs),
+        self_final_defs,
+        self_prior_defs,
         local_floor,
         reflection: reflection_boundary.map(|demand| ReflectionBoundary { demand }),
         parent: Some(Box::new(parent)),

@@ -233,7 +233,10 @@ mod resolver_context_tests {
                 vec![SyntaxKeyExpr::Atom("base".to_owned())],
                 Box::new(SyntaxExpr::Unit),
             )),
-            alias: None,
+            alias: Some(Alias {
+                name: "self".to_owned(),
+                line: 1,
+            }),
             body: vec![ObjectBodyDefinition {
                 line: 1,
                 kind: ObjectBodyDefinitionKind::Definition(DefinitionDecl {
@@ -536,6 +539,10 @@ pub(in crate::g_syntax) struct NameScope<V = Value> {
     pub(in crate::g_syntax) object_alias: Option<String>,
     pub(in crate::g_syntax) object_final_defs: Option<V>,
     pub(in crate::g_syntax) object_prior_defs: Option<V>,
+    /// What `self` and `_self` name: the innermost scope aliased `self`,
+    /// written or by default, which a module is.
+    pub(in crate::g_syntax) self_final_defs: V,
+    pub(in crate::g_syntax) self_prior_defs: V,
     /// Where the locals a bare name may read begin: a localized body's own,
     /// so the locals outside it take `^`, as its host's names do.
     pub(in crate::g_syntax) local_floor: usize,
@@ -618,6 +625,8 @@ impl NameScope<ResolvedRoot> {
                 .object_prior_defs
                 .as_ref()
                 .map(|root| root.duplicate_in(access)),
+            self_final_defs: self.self_final_defs.duplicate_in(access),
+            self_prior_defs: self.self_prior_defs.duplicate_in(access),
             reflection: self.reflection.as_ref().map(|boundary| ReflectionBoundary {
                 demand: boundary.demand.duplicate_in(access),
             }),
@@ -701,10 +710,12 @@ impl NameScope<Value> {
             final_defs: context.final_defs(access),
             prior_defs: access.duplicate_value(&visible_definitions),
             module_final_defs: context.final_defs(access),
-            module_prior_defs: visible_definitions,
+            module_prior_defs: access.duplicate_value(&visible_definitions),
             object_alias: None,
             object_final_defs: None,
             object_prior_defs: None,
+            self_final_defs: context.final_defs(access),
+            self_prior_defs: visible_definitions,
             local_floor: 0,
             reflection: Some(reflection),
             parent: None,
@@ -734,6 +745,8 @@ impl NameScope<Value> {
                 .object_prior_defs
                 .as_ref()
                 .map(|value| ResolvedRoot::Provided(access.duplicate_value(value))),
+            self_final_defs: ResolvedRoot::Provided(access.duplicate_value(&self.self_final_defs)),
+            self_prior_defs: ResolvedRoot::Provided(access.duplicate_value(&self.self_prior_defs)),
             reflection: self.reflection.as_ref().map(|boundary| ReflectionBoundary {
                 demand: ResolvedRoot::Provided(access.duplicate_value(&boundary.demand)),
             }),

@@ -4871,7 +4871,7 @@ fn module_definitions_can_use_path_list_targets() {
 #[test]
 fn object_definitions_can_use_expression_indexed_targets() {
     let parsed = parse(
-        "language g0\nidx = 42\nobject hello with\n  alias _\n  .[idx] = \"Hello\"\n  text = self.[idx] ++ \", World!\"\nasm.result = hello.text\n",
+        "language g0\nidx = 42\nobject hello with\n  alias h\n  .[idx] = \"Hello\"\n  text = h.[idx] ++ \", World!\"\nasm.result = hello.text\n",
     );
     let context = CompileContext::from_module_path(["assembly"]);
     let lowered = lower_parsed_source(parsed, &context);
@@ -8067,4 +8067,48 @@ fn file_lets_follow_local_unused_warning_rules() {
         .map(|diagnostic| (diagnostic.line, diagnostic.message.as_str()))
         .collect::<Vec<_>>();
     assert_eq!(warnings, [(2, "unused local `unused`")]);
+}
+
+/// Only `alias self`, written or by default, binds `self`: a module, an
+/// object by default, and a `using` scope. Under `alias _` or a named
+/// alias, `self` keeps its host's meaning, so `alias _` leaves no way to
+/// reference the body.
+#[test]
+fn self_names_the_innermost_scope_aliased_self() {
+    for (source, expected) in [
+        (
+            "language g0\nx = \"module\"\nasm.result = self.x\n",
+            "module",
+        ),
+        (
+            "language g0\nx = \"module\"\nd = {x:\"dict\"} with { y = self.x }\nasm.result = d.y\n",
+            "module",
+        ),
+        (
+            "language g0\nx = \"module\"\nd = {x:\"dict\"} with { alias self; y = self.x }\nasm.result = d.y\n",
+            "dict",
+        ),
+        (
+            "language g0\nx = \"module\"\nobject o with\n  alias named\n  x = \"object\"\n  y = self.x ++ named.x\nasm.result = o.y\n",
+            "moduleobject",
+        ),
+        (
+            "language g0\nx = \"module\"\nobject o with\n  x = \"object\"\n  object p with\n    alias _\n    y = self.x\nasm.result = o.p.y\n",
+            "object",
+        ),
+        (
+            "language g0\nx = \"module\"\nd = {x:\"dict\"} with { y = _self.x }\nasm.result = d.y\n",
+            "module",
+        ),
+        (
+            "language g0\nx = \"module\"\nasm.result = using {x:\"dict\"} in self.x\n",
+            "dict",
+        ),
+    ] {
+        assert_eq!(
+            assembly_result_text(source),
+            expected.as_bytes(),
+            "{source}"
+        );
+    }
 }

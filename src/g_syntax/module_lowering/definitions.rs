@@ -281,7 +281,9 @@ pub(in crate::g_syntax) fn definition_target_scope_resolved(
     scope.final_defs = visible_definitions.duplicate_in(access);
     scope.prior_defs = visible_definitions.duplicate_in(access);
     scope.module_final_defs = visible_definitions.duplicate_in(access);
-    scope.module_prior_defs = visible_definitions;
+    scope.module_prior_defs = visible_definitions.duplicate_in(access);
+    scope.self_final_defs = visible_definitions.duplicate_in(access);
+    scope.self_prior_defs = visible_definitions;
     scope
 }
 

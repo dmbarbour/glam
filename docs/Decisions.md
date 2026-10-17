@@ -701,9 +701,10 @@ maps the short names used here to file names.
     of a `with` body (object, `extend` or update), at most once. It binds
     `Name` and `_Name`; `alias _Name` marks it as possibly unused. `alias
     self` localizes the body's names: a bare `foo` is `self.foo`, and the
-    host's names and locals take `^name` or `^(Expr)`. `alias _` states
-    that there is none, with no way to reference the object, and leaves
-    names to the host. Defaults: `self` for objects, `_` for updates.
+    host's names and locals take `^name` or `^(Expr)`. Only `alias self`
+    binds `self`; under a named alias or `alias _`, `self` keeps its host's
+    meaning. `alias _` states that there is none, with no way to reference
+    the object, and leaves names to the host. Defaults: `self` for objects, `_` for updates.
     A module has `alias self` too, so `self.foo` reaches its namespace
     from its own scope, and `module` is a reserved alias for it from any
     scope. `alias` is reserved in `g0`, and headers lose `as Name`.
@@ -733,7 +734,8 @@ maps the short names used here to file names.
   - `as` no longer continues an expression, so an update needs no
     parentheses in a match's subject.
   - Before this, a named object alias, even `self`, left bare names to the
-    host, an object's `as _` localized them, and lexical locals outranked
+    host, an object's `as _` localized them, `self` named the innermost
+    object or update whatever its alias, and lexical locals outranked
     localized names everywhere, `using` included: drift from the intended
     reading, which this restores.
   - A `let` macro, or any `let`, that reads a global waits on the final

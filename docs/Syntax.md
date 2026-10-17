@@ -903,10 +903,11 @@ In this notation, a '.' prefix is required when first path element is expression
 
 Users may also name the dictionary with an `alias Name` declaration as the
 body's first member, or even support object scope via `alias self`. The
-default for an update is `alias _`, which names nothing. As with objects,
-users can reference prior definitions via `_name` prefix, and final
-definitions via `name`. But, for dictionaries, 'final' extends only to the
-current update because there is no specification to rebuild the dictionary.
+default for an update is `alias _`, which names nothing, so `self` there is
+the host's. As with objects, users can reference prior definitions via
+`_name` prefix, and final definitions via `name`. But, for dictionaries,
+'final' extends only to the current update because there is no specification
+to rebuild the dictionary.
 
         Dict with
             alias d
@@ -1438,7 +1439,10 @@ For cases that require too many escapes, a body may begin with an `alias
 Name` declaration, which names the object locally instead; names then resolve
 in the host scope. The default for objects is `alias self`, which is why we
 have the default local names and `^` escapes, while `alias _` names nothing
-and also resolves names in the host scope. In some contexts, it is more
+and also resolves names in the host scope. `self` is simply the name that
+`alias self` binds: under a named alias or `alias _`, `self` and `_self` keep
+their host's meaning, so `alias _` leaves no way to reference the body. In
+some contexts, it is more
 convenient to use a local name so we don't need escapes. An alias may only be
 the first member of an object, `extend` or update body, and only once; the
 same declaration serves all three. A module, too, has `alias self`, so

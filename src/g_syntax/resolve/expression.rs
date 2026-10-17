@@ -425,6 +425,19 @@ pub(in crate::g_syntax) fn dict_with_body_scope(
             parent.prior_defs.duplicate_in(access),
         )
     };
+    // Only `alias self` makes the update `self`; otherwise `self` keeps
+    // its host's meaning.
+    let (self_final_defs, self_prior_defs) = if localized {
+        (
+            final_defs.duplicate_in(access),
+            prior_defs.duplicate_in(access),
+        )
+    } else {
+        (
+            parent.self_final_defs.duplicate_in(access),
+            parent.self_prior_defs.duplicate_in(access),
+        )
+    };
 
     NameScope {
         final_defs,
@@ -434,6 +447,8 @@ pub(in crate::g_syntax) fn dict_with_body_scope(
         object_alias,
         object_final_defs,
         object_prior_defs,
+        self_final_defs,
+        self_prior_defs,
         local_floor,
         reflection: None,
         parent: Some(Box::new(parent)),
@@ -1297,13 +1312,7 @@ pub(in crate::g_syntax) fn lower_name_expr_resolved(
                     .unwrap_or_else(|| context.unavailable_origin(access)),
             );
         }
-        "self" => {
-            return scope
-                .object_final_defs
-                .as_ref()
-                .unwrap_or(&scope.module_final_defs)
-                .expr(access);
-        }
+        "self" => return scope.self_final_defs.expr(access),
         _ => {}
     }
 
@@ -1360,13 +1369,7 @@ pub(in crate::g_syntax) fn lower_prior_name_expr_resolved(
 
     match name {
         "module" => return Ok(scope.module_prior_defs.expr(access)),
-        "self" => {
-            return Ok(scope
-                .object_prior_defs
-                .as_ref()
-                .unwrap_or(&scope.module_prior_defs)
-                .expr(access));
-        }
+        "self" => return Ok(scope.self_prior_defs.expr(access)),
         _ => {}
     }
 
