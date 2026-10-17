@@ -38,6 +38,11 @@ declare foo, bar            # names expected to be defined, e.g. by a mixin;
 assume foo, bar             # names defined outside the journal (`:=` may
                             # override them; `=` would conflict)
 unique Red, Green, Blue     # introduce unique atoms based on namespace path
+
+# File-private bindings: not module entries; each group recursive within
+# itself and seen only by the declarations after it (and their macros).
+let helper x = x + 1        # a local: no global or local may share its name
+let { a = b; b = 1 }        # braced, or a hanging layout group
  
 # Multi-line: continuation lines must be indented; closing }]) may sit at col 0.
 big_thing = f arg1
@@ -614,7 +619,8 @@ using Dict do Body          # sugar for: using Dict in do Body
 ## Source Macros
 
 ```
-@macro_name input           # selects prior _module.macro_name
+@macro_name input           # selects prior _module.macro_name, or a file's
+                            #   earlier `let macro_name`
 @table.create input         # joint static paths only
 @grammar input              # object/dict may expose its primary effect as `eff`
 @outer @inner input         # inner expands first; each original call runs once

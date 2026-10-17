@@ -155,6 +155,15 @@ impl FileNameAnalysis {
             DeclarationKind::Definition(definition) => {
                 self.visit_definition(definition, line, scope, locals);
             }
+            // A file's `let` names are locals of the declarations after it.
+            DeclarationKind::Let(bindings) => {
+                for (name, _) in bindings {
+                    self.push_source_local(name, line, scope, locals);
+                }
+                for (_, value) in bindings {
+                    self.visit_expr(value, line, scope, locals);
+                }
+            }
             DeclarationKind::Language(_) | DeclarationKind::Unknown => {}
         }
     }

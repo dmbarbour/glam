@@ -193,7 +193,7 @@ The active `g0` table is:
 
 | Role | Keywords |
 | --- | --- |
-| declaration heads | `language`, `import`, `declare`, `assume`, `unique`, `object`, `abstract object`, `extend`, `alias` |
+| declaration heads | `language`, `import`, `declare`, `assume`, `unique`, `object`, `abstract object`, `extend`, `alias`, `let` |
 | expression forms | `abstract_global_path`, `let`, `where`, `using`, `do`, `if`, `match`, `try`, `try_match`, `object`, `abstract object` |
 | do statements | `declare` |
 | expression operators | `and`, `or` |
@@ -267,6 +267,31 @@ When defining names, we'll distinguish introductions versus overrides. An introd
 Users refer to prior versions of names via `_name`, i.e. `_` prefix. This applies consistently across modules and objects. A local has no prior version, so `_name` is an error where a local `name` is in scope; one name has one meaning in a file, and `_name` cannot reach past the local to a definition.
 
 The compiler enforces explicit overrides by implicit assertions analogous to: `name = assert (_name == {}) Expr` or `name := assert(_name <> {}) Expr` (where `{}` is the 'undefined' value). As an escape hatch, I propose a non-observing `name ::= \ prior -> Expr`. This also serves as an in-place update, i.e. `name ::= Update`. Users have more freedom with `::=`. 
+
+### File-Private Bindings
+
+A file may hold `let` declarations: private helpers that are not module
+entries. A `let` declaration has the bindings of a `let` expression: one
+binding, a hanging layout group whose first binding sets the column, a braced
+group, or a group on the indented lines after `let`:
+
+        let greeting = "Hello"
+        let
+            twice f x = f (f x)
+            shout s = s ++ "!"
+
+Each group is mutually recursive within itself and visible only to the
+declarations after it. The compiler lowers a group once where it stands,
+against the module's final self and the definitions visible there, so `_name`
+in it reads the prior definition at that point, and the declarations after it
+share its values. A `let` is compiler state rather than a module entry, since
+a compiler may do only what a user-defined front end can; `module.greeting`
+never reaches it.
+
+Its names are locals, and a name has one meaning in a file: no definition or
+use of a global, nor another local, in the file may share them. Within a
+localized body, such as an object's, a file's `let` is `^name`, as the
+module's own names are. A macro invocation sees the `let`s before it.
 
 ### Declarations (Tentative)
 
@@ -613,7 +638,8 @@ Because `.r` is concise, users can directly write `.r f <! op1 <! op2`. No need 
         @macro.path
 
 This selects `_module.macro` or `_module.macro.path` from the module
-definitions visible before the declaration containing the invocation. The
+definitions visible before the declaration containing the invocation, or, when
+a file's `let macro` precedes it, that binding or its `path`. The
 macro definition should express an effectful, local source rewrite. It reads
 source elements to its right, writes replacement elements, and disappears
 before ordinary expression parsing.

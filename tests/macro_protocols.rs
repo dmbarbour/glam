@@ -121,3 +121,40 @@ fn protocol_macros_retain_their_active_case_explanations() {
         .replace("field version u8", "field version word");
     assert_protocol_failure(&packet, "packet", "a packet field type");
 }
+
+/// A file's `let` before an invocation names a file-private macro, which
+/// needs no module entry, and its expansion reads the `let`s before it.
+#[test]
+fn file_let_macro_expands_with_the_lets_before_it() {
+    let source = concat!(
+        "language g0\n",
+        "import 'std\n",
+        "meta.macro.env = {}\n",
+        "let greeting = \"Hello\"\n",
+        "let greet =\n",
+        "      .read.text \"(\" =>> .read.text \")\" =>> .read.end =>>\n",
+        "      .write.text \"greeting\" =>> .write.sep =>> .write.text \"++\" =>> .write.sep =>>\n",
+        "      .write.data \", World!\"\n",
+        "asm.result = @greet()\n",
+    );
+    let assembler = Assembler::default();
+    let built = assembler
+        .module(["macro_protocol", "file_let"])
+        .script("g", source)
+        .build()
+        .unwrap_or_else(|error| panic!("a file-let macro should compile: {error:#?}"));
+    assert!(
+        built.diagnostics().is_empty(),
+        "a macro use is a use: {:#?}",
+        built.diagnostics()
+    );
+    let module = built.into_value();
+    assert_eq!(
+        binary_at(&assembler, &module, "asm.result").expect("the expansion should evaluate"),
+        b"Hello, World!".as_slice(),
+    );
+    assert!(
+        binary_at(&assembler, &module, "greeting").is_err(),
+        "a file `let` is no module entry"
+    );
+}

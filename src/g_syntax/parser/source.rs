@@ -57,6 +57,8 @@ pub(in crate::g_syntax) struct StagedSourceParser<'source> {
     diagnostics: Vec<Diagnostic>,
     next_declaration: usize,
     validate_language: bool,
+    /// The file's `let` names that macro invocations selected.
+    file_macro_uses: Vec<String>,
 }
 
 impl<'source> StagedSourceParser<'source> {
@@ -72,6 +74,7 @@ impl<'source> StagedSourceParser<'source> {
                     )],
                     next_declaration: 0,
                     validate_language: false,
+                    file_macro_uses: Vec::new(),
                 };
             }
         };
@@ -89,7 +92,14 @@ impl<'source> StagedSourceParser<'source> {
             diagnostics,
             next_declaration: 0,
             validate_language,
+            file_macro_uses: Vec::new(),
         }
+    }
+
+    /// The file's `let` names that macro invocations selected, which their
+    /// expansions no longer show.
+    pub(in crate::g_syntax) fn file_macro_uses(&self) -> &[String] {
+        &self.file_macro_uses
     }
 
     #[cfg(test)]
@@ -160,6 +170,7 @@ impl<'source> StagedSourceParser<'source> {
         mutator: &mut RuntimeValueMutator<'_, '_>,
         context: &CompileContext,
         prior_definitions: &RuntimeValueRoot,
+        file_environment: &[(String, RuntimeValueRoot)],
         language: Option<&super::super::LanguageDecl>,
     ) -> Option<Vec<Declaration>> {
         let lexical = self.lexical.as_ref()?;
@@ -186,7 +197,14 @@ impl<'source> StagedSourceParser<'source> {
             }
         };
         Some(mutator.suspend(|| {
-            self.expand_macro_declaration(context, prior_definitions, language, &declaration, work)
+            self.expand_macro_declaration(
+                context,
+                prior_definitions,
+                file_environment,
+                language,
+                &declaration,
+                work,
+            )
         }))
     }
 
@@ -195,6 +213,7 @@ impl<'source> StagedSourceParser<'source> {
         &mut self,
         context: &CompileContext,
         prior_definitions: &RuntimeValueRoot,
+        file_environment: &[(String, RuntimeValueRoot)],
         language: Option<&super::super::LanguageDecl>,
         declaration: &DeclarationSection,
         mut work: DeclarationMacroWork,
@@ -258,7 +277,21 @@ impl<'source> StagedSourceParser<'source> {
                 .iter()
                 .map(Key::atom_from_text)
                 .collect::<Vec<_>>();
-            let effect = match macro_lookup(execution, prior_definitions, &keys, true) {
+            // A file's `let` before the invocation names a file-private
+            // macro; otherwise the path selects a prior definition.
+            let file_macro = original.path.first().and_then(|root| {
+                file_environment
+                    .iter()
+                    .find(|(name, _)| name.strip_prefix('_').unwrap_or(name) == root)
+            });
+            let selected = match file_macro {
+                Some((name, value)) => {
+                    self.file_macro_uses.push(name.clone());
+                    macro_lookup(execution, value, &keys[1..], true)
+                }
+                None => macro_lookup(execution, prior_definitions, &keys, true),
+            };
+            let effect = match selected {
                 Ok(effect)
                     if !context.values().with_boundary_access(|access| {
                         effect

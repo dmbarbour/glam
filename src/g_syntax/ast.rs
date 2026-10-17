@@ -45,6 +45,9 @@ pub enum DeclarationKind {
     Object(ObjectDecl),
     Extend(ObjectExtendDecl),
     Definition(DefinitionDecl),
+    /// A file-private `let` group, mutually recursive within itself and
+    /// seen by the declarations after it.
+    Let(Vec<(String, SyntaxExpr)>),
     Unknown,
 }
 

@@ -375,6 +375,19 @@ on 2026-10-17, those that change the grammar with an entry in
       local of that name is an error, one name having one meaning in a file;
       `self.name` reads the member.
 
+    **`let` members and declarations as built (2026-10-17):**
+    - A body's or file's `let` reads its group as a `let` expression's
+      bindings: one binding, a hanging layout group, a braced group, or (in
+      a file) the indented lines after `let`. The declaration parser reads
+      it, reusing the `with` body's block split.
+    - A body's group lowers in place into the body's binding chain, sharing
+      the `let` expression's group lowering.
+    - A file's group lowers once into a record of its bindings, each name
+      then rooted as its own entry of that record; the lowerer keeps these
+      as the file environment, binds the names a later declaration uses
+      around its resolved expression, and offers them to macro lookup.
+      Unused warnings count a macro's selection as a use.
+
 **Item 7 as built (2026-10-17).
 - **Where a `where` ends.** The token pass closes the `else` tails before a
   `where` and stops the view there; a statement or arm holding one, and a

@@ -18,7 +18,9 @@ mod recursive_do;
 mod resolve;
 mod resolved;
 
-use analysis::{warn_unused_body_lets, warn_unused_locals, warn_unused_with_alias};
+use analysis::{
+    warn_unused_body_lets, warn_unused_file_lets, warn_unused_locals, warn_unused_with_alias,
+};
 pub use ast::*;
 use module_lowering::*;
 use name_analysis::check_file_global_local_shadowing;

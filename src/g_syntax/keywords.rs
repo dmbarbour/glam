@@ -108,7 +108,7 @@ pub(super) const G0_KEYWORDS: &[Keyword] = &[
     },
     Keyword {
         spelling: "let",
-        roles: &[Expression, LayoutIntroducer],
+        roles: &[Declaration, Expression, LayoutIntroducer],
     },
     Keyword {
         spelling: "match",
@@ -224,6 +224,10 @@ mod tests {
         assert_eq!(
             g0_keyword("alias").map(Keyword::roles),
             Some(&[Declaration][..])
+        );
+        assert_eq!(
+            g0_keyword("let").map(Keyword::roles),
+            Some(&[Declaration, Expression, LayoutIntroducer][..])
         );
         assert_eq!(
             g0_keyword("abstract_global_path").map(Keyword::roles),

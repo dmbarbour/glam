@@ -35,6 +35,7 @@ pub(in crate::g_syntax) fn lower_source(source: &[u8], context: &CompileContext)
                             &mut mutator,
                             context,
                             lowerer.definitions_root(),
+                            lowerer.file_environment(),
                             language.as_ref(),
                         )
                     });
@@ -43,6 +44,7 @@ pub(in crate::g_syntax) fn lower_source(source: &[u8], context: &CompileContext)
                 &mut mutator,
                 context,
                 lowerer.definitions_root(),
+                lowerer.file_environment(),
                 language.as_ref(),
             );
             let Some(declarations) = next else {
@@ -63,8 +65,9 @@ pub(in crate::g_syntax) fn lower_source(source: &[u8], context: &CompileContext)
                 lowerer.lower_declaration(&mutator, declaration);
             }
         }
+        let macro_uses = parser.file_macro_uses().to_vec();
         let diagnostics = parser.finish(lowerer.parsed_declarations());
-        lowerer.finish(&mutator, diagnostics)
+        lowerer.finish(&mutator, diagnostics, &macro_uses)
     })
 }
 
@@ -78,6 +81,9 @@ pub(in crate::g_syntax) struct ModuleLowerer<'context> {
     /// The objects this file declares or extends.
     declared_objects: BTreeSet<String>,
     journal: PendingJournal,
+    /// The file's `let` names in order, each bound to its share of its
+    /// group's value: compiler state, which no module entry holds.
+    file_environment: Vec<(String, RuntimeValueRoot)>,
     diagnostics: Vec<Diagnostic>,
     parsed_declarations: Vec<Declaration>,
 }
@@ -99,6 +105,7 @@ impl<'context> ModuleLowerer<'context> {
             nested_reflection: HashMap::new(),
             declared_objects: BTreeSet::new(),
             journal: PendingJournal::default(),
+            file_environment: Vec::new(),
             diagnostics: Vec::new(),
             parsed_declarations: Vec::new(),
         }
@@ -160,6 +167,7 @@ impl<'context> ModuleLowerer<'context> {
                             demand: reflection.clone_core_with(&access),
                         },
                     );
+                    let (mut locals, environment) = self.file_locals(line);
                     let resolved = match kind {
                         DeclarationKind::Definition(definition) => resolve_module_definition(
                             &access,
@@ -168,15 +176,29 @@ impl<'context> ModuleLowerer<'context> {
                             self.context,
                             definitions,
                             &scope,
+                            &mut locals,
                         ),
-                        DeclarationKind::Object(object) => {
-                            lower_object(&access, object, line, self.context, definitions, &scope)
-                        }
-                        DeclarationKind::Extend(extend) => {
-                            lower_extend(&access, extend, line, self.context, definitions, &scope)
-                        }
+                        DeclarationKind::Object(object) => lower_object(
+                            &access,
+                            object,
+                            line,
+                            self.context,
+                            definitions,
+                            &scope,
+                            &mut locals,
+                        ),
+                        DeclarationKind::Extend(extend) => lower_extend(
+                            &access,
+                            extend,
+                            line,
+                            self.context,
+                            definitions,
+                            &scope,
+                            &mut locals,
+                        ),
                         _ => unreachable!("resolved declarations were matched above"),
                     }?;
+                    let resolved = self.bind_file_environment(&access, environment, resolved);
                     Ok(access.root_runtime_value(lower_resolved_expr_in(&access, resolved)))
                 });
                 match result {
@@ -187,6 +209,7 @@ impl<'context> ModuleLowerer<'context> {
                     Err(diagnostic) => Err(diagnostic),
                 }
             }
+            DeclarationKind::Let(bindings) => self.lower_file_let(mutator, bindings, line),
             DeclarationKind::Language(_) => {
                 self.install_reflection(mutator);
                 Ok(())
@@ -199,6 +222,131 @@ impl<'context> ModuleLowerer<'context> {
             self.diagnostics.push(diagnostic);
         }
         self.parsed_declarations.push(declaration);
+    }
+
+    /// A resolver context holding the file's `let` names, and their
+    /// bindings.
+    fn file_locals(&self, line: usize) -> (ResolverContext, Vec<BindingId>) {
+        let mut locals = ResolverContext::default();
+        let bindings = locals
+            .extend_source_bindings(
+                self.file_environment.iter().map(|(name, _)| name.as_str()),
+                line,
+            )
+            .expect("a file's `let` names are distinct");
+        (locals, bindings)
+    }
+
+    /// Binds the file's `let` names that `resolved` reads to their shared
+    /// values.
+    fn bind_file_environment(
+        &self,
+        access: &RuntimeValueAccess<'_>,
+        environment: Vec<BindingId>,
+        resolved: ResolvedExpr<Value>,
+    ) -> ResolvedExpr<Value> {
+        if environment.is_empty() {
+            return resolved;
+        }
+        let free = resolved.free_bindings();
+        let (parameters, values): (Vec<_>, Vec<_>) = environment
+            .into_iter()
+            .zip(&self.file_environment)
+            .filter(|(binding, _)| free.contains(binding))
+            .map(|(binding, (_, value))| {
+                (
+                    binding,
+                    ResolvedExpr::Provided(value.clone_core_with(access)),
+                )
+            })
+            .unzip();
+        if parameters.is_empty() {
+            return resolved;
+        }
+        ResolvedExpr::apply(ResolvedExpr::lambda(parameters, resolved), values)
+    }
+
+    /// Lowers a file's `let` group once, where it stands: against the
+    /// module's final self and the definitions visible here, with the
+    /// `let`s before it. Its value is one record of the group's bindings,
+    /// which the declarations after it share, each name its own entry.
+    fn lower_file_let(
+        &mut self,
+        mutator: &RuntimeValueMutator<'_, '_>,
+        bindings: &[(String, SyntaxExpr)],
+        line: usize,
+    ) -> Result<(), Diagnostic> {
+        let entries = mutator.with_access(|access| {
+            let definitions = self.definitions.clone_core_with(&access);
+            let scope = NameScope::module_with_reflection(
+                &access,
+                self.context,
+                definitions,
+                ReflectionBoundary {
+                    demand: self.module_reflection.clone_core_with(&access),
+                },
+            )
+            .resolved_in(&access);
+            let (mut locals, environment) = self.file_locals(line);
+            let binders = lower_let_group_resolved(
+                &access,
+                bindings,
+                line,
+                self.context,
+                &scope,
+                &mut locals,
+            )?;
+            // The group's referable names and their bindings.
+            let named = bindings
+                .iter()
+                .filter_map(|(name, _)| {
+                    let canonical = local_name_metadata(name).canonical?;
+                    let binding = locals
+                        .iter()
+                        .rev()
+                        .find(|local| local.canonical.as_deref() == Some(canonical.as_str()))
+                        .and_then(|local| local.binding)?;
+                    Some((name.clone(), canonical, binding))
+                })
+                .collect::<Vec<_>>();
+            let mut record = named
+                .iter()
+                .map(|(_, canonical, binding)| {
+                    apply_builtin_resolved(
+                        &access,
+                        Builtin::DictSingleton,
+                        [
+                            ResolvedExpr::Embedded(Value::Atom(atom_from_str(canonical))),
+                            ResolvedExpr::Local(*binding),
+                        ],
+                    )
+                })
+                .reduce(|left, right| {
+                    apply_builtin_resolved(&access, Builtin::DictUnion, [left, right])
+                })
+                .unwrap_or_else(|| ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())));
+            for (parameters, values) in binders.into_iter().rev() {
+                record = ResolvedExpr::apply(ResolvedExpr::lambda(parameters, record), values);
+            }
+            let record = self.bind_file_environment(&access, environment, record);
+            let record = access.root_runtime_value(lower_resolved_expr_in(&access, record));
+            Ok::<_, Diagnostic>(
+                named
+                    .into_iter()
+                    .map(|(name, canonical, _)| {
+                        let entry = ResolvedExpr::Access {
+                            base: Box::new(ResolvedExpr::Provided(record.clone_core_with(&access))),
+                            path: vec![ResolvedPathPart::Key(name_as_key(&canonical))],
+                        };
+                        let entry =
+                            access.root_runtime_value(lower_resolved_expr_in(&access, entry));
+                        (name, entry)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })?;
+        self.file_environment.extend(entries);
+        Ok(())
     }
 
     /// Installs the module's reflection operation as `meta.refl`, the
@@ -431,13 +579,22 @@ impl<'context> ModuleLowerer<'context> {
         &self.definitions
     }
 
+    /// The file's `let` names so far, with their values.
+    pub(in crate::g_syntax) fn file_environment(&self) -> &[(String, RuntimeValueRoot)] {
+        &self.file_environment
+    }
+
+    /// Finishes the file; `macro_uses` are the `let` names its macro
+    /// invocations selected.
     pub(in crate::g_syntax) fn finish(
         mut self,
         mutator: &RuntimeValueMutator<'_, '_>,
         mut source_diagnostics: Vec<Diagnostic>,
+        macro_uses: &[String],
     ) -> LoweredSource {
         self.flush_journal(mutator);
         source_diagnostics.extend(check_file_global_local_shadowing(&self.parsed_declarations));
+        source_diagnostics.extend(warn_unused_file_lets(&self.parsed_declarations, macro_uses));
         source_diagnostics.extend(self.diagnostics);
         let definitions_root = self.definitions;
         LoweredSource {
@@ -461,7 +618,7 @@ pub(in crate::g_syntax) fn lower_parsed_source(
         for declaration in declarations {
             lowerer.lower_declaration(&mutator, declaration);
         }
-        lowerer.finish(&mutator, diagnostics)
+        lowerer.finish(&mutator, diagnostics, &[])
     })
 }
 
@@ -472,8 +629,8 @@ fn resolve_module_definition(
     context: &CompileContext,
     definitions: Value,
     scope: &NameScope,
+    locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let mut locals = ResolverContext::default();
     lower_definition_resolved(
         access,
         definition,
@@ -482,6 +639,6 @@ fn resolve_module_definition(
         &ResolvedRoot::Provided(definitions),
         &scope.resolved_in(access),
         true,
-        &mut locals,
+        locals,
     )
 }

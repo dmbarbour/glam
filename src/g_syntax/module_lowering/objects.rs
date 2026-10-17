@@ -9,8 +9,8 @@ pub(in crate::g_syntax) fn lower_object(
     context: &CompileContext,
     definitions: Value,
     module_scope: &NameScope<Value>,
+    locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let mut locals = ResolverContext::default();
     let scope = module_scope.resolved_in(access);
     let definitions_root = ResolvedRoot::Provided(definitions);
     let name = ResolvedExpr::Embedded(context.abstract_global_path(access, &object.target));
@@ -20,7 +20,7 @@ pub(in crate::g_syntax) fn lower_object(
         line,
         context,
         scope.duplicate_in(access),
-        &mut locals,
+        locals,
         name,
         declared_target_has_reflection(&object.target),
     )?;
@@ -543,8 +543,8 @@ pub(in crate::g_syntax) fn lower_extend(
     context: &CompileContext,
     definitions: Value,
     module_scope: &NameScope<Value>,
+    locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let mut locals = ResolverContext::default();
     let scope = module_scope.resolved_in(access);
     let definitions_root = ResolvedRoot::Provided(definitions);
     extend_object_resolved_in_scope(
@@ -554,7 +554,7 @@ pub(in crate::g_syntax) fn lower_extend(
         context,
         &definitions_root,
         &scope,
-        &mut locals,
+        locals,
         declared_target_has_reflection(&extend.target),
         true,
     )

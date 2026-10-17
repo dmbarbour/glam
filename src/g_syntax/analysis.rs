@@ -200,6 +200,68 @@ pub(super) fn warn_unused_body_lets(
     }
 }
 
+/// Warns for each binding of a file's `let` groups that neither the
+/// declarations after its group nor a macro invocation, by its name in
+/// `macro_uses`, uses.
+pub(super) fn warn_unused_file_lets(
+    declarations: &[Declaration],
+    macro_uses: &[String],
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    for (position, declaration) in declarations.iter().enumerate() {
+        let DeclarationKind::Let(bindings) = &declaration.kind else {
+            continue;
+        };
+        let params = binding_group_locals(bindings);
+        let mut used = bindings
+            .iter()
+            .map(|(name, _)| macro_uses.contains(name))
+            .collect::<Vec<_>>();
+        for later in &declarations[position + 1..] {
+            mark_used_declaration_locals(&later.kind, &params, &mut used);
+        }
+        warn_unused_binding_group(bindings, &params, used, declaration.line, &mut diagnostics);
+    }
+    diagnostics
+}
+
+fn mark_used_declaration_locals(kind: &DeclarationKind, locals: &[LocalName], used: &mut [bool]) {
+    match kind {
+        DeclarationKind::Definition(definition) => {
+            for key in &definition.target {
+                mark_used_key_expr(key, locals, used);
+            }
+            if let Some(expr) = &definition.expr {
+                mark_used_locals(expr, locals, used);
+            }
+        }
+        DeclarationKind::Object(object) => {
+            for parent in &object.deps {
+                mark_used_locals(parent, locals, used);
+            }
+            for item in &object.body {
+                mark_used_body_item_locals(item, locals, used);
+            }
+        }
+        DeclarationKind::Extend(extend) => {
+            for item in &extend.body {
+                mark_used_body_item_locals(item, locals, used);
+            }
+        }
+        DeclarationKind::Let(bindings) => {
+            for (_, value) in bindings {
+                mark_used_locals(value, locals, used);
+            }
+        }
+        DeclarationKind::Language(_)
+        | DeclarationKind::Import(_)
+        | DeclarationKind::Declare(_)
+        | DeclarationKind::Assume(_)
+        | DeclarationKind::Unique(_)
+        | DeclarationKind::Unknown => {}
+    }
+}
+
 pub(super) fn warn_unused_with_alias(
     alias: &str,
     body: &[ObjectBodyDefinition],

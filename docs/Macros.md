@@ -28,8 +28,11 @@ The `@`, names, and path dots must be joint. Consequently:
 ```
 
 Dynamic heads, computed path components, and `@(Expression)` are not part of
-`g0`. Macro lookup is independent of lambda parameters, patterns, `let`,
-`where`, and object-local names.
+`g0`. Macro lookup is independent of lambda parameters, patterns, `let`
+expressions, `where`, and object-local names. A file's `let` declaration
+before the invocation is the exception: `@format` selects a file-private
+`let format`, which needs no module entry, and the expansion may read the
+file's earlier `let`s as the declarations after them do.
 
 Each original declaration captures one prior-module snapshot. Its original
 macro invocations run exactly once from right to left, so `@inner` above
@@ -217,7 +220,9 @@ Macro expansion occurs before the current module fixpoint is sealed. An
 ordinary global reference normally denotes that future final module, even
 when the referenced definition appears earlier in the file. A helper selected
 that way may therefore wait on the very module compilation that is waiting
-for the macro.
+for the macro. A file's `let` is lowered against that final module too, so
+the same holds for a `let` macro that reads a global; one that reads only
+earlier `let`s and `_name` prior definitions does not wait.
 
 Prefer a named top-level object declaration for a reusable macro grammar:
 

@@ -94,6 +94,7 @@ pub enum GDeclarationKind {
     Object,
     Extend,
     Definition,
+    Let,
     MacroDeferred,
     Unknown,
 }
@@ -109,6 +110,7 @@ impl GDeclarationKind {
             Self::Object => "object",
             Self::Extend => "extend",
             Self::Definition => "definition",
+            Self::Let => "let",
             Self::MacroDeferred => "macro-deferred",
             Self::Unknown => "unknown",
         }
@@ -154,6 +156,7 @@ fn declaration_kind(kind: &InspectedDeclarationKind) -> GDeclarationKind {
             DeclarationKind::Object(_) => GDeclarationKind::Object,
             DeclarationKind::Extend(_) => GDeclarationKind::Extend,
             DeclarationKind::Definition(_) => GDeclarationKind::Definition,
+            DeclarationKind::Let(_) => GDeclarationKind::Let,
             DeclarationKind::Unknown => GDeclarationKind::Unknown,
         },
         InspectedDeclarationKind::MacroDeferred => GDeclarationKind::MacroDeferred,

@@ -7971,3 +7971,102 @@ fn localized_bodies_hide_outer_locals_from_bare_names() {
         );
     }
 }
+
+/// A file's `let` group is lowered once where it stands, against the
+/// module's final self and the definitions visible there, and the
+/// declarations after it share it.
+#[test]
+fn file_lets_bind_for_the_declarations_after_them() {
+    for (source, expected) in [
+        (
+            "language g0\nlet greeting = \"Hello\"\nasm.result = greeting ++ \", World!\"\n",
+            "Hello, World!",
+        ),
+        (
+            "language g0\ntarget = \"World\"\nlet text = \"Hello, \" ++ target ++ mark\n    mark = \"!\"\nasm.result = text\n",
+            "Hello, World!",
+        ),
+        (
+            "language g0\nlet count n = if n == 0 then \"done\" else count (n - 1)\nasm.result = count 3\n",
+            "done",
+        ),
+        (
+            "language g0\nx = \"Hello, \"\nlet prior = _x\nx := \"World!\"\nasm.result = prior ++ x\n",
+            "Hello, World!",
+        ),
+        (
+            "language g0\nlet greeting = \"Hello\"\nlet text = greeting ++ \", World!\"\nasm.result = text\n",
+            "Hello, World!",
+        ),
+        (
+            "language g0\nlet greeting = \"Hello, World!\"\nobject o with\n  text = ^greeting\nasm.result = o.text\n",
+            "Hello, World!",
+        ),
+        (
+            "language g0\nlet\n  greeting = \"Hello, \"\n  target = \"World!\"\nasm.result = greeting ++ target\n",
+            "Hello, World!",
+        ),
+    ] {
+        assert_eq!(
+            assembly_result_text(source),
+            expected.as_bytes(),
+            "{source}"
+        );
+    }
+}
+
+/// One file, one name, one meaning: a file's `let` names are locals that
+/// no global use or definition, nor other local, may share.
+#[test]
+fn file_lets_are_sequential_private_locals() {
+    for (source, expected) in [
+        (
+            "language g0\nasm.result = tmp\nlet tmp = 1\n",
+            "local `tmp` shadows external `tmp` used by this file on line 2",
+        ),
+        (
+            "language g0\nlet tmp = 1\ntmp = 2\n",
+            "local `tmp` shadows external `tmp` defined on line 3",
+        ),
+        (
+            "language g0\nlet tmp = 1\nlet tmp = 2\nasm.result = tmp\n",
+            "local `tmp` shadows existing local `tmp`; local name shadowing is not allowed",
+        ),
+        (
+            "language g0\nlet tmp = 1\nf = \\tmp -> tmp\n",
+            "local `tmp` shadows existing local `tmp`; local name shadowing is not allowed",
+        ),
+        (
+            "language g0\nlet tmp = 1\nasm.result = _tmp\n",
+            "`_tmp` names the local `tmp`, which has no prior definition",
+        ),
+        (
+            "language g0\nlet tmp = 1\nasm.result = abstract_global_path tmp\n",
+            "`abstract_global_path tmp` resolves `tmp` as a local; abstract global paths must bind to the module namespace",
+        ),
+    ] {
+        let lowered = lower_parsed_source(parse(source), &CompileContext::default());
+        assert!(
+            lowered.diagnostics.iter().any(|diagnostic| {
+                diagnostic.severity == Severity::Error && diagnostic.message == expected
+            }),
+            "{source}: {:?}",
+            lowered.diagnostics
+        );
+    }
+}
+
+#[test]
+fn file_lets_follow_local_unused_warning_rules() {
+    let lowered = lower_parsed_source(
+        parse("language g0\nlet unused = 1\nlet _quiet = 2\nlet { a = b; b = 1 }\nx = a\n"),
+        &CompileContext::default(),
+    );
+    let warnings = lowered
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == Severity::Warning)
+        .map(|diagnostic| (diagnostic.line, diagnostic.message.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(warnings, [(2, "unused local `unused`")]);
+}

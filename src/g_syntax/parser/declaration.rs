@@ -84,6 +84,8 @@ fn parse_declaration_in_context(
         }
         TokenKind::Name("extend") => parse_extend_declaration(view, line, context, diagnostics)
             .map_or(DeclarationKind::Unknown, DeclarationKind::Extend),
+        TokenKind::Name("let") => parse_let_member(view, line, context, diagnostics)
+            .map_or(DeclarationKind::Unknown, DeclarationKind::Let),
         // `alias = …` defines a reserved name, which the definition reports.
         TokenKind::Name("alias")
             if !view.top_level().any(|indexed| {
@@ -250,8 +252,9 @@ fn block_members<'lex, 'source>(
     }
 }
 
-/// A `let` member's group: one binding after `let`, a hanging layout block
-/// of them whose first sets the column, or a braced block.
+/// A `let` group, a body's member or a file's declaration: one binding
+/// after `let`, a hanging layout block of them whose first sets the column,
+/// or a braced block.
 fn parse_let_member(
     view: TokenView<'_, '_>,
     line: usize,
