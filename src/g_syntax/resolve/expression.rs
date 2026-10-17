@@ -1152,10 +1152,37 @@ pub(in crate::g_syntax) fn lower_let_group_resolved(
 
     // The group is mutually recursive. Its strongly connected components
     // bind in dependency order, each enclosing the next: one without a cycle
-    // as a plain application, one with a cycle through a fixpoint.
-    let dependencies = locals.group_dependencies(bindings);
+    // as a plain application, one with a cycle through a fixpoint. The edges
+    // of the groups in its values, found with its own, last until its values
+    // are resolved.
+    let (dependencies, walk) = locals.group_dependencies(bindings);
+    let binders = lower_group_components(
+        access,
+        bindings,
+        &dependencies,
+        line,
+        context,
+        scope,
+        locals,
+    );
+    if let Some(walk) = walk {
+        locals.forget_group_dependencies(walk);
+    }
+    binders
+}
+
+/// Binds a group's strongly connected components in dependency order.
+fn lower_group_components(
+    access: &RuntimeValueAccess<'_>,
+    bindings: &[(String, SyntaxExpr)],
+    dependencies: &[Vec<usize>],
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedRoot>,
+    locals: &mut ResolverContext,
+) -> Result<Vec<Binder>, Diagnostic> {
     let mut binders = Vec::new();
-    for component in dependency_components(&dependencies) {
+    for component in dependency_components(dependencies) {
         let names = component.iter().map(|&index| bindings[index].0.as_str());
         let resolve = |locals: &mut ResolverContext, index: usize| {
             syntax_expr_to_resolved_in_semantic_scope(

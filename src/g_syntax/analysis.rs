@@ -105,29 +105,49 @@ pub(super) fn warn_unused_file_lets(
 /// One walk computes the edges of a group and of every group nested in its
 /// values, and keeps the nested groups' edges until they are asked for, so
 /// nested groups cost one walk in all. Groups are known by their bindings'
-/// address in the source being resolved, which outlives the walk's users and
-/// is never rebuilt while they run.
+/// address. That identifies them only while their source lives, so what a
+/// walk finds lasts only until its group's values are resolved, while the
+/// resolver borrows the group (`forget`). Macros expand as a declaration
+/// parses, before it lowers, so nothing rebuilds the source meanwhile.
 #[derive(Debug, Default)]
 pub(in crate::g_syntax) struct GroupDependencies {
     known: HashMap<GroupKey, Vec<Vec<usize>>>,
 }
 
+/// The groups one walk found, nested in the values of the group it walked.
+#[derive(Debug)]
+pub(in crate::g_syntax) struct GroupWalk(Vec<GroupKey>);
+
 impl GroupDependencies {
-    pub(in crate::g_syntax) fn of(&mut self, bindings: &[(String, SyntaxExpr)]) -> Vec<Vec<usize>> {
+    /// The edges of `bindings`, and the walk that found them if this call
+    /// walked: the caller passes it to `forget` once the group's values are
+    /// resolved.
+    pub(in crate::g_syntax) fn of(
+        &mut self,
+        bindings: &[(String, SyntaxExpr)],
+    ) -> (Vec<Vec<usize>>, Option<GroupWalk>) {
         let key = group_key(bindings);
         if let Some(edges) = self.known.remove(&key) {
-            return edges;
+            return (edges, None);
         }
         let mut walk = Walk::quiet();
-        walk.dependencies = Some(std::mem::take(&mut self.known));
+        walk.dependencies = Some(HashMap::new());
         let start = walk.groups.len();
         walk.open_group(bindings, 0, None);
         walk.group_values(bindings, 0);
         walk.close_groups(start);
-        self.known = walk.dependencies.take().expect("the walk kept the edges");
-        self.known
-            .remove(&key)
-            .expect("the walk kept the group's edges")
+        let mut found = walk.dependencies.take().expect("the walk kept the edges");
+        let edges = found.remove(&key).expect("the walk kept the group's edges");
+        let walked = GroupWalk(found.keys().copied().collect());
+        self.known.extend(found);
+        (edges, Some(walked))
+    }
+
+    /// Forgets the edges a walk found that nothing asked for.
+    pub(in crate::g_syntax) fn forget(&mut self, walk: GroupWalk) {
+        for key in walk.0 {
+            self.known.remove(&key);
+        }
     }
 }
 

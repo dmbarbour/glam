@@ -3,7 +3,7 @@ use std::collections::hash_map::Entry;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 
-use super::super::analysis::GroupDependencies;
+use super::super::analysis::{GroupDependencies, GroupWalk};
 use super::super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,12 +94,18 @@ impl ResolverContext {
     }
 
     /// For each binding of `bindings`, a `let` group, the positions of the
-    /// group's bindings its value names.
+    /// group's bindings its value names; and, when this walked the group,
+    /// the walk, which `forget_group_dependencies` ends once the group's
+    /// values are resolved.
     pub(in crate::g_syntax) fn group_dependencies(
         &mut self,
         bindings: &[(String, SyntaxExpr)],
-    ) -> Vec<Vec<usize>> {
+    ) -> (Vec<Vec<usize>>, Option<GroupWalk>) {
         self.group_dependencies.of(bindings)
+    }
+
+    pub(in crate::g_syntax) fn forget_group_dependencies(&mut self, walk: GroupWalk) {
+        self.group_dependencies.forget(walk);
     }
 
     pub(in crate::g_syntax) fn fresh_binding(&mut self) -> BindingId {

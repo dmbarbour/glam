@@ -1334,6 +1334,33 @@ Module definitions alone (`chain`) grow as n^1.20, so the `let` families'
 remaining excess is not the front end's alone; resolver lookups are
 listed under `parser-constant-factors`.
 
+**Group edges and macros** (maintainer, 2026-10-17: address identity must
+attend to how macro expansion meets the source by phase). Macros expand
+as a declaration parses, before it lowers, and nothing parses during
+resolution, so a declaration's source is fixed while it resolves. The
+edges one walk finds are also forgotten once the group that walked has
+its values resolved, so no address outlives the borrow that makes it an
+identity.
+
+**Escapes and nested bodies** (maintainer, 2026-10-17: know how `^^^name`
+behaves with depth; not a priority). Three families in
+`scripts/profile.sh`: `object_nest` (objects nested n deep), `escape_each`
+(an `^x` at each level) and `escape_deep` (one `^`…`^x` from the innermost
+body to the module). Over 50/100/200, k is 1.31, 1.34 and 1.20, with
+reductions linear. Each level costs about 4 M instructions, mostly net
+lowering and evaluation, which grow linearly. Callgrind on `object_nest`
+at 100 and 200 finds two quadratic parts, about 150 M of 849 M at 200:
+- **the resolver copies the scope chain**: each nested body's
+  `NameScope` duplicates its parent chain (`duplicate_in`, 13.4 M to
+  53.5 M), and an escape duplicates it again at each level it steps. A
+  shared parent chain would make both linear;
+- **the parser reads nested `with` bodies again at each level**
+  (`parse_lexical_declaration` 19.2 M to 73.8 M), the keyword nesting
+  rescan that native keyword frames removed for other forms.
+
+Nesting this deep is unusual, so neither is scheduled; both are candidates
+for later parser or resolver work.
+
 ## Verification
 
 - The round trip of generated trees through the printer

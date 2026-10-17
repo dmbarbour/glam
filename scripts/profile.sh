@@ -189,6 +189,31 @@ family chain_let 200
 family let_wide 200
 family body_lets 200
 family file_lets 200
+
+# Nested object bodies, each its own `self`: nesting alone, an escape at
+# each level to the level outside it, and one escape from the innermost
+# body to the module.
+object_nest() {
+  local n=$1 opens='' closes='' path='' i
+  for ((i = 1; i <= n; i++)); do opens+="object _ with { x = $i; inner = "; closes+=' }'; done
+  for ((i = 1; i < n; i++)); do path+='.inner'; done
+  printf 'language g0\no = %s1%s\nasm.result = if o%s.x == %d then "ok" else "bad"' "$opens" "$closes" "$path" "$n"
+}
+escape_each() {
+  local n=$1 opens='' closes='' path='' i
+  for ((i = 1; i <= n; i++)); do opens+="object _ with { x = $i; up = ^x; inner = "; closes+=' }'; done
+  for ((i = 1; i < n; i++)); do path+='.inner'; done
+  printf 'language g0\nx = 0\no = %s1%s\nasm.result = if o%s.up == %d then "ok" else "bad"' "$opens" "$closes" "$path" "$((n - 1))"
+}
+escape_deep() {
+  local n=$1 opens='' closes='' path='' carets='^' i
+  for ((i = 1; i <= n; i++)); do opens+="object _ with { inner = "; closes+=' }'; carets+='^'; done
+  for ((i = 1; i <= n; i++)); do path+='.inner'; done
+  printf 'language g0\nx = "ok"\no = %sobject _ with { value = %sx }%s\nasm.result = o%s.value' "$opens" "$carets" "$closes" "$path"
+}
+family object_nest 50
+family escape_each 50
+family escape_deep 50
 # Workers follow the same producer chain as the foreground, so a scheduling
 # defect shows as superlinear growth here (`perf-worker-scaling`).
 family chain 200 4
