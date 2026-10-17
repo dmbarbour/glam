@@ -52,10 +52,9 @@ flags a step for discussion when work reaches it, not a decision.
 - [`GrammarReview_2026-10-16.md`](GrammarReview_2026-10-16.md): the
   grammar reviewed for clarity when read (Green's cognitive dimensions) and
   ease of parsing, and what belongs in the parser, a linter or a formatter.
-  Started 2026-10-16; its current items were decided by 2026-10-17. Next,
-  in order: `parser-keyword-frames-suffixes`, `parser-grammar-retirement`,
-  `grammar-body-declarations` (item 15: `alias` and `let` in bodies), then
-  the tag prefix syntax plan, before other work.
+  Started 2026-10-16; its current items were decided by 2026-10-17, and
+  `grammar-body-declarations` (item 15: `alias` and `let` in bodies) was
+  built 2026-10-17.
 - [`RuntimeOwnership_2026-10-17.md`](RuntimeOwnership_2026-10-17.md):
   `lifecycle-` steps, a sketch from the lifecycle review: a thread-affine
   owner that retires the runtime, handles for everything else, request
@@ -63,10 +62,11 @@ flags a step for discussion when work reaches it, not a decision.
   done; the rest waits for the grammar work, through the tag prefix
   syntax plan.
 - [`TagPrefixSyntax_2026-10-16.md`](TagPrefixSyntax_2026-10-16.md):
-  `path:` becomes a prefix operator and `:name` a pun everywhere, so braces
-  lose their member grammar. Agreed 2026-10-16; follows
-  `grammar-body-declarations`, after `parser-grammar-retirement`, ahead of
-  the remaining parser performance steps.
+  `path:` is a prefix operator and `:name` a pun everywhere, so braces lost
+  their member grammar; follow-ups retired bare tags, rejected tags as
+  predicates and views, and made an application's arguments atoms. Built
+  2026-10-17 except `tags-prefix-diagnostic-retirement`, which waits until
+  the transitional diagnostic has served.
 - [`ReflectionPerformance_2026-10-15.md`](ReflectionPerformance_2026-10-15.md):
   `perf-reflection-effects`, split from the structural overheads plan on
   2026-10-15. Reflection effect steps (`perf-reflection-step-cost`, 376 K
@@ -103,6 +103,12 @@ flags a step for discussion when work reaches it, not a decision.
   messages through request queues. Its decisions are settled, and
   [`RuntimeOwnership_2026-10-17.md`](RuntimeOwnership_2026-10-17.md) holds
   the remediation.
+- [`SyntaxTypeErrors_2026-10-17.md`](../reviews/SyntaxTypeErrors_2026-10-17.md)
+  reviews which type errors the front end could report from syntax alone:
+  applying data, data as a predicate, view or effect, member access on
+  data, and data operators' operands. Recommends `kinds-` steps, one
+  classifier of evident kinds and one walk; waits for the maintainer's
+  answers and a place in the order of work.
 
 ## Completed, Awaiting Retirement
 
