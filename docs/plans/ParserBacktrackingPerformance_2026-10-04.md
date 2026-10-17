@@ -332,6 +332,16 @@ Steps are referred to by name; see the plans README, "Step names".
    sampling is throttled here to about a hundred samples a run, too
    coarse to compare.
 
+   *Measured 2026-10-17* (`ca14d2ac`, after `rustc-hash` took the scope
+   walk's hashing back): every parse family is linear, at 5 K
+   instructions per list item to 394 K per nested `if` level, each
+   level's cost including analysis, resolution and net lowering. In
+   `hello_elf` (599 M) parsing is 7 M (1.2%), while net lowering is 183 M
+   (30.5%): `NetBuilder::try_finish` 118 M (19.7%), of which the polarity
+   check (`Topology::check`) 52 M (8.7%), and list trees 74 M (12.4%).
+   Evaluation is 291 M (49%). The parser's own constants matter little in
+   real code; net lowering's do, and no step owns them yet.
+
 `parser-cover-ir` and `parser-term-parser` are additive and low-risk:
 production keeps the old parser until the oracle agrees.
 
