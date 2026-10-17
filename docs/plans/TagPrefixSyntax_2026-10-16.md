@@ -3,7 +3,8 @@
 Status: design agreed with the maintainer on 2026-10-16;
 `tags-prefix-operator` and `tags-prefix-migration` built 2026-10-17 (see
 [As built](#as-built-2026-10-17)); `tags-prefix-diagnostic-retirement`
-waits. It
+waits. Three follow-up steps were agreed on 2026-10-17 (see
+[Follow-up](#follow-up-2026-10-17)). It
 follows `parser-grammar-retirement` in the
 [parser backtracking plan](ParserBacktrackingPerformance_2026-10-04.md), so
 the syntax changes in one parser rather than in the term parser and the
@@ -129,6 +130,48 @@ catch anything the corpus sweep missed.
   spaced one), the constructors in `hello_tagged.g` and `hello_dict.g`,
   `tagged_spacing.g`'s expectations, Rust test sources, and the docs. The
   measured counts held.
+
+## Follow-up (2026-10-17)
+
+*Agreed (maintainer, 2026-10-17)*, after the first two steps were built:
+- **No bare tags.** `path:` always takes a payload. Its constructor is the
+  section `(path:)`, a group holding only the prefix, as `(+ 1)` is an
+  operator's; `[foo:, bar:]` and `x |> foo:` become `[(foo:), (bar:)]` and
+  `x |> (foo:)`. Elsewhere a missing payload is an error naming the
+  section. Today a line break decides: `x = foo:` is the constructor when
+  the next line starts at the same indentation, and a tag with that line as
+  its payload when it is indented.
+- **A tag is neither a predicate nor a view.** In a pattern `F p` applies
+  the predicate `F`, which yields `.r ()` or `.fail`, and `(f -> p)` the
+  view `f`, which yields `.r View`. A tag builds a dict, so the front end
+  rejects one in either place: `(tag:) p`, `{(tag:) p}`, `((tag:) -> p)`,
+  and the joint `a:Nat n`, which reads as the predicate `a:Nat` over `n`.
+  Compilers lack the whole namespace, so they do not catch type errors in
+  general, but they may reject those they see.
+- **No tail-form arguments.** A tail form stands only after an operator
+  (a spaced tag's prefix included), after a separator keyword, or where a
+  region begins; an application's arguments are atoms. `f do …` becomes
+  `f <| do …`, `map xs \x -> …` becomes `map xs (\x -> …)` or
+  `map xs <| \x -> …`, and `g tag: x` becomes `g (tag: x)`; `do` gets no
+  exemption. `|>` and `<|` still do not mix, so a pipeline stage that
+  takes a block is parenthesized, or a `let` or `where` names one fragment
+  of the pipeline. The error suggests parentheses, which suffices for the
+  bootstrap; a suggestion fitted to the context would read better.
+
+Measured before the change, with a parser probe over the valid samples and
+the standing docs' code: 10 sample `f do` arguments and about a dozen in
+the docs, one tail lambda (`floor_contract.g`, whose `|> finish` the lambda
+takes into its body), and no tail tags or tail `match` outside the rule's
+own examples.
+
+Steps:
+4. `bare-tag-retirement`: the parser, samples, docs and the
+   `tags-are-prefix-operators` decision.
+5. `tag-predicate-view-rejection`: the pattern check, with tests of each
+   spelling, and the docs that read `a:Nat n` as a predicate.
+6. `tail-argument-retirement`: the parser and printer, the corpus, and
+   `Syntax.md` "Tail Position"; a decision amending
+   `tail-forms-end-at-separators`.
 
 ## Open questions (2026-10-16)
 

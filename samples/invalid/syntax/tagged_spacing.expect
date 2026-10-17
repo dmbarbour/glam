@@ -1,3 +1,5 @@
 error|3|`:` must be joint to its key
 error|4|adjacent to `:`|found `tag`
 error|5|an operator cannot begin
+error|6|requires a payload|(path:)
+error|7|requires a payload

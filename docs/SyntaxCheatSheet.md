@@ -78,7 +78,7 @@ _42                 # NEGATIVE 42 — prefix '_' is part of the literal
 # `path:` is a prefix, read alike everywhere, in braces or out:
 tag:Data            # joint: tags one atom; sugar for { tag:Data }
 tag: f x            # spaced: tags the rest of its item, tag:(f x)
-(tag:)              # nothing after it: constructor \ Data -> tag:Data
+(tag:)              # section: constructor \ Data -> tag:Data
 :tag                # pun on one bare name: tag:tag
 foo.bar:Data        # path-tagged data: sugar for { foo.bar:Data }
 (foo.bar:)          # constructor: \ Data -> foo.bar:Data
@@ -89,7 +89,7 @@ foo.bar:Data        # path-tagged data: sugar for { foo.bar:Data }
 ((PathExpr):)       # corresponding constructor
 # Joint binds tighter than application: g tag:f x ≡ g (tag:f) x. Spaced
 # runs to its item's end like a lambda body: g tag: f x ≡ g (tag:(f x)).
-# tag: |> g is an error; map (tag:) xs, [a:, b:] and x |> tag: construct.
+# tag: |> g and a bare tag: are errors; the section (tag:) constructs.
 # A joint colon always tags, even after an operator name: (and:x) is a
 # tag; (and x), (x and) and (and) are sections.
 

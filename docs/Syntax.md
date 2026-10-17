@@ -798,7 +798,7 @@ Tagged data is modeled as singleton dictionaries, built by the tag prefix
 
         tag:Data            # joint: tags one atom; same as { tag:Data }
         tag: f x            # spaced: tags the rest of its item, tag:(f x)
-        tag:                # nothing after it: (\ Data -> tag:Data)
+        (tag:)              # its section, the constructor: (\ Data -> tag:Data)
         :tag                # a pun on one bare name: tag:tag
 
 Joint to its operand, a tag binds tighter than juxtaposition: `g tag:f x y`
@@ -806,9 +806,11 @@ is `g (tag:f) x y`, and `g tag:(f x y)` couples the arguments. Followed by a
 space or line break, its operand is the rest of its item, as a lambda's body
 is: `tag: a + b` is `tag:(a + b)`, `g tag: f x` is `g (tag:(f x))`, and it
 ends where tails do, as at a `do` statement's `->`. An operator cannot begin
-a spaced tag's operand, so `tag: |> g` is an error. With nothing after it in
-its item, a tag is its constructor, and `(tag:)` its section, as `(+ 1)` is
-an operator's: `map (tag:) xs`, `[foo:, bar:]`, `x |> tag:`.
+a spaced tag's operand, so `tag: |> g` is an error. A tag always takes an
+operand. Its constructor is its section, `(tag:)`, as `(+ 1)` is an
+operator's: `map (tag:) xs`, `[(foo:), (bar:)]`, `x |> (tag:)`. Elsewhere a
+tag with nothing after it is an error, so a line break never turns a tag
+into its constructor.
 
 Every non-empty dictionary path takes part. Multi-component paths construct
 one hierarchical dictionary.

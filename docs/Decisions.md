@@ -777,8 +777,26 @@ maps the short names used here to file names.
     joint tag yet is no tag is an error, which catches what a sweep missed.
   - A joint tag's payload is an atom, so a lambda after one needs the
     spaced form: `update: \event -> …`.
+- **Amended by:** `tags-need-payloads` (2026-10-17): only the section
+  `(foo:)` stands without a payload.
 - **Rule lives in:** Syntax.md "Tagged Data" and "Dicts".
 - **Recorded in:** tag prefix plan.
+
+### A tag needs a payload; its constructor is its section
+`tags-need-payloads` · 2026-10-17 · maintainer · accepted
+- **Context:** under `tags-are-prefix-operators` a tag with nothing after
+  it in its item was its constructor, so a line break decided: `x = foo:`
+  was the constructor when the next line began at its indentation, and a
+  tag with that line as its payload when the next line was indented.
+- **Decision:** a tag always takes a payload. Its constructor is its
+  section, `(path:)`, a group holding only the prefix, as `(+ 1)` is an
+  operator's. Elsewhere a tag with no payload is an error naming the
+  section.
+- **Consequences:** `[foo:, bar:]` and `x |> foo:` become `[(foo:), (bar:)]`
+  and `x |> (foo:)`. A tag before a stop such as `where` is an error rather
+  than its constructor.
+- **Rule lives in:** Syntax.md "Tagged Data".
+- **Recorded in:** tag prefix plan, `bare-tag-retirement`.
 
 ### Keyword forms and lambdas stand alone only in tail position
 `tail-position` · 2026-10-16 · maintainer · superseded

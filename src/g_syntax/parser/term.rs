@@ -256,6 +256,16 @@ fn opens_keyword_region(view: TokenView<'_, '_>, index: usize, mode: Mode) -> bo
     regions_enabled() && mode == Mode::Cover && is_pattern_when(view, index)
 }
 
+/// The error for a tag prefix with no payload, which only a section,
+/// `(path:)`, may stand without.
+fn missing_payload(optional: bool) -> &'static str {
+    if optional {
+        "an optional dictionary entry pattern requires a payload after `?:`"
+    } else {
+        "a tag requires a payload after `:`; write `(path:)` for its constructor"
+    }
+}
+
 /// The error for a tail form at `head` that `follower` follows, so that it
 /// stands outside tail position.
 fn misplaced_tail(head: usize, label: &str, follower: &str) -> Fail {
@@ -765,6 +775,9 @@ fn interpret_paren(scope: Scope<'_, '_, '_>, frame: &GroupBody, close: usize) ->
         }));
     }
     if segments.len() == 1 {
+        if let Some(path) = Items::new(scope, contents).tag_section() {
+            return path.map(|path| ParenCover::Section(SyntaxExpr::TaggedConstructor(path)));
+        }
         let (last, before) = contents
             .split_last()
             .expect("non-empty contents have a last piece");
@@ -1657,6 +1670,15 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         })
     }
 
+    /// The path of a tag section, when the items are only a tag prefix with
+    /// nothing after it: `foo:` in `(foo:)`.
+    fn tag_section(&mut self) -> Option<Parse<Vec<SyntaxKeyExpr>>> {
+        let prefix = self.tag_prefix_at(0)?;
+        let end = self.data_path_end()? + 1;
+        (prefix.payload == TagPayload::Bare && !prefix.optional && end == self.pieces.len())
+            .then(|| self.data_path())
+    }
+
     /// The line starts before a tail tag argument at the cursor: a spaced
     /// tag prefix after a space or after line breaks.
     fn tail_tag_layout(&self) -> Option<usize> {
@@ -1713,17 +1735,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             .or_at(at));
         }
         if prefix.payload == TagPayload::Bare {
-            if prefix.optional {
-                return Err(Fail::error(
-                    "an optional dictionary entry pattern requires a payload after `?:`",
-                )
-                .or_at(at));
-            }
-            return Ok(Some(attach_tag(
-                mode,
-                attach,
-                Term::Expr(SyntaxExpr::TaggedConstructor(path)),
-            )));
+            return Err(Fail::error(missing_payload(prefix.optional)).or_at(at));
         }
         self.skip_line_starts();
         if self
@@ -1899,8 +1911,8 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     }
 
     /// One atom, with any joint tag prefixes (`a:`, `[k]:`, `(p):`, and in
-    /// a pattern `a?:`) applied to its payload, or a bare prefix as its
-    /// constructor. The prefixes are a loop, not recursion.
+    /// a pattern `a?:`) applied to its payload. The prefixes are a loop, not
+    /// recursion.
     fn atom(&mut self) -> Parse<Term> {
         let mut tags: Vec<(Vec<SyntaxKeyExpr>, bool)> = Vec::new();
         let base = loop {
@@ -1918,16 +1930,8 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                         tags.push((path, prefix.optional));
                         continue;
                     }
-                    TagPayload::Bare if !prefix.optional => {
-                        let path = self.data_path()?;
-                        self.position += 1;
-                        break Term::Expr(SyntaxExpr::TaggedConstructor(path));
-                    }
                     TagPayload::Bare => {
-                        return Err(Fail::error(
-                            "an optional dictionary entry pattern requires a payload after `?:`",
-                        )
-                        .or_at(at));
+                        return Err(Fail::error(missing_payload(prefix.optional)).or_at(at));
                     }
                     TagPayload::Spaced => {
                         return self.error_here(

@@ -74,9 +74,8 @@ fn ordinary_expressions_parse() {
         "{foo: 1, foo.bar: 2, [0, 1]: 3}",
         "([tag]:)",
         "(foo.bar:)",
-        "tag:",
-        "x |> tag:",
-        "[a:, b.c:, [k]:]",
+        "x |> (tag:)",
+        "[(a:), (b.c:), ([k]:)]",
         "map (tag:) xs",
         ":pun",
         "f :pun",
@@ -342,7 +341,7 @@ fn tag_prefixes_read_alike_in_braces_and_out() {
             SyntaxExpr::TaggedConstructor(vec![SyntaxKeyExpr::Atom("a".to_owned())]),
         ),
         (
-            "{a:}",
+            "{(a:)}",
             SyntaxExpr::DictUnion(vec![SyntaxExpr::TaggedConstructor(vec![
                 SyntaxKeyExpr::Atom("a".to_owned()),
             ])]),
@@ -361,6 +360,31 @@ fn tag_prefixes_read_alike_in_braces_and_out() {
     );
     for source in ["{a : 1}", "{a\n  :1}", "{a\n  : 1}"] {
         assert_rejects(source);
+    }
+}
+
+/// A tag always takes a payload; only its section, `(path:)`, stands
+/// without one.
+#[test]
+fn a_tag_without_a_payload_is_only_a_section() {
+    for source in [
+        "tag:",
+        "x |> tag:",
+        "[a:, b:]",
+        "{a:}",
+        "f a:",
+        "a:b:",
+        "(a:b:)",
+        "(a:) |> b:",
+    ] {
+        let diagnostics = parse_expression_fragment(source.as_bytes())
+            .expect_err("a tag without a payload is rejected");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("write `(path:)`")),
+            "{source}: {diagnostics:?}"
+        );
     }
 }
 
