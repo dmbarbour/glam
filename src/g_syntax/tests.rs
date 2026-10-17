@@ -7810,3 +7810,122 @@ fn overrides_replace_prior_definitions_without_union_ambiguity() {
         &Value::Number(2.into()),
     );
 }
+
+fn assembly_result_text(source: &str) -> Vec<u8> {
+    let context = CompileContext::from_module_path(["assembly"]);
+    let lowered = lower_parsed_source(parse(source), &context);
+    assert!(
+        lowered
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity != Severity::Error),
+        "{source}: {:?}",
+        lowered.diagnostics
+    );
+    let value = evaluated_module_value(&context, &lowered);
+    output_bytes(&fully_evaluated_value(resolved_value_at_path(
+        &value,
+        &["asm", "result"],
+    )))
+}
+
+/// A body's `let` group binds where it stands, for the members after it:
+/// recursive within itself, reading the definitions before it, and no
+/// entry of the body's result.
+#[test]
+fn body_lets_bind_for_the_members_after_them() {
+    for (source, expected) in [
+        (
+            "language g0\nobject hello with\n  target = \"World\"\n  let greeting = \"Hello, \"\n      mark = \"!\"\n  text = greeting ++ target ++ mark\nasm.result = hello.text\n",
+            "Hello, World!",
+        ),
+        (
+            "language g0\nbase = { x:\"Hello\" }\nd = base with\n  alias prior\n  let tmp = _prior.x ++ \", \"\n  x := tmp ++ \"World!\"\nasm.result = d.x\n",
+            "Hello, World!",
+        ),
+        (
+            "language g0\nobject o with\n  text = \"Hello\"\nextend o with\n  let tmp = _text ++ \"!\"\n  text := tmp\nasm.result = o.text\n",
+            "Hello!",
+        ),
+        (
+            "language g0\nd = {} with { let { a = b ++ \"!\"; b = \"Hi\" }; x = a }\nasm.result = d.x\n",
+            "Hi!",
+        ),
+        (
+            "language g0\nd = {} with\n  let count n = match n as\n        0 => \"done\"\n        _ => count (n - 1)\n  x = count 3\nasm.result = d.x\n",
+            "done",
+        ),
+        (
+            "language g0\nd = {} with { let tmp = 1; x = tmp }\nasm.result = match d as { {x:_} => \"private\"; _ => \"public\" }\n",
+            "private",
+        ),
+    ] {
+        assert_eq!(
+            assembly_result_text(source),
+            expected.as_bytes(),
+            "{source}"
+        );
+    }
+}
+
+/// What precedes a `let` group does not see it, and its names are locals:
+/// no member, use or other local may share them.
+#[test]
+fn body_lets_are_sequential_private_locals() {
+    for (source, expected) in [
+        (
+            "language g0\nd = {} with\n  x = tmp\n  let tmp = 1\n",
+            "local `tmp` shadows external `tmp` used by this file on line 3",
+        ),
+        (
+            "language g0\nobject o with\n  tmp = 2\n  let tmp = 1\n  x = tmp\n",
+            "local `tmp` shadows external `tmp` defined on line 3",
+        ),
+        (
+            "language g0\nobject o with\n  let tmp = 1\n  let tmp = 2\n  x = tmp\n",
+            "local `tmp` shadows existing local `tmp`; local name shadowing is not allowed",
+        ),
+        (
+            "language g0\nobject o with\n  let tmp = 1\n  x = _tmp\n",
+            "`_tmp` names the local `tmp`, which has no prior definition",
+        ),
+        (
+            "language g0\nobject o with\n  let\n  x = 1\n",
+            "a `let` member requires at least one binding",
+        ),
+        (
+            "language g0\nobject o with\n  let x := 1\n  y = x\n",
+            "local binding `x := 1` must use `=`",
+        ),
+        (
+            "language g0\nobject o with\n  let x = 1\n  alias o\n  y = x\n",
+            "`alias` may only be the first member of its body",
+        ),
+    ] {
+        let lowered = lower_parsed_source(parse(source), &CompileContext::default());
+        assert!(
+            lowered.diagnostics.iter().any(|diagnostic| {
+                diagnostic.severity == Severity::Error && diagnostic.message == expected
+            }),
+            "{source}: {:?}",
+            lowered.diagnostics
+        );
+    }
+}
+
+#[test]
+fn body_lets_follow_local_unused_warning_rules() {
+    for source in [
+        "language g0\nobject o with\n  let unused = 1\n  let _quiet = 2\n  let { a = b; b = 1 }\n  x = a\n",
+        "language g0\nd = {} with\n  let unused = 1\n  let _quiet = 2\n  let { a = b; b = 1 }\n  x = a\n",
+    ] {
+        let parsed = parse(source);
+        let warnings = parsed
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Warning)
+            .map(|diagnostic| (diagnostic.line, diagnostic.message.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(warnings, [(3, "unused local `unused`")], "{source}");
+    }
+}

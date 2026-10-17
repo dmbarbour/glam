@@ -8,7 +8,7 @@ use super::super::keywords::{g0_keyword, reserved_keyword_message};
 use super::super::{
     DeclarationKind, DefinitionDecl, DefinitionKind, Diagnostic, ObjectBodyDefinition,
     ObjectBodyDefinitionKind, ObjectDecl, ObjectExtendDecl, ObjectRealization, Severity,
-    SyntaxExpr, SyntaxKeyExpr, warn_unused_locals, warn_unused_with_alias,
+    SyntaxExpr, SyntaxKeyExpr, warn_unused_body_lets, warn_unused_locals, warn_unused_with_alias,
 };
 use super::expression_context::{ExpressionContext, validate_expression_floor};
 use super::input::{ParseSession, TokenView};
@@ -127,43 +127,8 @@ pub(in crate::g_syntax::parser) fn parse_object_body(
     if is_layout_empty(view) {
         return ObjectBody::default();
     }
-    let statement_views = match split_braced_members(view, "`with` body") {
-        Some(Ok(members)) => members
-            .into_iter()
-            .map(|member| {
-                let line = member
-                    .first_significant()
-                    .and_then(|(_, token)| member.line_at_span(token.span()))
-                    .unwrap_or(1);
-                (line, member)
-            })
-            .collect::<Vec<_>>(),
-        Some(Err(mut errors)) => {
-            diagnostics.append(&mut errors);
-            return ObjectBody::default();
-        }
-        None => {
-            let block = LayoutView::new(view).block();
-            if let Some(boundary) = block.boundary() {
-                diagnostics.push(Diagnostic::error(
-                    boundary.line(),
-                    format!(
-                        "layout line is indented {} spaces; expected at least {}",
-                        boundary.indentation(),
-                        block.anchor()
-                    ),
-                ));
-                return ObjectBody::default();
-            }
-            block
-                .into_statements()
-                .into_iter()
-                .filter_map(|statement| {
-                    view.subview(statement.tokens())
-                        .map(|statement_view| (statement.line(), statement_view))
-                })
-                .collect()
-        }
+    let Some(statement_views) = block_members(view, "`with` body", diagnostics) else {
+        return ObjectBody::default();
     };
 
     let mut body = Vec::with_capacity(statement_views.len());
@@ -185,6 +150,16 @@ pub(in crate::g_syntax::parser) fn parse_object_body(
             match parse_alias_member(statement_view) {
                 Ok(name) => alias = Some(name),
                 Err(message) => diagnostics.push(Diagnostic::error(line, message)),
+            }
+            continue;
+        }
+        if let Some(TokenKind::Name("let")) = head {
+            let context = parent_context.child_owner(statement_view);
+            if let Some(bindings) = parse_let_member(statement_view, line, context, diagnostics) {
+                body.push(ObjectBodyDefinition {
+                    line,
+                    kind: ObjectBodyDefinitionKind::Let(bindings),
+                });
             }
             continue;
         }
@@ -217,10 +192,171 @@ pub(in crate::g_syntax::parser) fn parse_object_body(
             body.push(ObjectBodyDefinition { line, kind });
         }
     }
+    warn_unused_body_lets(&body, diagnostics);
     ObjectBody {
         alias,
         members: body,
     }
+}
+
+/// The members of a braced or layout block, each with its line, or `None`
+/// once a malformed block is reported.
+fn block_members<'lex, 'source>(
+    view: TokenView<'lex, 'source>,
+    label: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Vec<(usize, TokenView<'lex, 'source>)>> {
+    match split_braced_members(view, label) {
+        Some(Ok(members)) => Some(
+            members
+                .into_iter()
+                .map(|member| {
+                    let line = member
+                        .first_significant()
+                        .and_then(|(_, token)| member.line_at_span(token.span()))
+                        .unwrap_or(1);
+                    (line, member)
+                })
+                .collect(),
+        ),
+        Some(Err(mut errors)) => {
+            diagnostics.append(&mut errors);
+            None
+        }
+        None => {
+            let block = LayoutView::new(view).block();
+            if let Some(boundary) = block.boundary() {
+                diagnostics.push(Diagnostic::error(
+                    boundary.line(),
+                    format!(
+                        "layout line is indented {} spaces; expected at least {}",
+                        boundary.indentation(),
+                        block.anchor()
+                    ),
+                ));
+                return None;
+            }
+            Some(
+                block
+                    .into_statements()
+                    .into_iter()
+                    .filter_map(|statement| {
+                        view.subview(statement.tokens())
+                            .map(|statement_view| (statement.line(), statement_view))
+                    })
+                    .collect(),
+            )
+        }
+    }
+}
+
+/// A `let` member's group: one binding after `let`, a hanging layout block
+/// of them whose first sets the column, or a braced block.
+fn parse_let_member(
+    view: TokenView<'_, '_>,
+    line: usize,
+    context: ExpressionContext,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Vec<(String, SyntaxExpr)>> {
+    let (let_index, _) = view
+        .first_significant()
+        .expect("a `let` member begins with its keyword");
+    let group = trim_layout(view_between(view, let_index + 1, view.range().end()));
+    let members = if is_layout_empty(group) {
+        Vec::new()
+    } else {
+        block_members(group, "`let` bindings", diagnostics)?
+    };
+    if members.is_empty() {
+        diagnostics.push(Diagnostic::error(
+            line,
+            "a `let` member requires at least one binding",
+        ));
+        return None;
+    }
+    let mut bindings = Vec::with_capacity(members.len());
+    let mut failed = false;
+    for (line, member) in members {
+        let member = trim_layout(member);
+        match parse_let_binding(member, line, context.child_owner(member), diagnostics) {
+            Some(binding) => bindings.push(binding),
+            None => failed = true,
+        }
+    }
+    (!failed).then_some(bindings)
+}
+
+/// One binding of a `let` member, `name params = value`, read as a `let`
+/// expression's: parameters are lambda sugar.
+fn parse_let_binding(
+    view: TokenView<'_, '_>,
+    line: usize,
+    context: ExpressionContext,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<(String, SyntaxExpr)> {
+    let text = |view: TokenView<'_, '_>| view.source_text().unwrap_or("").trim().to_owned();
+    let mut fail = |message: String| {
+        diagnostics.push(Diagnostic::error(line, message));
+        None
+    };
+    let operator = view.top_level().find(|indexed| {
+        matches!(
+            indexed.token().kind(),
+            TokenKind::Symbol("=" | ":=" | "::=")
+        )
+    });
+    let Some(equal) =
+        operator.filter(|indexed| matches!(indexed.token().kind(), TokenKind::Symbol("=")))
+    else {
+        return fail(format!("local binding `{}` must use `=`", text(view)));
+    };
+    let head = trim_layout(view_between(view, view.range().start(), equal.index()));
+    let value = trim_layout(view_between(view, equal.index() + 1, view.range().end()));
+    let one = |index: usize| view_between(view, index, index + 1);
+    let mut names = head
+        .top_level()
+        .filter(|indexed| !matches!(indexed.token().kind(), TokenKind::LineStart { .. }));
+    let Some(first) = names.next() else {
+        return fail(format!("invalid local binding name `{}`", text(head)));
+    };
+    let Some(name) = local_name(one(first.index())) else {
+        return fail(match single_reserved_keyword(one(first.index())) {
+            Some(keyword) => reserved_keyword_message(keyword),
+            None => format!("invalid local binding name `{}`", text(head)),
+        });
+    };
+    let mut parameters = Vec::new();
+    for indexed in names {
+        let Some(parameter) = local_name(one(indexed.index())) else {
+            return fail(match single_reserved_keyword(one(indexed.index())) {
+                Some(keyword) => reserved_keyword_message(keyword),
+                None => format!("local binding `{name}` parameters must be local names"),
+            });
+        };
+        if indexed.token().leading() == LeadingTrivia::Joint {
+            return fail(format!(
+                "local binding `{name}` parameters must be separated from its name"
+            ));
+        }
+        parameters.push(parameter.to_owned());
+    }
+    if is_layout_empty(value) {
+        return fail(format!("local binding `{name}` requires a value"));
+    }
+    let value = match parse_body(value, context) {
+        Ok(value) => value,
+        Err(errors) => {
+            diagnostics.extend(errors);
+            return None;
+        }
+    };
+    let value = if parameters.is_empty() {
+        value
+    } else {
+        SyntaxExpr::Lambda(parameters, Box::new(value))
+    };
+    warn_unused_locals(&value, line, diagnostics);
+    Some((name.to_owned(), value))
 }
 
 pub(in crate::g_syntax::parser) fn parse_nonempty_object_body(

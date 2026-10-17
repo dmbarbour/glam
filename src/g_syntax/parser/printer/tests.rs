@@ -247,16 +247,24 @@ impl Generator {
                 body: (0..self.below(3))
                     .map(|_| ObjectBodyDefinition {
                         line: 1,
-                        kind: ObjectBodyDefinitionKind::Definition(DefinitionDecl {
-                            target: vec![self.key()],
-                            parameters: Vec::new(),
-                            kind: if self.chance(2) {
-                                DefinitionKind::Override
-                            } else {
-                                DefinitionKind::Introduce
-                            },
-                            expr: Some(self.expression(depth)),
-                        }),
+                        kind: if self.chance(4) {
+                            ObjectBodyDefinitionKind::Let(
+                                (0..1 + self.below(2))
+                                    .map(|_| (self.name(), self.expression(depth)))
+                                    .collect(),
+                            )
+                        } else {
+                            ObjectBodyDefinitionKind::Definition(DefinitionDecl {
+                                target: vec![self.key()],
+                                parameters: Vec::new(),
+                                kind: if self.chance(2) {
+                                    DefinitionKind::Override
+                                } else {
+                                    DefinitionKind::Introduce
+                                },
+                                expr: Some(self.expression(depth)),
+                            })
+                        },
                     })
                     .collect(),
             },

@@ -89,6 +89,9 @@ pub enum ObjectBodyDefinitionKind {
     Extend(ObjectExtendDecl),
     Declare(Vec<String>),
     Assume(Vec<String>),
+    /// A `let` group: body-private bindings, mutually recursive within the
+    /// group and seen by the members after it.
+    Let(Vec<(String, SyntaxExpr)>),
 }
 
 impl ObjectBodyDefinition {

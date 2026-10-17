@@ -585,6 +585,11 @@ object foo extends bar with
     A = f.B + a             # 'a' resolves to host directly now
     B = f.C + 2             # _f.B would be the prior B
 
+Dict with                   # `let` members: private, not entries
+    alias d
+    let tmp = _d.x + 1      # one group; recursive within itself,
+    x := tmp + 2            #   seen only by the members after it
+
 baz = object NameExpr extends foo with ...           # named object expression
 qux = object _ extends foo with ...                   # anonymous object expression
 abstract object proto with ...                        # declaration: spec only

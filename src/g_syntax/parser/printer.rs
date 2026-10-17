@@ -528,8 +528,27 @@ impl Printer {
     }
 
     fn member(&mut self, member: &ObjectBodyDefinition) {
+        if let ObjectBodyDefinitionKind::Let(bindings) = &member.kind {
+            // One binding stands alone; a group is braced.
+            self.text("let ");
+            if let [(name, value)] = bindings.as_slice() {
+                self.text(name);
+                self.text(" = ");
+                self.expression(value, true);
+                return;
+            }
+            self.text("{");
+            for (at, (name, value)) in bindings.iter().enumerate() {
+                self.text(if at == 0 { " " } else { "; " });
+                self.text(name);
+                self.text(" = ");
+                self.expression(value, true);
+            }
+            self.text(" }");
+            return;
+        }
         let ObjectBodyDefinitionKind::Definition(definition) = &member.kind else {
-            unimplemented!("the printer prints only definitions as members yet");
+            unimplemented!("the printer prints only definitions and `let`s as members yet");
         };
         self.path(&definition.target);
         for parameter in &definition.parameters {

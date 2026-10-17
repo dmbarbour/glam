@@ -1433,6 +1433,30 @@ For example:
 
 In this context, `foo.A == 6`. Note that we do not need `^a` to reference the global `a`, but now we use `f.B` to reference the local `B`. To reference prior definitions, we'd use `_f.B` instead. 
 
+### Body Locals
+
+A `with` body may also hold `let` members: private bindings that serve as
+utility definitions with convenient access to the alias, and that are not
+entries of the result. A `let` member is one binding, a hanging layout group
+whose first binding sets the column, or a braced group, with the bindings of a
+`let` expression:
+
+        Dict with
+            alias d
+            let tmp = _d.x + 1
+            x := tmp + 2
+            y = tmp * 2
+
+        object counter with
+            let { step = 1; next n = n + step }
+            value = next 41
+
+Each group is mutually recursive within itself and visible only to the
+members after it; it reads the definitions before it, so `_d.x` above is the
+prior `x` where the group stands. Its names are locals: a member, a use in the
+same file, or another local in scope may not share them, and `_tmp` is an
+error rather than a prior definition.
+
 ### Anonymous Objects
 
 An anonymous object has no name, i.e. `spec.name` is explicitly left blank. Users express anonymous objects via `_` in name position, e.g. `object _ extends foo, bar with ...`. To ensure anonymous objects are intentional, we raise an error if `NameExpr` evaluates as `{}`.

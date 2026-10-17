@@ -359,6 +359,20 @@ pub(in crate::g_syntax) fn lower_dict_with_expr_resolved(
             definitions.duplicate_in(access),
             scope.duplicate_in(access),
         );
+        if let ObjectBodyDefinitionKind::Let(group) = &body_definition.kind {
+            body_bindings.bind_group(
+                access,
+                lower_let_group_resolved(
+                    access,
+                    group,
+                    body_definition.line,
+                    context,
+                    &body_scope,
+                    locals,
+                )?,
+            );
+            continue;
+        }
         let updated = lower_object_body_item_resolved(
             access,
             body_definition,
@@ -1069,10 +1083,30 @@ pub(in crate::g_syntax) fn lower_let_expr_resolved(
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
+    let base_len = locals.len();
+    let binders = lower_let_group_resolved(access, bindings, line, context, scope, locals)?;
+    let mut lowered =
+        syntax_expr_to_resolved_in_semantic_scope(access, body, line, context, scope, locals)?;
+    locals.truncate(base_len);
+    for (parameters, values) in binders.into_iter().rev() {
+        lowered = ResolvedExpr::apply(ResolvedExpr::lambda(parameters, lowered), values);
+    }
+    Ok(lowered)
+}
+
+/// The binders of one `let` group, outermost first, each the parameters of
+/// a lambda applied to its values around what the group scopes; the group's
+/// names stay bound in `locals`.
+pub(in crate::g_syntax) fn lower_let_group_resolved(
+    access: &RuntimeValueAccess<'_>,
+    bindings: &[(String, SyntaxExpr)],
+    line: usize,
+    context: &CompileContext,
+    scope: &NameScope<ResolvedRoot>,
+    locals: &mut ResolverContext,
+) -> Result<Vec<Binder>, Diagnostic> {
     if bindings.is_empty() {
-        return syntax_expr_to_resolved_in_semantic_scope(
-            access, body, line, context, scope, locals,
-        );
+        return Ok(Vec::new());
     }
 
     // Check the group's names together: no duplicate, no shadowing.
@@ -1169,13 +1203,7 @@ pub(in crate::g_syntax) fn lower_let_expr_resolved(
             }
         }
     }
-    let mut lowered =
-        syntax_expr_to_resolved_in_semantic_scope(access, body, line, context, scope, locals)?;
-    locals.truncate(base_len);
-    for (parameters, values) in binders.into_iter().rev() {
-        lowered = ResolvedExpr::apply(ResolvedExpr::lambda(parameters, lowered), values);
-    }
-    Ok(lowered)
+    Ok(binders)
 }
 
 /// The strongly connected components of a binding group's dependency

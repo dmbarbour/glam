@@ -235,6 +235,22 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
                 .as_ref()
                 .map(|root| root.duplicate_in(access)),
         );
+        // A `let` group binds here, against the definitions so far, for
+        // the members after it.
+        if let ObjectBodyDefinitionKind::Let(group) = &body_definition.kind {
+            bindings.bind_group(
+                access,
+                lower_let_group_resolved(
+                    access,
+                    group,
+                    body_definition.line,
+                    context,
+                    &scope,
+                    locals,
+                )?,
+            );
+            continue;
+        }
         let updated = lower_object_body_item_resolved(
             access,
             body_definition,
@@ -310,6 +326,7 @@ fn object_body_journal_entries(item: &ObjectBodyDefinition) -> Vec<(JournalOp, V
             .iter()
             .map(|target| (JournalOp::Assume, path(target), line))
             .collect(),
+        ObjectBodyDefinitionKind::Let(_) => Vec::new(),
     }
 }
 
@@ -361,6 +378,9 @@ pub(in crate::g_syntax) fn lower_object_body_item_resolved(
                 item.line,
                 "`declare` and `assume` belong to modules and object bodies, not dict `with` bodies",
             ))
+        }
+        ObjectBodyDefinitionKind::Let(_) => {
+            unreachable!("a body binds its `let` groups where it lowers its members")
         }
     }
 }

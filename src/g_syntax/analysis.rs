@@ -106,34 +106,10 @@ fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Dia
             }
         }
         SyntaxExpr::Let { bindings, body } => {
-            let params = bindings
-                .iter()
-                .map(|(name, _)| local_name_metadata(name))
-                .collect::<Vec<_>>();
+            let params = binding_group_locals(bindings);
             let mut used = vec![false; params.len()];
             mark_used_locals(body, &params, &mut used);
-            // The group is mutually recursive: a binding the body reaches
-            // uses the siblings its value names.
-            let dependencies = binding_group_dependencies(bindings);
-            let mut reached = (0..params.len())
-                .filter(|&index| used[index])
-                .collect::<Vec<_>>();
-            while let Some(index) = reached.pop() {
-                for &dependency in &dependencies[index] {
-                    if !used[dependency] {
-                        used[dependency] = true;
-                        reached.push(dependency);
-                    }
-                }
-            }
-            for (param, used) in params.iter().zip(used) {
-                if !used && param.canonical.is_some() && !param.suppress_unused_warning {
-                    diagnostics.push(Diagnostic::warn(
-                        line,
-                        format!("unused local `{}`", param.raw),
-                    ));
-                }
-            }
+            warn_unused_binding_group(bindings, &params, used, line, diagnostics);
             for (_, value) in bindings {
                 analyze_expr_locals(value, line, diagnostics);
             }
@@ -166,6 +142,64 @@ fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Dia
     }
 }
 
+fn binding_group_locals(bindings: &[(String, SyntaxExpr)]) -> Vec<LocalName> {
+    bindings
+        .iter()
+        .map(|(name, _)| local_name_metadata(name))
+        .collect()
+}
+
+/// Warns for each binding of a `let` group that is not `used`, by what the
+/// group scopes or by a binding that is. The group is mutually recursive:
+/// a used binding uses the siblings its value names.
+fn warn_unused_binding_group(
+    bindings: &[(String, SyntaxExpr)],
+    params: &[LocalName],
+    mut used: Vec<bool>,
+    line: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let dependencies = binding_group_dependencies(bindings);
+    let mut reached = (0..params.len())
+        .filter(|&index| used[index])
+        .collect::<Vec<_>>();
+    while let Some(index) = reached.pop() {
+        for &dependency in &dependencies[index] {
+            if !used[dependency] {
+                used[dependency] = true;
+                reached.push(dependency);
+            }
+        }
+    }
+    for (param, used) in params.iter().zip(used) {
+        if !used && param.canonical.is_some() && !param.suppress_unused_warning {
+            diagnostics.push(Diagnostic::warn(
+                line,
+                format!("unused local `{}`", param.raw),
+            ));
+        }
+    }
+}
+
+/// Warns for each binding of a body's `let` groups that the members after
+/// its group do not use.
+pub(super) fn warn_unused_body_lets(
+    body: &[ObjectBodyDefinition],
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for (position, item) in body.iter().enumerate() {
+        let ObjectBodyDefinitionKind::Let(bindings) = &item.kind else {
+            continue;
+        };
+        let params = binding_group_locals(bindings);
+        let mut used = vec![false; params.len()];
+        for later in &body[position + 1..] {
+            mark_used_body_item_locals(later, &params, &mut used);
+        }
+        warn_unused_binding_group(bindings, &params, used, item.line, diagnostics);
+    }
+}
+
 pub(super) fn warn_unused_with_alias(
     alias: &str,
     body: &[ObjectBodyDefinition],
@@ -194,11 +228,17 @@ pub(super) fn warn_unused_with_alias(
 }
 
 fn analyze_object_body_locals(body: &[ObjectBodyDefinition], diagnostics: &mut Vec<Diagnostic>) {
+    warn_unused_body_lets(body, diagnostics);
     for item in body {
         if let Some(definition) = item.definition()
             && let Some(expr) = &definition.expr
         {
             analyze_expr_locals(expr, item.line, diagnostics);
+        }
+        if let ObjectBodyDefinitionKind::Let(bindings) = &item.kind {
+            for (_, value) in bindings {
+                analyze_expr_locals(value, item.line, diagnostics);
+            }
         }
         if let Some(object) = item.object() {
             for parent in &object.deps {
@@ -375,6 +415,11 @@ fn mark_used_body_item_prior_alias(
         && let Some(expr) = &definition.expr
     {
         mark_used_prior_alias(expr, alias, used);
+    }
+    if let ObjectBodyDefinitionKind::Let(bindings) = &item.kind {
+        for (_, value) in bindings {
+            mark_used_prior_alias(value, alias, used);
+        }
     }
     if let Some(object) = item.object() {
         for parent in &object.deps {
@@ -1016,6 +1061,11 @@ fn mark_used_body_item_locals(
         && let Some(expr) = &definition.expr
     {
         mark_used_locals(expr, locals, used);
+    }
+    if let ObjectBodyDefinitionKind::Let(bindings) = &item.kind {
+        for (_, value) in bindings {
+            mark_used_locals(value, locals, used);
+        }
     }
     if let Some(object) = item.object() {
         for parent in &object.deps {

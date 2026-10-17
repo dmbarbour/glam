@@ -617,8 +617,12 @@ impl NameScope<ResolvedRoot> {
 
 #[derive(Default)]
 pub(in crate::g_syntax) struct ResolvedBindings {
-    bindings: Vec<(BindingId, ResolvedExpr<Value>)>,
+    bindings: Vec<Binder>,
 }
+
+/// The parameters of a lambda applied to their values around what they
+/// scope.
+pub(in crate::g_syntax) type Binder = (Vec<BindingId>, Vec<ResolvedExpr<Value>>);
 
 impl ResolvedBindings {
     pub(in crate::g_syntax) fn bind(
@@ -629,8 +633,17 @@ impl ResolvedBindings {
         value: ResolvedExpr<Value>,
     ) -> ResolvedRoot {
         let binding = locals.push_internal_binding(label);
-        self.bindings.push((binding, value));
+        self.bindings.push((vec![binding], vec![value]));
         ResolvedRoot::Local(binding)
+    }
+
+    /// Binds a `let` group's binders, whose names `locals` already holds.
+    pub(in crate::g_syntax) fn bind_group(
+        &mut self,
+        _access: &RuntimeValueAccess<'_>,
+        binders: Vec<Binder>,
+    ) {
+        self.bindings.extend(binders);
     }
 
     pub(in crate::g_syntax) fn wrap(
@@ -638,8 +651,8 @@ impl ResolvedBindings {
         _access: &RuntimeValueAccess<'_>,
         mut body: ResolvedExpr<Value>,
     ) -> ResolvedExpr<Value> {
-        for (binding, value) in self.bindings.into_iter().rev() {
-            body = ResolvedExpr::apply(ResolvedExpr::lambda(vec![binding], body), [value]);
+        for (parameters, values) in self.bindings.into_iter().rev() {
+            body = ResolvedExpr::apply(ResolvedExpr::lambda(parameters, body), values);
         }
         body
     }

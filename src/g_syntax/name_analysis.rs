@@ -267,8 +267,18 @@ impl FileNameAnalysis {
             self.record_binder_with_raw(&alias.raw, canonical, spec.line, scope);
         }
 
+        // A `let` group's names are locals of the members after it.
+        let base_len = locals.len();
         for item in body {
             match &item.kind {
+                ObjectBodyDefinitionKind::Let(bindings) => {
+                    for (name, _) in bindings {
+                        self.push_source_local(name, item.line, scope, locals);
+                    }
+                    for (_, value) in bindings {
+                        self.visit_expr(value, item.line, scope, locals);
+                    }
+                }
                 ObjectBodyDefinitionKind::Definition(definition) => {
                     self.visit_definition(definition, item.line, scope, locals);
                 }
@@ -286,6 +296,7 @@ impl FileNameAnalysis {
                 }
             }
         }
+        locals.truncate(base_len);
     }
 
     /// `declare` or `assume`: names a scope may use. An assumed name was
