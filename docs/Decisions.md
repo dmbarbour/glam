@@ -1265,6 +1265,40 @@ maps the short names used here to file names.
     each reflection effect step costs about a million.
 - **Recorded in:** structural overheads plan, `defs-meta-refl`.
 
+### Local analysis is one walk; file `let`s are read through the resolver
+`scope-analysis-is-one-walk` · 2026-10-17 · agent · accepted
+- **Context:** each binder walked its whole scope to mark its own locals,
+  each `let` group walked its values for its dependency edges, and every
+  declaration seeded all the file's `let` names as locals, checking each
+  against the rest. Nested `where` grew as n^1.61, and 800 file `let`s
+  before 800 definitions took 11.3 G instructions, cubic.
+- **Decision:**
+  - Unused-local analysis is one walk with a scope stack: each name
+    resolves to its innermost binder through an index of the binders in
+    scope, and a `let` group's dependency edges are recorded as the walk
+    meets them. A binder that warned before its scope's contents reserves
+    its place, so warnings keep their order.
+  - The resolver computes a group's edges with those of every group in its
+    values in one walk, kept by the groups' source addresses until the
+    walking group's values are resolved. Macros expand as a declaration
+    parses, before it lowers, so the source is fixed meanwhile.
+  - File `let` names lie beneath the locals, read on a lookup that misses
+    them, with the first binding identities; a scope sees them at module
+    level and in bodies transparent to it (`NameScope::sees_file_lets`).
+- **Alternatives rejected:** storing dependency edges in the syntax tree,
+  which every constructor and test of `let` would carry; and copying a
+  template of the file's locals per declaration, cheaper but still
+  O(lets) per declaration.
+- **Consequences:**
+  - Where a name is bound twice, analysis reads the innermost binder, as
+    the resolver does; before, a body's `let` did not hide an outer local
+    from the outer binder's walk. Rebinding a local is an error in the
+    resolver anyway.
+  - `chain_where` grows as n^1.06 and file `let`s as n^1.17.
+    `rustc-hash` hashes the scope names (maintainer, 2026-10-17), which
+    keeps `hello_elf` within 0.1% of its cost before.
+- **Recorded in:** parser backtracking plan, "Scope analysis 2026-10-17".
+
 ## Diagnostics
 
 ### Senders never evaluate diagnostics; renderers do

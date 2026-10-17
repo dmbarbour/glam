@@ -41,13 +41,9 @@ flags a step for discussion when work reaches it, not a decision.
 - [`PerformanceRoadmap_2026-10-05.md`](PerformanceRoadmap_2026-10-05.md):
   the umbrella for performance work, covering shared measurement, how
   budgets treat batching, and the order of its `perf-` steps. Latest
-  measurements: Snapshot 2026-10-15.
-- [`ParserBacktrackingPerformance_2026-10-04.md`](ParserBacktrackingPerformance_2026-10-04.md):
-  `perf-parser`, in progress. The prefix-shared term parser parses every
-  expression and pattern, Chumsky only declaration heads; the keyword
-  frames, `parser-grammar-retirement` and `parser-scope-analysis` (one
-  walk for local analysis, and file `let` names read through the
-  resolver) were done by 2026-10-17. `parser-constant-factors` remains.
+  measurements: Snapshot 2026-10-15. `perf-parser` closed 2026-10-17;
+  next, the representations, then `perf-net-lowering`, then
+  `perf-reflection-effects`.
 - [`GrammarReview_2026-10-16.md`](GrammarReview_2026-10-16.md): the
   grammar reviewed for clarity when read (Green's cognitive dimensions) and
   ease of parsing, and what belongs in the parser, a linter or a formatter.
@@ -112,6 +108,13 @@ flags a step for discussion when work reaches it, not a decision.
 ## Completed, Awaiting Retirement
 
 Each is done; what keeps it under the retention rule is listed.
+
+- [`ParserBacktrackingPerformance_2026-10-04.md`](ParserBacktrackingPerformance_2026-10-04.md),
+  `perf-parser`, closed 2026-10-17 (maintainer): the term parser, keyword
+  frames, one-walk local analysis. Its open findings moved to the
+  roadmap's standalone steps. Still cited by `Decisions.md`, the roadmap,
+  the grammar review, the tag prefix and panic-safety plans, and a comment
+  in `scripts/profile.sh`; it holds the measurements they cite.
 
 - [`StructuralOverheads_2026-10-08.md`](StructuralOverheads_2026-10-08.md),
   `perf-structural-overheads`, closed 2026-10-15 (maintainer): costs that

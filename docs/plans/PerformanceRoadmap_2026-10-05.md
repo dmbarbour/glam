@@ -2,14 +2,13 @@
 
 Status: agreed with the maintainer on 2026-10-05, including the harness
 questions. `perf-profiling-harness` and `perf-foreground-collection` are
-done, `perf-parser` is in production, and `perf-evaluation-recursion` is
-done (2026-10-08). `perf-structural-overheads` closed on 2026-10-15
+done, and `perf-evaluation-recursion` is done (2026-10-08). `perf-structural-overheads` closed on 2026-10-15
 (maintainer); its reflection steps continue as `perf-reflection-effects`
 ([plan](ReflectionPerformance_2026-10-15.md)), and the rest became
-[standalone steps](#standalone-steps). Next, in the maintainer's order
-(2026-10-15): the rest of `perf-parser`, then the representations, then
-`perf-reflection-effects`, since representation costs now bury other
-signals. The latest measurements are in
+[standalone steps](#standalone-steps). `perf-parser` closed on 2026-10-17
+(maintainer). Next, in the maintainer's order (2026-10-15, 2026-10-17): the
+representations, then `perf-net-lowering`, then `perf-reflection-effects`,
+since representation costs now bury other signals. The latest measurements are in
 [Snapshot 2026-10-15](#snapshot-2026-10-15). This is the umbrella for
 performance work. Each step gets its own plan when it starts; the existing
 plans it names stay the detailed records. Steps are referred to by name,
@@ -135,40 +134,22 @@ gains this consequence when it lands.
    latch is set (revised
    `noauto-runtime-collection-policy`). CLI memory figures now reflect live
    memory.
-3. **Parser** (`perf-parser`).
-   - [Parser Backtracking Performance](ParserBacktrackingPerformance_2026-10-04.md)
-     replaces the backtracking grammar with a prefix-shared,
-     explicit-stack parser over the lexer's delimiter groups, with a cover
-     IR for patterns and expressions. Today parse time is exponential in
-     nesting depth. The lookahead-guard fix was rejected.
-   - *Production since 2026-10-07:*
-     - the term parser parses every ordinary expression;
-     - keyword forms are delegated to the structural parsers;
-     - the old grammar remains only as a fallback for invalid tokens, and
-       as the differential oracle.
-
-     Nested parens and lists now parse as fast as an empty program.
-   - **Remaining**, as that plan's steps:
-     - `parser-patterns`, which needs the cover IR below group level;
-     - `parser-keyword-frames`, keyword forms as parser frames, which
-       removes the structural layer's whole-file scans. It also removes
-       an exponential found on 2026-10-08: a keyword form inside
-       parentheses, nested in another, doubles parse time per level;
-     - `parser-grammar-retirement`;
-     - `parser-scope-analysis` (added 2026-10-15): name analysis is
-       superlinear in `where` nesting (`chain_where`, Snapshot 2026-10-15).
-   - This closes the parser exception in
-     `no-semantic-recursion-on-rust-stack`.
-   - **Stack depth before evaluation** (`perf-pre-eval-stack-depth`). A
-     deep syntax tree overflows the
-     Rust stack when dropped: a 100k-term flat chain, for example.
-     Expected (maintainer, 2026-10-06): every stage before evaluation needs
-     an audit for recursion on user-controlled depth. That covers the
-     syntax tree and its drop, name analysis, resolution, and lowering.
-     Known instance: lowering's `collect_free_bindings` recurses to a
-     dictionary literal's depth (see `perf-lowering-free-bindings`). It
-     owns the deep-nesting remedy that `no-semantic-recursion-on-rust-stack`
-     first gave the panic-safety plan (maintainer, 2026-10-15).
+3. **Parser** (`perf-parser`). *Done 2026-10-17* (maintainer);
+   [Parser Backtracking Performance](ParserBacktrackingPerformance_2026-10-04.md)
+   holds the record.
+   - A prefix-shared term parser with an explicit stack of frames reads
+     every expression and pattern, parsing each group once; Chumsky reads
+     only declaration heads. The exponentials in nesting are gone: every
+     parse family is linear.
+   - Local analysis is one walk with a scope stack, and file `let` names
+     are read through the resolver (`parser-scope-analysis`):
+     `chain_where` grows as n^1.06, and file `let`s, once cubic, as
+     n^1.17.
+   - Parsing is about 1% of `hello_elf` (2026-10-17), so its constants were
+     not pursued: allocation parsing nested forms, expression mode's term
+     wrapping, and the lexer and number parsing. Net lowering's are
+     `perf-net-lowering`. Open findings moved to the standalone steps
+     `perf-nested-scopes` and `perf-pre-eval-stack-depth`.
 4. **Evaluation recursion cost** (`perf-evaluation-recursion`). Diagnose
    [Evaluation Recursion Performance](EvaluationRecursionPerformance_2026-10-04.md)
    before any representation work: a simple countdown costs tens of
@@ -243,7 +224,16 @@ gains this consequence when it lands.
        histories. The compact node needs those levels, so GAL comes first
        or alongside. It also takes on the deferred positive-erasure
        translation.
-7. **Reflection effects** (`perf-reflection-effects`).
+7. **Net lowering** (`perf-net-lowering`), after the representations and
+   before the evaluation steps that follow (maintainer, 2026-10-17, as
+   intuition). Lowering resolved expressions to interaction nets is 30.5%
+   of `hello_elf` (183 M of 599 M instructions, 2026-10-17): finishing
+   nets (`NetBuilder::try_finish`) 118 M, of which the polarity check
+   (`Topology::check`) 52 M, and list trees 74 M. Builder and finish costs
+   depend on the net representation, hence the order. Whether the polarity
+   check runs on every net is the maintainer's call: it guards an
+   invariant (the [polarity plan](NetPolarityChecker_2026-10-05.md)).
+8. **Reflection effects** (`perf-reflection-effects`).
    [Reflection Performance](ReflectionPerformance_2026-10-15.md), split from
    the structural overheads plan on 2026-10-15: `perf-reflection-step-cost`
    (a `.r ()` step is 376 K instructions, mostly net reduction, allocation
@@ -251,7 +241,7 @@ gains this consequence when it lands.
    `minimal`'s 24 M). It follows the representations (maintainer,
    2026-10-15): much of a step's cost is now representation, which buries
    any other signal.
-8. **Normal forms and batching**, as separate steps:
+9. **Normal forms and batching**, as separate steps:
    - **Normal forms at construction** (`perf-normal-forms`). These make hashing and memoization
      possible later, and simplify bulk materialization and multi-step
      evaluation without explicit materialization. Pure nets can diverge,
@@ -269,8 +259,28 @@ gains this consequence when it lands.
 ### Standalone steps
 
 Small steps without a plan of their own, moved here when the structural
-overheads plan closed (2026-10-15). Its sections hold their earlier
-evidence.
+overheads plan closed (2026-10-15) and the parser plan closed (2026-10-17).
+Their sections hold their earlier evidence.
+
+- **Stack depth before evaluation** (`perf-pre-eval-stack-depth`). A
+  deep syntax tree overflows the Rust stack when dropped: a 100k-term flat
+  chain, for example. Expected (maintainer, 2026-10-06): every stage
+  before evaluation needs an audit for recursion on user-controlled depth.
+  That covers the syntax tree and its drop, name analysis, local analysis,
+  resolution, and lowering. Known instance: lowering's
+  `collect_free_bindings` recurses to a dictionary literal's depth (see
+  `perf-lowering-free-bindings`). It owns the deep-nesting remedy that
+  `no-semantic-recursion-on-rust-stack` first gave the panic-safety plan
+  (maintainer, 2026-10-15). The term parser itself is iterative.
+- **Nested scopes in the front end** (`perf-nested-scopes`), not scheduled
+  (maintainer, 2026-10-17: know the behavior; not a priority). Objects
+  nested n deep grow as n^1.31 over 50/100/200, an `^x` at each level as
+  n^1.34, and one deep `^…^x` as n^1.20, with reductions linear: the
+  resolver copies the scope chain for each body and each escape step
+  (`NameScope::duplicate_in`), and the parser reads nested `with` bodies
+  again at each level. The resolver also scans the visible locals per
+  name lookup and per binding group, O(L) each; nested `let`s grow as
+  n^1.17. The parser plan's "Scope analysis 2026-10-17" has the evidence.
 
 - **Root checks by kind** (`perf-root-check-kinds`), after the
   representation steps (maintainer, 2026-10-15). A root made from a view

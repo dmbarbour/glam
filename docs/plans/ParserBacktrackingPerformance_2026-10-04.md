@@ -6,7 +6,11 @@ is in production since 2026-10-07 (see [Production switch](#production-switch-20
 2026-10-16 ([Patterns 2026-10-16](#patterns-2026-10-16)); the keyword frames
 and `parser-grammar-retirement` by 2026-10-17; `parser-scope-analysis` on
 2026-10-17 ([Scope analysis 2026-10-17](#scope-analysis-2026-10-17)).
-`parser-constant-factors` remains (see [Steps](#steps)). Rechecked 2026-10-15 (`01ec2fbc`): no parser step had
+**Closed 2026-10-17 (maintainer)** with `parser-constant-factors`'s
+measurements: parsing is about 1% of `hello_elf`, so the parser's listed
+constants are not pursued, and net lowering's went to the roadmap's
+`perf-net-lowering`. The findings still open moved to the roadmap's
+standalone steps (`perf-nested-scopes`, `perf-pre-eval-stack-depth`). Rechecked 2026-10-15 (`01ec2fbc`): no parser step had
 landed since `adcd994b` (2026-10-07), and a keyword form in parentheses
 nested in another was exponential ([Measures 2026-10-15](#measures-2026-10-15)).
 Keyword regions, the first part of `parser-keyword-frames`, merged
@@ -368,7 +372,8 @@ production keeps the old parser until the oracle agrees.
   `parser-keyword-frames-suffixes` on 2026-10-17.
 - `parser-scope-analysis`: done 2026-10-17; see
   [Scope analysis 2026-10-17](#scope-analysis-2026-10-17).
-- `parser-constant-factors`: added 2026-10-16; not started.
+- `parser-constant-factors`: added 2026-10-16; closed 2026-10-17 with its
+  measurements (maintainer). See the step's *Measured 2026-10-17*.
 - `parser-grammar-retirement`: done 2026-10-17 (see "as built" below).
   The term parser reads every expression and pattern; Chumsky reads only
   declaration heads.
@@ -1459,4 +1464,7 @@ in the panic-safety plan, because an overflow crashes the process.
   `src/README.md` describe only the Chumsky input adapter; the term parser,
   its oracle (`GLAM_TERM_ORACLE`, `GLAM_TERM_FUZZ`) and the Chumsky
   fallback are documented only here and in `parser/term.rs`. Document them
-  now, or after `parser-grammar-retirement`?
+  now, or after `parser-grammar-retirement`? *Done* with
+  `parser-grammar-retirement`: `front_end.md` and `src/README.md` describe
+  the term parser, and `AgentContext.md` its test knobs (`GLAM_ROUND_TRIP`,
+  `GLAM_TERM_FUZZ`); the oracle and the Chumsky fallback are gone.
