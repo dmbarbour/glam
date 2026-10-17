@@ -40,7 +40,8 @@ whichever way these questions are settled.
 ## Parser, linter, formatter
 
 Some rules belong to tools that do not exist yet: `glam --lint` and
-`glam --format` are possible later work.
+`glam --format` are possible later work. Lint candidates are collected in
+[`Lints.md`](../Lints.md).
 - **The parser** rejects what a reader could plausibly structure
   differently, and what would make the grammar ambiguous or need unbounded
   lookahead. Its rules are few and uniform, one sentence per construct,

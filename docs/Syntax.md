@@ -483,10 +483,10 @@ a lambda, as they do for an argument in a pipeline:
         values |> list.map (\value -> transform value) |> finish
 
 What parses may still read poorly, such as deeply nested inline `if`s or a
-lambda before a binding's `->` (`f \a -> e -> p`); a linter, rather than
-the grammar, is to flag those. The current Rust bootstrap enforces the rule
-for conditionals, `do` blocks, matches and lambdas; `let`, `using` and
-`object` follow.
+lambda before a binding's `->` (`f <| \a -> e -> p`); a linter, rather
+than the grammar, is to flag those (see [Lints](Lints.md)). The current
+Rust bootstrap enforces the rule for conditionals, `do` blocks, matches and
+lambdas; `let`, `using` and `object` follow.
 
 ## Effects
 

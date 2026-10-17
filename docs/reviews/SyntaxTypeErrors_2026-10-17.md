@@ -1,9 +1,10 @@
 # Syntax-Layer Type Errors Review — 2026-10-17
 
-Status: review complete. No code changed. This records findings and a
-recommended remediation, `kinds-` steps, which wait for the maintainer's
-answers to the [open questions](#open-questions-2026-10-17) and a place in
-the order of work.
+Status: review complete. This records findings and a recommended
+remediation, `kinds-` steps. The maintainer answered every
+[open question](#open-questions-2026-10-17) on 2026-10-17: the steps are
+low priority and follow the performance work, and one answer changed the
+lowering of a lone `do` statement.
 
 Revision reviewed: `6ef3f598` (clean `main`).
 
@@ -146,19 +147,20 @@ and the series gets one `Decisions.md` entry, amending
 
 ## Open Questions (2026-10-17)
 
-1. **Order of work.** The maintainer's order is the parser performance
-   steps, then the runtime ownership plan. Where do the `kinds-` steps go?
-   They touch only the front end, and `kinds-classifier` is small.
+1. **Order of work.** *Answered:* low priority, after the performance
+   work.
 2. **A literal final `do` statement.** *Answered (maintainer, 2026-10-17):*
    `do 42` is the kind of code a compiler should question, politely, so K3
    reports it, and a lone statement now lowers as `.r () >>= \_ -> X`
    (`lone-do-statements-run-as-effects`), a lightweight runtime check.
    Measured on the profiling suite, it costs nothing visible: +0.01% of all
    instructions, and +14 builtin steps in `hello_elf`.
-3. **K5 now or deferred**, and if now, which operators: arithmetic only, or
-   `++` too?
-4. **Embedded values.** A macro may embed a value (`SyntaxExpr::Embedded`)
-   whose kind is known when the macro expands. Should the classifier read
-   it, so macro output is checked too, or treat it as unknown?
-5. **Severity.** Errors throughout, as the maintainer said, including in
-   code that never runs, such as an unused definition?
+3. **K5 now or deferred.** *Answered:* later, with the others.
+4. **Embedded values.** A macro may embed a value (`SyntaxExpr::Embedded`).
+   *Answered:* a compiler does not look into embedded data, which may be
+   lazy and expensive, so the classifier treats it as unknown. Tracking the
+   provenance of embedded data would let the analysis see it; that is a
+   separate idea for macros.
+5. **Severity.** Errors, including in code that never runs? *Answered:*
+   the compiler's choice; insofar as compilation is lazy, lazy error
+   reporting makes sense.

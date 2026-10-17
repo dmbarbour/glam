@@ -107,8 +107,8 @@ flags a step for discussion when work reaches it, not a decision.
   reviews which type errors the front end could report from syntax alone:
   applying data, data as a predicate, view or effect, member access on
   data, and data operators' operands. Recommends `kinds-` steps, one
-  classifier of evident kinds and one walk; waits for the maintainer's
-  answers and a place in the order of work.
+  classifier of evident kinds and one walk. Its questions are answered;
+  the steps are low priority, after the performance work.
 
 ## Completed, Awaiting Retirement
 

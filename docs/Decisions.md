@@ -793,7 +793,9 @@ maps the short names used here to file names.
   that is `X` by left identity; anything else fails when the block runs.
 - **Alternatives rejected:** `.r () =>> X`, which adds a unit assertion that
   cannot fail; and a builtin that checks for an effect, needless at the
-  measured cost.
+  measured cost. Asserting that a value is an effect belongs to a
+  typechecker or an annotation; this lowering is a workaround until one
+  exists (maintainer, 2026-10-17).
 - **Consequences:** on the profiling suite the change costs +0.01% of all
   instructions, within noise; `hello_elf` takes 71 more WHNF delegations and
   14 more builtin steps, and no more reflection steps. A test that put a
