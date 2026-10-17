@@ -3354,6 +3354,31 @@ fn literal_paths_are_not_global_uses_but_computed_keys_are() {
     }));
 }
 
+/// A local has no prior definition, and `_x` cannot reach past a local
+/// `x` to the namespace's prior `x`.
+#[test]
+fn prior_names_of_locals_are_errors() {
+    for source in [
+        "language g0\nf = \\item -> _item\n",
+        "language g0\nf = let item = 1 in _item\n",
+        "language g0\nf = g where\n  item = 1\n  g = _item\n",
+        "language g0\nf v = match v as\n  item => _item\n",
+        "language g0\nf = do\n  item <- .read\n  .r _item\n",
+        "language g0\nobject o with\n  f = \\item -> _item\n",
+    ] {
+        let lowered = lower_parsed_source(parse(source), &CompileContext::default());
+        assert!(
+            lowered.diagnostics.iter().any(|diagnostic| {
+                diagnostic.severity == Severity::Error
+                    && diagnostic.message
+                        == "`_item` names the local `item`, which has no prior definition"
+            }),
+            "{source}: {:?}",
+            lowered.diagnostics
+        );
+    }
+}
+
 #[test]
 fn object_body_locals_use_their_visible_namespace_index() {
     let parsed = parse(concat!(

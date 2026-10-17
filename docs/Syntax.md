@@ -264,7 +264,7 @@ non-name keys such as `abstract_global_path module.[42]`.
 
 When defining names, we'll distinguish introductions versus overrides. An introduction `name = Expr`. An override uses `name := Expr`. It is an error to introduce a name that is already defined, or to override a name that isn't already defined. This resists ambiguity issues, i.e. a name is introduced with some intention or purpose, and overrides should preserve purpose. 
 
-Users refer to prior versions of names via `_name`, i.e. `_` prefix. This applies consistently across modules and objects.
+Users refer to prior versions of names via `_name`, i.e. `_` prefix. This applies consistently across modules and objects. A local has no prior version, so `_name` is an error where a local `name` is in scope; one name has one meaning in a file, and `_name` cannot reach past the local to a definition.
 
 The compiler enforces explicit overrides by implicit assertions analogous to: `name = assert (_name == {}) Expr` or `name := assert(_name <> {}) Expr` (where `{}` is the 'undefined' value). As an escape hatch, I propose a non-observing `name ::= \ prior -> Expr`. This also serves as an in-place update, i.e. `name ::= Update`. Users have more freedom with `::=`. 
 

@@ -61,7 +61,9 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
             lower_dict_union_resolved(access, items, line, context, scope, locals)?
         }
         SyntaxExpr::Name(name) => lower_name_expr_resolved(access, name, context, scope, locals),
-        SyntaxExpr::PriorName(name) => lower_prior_name_expr_resolved(access, name, line, scope)?,
+        SyntaxExpr::PriorName(name) => {
+            lower_prior_name_expr_resolved(access, name, line, scope, locals)?
+        }
         SyntaxExpr::Escape(depth, expr) => {
             let escaped_scope = escaped_name_scope(access, scope, *depth, line)?;
             syntax_expr_to_resolved_in_semantic_scope(
@@ -1292,11 +1294,23 @@ pub(in crate::g_syntax) fn lower_prior_name_expr_resolved(
     name: &str,
     line: usize,
     scope: &NameScope<ResolvedRoot>,
+    locals: &ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     if name.is_empty() {
         return Err(Diagnostic::error(
             line,
             "prior name expression must have a name",
+        ));
+    }
+    // One name has one meaning in a file, so `_x` cannot reach past a
+    // local `x` to a prior definition.
+    if locals
+        .iter()
+        .any(|local| local.canonical.as_deref() == Some(name))
+    {
+        return Err(Diagnostic::error(
+            line,
+            format!("`_{name}` names the local `{name}`, which has no prior definition"),
         ));
     }
 
