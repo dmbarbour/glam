@@ -733,9 +733,14 @@ maps the short names used here to file names.
 - **Consequences:**
   - `as` no longer continues an expression, so an update needs no
     parentheses in a match's subject.
+  - In every scope, `foo` is a visible local or `self.foo`, and each `^`
+    steps out of the innermost `self` to its lexical parent, a body without
+    its own `self` being transparent; `^` at module scope is an error. An
+    escape sees the locals lexically visible where it lands, and its own.
   - Before this, a named object alias, even `self`, left bare names to the
     host, an object's `as _` localized them, `self` named the innermost
-    object or update whatever its alias, and lexical locals outranked
+    object or update whatever its alias, `^` stepped out of one body
+    whatever it bound and saw every local, and lexical locals outranked
     localized names everywhere, `using` included: drift from the intended
     reading, which this restores.
   - A `let` macro, or any `let`, that reads a global waits on the final

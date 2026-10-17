@@ -37,6 +37,9 @@ struct ResolutionScope {
     /// Where the locals a bare name may read begin, as in the resolver's
     /// `NameScope`.
     local_floor: usize,
+    /// Whether the scope is its own `self`; one that is not is transparent
+    /// to `^`.
+    binds_self: bool,
     parent: Option<ResolutionScopeId>,
 }
 
@@ -65,6 +68,7 @@ impl FileNameAnalysis {
                 lookup: root_namespace,
                 object_alias: None,
                 local_floor: 0,
+                binds_self: true,
                 parent: None,
             }],
             binders: Vec::new(),
@@ -271,6 +275,7 @@ impl FileNameAnalysis {
             lookup,
             object_alias: canonical_alias.clone(),
             local_floor,
+            binds_self: localized,
             parent: Some(spec.parent),
         });
         if let Some(alias) = alias
@@ -347,8 +352,11 @@ impl FileNameAnalysis {
             | SyntaxExpr::PriorName(_) => {}
             SyntaxExpr::Name(name) => self.record_name_use(name, line, scope, locals),
             SyntaxExpr::Escape(depth, expr) => {
-                let escaped = self.escape_scope(scope, *depth);
-                self.visit_expr(expr, line, escaped, locals);
+                // An escape reads its target's lexical locals, as in the
+                // resolver.
+                let (escaped, boundary) = self.escape_scope(scope, *depth);
+                let mut outer = locals[..boundary.min(locals.len())].to_vec();
+                self.visit_expr(expr, line, escaped, &mut outer);
             }
             SyntaxExpr::Access(base, path) => {
                 self.visit_expr(base, line, scope, locals);
@@ -399,6 +407,7 @@ impl FileNameAnalysis {
                     lookup: namespace,
                     object_alias: None,
                     local_floor: locals.len(),
+                    binds_self: true,
                     parent: Some(scope),
                 });
                 self.visit_expr(body, line, using_scope, locals);
@@ -699,14 +708,29 @@ impl FileNameAnalysis {
         visible
     }
 
-    fn escape_scope(&self, mut scope: ResolutionScopeId, depth: usize) -> ResolutionScopeId {
+    /// Where `depth` escapes lead, and the boundary below which the locals
+    /// they reach were bound, as in the resolver: each steps out of the
+    /// innermost `self`.
+    fn escape_scope(
+        &self,
+        mut scope: ResolutionScopeId,
+        depth: usize,
+    ) -> (ResolutionScopeId, usize) {
+        let mut boundary = self.scopes[scope.0].local_floor;
         for _ in 0..depth {
+            while !self.scopes[scope.0].binds_self {
+                let Some(parent) = self.scopes[scope.0].parent else {
+                    return (scope, boundary);
+                };
+                scope = parent;
+            }
+            boundary = self.scopes[scope.0].local_floor;
             let Some(parent) = self.scopes[scope.0].parent else {
-                return scope;
+                return (scope, boundary);
             };
             scope = parent;
         }
-        scope
+        (scope, boundary)
     }
 
     fn introduce_definition_path(

@@ -546,6 +546,7 @@ pub(in crate::g_syntax) fn object_body_scope_resolved(
         object_prior_defs: Some(object_prior_defs),
         self_final_defs,
         self_prior_defs,
+        binds_self: localized,
         local_floor,
         reflection: reflection_boundary.map(|demand| ReflectionBoundary { demand }),
         parent: Some(Box::new(parent)),

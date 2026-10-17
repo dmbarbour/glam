@@ -692,10 +692,10 @@ object direct_x86_64 extends direct_standard_effects with
 
 object direct_linux_x86_64 with
   alias linux
-  trace = ^direct_x86_64.trace
+  trace = direct_x86_64.trace
 
   little_endian width value =
-    ^direct_x86_64.little_endian width value
+    direct_x86_64.little_endian width value
 
   elf_header entry_address =
     [0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0] ++
@@ -724,17 +724,17 @@ object direct_linux_x86_64 with
     linux.little_endian 8 0x1000
 
   executable program =
-    linux.executable_compiled (^direct_x86_64.compile 0x400078 program)
+    linux.executable_compiled (direct_x86_64.compile 0x400078 program)
 
   executable_with_trace trace_policy program =
     linux.executable_compiled (
-      ^direct_x86_64.compile_with_trace trace_policy 0x400078 program
+      direct_x86_64.compile_with_trace trace_policy 0x400078 program
     )
 
   executable_compiled compiled =
     linux.executable_code
       (
-        ^direct_x86_64.label_address
+        direct_x86_64.label_address
           compiled.symbols.["_start"]
           compiled.instructions
           compiled.code_address

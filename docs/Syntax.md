@@ -1435,6 +1435,14 @@ To improve concision, expressions within objects are localized by default. That 
 
 Use of `^` composes, e.g. `^^^method` escapes three lexical levels. But it's best to keep syntax shallow.
 
+In every scope, a bare `foo` is a visible local `foo` or `self.foo`, and each
+`^` steps out of the innermost `self` to its lexical parent. A body that binds
+no `self`, under a named alias or `alias _`, is transparent: there `foo` is
+its host's `self.foo`, and `^foo` its host's parent's. The module's `self` has
+no parent, so `^name` at module scope, even within a transparent body there,
+is an error. An escape sees the locals lexically visible where it lands,
+together with those it binds itself, as in `^(\w -> w ++ v)`.
+
 For cases that require too many escapes, a body may begin with an `alias
 Name` declaration, which names the object locally instead; names then resolve
 in the host scope. The default for objects is `alias self`, which is why we

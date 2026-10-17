@@ -65,15 +65,20 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
             lower_prior_name_expr_resolved(access, name, line, scope, locals)?
         }
         SyntaxExpr::Escape(depth, expr) => {
-            let escaped_scope = escaped_name_scope(access, scope, *depth, line)?;
-            syntax_expr_to_resolved_in_semantic_scope(
+            // An escape reads its target's lexical locals: those bound
+            // before the `self` it stepped out of, and its own.
+            let (escaped_scope, boundary) = escaped_name_scope(access, scope, *depth, line)?;
+            let mut outer = locals.prefix(boundary);
+            let lowered = syntax_expr_to_resolved_in_semantic_scope(
                 access,
                 expr,
                 line,
                 context,
                 &escaped_scope,
-                locals,
-            )?
+                &mut outer,
+            )?;
+            locals.resume_after(&outer);
+            lowered
         }
         SyntaxExpr::Access(base, parts) => ResolvedExpr::Access {
             base: Box::new(syntax_expr_to_resolved_in_semantic_scope(
@@ -449,6 +454,7 @@ pub(in crate::g_syntax) fn dict_with_body_scope(
         object_prior_defs,
         self_final_defs,
         self_prior_defs,
+        binds_self: localized,
         local_floor,
         reflection: None,
         parent: Some(Box::new(parent)),
@@ -1385,14 +1391,27 @@ pub(in crate::g_syntax) fn lower_prior_name_expr_resolved(
     })
 }
 
+/// Where `depth` escapes lead, and the boundary below which the locals
+/// they reach were bound: the floor of the last `self` they stepped out of.
 pub(in crate::g_syntax) fn escaped_name_scope(
     access: &RuntimeValueAccess<'_>,
     scope: &NameScope<ResolvedRoot>,
     depth: usize,
     line: usize,
-) -> Result<NameScope<ResolvedRoot>, Diagnostic> {
+) -> Result<(NameScope<ResolvedRoot>, usize), Diagnostic> {
     let mut escaped = scope.duplicate_in(access);
+    let mut boundary = escaped.local_floor;
     for level in 0..depth {
+        // Each `^` steps out of the innermost `self`: a scope that is not
+        // its own `self` is transparent.
+        while !escaped.binds_self {
+            let parent = escaped
+                .parent
+                .as_deref()
+                .expect("a scope that is not its own `self` has a host");
+            escaped = parent.duplicate_in(access);
+        }
+        boundary = escaped.local_floor;
         let Some(parent) = escaped.parent.as_deref() else {
             return Err(Diagnostic::error(
                 line,
@@ -1404,7 +1423,7 @@ pub(in crate::g_syntax) fn escaped_name_scope(
         };
         escaped = parent.duplicate_in(access);
     }
-    Ok(escaped)
+    Ok((escaped, boundary))
 }
 
 pub(in crate::g_syntax) fn local_name_metadata(raw: &str) -> LocalName {

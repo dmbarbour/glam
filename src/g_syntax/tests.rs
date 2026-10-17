@@ -8112,3 +8112,69 @@ fn self_names_the_innermost_scope_aliased_self() {
         );
     }
 }
+
+/// `foo` is a visible local or `self.foo` in every scope, and each `^` steps
+/// out of the innermost `self`: a body that binds no `self` is transparent.
+/// An escape sees the locals lexically visible where it lands, and its own.
+#[test]
+fn escapes_step_out_of_the_innermost_self() {
+    for (source, expected) in [
+        (
+            "language g0\nx = \"module\"\nobject o with\n  x = \"o\"\n  d = {} with { y = ^x }\nasm.result = o.d.y\n",
+            "module",
+        ),
+        (
+            "language g0\nx = \"m\"\nobject a with\n  x = \"a\"\n  object b with\n    x = \"b\"\n    d = {} with { y = ^x ++ ^^x ++ x }\nasm.result = a.b.d.y\n",
+            "amb",
+        ),
+        (
+            "language g0\nx = \"module\"\nobject o with\n  alias named\n  y = x\nasm.result = o.y\n",
+            "module",
+        ),
+        (
+            "language g0\nobject o with\n  x = \"o\"\n  object p with\n    alias q\n    object r with\n      y = ^x\nasm.result = o.p.r.y\n",
+            "o",
+        ),
+        (
+            "language g0\nobject o with\n  let t = \"o \"\n  d = object _ with\n    alias _\n    let u = \"d\"\n    object r with\n      y = ^t ++ ^u\nasm.result = o.d.r.y\n",
+            "o d",
+        ),
+        (
+            "language g0\nf = \\v -> object _ with\n  g = ^(\\w -> w ++ v)\nasm.result = (f \"a\").g \"b\"\n",
+            "ba",
+        ),
+    ] {
+        assert_eq!(
+            assembly_result_text(source),
+            expected.as_bytes(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn escapes_reach_only_what_their_target_sees() {
+    for (source, expected) in [
+        (
+            "language g0\nx = 1\nasm.result = ^x\n",
+            "scope escape depth `1` exceeds available parent scopes at level `1`",
+        ),
+        (
+            "language g0\nx = 1\nd = {} with { y = ^x }\n",
+            "scope escape depth `1` exceeds available parent scopes at level `1`",
+        ),
+        (
+            "language g0\nobject o with\n  f = \\v -> {} with { y = ^v }\n",
+            "local `v` shadows external `v` used by this file on line 3",
+        ),
+    ] {
+        let lowered = lower_parsed_source(parse(source), &CompileContext::default());
+        assert!(
+            lowered.diagnostics.iter().any(|diagnostic| {
+                diagnostic.severity == Severity::Error && diagnostic.message == expected
+            }),
+            "{source}: {:?}",
+            lowered.diagnostics
+        );
+    }
+}

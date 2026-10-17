@@ -19,6 +19,22 @@ pub(in crate::g_syntax) struct ResolverContext {
 }
 
 impl ResolverContext {
+    /// The locals bound before `boundary`, as a context of their own that
+    /// continues this one's binding identities: what an escape's target
+    /// sees lexically. `resume_after` takes the identities back.
+    pub(in crate::g_syntax) fn prefix(&self, boundary: usize) -> Self {
+        Self {
+            locals: self.locals[..boundary.min(self.locals.len())].to_vec(),
+            next_binding_id: self.next_binding_id,
+        }
+    }
+
+    /// Continues after `prefix`, a prefix of this context that bound locals
+    /// of its own, so that identities stay unique.
+    pub(in crate::g_syntax) fn resume_after(&mut self, prefix: &Self) {
+        self.next_binding_id = self.next_binding_id.max(prefix.next_binding_id);
+    }
+
     pub(in crate::g_syntax) fn fresh_binding(&mut self) -> BindingId {
         let binding = BindingId::from_local_index(self.next_binding_id);
         self.next_binding_id = self
@@ -543,6 +559,9 @@ pub(in crate::g_syntax) struct NameScope<V = Value> {
     /// written or by default, which a module is.
     pub(in crate::g_syntax) self_final_defs: V,
     pub(in crate::g_syntax) self_prior_defs: V,
+    /// Whether this scope is the `self` it names; one that is not is
+    /// transparent to `^`, which steps out of the innermost `self`.
+    pub(in crate::g_syntax) binds_self: bool,
     /// Where the locals a bare name may read begin: a localized body's own,
     /// so the locals outside it take `^`, as its host's names do.
     pub(in crate::g_syntax) local_floor: usize,
@@ -627,6 +646,7 @@ impl NameScope<ResolvedRoot> {
                 .map(|root| root.duplicate_in(access)),
             self_final_defs: self.self_final_defs.duplicate_in(access),
             self_prior_defs: self.self_prior_defs.duplicate_in(access),
+            binds_self: self.binds_self,
             reflection: self.reflection.as_ref().map(|boundary| ReflectionBoundary {
                 demand: boundary.demand.duplicate_in(access),
             }),
@@ -716,6 +736,7 @@ impl NameScope<Value> {
             object_prior_defs: None,
             self_final_defs: context.final_defs(access),
             self_prior_defs: visible_definitions,
+            binds_self: true,
             local_floor: 0,
             reflection: Some(reflection),
             parent: None,
@@ -747,6 +768,7 @@ impl NameScope<Value> {
                 .map(|value| ResolvedRoot::Provided(access.duplicate_value(value))),
             self_final_defs: ResolvedRoot::Provided(access.duplicate_value(&self.self_final_defs)),
             self_prior_defs: ResolvedRoot::Provided(access.duplicate_value(&self.self_prior_defs)),
+            binds_self: self.binds_self,
             reflection: self.reflection.as_ref().map(|boundary| ReflectionBoundary {
                 demand: ResolvedRoot::Provided(access.duplicate_value(&boundary.demand)),
             }),
