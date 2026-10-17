@@ -187,13 +187,13 @@ introduce them as definitions or locals, use them as ordinary references, or
 use them as bare path roots. Reservation is independent of the position in
 which a keyword normally has meaning: contextual words such as `where` and
 `as` do not become ordinary names merely because they occur outside a valid
-`where` or object header.
+`where` or `match`.
 
 The active `g0` table is:
 
 | Role | Keywords |
 | --- | --- |
-| declaration heads | `language`, `import`, `declare`, `assume`, `unique`, `object`, `abstract object`, `extend` |
+| declaration heads | `language`, `import`, `declare`, `assume`, `unique`, `object`, `abstract object`, `extend`, `alias` |
 | expression forms | `abstract_global_path`, `let`, `where`, `using`, `do`, `if`, `match`, `try`, `try_match`, `object`, `abstract object` |
 | do statements | `declare` |
 | expression operators | `and`, `or` |
@@ -872,13 +872,20 @@ In this notation, a '.' prefix is required when first path element is expression
             .[0] := 1
             .[1] := 0
 
-Users may also capture the dictionary via `Dict as Name with ...`, or even support object scope via `Dict as self with ...`. As with objects, users can reference prior definitions via `_name` prefix, and final definitions via `name`. But, for dictionaries, 'final' extends only to the current update because there is no specification to rebuild the dictionary.
+Users may also name the dictionary with an `alias Name` declaration as the
+body's first member, or even support object scope via `alias self`. The
+default for an update is `alias _`, which names nothing. As with objects,
+users can reference prior definitions via `_name` prefix, and final
+definitions via `name`. But, for dictionaries, 'final' extends only to the
+current update because there is no specification to rebuild the dictionary.
 
-        Dict as d with  
+        Dict with
+            alias d
             x := _d.x + 1   # prior d.x
             y = d.x + a     # result d.x
 
-        Dict as self with
+        Dict with
+            alias self
             x := _x + 1
             y = x + ^a      # access 'a' in host scope
 
@@ -1331,10 +1338,10 @@ Object syntax can and should be compact by default. I propose:
             }
 
         # declaration
-        (abstract)? object Name (as Name)? (extends ExpressionList)? (with Body)?
+        (abstract)? object Name (extends ExpressionList)? (with Body)?
 
         # expression
-        (abstract)? object (NameExpr|_) (as Name)? (extends ExpressionList)? (with Body)?
+        (abstract)? object (NameExpr|_) (extends ExpressionList)? (with Body)?
 
 The `extends` and `with` sections are optional, with `spec.deps` and
 `spec.defs` respectively defaulting to the empty list and const function
@@ -1381,7 +1388,7 @@ For consistency and convenience, the compiler may expose the linearization and i
         extend foo with
             def1 := ...
 
-        extend Name (as Name)? with Body        # declaration
+        extend Name with Body                   # declaration
 
 We also have syntax `extend Object with ...`, which updates the specification then re-instantiates the object, preserving name and deps. This is declaration-only because it's usually a bad idea to preserve name while forking identity. Note that `_spec` is always undefined when extending objects, only the final `spec` is visible.
 
@@ -1398,11 +1405,18 @@ To improve concision, expressions within objects are localized by default. That 
 
 Use of `^` composes, e.g. `^^^method` escapes three lexical levels. But it's best to keep syntax shallow.
 
-For cases that require too many escapes, we also support an `as Name` modifier for object declarations and expressions. The default for object declarations is `as self`, which is why we have the default local names and `^` escapes. In some contexts, it is more convenient to use a local name so we don't need escapes.
+For cases that require too many escapes, a body may begin with an `alias
+Name` declaration, which names the object locally instead; names then resolve
+in the host scope. The default for objects is `alias self`, which is why we
+have the default local names and `^` escapes, while `alias _` names nothing
+and also resolves names in the host scope. In some contexts, it is more
+convenient to use a local name so we don't need escapes. An alias may only be
+the first member of an object, `extend` or update body, and only once; the
+same declaration serves all three.
 
-        (abstract)? object Name (as Name)? (extends ExpressionList)? (with Body)?       # object declaration
-        (abstract)? object (NameExpr|_) (as Name)? (extends ExpressionList)? (with Body)? # object expression
-        extend (abstract)? Name (as Name)? with Body                                    # extend declaration
+        with
+            alias Name      # or `alias self`, or `alias _`
+            Definitions
 
 For example:
 
@@ -1412,7 +1426,8 @@ For example:
         object bar with 
             C = 3
 
-        object foo as f extends bar with
+        object foo extends bar with
+            alias f
             A = f.B + a
             B = f.C + b
 
@@ -1446,13 +1461,14 @@ instantiates its result even when the prior object was abstract.
 
 ### Lightweight Extension
 
-The `with` and `as with` syntax for dict updates also works for objects:
+The `with` syntax for dict updates also works for objects, with an update's
+default alias:
 
         Object with Body
-        object _ as _ extends Object with Body
+        object _ extends Object with { alias _; Body }
 
-        Object as Name with Body
-        object _ as Name extends Object with Body
+        Object with { alias Name; Body }
+        object _ extends Object with { alias Name; Body }
 
 Essentially, the `with` syntax for dictionary updates will recognize `spec` and and treat the `with` body as an anonymous mixin.
 
@@ -1460,7 +1476,8 @@ This supports lightweight extensions
 
         foo = op1 >>= op2 >>= op3 with 
             A := 42
-            B := op4 >>= op5 >>= op6 as o with
+            B := op4 >>= op5 >>= op6 with
+                alias o
                 C c = op7 ...
           where
             op1 = ...
@@ -1641,13 +1658,13 @@ The first ungrouped `as` after `match` ends the subject expression and begins
 the arms; a match nested in the subject takes the first `as` after its own
 head, as nested `if`s take their `then`s. After `as` come pattern arms, as
 `P as Q` views a value through a pattern, and after `when` come guard arms.
-Since a subject's `as` is its match's, an update that names its base is
-parenthesized there; any other update need not be:
+An update in a subject needs no parentheses, since it names its base in its
+body:
 
         match Dict with { value := 42 } as
             {value:x} => x
             _ => {}
-        match (Dict as d with { value := 42 }) as
+        match Dict with { alias d; value := d.base + 1 } as
             {value:x} => x
             _ => {}
 
@@ -1893,7 +1910,8 @@ At least for now, I'll defer keywords for loops. But there are at least a few mo
 Assuming the *Lightweight Extension* syntax for objects, we can support continuation-passing style via extension of abstract method objects. This is another way of passing parameters, more extensible and flexible than function arguments. Moreover, it shifts some parameters from horizontal to vertical layout, and avoids some redundancy of reference. The resulting syntax might look a bit like this:
 
         foo x y = op1 x >>= op2 y >>= op3 with
-            A a = op4 x >>=\_-> op5 a >>= op6 as op with
+            A a = op4 x >>=\_-> op5 a >>= op6 with
+                alias op
                 B := ... op.F ... 
                 C c = ...
             D ::= \ prior -> prior + 42

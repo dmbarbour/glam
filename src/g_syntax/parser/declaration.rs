@@ -84,6 +84,21 @@ fn parse_declaration_in_context(
         }
         TokenKind::Name("extend") => parse_extend_declaration(view, line, context, diagnostics)
             .map_or(DeclarationKind::Unknown, DeclarationKind::Extend),
+        // `alias = …` defines a reserved name, which the definition reports.
+        TokenKind::Name("alias")
+            if !view.top_level().any(|indexed| {
+                matches!(
+                    indexed.token().kind(),
+                    TokenKind::Symbol("=" | ":=" | "::=")
+                )
+            }) =>
+        {
+            diagnostics.push(Diagnostic::error(
+                line,
+                "`alias` may only be the first member of a `with` body",
+            ));
+            DeclarationKind::Unknown
+        }
         _ => parse_definition(view, line, context, diagnostics)
             .map_or(DeclarationKind::Unknown, DeclarationKind::Definition),
     }
@@ -96,13 +111,21 @@ pub(super) fn is_abstract_object_declaration(view: TokenView<'_, '_>) -> bool {
     )
 }
 
+/// A `with` body: the alias its first member declares, if any, and its
+/// members.
+#[derive(Default)]
+pub(in crate::g_syntax::parser) struct ObjectBody {
+    pub(in crate::g_syntax::parser) alias: Option<String>,
+    pub(in crate::g_syntax::parser) members: Vec<ObjectBodyDefinition>,
+}
+
 pub(in crate::g_syntax::parser) fn parse_object_body(
     view: TokenView<'_, '_>,
     parent_context: ExpressionContext,
     diagnostics: &mut Vec<Diagnostic>,
-) -> Vec<ObjectBodyDefinition> {
+) -> ObjectBody {
     if is_layout_empty(view) {
-        return Vec::new();
+        return ObjectBody::default();
     }
     let statement_views = match split_braced_members(view, "`with` body") {
         Some(Ok(members)) => members
@@ -117,7 +140,7 @@ pub(in crate::g_syntax::parser) fn parse_object_body(
             .collect::<Vec<_>>(),
         Some(Err(mut errors)) => {
             diagnostics.append(&mut errors);
-            return Vec::new();
+            return ObjectBody::default();
         }
         None => {
             let block = LayoutView::new(view).block();
@@ -130,7 +153,7 @@ pub(in crate::g_syntax::parser) fn parse_object_body(
                         block.anchor()
                     ),
                 ));
-                return Vec::new();
+                return ObjectBody::default();
             }
             block
                 .into_statements()
@@ -144,11 +167,27 @@ pub(in crate::g_syntax::parser) fn parse_object_body(
     };
 
     let mut body = Vec::with_capacity(statement_views.len());
-    for (line, statement_view) in statement_views {
+    let mut alias = None;
+    for (position, (line, statement_view)) in statement_views.into_iter().enumerate() {
         let statement_view = trim_layout(statement_view);
         let head = statement_view
             .first_significant()
             .map(|(_, token)| token.kind());
+        // `alias Name` may only be a body's first member.
+        if let Some(TokenKind::Name("alias")) = head {
+            if position > 0 {
+                diagnostics.push(Diagnostic::error(
+                    line,
+                    "`alias` may only be the first member of its body",
+                ));
+                continue;
+            }
+            match parse_alias_member(statement_view) {
+                Ok(name) => alias = Some(name),
+                Err(message) => diagnostics.push(Diagnostic::error(line, message)),
+            }
+            continue;
+        }
         if let Some(TokenKind::Name(head @ ("declare" | "assume"))) = head {
             let declare = *head == "declare";
             let keyword = if declare { "declare" } else { "assume" };
@@ -178,7 +217,10 @@ pub(in crate::g_syntax::parser) fn parse_object_body(
             body.push(ObjectBodyDefinition { line, kind });
         }
     }
-    body
+    ObjectBody {
+        alias,
+        members: body,
+    }
 }
 
 pub(in crate::g_syntax::parser) fn parse_nonempty_object_body(
@@ -187,10 +229,10 @@ pub(in crate::g_syntax::parser) fn parse_nonempty_object_body(
     empty_message: &str,
     parent_context: ExpressionContext,
     diagnostics: &mut Vec<Diagnostic>,
-) -> Option<Vec<ObjectBodyDefinition>> {
+) -> Option<ObjectBody> {
     let diagnostic_start = diagnostics.len();
     let body = parse_object_body(view, parent_context, diagnostics);
-    if body.is_empty() {
+    if body.members.is_empty() && body.alias.is_none() {
         if !diagnostics[diagnostic_start..]
             .iter()
             .any(|diagnostic| diagnostic.severity == Severity::Error)
@@ -200,6 +242,25 @@ pub(in crate::g_syntax::parser) fn parse_nonempty_object_body(
         return None;
     }
     Some(body)
+}
+
+/// The name an `alias Name` member gives its body: a local name, `self`,
+/// or `_` for none.
+fn parse_alias_member(view: TokenView<'_, '_>) -> Result<String, String> {
+    let (alias_index, _) = view
+        .first_significant()
+        .expect("an `alias` member begins with its keyword");
+    let name_view = trim_layout(view_between(view, alias_index + 1, view.range().end()));
+    if is_layout_empty(name_view) {
+        return Err("`alias` requires a name, `self`, or `_`".to_owned());
+    }
+    match object_alias_name(name_view) {
+        Some(name) => Ok(name.to_owned()),
+        None => Err(match single_reserved_keyword(name_view) {
+            Some(keyword) => reserved_keyword_message(keyword),
+            None => "`alias` requires a name, `self`, or `_`".to_owned(),
+        }),
+    }
 }
 
 fn parse_definition(
@@ -468,13 +529,6 @@ fn parse_object_declaration(
         ));
         return None;
     }
-    if parsed.alias.is_some() && !parsed.has_with {
-        diagnostics.push(Diagnostic::error(
-            line,
-            "object declaration `as` requires a `with` body",
-        ));
-        return None;
-    }
     for parent in &parsed.deps {
         warn_unused_locals(parent, line, diagnostics);
     }
@@ -498,17 +552,17 @@ fn parse_object_declaration(
             )?
         }
     } else {
-        Vec::new()
+        ObjectBody::default()
     };
-    if let Some(alias) = &parsed.alias {
-        warn_unused_with_alias(alias, &body, line, diagnostics);
+    if let Some(alias) = &body.alias {
+        warn_unused_with_alias(alias, &body.members, line, diagnostics);
     }
     Some(ObjectDecl {
         realization,
         target: parsed.target,
-        alias: parsed.alias,
+        alias: body.alias,
         deps: parsed.deps,
-        body,
+        body: body.members,
     })
 }
 
@@ -542,7 +596,7 @@ fn parse_extend_declaration(
     if !parsed.has_with {
         diagnostics.push(Diagnostic::error(
             line,
-            "extend declarations currently require `extend name (as alias)? with`",
+            "extend declarations currently require `extend name with`",
         ));
         return None;
     }
@@ -564,14 +618,14 @@ fn parse_extend_declaration(
             diagnostics,
         )?
     };
-    if let Some(alias) = &parsed.alias {
-        warn_unused_with_alias(alias, &body, line, diagnostics);
+    if let Some(alias) = &body.alias {
+        warn_unused_with_alias(alias, &body.members, line, diagnostics);
     }
     Some(ObjectExtendDecl {
         realization,
         target: parsed.target,
-        alias: parsed.alias,
-        body,
+        alias: body.alias,
+        body: body.members,
     })
 }
 
@@ -594,10 +648,13 @@ fn object_declaration_head(view: TokenView<'_, '_>) -> Option<(ObjectRealization
 
 struct StaticObjectHeader {
     target: String,
-    alias: Option<String>,
     deps: Vec<SyntaxExpr>,
     has_with: bool,
 }
+
+/// The error for an `as Name` alias in a header, which moved into the body.
+pub(in crate::g_syntax::parser) const MOVED_ALIAS: &str =
+    "an alias is its body's first member: write `with { alias Name; … }`, not `as Name`";
 
 fn parse_static_object_header(
     mut header: TokenView<'_, '_>,
@@ -625,15 +682,6 @@ fn parse_static_object_header(
         diagnostics.push(Diagnostic::error(
             line,
             "extend declaration does not accept `extends` dependencies",
-        ));
-        return None;
-    }
-    if as_index
-        .is_some_and(|as_index| extends_index.is_some_and(|extends_index| as_index > extends_index))
-    {
-        diagnostics.push(Diagnostic::error(
-            line,
-            "object declaration `as` must precede `extends`",
         ));
         return None;
     }
@@ -678,26 +726,10 @@ fn parse_static_object_header(
         }
     };
 
-    let alias = if let Some(as_index) = as_index {
-        let end = extends_index.unwrap_or(header.range().end());
-        let alias_view = trim_layout(view_between(header, as_index + 1, end));
-        match object_alias_name(alias_view) {
-            Some(alias) => Some(alias.to_owned()),
-            None => {
-                if let Some(keyword) = single_reserved_keyword(alias_view) {
-                    diagnostics.push(Diagnostic::error(line, reserved_keyword_message(keyword)));
-                    return None;
-                }
-                diagnostics.push(Diagnostic::error(
-                    line,
-                    "`as` requires a valid object alias name",
-                ));
-                return None;
-            }
-        }
-    } else {
-        None
-    };
+    if as_index.is_some() {
+        diagnostics.push(Diagnostic::error(line, MOVED_ALIAS));
+        return None;
+    }
 
     let deps = if let Some(extends_index) = extends_index {
         let deps_view = trim_layout(view_between(
@@ -718,7 +750,6 @@ fn parse_static_object_header(
 
     Some(StaticObjectHeader {
         target,
-        alias,
         deps,
         has_with,
     })

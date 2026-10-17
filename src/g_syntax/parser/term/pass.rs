@@ -67,10 +67,12 @@
 
 use crate::g_syntax::{
     ConditionalMode, ConditionalResultMode, IfExpr, MatchArm, MatchCommitment, MatchExpr,
-    MatchWhenExpr, ObjectBodyDefinition, Severity, SyntaxExpr, WhenArm,
+    MatchWhenExpr, Severity, SyntaxExpr, WhenArm,
 };
 
-use super::super::declaration::{parse_nonempty_object_body, parse_object_body};
+use super::super::declaration::{
+    MOVED_ALIAS, ObjectBody, parse_nonempty_object_body, parse_object_body,
+};
 use super::super::do_expr::{empty_do_expr, finish_do_statements, line_begins_do_statement};
 use super::super::expression::{structural_view_at, syntax_operator};
 use super::super::expression_context::{ExpressionContext, validate_expression_floor};
@@ -79,7 +81,7 @@ use super::super::layout::group_separator;
 use super::super::lexical::{Delimiter, GroupId, LeadingTrivia, TokenKind};
 use super::super::structural::{
     in_keyword_position, is_layout_empty, keyword_head, line_begins_object_member,
-    object_alias_name, parse_object_expression_header, trim_layout,
+    parse_object_expression_header, trim_layout,
 };
 use super::binding::{self, NestedArms};
 use super::{
@@ -206,8 +208,8 @@ enum Pending {
 /// Whose body a block of members holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Members {
-    /// An update, `Base (as Name)? with Body`, with its alias.
-    Update { alias: Option<String> },
+    /// An update, `Base with Body`.
+    Update,
     /// The object frame below the block.
     Object,
 }
@@ -220,7 +222,7 @@ struct ObjectForm {
     /// The form's own context, floored at its head's line.
     context: ExpressionContext,
     /// Its body, once the block after its `with` closes.
-    body: Option<Parse<Vec<ObjectBodyDefinition>>>,
+    body: Option<Parse<ObjectBody>>,
     /// Where its header ends: its `with`, once one begins its body.
     with: Option<usize>,
 }
@@ -2084,47 +2086,24 @@ impl Pass<'_, '_, '_> {
             top.pieces.push(Piece::Token(index));
             return Step::Next;
         }
-        // `Dict as Name with Defs` names the update's base.
+        // An update's alias is its body's first member now.
         let top = self.top();
-        let pieces = &top.pieces;
-        let significant = pieces
-            .iter()
-            .rev()
-            .filter(|piece| {
+        let named = {
+            let mut significant = top.pieces.iter().rev().filter(|piece| {
                 !matches!(piece, Piece::Token(at)
                     if matches!(token(view, *at).kind(), TokenKind::LineStart { .. }))
-            })
-            .take(2)
-            .collect::<Vec<_>>();
-        let alias = match significant.as_slice() {
-            [Piece::Token(name), Piece::Token(as_index)]
+            });
+            significant.next();
+            matches!(significant.next(), Some(Piece::Token(as_index))
                 if matches!(token(view, *as_index).kind(), TokenKind::Name("as"))
-                    && in_keyword_position(view, *as_index) =>
-            {
-                let name_view = subview(view, *name, name + 1);
-                if object_alias_name(name_view) == Some("_") {
-                    Some(None)
-                } else {
-                    object_alias_name(name_view).map(|name| Some(name.to_owned()))
-                }
-            }
-            _ => None,
+                    && in_keyword_position(view, *as_index))
         };
-        let alias = match alias {
-            Some(alias) => {
-                // The alias is the update's, not its base's.
-                while let Some(Piece::Token(last)) = top.pieces.last()
-                    && !matches!(token(view, *last).kind(), TokenKind::Name("as"))
-                {
-                    top.pieces.pop();
-                }
-                top.pieces.pop();
-                alias
-            }
-            None => None,
-        };
+        if named {
+            self.violate(Fail::error(MOVED_ALIAS).or_at(Some(index)));
+        }
+        let top = self.top();
         top.lambda_head = false;
-        self.open_members(index, Members::Update { alias });
+        self.open_members(index, Members::Update);
         Step::Next
     }
 
@@ -2173,7 +2152,7 @@ impl Pass<'_, '_, '_> {
         layout: &LayoutBlock,
         members: &Members,
         end: usize,
-    ) -> Parse<Vec<ObjectBodyDefinition>> {
+    ) -> Parse<ObjectBody> {
         let view = self.scope.view;
         let head = layout.head;
         if layout.anchor.is_none() && *members == Members::Object {
@@ -2210,7 +2189,7 @@ impl Pass<'_, '_, '_> {
             .and_then(|token| view.line_at_span(token.span()))
             .unwrap_or(1);
         let empty = match members {
-            Members::Update { .. } => {
+            Members::Update => {
                 "`with` body cannot be empty; use `with {}` for an explicit empty body"
             }
             Members::Object => {
@@ -2231,12 +2210,7 @@ impl Pass<'_, '_, '_> {
     }
 
     /// A braced block's members, read by the declaration parser.
-    fn finish_braced_members(
-        &self,
-        block: &Block,
-        open: usize,
-        close: usize,
-    ) -> Parse<Vec<ObjectBodyDefinition>> {
+    fn finish_braced_members(&self, block: &Block, open: usize, close: usize) -> Parse<ObjectBody> {
         let view = self.scope.view;
         let mut diagnostics = Vec::new();
         let body = parse_object_body(
@@ -2259,12 +2233,12 @@ impl Pass<'_, '_, '_> {
         &mut self,
         head: usize,
         members: Members,
-        body: Parse<Vec<ObjectBodyDefinition>>,
+        body: Parse<ObjectBody>,
         end: usize,
         ends_with_block: bool,
     ) {
         match members {
-            Members::Update { alias } => {
+            Members::Update => {
                 let covers = self.scope.covers;
                 let parent = self.top();
                 parent.lambda_head = false;
@@ -2277,8 +2251,8 @@ impl Pass<'_, '_, '_> {
                         shape: FormShape::With,
                         result: body.map(|body| SyntaxExpr::With {
                             base: Box::new(SyntaxExpr::Unit),
-                            alias,
-                            body,
+                            alias: body.alias,
+                            body: body.members,
                         }),
                         ends_with_block,
                     }),
@@ -2368,7 +2342,9 @@ impl Pass<'_, '_, '_> {
             .map_err(Fail::Reported)
             .and_then(|mut expression| {
                 if let Some(body) = object.body {
-                    expression.body = body?;
+                    let body = body?;
+                    expression.alias = body.alias;
+                    expression.body = body.members;
                 }
                 Ok(SyntaxExpr::Object(expression))
             });
@@ -2933,8 +2909,8 @@ impl Pass<'_, '_, '_> {
     /// Takes the `as` at `index` for the innermost match reading its
     /// subject at this level, if any: the frames open in its subject close
     /// before it, and its subject is read. Returns whether it took it. So an
-    /// `as` in a subject, as in `Dict as Name with Defs`, is parenthesized,
-    /// as `layout::match_arms_keywords` also reads it.
+    /// `as` in a subject, as in a nested match, is parenthesized, as
+    /// `layout::match_arms_keywords` also reads it.
     fn claim_as(&mut self, index: usize) -> bool {
         let Some(owner) = self.stack.last().and_then(|frame| frame.match_owner) else {
             return false;
@@ -2950,8 +2926,8 @@ impl Pass<'_, '_, '_> {
         self.lambda_ends_at(index);
         let scope = self.scope;
         let view = scope.view;
-        // `Dict as Name with Defs` names an update's base, which an `as`
-        // that ends a subject cannot do.
+        // `Dict as Name with Defs` is the retired spelling of an update's
+        // alias, which an `as` that ends a subject cannot be.
         let name_with = |at: usize| {
             view.range().contains(at + 2)
                 && matches!(token(view, at + 1).kind(), TokenKind::Name(_))
@@ -2959,12 +2935,7 @@ impl Pass<'_, '_, '_> {
                 && in_keyword_position(view, at + 2)
         };
         if name_with(index) {
-            self.violate(
-                Fail::error(
-                    "a match's first `as` ends its subject; parenthesize an update that names its base, as in `match (d as n with {…}) as …`",
-                )
-                .or_at(Some(index)),
-            );
+            self.violate(Fail::error(MOVED_ALIAS).or_at(Some(index)));
         }
         let frame = self.top();
         frame.region = false;

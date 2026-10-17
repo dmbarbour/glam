@@ -352,14 +352,15 @@ fn flat_match_parses_layout_and_braced_arms() {
     assert!(empty.arms.is_empty());
 }
 
-/// A subject's `as` is its match's, so an update in a subject needs no
-/// parentheses unless it names its base with `as`.
+/// A subject's `as` is its match's, and an update names its base in its
+/// body, so an update in a subject needs no parentheses.
 #[test]
-fn a_subject_update_is_grouped_only_when_it_names_its_base() {
+fn a_subject_update_needs_no_parentheses() {
     for source in [
         "match base with { x := 1 } as { {x:item} => item; _ => 0; }",
         "match (base with { x := 1 }) as { {x:item} => item; _ => 0; }",
-        "match (base as b with { x := 1 }) as { {x:item} => item; _ => 0; }",
+        "match base with { alias b; x := 1 } as { {x:item} => item; _ => 0; }",
+        "match (base with { alias b; x := 1 }) as { {x:item} => item; _ => 0; }",
     ] {
         let SyntaxExpr::Match(found) = parse(source) else {
             panic!("`{source}` should parse as a match");
@@ -371,7 +372,7 @@ fn a_subject_update_is_grouped_only_when_it_names_its_base() {
     }
     assert_rejected(
         "match base as b with { x := 1 } as { {x:item} => item; _ => 0; }",
-        "parenthesize an update that names its base",
+        "an alias is its body's first member",
     );
 }
 
@@ -682,14 +683,14 @@ fn a_subjects_as_begins_the_arms() {
         "match v as p as {a:y, b:z} => y",
         "match v as\n  p as {a:y, b:z} => y\n  _ => 0",
         "match d with { a := 1 } as { {a:y} => y; _ => 0 }",
-        "match (d as e with { a := 1 }) as { _ => 0 }",
+        "match (d with { alias e; a := 1 }) as { _ => 0 }",
         "match if a then b else c as { _ => 0 }",
     ] {
         assert!(matches!(parse(source), SyntaxExpr::Match(_)), "{source}");
     }
     assert_rejected(
         "match d as e with { a := 1 }",
-        "parenthesize an update that names its base",
+        "an alias is its body's first member",
     );
     assert_rejected(
         "match d with\n  1 => 2",

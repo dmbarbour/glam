@@ -238,8 +238,13 @@ impl Generator {
             }),
             20 => SyntaxExpr::With {
                 base: Box::new(self.expression(depth)),
-                alias: None,
-                body: (0..1 + self.below(2))
+                alias: match self.below(6) {
+                    0 => Some(self.name()),
+                    1 => Some("_".to_owned()),
+                    2 => Some("self".to_owned()),
+                    _ => None,
+                },
+                body: (0..self.below(3))
                     .map(|_| ObjectBodyDefinition {
                         line: 1,
                         kind: ObjectBodyDefinitionKind::Definition(DefinitionDecl {

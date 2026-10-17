@@ -1070,7 +1070,7 @@ fn configured_logger_can_drain_until_coordinated_exit() {
         concat!(
             "language g0\n",
             "object conf.env\n",
-            "object conf.logger_loop as logger_loop with\n",
+            "object conf.logger_loop with\n  alias logger_loop\n",
             "  run = (.cut (.alt ",
             "(.read_log >>= (\\message -> ",
             "(.write_stderr (message.msg.text ++ [10])) =>> .r ())) ",

@@ -245,7 +245,11 @@ impl FileNameAnalysis {
         let canonical_alias = alias.as_ref().and_then(|alias| alias.canonical.clone());
         let parent_lookup = self.scopes[spec.parent.0].lookup;
         let lookup = match spec.kind {
-            BodyScopeKind::Object if canonical_alias.is_none() => spec.namespace,
+            BodyScopeKind::Object
+                if alias.is_none() || canonical_alias.as_deref() == Some("self") =>
+            {
+                spec.namespace
+            }
             BodyScopeKind::Dictionary if canonical_alias.as_deref() == Some("self") => {
                 spec.namespace
             }

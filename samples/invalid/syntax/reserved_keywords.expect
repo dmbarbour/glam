@@ -2,3 +2,4 @@ error|3|`where`|reserved keyword|`'where`|`.['where]`
 error|4|`where`|reserved keyword|`'where`|`.['where]`
 error|5|`as`|reserved keyword|`'as`|`.['as]`
 error|6|`binary`|reserved keyword|`'binary`|`.['binary]`
+error|7|`alias`|reserved keyword|`'alias`|`.['alias]`

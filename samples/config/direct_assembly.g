@@ -4,7 +4,8 @@ import "minimal.g"
 
 # A small, shared direct-assembly environment. Programs remain effect values
 # until `linux_x86_64.executable` interprets their instruction stream.
-object direct_standard_effects as effects with
+object direct_standard_effects with
+  alias effects
   # `{}` is undefined and therefore cannot establish an overridable member.
   initial_state = {
     handler:{
@@ -82,7 +83,8 @@ object direct_standard_effects as effects with
     get path = ^effects.user_get path
     set path value = ^effects.user_set path value
 
-object direct_x86_64 as x86 extends direct_standard_effects with
+object direct_x86_64 extends direct_standard_effects with
+  alias x86
   initial_state := {
     handler:{
       current_cursor:{},
@@ -688,7 +690,8 @@ object direct_x86_64 as x86 extends direct_standard_effects with
     code_address +
       x86.label_offset label_handle instructions 0
 
-object direct_linux_x86_64 as linux with
+object direct_linux_x86_64 with
+  alias linux
   trace = ^direct_x86_64.trace
 
   little_endian width value =

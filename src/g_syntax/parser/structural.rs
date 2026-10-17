@@ -3,7 +3,7 @@
 //! `where`, and the keyword, view and object-header helpers that the
 //! declaration parser and the term parser share.
 
-use super::super::keywords::{canonical_keyword, reserved_keyword_message};
+use super::super::keywords::canonical_keyword;
 use super::super::{Diagnostic, ObjectExpr, ObjectRealization, SyntaxExpr};
 use super::expression::parse_expression_chain_view;
 use super::expression_context::{ExpressionContext, ParsedExpression, validate_expression_floor};
@@ -17,7 +17,6 @@ type ParseResult<T> = Result<T, Vec<Diagnostic>>;
 struct ObjectHeader {
     realization: ObjectRealization,
     name: Option<Box<SyntaxExpr>>,
-    alias: Option<String>,
     deps: Vec<SyntaxExpr>,
     has_with: bool,
 }
@@ -272,41 +271,10 @@ fn parse_object_header(
         }
     };
 
-    let alias = if let Some(as_index) = as_index {
-        let alias_end = extends_index.unwrap_or(header.range().end());
-        let alias_view = trim_layout(view_between(header, as_index + 1, alias_end));
-        match object_alias_name(alias_view) {
-            Some(alias) => Some(alias.to_owned()),
-            None => {
-                if let Some(keyword) = single_reserved_keyword(alias_view) {
-                    return Some(Err(error_at_view(
-                        alias_view,
-                        reserved_keyword_message(keyword),
-                    )));
-                }
-                return Some(Err(error_at_view(
-                    alias_view,
-                    "`as` requires a valid object alias name",
-                )));
-            }
-        }
-    } else {
-        None
-    };
-    if alias.is_some() && !has_with {
-        return Some(Err(error_at_view(
-            header,
-            "object expression `as` requires a `with` body",
-        )));
+    if as_index.is_some() {
+        return Some(Err(error_at_view(header, super::declaration::MOVED_ALIAS)));
     }
-
     let deps = if let Some(extends_index) = extends_index {
-        if as_index.is_some_and(|as_index| as_index > extends_index) {
-            return Some(Err(error_at_view(
-                header,
-                "object expression `as` must precede `extends`",
-            )));
-        }
         let deps_view = trim_layout(view_between(
             header,
             extends_index + 1,
@@ -327,7 +295,6 @@ fn parse_object_header(
     Some(Ok(ObjectHeader {
         realization,
         name,
-        alias,
         deps,
         has_with,
     }))
@@ -345,7 +312,7 @@ pub(in crate::g_syntax::parser) fn parse_object_expression_header(
     Ok(ObjectExpr {
         realization: header.realization,
         name: header.name,
-        alias: header.alias,
+        alias: None,
         deps: header.deps,
         body: Vec::new(),
     })

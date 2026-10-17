@@ -3,7 +3,8 @@ import 'std
 
 meta.macro.env = {}
 
-object packet as packet_object with
+object packet with
+  alias packet_object
   encode _packet_layout packet_input =
     [list.at 0 packet_input] ++
     [math.floor (list.at 1 packet_input / 256)] ++

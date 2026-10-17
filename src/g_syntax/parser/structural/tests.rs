@@ -408,24 +408,21 @@ fn token_keywords_ignore_nested_groups_and_text() {
     parse_structural("(choose 'as value)");
 
     let object = token_object_header(
-        "object (choose 'as 'extends) as alias extends (parent 'with), right with\n  value = 1",
+        "object (choose 'as 'extends) extends (parent 'with), right with\n  value = 1",
     );
     assert!(matches!(
         object,
-        ObjectHeader {
-            alias: Some(alias),
-            deps,
-            ..
-        } if alias == "alias" && deps.len() == 2
+        ObjectHeader { deps, .. } if deps.len() == 2
     ));
 
-    let with = parse_structural("(choose 'as value) as alias with\n  value = \"as with = where\"");
+    let with =
+        parse_structural("(choose 'as value) with\n  alias named\n  value = \"as with = where\"");
     assert!(matches!(
         with,
         SyntaxExpr::With {
             alias: Some(alias),
             ..
-        } if alias == "alias"
+        } if alias == "named"
     ));
 
     assert!(matches!(
@@ -448,16 +445,15 @@ fn object_headers_match_the_complete_structural_parse() {
     for source in [
         "object \"child\" with\n  value = 1",
         "object \"child\" with { value = 1 }",
-        "object \"child\" as _self extends left, right with\n  value = 1",
-        "object \"child\" as _self extends left, right with {; value = 1; }",
-        "object _ as _ with\n  value = 1",
-        "object _ as _ with {}",
+        "object \"child\" extends left, right with\n  alias _self\n  value = 1",
+        "object \"child\" extends left, right with { alias _self; value = 1; }",
+        "object _ with\n  alias _\n  value = 1",
+        "object _ with { alias _ }",
     ] {
         let parsed = parse_structural(source);
         let SyntaxExpr::Object(ObjectExpr {
             realization,
             name,
-            alias,
             deps,
             ..
         }) = parsed
@@ -469,7 +465,6 @@ fn object_headers_match_the_complete_structural_parse() {
             ObjectHeader {
                 realization,
                 name,
-                alias,
                 deps,
                 has_with: true,
             }
@@ -482,10 +477,10 @@ fn update_aliases_name_the_update() {
     for (source, expected) in [
         ("{x:1} with\n  x := 2", None),
         ("{x:1} with { x := 2 }", None),
-        ("base as prior with\n  x := _prior.x", Some("prior")),
-        ("base as prior with {; x := _prior.x; }", Some("prior")),
-        ("base as _ with\n  x := 2", None),
-        ("base as _ with {}", None),
+        ("base with\n  alias prior\n  x := _prior.x", Some("prior")),
+        ("base with { alias prior; x := _prior.x; }", Some("prior")),
+        ("base with\n  alias _\n  x := 2", Some("_")),
+        ("base with { alias _ }", Some("_")),
     ] {
         let SyntaxExpr::With { alias, .. } = parse_structural(source) else {
             panic!("parser did not produce a with expression");

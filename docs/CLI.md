@@ -171,7 +171,8 @@ The conventional exported values are:
 its coordinated exit after the empty-read alternative:
 
 ```g
-object conf.logger_loop as logger_loop with
+object conf.logger_loop with
+  alias logger_loop
   run =
     (.cut (.alt
       (.read_log >>= \message ->

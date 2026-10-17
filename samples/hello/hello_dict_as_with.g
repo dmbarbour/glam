@@ -2,7 +2,8 @@ language g0
 
 suffix = "!"
 base = { text:"Hello, World" }
-hello = base as h with
+hello = base with
+  alias h
   text := _h.text ++ suffix
   result = h.text
 

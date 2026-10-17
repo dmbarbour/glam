@@ -331,6 +331,43 @@ on 2026-10-17, those that change the grammar with an entry in
     - **Modules** take `let` declarations too, as file-private helpers;
       a module's alias is implicitly `module`.
 
+    **Refined (maintainer, 2026-10-17):**
+    - **Groups are sequential.** A `let` group, in a body or a file, is
+      mutually recursive within itself, and what follows it sees it;
+      nothing before it does. `_module.foo` and a body's `_alias.foo`
+      mean the namespace where they are written, and macros see only what
+      precedes their invocation, so a group sees what precedes it.
+      Recursion with later definitions goes through `module.x`.
+    - **A module `let` is compiler state**, a file-level binding
+      environment: the compiler may do only what a user-defined front end
+      can, and the only hidden names, `abstract_global_path`, are bound to a
+      place in the namespace, not to a file. Each group is lowered once at
+      its position, against the module's final self and the definitions
+      visible there, and later declarations bind its names to that shared
+      value. A macro invocation's captured environment includes the `let`s
+      before it, so a file-private helper or macro needs no export.
+    - **One file, one name, one meaning.** The shadowing checks block a
+      `let` named like any name the file uses to reach a global, even only
+      in another definition's value, and like any local in scope; only an
+      explicit `module.tmp` reaches past a local `tmp`.
+    - **`alias self`** localizes an object's or an update's names, as the
+      default does for objects; an explicit object alias no longer makes
+      bare names read the parent's definitions when it is `self`.
+    - **`_x` naming a local** is an error, for every kind of local; today
+      it reads the prior definition `x`.
+
+    **Alias syntax as built (2026-10-17):**
+    - `alias Name`, `alias self` or `alias _` is a `with` body's first
+      member, at most once, in object, `extend` and update bodies; a header
+      `as Name`, including a match subject's `Dict as d with`, reports the
+      move; a module-level `alias Name` says where an alias belongs.
+    - Names are localized iff the alias is `self`, written or by an
+      object's default. `alias _` names nothing and leaves names to the
+      host scope for objects too, as Syntax.md's `object _ as _ extends
+      Object` reading of `Object with Body` always said; before, an
+      object's `as _` localized.
+    - An update in a match subject needs no parentheses.
+
 **Item 7 as built (2026-10-17).
 - **Where a `where` ends.** The token pass closes the `else` tails before a
   `where` and stops the view there; a statement or arm holding one, and a

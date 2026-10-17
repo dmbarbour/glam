@@ -594,7 +594,7 @@ mod tests {
                 concat!(
                     "language g0\n",
                     "import 'std\n",
-                    "object logger as logger_object with\n",
+                    "object logger with\n  alias logger_object\n",
                     "  run = (.cut (.alt ",
                     "(.read_log >>= (\\_message -> .r ())) ",
                     "(.exit.success))) =>> logger_object\n",

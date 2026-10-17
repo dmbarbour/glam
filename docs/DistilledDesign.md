@@ -30,7 +30,7 @@
 - Names: `[a-zA-Z][a-zA-Z0-9]*` parts joined by `_`; paths dotted; expression-indexed paths `.[Expr]` / `.(ListExpr)`. 
 - Keywords: `import as module abstract declare assume using unique with do let in where object extend self if then else match try when and or` etc.
 - `declare Name, ...` declares names a module expects to be defined, e.g. by a mixin (also enables recursive-do forward references); `assume Name, ...` names ones defined outside the module's journal. A namespace's `meta.journal` records introductions, overrides, updates and these, and its reflection boundary reports conflicts. `unique Foo, Bar` declares scope-unique atoms from namespace paths.
-- **Object scoping**: inside objects, names bind to `self` by default; `^name` escapes one lexical level (composes: `^^name`); `as Name` gives the object a local alias instead. Local-to-local shadowing is forbidden; namespace shadowing may warn. `using Dict in Expr` treats any dict as a temporary object scope. Prior definitions via `_name` (or `_self.name`).
+- **Object scoping**: inside objects, names bind to `self` by default; `^name` escapes one lexical level (composes: `^^name`); an `alias Name` first body member gives the object a local alias instead (`alias self` is the default; `alias _` names nothing). Local-to-local shadowing is forbidden; namespace shadowing may warn. `using Dict in Expr` treats any dict as a temporary object scope. Prior definitions via `_name` (or `_self.name`).
 - **Do notation**: supports both `Pattern <- op` and `op -> Pattern` (the latter suits vertical assembly columns); `Pattern = Expr` without `let`; applicatives `!>` / `<!`; pure pipes `|>` `<|`, function composition `>>` `<<`; no mixing opposing directions without parens.
 - **Numbers**: `_42` is negative (prefix underscore is part of the literal); `1_000_000`, `1.23e_7`, `0xc0de`, `0b1010`.
 - **Texts**: raw, no escape characters; multi-line via `"""` blocks with `"`-prefixed lines, LF-separated, no trailing LF; postprocess explicitly (e.g. `|> hex2bin`). Prefer `import "file" binary as x` for large data.
@@ -41,7 +41,7 @@
   it cannot see comments or other macro invocations, cannot emit either, and
   may transport arbitrary Glam values as embedded data. This bootstrap
   protocol deliberately exposes neither ASTs nor hygienic binder identities.
-- `with` updates on dicts/objects use the same `=`/`:=`/`::=` discipline; `Dict as d with ...` captures; on objects, `with` bodies are anonymous mixins and `extend Name with ...` updates the spec and re-instantiates.
+- `with` updates on dicts/objects use the same `=`/`:=`/`::=` discipline; `Dict with { alias d; ... }` captures; on objects, `with` bodies are anonymous mixins and `extend Name with ...` updates the spec and re-instantiates.
 
 ## Assembler Executable
 

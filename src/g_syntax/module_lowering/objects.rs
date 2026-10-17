@@ -474,18 +474,22 @@ pub(in crate::g_syntax) fn object_body_scope_resolved(
     parent: NameScope<ResolvedRoot>,
     reflection_boundary: Option<ResolvedRoot>,
 ) -> NameScope<ResolvedRoot> {
-    let object_alias = alias
-        .map(local_name_metadata)
-        .and_then(|alias| alias.canonical);
-    let (final_defs, prior_defs) = if object_alias.is_some() {
-        (
-            parent.final_defs.duplicate_in(access),
-            parent.prior_defs.duplicate_in(access),
-        )
-    } else {
+    // An object's names are its own unless an alias other than `self`
+    // names it; `alias _` names nothing and leaves names to the parent.
+    let alias = alias.map(local_name_metadata);
+    let localized = alias
+        .as_ref()
+        .is_none_or(|alias| alias.canonical.as_deref() == Some("self"));
+    let object_alias = alias.and_then(|alias| alias.canonical);
+    let (final_defs, prior_defs) = if localized {
         (
             object_final_defs.duplicate_in(access),
             object_prior_defs.duplicate_in(access),
+        )
+    } else {
+        (
+            parent.final_defs.duplicate_in(access),
+            parent.prior_defs.duplicate_in(access),
         )
     };
 

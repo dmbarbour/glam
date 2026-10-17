@@ -1,6 +1,7 @@
 language g0
 
-hello = object "hello" as _h with
+hello = object "hello" with
+  alias _h
   target = "World"
   text = "Hello, " ++ h.target ++ "!"
 

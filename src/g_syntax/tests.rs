@@ -602,7 +602,7 @@ fn g0_keywords_are_reserved_across_source_name_positions() {
         ),
         (
             "binary",
-            "language g0\nvalue = object \"value\" as binary with {}\n",
+            "language g0\nvalue = object \"value\" with { alias binary }\n",
         ),
     ] {
         assert_reserved_keyword_diagnostic(source, keyword);
@@ -1272,7 +1272,7 @@ fn parses_hierarchical_object_body_declarations() {
 #[test]
 fn parses_hierarchical_extend_body_declarations() {
     let parsed = parse(
-        "language g0\nobject parent with\n  object child with\n    text = \"Hello\"\n  extend child as prior with\n    text := _prior.text ++ \"!\"\n",
+        "language g0\nobject parent with\n  object child with\n    text = \"Hello\"\n  extend child with\n    alias prior\n    text := _prior.text ++ \"!\"\n",
     );
 
     assert_eq!(parsed.diagnostics, []);
@@ -1290,8 +1290,9 @@ fn parses_hierarchical_extend_body_declarations() {
 
 #[test]
 fn parses_object_expressions() {
-    let parsed =
-        parse("language g0\nhello = object \"hello\" as _h extends base with\n  text = h.target\n");
+    let parsed = parse(
+        "language g0\nhello = object \"hello\" extends base with\n  alias _h\n  text = h.target\n",
+    );
 
     assert_eq!(parsed.diagnostics, []);
     assert!(matches!(
@@ -1669,29 +1670,70 @@ fn braced_with_bodies_reject_semicolon_only_and_interior_empty_members() {
 }
 
 #[test]
-fn object_aliases_require_with_bodies() {
-    for (source, expected) in [
-        (
-            "language g0\nobject declared as self\n",
-            "object declaration `as` requires a `with` body",
-        ),
-        (
-            "language g0\nexpression = object \"expression\" as self\n",
-            "object expression `as` requires a `with` body",
-        ),
+fn object_header_aliases_point_to_their_bodies() {
+    for source in [
+        "language g0\nobject declared as self\n",
+        "language g0\nobject declared as named with\n  x = named.y\n",
+        "language g0\nexpression = object \"expression\" as self\n",
     ] {
         let parsed = parse(source);
 
         assert_eq!(parsed.diagnostics.len(), 1, "{source}");
         assert_eq!(parsed.diagnostics[0].severity, Severity::Error, "{source}");
-        assert_eq!(parsed.diagnostics[0].message, expected, "{source}");
+        assert_eq!(
+            parsed.diagnostics[0].message,
+            "an alias is its body's first member: write `with { alias Name; … }`, not `as Name`",
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn an_alias_is_only_its_bodys_first_member() {
+    for (source, expected) in [
+        (
+            "language g0\nobject declared with\n  x = 1\n  alias late\n",
+            "`alias` may only be the first member of its body",
+        ),
+        (
+            "language g0\nobject declared with { alias a; alias b }\n",
+            "`alias` may only be the first member of its body",
+        ),
+        (
+            "language g0\nupdated = {} with { x = 1; alias late }\n",
+            "`alias` may only be the first member of its body",
+        ),
+        (
+            "language g0\nobject declared with\n  alias\n  x = 1\n",
+            "`alias` requires a name, `self`, or `_`",
+        ),
+        (
+            "language g0\nobject declared with { alias 'a }\n",
+            "`alias` requires a name, `self`, or `_`",
+        ),
+        (
+            "language g0\nalias named\n",
+            "`alias` may only be the first member of a `with` body",
+        ),
+    ] {
+        let parsed = parse(source);
+
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == Severity::Error
+                    && diagnostic.message.starts_with(expected)),
+            "{source}: {:?}",
+            parsed.diagnostics
+        );
     }
 }
 
 #[test]
 fn parses_object_and_extend_aliases() {
     let parsed = parse(
-        "language g0\nobject child as _c extends base with\n  text = c.base\nextend child as _c with\n  text := _c.text ++ \"!\"\n",
+        "language g0\nobject child extends base with\n  alias _c\n  text = c.base\nextend child with\n  alias _c\n  text := _c.text ++ \"!\"\n",
     );
 
     assert_eq!(parsed.diagnostics, []);
@@ -1715,7 +1757,7 @@ fn parses_object_and_extend_aliases() {
 #[test]
 fn object_declaration_aliases_follow_local_unused_warning_rules() {
     let parsed = parse(
-        "language g0\nobject a as unused with\n  x = 1\nobject b as _unused with\n  x = 1\nobject c as _ with\n  x = 1\nobject d as used with\n  x = used.y\nextend d as update_unused with\n  x := 2\nextend d as _update_unused with\n  x := 3\n",
+        "language g0\nobject a with\n  alias unused\n  x = 1\nobject b with\n  alias _unused\n  x = 1\nobject c with\n  alias _\n  x = 1\nobject d with\n  alias used\n  x = used.y\nextend d with\n  alias update_unused\n  x := 2\nextend d with\n  alias _update_unused\n  x := 3\n",
     );
 
     assert_eq!(
@@ -1733,7 +1775,7 @@ fn object_declaration_aliases_follow_local_unused_warning_rules() {
     }));
     assert!(parsed.diagnostics.iter().any(|diag| {
         diag.severity == Severity::Warning
-            && diag.line == 10
+            && diag.line == 14
             && diag.message == "unused local `update_unused`"
     }));
 }
@@ -3320,7 +3362,7 @@ fn object_body_locals_use_their_visible_namespace_index() {
         "object parent with\n",
         "  member = 2\n",
         "  apply = \\_member -> member\n",
-        "object child as _alias with\n",
+        "object child with\n  alias _named\n",
         "  apply = \\_outer -> outer\n",
     ));
     let lowered = lower_parsed_source(parsed, &CompileContext::default());
@@ -3336,7 +3378,7 @@ fn object_body_locals_use_their_visible_namespace_index() {
         errors[0].message,
         "local `_member` shadows external `member` defined on line 4"
     );
-    assert_eq!(errors[1].line, 7);
+    assert_eq!(errors[1].line, 8);
     assert_eq!(
         errors[1].message,
         "local `_outer` shadows external `outer` defined on line 2"
@@ -4494,7 +4536,7 @@ fn object_expressions_can_extend_other_object_expressions() {
 #[test]
 fn object_expression_aliases_default_to_parent_scope() {
     let parsed = parse(
-        "language g0\nprefix = \"Hello\"\nhello = object \"hello\" as _h with\n  target = \"World\"\n  text = prefix ++ \", \" ++ h.target ++ \"!\"\nasm.result = hello.text\n",
+        "language g0\nprefix = \"Hello\"\nhello = object \"hello\" with\n  alias _h\n  target = \"World\"\n  text = prefix ++ \", \" ++ h.target ++ \"!\"\nasm.result = hello.text\n",
     );
     let context = CompileContext::from_module_path(["assembly"]);
     let lowered = lower_parsed_source(parsed, &context);
@@ -4551,8 +4593,39 @@ fn prior_self_and_module_keywords_resolve_at_module_scope() {
 #[test]
 fn self_and_module_keywords_resolve_inside_aliased_object_scope() {
     let parsed = parse(
-        "language g0\nprefix = \"Hello\"\nobject hello as self with\n  prefix = \"Nope\"\n  target = \"World\"\n  text = module.prefix ++ \", \" ++ self.target ++ \"!\"\nasm.result = hello.text\n",
+        "language g0\nprefix = \"Hello\"\nobject hello with\n  alias self\n  prefix = \"Nope\"\n  target = \"World\"\n  text = module.prefix ++ \", \" ++ self.target ++ \"!\"\nasm.result = hello.text\n",
     );
+    let context = CompileContext::from_module_path(["assembly"]);
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    assert_eq!(
+        output_bytes(&fully_evaluated_value(resolved_value_at_path(
+            &value,
+            &["asm", "result"]
+        ))),
+        b"Hello, World!"
+    );
+}
+
+/// `alias self` is an object's default and localizes its names; `alias _`
+/// names nothing and leaves its names to the host scope.
+#[test]
+fn object_aliases_self_and_none_choose_the_name_scope() {
+    let parsed = parse(concat!(
+        "language g0\n",
+        "greeting = \"Hello\"\n",
+        "suffix = \"!\"\n",
+        "object localized with\n",
+        "  alias self\n",
+        "  target = \"World\"\n",
+        "  text = ^greeting ++ \", \" ++ target\n",
+        "object hosted with\n",
+        "  alias _\n",
+        "  text = localized.text ++ suffix\n",
+        "asm.result = hosted.text\n",
+    ));
     let context = CompileContext::from_module_path(["assembly"]);
     let lowered = lower_parsed_source(parsed, &context);
     assert_eq!(lowered.diagnostics, []);
@@ -4770,7 +4843,7 @@ fn module_definitions_can_use_path_list_targets() {
 #[test]
 fn object_definitions_can_use_expression_indexed_targets() {
     let parsed = parse(
-        "language g0\nidx = 42\nobject hello as self with\n  .[idx] = \"Hello\"\n  text = self.[idx] ++ \", World!\"\nasm.result = hello.text\n",
+        "language g0\nidx = 42\nobject hello with\n  alias _\n  .[idx] = \"Hello\"\n  text = self.[idx] ++ \", World!\"\nasm.result = hello.text\n",
     );
     let context = CompileContext::from_module_path(["assembly"]);
     let lowered = lower_parsed_source(parsed, &context);
@@ -4827,7 +4900,7 @@ fn hierarchical_object_declarations_can_extend_sibling_objects() {
 #[test]
 fn hierarchical_extend_declarations_preserve_target_and_prior_scope() {
     let parsed = parse(
-        "language g0\nobject parent with\n  suffix = \"!\"\n  object child with\n    text = \"Hello\"\n  extend child as prior with\n    text := _prior.text ++ suffix\nasm.result = parent.child.text\n",
+        "language g0\nobject parent with\n  suffix = \"!\"\n  object child with\n    text = \"Hello\"\n  extend child with\n    alias prior\n    text := _prior.text ++ suffix\nasm.result = parent.child.text\n",
     );
     let context = CompileContext::from_module_path(["assembly"]);
     let lowered = lower_parsed_source(parsed, &context);
@@ -4961,7 +5034,7 @@ fn extend_declarations_reinstantiate_objects() {
 #[test]
 fn with_expressions_reinstantiate_adapting_objects() {
     let parsed = parse(
-        "language g0\nobject environment as self with\n  adapted = self.language\nconfigured = environment with\n  .['language] = \"g0\"\nasm.result = configured.adapted\n",
+        "language g0\nobject environment with\n  alias self\n  adapted = self.language\nconfigured = environment with\n  .['language] = \"g0\"\nasm.result = configured.adapted\n",
     );
     let context = CompileContext::from_module_path(["assembly"]);
     let lowered = lower_parsed_source(parsed, &context);
@@ -5030,7 +5103,7 @@ fn excessive_scope_escapes_report_lowering_errors() {
 #[test]
 fn aliased_object_bodies_default_to_module_scope() {
     let parsed = parse(
-        "language g0\nprefix = \"Hello\"\nobject hello as h with\n  target = \"World\"\n  text = prefix ++ \", \" ++ h.target ++ \"!\"\nasm.result = hello.text\n",
+        "language g0\nprefix = \"Hello\"\nobject hello with\n  alias h\n  target = \"World\"\n  text = prefix ++ \", \" ++ h.target ++ \"!\"\nasm.result = hello.text\n",
     );
     let context = CompileContext::from_module_path(["assembly"]);
     let lowered = lower_parsed_source(parsed, &context);
@@ -5049,7 +5122,7 @@ fn aliased_object_bodies_default_to_module_scope() {
 #[test]
 fn suppressed_object_aliases_still_bind_canonical_names() {
     let parsed = parse(
-        "language g0\nprefix = \"Hello\"\nobject hello as _h with\n  target = \"World\"\n  text = prefix ++ \", \" ++ h.target ++ \"!\"\nasm.result = hello.text\n",
+        "language g0\nprefix = \"Hello\"\nobject hello with\n  alias _h\n  target = \"World\"\n  text = prefix ++ \", \" ++ h.target ++ \"!\"\nasm.result = hello.text\n",
     );
     let context = CompileContext::from_module_path(["assembly"]);
     let lowered = lower_parsed_source(parsed, &context);
@@ -5068,7 +5141,7 @@ fn suppressed_object_aliases_still_bind_canonical_names() {
 #[test]
 fn aliased_extend_bodies_can_reference_prior_object_and_module_scope() {
     let parsed = parse(
-        "language g0\nsuffix = \"!\"\nobject hello with\n  text = \"Hello, World\"\nextend hello as h with\n  text := _h.text ++ suffix\nasm.result = hello.text\n",
+        "language g0\nsuffix = \"!\"\nobject hello with\n  text = \"Hello, World\"\nextend hello with\n  alias h\n  text := _h.text ++ suffix\nasm.result = hello.text\n",
     );
     let context = CompileContext::from_module_path(["assembly"]);
     let lowered = lower_parsed_source(parsed, &context);
@@ -5087,7 +5160,7 @@ fn aliased_extend_bodies_can_reference_prior_object_and_module_scope() {
 #[test]
 fn suppressed_extend_aliases_still_bind_canonical_prior_names() {
     let parsed = parse(
-        "language g0\nsuffix = \"!\"\nobject hello with\n  text = \"Hello, World\"\nextend hello as _h with\n  text := _h.text ++ suffix\nasm.result = hello.text\n",
+        "language g0\nsuffix = \"!\"\nobject hello with\n  text = \"Hello, World\"\nextend hello with\n  alias _h\n  text := _h.text ++ suffix\nasm.result = hello.text\n",
     );
     let context = CompileContext::from_module_path(["assembly"]);
     let lowered = lower_parsed_source(parsed, &context);
@@ -5125,7 +5198,7 @@ fn dictionary_with_without_alias_uses_parent_scope() {
 #[test]
 fn dictionary_with_aliases_capture_prior_and_final_dictionaries() {
     let parsed = parse(
-        "language g0\nsuffix = \"!\"\nbase = { text:\"Hello, World\" }\nd = base as b with\n  text := _b.text ++ suffix\n  result = b.text\nasm.result = d.result\n",
+        "language g0\nsuffix = \"!\"\nbase = { text:\"Hello, World\" }\nd = base with\n  alias b\n  text := _b.text ++ suffix\n  result = b.text\nasm.result = d.result\n",
     );
     let context = CompileContext::from_module_path(["assembly"]);
     let lowered = lower_parsed_source(parsed, &context);
@@ -5144,7 +5217,7 @@ fn dictionary_with_aliases_capture_prior_and_final_dictionaries() {
 #[test]
 fn dictionary_with_suppressed_aliases_still_bind_canonical_names() {
     let parsed = parse(
-        "language g0\nsuffix = \"!\"\nbase = { text:\"Hello, World\" }\nd = base as _b with\n  text := _b.text ++ suffix\n  result = b.text\nasm.result = d.result\n",
+        "language g0\nsuffix = \"!\"\nbase = { text:\"Hello, World\" }\nd = base with\n  alias _b\n  text := _b.text ++ suffix\n  result = b.text\nasm.result = d.result\n",
     );
     let context = CompileContext::from_module_path(["assembly"]);
     let lowered = lower_parsed_source(parsed, &context);
@@ -5162,8 +5235,9 @@ fn dictionary_with_suppressed_aliases_still_bind_canonical_names() {
 
 #[test]
 fn dictionary_with_aliases_follow_local_unused_warning_rules() {
-    let parsed =
-        parse("language g0\nd = {} as unused with\n  x = 1\ne = {} as _unused with\n  x = 1\n");
+    let parsed = parse(
+        "language g0\nd = {} with\n  alias unused\n  x = 1\ne = {} with\n  alias _unused\n  x = 1\n",
+    );
 
     assert_eq!(
         parsed
@@ -5183,7 +5257,7 @@ fn dictionary_with_aliases_follow_local_unused_warning_rules() {
 #[test]
 fn dictionary_with_self_alias_uses_object_style_scope() {
     let parsed = parse(
-        "language g0\nsuffix = \"!\"\nbase = { text:\"Hello, World\" }\nd = base as self with\n  text := _text ++ ^suffix\nasm.result = d.text\n",
+        "language g0\nsuffix = \"!\"\nbase = { text:\"Hello, World\" }\nd = base with\n  alias self\n  text := _text ++ ^suffix\nasm.result = d.text\n",
     );
     let context = CompileContext::from_module_path(["assembly"]);
     let lowered = lower_parsed_source(parsed, &context);
@@ -6844,7 +6918,7 @@ fn abstract_global_path_keyword_rejects_local_and_object_roots() {
             "resolves through an object or `using` namespace",
         ),
         (
-            "language g0\nobject holder as h with\n  bad = abstract_global_path h\n",
+            "language g0\nobject holder with\n  alias h\n  bad = abstract_global_path h\n",
             "resolves `h` as an object alias",
         ),
         (
@@ -6872,7 +6946,7 @@ fn explicit_module_abstract_global_paths_escape_object_scope() {
             "language g0\n",
             "object holder with\n",
             "  path = abstract_global_path module.target\n",
-            "object aliased as _a with\n",
+            "object aliased with\n  alias _a\n",
             "  path = abstract_global_path target\n",
         ),
         &["pkg", "module"],

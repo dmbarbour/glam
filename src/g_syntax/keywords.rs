@@ -47,6 +47,10 @@ pub(super) const G0_KEYWORDS: &[Keyword] = &[
         roles: &[Expression],
     },
     Keyword {
+        spelling: "alias",
+        roles: &[Declaration],
+    },
+    Keyword {
         spelling: "and",
         roles: &[Operator],
     },
@@ -215,6 +219,10 @@ mod tests {
         );
         assert_eq!(
             g0_keyword("assume").map(Keyword::roles),
+            Some(&[Declaration][..])
+        );
+        assert_eq!(
+            g0_keyword("alias").map(Keyword::roles),
             Some(&[Declaration][..])
         );
         assert_eq!(

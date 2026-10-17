@@ -331,11 +331,12 @@ impl Printer {
                 } else {
                     self.group(base);
                 }
-                if let Some(alias) = alias {
-                    self.text(" as ");
-                    self.text(alias);
-                }
                 self.text(" with {");
+                if let Some(alias) = alias {
+                    self.text(" alias ");
+                    self.text(alias);
+                    self.text(";");
+                }
                 for (at, member) in body.iter().enumerate() {
                     self.text(if at == 0 { " " } else { "; " });
                     self.member(member);

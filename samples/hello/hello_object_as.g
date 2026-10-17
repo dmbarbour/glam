@@ -2,7 +2,8 @@ language g0
 
 prefix = "Hello"
 
-object hello as h with
+object hello with
+  alias h
   target = "World"
   text = prefix ++ ", " ++ h.target ++ "!"
 

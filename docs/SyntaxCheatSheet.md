@@ -109,10 +109,12 @@ d2h = d1 with x := 10       # inline first member sets hanging sibling column
               y = 20
 d3 = d2 with { x := 11; z = 30 } # semicolon-delimited equivalent
 d4 = d3 with {}             # explicit no-op update
-Dict as d with              # capture: _d.x = prior, d.x = result
+Dict with                   # capture: _d.x = prior, d.x = result
+    alias d                 # an alias is a body's first member; default `_`
     x := _d.x + 1
     y = d.x + a
-Dict as self with           # object-style scope: _x prior, ^a escapes to host
+Dict with                   # object-style scope: _x prior, ^a escapes to host
+    alias self
     x := _x + 1
     y = x + ^a
 ```
@@ -463,8 +465,7 @@ match Expr as {}                   # error: match exhausted on its source line
 match* Expr as ...                  # lazy list of every successful result
 match* Expr as {}                   # []
 
-# The first ungrouped `as` belongs to `match`, so group an update that names
-# its base (`Dict as d with ...`) in a subject. Pattern arms follow `as`, as
+# The first ungrouped `as` belongs to `match`. Pattern arms follow `as`, as
 # in `P as Q`; guard arms follow `when`.
 # A match is a tail form: `(match X as {...}) y` applies it.
 match Dict with { x := 1 } as { {x:value} => value; _ => {}; }
@@ -579,7 +580,8 @@ import 'std
 object legacy extends object_from_dict optional_defs with
     ...                     # explicit plain-dict to anonymous-object conversion
 
-object foo as f extends bar with    # 'as f': local alias, no ^ needed
+object foo extends bar with
+    alias f                 # local alias, no ^ needed; default `alias self`
     A = f.B + a             # 'a' resolves to host directly now
     B = f.C + 2             # _f.B would be the prior B
 
@@ -594,7 +596,8 @@ extend foo with                                       # update spec + instantiat
 # Lightweight extension — any expression, 'with' body is anonymous mixin:
 foo = op1 >>= op2 with
     A := 42
-    B := op4 >>= op5 as o with      # nested, with capture
+    B := op4 >>= op5 with           # nested, with capture
+        alias o
         C c = ... o.F ...
     D ::= \ prior -> prior + 1
 

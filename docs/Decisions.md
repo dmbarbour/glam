@@ -710,8 +710,18 @@ maps the short names used here to file names.
     with another local or a member in scope is a shadowing error.
   - Modules take `let` declarations as file-private helpers; a module's
     alias is implicitly `module`.
+  - *Refined the same day (maintainer):* a `let` group is recursive within
+    itself and seen by what follows it, in a body or a file; a module
+    `let` is a compiler-local file environment, lowered once at its
+    position; one file, one name, one meaning, so a `let` may not share a
+    name the file uses for a global or a local in scope; `alias self`
+    localizes names as the default does; `_x` naming any local is an
+    error.
 - **Alternatives rejected:** keeping `as Name` in headers; private helpers
-  as members or per-member `where`s.
+  as members or per-member `where`s; one recursive group per body or per
+  file, which would let a declaration see a `let` below it whose
+  `_module` reads differ; a hidden module entry for a module `let`, which
+  no user-defined front end could make.
 - **Consequences:**
   - `as` no longer continues an expression, so an update needs no
     parentheses in a match's subject.

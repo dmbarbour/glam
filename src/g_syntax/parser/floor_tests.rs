@@ -257,7 +257,7 @@ fn dedented_where_preserves_nested_with_owners() {
         "language g0\n",
         "foo = op1 >>= op2 >>= op3 with\n",
         "    A := 42\n",
-        "    B := op4 >>= op5 >>= op6 as o with\n",
+        "    B := op4 >>= op5 >>= op6 with\n        alias o\n",
         "        C c = op7\n",
         "  where\n",
         "    op1 = replacement\n",

@@ -1069,7 +1069,7 @@ fn tail_forms_stand_alone_only_in_tail_position() {
         "match v as {p when any \\z -> z => 1}",
         "match \\z -> z as {_ => 1}",
         "match if a then b else c as {_ => 1}",
-        "match (d as e with { a := 1 }) as {_ => 1}",
+        "match (d with { alias e; a := 1 }) as {_ => 1}",
         "do\n    a if c else b -> p\n    .r p",
         "do\n    p <- f \\a -> a\n    .r p",
         "if y <- (if a then b else c) and d then 1 else 2",
