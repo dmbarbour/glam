@@ -1218,6 +1218,27 @@ last part.
   parse quickly (`nested_update_bodies_parse`); a pieces-based member
   reader would remove the rest, if profiles ask for it.
 
+**`parser-grammar-retirement`, the round trip (2026-10-17).** Before the
+oracle goes, generated trees replace its generated sources, as the grammar
+review's sequencing planned (maintainer, 2026-10-17).
+- **The printer** (`parser/printer.rs`, test-only for now) prints a tree
+  on one line, every block braced, with the fewest parentheses the grammar
+  reads back: operands by the operator table (`operand_reads_ungrouped`),
+  tail forms only where nothing follows them in their region, braced forms
+  where an operator but no argument follows, an update only where it
+  begins its chain, and no prefix conditional after an operand. It is a
+  start on the formatter.
+- **The round trip** (`generated_trees_round_trip`) generates trees of the
+  expression grammar (operators, applications, paths, tags, groups,
+  lambdas, conditionals, `let`, `using`, `do`, `match`, updates, sections)
+  and checks that each prints and parses back to itself: 2,000 by default,
+  400,000 at `GLAM_ROUND_TRIP=200`. It found that a `do` after a `using`'s
+  namespace began its body only after an `in`-less namespace in the
+  structural parser, which looked ahead for an `in`; the frame now begins
+  the body at the first `do` after a nonempty namespace, as Syntax.md's
+  sugar `using Dict do Body` reads, so a namespace ending in a `do` block
+  is parenthesized.
+
 ## Verification
 
 - The differential oracle above, while both parsers exist.

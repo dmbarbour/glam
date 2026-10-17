@@ -123,6 +123,38 @@ fn reduce_top_operator(
     Ok(())
 }
 
+/// Whether an operand whose top operator is `child` reads without
+/// parentheses on `parent`'s left side, or its right side, as the chain's
+/// resolution reads it back. A comparison beside a comparison would join
+/// its chain.
+#[cfg(test)]
+pub(in crate::g_syntax::parser) fn operand_reads_ungrouped(
+    parent: SyntaxOperator,
+    child: SyntaxOperator,
+    left: bool,
+) -> bool {
+    if is_comparison_operator(parent) && is_comparison_operator(child) {
+        return false;
+    }
+    if left {
+        matches!(
+            infix_operator_relation(child, parent),
+            OperatorRelation::Stronger | OperatorRelation::Same(Associativity::Left)
+        )
+    } else {
+        matches!(
+            infix_operator_relation(parent, child),
+            OperatorRelation::Weaker | OperatorRelation::Same(Associativity::Right)
+        )
+    }
+}
+
+/// An infix operator's spelling.
+#[cfg(test)]
+pub(in crate::g_syntax::parser) fn operator_symbol(operator: SyntaxOperator) -> &'static str {
+    infix_operator_symbol(operator)
+}
+
 fn infix_operator_relation(left: SyntaxOperator, right: SyntaxOperator) -> OperatorRelation {
     use crate::core::Builtin::{
         Add, Append, Divide, Equal, Greater, GreaterEqual, Less, LessEqual, Multiply, NotEqual,

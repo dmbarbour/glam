@@ -1352,9 +1352,11 @@ impl Pass<'_, '_, '_> {
                 }
                 "in" if in_keyword_position(view, index) => return self.scoped_in(index),
                 "do" if may_head_keyword_form(view, index) => {
-                    // A `do` after a `using`'s namespace begins its body.
+                    // A `do` after a `using`'s namespace begins its body
+                    // (`using Dict do Body` is `using Dict in do Body`).
                     if matches!(&self.top().kind,
                         FrameKind::Scoped(scoped) if scoped.phase == ScopedPhase::Namespace)
+                        && !trim_padding(view, &self.top().pieces).is_empty()
                     {
                         self.begin_scoped_body(index, index);
                         self.significant(index);

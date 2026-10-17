@@ -12,6 +12,8 @@ mod layout;
 mod lexical;
 mod logical;
 mod pattern;
+#[cfg(test)]
+mod printer;
 mod source;
 mod structural;
 mod term;

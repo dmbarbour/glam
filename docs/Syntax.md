@@ -308,6 +308,9 @@ A using scope enables any dictionary as an object namespace.
         using Dict in Expr
         using Dict do Body      # short for `using Dict in do Body`
 
+The first `do` after a nonempty namespace begins the body, so a namespace
+that ends with a `do` block is parenthesized.
+
 The namespace expression is bound outside the temporary scope, then lazily
 evaluated and shared when that namespace is observed within `Expr`. Lexical
 locals continue to take precedence, allowing a function such as

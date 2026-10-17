@@ -7,6 +7,8 @@ use chumsky::error::Rich;
 use chumsky::prelude::*;
 
 use self::infix::resolve_infix_chain;
+#[cfg(test)]
+pub(in crate::g_syntax::parser) use self::infix::{operand_reads_ungrouped, operator_symbol};
 use super::super::keywords::{canonical_keyword, g0_keyword, reserved_keyword_message};
 use super::super::{
     Diagnostic, IfExpr, PathSuffix, SyntaxExpr, SyntaxKeyExpr, SyntaxOperator,
