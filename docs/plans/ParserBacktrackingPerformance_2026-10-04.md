@@ -910,12 +910,17 @@ beside group frames:
    suffix slice on 2026-10-16, with the rest of `let`.)
 4. `parser-keyword-frames-suffixes`: `let`, `using`, `where`, `with` and
    `object`. Paused on 2026-10-16 for the
-   [grammar review](GrammarReview_2026-10-16.md), which may change these
-   forms; its sequencing section says how the remaining steps follow it.
-   The pass checks the review's rules since 2026-10-16
-   (`tail-forms-end-at-separators` and the review's items 1–4), and the
+   [grammar review](GrammarReview_2026-10-16.md), whose current items were
+   settled on 2026-10-17; its sequencing section says how the remaining
+   steps follow it. The pass checks the review's rules
+   (`tail-forms-end-at-separators` and the review's further items), and the
    oracle compares the term parser's legacy-grammar reading where they
-   change whether an expression parses.
+   change a parse. `where-scopes-its-definition` already moved `where`
+   attachment into the pass and `parse_body`, gated by the legacy switch.
+   It also made `chain_where` nest each group in the binding before it,
+   whose structural parse rescans the rest of the line, about five times
+   the CPU time at 1,600 bindings; this slice's frames remove those scans,
+   and that workload measures them.
 5. The structural parsers' expression paths then serve only the oracle,
    and go with the Chumsky grammar in `parser-grammar-retirement`.
 

@@ -135,9 +135,14 @@ disagree.
   through siblings). It lowers by strongly connected components in
   dependency order: an acyclic one as an application, a cycle through
   `fixpoint`, one binding directly and several through a dictionary of
-  the members. Separate `where` suffixes remain separate groups. A local
-  binding takes parameters as a module definition does: `go k = Body` is
-  `go = \k -> Body`.
+  the members. A body takes one `where` group; a `where` in a binding is
+  that binding's own group. A local binding takes parameters as a module
+  definition does: `go k = Body` is `go = \k -> Body`.
+- A `where` scopes the whole definition, statement or arm it ends, or a
+  parenthesized expression (`where-scopes-its-definition`). Expressions
+  stop at one; only `structural::parse_body` and the body sides that call
+  `where_suffix` take it. Never attach a `where` where an expression is
+  parsed.
 - `using Dict in Expr` evaluates and shares `Dict` in the surrounding scope,
   then installs it as temporary final namespace and `self`; prior namespace is
   `{}` and `^` still escapes outward. It is front-end sugar, not a runtime

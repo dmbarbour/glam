@@ -19,7 +19,8 @@ use super::super::input::{TokenRange, TokenView};
 use super::super::lexical::{Delimiter, TokenKind};
 use super::super::pattern::{Binding, BindingSite, Missing};
 use super::super::structural::{
-    before_key_mark, in_keyword_position, parse_expression_extent, trim_layout,
+    before_key_mark, in_keyword_position, misplaced_where, parse_expression_extent, trim_layout,
+    where_at, where_suffix,
 };
 use super::{
     Fail, Items, Mode, Parse, Piece, Position, Scope, legacy_grammar, piece_token, token,
@@ -158,7 +159,13 @@ fn binding(
         if right.is_empty() {
             return missing(missing_right);
         }
-        let (right, _) = expression(scope, right, context, false)?;
+        let (right, _) = expression(
+            scope,
+            right,
+            context,
+            false,
+            matches!(site, BindingSite::DoStatement),
+        )?;
         return Ok(if backward {
             Binding::Effect {
                 pattern,
@@ -177,7 +184,13 @@ fn binding(
     {
         return missing(Missing::ForwardOperation);
     }
-    let (operation, stop) = expression(scope, pieces, context, true)?;
+    let (operation, stop) = expression(
+        scope,
+        pieces,
+        context,
+        true,
+        matches!(site, BindingSite::DoStatement),
+    )?;
     let Some(arrow) = stop else {
         return Ok(Binding::Operation(operation));
     };
@@ -318,8 +331,13 @@ fn choice_arm<'p>(
         }
         let first = piece_token(&result[0]);
         let line = line_of(view, result);
-        let (expression, _) =
-            expression(scope, result, context.child_owner_at(view, first), false)?;
+        let (expression, _) = expression(
+            scope,
+            result,
+            context.child_owner_at(view, first),
+            false,
+            true,
+        )?;
         return Ok((
             head,
             MatchOutcome::Result {
@@ -392,6 +410,18 @@ fn pattern_binder(view: TokenView<'_, '_>, pieces: &[Piece]) -> Option<usize> {
 fn pattern(scope: Scope<'_, '_, '_>, pieces: &[Piece], position: Position) -> Parse<SyntaxPattern> {
     let view = scope.view;
     let first = piece_token(&pieces[0]);
+    // A `where` after a bind's pattern would scope the statement from its
+    // end, past the pattern it binds.
+    if !legacy_grammar()
+        && let Some(found) = pieces[1..]
+            .iter()
+            .find(|piece| is_keyword(view, piece, "where"))
+    {
+        return Err(Fail::error(
+            "`where` cannot follow a pattern: write `(E where …) -> P` to scope a bind's operation",
+        )
+        .or_at(Some(piece_token(found))));
+    }
     let scope = Scope {
         view: pieces_view(view, pieces),
         context: ExpressionContext::for_owner_at(view, first).ending_at_arrow(),
@@ -405,12 +435,14 @@ fn pattern(scope: Scope<'_, '_, '_>, pieces: &[Piece], position: Position) -> Pa
 }
 
 /// An expression side, returning the position of the `->` it stopped at
-/// when `ends_at_arrow`.
+/// when `ends_at_arrow`. A `body`, a statement's or an arm's, takes the
+/// `where` suffixes that end it.
 pub(super) fn expression(
     scope: Scope<'_, '_, '_>,
     pieces: &[Piece],
     context: ExpressionContext,
     ends_at_arrow: bool,
+    body: bool,
 ) -> Parse<(SyntaxExpr, Option<usize>)> {
     let view = scope.view;
     let side = pieces_view(view, pieces);
@@ -420,7 +452,13 @@ pub(super) fn expression(
         context.complete()
     };
     if needs_view_dispatch(view, pieces) {
-        let parsed = parse_expression_extent(side, context).map_err(Fail::Reported)?;
+        let mut parsed = parse_expression_extent(side, context).map_err(Fail::Reported)?;
+        if where_at(side, parsed.end()).is_some() {
+            if !body {
+                return Err(Fail::Reported(misplaced_where(side, parsed.end())));
+            }
+            parsed = where_suffix(side, context.complete(), parsed).map_err(Fail::Reported)?;
+        }
         let end = parsed.end();
         let expression = parsed
             .into_expression()

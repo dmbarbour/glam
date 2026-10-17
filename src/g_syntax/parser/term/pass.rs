@@ -59,13 +59,15 @@ use super::super::input::{TokenRange, TokenView};
 use super::super::layout::group_separator;
 use super::super::lexical::{Delimiter, GroupId, LeadingTrivia, TokenKind};
 use super::super::structural::{
-    in_keyword_position, is_layout_empty, parse_expression_in_context, parse_open_tail, trim_layout,
+    in_keyword_position, is_layout_empty, parse_body, parse_expression_in_context, parse_open_tail,
+    trim_layout,
 };
 use super::binding::{self, NestedArms, needs_view_dispatch};
 use super::{
-    Cover, Deferred, Fail, GroupBody, Items, Mode, Parse, Piece, Scope, conditional_argument,
-    ends_operand, form_label, interpret_group, legacy_grammar, may_head_keyword_form,
-    misplaced_tail, opens_keyword_region, piece_token, regions_enabled, token, trim_padding,
+    Cover, Deferred, Fail, GroupBody, Items, Mode, ParenCover, Parse, Piece, Scope, Term,
+    conditional_argument, ends_operand, form_label, interpret_group, is_symbol, legacy_grammar,
+    may_head_keyword_form, misplaced_tail, opens_keyword_region, piece_token, regions_enabled,
+    token, trim_padding,
 };
 
 /// One frame on the pass's stack.
@@ -814,6 +816,39 @@ impl Pass<'_, '_, '_> {
                 close: index,
                 in_parent_region: parent.region,
             })
+        } else if view_level && delimiter == Delimiter::Parenthesis && !legacy_grammar() {
+            // A parenthesized expression is a body, whose `where` and
+            // keyword forms its structural parser reads, and never a
+            // pattern, which holds no keyword form. A tuple's item is no
+            // body.
+            let tuple = body.pieces.iter().any(|piece| is_symbol(view, piece, ","));
+            let where_item = body.pieces.iter().find_map(|piece| match piece {
+                Piece::Token(at)
+                    if matches!(token(view, *at).kind(), TokenKind::Name("where"))
+                        && in_keyword_position(view, *at) =>
+                {
+                    Some(*at)
+                }
+                _ => None,
+            });
+            let contents = view
+                .group_contents(group)
+                .expect("an open frame's group exists");
+            covers.ready(match (tuple, where_item) {
+                (true, Some(at)) => Cover::Invalid(
+                    Fail::error(
+                        "`where` cannot stand in a tuple item: it scopes a whole definition, statement or arm; parenthesize `(… where …)` or use `let … in` for part of an expression",
+                    )
+                    .or_at(Some(at)),
+                ),
+                (true, None) => interpret_group(scope, &body, index)
+                    .unwrap_or_else(|fail| Cover::Invalid(fail.or_at(Some(open)))),
+                (false, _) => parse_body(contents, body.context.complete())
+                    .map(|expression| Cover::Paren(ParenCover::Grouped(Term::Expr(expression))))
+                    .unwrap_or_else(|diagnostics| {
+                        Cover::Invalid(Fail::Reported(diagnostics).or_at(Some(open)))
+                    }),
+            })
         } else {
             covers.ready(
                 interpret_group(scope, &body, index)
@@ -1005,6 +1040,10 @@ impl Pass<'_, '_, '_> {
             return Step::Next;
         }
         let after_operand = matches!(kind, TokenKind::Name("if" | "try")) && self.follows_operand();
+        let begins_member = {
+            let top = self.top();
+            top.first.is_none() || top.member_start
+        };
         self.significant(index);
         if self.top().region {
             return self.region_token(index);
@@ -1058,6 +1097,9 @@ impl Pass<'_, '_, '_> {
                     top.member_start = true;
                     top.pieces.push(Piece::Token(index));
                     return Step::Next;
+                }
+                "where" if in_keyword_position(view, index) && !legacy_grammar() => {
+                    return self.where_ends(index, begins_member);
                 }
                 "let" | "object" | "where" if in_keyword_position(view, index) => {
                     self.top().view_level = true;
@@ -1334,6 +1376,69 @@ impl Pass<'_, '_, '_> {
         if self.violation.is_none() && !legacy_grammar() {
             self.violation = Some(fail);
         }
+    }
+
+    /// A `where` ends the definition, statement or arm it stands in, or a
+    /// parenthesized expression (Syntax.md "Local Definitions"): the open
+    /// tails before it close, and the pass stops at it when the view is that
+    /// body. A statement or arm holding one is parsed from its view, and so
+    /// are a group's contents. Elsewhere it would scope only part of an
+    /// expression, which parentheses or `let … in` say.
+    fn where_ends(&mut self, index: usize, begins_member: bool) -> Step {
+        while matches!(&self.top().kind,
+            FrameKind::Conditional(conditional) if conditional.phase == Phase::Else)
+        {
+            self.close_conditional(index);
+        }
+        let single = self.stack.len() == 1;
+        let top = self.top();
+        let block = matches!(
+            &top.kind,
+            FrameKind::Layout(_) | FrameKind::Group { block: Some(_), .. }
+        );
+        let misplaced = match &top.kind {
+            _ if begins_member && block => None,
+            FrameKind::Conditional(conditional) if conditional.phase == Phase::Guards => {
+                Some("a conditional's guards")
+            }
+            FrameKind::Conditional(_) => Some("a `then` branch"),
+            FrameKind::Match(_) => Some("a match's subject"),
+            _ if top
+                .arms()
+                .is_some_and(|arms| arms.phase != ArmPhase::Result) =>
+            {
+                Some("an arm's pattern or guards")
+            }
+            FrameKind::Group {
+                delimiter, block, ..
+            } if block.is_none() && *delimiter != Delimiter::Parenthesis => {
+                Some("a list or dictionary item")
+            }
+            FrameKind::View if top.mode == Mode::Cover => Some("a pattern"),
+            _ => None,
+        };
+        if let Some(place) = misplaced {
+            self.violate(
+                Fail::error(format!(
+                    "`where` cannot stand in {place}: it scopes a whole definition, statement or arm; parenthesize `(… where …)` or use `let … in` for part of an expression"
+                ))
+                .or_at(Some(index)),
+            );
+        } else if begins_member && block {
+            self.violate(
+                Fail::error(
+                    "`where` cannot begin a statement or arm: indent it to scope the one above, or dedent it below the block to scope the definition",
+                )
+                .or_at(Some(index)),
+            );
+        } else if single && !begins_member {
+            return Step::Stop;
+        }
+        let top = self.top();
+        top.view_level = true;
+        top.lambda_head = false;
+        top.pieces.push(Piece::Token(index));
+        Step::Next
     }
 
     /// Notes a lambda open in the top frame's member, whose body the keyword
@@ -1723,7 +1828,7 @@ impl Pass<'_, '_, '_> {
                     ..scope
                 };
                 let context = found.context.child_owner_at(view, first);
-                binding::expression(scope, subject, context, false)
+                binding::expression(scope, subject, context, false, false)
                     .map(|(expression, _)| expression)
             }
         });
@@ -1849,18 +1954,21 @@ impl Pass<'_, '_, '_> {
                 ) => true,
                 Some(_) => false,
             };
-        // An arm's line holds one arrow, as the structural parser counted
-        // the arrows on its first line.
+        // The legacy grammar allowed one arrow on an arm's first line, since
+        // the structural parser counted them there. Now a later arrow there
+        // belongs to a nested match's hanging arms, and a second arrow of
+        // this arm's own is an error when the arm is read.
         let mut later = next;
-        let second_arrow = loop {
-            match later {
-                Some(mark) if !matches!(token(view, mark).kind(), TokenKind::Name("when")) => {
-                    break !when;
+        let second_arrow = legacy_grammar()
+            && loop {
+                match later {
+                    Some(mark) if !matches!(token(view, mark).kind(), TokenKind::Name("when")) => {
+                        break !when;
+                    }
+                    Some(mark) => later = self.line_mark(mark + 1),
+                    None => break false,
                 }
-                Some(mark) => later = self.line_mark(mark + 1),
-                None => break false,
-            }
-        };
+            };
         let frame = self.top();
         frame.region = false;
         frame.region_conditionals.clear();

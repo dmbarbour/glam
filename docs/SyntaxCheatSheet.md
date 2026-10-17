@@ -47,7 +47,7 @@ big_thing = f arg1
 # - The owner line establishes an exclusive floor; continuations stay right.
 # - First body member chooses the sibling anchor; inline means hanging layout.
 # - A final structural child inherits its owner's floor rather than drifting.
-# - Dedent closes a body; only a compatible `where`/operator may resume it.
+# - Dedent closes a body; only an operator or a `where` may resume it.
 # - A leading operator chain aligns at one resumption anchor.
 ```
 
@@ -209,18 +209,22 @@ Body where
 Body where n1 = d1          # inline first binding sets hanging sibling column
            n2 = d2
 
-# `where` is low-precedence and left-associative. These are separate groups;
-# the later group is the outer scope.
+# `where` scopes the whole definition, statement or arm it ends, never part
+# of an expression: it ends open tails, and parentheses scope less.
+f x = if x then a else b where b = 1 # scopes all of f's body
+f (a where a = 1)                    # a parenthesized expression is a body
+if c then (a where a = 1) else b     # `if c then a where ... else b` is an ERROR
+
+# One `where` per definition, statement or arm; its one group is mutually
+# recursive. A where binding is a definition, so a `where` on its line scopes it.
 Body where x = y where y = 1
-(Body where x = y) where y = 1
-
-# One suffix with multiple bindings is one mutually recursive group.
-Body where { x = y; y = x }
-
-# Parenthesize a right-associated binding expression explicitly.
 Body where x = (y where y = 1)
+Body where { x = y; y = x }
+Body
+  where x = y
+  where y = 1               # ERROR: a second `where` for Body
 
-# Dedent closes layout bodies before `where` resumes the nearest owner.
+# Dedent closes layout bodies; this `where` scopes the whole definition.
 Body with
     member = Inner with
         value = x

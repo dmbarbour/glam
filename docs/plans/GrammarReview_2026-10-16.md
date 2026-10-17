@@ -3,10 +3,11 @@
 Status: started 2026-10-16 at the maintainer's request. The first item,
 [`grammar-tail-position`](#grammar-tail-position), was decided and built on
 2026-10-16 and refined the same day with separator keywords
-(`tail-forms-end-at-separators` in `Decisions.md`). Further items 1–4 were
-decided and built on 2026-10-16; the others are listed for review. `parser-keyword-frames-suffixes` in the
-[parser backtracking plan](ParserBacktrackingPerformance_2026-10-04.md) is
-paused until this review settles the forms it covers.
+(`tail-forms-end-at-separators` in `Decisions.md`). Further items 1–14
+were decided by 2026-10-17: those that change the grammar are built, and
+the others recorded. `parser-keyword-frames-suffixes` in the
+[parser backtracking plan](ParserBacktrackingPerformance_2026-10-04.md)
+resumes on the settled grammar.
 
 ## Goal
 
@@ -206,8 +207,9 @@ and nothing in an expression continues with `then`, `else` or a binding's
 
 ### Further items
 
-Each needs options, a recommendation and the maintainer's decision. Items
-1–4 were decided as proposed and built on 2026-10-16, each with an entry in
+Each needed options, a recommendation and the maintainer's decision.
+Items 1–4 were decided as proposed and built on 2026-10-16, and items 5–10
+on 2026-10-17, those that change the grammar with an entry in
 `Decisions.md`.
 1. **`{` after `with`** (`brace-after-with-delimits-arms`). Whether it began
    a layout arm (a dict pattern) or braced arms depended on what followed
@@ -231,20 +233,36 @@ Each needs options, a recommendation and the maintainer's decision. Items
    `and` and `or` have no precedence relationship. Decided: a guard is an
    ordinary `and` chain whose operands may be bindings, so the same error
    applies.
-5. **One `=>` per arm's first line**, kept from the structural parser,
-   which split arms by scanning. With item 1, a second arrow belongs to a
-   nested match's hanging arms.
+5. **One `=>` per arm's first line** (`nested-arrows-share-an-arms-line`),
+   kept from the structural parser, which split arms by scanning. With
+   item 1, a second arrow belongs to a nested match's hanging arms.
+   Decided and built: the rule is dropped, so `p => match b as q => r`
+   nests a one-arm match, and two arrows of one arm are still an error. A
+   linter may flag same-line nesting.
 6. **Roles of one spelling.** `->` is a lambda arrow, a bind and a view
-   arrow; `with` ends a match's subject, opens an object body and updates;
-   `when` begins guards, nested arms and `match when`.
-7. **`where` by indentation.** Changing only the indentation of a `where`
-   can change its owner; Syntax.md says so.
-8. **Postfix `if` binds names used to its left.**
-9. **Resumption after a dedent.** Check that the layout pass decides it
-   without the parser.
+   arrow; `with` ended a match's subject, opened an object body and
+   updated; `when` begins guards, nested arms and `match when`. After item
+   11, `with` means only "with these definitions", and `when` heads guarded
+   alternatives in each role. Decided: keep the roles; the separator test
+   tells `->`'s apart, and the linter flags `f \a -> E -> P`. The spelling
+   of the update alias, `Dict as Name with Defs`, the one role of `as` that
+   continues an expression, is settled separately.
+7. **`where` by indentation** (`where-scopes-its-definition`). Changing only
+   the indentation of a `where` could change its owner. Decided and built:
+   a `where` scopes the whole definition, statement or arm it ends, or a
+   parenthesized expression, and `let … in` or `(e where …)` scope less.
+   See "As built" below.
+8. **Postfix `if` binds names used to its left**, as in
+   `value if (value, rest) = decompose input else fallback`. Decided: keep
+   it, as comprehensions do, with a lint.
+9. **Resumption after a dedent.** Closed by the tail rule, with no change:
+   after a block's dedent only an operator or a keyword may follow, so
+   indentation alone tells the layout pass that a line continues the
+   enclosing statement, and whether the line is valid is ordinary parsing.
 10. **The trailing bind `E -> P`**, the one place a pattern follows its
     expression, against the lambda arrow. With separators, `->` ends any
-    open tail, and a lambda before it is a lint.
+    open tail, and a lambda before it is a lint. Decided: keep it, since
+    it makes columns of `.op args -> result` work.
 11. **`match Expr as Arms`** (`match-arms-follow-as`; decided and built
     2026-10-16; the maintainer may revisit `Dict as Name with Defs`). `as` would
     replace a match's `with`, leaving `with` one meaning, "with these
@@ -285,6 +303,40 @@ Each needs options, a recommendation and the maintainer's decision. Items
     the oracle now compares the legacy reading wherever the readings differ.
 14. **Errors for item 1.** Built: a misplaced `{` after `with`, `when` or a
     nested `when` reports the rule.
+
+**Item 7 as built (2026-10-17).**
+- **Where a `where` ends.** The token pass closes the `else` tails before a
+  `where` and stops the view there; a statement or arm holding one, and a
+  parenthesized group, are parsed from their views. The structural parsers
+  no longer attach a `where` to any expression they parse: an expression
+  may end at one, and only a body takes it (`parse_body`): a declaration's
+  or binding's right-hand side, a statement's or an arm's side, or a
+  group's contents.
+- **One `where` per body.** Its group ends at its `}` or its layout
+  block's end, which ends the body; the legacy grammar ended a group at the
+  next `where` anywhere and chained the next. The maintainer dropped chains
+  (2026-10-17): they no longer compose as an expression, and one group says
+  what they said.
+- **Errors** name where the `where` stands: in guards, a `then` branch, a
+  subject, an arm's head, a list, dictionary or tuple item, or after a
+  bind's pattern; at a statement's or arm's anchor; as a second `where`; or
+  before anything else after its bindings.
+- **Cost.** `chain_where`, one line of `where`s, now nests each group in
+  the binding before it, and parses in about five times the CPU time at
+  1,600 bindings: each nested binding's structural parse rescans the rest
+  of the line. The suffix slice's frames remove those scans.
+- **Found while building it.** A `where` in a layout `do` statement failed
+  to parse, and a parenthesized `where`, `let` or `with` was rejected as an
+  argument, in guards and in statements: view-level dispatch read only
+  whole views. Both parse now.
+- **Legacy reading.** Unlike the earlier items, this one changes the
+  structural parsers, since they parse `where` in both readings until
+  `parser-keyword-frames-suffixes` makes it a frame; each change checks the
+  legacy switch. Two changes alter meanings rather than reject: a trailing
+  `where` scopes a whole conditional or `let`, no longer its last branch or
+  body, and `Body where x = y where y = 1` nests the second group in `x`
+  (the agent's reading: a `where` binding is a definition). The oracle
+  compares the legacy reading wherever they differ.
 
 ## Method
 

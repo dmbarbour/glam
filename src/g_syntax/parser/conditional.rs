@@ -1577,6 +1577,27 @@ mod tests {
         );
     }
 
+    /// A later arrow on an arm's line belongs to a nested match's hanging
+    /// arms; two arrows of one arm are an error.
+    #[test]
+    fn a_later_arrow_on_an_arms_line_belongs_to_a_nested_match() {
+        let SyntaxExpr::Match(outer) = parse("match v as\n  p => match b as q => 1\n  _ => 2")
+        else {
+            panic!("the nested match should parse");
+        };
+        assert_eq!(outer.arms.len(), 2);
+        assert!(matches!(
+            &outer.arms[0].outcome,
+            MatchOutcome::Result { expression: SyntaxExpr::Match(inner), .. } if inner.arms.len() == 1
+        ));
+        for source in [
+            "match v as { _ => 1 => 2 }",
+            "match v as\n  p => 1 => 2\n  _ => 3",
+        ] {
+            assert_rejected(source, "permits exactly one top-level `=>`");
+        }
+    }
+
     #[test]
     fn a_match_in_a_subject_takes_the_first_as_after_its_head() {
         for source in [

@@ -52,8 +52,8 @@ flags a step for discussion when work reaches it, not a decision.
 - [`GrammarReview_2026-10-16.md`](GrammarReview_2026-10-16.md): the
   grammar reviewed for clarity when read (Green's cognitive dimensions) and
   ease of parsing, and what belongs in the parser, a linter or a formatter.
-  Started 2026-10-16; `grammar-tail-position` has a survey. Pauses
-  `parser-keyword-frames-suffixes`.
+  Started 2026-10-16; its current items were decided by 2026-10-17, and
+  `parser-keyword-frames-suffixes` resumes on the settled grammar.
 - [`RuntimeOwnership_2026-10-17.md`](RuntimeOwnership_2026-10-17.md):
   `lifecycle-` steps, a sketch from the lifecycle review: a thread-affine
   owner that retires the runtime, handles for everything else, request

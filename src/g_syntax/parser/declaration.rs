@@ -16,7 +16,7 @@ use super::layout::LayoutView;
 use super::lexical::{Delimiter, LeadingTrivia, TokenKind};
 use super::structural::{
     braced_contents, contextual_keywords, is_layout_empty, local_name, object_alias_name,
-    parse_expression_in_context, parse_object_parents, single_reserved_keyword,
+    parse_body, parse_expression_in_context, parse_object_parents, single_reserved_keyword,
     split_braced_members, split_compound_header_body, split_top_level, trim_layout, view_between,
 };
 
@@ -236,7 +236,7 @@ fn parse_definition(
             return None;
         }
     };
-    let parsed_body = match parse_expression_in_context(body_view, context) {
+    let parsed_body = match parse_body(body_view, context) {
         Ok(expr) => expr,
         Err(errors) => {
             diagnostics.extend(errors);
@@ -421,7 +421,7 @@ fn parse_definition_target(
                 let contents = view
                     .group_contents(*group)
                     .ok_or_else(|| Diagnostic::error(line, "invalid computed path"))?;
-                let expr = parse_expression_in_context(contents, context.complete())
+                let expr = parse_body(contents, context.complete())
                     .map_err(|errors| combine_parse_errors(line, errors))?;
                 parts.push(SyntaxKeyExpr::PathIndex(Box::new(expr)));
             }

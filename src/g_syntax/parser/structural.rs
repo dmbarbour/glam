@@ -18,7 +18,7 @@ use super::expression_context::{ExpressionContext, ParsedExpression, validate_ex
 use super::input::{TokenRange, TokenView};
 use super::layout::LayoutView;
 use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
-use super::term::may_head_keyword_form;
+use super::term::{legacy_grammar, may_head_keyword_form};
 
 type ParseResult<T> = Result<T, Vec<Diagnostic>>;
 
@@ -48,7 +48,7 @@ pub(in crate::g_syntax::parser) fn parse_compound_expression_fragment(
     source: &[u8],
 ) -> ParseResult<SyntaxExpr> {
     super::input::parse_expression_fragment(source, |view| {
-        parse_expression_in_context(view, ExpressionContext::for_fragment(view))
+        parse_body(view, ExpressionContext::for_fragment(view))
     })
 }
 
@@ -58,10 +58,103 @@ pub(in crate::g_syntax::parser) fn parse_expression_in_context(
 ) -> ParseResult<SyntaxExpr> {
     let view = trim_layout(view);
     let parsed = parse_expression_extent(view, context.complete())?;
-    debug_assert_eq!(parsed.end(), view.range().end());
+    if parsed.end() < view.range().end() {
+        return Err(misplaced_where(view, parsed.end()));
+    }
     parsed
         .into_expression()
         .map_err(|message| error_at_view(view, message))
+}
+
+/// Parses a body that a `where` may end: a definition's or binding's
+/// right-hand side, a statement's expression, an arm's result, or a
+/// parenthesized expression's contents. Each `where` scopes everything
+/// before it in the body, and no expression inside it ends at one.
+pub(in crate::g_syntax::parser) fn parse_body(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+) -> ParseResult<SyntaxExpr> {
+    if legacy_grammar() {
+        return parse_expression_in_context(view, context);
+    }
+    let view = trim_layout(view);
+    // A lone `where` reads as a name, which the expression parser reports
+    // as a reserved keyword.
+    if let Some(where_index) = keyword_head(view, "where")
+        && view
+            .last_significant()
+            .is_some_and(|(last, _)| last > where_index)
+    {
+        let where_token = view
+            .token_at(where_index)
+            .expect("a body's `where` lies in its view");
+        return Err(error_at_token(
+            view,
+            where_token,
+            "where expression requires a body",
+        ));
+    }
+    let parsed = parse_expression_extent(view, context.complete())?;
+    where_suffix(view, context, parsed)?
+        .into_expression()
+        .map_err(|message| error_at_view(view, message))
+}
+
+/// Applies the `where` at the end of `parsed`, an expression that begins a
+/// body in `view`, if one is there: it scopes everything before it, and its
+/// bindings end the body.
+pub(in crate::g_syntax::parser) fn where_suffix(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+    parsed: ParsedExpression,
+) -> ParseResult<ParsedExpression> {
+    let Some(where_index) = where_at(view, parsed.end()) else {
+        return Ok(parsed);
+    };
+    let body = parsed
+        .into_expression()
+        .map_err(|message| error_at_view(view, message))?;
+    let parsed = parse_where_suffix(view, context, where_index, body)?;
+    if parsed.end() < view.range().end() {
+        if let Some(another) = where_at(view, parsed.end()).and_then(|index| view.token_at(index)) {
+            return Err(error_at_token(
+                view,
+                another,
+                "a definition, statement or arm takes one `where`: put these bindings in its group",
+            ));
+        }
+        let tail = trim_layout(view_between(view, parsed.end(), view.range().end()));
+        return Err(error_at_view(
+            tail,
+            "nothing may follow a `where`'s bindings, which end its definition, statement or arm",
+        ));
+    }
+    Ok(parsed)
+}
+
+/// The `where` an expression that ended at `end` stopped at, if any.
+pub(in crate::g_syntax::parser) fn where_at(view: TokenView<'_, '_>, end: usize) -> Option<usize> {
+    trim_layout(view_between(view, end, view.range().end()))
+        .first_significant()
+        .map(|(index, _)| index)
+        .filter(|index| is_contextual_keyword_at(view, *index, "where"))
+}
+
+/// The error for a `where` at `end` that ends an expression which is no
+/// body.
+pub(in crate::g_syntax::parser) fn misplaced_where(
+    view: TokenView<'_, '_>,
+    end: usize,
+) -> Vec<Diagnostic> {
+    let tail = trim_layout(view_between(view, end, view.range().end()));
+    match where_at(view, end).and_then(|index| view.token_at(index)) {
+        Some(where_token) => error_at_token(
+            view,
+            where_token,
+            "`where` scopes a whole definition, statement or arm; parenthesize `(… where …)` or use `let … in` for part of an expression",
+        ),
+        None => error_at_view(tail, "expression ended before its view"),
+    }
 }
 
 pub(in crate::g_syntax::parser) fn parse_expression_extent(
@@ -85,11 +178,12 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
         // whole view: its `else` branch owns any `where` or `with` in it.
         parse_expression_chain_view(view, context)?
     } else if (keyword_head(view, "match").is_some() || keyword_head(view, "try_match").is_some())
-        && contextual_keywords(view, "where").next().is_none()
+        && (!legacy_grammar() || contextual_keywords(view, "where").next().is_none())
     {
         // A match is a frame of the term parser, and an atom like any form:
         // what follows its arms reads as the expression grammar reads it.
-        // Only a `where` after them suffixes the whole view here.
+        // In the legacy grammar, a `where` after them suffixed the whole
+        // view here.
         parse_expression_chain_view(view, context)?
     } else if let Some(match_index) = keyword_head(view, "match") {
         leading_match = true;
@@ -102,7 +196,10 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
     } else if postfix_if_suffix(view).is_some() {
         // So does a postfix conditional, whose fallback owns any `where`.
         parse_expression_chain_view(view, context)?
-    } else if let Some(where_index) = contextual_keywords(view, "where").next() {
+    } else if let Some(where_index) = contextual_keywords(view, "where")
+        .next()
+        .filter(|_| legacy_grammar())
+    {
         let where_token = view
             .token_at(where_index)
             .expect("a selected where suffix remains within its expression view");
@@ -121,9 +218,12 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
         parse_expression_chain_view(view, context)?
     };
     let parsed = resume_expression_suffixes(view, context, parsed)?;
+    // An expression may always end at a `where`, which the body around it
+    // takes.
     if parsed.end() < view.range().end()
         && !context.permits_yield()
         && !stops_at_arrow(view, context, parsed.end())
+        && (legacy_grammar() || where_at(view, parsed.end()).is_none())
     {
         // What follows a match's arms before its `where` reads as the
         // expression grammar reads it.
@@ -156,13 +256,14 @@ fn stops_at_arrow(view: TokenView<'_, '_>, context: ExpressionContext, end: usiz
 
 /// Parses an open tail: an `else` branch, a postfix `if`'s fallback, or a
 /// `let` body. It runs to `form_end`, its form's end, unless `context` ends
-/// tails at a `->`. Returns the tail and where its form ends.
+/// tails at a `->` or a `where` ends it. Returns the tail and where its form
+/// ends.
 pub(in crate::g_syntax::parser) fn parse_open_tail(
     view: TokenView<'_, '_>,
     context: ExpressionContext,
     form_end: usize,
 ) -> ParseResult<(SyntaxExpr, usize)> {
-    if !context.arrow_ends_tail() {
+    if !context.arrow_ends_tail() && legacy_grammar() {
         return parse_expression_in_context(view, context).map(|tail| (tail, form_end));
     }
     let view = trim_layout(view);
@@ -199,13 +300,14 @@ fn parse_parenthesized_structural(
     }
 
     let contents = trim_layout(view.group_contents(*group)?);
-    // A match leading a tuple, as in `(match y as {…}, 1)`, ends at its
-    // comma, since its arms cannot hold an unparenthesized one. The
-    // expression grammar parses the tuple and delimits the member.
+    // The expression grammar parses a tuple and delimits its members: a
+    // tuple's items are no bodies, and a match leading one, as in
+    // `(match y as {…}, 1)`, ends at its comma, since its arms cannot hold
+    // an unparenthesized one. The legacy grammar read other tuples here.
     let leads_with_match = ["match", "try_match"]
         .into_iter()
         .any(|head| keyword_head(contents, head).is_some());
-    if leads_with_match && !top_level_symbols(contents, ",").is_empty() {
+    if (leads_with_match || !legacy_grammar()) && !top_level_symbols(contents, ",").is_empty() {
         return None;
     }
     let context = context.complete();
@@ -216,11 +318,15 @@ fn parse_parenthesized_structural(
         || postfix_if_suffix(contents).is_some()
         || has_compound_with_body(contents);
     starts_structural.then(|| {
-        parse_expression_extent(contents, context).and_then(|parsed| {
-            parsed
-                .into_expression()
-                .map_err(|message| error_at_view(contents, message))
-        })
+        if legacy_grammar() {
+            parse_expression_extent(contents, context).and_then(|parsed| {
+                parsed
+                    .into_expression()
+                    .map_err(|message| error_at_view(contents, message))
+            })
+        } else {
+            parse_body(contents, context)
+        }
     })
 }
 
@@ -407,8 +513,14 @@ fn parse_where_suffix(
     let where_token = view
         .token_at(where_index)
         .expect("a selected where suffix remains within its expression view");
-    let suffix_end =
-        contextual_keyword_after(view, where_index, "where").unwrap_or(view.range().end());
+    // The legacy grammar ended a group at the next `where`, wherever it
+    // stood. A `where` in a binding now scopes that binding, and a group
+    // ends at its `}` or its layout block's end, which ends the body.
+    let suffix_end = if legacy_grammar() {
+        contextual_keyword_after(view, where_index, "where").unwrap_or(view.range().end())
+    } else {
+        braced_group_end(view, where_index + 1).unwrap_or(view.range().end())
+    };
     let all_bindings = trim_layout(view_between(view, where_index + 1, suffix_end));
     if is_layout_empty(all_bindings) {
         return Err(error_at_token(
@@ -437,10 +549,13 @@ fn parse_where_suffix(
                 ),
             )]);
         }
+        // A line-led `where` after the block is a second `where`, which the
+        // body reports.
         if let Some(boundary) = block.boundary()
-            && all_bindings
-                .subview(boundary.tokens())
-                .is_some_and(|line| !top_level_symbols(line, "=").is_empty())
+            && all_bindings.subview(boundary.tokens()).is_some_and(|line| {
+                !top_level_symbols(line, "=").is_empty()
+                    && (legacy_grammar() || keyword_head(line, "where").is_none())
+            })
         {
             return Err(vec![Diagnostic::error(
                 boundary.line(),
@@ -487,6 +602,24 @@ fn parse_where_suffix(
     ))
 }
 
+/// The end of a brace group that begins at `start`'s first significant
+/// token, past its `}`.
+fn braced_group_end(view: TokenView<'_, '_>, start: usize) -> Option<usize> {
+    let rest = view_between(view, start, view.range().end());
+    let (_, token) = rest.first_significant()?;
+    let TokenKind::Open {
+        group,
+        delimiter: Delimiter::Brace,
+    } = token.kind()
+    else {
+        return None;
+    };
+    view.group(*group)?
+        .close_token()
+        .map(|close| close + 1)
+        .filter(|end| *end <= view.range().end())
+}
+
 fn resume_expression_suffixes(
     view: TokenView<'_, '_>,
     context: ExpressionContext,
@@ -497,10 +630,15 @@ fn resume_expression_suffixes(
         let Some((boundary_index, token)) = tail.first_significant() else {
             break;
         };
+        // A `where` ends the expression for the body around it, which the
+        // legacy grammar's view-level dispatch took to be this one.
         if token_is_name(token, "where")
             && (token.leading() != LeadingTrivia::Joint
                 || begins_layout_line(view, boundary_index, token))
         {
+            if !legacy_grammar() {
+                break;
+            }
             let body = parsed
                 .into_expression()
                 .map_err(|message| error_at_view(tail, message))?;
@@ -547,7 +685,11 @@ fn resume_expression_suffixes(
             })
             .may_yield();
         let right = parse_expression_extent(operand_view, operand_context)?;
-        if right.end() != operand_view.range().end() {
+        let operand_end = match where_at(view, right.end()) {
+            Some(_) if !legacy_grammar() && right.end() < operand_view.range().end() => right.end(),
+            _ => operand_end,
+        };
+        if right.end() != operand_view.range().end() && right.end() != operand_end {
             let unconsumed =
                 trim_layout(view_between(view, right.end(), operand_view.range().end()));
             return Err(error_at_view(
@@ -646,7 +788,7 @@ fn parse_binding(
             format!("local binding `{name}` requires a value"),
         ));
     }
-    let value = parse_expression_in_context(value_view, context)?;
+    let value = parse_body(value_view, context)?;
     let value = if parameters.is_empty() {
         value
     } else {
@@ -717,8 +859,18 @@ fn parse_object(
     context: ExpressionContext,
 ) -> Option<ParseResult<ParsedExpression>> {
     object_expression_head(view)?;
-    if contextual_keywords(view, "where").next().is_some() && !has_compound_with_body(view) {
-        return None;
+    if let Some(where_index) = contextual_keywords(view, "where").next()
+        && !has_compound_with_body(view)
+    {
+        // A bodyless object ends at its `where`, which the legacy grammar's
+        // view-level dispatch took first.
+        if legacy_grammar() {
+            return None;
+        }
+        return parse_object(
+            trim_layout(view_between(view, view.range().start(), where_index)),
+            context,
+        );
     }
     let (owned_view, end) = match structural_body_extent(view, context) {
         Ok(owned) => owned,

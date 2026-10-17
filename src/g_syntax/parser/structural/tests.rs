@@ -201,88 +201,143 @@ fn braced_binding_groups_distinguish_empty_bodies_from_empty_members() {
 }
 
 #[test]
-fn chained_where_suffixes_are_left_associative_binding_groups() {
+fn a_where_in_a_where_binding_scopes_that_binding() {
+    // A `where` binding is a definition, so a `where` after its value on its
+    // line scopes that value, as parentheses would.
     let parsed = parse_structural("result where x = y where y = 1");
-    let SyntaxExpr::Let {
-        bindings: outer_bindings,
-        body: outer_body,
-    } = parsed
-    else {
-        panic!("last `where` suffix should produce the outer binding group");
+    assert_eq!(parsed, parse_structural("result where x = (y where y = 1)"));
+    let SyntaxExpr::Let { bindings, body } = parsed else {
+        panic!("the first `where` should scope the body");
     };
-    assert_eq!(
-        outer_bindings
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>(),
-        ["y"]
-    );
-
-    let SyntaxExpr::Let {
-        bindings: inner_bindings,
-        body: inner_body,
-    } = *outer_body
-    else {
-        panic!("first `where` suffix should produce the inner binding group");
-    };
-    assert_eq!(
-        inner_bindings
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>(),
-        ["x"]
-    );
-    assert!(matches!(*inner_body, SyntaxExpr::Name(ref name) if name == "result"));
-
-    let after_structural = parse_structural("base with { member = value } where x = y where y = 1");
-    let SyntaxExpr::Let {
-        bindings: outer_bindings,
-        body: outer_body,
-    } = after_structural
-    else {
-        panic!("the later where should remain the outer structural suffix");
-    };
-    assert_eq!(outer_bindings[0].0, "y");
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].0, "x");
+    assert!(matches!(*body, SyntaxExpr::Name(ref name) if name == "result"));
     assert!(matches!(
-        outer_body.as_ref(),
+        &bindings[0].1,
         SyntaxExpr::Let { bindings, body }
-            if bindings[0].0 == "x" && matches!(body.as_ref(), SyntaxExpr::With { .. })
+            if bindings[0].0 == "y" && matches!(body.as_ref(), SyntaxExpr::Name(name) if name == "y")
     ));
 }
 
+/// A definition, statement or arm takes one `where`, whose group holds all
+/// its bindings; parentheses scope a nested one.
 #[test]
-fn parentheses_can_make_a_where_binding_right_associative() {
-    let parsed = parse_structural("result where x = (y where y = 1)");
-    let SyntaxExpr::Let { bindings, body } = parsed else {
-        panic!("outer expression should contain the `x` binding group");
-    };
-    assert_eq!(
-        bindings
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>(),
-        ["x"]
-    );
-    assert!(matches!(*body, SyntaxExpr::Name(ref name) if name == "result"));
-
-    let SyntaxExpr::Let {
-        bindings: nested_bindings,
-        body: nested_body,
-    } = &bindings[0].1
+fn a_body_takes_one_where() {
+    for source in [
+        "result\n  where x = y\n  where y = 1",
+        "result where { x = y } where { y = 1 }",
+        "base with { member = value }\n  where x = y\n  where y = 1",
+        "do\n  .r a\n    where a = 1\n    where b = 2",
+    ] {
+        let diagnostics = parse_compound_expression_fragment(source.as_bytes())
+            .expect_err("a second `where` is an error");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("takes one `where`")),
+            "`{source}` reported {diagnostics:#?}"
+        );
+    }
+    let SyntaxExpr::Let { bindings, body } = parse_structural("(result where x = y) where y = 1")
     else {
-        panic!("parenthesized `where` should remain inside the `x` definition");
+        panic!("the outer `where` should scope the parenthesized body");
     };
-    assert_eq!(
-        nested_bindings
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>(),
-        ["y"]
-    );
+    assert_eq!(bindings[0].0, "y");
     assert!(matches!(
-        nested_body.as_ref(),
-        SyntaxExpr::Name(name) if name == "y"
+        body.as_ref(),
+        SyntaxExpr::Let { bindings, body }
+            if bindings[0].0 == "x" && matches!(body.as_ref(), SyntaxExpr::Name(name) if name == "result")
     ));
+}
+
+/// A `where` scopes the whole definition, statement or arm it ends, or a
+/// parenthesized expression: it ends the open tails before it, and one that
+/// would scope only part of an expression is an error.
+#[test]
+fn where_scopes_its_definition_statement_or_arm() {
+    for (source, equivalent) in [
+        (
+            "if c then a else b where b = 1",
+            "(if c then a else b) where b = 1",
+        ),
+        ("a if c else b where b = 1", "(a if c else b) where b = 1"),
+        (
+            "let a = 1 in a + b where b = 2",
+            "(let a = 1 in a + b) where b = 2",
+        ),
+        ("\\y -> y + b where b = 1", "(\\y -> y + b) where b = 1"),
+        ("f (a where a = 1) 2", "f (let a = 1 in a) 2"),
+        (
+            "do\n  p <- f (a where a = 1)\n  if g (b where b = 1) then .r p else .r 0",
+            "do\n  p <- f (let a = 1 in a)\n  if g (let b = 1 in b) then .r p else .r 0",
+        ),
+        (
+            "source\n  |> finish\n    where finish = 1",
+            "(source\n  |> finish)\n    where finish = 1",
+        ),
+        (
+            "do\n  a <- f b\n    where b = 1\n  g a",
+            "do\n  a <- (f b\n    where b = 1)\n  g a",
+        ),
+        (
+            "match v as\n  p => a\n    where a = 1\n  _ => 2",
+            "match v as\n  p => (a\n    where a = 1)\n  _ => 2",
+        ),
+        (
+            "a with\n    A := b\n      where b = 2\n    B := 3",
+            "a with\n    A := (b\n      where b = 2)\n    B := 3",
+        ),
+    ] {
+        assert_eq!(
+            parse_structural(source),
+            parse_structural(equivalent),
+            "{source}"
+        );
+    }
+    for (source, expected) in [
+        (
+            "if c then a where a = 1 else b",
+            "cannot stand in a `then` branch",
+        ),
+        (
+            "if a where a = 1 then 1 else 2",
+            "cannot stand in a conditional's guards",
+        ),
+        (
+            "match a where a = 1 as\n  _ => 1",
+            "cannot stand in a match's subject",
+        ),
+        (
+            "match v as\n  p when a where a = 1 => 1",
+            "cannot stand in an arm's pattern or guards",
+        ),
+        (
+            "[a where a = 1, 2]",
+            "cannot stand in a list or dictionary item",
+        ),
+        ("(a where a = 1, 2)", "cannot stand in a tuple item"),
+        (
+            "do\n  a <- f b\n  g a\n  where b = 1",
+            "cannot begin a statement or arm",
+        ),
+        (
+            "do\n  .op b -> a\n    where b = 1\n  g a",
+            "cannot follow a pattern",
+        ),
+        (
+            "source\n  |> g with\n      A := 1\n    where g = 1\n  |> h",
+            "nothing may follow a `where`'s bindings",
+        ),
+    ] {
+        let diagnostics = parse_compound_expression_fragment(source.as_bytes())
+            .expect_err("the source is invalid");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "`{source}` reported {diagnostics:#?} instead of `{expected}`"
+        );
+    }
 }
 
 #[test]

@@ -253,7 +253,7 @@ fn opens_keyword_region(view: TokenView<'_, '_>, index: usize, mode: Mode) -> bo
 /// before the grammar review's rules (Syntax.md "Tail Position" and the
 /// review's decisions): only while the oracle compares the two, since the
 /// structural parsers retire before they would learn the rules.
-fn legacy_grammar() -> bool {
+pub(super) fn legacy_grammar() -> bool {
     #[cfg(test)]
     if LEGACY_GRAMMAR.with(std::cell::Cell::get) {
         return true;
@@ -1213,17 +1213,30 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         let chain = self.chain()?;
         let stop = self.peek().is_some().then_some(self.position);
         debug_assert!(
-            stop.is_none() || self.stop_at_arrow,
+            stop.is_none() || self.stop_at_arrow || self.where_at(0),
             "an expression chain ends its item"
         );
         Ok((self.infix_chain(chain)?, stop))
     }
 
     /// Whether the item ends at the piece at `offset`: a pattern operator in
-    /// cover mode, or a `->` ending an open tail.
+    /// cover mode, a `->` ending an open tail, or a `where`, which ends the
+    /// definition, statement or arm the item stands in.
     fn stops_at(&self, offset: usize) -> bool {
         self.pattern_operator_at(offset).is_some()
             || self.stop_at_arrow && self.symbol_at(offset, "->")
+            || self.where_at(offset)
+    }
+
+    /// Whether the piece at `offset` is a `where` that the body around the
+    /// expression takes; a pattern has none. The legacy grammar's view-level
+    /// dispatch found every one.
+    fn where_at(&self, offset: usize) -> bool {
+        !legacy_grammar()
+            && self.scope.mode == Mode::Expression
+            && matches!(self.peek_at(offset), Some(Piece::Token(index))
+                if matches!(token(self.scope.view, *index).kind(), TokenKind::Name("where"))
+                    && in_keyword_position(self.scope.view, *index))
     }
 
     /// A pattern position's item, in cover mode: an `as` chain, at most one
@@ -1737,6 +1750,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                 Some(TokenKind::Name(name)) => {
                     (!matches!(*name, "and" | "or") || self.named_tag_at(offset))
                         && self.pattern_operator_at(offset).is_none()
+                        && !self.where_at(offset)
                 }
                 Some(TokenKind::Number(_) | TokenKind::Text(_) | TokenKind::Embedded(_)) => true,
                 Some(TokenKind::Symbol(symbol)) => matches!(*symbol, ":" | "'" | "." | "^"),

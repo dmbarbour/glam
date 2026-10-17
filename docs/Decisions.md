@@ -626,6 +626,66 @@ maps the short names used here to file names.
   Patterns".
 - **Recorded in:** grammar review, items 12–14.
 
+### A nested match's arrows may share its arm's line
+`nested-arrows-share-an-arms-line` · 2026-10-17 · maintainer · accepted
+- **Context:** the structural parser split arms by scanning, so it allowed
+  one `=>` or `=>?` on an arm's first line. After
+  `brace-after-with-delimits-arms`, a later arrow on that line can only
+  belong to a nested match's hanging arms.
+- **Decision:** the rule is dropped. `P => match E as Q => R` nests a
+  match with one arm in the outer arm's result; a second arrow of one arm,
+  as in `P => 1 => 2`, is still an error.
+- **Consequences:** a linter may flag same-line nesting.
+- **Rule lives in:** `Syntax.md` "Match".
+- **Recorded in:** grammar review, item 5.
+
+### A `where` scopes its whole definition, statement or arm
+`where-scopes-its-definition` · 2026-10-17 · maintainer · accepted
+- **Context:** `where` attached to the nearest expression whose body had
+  closed at its indentation, so changing only its indentation could change
+  its owner. In practice it attached to whatever view-level dispatch found:
+  an `else` branch or a `let` body owned a trailing `where`, and a `then`
+  branch one before its `else`. One in a layout `do` statement failed to
+  parse, and `f (a where a = 1)` was rejected.
+- **Decision:** a `where` scopes the whole definition, statement or arm it
+  ends: a declaration's, member's or local binding's right-hand side, a
+  `do` statement's expression, a match arm's result, or a parenthesized
+  expression's contents. It ends the open tails before it. Layout decides
+  which of these a `where` line belongs to; indentation never selects a
+  smaller expression. Each takes one `where`, whose one mutually recursive
+  group holds all its bindings: chained suffixes no longer compose as an
+  expression, and one group says what they said (maintainer). A `where`
+  binding is a definition, so a `where` on its line scopes it.
+- **Errors:** a `where` in a conditional's guards or `then` branch, a
+  match's subject, an arm's head or guards, a list, dictionary or tuple
+  item, or after a bind's pattern; one that begins a statement or arm; a
+  second `where`; and anything after a `where`'s bindings.
+- **Alternatives rejected:** keeping attachment by indentation; keeping
+  chained `where` groups, the later the outer scope.
+- **Consequences:**
+  - Meanings change: `if c then a else b where …`, `a if c else b where …`
+    and `let … in e where …` scope the whole form, no longer the last branch
+    or the body; `Body where x = y where y = 1` reads as
+    `Body where x = (y where y = 1)`, no longer as a left-associative chain.
+    The second change is the agent's reading of the decision, taking a
+    `where` binding as a definition.
+  - The `chain_where` profiling workload, one line of `where`s, now nests
+    each group in the binding before it. Parsing it costs about five times
+    the CPU time it did at 1,600 bindings, since each nested binding's
+    structural parse rescans the rest of the line, until
+    `parser-keyword-frames-suffixes` makes `where` a frame. Its baselines
+    from before are not comparable.
+  - A parenthesized expression is a body wherever it stands, so
+    `f (a where a = 1)`, `f (let a = 1 in a)` and `f (a with B := 1)` parse
+    as arguments, in guards and in statements.
+  - Implements `where` as the separator keyword
+    `tail-forms-end-at-separators` lists.
+  - The legacy grammar keeps the old attachment while the oracle compares
+    it.
+- **Rule lives in:** `Syntax.md` "Layout Bodies and Expression Resumption"
+  and "Local Definitions"; `SyntaxCheatSheet.md` "Functions, Locals".
+- **Recorded in:** grammar review, item 7.
+
 ### Keyword forms and lambdas stand alone only in tail position
 `tail-position` · 2026-10-16 · maintainer · superseded
 - **Context:** the grammar review's first item. Forms whose last part

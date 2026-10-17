@@ -122,8 +122,16 @@ does not require indentation to drift progressively right. A dedent closes a
 layout body and leaves its boundary unconsumed. Only an enclosing grammar that
 expects a postfix or infix continuation may resume there.
 
-`where` attaches to the nearest expression whose body has closed at its
-indentation. One dedent may close several nested `with` or object bodies:
+A `where` scopes the whole definition, statement or arm it ends: a
+declaration's, member's or local binding's right-hand side, a `do`
+statement, or a match arm's result. A parenthesized expression is a body
+too. A `where` ends the open tails before it, so in
+`f x = if x then a else b where …` it scopes the whole conditional. One
+that would scope only part of an expression, as before an `else` or in a
+match's subject, is an error; write `(e where …)` or `let … in` there.
+Layout decides which definition, statement or arm a `where` line belongs
+to, as for any line, but indentation never selects a smaller expression.
+One dedent may close several nested `with` or object bodies:
 
 ```g
 configured = source
@@ -135,10 +143,10 @@ configured = source
     derive = transform
 ```
 
-Changing only the indentation of `where` can therefore change its owner. A
-`where` below an inner member anchor but still above an outer member anchor
-belongs to that outer member's expression. Dedenting below the outer anchor
-attaches it to the surrounding definition.
+Here the `where` scopes the whole definition. Indented past `B`'s column,
+it would continue `B`'s definition and scope that instead; at the members'
+anchor it would begin no member, which is an error. Nothing may follow a
+`where`'s bindings.
 
 A leading infix operator uses the same yielded boundary. The first leading
 operator establishes a resumption anchor; later leading operators in that
@@ -728,25 +736,20 @@ included:
           odd n = if n == 0 then "odd" else even (n - 1)
           parity n = even n
 
-`where` is a low-precedence, left-associative postfix construct. Each suffix
-introduces a separate mutually recursive binding group:
+A `where` scopes the whole definition, statement or arm it ends (see
+*Layout Bodies and Expression Resumption*). Each takes one `where`, whose
+one mutually recursive group holds all its bindings, so a second `where`
+after that group is an error. A `where` binding is a definition too, so a
+`where` after its value scopes that value:
 
         Body where x = y where y = 1
         # equivalent to:
-        (Body where x = y) where y = 1
-        # and therefore:
-        let y = 1 in let x = y in Body
-
-The later textual group is the outer scope: its names are visible in earlier
-groups, but names from an earlier group are not visible in a later group.
-Chaining does not combine the groups. Use one binding block when mutual
-recursion across all names is intended:
-
-        Body where { x = y; y = x }
-
-Use parentheses to request the right-associated structure explicitly:
-
         Body where x = (y where y = 1)
+
+        Body
+          where x = y
+          where y = 1     # ERROR: a second `where` for Body
+        Body where { x = y; y = 1 }
 
 Naked semicolons do not delimit `let` or `where` bindings. They are reserved
 for an enclosing braced construct such as `do { ... }`; use a braced binding
@@ -1656,7 +1659,13 @@ an ordinary layout-arm head:
         match Value as { {value:x} => x; _ => {}; }
 
 A match is a tail form (see *Tail Position*): an operator or an enclosing
-form's keyword may follow its arms, but an argument may not.
+form's keyword may follow its arms, but an argument may not. A match in an
+arm's result may hang its arms on that arm's line, so a later `=>` there is
+the nested match's, while a second `=>` of one arm is an error:
+
+        match Expr as
+            P1 => match R1 as Q => R2   # one nested arm
+            _ => R3
 
 We also support branching guard clauses. We use `when` to separate the pattern from the a branching clause. base case, we have only one branch. But we'll need another `when` for hierarchical branching.
 
@@ -1812,9 +1821,8 @@ Predicate patterns are a specialized case of view patterns. The predicate is pas
         match Value as
             Prefix "foo-" text => text
 
-        # as a view pattern
+        # as a view pattern, given p2v p x = do { p x; .r x }
         (p2v Pred -> Pattern)
-            where p2v p x = do { p x; .r x }
 
 Consistent with view patterns, we forward the argument to the inner pattern
 only on pass, i.e. the predicate runs first. The `=>` boundary makes the
