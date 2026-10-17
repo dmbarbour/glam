@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::ops::{Deref, DerefMut};
 
+use super::super::analysis::GroupDependencies;
 use super::super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +19,9 @@ pub(in crate::g_syntax) struct LocalName {
 pub(in crate::g_syntax) struct ResolverContext {
     locals: Vec<LocalName>,
     next_binding_id: u64,
+    /// The dependency edges of `let` groups nested in a group already
+    /// resolved, kept for when each is reached.
+    group_dependencies: GroupDependencies,
 }
 
 impl ResolverContext {
@@ -28,6 +32,7 @@ impl ResolverContext {
         Self {
             locals: self.locals[..boundary.min(self.locals.len())].to_vec(),
             next_binding_id: self.next_binding_id,
+            group_dependencies: GroupDependencies::default(),
         }
     }
 
@@ -35,6 +40,15 @@ impl ResolverContext {
     /// of its own, so that identities stay unique.
     pub(in crate::g_syntax) fn resume_after(&mut self, prefix: &Self) {
         self.next_binding_id = self.next_binding_id.max(prefix.next_binding_id);
+    }
+
+    /// For each binding of `bindings`, a `let` group, the positions of the
+    /// group's bindings its value names.
+    pub(in crate::g_syntax) fn group_dependencies(
+        &mut self,
+        bindings: &[(String, SyntaxExpr)],
+    ) -> Vec<Vec<usize>> {
+        self.group_dependencies.of(bindings)
     }
 
     pub(in crate::g_syntax) fn fresh_binding(&mut self) -> BindingId {

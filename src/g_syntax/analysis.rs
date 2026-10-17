@@ -1,203 +1,52 @@
+//! Unused-local warnings, and the dependency edges of `let` groups.
+//!
+//! One walk with a scope stack serves every analysis here
+//! (`parser-scope-analysis`). A name resolves to its innermost binder as the
+//! walk meets it, through an index of the binders in scope by name, so the
+//! cost is linear in the source however deeply binders nest. A binder's
+//! unused locals are known when its scope ends; a binder that warns before
+//! the warnings inside its scope reserves its place in the output, so
+//! warnings keep the order of a walk per binder.
+//!
+//! Scopes follow the source, not resolution: a localized body does not hide
+//! the locals around it here, so a name it reads as `self.name` still counts
+//! as a use of an outer local of that name.
+
+use std::collections::HashMap;
+
 use super::*;
 
+/// Warns for each local bound in `expr` that its scope does not use.
 pub(super) fn warn_unused_locals(
     expr: &SyntaxExpr,
     line: usize,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    analyze_expr_locals(expr, line, diagnostics);
-}
-
-fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Diagnostic>) {
-    match expr {
-        SyntaxExpr::Unit
-        | SyntaxExpr::Embedded(_)
-        | SyntaxExpr::Number(_)
-        | SyntaxExpr::Text(_)
-        | SyntaxExpr::Atom(_)
-        | SyntaxExpr::Effect(_)
-        | SyntaxExpr::AbstractGlobalPath { .. } => {}
-        SyntaxExpr::Name(_) | SyntaxExpr::PriorName(_) => {}
-        SyntaxExpr::Escape(_, expr) => analyze_expr_locals(expr, line, diagnostics),
-        SyntaxExpr::Access(base, parts) => {
-            analyze_expr_locals(base, line, diagnostics);
-            for part in parts {
-                analyze_key_expr_locals(part, line, diagnostics);
-            }
-        }
-        SyntaxExpr::Object(object) => {
-            if let Some(name) = &object.name {
-                analyze_expr_locals(name, line, diagnostics);
-            }
-            for dep in &object.deps {
-                analyze_expr_locals(dep, line, diagnostics);
-            }
-            if let Some(alias) = &object.alias {
-                warn_unused_with_alias(alias, &object.body, diagnostics);
-            }
-            analyze_object_body_locals(&object.body, diagnostics);
-        }
-        SyntaxExpr::With { base, alias, body } => {
-            analyze_expr_locals(base, line, diagnostics);
-            if let Some(alias) = alias {
-                warn_unused_with_alias(alias, body, diagnostics);
-            }
-            analyze_object_body_locals(body, diagnostics);
-        }
-        SyntaxExpr::Using { namespace, body } => {
-            analyze_expr_locals(namespace, line, diagnostics);
-            analyze_expr_locals(body, line, diagnostics);
-        }
-        SyntaxExpr::PathDict(path, value) => {
-            for key in path {
-                analyze_key_expr_locals(key, line, diagnostics);
-            }
-            analyze_expr_locals(value, line, diagnostics);
-        }
-        SyntaxExpr::TaggedConstructor(path) => {
-            for key in path {
-                analyze_key_expr_locals(key, line, diagnostics);
-            }
-        }
-        SyntaxExpr::DictUnion(items) | SyntaxExpr::List(items) | SyntaxExpr::Tuple(items) => {
-            for item in items {
-                analyze_expr_locals(item, line, diagnostics);
-            }
-        }
-        SyntaxExpr::Lambda(params, body) => {
-            let params = params
-                .iter()
-                .map(|param| local_name_metadata(param))
-                .collect::<Vec<_>>();
-            let mut used = vec![false; params.len()];
-            mark_used_locals(body, &params, &mut used);
-            for (param, used) in params.iter().zip(used) {
-                if !used && param.canonical.is_some() && !param.suppress_unused_warning {
-                    diagnostics.push(Diagnostic::warn(
-                        line,
-                        format!("unused local `{}`", param.raw),
-                    ));
-                }
-            }
-            analyze_expr_locals(body, line, diagnostics);
-        }
-        SyntaxExpr::Do(do_expr) => {
-            analyze_do_expr_locals(do_expr, diagnostics);
-        }
-        SyntaxExpr::If(if_expr) => {
-            analyze_guard_branch_locals(&if_expr.guards, &if_expr.then_result, line, diagnostics);
-            analyze_expr_locals(&if_expr.else_result, line, diagnostics);
-        }
-        SyntaxExpr::Match(match_expr) => {
-            analyze_expr_locals(&match_expr.subject, line, diagnostics);
-            for arm in &match_expr.arms {
-                analyze_pattern_guard_outcome_branch_locals(
-                    &arm.pattern,
-                    &arm.guards,
-                    &arm.outcome,
-                    arm.line,
-                    diagnostics,
-                );
-            }
-        }
-        SyntaxExpr::MatchWhen(match_when) => {
-            for arm in &match_when.arms {
-                analyze_when_branch_locals(arm, diagnostics);
-            }
-        }
-        SyntaxExpr::Let { bindings, body } => {
-            let params = binding_group_locals(bindings);
-            let mut used = vec![false; params.len()];
-            mark_used_locals(body, &params, &mut used);
-            warn_unused_binding_group(bindings, &params, used, line, diagnostics);
-            for (_, value) in bindings {
-                analyze_expr_locals(value, line, diagnostics);
-            }
-            analyze_expr_locals(body, line, diagnostics);
-        }
-        SyntaxExpr::OperatorSection { left, right, .. } => {
-            if let Some(left) = left {
-                analyze_expr_locals(left, line, diagnostics);
-            }
-            if let Some(right) = right {
-                analyze_expr_locals(right, line, diagnostics);
-            }
-        }
-        SyntaxExpr::ComparisonChain { first, rest } => {
-            analyze_expr_locals(first, line, diagnostics);
-            for (_, expr) in rest {
-                analyze_expr_locals(expr, line, diagnostics);
-            }
-        }
-        SyntaxExpr::OperatorApply { left, right, .. }
-        | SyntaxExpr::Apply(left, right)
-        | SyntaxExpr::Multiply(left, right)
-        | SyntaxExpr::Divide(left, right)
-        | SyntaxExpr::Add(left, right)
-        | SyntaxExpr::Subtract(left, right)
-        | SyntaxExpr::Append(left, right) => {
-            analyze_expr_locals(left, line, diagnostics);
-            analyze_expr_locals(right, line, diagnostics);
-        }
-    }
-}
-
-fn binding_group_locals(bindings: &[(String, SyntaxExpr)]) -> Vec<LocalName> {
-    bindings
-        .iter()
-        .map(|(name, _)| local_name_metadata(name))
-        .collect()
-}
-
-/// Warns for each binding of a `let` group that is not `used`, by what the
-/// group scopes or by a binding that is. The group is mutually recursive:
-/// a used binding uses the siblings its value names.
-fn warn_unused_binding_group(
-    bindings: &[(String, SyntaxExpr)],
-    params: &[LocalName],
-    mut used: Vec<bool>,
-    line: usize,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    let dependencies = binding_group_dependencies(bindings);
-    let mut reached = (0..params.len())
-        .filter(|&index| used[index])
-        .collect::<Vec<_>>();
-    while let Some(index) = reached.pop() {
-        for &dependency in &dependencies[index] {
-            if !used[dependency] {
-                used[dependency] = true;
-                reached.push(dependency);
-            }
-        }
-    }
-    for (param, used) in params.iter().zip(used) {
-        if !used && param.canonical.is_some() && !param.suppress_unused_warning {
-            diagnostics.push(Diagnostic::warn(
-                line,
-                format!("unused local `{}`", param.raw),
-            ));
-        }
-    }
+    let mut walk = Walk::reporting();
+    walk.expr(expr, line);
+    walk.finish(diagnostics);
 }
 
 /// Warns for each binding of a body's `let` groups that the members after
-/// its group do not use.
+/// its group do not use. The members report their own locals as they parse.
 pub(super) fn warn_unused_body_lets(
     body: &[ObjectBodyDefinition],
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    for (position, item) in body.iter().enumerate() {
-        let ObjectBodyDefinitionKind::Let(bindings) = &item.kind else {
-            continue;
-        };
-        let params = binding_group_locals(bindings);
-        let mut used = vec![false; params.len()];
-        for later in &body[position + 1..] {
-            mark_used_body_item_locals(later, &params, &mut used);
-        }
-        warn_unused_binding_group(bindings, &params, used, item.line, diagnostics);
-    }
+    let mut walk = Walk::quiet();
+    walk.body(None, body, Report::Lets);
+    walk.finish(diagnostics);
+}
+
+/// Warns, on its member's line, for an alias its body does not use.
+pub(super) fn warn_unused_with_alias(
+    alias: &Alias,
+    body: &[ObjectBodyDefinition],
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut walk = Walk::quiet();
+    walk.body(Some(alias), body, Report::Alias);
+    walk.finish(diagnostics);
 }
 
 /// Warns for each binding of a file's `let` groups that neither the
@@ -207,325 +56,86 @@ pub(super) fn warn_unused_file_lets(
     declarations: &[Declaration],
     macro_uses: &[String],
 ) -> Vec<Diagnostic> {
-    let mut diagnostics = Vec::new();
-    for (position, declaration) in declarations.iter().enumerate() {
-        let DeclarationKind::Let(bindings) = &declaration.kind else {
-            continue;
-        };
-        let params = binding_group_locals(bindings);
-        let mut used = bindings
-            .iter()
-            .map(|(name, _)| macro_uses.contains(name))
-            .collect::<Vec<_>>();
-        for later in &declarations[position + 1..] {
-            mark_used_declaration_locals(&later.kind, &params, &mut used);
+    let mut walk = Walk::quiet();
+    let start = walk.groups.len();
+    for declaration in declarations {
+        let line = declaration.line;
+        match &declaration.kind {
+            DeclarationKind::Let(bindings) => {
+                let slot = walk.reserve();
+                let first = walk.open_group(bindings, line, Some(slot));
+                for (offset, (name, _)) in bindings.iter().enumerate() {
+                    walk.locals[first + offset].used = macro_uses.contains(name);
+                }
+                walk.group_values(bindings, line);
+            }
+            DeclarationKind::Definition(definition) => {
+                walk.keys(&definition.target, line);
+                if let Some(expr) = &definition.expr {
+                    walk.expr(expr, line);
+                }
+            }
+            DeclarationKind::Object(object) => {
+                for parent in &object.deps {
+                    walk.expr(parent, line);
+                }
+                walk.body(object.alias.as_ref(), &object.body, Report::None);
+            }
+            DeclarationKind::Extend(extend) => {
+                walk.body(extend.alias.as_ref(), &extend.body, Report::None);
+            }
+            DeclarationKind::Language(_)
+            | DeclarationKind::Import(_)
+            | DeclarationKind::Declare(_)
+            | DeclarationKind::Assume(_)
+            | DeclarationKind::Unique(_)
+            | DeclarationKind::Unknown => {}
         }
-        warn_unused_binding_group(bindings, &params, used, declaration.line, &mut diagnostics);
     }
+    walk.close_groups(start);
+    let mut diagnostics = Vec::new();
+    walk.finish(&mut diagnostics);
     diagnostics
 }
 
-fn mark_used_declaration_locals(kind: &DeclarationKind, locals: &[LocalName], used: &mut [bool]) {
-    match kind {
-        DeclarationKind::Definition(definition) => {
-            for key in &definition.target {
-                mark_used_key_expr(key, locals, used);
-            }
-            if let Some(expr) = &definition.expr {
-                mark_used_locals(expr, locals, used);
-            }
+/// The dependency edges of `let` groups: for each binding of a group, the
+/// positions of the group's bindings its value names. A group is mutually
+/// recursive, so these order its strongly connected components.
+///
+/// One walk computes the edges of a group and of every group nested in its
+/// values, and keeps the nested groups' edges until they are asked for, so
+/// nested groups cost one walk in all. Groups are known by their bindings'
+/// address in the source being resolved, which outlives the walk's users and
+/// is never rebuilt while they run.
+#[derive(Debug, Default)]
+pub(in crate::g_syntax) struct GroupDependencies {
+    known: HashMap<GroupKey, Vec<Vec<usize>>>,
+}
+
+impl GroupDependencies {
+    pub(in crate::g_syntax) fn of(&mut self, bindings: &[(String, SyntaxExpr)]) -> Vec<Vec<usize>> {
+        let key = group_key(bindings);
+        if let Some(edges) = self.known.remove(&key) {
+            return edges;
         }
-        DeclarationKind::Object(object) => {
-            for parent in &object.deps {
-                mark_used_locals(parent, locals, used);
-            }
-            for item in &object.body {
-                mark_used_body_item_locals(item, locals, used);
-            }
-        }
-        DeclarationKind::Extend(extend) => {
-            for item in &extend.body {
-                mark_used_body_item_locals(item, locals, used);
-            }
-        }
-        DeclarationKind::Let(bindings) => {
-            for (_, value) in bindings {
-                mark_used_locals(value, locals, used);
-            }
-        }
-        DeclarationKind::Language(_)
-        | DeclarationKind::Import(_)
-        | DeclarationKind::Declare(_)
-        | DeclarationKind::Assume(_)
-        | DeclarationKind::Unique(_)
-        | DeclarationKind::Unknown => {}
+        let mut walk = Walk::quiet();
+        walk.dependencies = Some(std::mem::take(&mut self.known));
+        let start = walk.groups.len();
+        walk.open_group(bindings, 0, None);
+        walk.group_values(bindings, 0);
+        walk.close_groups(start);
+        self.known = walk.dependencies.take().expect("the walk kept the edges");
+        self.known
+            .remove(&key)
+            .expect("the walk kept the group's edges")
     }
 }
 
-/// Warns, on its member's line, for an alias its body does not use.
-pub(super) fn warn_unused_with_alias(
-    alias: &Alias,
-    body: &[ObjectBodyDefinition],
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    if alias.name == "self" {
-        return;
-    }
-    let line = alias.line;
-    let alias = local_name_metadata(&alias.name);
-    if alias.canonical.is_none() || alias.suppress_unused_warning {
-        return;
-    }
+/// A group's bindings by address and length.
+type GroupKey = (usize, usize);
 
-    let mut used = vec![false];
-    for item in body {
-        mark_used_body_item_locals(item, std::slice::from_ref(&alias), &mut used);
-        mark_used_body_item_prior_alias(item, alias.canonical.as_deref(), &mut used[0]);
-    }
-    if !used[0] {
-        diagnostics.push(Diagnostic::warn(
-            line,
-            format!("unused local `{}`", alias.raw),
-        ));
-    }
-}
-
-fn analyze_object_body_locals(body: &[ObjectBodyDefinition], diagnostics: &mut Vec<Diagnostic>) {
-    warn_unused_body_lets(body, diagnostics);
-    for item in body {
-        if let Some(definition) = item.definition()
-            && let Some(expr) = &definition.expr
-        {
-            analyze_expr_locals(expr, item.line, diagnostics);
-        }
-        if let ObjectBodyDefinitionKind::Let(bindings) = &item.kind {
-            for (_, value) in bindings {
-                analyze_expr_locals(value, item.line, diagnostics);
-            }
-        }
-        if let Some(object) = item.object() {
-            for parent in &object.deps {
-                analyze_expr_locals(parent, item.line, diagnostics);
-            }
-            if let Some(alias) = &object.alias {
-                warn_unused_with_alias(alias, &object.body, diagnostics);
-            }
-            analyze_object_body_locals(&object.body, diagnostics);
-        }
-        if let Some(extend) = item.extend() {
-            if let Some(alias) = &extend.alias {
-                warn_unused_with_alias(alias, &extend.body, diagnostics);
-            }
-            analyze_object_body_locals(&extend.body, diagnostics);
-        }
-    }
-}
-
-fn analyze_key_expr_locals(key: &SyntaxKeyExpr, line: usize, diagnostics: &mut Vec<Diagnostic>) {
-    match key {
-        SyntaxKeyExpr::Atom(_) => {}
-        SyntaxKeyExpr::Index(expr) | SyntaxKeyExpr::PathIndex(expr) => {
-            analyze_expr_locals(expr, line, diagnostics)
-        }
-    }
-}
-
-fn mark_used_prior_alias(expr: &SyntaxExpr, alias: Option<&str>, used: &mut bool) {
-    match expr {
-        SyntaxExpr::PriorName(name) if Some(name.as_str()) == alias => *used = true,
-        SyntaxExpr::Unit
-        | SyntaxExpr::Embedded(_)
-        | SyntaxExpr::Number(_)
-        | SyntaxExpr::Text(_)
-        | SyntaxExpr::Atom(_)
-        | SyntaxExpr::Effect(_)
-        | SyntaxExpr::AbstractGlobalPath { .. }
-        | SyntaxExpr::Name(_)
-        | SyntaxExpr::PriorName(_) => {}
-        SyntaxExpr::Escape(_, expr) => mark_used_prior_alias(expr, alias, used),
-        SyntaxExpr::Access(base, parts) => {
-            mark_used_prior_alias(base, alias, used);
-            for part in parts {
-                mark_used_prior_alias_in_key(part, alias, used);
-            }
-        }
-        SyntaxExpr::Object(object) => {
-            if let Some(name) = &object.name {
-                mark_used_prior_alias(name, alias, used);
-            }
-            for dep in &object.deps {
-                mark_used_prior_alias(dep, alias, used);
-            }
-            for item in &object.body {
-                mark_used_body_item_prior_alias(item, alias, used);
-            }
-        }
-        SyntaxExpr::With { base, body, .. } => {
-            mark_used_prior_alias(base, alias, used);
-            for item in body {
-                mark_used_body_item_prior_alias(item, alias, used);
-            }
-        }
-        SyntaxExpr::Using { namespace, body } => {
-            mark_used_prior_alias(namespace, alias, used);
-            mark_used_prior_alias(body, alias, used);
-        }
-        SyntaxExpr::PathDict(path, value) => {
-            for key in path {
-                mark_used_prior_alias_in_key(key, alias, used);
-            }
-            mark_used_prior_alias(value, alias, used);
-        }
-        SyntaxExpr::TaggedConstructor(path) => {
-            for key in path {
-                mark_used_prior_alias_in_key(key, alias, used);
-            }
-        }
-        SyntaxExpr::DictUnion(items) | SyntaxExpr::List(items) | SyntaxExpr::Tuple(items) => {
-            for item in items {
-                mark_used_prior_alias(item, alias, used);
-            }
-        }
-        SyntaxExpr::Lambda(_, body) => mark_used_prior_alias(body, alias, used),
-        SyntaxExpr::Do(do_expr) => {
-            for step in &do_expr.steps {
-                if let Some(expr) = do_step_expr(step) {
-                    mark_used_prior_alias(expr, alias, used);
-                }
-            }
-            mark_used_prior_alias(&do_expr.result, alias, used);
-        }
-        SyntaxExpr::If(if_expr) => {
-            for guard in &if_expr.guards {
-                guard.visit_scope_events(&mut |event| {
-                    if let SyntaxPatternScopeEvent::Expression(expr) = event {
-                        mark_used_prior_alias(expr, alias, used);
-                    }
-                });
-            }
-            mark_used_prior_alias(&if_expr.then_result, alias, used);
-            mark_used_prior_alias(&if_expr.else_result, alias, used);
-        }
-        SyntaxExpr::Match(match_expr) => {
-            mark_used_prior_alias(&match_expr.subject, alias, used);
-            for arm in &match_expr.arms {
-                arm.pattern.visit_scope_events(&mut |event| {
-                    if let SyntaxPatternScopeEvent::Expression(expr) = event {
-                        mark_used_prior_alias(expr, alias, used);
-                    }
-                });
-                for guard in &arm.guards {
-                    guard.visit_scope_events(&mut |event| {
-                        if let SyntaxPatternScopeEvent::Expression(expr) = event {
-                            mark_used_prior_alias(expr, alias, used);
-                        }
-                    });
-                }
-                mark_used_prior_alias_in_outcome(&arm.outcome, alias, used);
-            }
-        }
-        SyntaxExpr::MatchWhen(match_when) => {
-            for arm in &match_when.arms {
-                for guard in &arm.guards {
-                    guard.visit_scope_events(&mut |event| {
-                        if let SyntaxPatternScopeEvent::Expression(expr) = event {
-                            mark_used_prior_alias(expr, alias, used);
-                        }
-                    });
-                }
-                mark_used_prior_alias_in_outcome(&arm.outcome, alias, used);
-            }
-        }
-        SyntaxExpr::Let { bindings, body } => {
-            for (_, value) in bindings {
-                mark_used_prior_alias(value, alias, used);
-            }
-            mark_used_prior_alias(body, alias, used);
-        }
-        SyntaxExpr::OperatorSection { left, right, .. } => {
-            if let Some(left) = left {
-                mark_used_prior_alias(left, alias, used);
-            }
-            if let Some(right) = right {
-                mark_used_prior_alias(right, alias, used);
-            }
-        }
-        SyntaxExpr::ComparisonChain { first, rest } => {
-            mark_used_prior_alias(first, alias, used);
-            for (_, expr) in rest {
-                mark_used_prior_alias(expr, alias, used);
-            }
-        }
-        SyntaxExpr::OperatorApply { left, right, .. }
-        | SyntaxExpr::Apply(left, right)
-        | SyntaxExpr::Multiply(left, right)
-        | SyntaxExpr::Divide(left, right)
-        | SyntaxExpr::Add(left, right)
-        | SyntaxExpr::Subtract(left, right)
-        | SyntaxExpr::Append(left, right) => {
-            mark_used_prior_alias(left, alias, used);
-            mark_used_prior_alias(right, alias, used);
-        }
-    }
-}
-
-fn mark_used_body_item_prior_alias(
-    item: &ObjectBodyDefinition,
-    alias: Option<&str>,
-    used: &mut bool,
-) {
-    if let Some(definition) = item.definition()
-        && let Some(expr) = &definition.expr
-    {
-        mark_used_prior_alias(expr, alias, used);
-    }
-    if let ObjectBodyDefinitionKind::Let(bindings) = &item.kind {
-        for (_, value) in bindings {
-            mark_used_prior_alias(value, alias, used);
-        }
-    }
-    if let Some(object) = item.object() {
-        for parent in &object.deps {
-            mark_used_prior_alias(parent, alias, used);
-        }
-        for item in &object.body {
-            mark_used_body_item_prior_alias(item, alias, used);
-        }
-    }
-    if let Some(extend) = item.extend() {
-        for item in &extend.body {
-            mark_used_body_item_prior_alias(item, alias, used);
-        }
-    }
-}
-
-fn mark_used_prior_alias_in_key(key: &SyntaxKeyExpr, alias: Option<&str>, used: &mut bool) {
-    match key {
-        SyntaxKeyExpr::Atom(_) => {}
-        SyntaxKeyExpr::Index(expr) | SyntaxKeyExpr::PathIndex(expr) => {
-            mark_used_prior_alias(expr, alias, used)
-        }
-    }
-}
-
-/// For each binding of one `let` or `where` group, the positions of the
-/// group's bindings its value names. The group is mutually recursive, so
-/// these are its dependency edges.
-pub(in crate::g_syntax) fn binding_group_dependencies(
-    bindings: &[(String, SyntaxExpr)],
-) -> Vec<Vec<usize>> {
-    let names = bindings
-        .iter()
-        .map(|(name, _)| local_name_metadata(name))
-        .collect::<Vec<_>>();
-    bindings
-        .iter()
-        .map(|(_, value)| {
-            let mut used = vec![false; names.len()];
-            mark_used_locals(value, &names, &mut used);
-            (0..names.len()).filter(|&index| used[index]).collect()
-        })
-        .collect()
+fn group_key(bindings: &[(String, SyntaxExpr)]) -> GroupKey {
+    (bindings.as_ptr() as usize, bindings.len())
 }
 
 /// The canonical name a source binder binds, as `local_name_metadata`
@@ -538,482 +148,526 @@ fn binder_canonical(raw: &str) -> Option<&str> {
     }
 }
 
-/// The outer locals one marking walk tracks, as a nested scope sees them.
-/// Only the outer locals' uses are read, so a nested binder matters only
-/// where it rebinds an outer local's name, hiding that local in its scope.
-/// Nothing is copied until a nested binder shadows an outer local, so a
-/// walk costs time linear in the expression it visits, however deeply its
-/// binders nest.
-struct NestedLocals<'outer> {
-    outer: &'outer [LocalName],
-    /// `outer` with each shadowed local's name removed, once one is.
-    hidden: Option<Vec<LocalName>>,
+/// A local in scope.
+struct Local<'a> {
+    raw: &'a str,
+    canonical: Option<&'a str>,
+    /// Where its warning goes.
+    line: usize,
+    used: bool,
+    /// An object alias, which `_alias` uses too.
+    alias: bool,
+    /// Its `let` group and position there. A use from one of the group's
+    /// values is a dependency edge, not a use.
+    member: Option<(usize, usize)>,
 }
 
-impl<'outer> NestedLocals<'outer> {
-    fn new(outer: &'outer [LocalName]) -> Self {
+impl Local<'_> {
+    /// Whether it warns as unused: a `_` prefix suppresses the warning, and
+    /// `_` binds nothing.
+    fn warns(&self, used: bool) -> bool {
+        !used && !self.raw.starts_with('_')
+    }
+
+    fn warning(&self) -> Diagnostic {
+        Diagnostic::warn(self.line, format!("unused local `{}`", self.raw))
+    }
+}
+
+/// An open `let` group: a `let` expression's, a body's or a file's.
+struct Group {
+    /// Where its members start among the locals.
+    first: usize,
+    /// The binding whose value the walk is in.
+    current: Option<usize>,
+    /// For each binding, the members its value uses.
+    edges: Vec<Vec<usize>>,
+    key: GroupKey,
+    /// Where its warnings go, if it reports.
+    slot: Option<usize>,
+}
+
+/// The output: warnings, and places reserved for warnings a scope's end
+/// gives.
+enum Out {
+    Warning(Diagnostic),
+    Reserved(Vec<Diagnostic>),
+}
+
+/// Which binders of a body report, in a walk that is otherwise quiet.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Report {
+    None,
+    Alias,
+    Lets,
+}
+
+struct Walk<'a> {
+    locals: Vec<Local<'a>>,
+    /// The locals in scope by canonical name, innermost last.
+    by_name: HashMap<&'a str, Vec<usize>>,
+    groups: Vec<Group>,
+    out: Vec<Out>,
+    /// Whether binders report their unused locals. A quiet walk reports only
+    /// the binders it is asked about.
+    reporting: bool,
+    /// Each closed group's edges, when kept.
+    dependencies: Option<HashMap<GroupKey, Vec<Vec<usize>>>>,
+}
+
+impl<'a> Walk<'a> {
+    fn reporting() -> Self {
         Self {
-            outer,
-            hidden: None,
+            locals: Vec::new(),
+            by_name: HashMap::new(),
+            groups: Vec::new(),
+            out: Vec::new(),
+            reporting: true,
+            dependencies: None,
         }
     }
 
-    fn bind(&mut self, raw: &str) {
-        let Some(canonical) = binder_canonical(raw) else {
+    fn quiet() -> Self {
+        Self {
+            reporting: false,
+            ..Self::reporting()
+        }
+    }
+
+    fn finish(self, diagnostics: &mut Vec<Diagnostic>) {
+        for out in self.out {
+            match out {
+                Out::Warning(warning) => diagnostics.push(warning),
+                Out::Reserved(warnings) => diagnostics.extend(warnings),
+            }
+        }
+    }
+
+    /// Reserves a place for warnings a scope's end gives.
+    fn reserve(&mut self) -> usize {
+        self.out.push(Out::Reserved(Vec::new()));
+        self.out.len() - 1
+    }
+
+    fn fill(&mut self, slot: usize, warnings: impl IntoIterator<Item = Diagnostic>) {
+        let Out::Reserved(reserved) = &mut self.out[slot] else {
+            unreachable!("a reserved place holds warnings");
+        };
+        reserved.extend(warnings);
+    }
+
+    fn bind(&mut self, raw: &'a str, line: usize) -> usize {
+        let index = self.locals.len();
+        let canonical = binder_canonical(raw);
+        self.locals.push(Local {
+            raw,
+            canonical,
+            line,
+            used: false,
+            alias: false,
+            member: None,
+        });
+        if let Some(canonical) = canonical {
+            self.by_name.entry(canonical).or_default().push(index);
+        }
+        index
+    }
+
+    /// Ends the scope of the locals from `start`.
+    fn unbind(&mut self, start: usize) -> Vec<Local<'a>> {
+        let locals = self.locals.split_off(start);
+        for local in locals.iter().rev() {
+            if let Some(canonical) = local.canonical {
+                let binders = self
+                    .by_name
+                    .get_mut(canonical)
+                    .expect("a bound name is indexed");
+                binders.pop();
+                if binders.is_empty() {
+                    self.by_name.remove(canonical);
+                }
+            }
+        }
+        locals
+    }
+
+    /// Ends the scope of the locals from `start`, warning for the unused at
+    /// `slot`, or in place.
+    fn close(&mut self, start: usize, slot: Option<usize>) {
+        let locals = self.unbind(start);
+        if !self.reporting {
+            return;
+        }
+        let warnings = locals
+            .iter()
+            .filter(|local| local.warns(local.used))
+            .map(Local::warning);
+        match slot {
+            Some(slot) => self.fill(slot, warnings),
+            None => self.out.extend(warnings.map(Out::Warning)),
+        }
+    }
+
+    fn use_name(&mut self, name: &str) {
+        let Some(&index) = self.by_name.get(name).and_then(|binders| binders.last()) else {
             return;
         };
-        let shadows = |local: &LocalName| local.canonical.as_deref() == Some(canonical);
-        if !self.get().iter().any(shadows) {
-            return;
-        }
-        let outer = self.outer;
-        let hidden = self.hidden.get_or_insert_with(|| outer.to_vec());
-        for local in hidden.iter_mut().filter(|local| shadows(local)) {
-            local.canonical = None;
+        if let Some((group, member)) = self.locals[index].member
+            && let Some(current) = self.groups[group].current
+        {
+            self.groups[group].edges[current].push(member);
+        } else {
+            self.locals[index].used = true;
         }
     }
 
-    fn get(&self) -> &[LocalName] {
-        self.hidden.as_deref().unwrap_or(self.outer)
+    /// `_name` uses an alias of that name.
+    fn use_prior(&mut self, name: &str) {
+        if let Some(&index) = self.by_name.get(name).and_then(|binders| binders.last())
+            && self.locals[index].alias
+        {
+            self.locals[index].used = true;
+        }
     }
-}
 
-fn mark_used_locals(expr: &SyntaxExpr, locals: &[LocalName], used: &mut [bool]) {
-    match expr {
-        SyntaxExpr::Unit
-        | SyntaxExpr::Embedded(_)
-        | SyntaxExpr::Number(_)
-        | SyntaxExpr::Text(_)
-        | SyntaxExpr::Atom(_)
-        | SyntaxExpr::Effect(_)
-        | SyntaxExpr::AbstractGlobalPath { .. } => {}
-        SyntaxExpr::Name(name) => {
-            if let Some(index) = locals
-                .iter()
-                .rposition(|local| local.canonical.as_deref() == Some(name.as_str()))
+    /// Opens a group of `bindings`, warning at `line` into `slot` when it
+    /// reports. Returns where its members start.
+    fn open_group(
+        &mut self,
+        bindings: &'a [(String, SyntaxExpr)],
+        line: usize,
+        slot: Option<usize>,
+    ) -> usize {
+        let group = self.groups.len();
+        let first = self.locals.len();
+        for (member, (name, _)) in bindings.iter().enumerate() {
+            let index = self.bind(name, line);
+            self.locals[index].member = Some((group, member));
+        }
+        self.groups.push(Group {
+            first,
+            current: None,
+            edges: vec![Vec::new(); bindings.len()],
+            key: group_key(bindings),
+            slot,
+        });
+        first
+    }
+
+    /// Walks the values of the innermost group, each the group's current
+    /// binding while the walk is in it.
+    fn group_values(&mut self, bindings: &'a [(String, SyntaxExpr)], line: usize) {
+        let group = self.groups.len() - 1;
+        for (member, (_, value)) in bindings.iter().enumerate() {
+            self.groups[group].current = Some(member);
+            self.expr(value, line);
+        }
+        self.groups[group].current = None;
+    }
+
+    /// Closes the groups from `start`, innermost first. A member is used if
+    /// its scope uses it, or a used member's value does.
+    fn close_groups(&mut self, start: usize) {
+        while self.groups.len() > start {
+            let group = self.groups.pop().expect("a group is open");
+            let members = self.unbind(group.first);
+            let mut used = members.iter().map(|member| member.used).collect::<Vec<_>>();
+            let mut reached = (0..used.len())
+                .filter(|&member| used[member])
+                .collect::<Vec<_>>();
+            while let Some(member) = reached.pop() {
+                for &dependency in &group.edges[member] {
+                    if !used[dependency] {
+                        used[dependency] = true;
+                        reached.push(dependency);
+                    }
+                }
+            }
+            if let Some(slot) = group.slot {
+                let warnings = members
+                    .iter()
+                    .zip(used)
+                    .filter(|(member, used)| member.warns(*used))
+                    .map(|(member, _)| member.warning())
+                    .collect::<Vec<_>>();
+                self.fill(slot, warnings);
+            }
+            if let Some(dependencies) = &mut self.dependencies {
+                let edges = group
+                    .edges
+                    .into_iter()
+                    .map(|mut edges| {
+                        edges.sort_unstable();
+                        edges.dedup();
+                        edges
+                    })
+                    .collect();
+                dependencies.insert(group.key, edges);
+            }
+        }
+    }
+
+    fn keys(&mut self, keys: &'a [SyntaxKeyExpr], line: usize) {
+        for key in keys {
+            match key {
+                SyntaxKeyExpr::Atom(_) => {}
+                SyntaxKeyExpr::Index(expr) | SyntaxKeyExpr::PathIndex(expr) => {
+                    self.expr(expr, line)
+                }
+            }
+        }
+    }
+
+    fn expr(&mut self, expr: &'a SyntaxExpr, line: usize) {
+        match expr {
+            SyntaxExpr::Unit
+            | SyntaxExpr::Embedded(_)
+            | SyntaxExpr::Number(_)
+            | SyntaxExpr::Text(_)
+            | SyntaxExpr::Atom(_)
+            | SyntaxExpr::Effect(_)
+            | SyntaxExpr::AbstractGlobalPath { .. } => {}
+            SyntaxExpr::Name(name) => self.use_name(name),
+            SyntaxExpr::PriorName(name) => self.use_prior(name),
+            SyntaxExpr::Escape(_, expr) => self.expr(expr, line),
+            SyntaxExpr::Access(base, parts) => {
+                self.expr(base, line);
+                self.keys(parts, line);
+            }
+            SyntaxExpr::Object(object) => {
+                if let Some(name) = &object.name {
+                    self.expr(name, line);
+                }
+                for dep in &object.deps {
+                    self.expr(dep, line);
+                }
+                self.body(object.alias.as_ref(), &object.body, Report::None);
+            }
+            SyntaxExpr::With { base, alias, body } => {
+                self.expr(base, line);
+                self.body(alias.as_ref(), body, Report::None);
+            }
+            SyntaxExpr::Using { namespace, body } => {
+                self.expr(namespace, line);
+                self.expr(body, line);
+            }
+            SyntaxExpr::PathDict(path, value) => {
+                self.keys(path, line);
+                self.expr(value, line);
+            }
+            SyntaxExpr::TaggedConstructor(path) => self.keys(path, line),
+            SyntaxExpr::DictUnion(items) | SyntaxExpr::List(items) | SyntaxExpr::Tuple(items) => {
+                for item in items {
+                    self.expr(item, line);
+                }
+            }
+            SyntaxExpr::Lambda(params, body) => {
+                let slot = self.reporting.then(|| self.reserve());
+                let start = self.locals.len();
+                for param in params {
+                    self.bind(param, line);
+                }
+                self.expr(body, line);
+                self.close(start, slot);
+            }
+            SyntaxExpr::Do(do_expr) => self.do_block(do_expr),
+            SyntaxExpr::If(if_expr) => {
+                self.branch(None, &if_expr.guards, line, |walk| {
+                    walk.expr(&if_expr.then_result, line)
+                });
+                self.expr(&if_expr.else_result, line);
+            }
+            SyntaxExpr::Match(match_expr) => {
+                self.expr(&match_expr.subject, line);
+                for arm in &match_expr.arms {
+                    self.branch(Some(&arm.pattern), &arm.guards, arm.line, |walk| {
+                        walk.outcome(&arm.outcome)
+                    });
+                }
+            }
+            SyntaxExpr::MatchWhen(match_when) => {
+                for arm in &match_when.arms {
+                    self.when_arm(arm);
+                }
+            }
+            SyntaxExpr::Let { bindings, body } => {
+                let slot = self.reporting.then(|| self.reserve());
+                let start = self.groups.len();
+                self.open_group(bindings, line, slot);
+                self.group_values(bindings, line);
+                self.expr(body, line);
+                self.close_groups(start);
+            }
+            SyntaxExpr::OperatorSection { left, right, .. } => {
+                if let Some(left) = left {
+                    self.expr(left, line);
+                }
+                if let Some(right) = right {
+                    self.expr(right, line);
+                }
+            }
+            SyntaxExpr::ComparisonChain { first, rest } => {
+                self.expr(first, line);
+                for (_, expr) in rest {
+                    self.expr(expr, line);
+                }
+            }
+            SyntaxExpr::OperatorApply { left, right, .. }
+            | SyntaxExpr::Apply(left, right)
+            | SyntaxExpr::Multiply(left, right)
+            | SyntaxExpr::Divide(left, right)
+            | SyntaxExpr::Add(left, right)
+            | SyntaxExpr::Subtract(left, right)
+            | SyntaxExpr::Append(left, right) => {
+                self.expr(left, line);
+                self.expr(right, line);
+            }
+        }
+    }
+
+    /// An object's or update's body. Its alias is in scope for every member,
+    /// and each `let` group from its own member on. They warn before the
+    /// members' own locals, in a reporting walk or as `report` asks.
+    fn body(
+        &mut self,
+        alias: Option<&'a Alias>,
+        items: &'a [ObjectBodyDefinition],
+        report: Report,
+    ) {
+        let report_alias = self.reporting || report == Report::Alias;
+        let report_lets = self.reporting || report == Report::Lets;
+        let start = self.locals.len();
+        let alias_slot = match alias.filter(|alias| alias.name != "self") {
+            Some(alias) => {
+                let slot = report_alias.then(|| self.reserve());
+                let index = self.bind(&alias.name, alias.line);
+                self.locals[index].alias = true;
+                Some(slot)
+            }
+            None => None,
+        };
+        let mut let_slots = items
+            .iter()
+            .filter(|item| matches!(item.kind, ObjectBodyDefinitionKind::Let(_)))
+            .map(|_| report_lets.then(|| self.reserve()))
+            .collect::<Vec<_>>()
+            .into_iter();
+        let groups = self.groups.len();
+        for item in items {
+            let line = item.line;
+            if let Some(definition) = item.definition()
+                && let Some(expr) = &definition.expr
             {
-                used[index] = true;
+                self.expr(expr, line);
+            }
+            if let ObjectBodyDefinitionKind::Let(bindings) = &item.kind {
+                let slot = let_slots.next().expect("each `let` member has a place");
+                self.open_group(bindings, line, slot);
+                self.group_values(bindings, line);
+            }
+            if let Some(object) = item.object() {
+                for parent in &object.deps {
+                    self.expr(parent, line);
+                }
+                self.body(object.alias.as_ref(), &object.body, Report::None);
+            }
+            if let Some(extend) = item.extend() {
+                self.body(extend.alias.as_ref(), &extend.body, Report::None);
             }
         }
-        SyntaxExpr::PriorName(_) => {}
-        SyntaxExpr::Escape(_, expr) => mark_used_locals(expr, locals, used),
-        SyntaxExpr::Access(base, parts) => {
-            mark_used_locals(base, locals, used);
-            for part in parts {
-                mark_used_key_expr(part, locals, used);
-            }
-        }
-        SyntaxExpr::Object(object) => {
-            if let Some(name) = &object.name {
-                mark_used_locals(name, locals, used);
-            }
-            for dep in &object.deps {
-                mark_used_locals(dep, locals, used);
-            }
-            for item in &object.body {
-                mark_used_body_item_locals(item, locals, used);
-            }
-        }
-        SyntaxExpr::With { base, body, .. } => {
-            mark_used_locals(base, locals, used);
-            for item in body {
-                mark_used_body_item_locals(item, locals, used);
-            }
-        }
-        SyntaxExpr::Using { namespace, body } => {
-            mark_used_locals(namespace, locals, used);
-            mark_used_locals(body, locals, used);
-        }
-        SyntaxExpr::PathDict(path, value) => {
-            for key in path {
-                mark_used_key_expr(key, locals, used);
-            }
-            mark_used_locals(value, locals, used);
-        }
-        SyntaxExpr::TaggedConstructor(path) => {
-            for key in path {
-                mark_used_key_expr(key, locals, used);
-            }
-        }
-        SyntaxExpr::DictUnion(items) | SyntaxExpr::List(items) | SyntaxExpr::Tuple(items) => {
-            for item in items {
-                mark_used_locals(item, locals, used);
-            }
-        }
-        SyntaxExpr::Lambda(params, body) => {
-            let mut nested = NestedLocals::new(locals);
-            for param in params {
-                nested.bind(param);
-            }
-            mark_used_locals(body, nested.get(), used);
-        }
-        SyntaxExpr::Do(do_expr) => {
-            mark_used_do_locals(do_expr, locals, used);
-        }
-        SyntaxExpr::If(if_expr) => {
-            mark_used_guard_branch(&if_expr.guards, &if_expr.then_result, locals, used);
-            mark_used_locals(&if_expr.else_result, locals, used);
-        }
-        SyntaxExpr::Match(match_expr) => {
-            mark_used_locals(&match_expr.subject, locals, used);
-            for arm in &match_expr.arms {
-                mark_used_pattern_guard_outcome_branch(
-                    &arm.pattern,
-                    &arm.guards,
-                    &arm.outcome,
-                    locals,
-                    used,
-                );
-            }
-        }
-        SyntaxExpr::MatchWhen(match_when) => {
-            for arm in &match_when.arms {
-                mark_used_when_branch(arm, locals, used);
-            }
-        }
-        SyntaxExpr::Let { bindings, body } => {
-            // The group's names are in scope in every value as well as the
-            // body.
-            let mut nested = NestedLocals::new(locals);
-            for (name, _) in bindings {
-                nested.bind(name);
-            }
-            for (_, value) in bindings {
-                mark_used_locals(value, nested.get(), used);
-            }
-            mark_used_locals(body, nested.get(), used);
-        }
-        SyntaxExpr::OperatorSection { left, right, .. } => {
-            if let Some(left) = left {
-                mark_used_locals(left, locals, used);
-            }
-            if let Some(right) = right {
-                mark_used_locals(right, locals, used);
-            }
-        }
-        SyntaxExpr::ComparisonChain { first, rest } => {
-            mark_used_locals(first, locals, used);
-            for (_, expr) in rest {
-                mark_used_locals(expr, locals, used);
-            }
-        }
-        SyntaxExpr::OperatorApply { left, right, .. }
-        | SyntaxExpr::Apply(left, right)
-        | SyntaxExpr::Multiply(left, right)
-        | SyntaxExpr::Divide(left, right)
-        | SyntaxExpr::Add(left, right)
-        | SyntaxExpr::Subtract(left, right)
-        | SyntaxExpr::Append(left, right) => {
-            mark_used_locals(left, locals, used);
-            mark_used_locals(right, locals, used);
-        }
-    }
-}
-
-fn analyze_guard_branch_locals(
-    guards: &[SyntaxGuardClause],
-    result: &SyntaxExpr,
-    line: usize,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    analyze_branch_locals(None, guards, result, line, diagnostics);
-}
-
-fn analyze_pattern_guard_outcome_branch_locals(
-    pattern: &SyntaxPattern,
-    guards: &[SyntaxGuardClause],
-    outcome: &MatchOutcome,
-    line: usize,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    analyze_outcome_branch_locals(Some(pattern), guards, outcome, line, diagnostics);
-}
-
-fn analyze_branch_locals(
-    pattern: Option<&SyntaxPattern>,
-    guards: &[SyntaxGuardClause],
-    result: &SyntaxExpr,
-    line: usize,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    let mut locals = Vec::new();
-    let mut used = Vec::new();
-    if let Some(pattern) = pattern {
-        pattern.visit_scope_events(&mut |event| match event {
-            SyntaxPatternScopeEvent::Expression(expr) => {
-                mark_used_locals(expr, &locals, &mut used);
-                analyze_expr_locals(expr, line, diagnostics);
-            }
-            SyntaxPatternScopeEvent::Capture(name) => {
-                locals.push(local_name_metadata(name));
-                used.push(false);
-            }
-        });
-    }
-    for guard in guards {
-        guard.visit_scope_events(&mut |event| match event {
-            SyntaxPatternScopeEvent::Expression(expr) => {
-                mark_used_locals(expr, &locals, &mut used);
-                analyze_expr_locals(expr, line, diagnostics);
-            }
-            SyntaxPatternScopeEvent::Capture(name) => {
-                locals.push(local_name_metadata(name));
-                used.push(false);
-            }
-        });
-    }
-    mark_used_locals(result, &locals, &mut used);
-    analyze_expr_locals(result, line, diagnostics);
-    for (local, used) in locals.iter().zip(used) {
-        if !used && local.canonical.is_some() && !local.suppress_unused_warning {
-            diagnostics.push(Diagnostic::warn(
-                line,
-                format!("unused local `{}`", local.raw),
-            ));
-        }
-    }
-}
-
-fn analyze_when_branch_locals(arm: &WhenArm, diagnostics: &mut Vec<Diagnostic>) {
-    analyze_outcome_branch_locals(None, &arm.guards, &arm.outcome, arm.line, diagnostics);
-}
-
-fn analyze_outcome_branch_locals(
-    pattern: Option<&SyntaxPattern>,
-    guards: &[SyntaxGuardClause],
-    outcome: &MatchOutcome,
-    line: usize,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    let mut locals = Vec::new();
-    let mut used = Vec::new();
-    visit_branch_prefix(pattern, guards, line, &mut locals, &mut used, diagnostics);
-    analyze_outcome_locals(outcome, &locals, &mut used, diagnostics);
-    warn_unused_branch_locals(&locals, &used, line, diagnostics);
-}
-
-fn analyze_outcome_locals(
-    outcome: &MatchOutcome,
-    locals: &[LocalName],
-    used: &mut [bool],
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    match outcome {
-        MatchOutcome::Result {
-            line, expression, ..
-        } => {
-            mark_used_locals(expression, locals, used);
-            analyze_expr_locals(expression, *line, diagnostics);
-        }
-        MatchOutcome::Nested(arms) => {
-            for arm in arms {
-                mark_used_when_branch(arm, locals, used);
-                analyze_when_branch_locals(arm, diagnostics);
+        self.close_groups(groups);
+        if let Some(slot) = alias_slot {
+            let alias = self.unbind(start).pop().expect("the alias is bound");
+            if let Some(slot) = slot
+                && alias.warns(alias.used)
+            {
+                self.fill(slot, [alias.warning()]);
             }
         }
     }
-}
 
-fn visit_branch_prefix(
-    pattern: Option<&SyntaxPattern>,
-    guards: &[SyntaxGuardClause],
-    line: usize,
-    locals: &mut Vec<LocalName>,
-    used: &mut Vec<bool>,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    if let Some(pattern) = pattern {
-        pattern.visit_scope_events(&mut |event| match event {
-            SyntaxPatternScopeEvent::Expression(expr) => {
-                mark_used_locals(expr, locals, used);
-                analyze_expr_locals(expr, line, diagnostics);
-            }
-            SyntaxPatternScopeEvent::Capture(name) => {
-                locals.push(local_name_metadata(name));
-                used.push(false);
-            }
-        });
-    }
-    for guard in guards {
-        guard.visit_scope_events(&mut |event| match event {
-            SyntaxPatternScopeEvent::Expression(expr) => {
-                mark_used_locals(expr, locals, used);
-                analyze_expr_locals(expr, line, diagnostics);
-            }
-            SyntaxPatternScopeEvent::Capture(name) => {
-                locals.push(local_name_metadata(name));
-                used.push(false);
-            }
-        });
-    }
-}
-
-fn warn_unused_branch_locals(
-    locals: &[LocalName],
-    used: &[bool],
-    line: usize,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    for (local, used) in locals.iter().zip(used) {
-        if !used && local.canonical.is_some() && !local.suppress_unused_warning {
-            diagnostics.push(Diagnostic::warn(
-                line,
-                format!("unused local `{}`", local.raw),
-            ));
+    fn do_block(&mut self, do_expr: &'a DoExpr) {
+        if self.reporting
+            && let Ok(plan) = preview_recursive_do_plan(do_expr)
+        {
+            self.out
+                .extend(plan.promotion_warnings().into_iter().map(Out::Warning));
         }
-    }
-}
-
-fn mark_used_guard_branch(
-    guards: &[SyntaxGuardClause],
-    result: &SyntaxExpr,
-    locals: &[LocalName],
-    used: &mut [bool],
-) {
-    mark_used_branch(None, guards, result, locals, used);
-}
-
-fn mark_used_pattern_guard_outcome_branch(
-    pattern: &SyntaxPattern,
-    guards: &[SyntaxGuardClause],
-    outcome: &MatchOutcome,
-    locals: &[LocalName],
-    used: &mut [bool],
-) {
-    mark_used_outcome_branch(Some(pattern), guards, outcome, locals, used);
-}
-
-fn mark_used_branch(
-    pattern: Option<&SyntaxPattern>,
-    guards: &[SyntaxGuardClause],
-    result: &SyntaxExpr,
-    locals: &[LocalName],
-    used: &mut [bool],
-) {
-    let mut nested = NestedLocals::new(locals);
-    mark_used_branch_prefix(pattern, guards, &mut nested, used);
-    mark_used_locals(result, nested.get(), used);
-}
-
-/// Marks a branch's pattern and guard expressions, binding their captures in
-/// `nested` as they appear.
-fn mark_used_branch_prefix(
-    pattern: Option<&SyntaxPattern>,
-    guards: &[SyntaxGuardClause],
-    nested: &mut NestedLocals<'_>,
-    used: &mut [bool],
-) {
-    let mut visit = |event| match event {
-        SyntaxPatternScopeEvent::Expression(expr) => mark_used_locals(expr, nested.get(), used),
-        SyntaxPatternScopeEvent::Capture(name) => nested.bind(name),
-    };
-    if let Some(pattern) = pattern {
-        pattern.visit_scope_events(&mut visit);
-    }
-    for guard in guards {
-        guard.visit_scope_events(&mut visit);
-    }
-}
-
-fn mark_used_when_branch(arm: &WhenArm, locals: &[LocalName], used: &mut [bool]) {
-    mark_used_outcome_branch(None, &arm.guards, &arm.outcome, locals, used);
-}
-
-fn mark_used_outcome_branch(
-    pattern: Option<&SyntaxPattern>,
-    guards: &[SyntaxGuardClause],
-    outcome: &MatchOutcome,
-    locals: &[LocalName],
-    used: &mut [bool],
-) {
-    let mut nested = NestedLocals::new(locals);
-    mark_used_branch_prefix(pattern, guards, &mut nested, used);
-    match outcome {
-        MatchOutcome::Result { expression, .. } => {
-            mark_used_locals(expression, nested.get(), used);
-        }
-        MatchOutcome::Nested(arms) => {
-            for arm in arms {
-                mark_used_when_branch(arm, nested.get(), used);
+        let start = self.locals.len();
+        let mut unresolved_abstracts = Vec::new();
+        for step in &do_expr.steps {
+            if let Some(expr) = do_step_expr(step) {
+                self.expr(expr, step.line);
             }
-        }
-    }
-}
-
-fn mark_used_prior_alias_in_outcome(outcome: &MatchOutcome, alias: Option<&str>, used: &mut bool) {
-    match outcome {
-        MatchOutcome::Result { expression, .. } => mark_used_prior_alias(expression, alias, used),
-        MatchOutcome::Nested(arms) => {
-            for arm in arms {
-                for guard in &arm.guards {
-                    guard.visit_scope_events(&mut |event| {
-                        if let SyntaxPatternScopeEvent::Expression(expr) = event {
-                            mark_used_prior_alias(expr, alias, used);
+            match &step.kind {
+                DoStepKind::Declare(names) => {
+                    for name in names {
+                        if let Some(canonical) = binder_canonical(name) {
+                            unresolved_abstracts.push(canonical);
+                        }
+                        self.bind(name, step.line);
+                    }
+                }
+                DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
+                    pattern.visit_scope_events(&mut |event| match event {
+                        SyntaxPatternScopeEvent::Expression(expr) => self.expr(expr, step.line),
+                        SyntaxPatternScopeEvent::Capture(name) => {
+                            if !fulfills_abstract(name, &mut unresolved_abstracts) {
+                                self.bind(name, step.line);
+                            }
                         }
                     });
                 }
-                mark_used_prior_alias_in_outcome(&arm.outcome, alias, used);
+                DoStepKind::Then(_) => {}
             }
         }
-    }
-}
-
-fn analyze_do_expr_locals(do_expr: &DoExpr, diagnostics: &mut Vec<Diagnostic>) {
-    if let Ok(plan) = preview_recursive_do_plan(do_expr) {
-        diagnostics.extend(plan.promotion_warnings());
+        self.expr(&do_expr.result, do_expr.result_line);
+        self.close(start, None);
     }
 
-    let mut locals = Vec::new();
-    let mut used = Vec::new();
-    let mut binding_lines = Vec::new();
-    let mut unresolved_abstracts = Vec::new();
-
-    for step in &do_expr.steps {
-        if let Some(expr) = do_step_expr(step) {
-            mark_used_locals(expr, &locals, &mut used);
-            analyze_expr_locals(expr, step.line, diagnostics);
+    /// A branch: a pattern's and guards' captures, in scope for the guards
+    /// after them and for `rest`, warning at `line` after the branch's own
+    /// warnings.
+    fn branch(
+        &mut self,
+        pattern: Option<&'a SyntaxPattern>,
+        guards: &'a [SyntaxGuardClause],
+        line: usize,
+        rest: impl FnOnce(&mut Self),
+    ) {
+        let start = self.locals.len();
+        let mut visit = |event| match event {
+            SyntaxPatternScopeEvent::Expression(expr) => self.expr(expr, line),
+            SyntaxPatternScopeEvent::Capture(name) => {
+                self.bind(name, line);
+            }
+        };
+        if let Some(pattern) = pattern {
+            pattern.visit_scope_events(&mut visit);
         }
+        for guard in guards {
+            guard.visit_scope_events(&mut visit);
+        }
+        rest(self);
+        self.close(start, None);
+    }
 
-        match &step.kind {
-            DoStepKind::Declare(names) => {
-                for name in names {
-                    let local = local_name_metadata(name);
-                    if let Some(canonical) = &local.canonical {
-                        unresolved_abstracts.push(canonical.clone());
-                    }
-                    locals.push(local);
-                    used.push(false);
-                    binding_lines.push(step.line);
+    fn when_arm(&mut self, arm: &'a WhenArm) {
+        self.branch(None, &arm.guards, arm.line, |walk| {
+            walk.outcome(&arm.outcome)
+        });
+    }
+
+    fn outcome(&mut self, outcome: &'a MatchOutcome) {
+        match outcome {
+            MatchOutcome::Result {
+                line, expression, ..
+            } => self.expr(expression, *line),
+            MatchOutcome::Nested(arms) => {
+                for arm in arms {
+                    self.when_arm(arm);
                 }
             }
-            DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
-                pattern.visit_scope_events(&mut |event| match event {
-                    SyntaxPatternScopeEvent::Expression(expr) => {
-                        mark_used_locals(expr, &locals, &mut used);
-                        analyze_expr_locals(expr, step.line, diagnostics);
-                    }
-                    SyntaxPatternScopeEvent::Capture(name) => {
-                        if !fulfills_abstract(name, &mut unresolved_abstracts) {
-                            locals.push(local_name_metadata(name));
-                            used.push(false);
-                            binding_lines.push(step.line);
-                        }
-                    }
-                });
-            }
-            DoStepKind::Then(_) => {}
-        }
-    }
-
-    mark_used_locals(&do_expr.result, &locals, &mut used);
-    analyze_expr_locals(&do_expr.result, do_expr.result_line, diagnostics);
-
-    for ((local, used), line) in locals.iter().zip(used).zip(binding_lines) {
-        if !used && local.canonical.is_some() && !local.suppress_unused_warning {
-            diagnostics.push(Diagnostic::warn(
-                line,
-                format!("unused local `{}`", local.raw),
-            ));
         }
     }
 }
@@ -1059,41 +713,6 @@ fn preview_recursive_do_plan(
     recursive_do::RecursiveDoPlan::build(steps.iter(), registry.into_forwards())
 }
 
-fn mark_used_do_locals(do_expr: &DoExpr, locals: &[LocalName], used: &mut [bool]) {
-    let mut nested = NestedLocals::new(locals);
-    let mut unresolved_abstracts = Vec::new();
-
-    for step in &do_expr.steps {
-        if let Some(expr) = do_step_expr(step) {
-            mark_used_locals(expr, nested.get(), used);
-        }
-        match &step.kind {
-            DoStepKind::Declare(names) => {
-                for name in names {
-                    if let Some(canonical) = binder_canonical(name) {
-                        unresolved_abstracts.push(canonical.to_owned());
-                    }
-                    nested.bind(name);
-                }
-            }
-            DoStepKind::Bind { pattern, .. } | DoStepKind::ValueBind { pattern, .. } => {
-                pattern.visit_scope_events(&mut |event| match event {
-                    SyntaxPatternScopeEvent::Expression(expr) => {
-                        mark_used_locals(expr, nested.get(), used);
-                    }
-                    SyntaxPatternScopeEvent::Capture(name) => {
-                        if !fulfills_abstract(name, &mut unresolved_abstracts) {
-                            nested.bind(name);
-                        }
-                    }
-                });
-            }
-            DoStepKind::Then(_) => {}
-        }
-    }
-    mark_used_locals(&do_expr.result, nested.get(), used);
-}
-
 fn do_step_expr(step: &DoStep) -> Option<&SyntaxExpr> {
     match &step.kind {
         DoStepKind::Declare(_) => None,
@@ -1103,53 +722,16 @@ fn do_step_expr(step: &DoStep) -> Option<&SyntaxExpr> {
     }
 }
 
-fn fulfills_abstract(name: &str, unresolved: &mut Vec<String>) -> bool {
-    let canonical = local_name_metadata(name).canonical;
+/// Whether `name` fulfills a `declare`d name still waiting, which it then
+/// stops waiting for.
+fn fulfills_abstract(name: &str, unresolved: &mut Vec<&str>) -> bool {
+    let canonical = binder_canonical(name);
     let Some(index) = unresolved
         .iter()
-        .rposition(|abstract_name| Some(abstract_name) == canonical.as_ref())
+        .rposition(|abstract_name| Some(*abstract_name) == canonical)
     else {
         return false;
     };
     unresolved.remove(index);
     true
-}
-
-fn mark_used_body_item_locals(
-    item: &ObjectBodyDefinition,
-    locals: &[LocalName],
-    used: &mut [bool],
-) {
-    if let Some(definition) = item.definition()
-        && let Some(expr) = &definition.expr
-    {
-        mark_used_locals(expr, locals, used);
-    }
-    if let ObjectBodyDefinitionKind::Let(bindings) = &item.kind {
-        for (_, value) in bindings {
-            mark_used_locals(value, locals, used);
-        }
-    }
-    if let Some(object) = item.object() {
-        for parent in &object.deps {
-            mark_used_locals(parent, locals, used);
-        }
-        for item in &object.body {
-            mark_used_body_item_locals(item, locals, used);
-        }
-    }
-    if let Some(extend) = item.extend() {
-        for item in &extend.body {
-            mark_used_body_item_locals(item, locals, used);
-        }
-    }
-}
-
-fn mark_used_key_expr(key: &SyntaxKeyExpr, locals: &[LocalName], used: &mut [bool]) {
-    match key {
-        SyntaxKeyExpr::Atom(_) => {}
-        SyntaxKeyExpr::Index(expr) | SyntaxKeyExpr::PathIndex(expr) => {
-            mark_used_locals(expr, locals, used)
-        }
-    }
 }

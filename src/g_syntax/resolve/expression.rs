@@ -1,5 +1,4 @@
 use super::super::*;
-use crate::g_syntax::analysis::binding_group_dependencies;
 
 #[cfg(test)]
 pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_scope(
@@ -1152,7 +1151,7 @@ pub(in crate::g_syntax) fn lower_let_group_resolved(
     // The group is mutually recursive. Its strongly connected components
     // bind in dependency order, each enclosing the next: one without a cycle
     // as a plain application, one with a cycle through a fixpoint.
-    let dependencies = binding_group_dependencies(bindings);
+    let dependencies = locals.group_dependencies(bindings);
     let mut binders = Vec::new();
     for component in dependency_components(&dependencies) {
         let names = component.iter().map(|&index| bindings[index].0.as_str());
