@@ -329,7 +329,9 @@ on 2026-10-17, those that change the grammar with an entry in
       is never referenced as `_name`, and a name it shares with another
       local, or with a member in scope, is a shadowing error.
     - **Modules** take `let` declarations too, as file-private helpers;
-      a module's alias is implicitly `module`.
+      a module's alias is implicitly `module`. *(Corrected by the
+      maintainer: a module has `alias self`, and `module` is a reserved
+      alias for it from any scope.)*
 
     **Refined (maintainer, 2026-10-17):**
     - **Groups are sequential.** A `let` group, in a body or a file, is

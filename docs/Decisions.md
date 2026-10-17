@@ -699,37 +699,45 @@ maps the short names used here to file names.
 - **Decision:**
   - `alias Name` is a declaration that may stand only as the first member
     of a `with` body (object, `extend` or update), at most once. It binds
-    `Name` and `_Name`; `alias _Name` marks it as possibly unused,
-    `alias self` localizes an update's names, and `alias _` states that
-    there is none. Defaults are unchanged: `self` for objects, none for
-    updates. `alias` is reserved in `g0`, and headers lose `as Name`.
-  - `let` members are body-private bindings, not members of the result:
-    one mutually recursive group per body, visible to its members and each
-    other, not to the base expression or the `extends` list. Like any
-    local, a `let` is never referenced as `_name`, and a name it shares
-    with another local or a member in scope is a shadowing error.
-  - Modules take `let` declarations as file-private helpers; a module's
-    alias is implicitly `module`.
-  - *Refined the same day (maintainer):* a `let` group is recursive within
-    itself and seen by what follows it, in a body or a file; a module
-    `let` is a compiler-local file environment, lowered once at its
-    position; one file, one name, one meaning, so a `let` may not share a
-    name the file uses for a global or a local in scope; `alias self`
-    localizes names as the default does; `_x` naming any local is an
-    error; a localized body or `using` scope reaches its host's locals, as
-    its host's names, through `^`, a controlled shadowing.
+    `Name` and `_Name`; `alias _Name` marks it as possibly unused. `alias
+    self` localizes the body's names: a bare `foo` is `self.foo`, and the
+    host's names and locals take `^name` or `^(Expr)`. `alias _` states
+    that there is none, with no way to reference the object, and leaves
+    names to the host. Defaults: `self` for objects, `_` for updates.
+    A module has `alias self` too, so `self.foo` reaches its namespace
+    from its own scope, and `module` is a reserved alias for it from any
+    scope. `alias` is reserved in `g0`, and headers lose `as Name`.
+  - `using Dict` localizes as `alias self` does, hiding the host's locals
+    behind `^` too: a controlled, coarse-grained shadowing in a language
+    that otherwise blocks it, so a bare name there reads the scope's own
+    even beside a hidden local.
+  - `let` groups, as body members or file declarations, are private
+    bindings, not entries of the result. Each is mutually recursive within
+    itself and seen only by what follows it. A body's group binds where it
+    stands, against the definitions before it. A file's is compiler state,
+    lowered once where it stands against the module's final self and the
+    definitions visible there, and shared by the declarations after it;
+    a macro invocation sees the file's `let`s before it.
+  - Locals have one meaning in a file: a `let` may not share a name the
+    file uses for a global or a local in scope, and `_x` naming any local
+    is an error.
+  - `let` hinders extensibility by hiding logic, so it is not encouraged:
+    a lint heuristic may flag it, and its performance is not a target.
 - **Alternatives rejected:** keeping `as Name` in headers; private helpers
   as members or per-member `where`s; one recursive group per body or per
   file, which would let a declaration see a `let` below it whose
   `_module` reads differ; a hidden module entry for a module `let`, which
-  no user-defined front end could make.
+  no user-defined front end could make; no `let` at all, which leads to
+  awkward workarounds.
 - **Consequences:**
   - `as` no longer continues an expression, so an update needs no
     parentheses in a match's subject.
-  - Lowering wraps a body's update in its `let` group inside the mixin
-    function: `\prior instance -> let … in prior with …`.
-  - Not built yet: `grammar-body-declarations` follows
-    `parser-grammar-retirement`, and the standing docs change with it.
+  - Before this, a named object alias, even `self`, left bare names to the
+    host, an object's `as _` localized them, and lexical locals outranked
+    localized names everywhere, `using` included: drift from the intended
+    reading, which this restores.
+  - A `let` macro, or any `let`, that reads a global waits on the final
+    module, as a global helper does.
 - **Recorded in:** grammar review, item 15.
 
 ### Keyword forms and lambdas stand alone only in tail position

@@ -1441,7 +1441,9 @@ have the default local names and `^` escapes, while `alias _` names nothing
 and also resolves names in the host scope. In some contexts, it is more
 convenient to use a local name so we don't need escapes. An alias may only be
 the first member of an object, `extend` or update body, and only once; the
-same declaration serves all three.
+same declaration serves all three. A module, too, has `alias self`, so
+`self.foo` reaches the module namespace from the module's own scope, while
+`module` is a reserved alias for it from any scope.
 
         with
             alias Name      # or `alias self`, or `alias _`

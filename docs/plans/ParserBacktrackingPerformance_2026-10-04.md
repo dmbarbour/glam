@@ -295,6 +295,17 @@ Steps are referred to by name; see the plans README, "Step names".
    scans 245 M (`parser-keyword-frames`), `mark_used_locals` and
    `NestedLocals::bind` about 160 M, name comparisons 71 M, and binding-view
    parsing the rest. Make analysis linear in nesting depth.
+   - *Added 2026-10-17 (maintainer):* chaining tests for `let` bindings
+     alongside `chain_where`: large numbers of locals, to catch unexpected
+     exponentials. Shapes: nested `let` expressions, one wide `let` group,
+     many body `let` groups, and many file `let` declarations before many
+     declarations. `let` is not a performance target, so the aim is no
+     superlinear surprise, not speed. Suspects visible in the code:
+     `ResolverContext::extend_source_bindings` checks each new name
+     against every local and the rest of its group, O(k·(L+k)); the module
+     lowerer binds every file `let` name for each declaration, through
+     that check, and walks each resolved declaration for the names it
+     uses; and a name's lookup scans the locals.
 7. **Constant factors** (`parser-constant-factors`; added 2026-10-16, the
    maintainer placing it toward the end of the parser plan). Once the
    front end is linear, look for constant-factor reductions. Candidates
