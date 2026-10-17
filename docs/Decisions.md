@@ -717,7 +717,7 @@ maps the short names used here to file names.
   - Lowering wraps a body's update in its `let` group inside the mixin
     function: `\prior instance -> let … in prior with …`.
   - Not built yet: `grammar-body-declarations` follows
-    `parser-keyword-frames-suffixes`, and the standing docs change with it.
+    `parser-grammar-retirement`, and the standing docs change with it.
 - **Recorded in:** grammar review, item 15.
 
 ### Keyword forms and lambdas stand alone only in tail position

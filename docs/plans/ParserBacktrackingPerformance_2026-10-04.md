@@ -338,6 +338,11 @@ production keeps the old parser until the oracle agrees.
 - `parser-grammar-retirement`: not started. Chumsky still parses the
   views the term parser reports as unsupported, and runs as the oracle in
   tests.
+- **Order (maintainer, 2026-10-17):** `parser-keyword-frames-suffixes`,
+  then `parser-grammar-retirement`; then the grammar review's
+  `grammar-body-declarations` and the
+  [tag prefix syntax plan](TagPrefixSyntax_2026-10-16.md); then
+  `parser-scope-analysis` and `parser-constant-factors`.
 
 **Progress 2026-10-06.** The core of `parser-term-parser` is in
 `parser/term.rs`; it is test-only so far.

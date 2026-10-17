@@ -378,12 +378,15 @@ on 2026-10-17, those that change the grammar with an entry in
 
 - `parser-keyword-frames-suffixes` waits for this review: `let`, `where`,
   `with`, `using` and `object` carry several items.
-- `grammar-body-declarations` builds item 15 after
-  `parser-keyword-frames-suffixes`, so the frames first replace the
-  structural parsers under the oracle with the syntax unchanged. It
-  changes the declaration vocabulary that module, object and `with`
-  bodies share, and resolution, lowering and name analysis with it; a
-  script moves each `as Name` into its body, as the `as` rename did.
+- **Order (maintainer, 2026-10-17):** `parser-keyword-frames-suffixes`,
+  then `parser-grammar-retirement`, then `grammar-body-declarations`
+  (item 15), then the [tag prefix syntax plan](TagPrefixSyntax_2026-10-16.md),
+  before other work. The frames replace the structural parsers under the
+  oracle with the syntax unchanged; once the legacy parsers retire, each
+  syntax change goes to one parser. `grammar-body-declarations` changes the
+  declaration vocabulary that module, object and `with` bodies share, and
+  resolution, lowering and name analysis with it; a script moves each
+  `as Name` into its body, as the `as` rename did.
 - Grammar changes go to the term parser only. The Chumsky grammar and the
   structural parsers are not updated to keep the oracle; the grammar's own
   examples and a round-trip test (generate trees, print them with the

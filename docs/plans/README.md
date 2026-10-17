@@ -52,18 +52,21 @@ flags a step for discussion when work reaches it, not a decision.
 - [`GrammarReview_2026-10-16.md`](GrammarReview_2026-10-16.md): the
   grammar reviewed for clarity when read (Green's cognitive dimensions) and
   ease of parsing, and what belongs in the parser, a linter or a formatter.
-  Started 2026-10-16; its current items were decided by 2026-10-17, and
-  `parser-keyword-frames-suffixes` resumes on the settled grammar, followed
-  by `grammar-body-declarations` (item 15: `alias` and `let` in bodies).
+  Started 2026-10-16; its current items were decided by 2026-10-17. Next,
+  in order: `parser-keyword-frames-suffixes`, `parser-grammar-retirement`,
+  `grammar-body-declarations` (item 15: `alias` and `let` in bodies), then
+  the tag prefix syntax plan, before other work.
 - [`RuntimeOwnership_2026-10-17.md`](RuntimeOwnership_2026-10-17.md):
   `lifecycle-` steps, a sketch from the lifecycle review: a thread-affine
   owner that retires the runtime, handles for everything else, request
   queues, and hosts reduced to message endpoints. `lifecycle-cli-logger` is
-  done; the rest waits for the grammar review's current items.
+  done; the rest waits for the grammar work, through the tag prefix
+  syntax plan.
 - [`TagPrefixSyntax_2026-10-16.md`](TagPrefixSyntax_2026-10-16.md):
   `path:` becomes a prefix operator and `:name` a pun everywhere, so braces
-  lose their member grammar. Agreed 2026-10-16; follows the performance
-  work, after `parser-grammar-retirement`.
+  lose their member grammar. Agreed 2026-10-16; follows
+  `grammar-body-declarations`, after `parser-grammar-retirement`, ahead of
+  the remaining parser performance steps.
 - [`ReflectionPerformance_2026-10-15.md`](ReflectionPerformance_2026-10-15.md):
   `perf-reflection-effects`, split from the structural overheads plan on
   2026-10-15. Reflection effect steps (`perf-reflection-step-cost`, 376 K

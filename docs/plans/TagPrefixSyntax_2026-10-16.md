@@ -1,10 +1,13 @@
 # Tag Prefix Syntax Plan — 2026-10-16
 
 Status: design agreed with the maintainer on 2026-10-16; not started. It
-follows the performance work, and in particular `parser-grammar-retirement`
-in the [parser backtracking plan](ParserBacktrackingPerformance_2026-10-04.md),
-so the syntax changes in one parser rather than in the term parser and the
-Chumsky grammar both.
+follows `parser-grammar-retirement` in the
+[parser backtracking plan](ParserBacktrackingPerformance_2026-10-04.md), so
+the syntax changes in one parser rather than in the term parser and the
+Chumsky grammar both, and then `grammar-body-declarations` in the
+[grammar review](GrammarReview_2026-10-16.md). It comes before the
+remaining parser performance steps and other work (maintainer,
+2026-10-17).
 
 ## Problem
 

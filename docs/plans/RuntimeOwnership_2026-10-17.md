@@ -4,8 +4,9 @@ Status: sketch. The design was agreed with the maintainer on 2026-10-16 in
 the [lifecycle review](../reviews/RuntimeLifecycleCapabilities_2026-10-16.md)
 ("Target Model" and "Maintainer Decisions"); this plan orders the work.
 `lifecycle-cli-logger` is done (2026-10-16, `988e887d`). The rest waits for
-the [grammar review](GrammarReview_2026-10-16.md) to finish its current
-items; each step's details are settled when it starts.
+the grammar work the [grammar review](GrammarReview_2026-10-16.md)
+sequences, through the tag prefix syntax plan; each step's details are
+settled when it starts.
 
 ## Goal
 
