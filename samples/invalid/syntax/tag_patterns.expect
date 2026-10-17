@@ -1,0 +1,3 @@
+error|5|a tag is not a predicate|`a: Nat n`
+error|7|a tag is not a predicate
+error|9|a tag is not a view

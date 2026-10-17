@@ -864,7 +864,7 @@ fn token_do_reports_structural_statement_errors() {
         ("do\n.r {} -> :42\n.r ()", "expected a name adjacent to `:`"),
         (
             "do\n.r {} -> (value:)\n.r ()",
-            "a tag's constructor `path:` is not a pattern",
+            "a tag's constructor `(path:)` is not a pattern",
         ),
         (
             "do\ndeclare\n.r ()",

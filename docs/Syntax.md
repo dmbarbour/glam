@@ -928,14 +928,16 @@ to rebuild the dictionary.
 Pattern matching on dictionaries generally has the form
 `{Path1:Pattern1, Path2:Pattern2, RemainingPattern}`. There is at most one
 remaining pattern, default `{}` thus requiring a full match. Patterns read as
-expressions do: `foo:p`, `foo: p` and `(foo:) p` are the same tag pattern, and
-`:x` captures `x` under the key `x`, so `{:x,:y,:z}` is `{x:x, y:y, z:z}`. A
-bare `foo:` is not a pattern. A spaced payload is a complete position: its
-item's comma or brace bounds it, and it runs to the end of its item, pattern
-operators included, so `{x: Nat n}` tags a predicate, `{x: f -> p}` a view,
-and `{x: a as b}` both captures. A joint payload stays nested, as in
-expressions: `x:Nat n` is the predicate `x:Nat` over `n`, and a spaced tag as
-a view's function needs parentheses: `((foo: f) -> p)`.
+expressions do: `foo:p` and `foo: p` are the same tag pattern, and `:x`
+captures `x` under the key `x`, so `{:x,:y,:z}` is `{x:x, y:y, z:z}`. A
+constructor, `(foo:)`, is not a pattern. A spaced payload is a complete
+position: its item's comma or brace bounds it, and it runs to the end of its
+item, pattern operators included, so `{x: Nat n}` tags a predicate,
+`{x: f -> p}` a view, and `{x: a as b}` both captures. A joint payload stays
+nested, as in expressions, so `x:Nat n` would apply the predicate `x:Nat`
+to `n`. A tag builds data, so it is never a predicate, which passes or
+fails, nor a view, which yields `.r View`, and the compiler rejects one in
+either place: `x:Nat n`, `(foo:) p` and `((foo:) -> p)` are errors.
 
 ## Embedded Texts
 
@@ -1879,8 +1881,9 @@ Patterns offer a concise way of extracting data from similar structure. I'm borr
 Within a pattern, `when` binds loosest, then one view arrow (`->` or `<-`),
 then `as`. Below them a pattern reads as the same tokens would as an
 expression: juxtaposition binds tighter than `++`, and a tag tighter than
-juxtaposition. So `a:Nat n` is a predicate `a:Nat` over `n`, while
-`a:(Nat n)` tags a predicate. Views, predicates and local guards fill a
+juxtaposition. So `a:Nat n` would apply the predicate `a:Nat` to `n`, which
+is an error since a tag is no predicate, while `a:(Nat n)` and `a: Nat n`
+tag a predicate. Views, predicates and local guards fill a
 parenthesized pattern or a whole match-arm head. There they may also follow
 `as` or a view's arrow, or precede `when`, as in `(p as Nat n)`,
 `(f -> Nat n)` and `(Nat n when n > 0)`.

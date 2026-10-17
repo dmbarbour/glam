@@ -78,6 +78,11 @@ pub(in crate::g_syntax::parser) enum Position {
     Nested,
 }
 
+const TAG_PREDICATE: &str = "a tag is not a predicate, which passes or fails; to match a tag, write `path: Pattern`, as in `a: Nat n`";
+
+const TAG_VIEW: &str =
+    "a tag is not a view, which yields `.r View`; to match a tag, write `path: Pattern`";
+
 const EXPECTED_PATTERN: &str =
     "expected a capture, literal, list pattern, quoted-path pattern, or parenthesized pattern";
 
@@ -157,9 +162,9 @@ impl Term {
             Self::Tuple(items) => tuple_pattern(patterns(items)?),
             Self::List(items) => fixed_list_pattern(patterns(items)?),
             Self::Dict(members) => dict_pattern_from(members)?,
-            // A tag, `path:p`, `path: p`, `(path:) p` or `:name`, is a dict
-            // pattern of one entry.
-            Self::Tag(..) | Self::Pun(_) | Self::Apply(..) if tag_entry(&self) => {
+            // A tag, `path:p`, `path: p` or `:name`, is a dict pattern of one
+            // entry.
+            Self::Tag(..) | Self::Pun(_) => {
                 let (path, optional, pattern) = self.into_entry()?;
                 dict_pattern(vec![dict_entry(path, optional, pattern)], None)
             }
@@ -168,7 +173,9 @@ impl Term {
                     "an optional entry `path?:` is valid only in a dictionary pattern".to_owned(),
                 );
             }
-            Self::Tag(..) | Self::Pun(_) => unreachable!("a tag is an entry"),
+            Self::Apply(predicate, _) if builds_tag(&predicate) => {
+                return Err(TAG_PREDICATE.to_owned());
+            }
             Self::Apply(predicate, pattern) if complete => kind(SyntaxPatternKind::Predicate {
                 predicate,
                 pattern: Box::new(pattern.into_pattern(Position::Nested)?),
@@ -184,6 +191,7 @@ impl Term {
                 Box::new(left.into_pattern(position)?),
                 Box::new(right.into_pattern(position)?),
             )),
+            Self::View { view, .. } if builds_tag(&view) => return Err(TAG_VIEW.to_owned()),
             Self::View { view, pattern } if complete => kind(SyntaxPatternKind::View {
                 view,
                 pattern: Box::new(pattern.into_pattern(position)?),
@@ -227,12 +235,6 @@ impl Term {
                 )];
                 (path, false, pattern)
             }
-            Self::Apply(constructor, payload) => {
-                let SyntaxExpr::TaggedConstructor(path) = *constructor else {
-                    unreachable!("only a constructor's application is an entry");
-                };
-                (path, false, payload.into_pattern(Position::Nested)?)
-            }
             Self::Group(term) => term.into_entry()?,
             _ => unreachable!("only a tag is an entry"),
         })
@@ -240,15 +242,23 @@ impl Term {
 }
 
 /// Whether a term is a tag, read as one dict pattern entry: `path:p`,
-/// `path?:p`, `:name`, a constructor applied, `(path:) p`, or one of these
-/// parenthesized.
+/// `path?:p`, `:name`, or one of these parenthesized.
 fn tag_entry(term: &Term) -> bool {
     match term {
         Term::Tag(..) | Term::OptionalTag(..) | Term::Pun(_) => true,
-        Term::Apply(function, _) => matches!(function.as_ref(), SyntaxExpr::TaggedConstructor(_)),
         Term::Group(term) => tag_entry(term),
         _ => false,
     }
+}
+
+/// Whether an expression builds a tag: tagged data or a tag's constructor.
+/// A tag builds data, so it is neither a predicate nor a view, the only
+/// type errors a pattern's syntax shows.
+fn builds_tag(expr: &SyntaxExpr) -> bool {
+    matches!(
+        expr,
+        SyntaxExpr::PathDict(..) | SyntaxExpr::TaggedConstructor(_)
+    )
 }
 
 fn exprs(terms: Vec<Term>) -> Result<Vec<SyntaxExpr>, String> {
@@ -296,7 +306,7 @@ fn expr_pattern(expr: SyntaxExpr) -> Result<SyntaxPattern, String> {
         SyntaxExpr::Atom(name) => SyntaxPatternLiteral::Atom(name),
         SyntaxExpr::TaggedConstructor(_) => {
             return Err(
-                "a tag's constructor `path:` is not a pattern; write `path: Pattern`".to_owned(),
+                "a tag's constructor `(path:)` is not a pattern; write `path: Pattern`".to_owned(),
             );
         }
         _ => return Err(EXPECTED_PATTERN.to_owned()),

@@ -435,6 +435,7 @@ fn invalid_syntax_fixtures_have_explicit_lexical_classification() {
         "non_ascii_without_utf8.g",
         "path_whitespace.g",
         "reserved_keywords.g",
+        "tag_patterns.g",
         "tagged_spacing.g",
         "unknown_language_extension.g",
         "unknown_language_version.g",

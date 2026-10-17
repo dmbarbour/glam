@@ -778,7 +778,8 @@ maps the short names used here to file names.
   - A joint tag's payload is an atom, so a lambda after one needs the
     spaced form: `update: \event -> …`.
 - **Amended by:** `tags-need-payloads` (2026-10-17): only the section
-  `(foo:)` stands without a payload.
+  `(foo:)` stands without a payload. `tags-are-not-predicates-or-views`
+  (2026-10-17): `(foo:) p` is no tag pattern but an error.
 - **Rule lives in:** Syntax.md "Tagged Data" and "Dicts".
 - **Recorded in:** tag prefix plan.
 
@@ -797,6 +798,23 @@ maps the short names used here to file names.
   than its constructor.
 - **Rule lives in:** Syntax.md "Tagged Data".
 - **Recorded in:** tag prefix plan, `bare-tag-retirement`.
+
+### A tag is neither a predicate nor a view
+`tags-are-not-predicates-or-views` · 2026-10-17 · maintainer · accepted
+- **Context:** in a pattern, `F p` applies the predicate `F`, which passes
+  or fails, and `(f -> p)` the view `f`, which yields `.r View`. Under
+  `tags-are-prefix-operators`, `(foo:) p` was read as the tag pattern
+  `foo: p`, a reading no other application has, and the joint `a:Nat n`
+  as the predicate `a:Nat` over `n`, almost surely meant as `a: Nat n`.
+- **Decision:** a tag builds data, so the front end rejects tagged data or
+  a tag's constructor as a predicate or a view: `(foo:) p`, `{(foo:) p}`,
+  `a:Nat n`, `(:a n)`, `((foo:) -> p)` and `((foo: f) -> p)`. The message
+  names `path: Pattern`.
+- **Consequences:** compilers lack the whole namespace, so they do not
+  catch type errors in general, but they may reject those a pattern's
+  syntax shows.
+- **Rule lives in:** Syntax.md "Dicts" and "Pattern Matching".
+- **Recorded in:** tag prefix plan, `tag-predicate-view-rejection`.
 
 ### Keyword forms and lambdas stand alone only in tail position
 `tail-position` · 2026-10-16 · maintainer · superseded

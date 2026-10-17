@@ -541,7 +541,7 @@ P1 as P2            # both views
 {selector:key, [key]:P, rem}       # prior capture selects a computed key
 {selector:key, root.[key]:P, rem}  # computed hierarchical component
 {path:p, (p):P, rem}               # splice a computed list-valued path
-tag:P    'name      # tag:P ≡ tag: P ≡ (tag:) P; a bare tag: is no pattern
+tag:P    'name      # tag:P ≡ tag: P; (tag:) is no pattern
 {x: Nat n}          # a spaced payload is complete: tags a predicate,
 {x: f -> p}         #   a view, or {x: a as b} both captures
 [KeyExpr]:P       # computed singleton tag; prior captures are in scope
@@ -563,7 +563,8 @@ Prefix "x-" rest => Result # complete match arm may omit outer parentheses
 (P when Guard)      # local guard
 (P as Nat n)  (f -> Nat n)  (Nat n when G)  # also after `as`, `->`, before `when`
 # Loosest first: `when`, one view arrow, `as`; then as in expressions:
-# `[x] ++ Nat n` is an error (predicate needs parens), a:Nat n ≡ (a:Nat) n
+# `[x] ++ Nat n` is an error (predicate needs parens); a:Nat n ≡ (a:Nat) n
+# is an error too: a tag is never a predicate or a view. Write a: Nat n.
 ```
 
 ## Objects
