@@ -35,6 +35,7 @@ pub(in crate::g_syntax::parser) fn parse_pattern(
 /// Match-arm `=>` gives the left side an unambiguous end, so a top-level view
 /// arrow or predicate application does not need the parentheses required in
 /// do-binding and nested-pattern positions.
+#[cfg(test)]
 pub(in crate::g_syntax::parser) fn parse_complete_pattern(
     view: TokenView<'_, '_>,
 ) -> ParseResult<SyntaxPattern> {
@@ -48,9 +49,6 @@ fn parse_pattern_in(view: TokenView<'_, '_>, position: Position) -> ParseResult<
     term::parse_pattern_term(view, context, position).map_err(|fail| match fail {
         Fail::Error { at, message } => vec![term::diagnostic(view, at, message)],
         Fail::Reported(diagnostics) => diagnostics,
-        Fail::Unsupported(construct) => {
-            error_at_view(view, format!("a pattern cannot contain {construct}"))
-        }
     })
 }
 

@@ -59,9 +59,12 @@ SourceArtifact bytes
 `g_syntax/parser/lexical.rs` performs the one source-wide lexical pass. Its
 result owns normalized newline and whitespace facts, eagerly parsed numeric and
 text payloads, delimiter groups, indentation facts, and declaration sections.
-`parser/input.rs` is the checked adapter from that structure to Chumsky token
-parsers. Production parsers receive `TokenView` ranges and do not re-lex source
-substrings.
+`parser/input.rs` is the checked adapter from that structure to the Chumsky
+token parsers that read declaration heads. Expressions and patterns are read
+by the term parser (`parser/term.rs` and `term/`): one pass over a view's
+tokens with a stack of frames for every keyword form, layout block and group,
+which interprets each group once. Production parsers receive `TokenView`
+ranges and do not re-lex source substrings.
 
 `parser/logical.rs` owns the declaration-scoped macro rewrite pipeline. It
 discovers original invocations, constructs normalized macro input and layout

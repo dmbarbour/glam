@@ -4,17 +4,12 @@
 //! lexical pass. A statement expression is handed back to the complete token
 //! expression parser; no source substring is normalized or re-lexed.
 
-use crate::g_syntax::keywords::{canonical_keyword, reserved_keyword_message};
-use crate::g_syntax::{Diagnostic, DoExpr, DoStep, DoStepKind, SyntaxExpr, SyntaxPattern};
+use crate::g_syntax::{DoExpr, DoStep, DoStepKind, SyntaxExpr, SyntaxPattern};
 
-use super::expression_context::{ExpressionContext, ParsedExpression};
 use super::input::{TokenRange, TokenView};
-use super::layout::LayoutView;
-use super::lexical::{Delimiter, LeadingTrivia, SpannedToken, TokenKind};
-use super::pattern::{Binding, BindingSite, parse_binding, parse_pattern, pattern_binder};
-use super::structural::{is_layout_empty, keyword_head, single_reserved_keyword, trim_layout};
-
-type ParseResult<T> = Result<T, Vec<Diagnostic>>;
+use super::lexical::TokenKind;
+use super::pattern::{parse_pattern, pattern_binder};
+use super::structural::{keyword_head, trim_layout};
 
 pub(in crate::g_syntax::parser) enum ParsedDoStatement {
     Declare(Vec<String>),
@@ -27,168 +22,6 @@ pub(in crate::g_syntax::parser) enum ParsedDoStatement {
         value: SyntaxExpr,
     },
     Expr(SyntaxExpr),
-}
-
-/// Parses the `do` expression beginning at `do_index` and reports its exact
-/// lexical end. A braced form ends at its matching `}`; a layout form ends at
-/// the first boundary yielded by its inferred statement block.
-pub(in crate::g_syntax::parser) fn parse_do_expression(
-    view: TokenView<'_, '_>,
-    do_index: usize,
-    context: ExpressionContext,
-) -> ParseResult<ParsedExpression> {
-    let Some(do_token) = view.token_at(do_index) else {
-        return Err(error_at_view(
-            view,
-            "do expression starts outside its token view",
-        ));
-    };
-    if !token_is_name(do_token, "do") {
-        return Err(error_at_token(view, do_token, "expected `do`"));
-    }
-
-    let after_do = view_between(view, do_index + 1, view.range().end());
-    let Some((next_index, next)) = after_do.first_significant() else {
-        return Err(error_at_token(
-            view,
-            do_token,
-            "layout do expression requires a newline-delimited block",
-        ));
-    };
-    let separated = next.leading() != LeadingTrivia::Joint
-        || after_do
-            .tokens()
-            .iter()
-            .take(next_index - after_do.range().start())
-            .any(|token| matches!(token.kind(), TokenKind::LineStart { .. }));
-    if !separated {
-        return Err(error_at_token(
-            view,
-            do_token,
-            "`do` must be separated from its body",
-        ));
-    }
-    if let TokenKind::Open {
-        group: group_id,
-        delimiter: Delimiter::Brace,
-    } = next.kind()
-    {
-        let Some(group) = view.group(*group_id) else {
-            return Err(error_at_token(
-                view,
-                next,
-                "braced do expression refers to an unknown delimiter group",
-            ));
-        };
-        let Some(close) = group.close_token() else {
-            return Err(error_at_token(
-                view,
-                next,
-                "braced do expression has an unmatched or mismatched `}`",
-            ));
-        };
-        let Some(body) = view.group_contents(*group_id) else {
-            return Err(error_at_token(
-                view,
-                next,
-                "braced do expression body falls outside its token view",
-            ));
-        };
-        return parse_braced_body(body, do_token, context)
-            .map(|expr| ParsedExpression::new(expr, close + 1));
-    }
-
-    parse_layout_body(after_do, do_token, context)
-}
-
-fn parse_layout_body(
-    body: TokenView<'_, '_>,
-    do_token: &SpannedToken<'_>,
-    context: ExpressionContext,
-) -> ParseResult<ParsedExpression> {
-    let block = LayoutView::new(body).block();
-    if !block.statements().is_empty() && !context.accepts_layout_anchor(block.anchor()) {
-        return Err(vec![Diagnostic::error(
-            block.statements()[0].line(),
-            format!(
-                "do layout begins at indentation {}; expected more than continuation floor {}",
-                block.anchor(),
-                context.continuation_floor()
-            ),
-        )]);
-    }
-    if block.hanging() {
-        validate_hanging_statement_alignment(body, &block)?;
-    }
-    let end = block.end();
-    let statements = block.into_statements();
-    if statements.is_empty() {
-        return Err(error_at_token(
-            body,
-            do_token,
-            "layout do expression requires at least one statement",
-        ));
-    }
-    let statements = statements
-        .into_iter()
-        .map(|statement| {
-            let view = body
-                .subview(statement.tokens())
-                .expect("layout statements remain within the do body");
-            parse_statement(view, context).map(|statement_kind| (statement.line(), statement_kind))
-        })
-        .collect::<ParseResult<Vec<_>>>()?;
-    finish_do_statements(statements)
-        .map(|expr| ParsedExpression::new(expr, end))
-        .map_err(|message| error_at_token(body, do_token, message))
-}
-
-fn validate_hanging_statement_alignment(
-    body: TokenView<'_, '_>,
-    block: &super::layout::LayoutBlock,
-) -> ParseResult<()> {
-    if let Some(boundary) = block.boundary() {
-        let line_view = body
-            .subview(boundary.tokens())
-            .expect("a do layout boundary remains within the body");
-        if line_begins_do_statement(line_view) {
-            return Err(hanging_statement_alignment_error(
-                boundary.line(),
-                boundary.indentation(),
-                block.anchor(),
-            ));
-        }
-    }
-
-    for line in LayoutView::new(body).lines().into_iter().skip(1) {
-        if line.start() >= block.end() || line.indentation() <= block.anchor() {
-            continue;
-        }
-        let line_view = body
-            .subview(line.tokens())
-            .expect("layout lines remain within the do body");
-        if line_begins_do_statement(line_view) {
-            return Err(hanging_statement_alignment_error(
-                line.line(),
-                line.indentation(),
-                block.anchor(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn hanging_statement_alignment_error(
-    line: usize,
-    indentation: usize,
-    expected: usize,
-) -> Vec<Diagnostic> {
-    vec![Diagnostic::error(
-        line,
-        format!(
-            "hanging do statement is indented {indentation} spaces; expected sibling indentation {expected}"
-        ),
-    )]
 }
 
 /// Whether a continuation line reads as a statement of its own: a
@@ -209,55 +42,6 @@ pub(in crate::g_syntax::parser) fn line_begins_do_statement(view: TokenView<'_, 
                 )))
                 .is_ok()
             })
-}
-
-fn parse_braced_body(
-    body: TokenView<'_, '_>,
-    do_token: &SpannedToken<'_>,
-    context: ExpressionContext,
-) -> ParseResult<SyntaxExpr> {
-    if is_layout_empty(body) {
-        let line = body.line_at_span(do_token.span()).unwrap_or(1);
-        return Ok(empty_do_expr(line));
-    }
-
-    let mut statements = split_top_level(body, ";");
-    if statements
-        .first()
-        .is_some_and(|view| is_layout_empty(*view))
-    {
-        statements.remove(0);
-    }
-    if statements.last().is_some_and(|view| is_layout_empty(*view)) {
-        statements.pop();
-    }
-    if statements.is_empty() {
-        return Err(error_at_token(
-            body,
-            do_token,
-            "`do {;}` is invalid; a semicolon is not an empty computation",
-        ));
-    }
-
-    let statements = statements
-        .into_iter()
-        .map(trim_layout)
-        .map(|statement| {
-            if is_layout_empty(statement) {
-                return Err(error_at_token(
-                    body,
-                    do_token,
-                    "braced do block contains an empty statement between semicolons",
-                ));
-            }
-            let line = statement
-                .first_significant()
-                .and_then(|(_, token)| statement.line_at_span(token.span()))
-                .unwrap_or(1);
-            parse_statement(statement, context).map(|statement_kind| (line, statement_kind))
-        })
-        .collect::<ParseResult<Vec<_>>>()?;
-    finish_do_statements(statements).map_err(|message| error_at_token(body, do_token, message))
 }
 
 pub(in crate::g_syntax::parser) fn finish_do_statements(
@@ -312,66 +96,6 @@ pub(in crate::g_syntax::parser) fn empty_do_expr(line: usize) -> SyntaxExpr {
     })
 }
 
-fn parse_statement(
-    view: TokenView<'_, '_>,
-    parent_context: ExpressionContext,
-) -> ParseResult<ParsedDoStatement> {
-    let view = trim_layout(view);
-    let context = parent_context.child_owner(view);
-    if keyword_head(view, "declare").is_some() {
-        return parse_declare(view);
-    }
-    Ok(
-        match parse_binding(view, context, BindingSite::DoStatement)? {
-            Binding::Effect { pattern, operation } => {
-                ParsedDoStatement::Bind { pattern, operation }
-            }
-            Binding::Value { pattern, value } => ParsedDoStatement::ValueBind { pattern, value },
-            Binding::Operation(expr) => ParsedDoStatement::Expr(expr),
-        },
-    )
-}
-
-fn parse_declare(view: TokenView<'_, '_>) -> ParseResult<ParsedDoStatement> {
-    let (abstract_index, declare_token) = view
-        .first_significant()
-        .expect("declare statement has a leading token");
-    let names = trim_layout(view_between(view, abstract_index + 1, view.range().end()));
-    let names = split_top_level(names, ",")
-        .into_iter()
-        .map(trim_layout)
-        .map(|name| {
-            local_name(name)
-                .filter(|name| *name != "_")
-                .map(str::to_owned)
-                .ok_or_else(|| {
-                    if local_name(name) == Some("_") {
-                        error_at_view(
-                            name,
-                            "do `declare` statement cannot use the inaccessible `_` name",
-                        )
-                    } else if let Some(keyword) = single_reserved_keyword(name) {
-                        error_at_view(name, reserved_keyword_message(keyword))
-                    } else {
-                        error_at_token(
-                            view,
-                            declare_token,
-                            "do `declare` statement requires one or more comma-separated local names",
-                        )
-                    }
-                })
-        })
-        .collect::<ParseResult<Vec<_>>>()?;
-    if names.is_empty() {
-        return Err(error_at_token(
-            view,
-            declare_token,
-            "do `declare` statement requires one or more comma-separated local names",
-        ));
-    }
-    Ok(ParsedDoStatement::Declare(names))
-}
-
 fn top_level_symbols(view: TokenView<'_, '_>, expected: &str) -> Vec<usize> {
     view.top_level()
         .filter(|indexed| {
@@ -381,40 +105,6 @@ fn top_level_symbols(view: TokenView<'_, '_>, expected: &str) -> Vec<usize> {
         .collect()
 }
 
-fn split_top_level<'lex, 'source>(
-    view: TokenView<'lex, 'source>,
-    separator: &str,
-) -> Vec<TokenView<'lex, 'source>> {
-    let mut start = view.range().start();
-    let mut parts = Vec::new();
-    for separator in top_level_symbols(view, separator) {
-        parts.push(view_between(view, start, separator));
-        start = separator + 1;
-    }
-    parts.push(view_between(view, start, view.range().end()));
-    parts
-}
-
-fn local_name<'source>(view: TokenView<'_, 'source>) -> Option<&'source str> {
-    let mut significant = view
-        .tokens()
-        .iter()
-        .filter(|token| !matches!(token.kind(), TokenKind::LineStart { .. }));
-    let TokenKind::Name(name) = significant.next()?.kind() else {
-        return None;
-    };
-    let valid = *name == "_"
-        || name.starts_with(|character: char| character.is_ascii_alphabetic())
-        || name.strip_prefix('_').is_some_and(|rest| {
-            rest.starts_with(|character: char| character.is_ascii_alphabetic())
-        });
-    (valid && significant.next().is_none() && canonical_keyword(name).is_none()).then_some(*name)
-}
-
-fn token_is_name(token: &SpannedToken<'_>, expected: &str) -> bool {
-    matches!(token.kind(), TokenKind::Name(name) if *name == expected)
-}
-
 fn view_between<'lex, 'source>(
     view: TokenView<'lex, 'source>,
     start: usize,
@@ -422,25 +112,6 @@ fn view_between<'lex, 'source>(
 ) -> TokenView<'lex, 'source> {
     view.subview(TokenRange::new(start, end).expect("ordered token indices form a range"))
         .expect("subexpression range remains within its source view")
-}
-
-fn error_at_view(view: TokenView<'_, '_>, message: impl Into<String>) -> Vec<Diagnostic> {
-    let line = view
-        .first_significant()
-        .and_then(|(_, token)| view.line_at_span(token.span()))
-        .unwrap_or(1);
-    vec![Diagnostic::error(line, message)]
-}
-
-fn error_at_token(
-    view: TokenView<'_, '_>,
-    token: &SpannedToken<'_>,
-    message: impl Into<String>,
-) -> Vec<Diagnostic> {
-    vec![Diagnostic::error(
-        view.line_at_span(token.span()).unwrap_or(1),
-        message,
-    )]
 }
 
 #[cfg(test)]

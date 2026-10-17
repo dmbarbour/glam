@@ -165,11 +165,10 @@ nightly with the `miri` and `rust-src` components is installed; run
 nightly is available. There is no CI yet; the two scripts are the gates.
 
 Fuzz-style runs are judgement calls too, never routine, and none joins
-`scripts/check.sh` (`panic-discovery-by-inspection`). After parser changes
-that move work between the term parser and the grammar, sweep the
-differential oracle over every expression the tests parse
-(`GLAM_TERM_ORACLE=1 cargo test --lib`, about a minute), and multiply the
-generated cases with `GLAM_TERM_FUZZ=<n>` when a change widens what the
+`scripts/check.sh` (`panic-discovery-by-inspection`). After parser changes,
+multiply the generated trees that must print and parse back to themselves
+with `GLAM_ROUND_TRIP=<n>`, and the generated sources the parser must read
+without panicking with `GLAM_TERM_FUZZ=<n>`, when a change widens what the
 generators cover.
 
 Dynamic tools detect defects; they are not ordering evidence. A clean

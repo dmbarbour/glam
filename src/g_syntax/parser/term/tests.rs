@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use super::super::expression::term_oracle::{Report, observe, suspended};
 use super::super::expression_context::ExpressionContext;
 use super::super::parse_source;
 use crate::g_syntax::{Severity, SyntaxExpr};
@@ -9,32 +8,18 @@ fn source(expression: &str) -> Vec<u8> {
     format!("language g0\nx = {expression}\n").into_bytes()
 }
 
-fn oracle_over(sources: impl IntoIterator<Item = Vec<u8>>) -> Report {
-    observe(|| {
-        for source in sources {
-            let _ = parse_source(&source);
-        }
-    })
-}
-
-#[track_caller]
-fn assert_agrees(report: &Report, minimum_compared: usize) {
-    assert!(
-        report.disagreements.is_empty(),
-        "the term parser disagrees with the Chumsky grammar:\n{}",
-        report.disagreements.join("\n")
-    );
-    assert!(
-        report.compared >= minimum_compared,
-        "the oracle compared only {} expressions ({} unsupported: {:?})",
-        report.compared,
-        report.unsupported,
-        report.unsupported_reasons
-    );
-    eprintln!(
-        "term oracle: {} compared ({} accepted), unsupported {:?}",
-        report.compared, report.accepted, report.unsupported_reasons
-    );
+/// Parses every source, valid or not, to its end: the parser reports what
+/// it rejects and never panics. Returns how many it accepted.
+fn parse_all(sources: impl IntoIterator<Item = Vec<u8>>) -> usize {
+    sources
+        .into_iter()
+        .filter(|source| {
+            parse_source(source)
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.severity != Severity::Error)
+        })
+        .count()
 }
 
 /// Edge cases of every covered construct, valid and invalid alike: the two
@@ -360,9 +345,8 @@ const SNIPPETS: &[&str] = &[
 ];
 
 #[test]
-fn term_parser_agrees_on_edge_cases() {
-    let report = oracle_over(SNIPPETS.iter().map(|snippet| source(snippet)));
-    assert_agrees(&report, SNIPPETS.len() / 2);
+fn term_parser_reads_edge_cases() {
+    assert!(parse_all(SNIPPETS.iter().map(|snippet| source(snippet))) >= SNIPPETS.len() / 2);
 }
 
 fn nested(depth: usize, (open, close, inner): (&str, &str, &str)) -> String {
@@ -386,14 +370,13 @@ const NESTING_SHAPES: &[(&str, &str, &str)] = &[
 ];
 
 #[test]
-fn term_parser_agrees_on_nesting() {
+fn term_parser_reads_nesting() {
     let sources = (1..=6).flat_map(|depth| {
         NESTING_SHAPES
             .iter()
             .map(move |shape| source(&nested(depth, *shape)))
     });
-    let report = oracle_over(sources);
-    assert_agrees(&report, 50);
+    assert_eq!(parse_all(sources), 6 * NESTING_SHAPES.len());
 }
 
 fn sample_files() -> Vec<PathBuf> {
@@ -414,15 +397,14 @@ fn sample_files() -> Vec<PathBuf> {
 }
 
 #[test]
-fn term_parser_agrees_on_every_sample() {
+fn term_parser_reads_every_sample() {
     let files = sample_files();
     assert!(!files.is_empty());
-    let report = oracle_over(
+    parse_all(
         files
             .iter()
             .map(|path| std::fs::read(path).expect("samples are readable")),
     );
-    assert_agrees(&report, 100);
 }
 
 /// A seeded xorshift generator, so generated cases are reproducible without a
@@ -651,23 +633,21 @@ fn generated_sources(
 }
 
 #[test]
-fn term_parser_agrees_on_generated_token_soup() {
-    let report = oracle_over(generated_sources(
+fn term_parser_reads_generated_token_soup() {
+    parse_all(generated_sources(
         0x5eed_0001,
         generated_count(10_000),
         |generator, out| generator.soup(0, out),
     ));
-    assert_agrees(&report, 3_000);
 }
 
 #[test]
-fn term_parser_agrees_on_generated_expressions() {
-    let report = oracle_over(generated_sources(
+fn term_parser_reads_generated_expressions() {
+    parse_all(generated_sources(
         0x5eed_0002,
         generated_count(800),
         |generator, out| generator.expression(0, out),
     ));
-    assert_agrees(&report, 600);
 }
 
 /// Parses and resolves `text` with the term parser alone, within `limit`.
@@ -761,10 +741,8 @@ fn keyword_frame_nesting_parses_in_linear_time_without_recursion() {
 /// frames read as the rest of the grammar does.
 #[test]
 fn conditional_frames_read_branches_as_expressions() {
-    // The Chumsky grammar delegates to the structural parsers, which reject
-    // these, so the oracle stays off.
     let parse = |text: &str| {
-        suspended(|| super::super::structural::parse_compound_expression_fragment(text.as_bytes()))
+        super::super::structural::parse_compound_expression_fragment(text.as_bytes())
             .unwrap_or_else(|diagnostics| panic!("{text}: {diagnostics:?}"))
     };
     // A form in a parenthesized branch ended at its group, past `else`.
@@ -870,9 +848,7 @@ fn assert_each_group_interpreted_once(shapes: &[(&str, &str, &str)]) {
             .filter(|c| matches!(c, '(' | '[' | '{'))
             .count();
         super::INTERPRETED_GROUPS.with(|count| count.set(0));
-        let parsed = suspended(|| {
-            super::super::structural::parse_compound_expression_fragment(text.as_bytes())
-        });
+        let parsed = super::super::structural::parse_compound_expression_fragment(text.as_bytes());
         let interpreted = super::INTERPRETED_GROUPS.with(std::cell::Cell::get);
         let preview: String = text.chars().take(24).collect();
         assert!(parsed.is_ok(), "{preview}…: {parsed:?}");
@@ -907,12 +883,10 @@ fn pattern_nesting_interprets_each_group_once() {
             .filter(|c| matches!(c, '(' | '[' | '{'))
             .count();
         super::INTERPRETED_GROUPS.with(|count| count.set(0));
-        let parsed = suspended(|| {
-            super::super::input::parse_expression_fragment(
-                text.as_bytes(),
-                super::super::pattern::parse_pattern,
-            )
-        });
+        let parsed = super::super::input::parse_expression_fragment(
+            text.as_bytes(),
+            super::super::pattern::parse_pattern,
+        );
         let interpreted = super::INTERPRETED_GROUPS.with(std::cell::Cell::get);
         let preview: String = text.chars().take(24).collect();
         assert!(parsed.is_ok(), "{preview}…: {parsed:?}");
@@ -993,9 +967,11 @@ const KEYWORDS_AS_KEYS: &[&str] = &[
 ];
 
 #[test]
-fn keywords_as_keys_agree_with_the_grammar() {
-    let report = oracle_over(KEYWORDS_AS_KEYS.iter().map(|text| source(text)));
-    assert_agrees(&report, KEYWORDS_AS_KEYS.len() / 2);
+fn keywords_as_keys_parse() {
+    // A keyword rooting a path is an error; the rest are keys.
+    assert!(
+        parse_all(KEYWORDS_AS_KEYS.iter().map(|text| source(text))) >= KEYWORDS_AS_KEYS.len() / 2
+    );
 }
 
 /// Regions only decide which parser interprets a group: the parse with them
@@ -1135,6 +1111,4 @@ fn tail_forms_stand_alone_only_in_tail_position() {
             parsed.diagnostics
         );
     }
-    let report = oracle_over(OUTSIDE.iter().chain(INSIDE).map(|text| source(text)));
-    assert_agrees(&report, OUTSIDE.len() + INSIDE.len());
 }

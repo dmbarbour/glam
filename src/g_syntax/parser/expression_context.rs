@@ -1,11 +1,9 @@
-//! Floors and extent policy for one contextual expression parse.
+//! Floors and the arrow policy for one contextual expression parse.
 //!
 //! An owner establishes the exclusive physical floor for its continuations.
-//! Nested owners validate only their newly stricter interval. `MayYield`
-//! permits a structural expression to return an exact dedent boundary for an
-//! enclosing postfix or infix parser; a complete hard range rejects that tail.
-//! Where a pattern follows an operation after `->`, as in a binding or a
-//! view, an open tail ends at a top-level `->` instead of running over it.
+//! Nested owners validate only their newly stricter interval. Where a
+//! pattern follows an operation after `->`, as in a binding or a view, an
+//! open tail ends at a top-level `->` instead of running over it.
 
 use super::super::Diagnostic;
 use super::super::SyntaxExpr;
@@ -14,17 +12,10 @@ use super::input::{TokenRange, TokenView};
 use super::lexical::TokenKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ExpressionExtent {
-    CompleteHardRange,
-    MayYield,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ExpressionContext {
     continuation_floor: usize,
     validated_through: Option<usize>,
     floor_enforced: bool,
-    extent: ExpressionExtent,
     /// Whether an open tail ends at a top-level `->`: an `else` branch, a
     /// `let` or `using` body, a postfix `if`'s fallback, or a lambda body.
     arrow_ends_tail: bool,
@@ -36,7 +27,6 @@ impl ExpressionContext {
             continuation_floor: owner_indentation(view).unwrap_or(0),
             validated_through: None,
             floor_enforced: true,
-            extent: ExpressionExtent::CompleteHardRange,
             arrow_ends_tail: false,
         }
     }
@@ -47,7 +37,6 @@ impl ExpressionContext {
             continuation_floor: view.line_indentation_at(first).unwrap_or(0),
             validated_through: None,
             floor_enforced: true,
-            extent: ExpressionExtent::CompleteHardRange,
             arrow_ends_tail: false,
         }
     }
@@ -60,7 +49,6 @@ impl ExpressionContext {
             continuation_floor: owner_indentation(view).unwrap_or(0),
             validated_through: Some(usize::MAX),
             floor_enforced: false,
-            extent: ExpressionExtent::CompleteHardRange,
             arrow_ends_tail: false,
         }
     }
@@ -75,7 +63,6 @@ impl ExpressionContext {
                     }),
             ),
             floor_enforced: true,
-            extent: ExpressionExtent::CompleteHardRange,
             arrow_ends_tail: self.arrow_ends_tail,
         }
     }
@@ -93,24 +80,14 @@ impl ExpressionContext {
                     }),
             ),
             floor_enforced: true,
-            extent: ExpressionExtent::CompleteHardRange,
             arrow_ends_tail: self.arrow_ends_tail,
         }
     }
 
+    /// A context in which no `->` ends an open tail.
     pub(super) fn complete(self) -> Self {
         Self {
-            extent: ExpressionExtent::CompleteHardRange,
             arrow_ends_tail: false,
-            ..self
-        }
-    }
-
-    /// A complete hard range that still ends at a `->` where this context
-    /// does: the body of a tail or of a suffix form.
-    pub(super) fn complete_keeping_arrow(self) -> Self {
-        Self {
-            extent: ExpressionExtent::CompleteHardRange,
             ..self
         }
     }
@@ -125,13 +102,6 @@ impl ExpressionContext {
 
     pub(super) fn arrow_ends_tail(self) -> bool {
         self.arrow_ends_tail
-    }
-
-    pub(super) fn may_yield(self) -> Self {
-        Self {
-            extent: ExpressionExtent::MayYield,
-            ..self
-        }
     }
 
     pub(super) fn continuation_floor(self) -> usize {
@@ -178,10 +148,6 @@ impl ExpressionContext {
             ..self
         }
     }
-
-    pub(super) fn permits_yield(self) -> bool {
-        self.extent == ExpressionExtent::MayYield
-    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -204,10 +170,6 @@ impl ParsedExpression {
 
     pub(super) fn end(&self) -> usize {
         self.end
-    }
-
-    pub(super) fn into_chain(self) -> InfixChain {
-        self.expression
     }
 
     pub(super) fn into_expression(self) -> Result<SyntaxExpr, String> {
@@ -341,12 +303,11 @@ mod tests {
     use crate::g_syntax::parser::input::parse_expression_fragment;
 
     #[test]
-    fn owner_context_uses_physical_indentation_and_preserves_it_for_hard_ranges() {
+    fn owner_context_uses_physical_indentation() {
         parse_expression_fragment(b"  value", |view| {
             let owner = ExpressionContext::for_owner(view);
             assert_eq!(owner.continuation_floor(), 2);
-            assert!(!owner.permits_yield());
-            assert_eq!(owner.may_yield().complete(), owner);
+            assert_eq!(owner.ending_at_arrow().complete(), owner);
             Ok(())
         })
         .unwrap();

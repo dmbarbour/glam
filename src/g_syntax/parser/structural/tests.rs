@@ -14,14 +14,6 @@ fn token_object_header(source: &str) -> ObjectHeader {
     .unwrap()
 }
 
-fn token_with_header(source: &str) -> WithHeader {
-    super::super::input::parse_expression_fragment(source.as_bytes(), |view| {
-        parse_with_header(view, ExpressionContext::for_owner(view))
-            .expect("source should contain a with-expression header")
-    })
-    .unwrap()
-}
-
 #[test]
 fn let_and_where_parse() {
     for source in [
@@ -427,10 +419,10 @@ fn token_keywords_ignore_nested_groups_and_text() {
         } if alias == "alias" && deps.len() == 2
     ));
 
-    let with = token_with_header("(choose 'as value) as alias with\n  value = \"as with = where\"");
+    let with = parse_structural("(choose 'as value) as alias with\n  value = \"as with = where\"");
     assert!(matches!(
         with,
-        WithHeader {
+        SyntaxExpr::With {
             alias: Some(alias),
             ..
         } if alias == "alias"
@@ -486,20 +478,19 @@ fn object_headers_match_the_complete_structural_parse() {
 }
 
 #[test]
-fn with_headers_match_the_complete_structural_parse() {
-    for source in [
-        "{x:1} with\n  x := 2",
-        "{x:1} with { x := 2 }",
-        "base as prior with\n  x := _prior.x",
-        "base as prior with {; x := _prior.x; }",
-        "base as _ with\n  x := 2",
-        "base as _ with {}",
+fn update_aliases_name_the_update() {
+    for (source, expected) in [
+        ("{x:1} with\n  x := 2", None),
+        ("{x:1} with { x := 2 }", None),
+        ("base as prior with\n  x := _prior.x", Some("prior")),
+        ("base as prior with {; x := _prior.x; }", Some("prior")),
+        ("base as _ with\n  x := 2", None),
+        ("base as _ with {}", None),
     ] {
-        let parsed = parse_structural(source);
-        let SyntaxExpr::With { base, alias, .. } = parsed else {
+        let SyntaxExpr::With { alias, .. } = parse_structural(source) else {
             panic!("parser did not produce a with expression");
         };
-        assert_eq!(token_with_header(source), WithHeader { base, alias });
+        assert_eq!(alias.as_deref(), expected, "{source}");
     }
 }
 

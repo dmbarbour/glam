@@ -1,6 +1,7 @@
 //! Parsing façade for G source files and expressions.
 
-mod conditional;
+#[cfg(test)]
+mod conditional_tests;
 mod declaration;
 mod do_expr;
 mod expression;

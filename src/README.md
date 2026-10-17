@@ -39,7 +39,9 @@ not define language semantics or collect subsystem invariants.
 | `g_syntax/parser/logical.rs` | Declaration-scoped macro input/layout discovery, generated-output validation, embedded-value rendering, and source replay |
 | `g_syntax/parser/input.rs` | Checked token views and Chumsky input over the authoritative lexical structure |
 | `g_syntax/parser/layout.rs`, `expression_context.rs` | Layout ownership, floors, and expression boundaries |
-| `g_syntax/parser/expression.rs`, `structural.rs`, `do_expr.rs`, `conditional.rs` | Expression and structural syntax |
+| `g_syntax/parser/term.rs`, `term/` | The term parser: one token pass with a stack of frames for every expression form, and the item interpreter |
+| `g_syntax/parser/expression.rs`, `structural.rs`, `do_expr.rs` | Infix chains, the entry points to the term parser for bodies and views, and helpers shared with declarations |
+| `g_syntax/parser/printer.rs` | Test-only printer of expression trees, for the round-trip test; a start on the formatter |
 | `g_syntax/parser/pattern.rs` | Pattern positions, parsed in the term parser's cover mode, and the binding rule for do statements and guard clauses |
 | `g_syntax/parser/declaration.rs`, `declaration/` | Top-level and recursive declarations |
 | `g_syntax/keywords.rs` | Language-version keyword ownership |

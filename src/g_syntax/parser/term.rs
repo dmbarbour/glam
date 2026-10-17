@@ -62,19 +62,14 @@
 //! opens a keyword region, and the guard-clause parser reads its clauses. A
 //! term converts by role once the role is known; ordinary expression parses
 //! never build terms that are not expressions.
-//!
-//! **Coverage.** Constructs not yet covered report `Fail::Unsupported`:
-//! keywords as lambda parameters, and invalid tokens.
 
 use std::cell::RefCell;
 
 use crate::g_syntax::keywords::{canonical_keyword, g0_keyword, reserved_keyword_message};
 use crate::g_syntax::{PathSuffix, SyntaxExpr, SyntaxKeyExpr, SyntaxOperator, SyntaxPattern};
 
-use super::conditional::is_postfix_if_candidate;
 use super::expression::{
-    InfixChain, StructuralAtomParser, access_if_path, parse_postfix_if_tail, parse_structural_atom,
-    quoted_path, structural_atom_parser, syntax_operator, validate_dict_colon_members,
+    InfixChain, access_if_path, quoted_path, syntax_operator, validate_dict_colon_members,
     validate_expr_name,
 };
 use super::expression_context::ExpressionContext;
@@ -94,8 +89,6 @@ mod pass;
 /// Why the term parser produced no syntax tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Fail {
-    /// The view uses a construct this parser does not cover yet.
-    Unsupported(&'static str),
     /// The view is not a valid expression. `at` is the token where parsing
     /// stopped, when known.
     Error { at: Option<usize>, message: String },
@@ -191,11 +184,6 @@ pub(super) fn parse_where_group(
     pass::where_group(scope, where_index).map_err(|fail| match fail {
         Fail::Error { at, message } => vec![diagnostic(view, at, message)],
         Fail::Reported(diagnostics) => diagnostics,
-        Fail::Unsupported(reason) => vec![diagnostic(
-            view,
-            Some(where_index),
-            format!("unsupported `where` bindings: {reason}"),
-        )],
     })
 }
 
@@ -223,16 +211,17 @@ pub(super) fn parse_pattern_term(
         .map_err(Fail::error)
 }
 
-/// Rejects, before any group is interpreted, constructs this parser does not
-/// cover yet, so an uncovered construct is never misreported as an error.
+/// Rejects, before any group is interpreted, a token the lexer could not
+/// read.
 fn prescan(view: TokenView<'_, '_>) -> Parse<()> {
-    if view.tokens().iter().any(|token| {
-        matches!(
-            token.kind(),
-            TokenKind::InvalidNumber(_) | TokenKind::Unknown(_)
-        )
-    }) {
-        return Err(Fail::Unsupported("an invalid token"));
+    let range = view.range();
+    for (offset, token) in view.tokens().iter().enumerate() {
+        let message = match token.kind() {
+            TokenKind::InvalidNumber(text) => format!("invalid number literal `{text}`"),
+            TokenKind::Unknown(character) => format!("unexpected character `{character}`"),
+            _ => continue,
+        };
+        return Err(Fail::error(message).or_at(Some(range.start() + offset)));
     }
     Ok(())
 }
@@ -275,18 +264,6 @@ fn opens_keyword_region(view: TokenView<'_, '_>, index: usize, mode: Mode) -> bo
     regions_enabled()
         && (may_head_keyword_form(view, index)
             || mode == Mode::Cover && is_pattern_when(view, index))
-}
-
-/// Whether the term parser reads the grammar the structural parsers know,
-/// before the grammar review's rules (Syntax.md "Tail Position" and the
-/// review's decisions): only while the oracle compares the two, since the
-/// structural parsers retire before they would learn the rules.
-pub(super) fn legacy_grammar() -> bool {
-    #[cfg(test)]
-    if LEGACY_GRAMMAR.with(std::cell::Cell::get) {
-        return true;
-    }
-    false
 }
 
 /// The error for a tail form at `head` that `follower` follows, so that it
@@ -359,7 +336,8 @@ pub(super) fn may_head_keyword_form(view: TokenView<'_, '_>, index: usize) -> bo
     let TokenKind::Name(name) = head.kind() else {
         return false;
     };
-    structural_atom_parser(name).is_some() && heads_form(view, index)
+    matches!(*name, "if" | "try" | "match" | "try_match" | "using" | "do")
+        && heads_form(view, index)
 }
 
 /// Whether the keyword at `index` heads its form where it stands: it is no
@@ -704,16 +682,6 @@ thread_local! {
     /// check no group is interpreted twice.
     static INTERPRETED_GROUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static REGIONS_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static LEGACY_GRAMMAR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Runs `work` reading the legacy grammar on this thread, for the oracle.
-#[cfg(test)]
-pub(super) fn with_legacy_grammar<R>(work: impl FnOnce() -> R) -> R {
-    let was = LEGACY_GRAMMAR.with(|legacy| legacy.replace(true));
-    let result = work();
-    LEGACY_GRAMMAR.with(|legacy| legacy.set(was));
-    result
 }
 
 /// Runs `work` with no keyword regions on this thread, for tests that check
@@ -1291,21 +1259,14 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     }
 
     /// An update's body (`FormShape::With`), whose base is the chain before
-    /// it at its level; the legacy grammar's was the whole item before it.
-    /// The update is the operand that what follows continues.
-    fn with_update(&mut self, levels: &mut Vec<Level>) -> Parse<()> {
+    /// it at its level. The update is the operand that what follows
+    /// continues.
+    fn with_update(&mut self, levels: &mut [Level]) -> Parse<()> {
         let Some(Piece::Form { form, .. }) = self.peek() else {
             unreachable!("with_update is called on an update's form");
         };
         let form = self.scope.covers.take_form(*form);
         self.position += 1;
-        if legacy_grammar() && levels.len() > 1 {
-            let chain = self.close_levels(std::mem::take(levels))?;
-            levels.push(Level {
-                chain,
-                lambda: None,
-            });
-        }
         let level = levels.last_mut().expect("an item always has a level");
         let chain = std::mem::take(&mut level.chain);
         let anchors = chain.anchors.clone();
@@ -1329,11 +1290,9 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     }
 
     /// Whether the piece at `offset` is a `where` that the body around the
-    /// expression takes; a pattern has none. The legacy grammar's view-level
-    /// dispatch found every one.
+    /// expression takes; a pattern has none.
     fn where_at(&self, offset: usize) -> bool {
-        !legacy_grammar()
-            && self.scope.mode == Mode::Expression
+        self.scope.mode == Mode::Expression
             && match self.peek_at(offset) {
                 Some(Piece::Token(index)) => {
                     matches!(
@@ -1596,11 +1555,6 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                 self.scope.covers.form_shape(*form),
                 (FormShape::Postfix | FormShape::Unfinished, "if")
             ),
-            Some(Piece::Token(index)) => {
-                matches!(token(self.scope.view, *index).kind(), TokenKind::Name("if"))
-                    && !self.named_tag_at(offset)
-                    && is_postfix_if_candidate(self.scope.view, *index)
-            }
             _ => false,
         }
     }
@@ -1611,30 +1565,18 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     /// no lambda is open. Nothing but a stop (see `stops_at`) may follow it
     /// in the item.
     fn postfix_if(&mut self, levels: &mut [Level]) -> Parse<()> {
-        let (if_index, result) = match self.peek() {
-            Some(Piece::Form { form, .. }) => {
-                let form = self.scope.covers.take_form(*form);
-                self.position += 1;
-                let result = match form.shape {
-                    FormShape::Unfinished => Err(Fail::error(
-                        "postfix `if` requires `else` and a fallback result",
-                    )
-                    .or_at(Some(form.head))),
-                    _ => form.result,
-                };
-                (form.head, result)
-            }
-            _ => {
-                let if_index = self.here().expect("a postfix `if` is a piece");
-                let parsed = parse_postfix_if_tail(self.scope.view, if_index, self.scope.context)
-                    .map_err(Fail::Reported)?;
-                self.position += 1;
-                self.skip_to_token(parsed.end())?;
-                let result = parsed
-                    .into_expression()
-                    .map_err(|message| Fail::error(message).or_at(Some(if_index)));
-                (if_index, result)
-            }
+        let Some(Piece::Form { form, .. }) = self.peek() else {
+            unreachable!("a postfix `if` is a form piece");
+        };
+        let form = self.scope.covers.take_form(*form);
+        self.position += 1;
+        let if_index = form.head;
+        let result = match form.shape {
+            FormShape::Unfinished => Err(Fail::error(
+                "postfix `if` requires `else` and a fallback result",
+            )
+            .or_at(Some(form.head))),
+            _ => form.result,
         };
         let (breaks, _) = self.line_starts_at(0);
         if self.peek_at(breaks).is_some() && !self.stops_at(breaks) {
@@ -1655,60 +1597,6 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             .chain
             .push_operand(Term::Expr(SyntaxExpr::If(postfix)));
         Ok(())
-    }
-
-    /// Advances past every piece that starts before token `end`, where a
-    /// structural parser stopped.
-    fn skip_to_token(&mut self, end: usize) -> Parse<()> {
-        while let Some(piece) = self.peek() {
-            if piece_token(piece) >= end {
-                return Ok(());
-            }
-            if let Piece::Group { close, .. } = piece
-                && *close >= end
-            {
-                return Err(Fail::Unsupported("a structural form ending inside a group"));
-            }
-            if let Piece::Form { end: form_end, .. } = piece
-                && *form_end > end
-            {
-                return Err(Fail::Unsupported(
-                    "a structural form ending inside a conditional",
-                ));
-            }
-            self.position += 1;
-        }
-        // A form may end past the item only over layout the item trimmed.
-        let item_end = self.pieces.last().map_or(0, |piece| match piece {
-            Piece::Token(index) => index + 1,
-            Piece::Group { close, .. } => close + 1,
-            Piece::Form { end, .. } => *end,
-        });
-        let only_layout = (item_end..end).all(|index| {
-            self.scope
-                .view
-                .token_at(index)
-                .is_some_and(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
-        });
-        if !only_layout {
-            return self.error_here("structural expression extends beyond its token range");
-        }
-        Ok(())
-    }
-
-    /// A keyword form delegated to its structural parser, with path
-    /// suffixes.
-    fn structural_atom(&mut self, parse: StructuralAtomParser) -> Parse<SyntaxExpr> {
-        let head = self.here().expect("a keyword head is a piece");
-        let parsed = parse_structural_atom(self.scope.view, head, self.scope.context, parse)
-            .map_err(Fail::Reported)?;
-        self.position += 1;
-        self.skip_to_token(parsed.end())?;
-        let expression = parsed
-            .into_expression()
-            .map_err(|message| Fail::error(message).or_at(Some(head)))?;
-        let suffixes = self.path_suffixes()?;
-        Ok(access_if_path(expression, suffixes))
     }
 
     /// `abstract_global_path` and a static name path, after a space or line
@@ -1777,8 +1665,8 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             if !is_local {
                 return self.expected("a lambda parameter");
             }
-            if canonical_keyword(name).is_some() {
-                return Err(Fail::Unsupported("a keyword lambda parameter"));
+            if let Some(keyword) = canonical_keyword(name) {
+                return self.error_here(reserved_keyword_message(keyword));
             }
             params.push((*name).to_owned());
             self.position += 1;
@@ -1812,9 +1700,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             }
             // A tail form stands only where nothing but an operator or a
             // keyword follows it.
-            if let Some((head, keyword)) = form
-                && !legacy_grammar()
-            {
+            if let Some((head, keyword)) = form {
                 return Err(misplaced_tail(head, &form_label(keyword), "an argument"));
             }
             form = self.prefix_form_at(breaks);
@@ -1914,18 +1800,10 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                 Some(Piece::Token(_)) => match self.kind() {
                     Some(TokenKind::Symbol(":")) => break Term::Expr(self.constructor()?),
                     Some(TokenKind::Name(name)) if is_glam_name(name) => {
-                        // A keyword heads a form unless it is a tag's key.
-                        if !self.named_tag_at(0) {
-                            if *name == "abstract_global_path" {
-                                break Term::Expr(self.abstract_global_path()?);
-                            }
-                            if let Some(parse) = structural_atom_parser(name)
-                                && self.here().is_some_and(|head| {
-                                    may_head_keyword_form(self.scope.view, head)
-                                })
-                            {
-                                break Term::Expr(self.structural_atom(parse)?);
-                            }
+                        // `abstract_global_path` heads its form unless it is
+                        // a tag's key; the pass made every other form a piece.
+                        if *name == "abstract_global_path" && !self.named_tag_at(0) {
+                            break Term::Expr(self.abstract_global_path()?);
                         }
                         let path = self.named_path(name)?;
                         if self.symbol_at(0, ":") && self.joint_at(0) && self.joint_at(1) {
@@ -1987,7 +1865,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             }
         };
         let suffixes = self.path_suffixes()?;
-        if !suffixes.is_empty() && !legacy_grammar() {
+        if !suffixes.is_empty() {
             return Err(misplaced_tail(
                 form.head,
                 &form_label(form.keyword),

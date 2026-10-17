@@ -62,9 +62,8 @@
 //! members from their views. An update closes into a form piece whose base
 //! the item interpreter takes from the chain before it.
 //!
-//! The legacy grammar's view-level dispatch parsed `let`, `where`, `with`
-//! and `object` from a branch's view; a branch holding one of them where
-//! the legacy reading leaves it a token is still parsed that way.
+//! A lone keyword that heads nothing stays a token, which the item reports
+//! as a reserved word.
 
 use crate::g_syntax::{
     ConditionalMode, ConditionalResultMode, IfExpr, MatchArm, MatchCommitment, MatchExpr,
@@ -87,8 +86,8 @@ use super::binding::{self, NestedArms, needs_view_dispatch};
 use super::{
     Bindings, Cover, Deferred, Fail, GroupBody, Items, Mode, ParenCover, Parse, Piece, Scope, Term,
     conditional_argument, ends_operand, form_label, heads_form, interpret_group, is_symbol,
-    legacy_grammar, may_head_keyword_form, misplaced_tail, opens_keyword_region, piece_token,
-    regions_enabled, token, trim_padding,
+    may_head_keyword_form, misplaced_tail, opens_keyword_region, piece_token, regions_enabled,
+    token, trim_padding,
 };
 
 /// One frame on the pass's stack.
@@ -139,8 +138,6 @@ struct Frame {
     arms_owner: Option<usize>,
     /// The stack index of the group or view whose depth its tokens are at.
     level: usize,
-    /// For a group or the view, the last scan along a line for arm marks.
-    mark_scan: Option<MarkScan>,
     /// Whether it holds an object or update body, whose members the
     /// declaration parser reads from their views: its tokens and groups are
     /// only kept, and its lines judged.
@@ -379,15 +376,6 @@ enum ArmList {
     When(Vec<WhenArm>),
 }
 
-/// A scan along a line for arm marks (see `Pass::line_mark`): from `from`,
-/// the first mark or end of the line at the scan's depth is at `to`.
-#[derive(Clone, Copy)]
-struct MarkScan {
-    from: usize,
-    to: usize,
-    mark: bool,
-}
-
 impl Arms {
     fn new(head: usize, kind: ArmsKind, context: ExpressionContext) -> Self {
         Self {
@@ -429,13 +417,6 @@ impl Arms {
     /// arms after a `{` are always braced.
     fn brace_may_begin_arm(&self) -> bool {
         self.kind != ArmsKind::Nested
-    }
-
-    fn arm_label(&self) -> &'static str {
-        match self.kind {
-            ArmsKind::Match { .. } => "match arm",
-            _ => "match-when arm",
-        }
     }
 
     fn body_label(&self) -> String {
@@ -529,7 +510,6 @@ fn form_context(
         .map_or(context, |indentation| {
             context.with_physical_line_floor(indentation)
         })
-        .may_yield()
 }
 
 impl Frame {
@@ -562,7 +542,6 @@ impl Frame {
             match_owner: None,
             arms_owner: None,
             level: 0,
-            mark_scan: None,
             raw: false,
         }
     }
@@ -689,15 +668,14 @@ impl Conditional {
     /// The conditional's own context: a prefix form's is floored at its
     /// head's line, as for every delegated keyword form.
     fn context(&self, view: TokenView<'_, '_>) -> ExpressionContext {
-        let context = if self.postfix() {
+        if self.postfix() {
             self.enclosing
         } else {
             view.line_indentation_at(self.head)
                 .map_or(self.enclosing, |indentation| {
                     self.enclosing.with_physical_line_floor(indentation)
                 })
-        };
-        context.may_yield()
+        }
     }
 
     fn fail(&mut self, at: usize, message: impl Into<String>) {
@@ -868,7 +846,10 @@ impl Pass<'_, '_, '_> {
         view.group(group)
             .and_then(|group| group.close_token())
             .filter(|close| *close < view.range().end())
-            .ok_or(Fail::Unsupported("a delimiter group crossing the view"))?;
+            .ok_or_else(|| {
+                Fail::error("a delimiter group crosses the end of its expression")
+                    .or_at(Some(index))
+            })?;
         let pending = self.top().pending.take();
         self.significant(index);
         let parent = self.top();
@@ -1089,7 +1070,6 @@ impl Pass<'_, '_, '_> {
             })
         } else if view_level
             && delimiter == Delimiter::Parenthesis
-            && !legacy_grammar()
             && !body.pieces.iter().any(|piece| is_symbol(view, piece, ","))
         {
             // A parenthesized expression is a body, whose keyword forms
@@ -1144,7 +1124,7 @@ impl Pass<'_, '_, '_> {
                 phase => {
                     let owner = conditional.context(view).child_owner_at(view, index);
                     let owner = if phase == Phase::Else {
-                        owner.complete_keeping_arrow()
+                        owner
                     } else {
                         owner.complete()
                     };
@@ -1209,7 +1189,6 @@ impl Pass<'_, '_, '_> {
             FrameKind::Scoped(scoped) => {
                 let owner = scoped.context.child_owner_at(view, index);
                 top.context = if scoped.phase == ScopedPhase::Body {
-                    let owner = owner.complete_keeping_arrow();
                     scoped.body_context = Some(owner);
                     owner.validated()
                 } else {
@@ -1340,8 +1319,7 @@ impl Pass<'_, '_, '_> {
                 "let"
                     if heads_form(view, index)
                         && in_keyword_position(view, index)
-                        && self.form_follows(index)
-                        && (!legacy_grammar() || self.legacy_let(begins_member)) =>
+                        && self.form_follows(index) =>
                 {
                     self.open_let(index);
                     return Step::Next;
@@ -1382,8 +1360,7 @@ impl Pass<'_, '_, '_> {
                 "object" | "abstract"
                     if heads_form(view, index)
                         && in_keyword_position(view, index)
-                        && self.object_follows(index)
-                        && (!legacy_grammar() || self.legacy_let(begins_member)) =>
+                        && self.object_follows(index) =>
                 {
                     return self.open_object(index);
                 }
@@ -1404,7 +1381,7 @@ impl Pass<'_, '_, '_> {
                     top.pieces.push(Piece::Token(index));
                     return Step::Next;
                 }
-                "where" if in_keyword_position(view, index) && !legacy_grammar() => {
+                "where" if in_keyword_position(view, index) => {
                     return self.where_ends(index, begins_member);
                 }
                 "let" | "object" | "where" if in_keyword_position(view, index) => {
@@ -1441,16 +1418,11 @@ impl Pass<'_, '_, '_> {
     }
 
     /// Whether the `do` at `index` heads a braced block: a `{` follows it on
-    /// its line, separated from it as the `do` form requires. The legacy
-    /// grammar also took a `{` on the next line.
+    /// its line, separated from it as the `do` form requires.
     fn braced_do(&self, index: usize) -> bool {
         let view = self.scope.view;
-        let next = if legacy_grammar() {
-            self.next_significant(index + 1)
-        } else {
-            Some(index + 1).filter(|next| view.range().contains(*next))
-        };
-        next.is_some_and(|next| {
+        let next = index + 1;
+        view.range().contains(next) && {
             let token = token(view, next);
             matches!(
                 token.kind(),
@@ -1458,8 +1430,8 @@ impl Pass<'_, '_, '_> {
                     delimiter: Delimiter::Brace,
                     ..
                 }
-            ) && (next > index + 1 || token.leading() != LeadingTrivia::Joint)
-        })
+            ) && token.leading() != LeadingTrivia::Joint
+        }
     }
 
     /// The first token from `index` on that is not a line start.
@@ -1675,10 +1647,9 @@ impl Pass<'_, '_, '_> {
         inside
     }
 
-    /// Records a break of the grammar review's rules, unless the oracle
-    /// reads the legacy grammar; the first one fails the view.
+    /// Records a break of the grammar's rules; the first one fails the view.
     fn violate(&mut self, fail: Fail) {
-        if self.violation.is_none() && !legacy_grammar() {
+        if self.violation.is_none() {
             self.violation = Some(fail);
         }
     }
@@ -1942,13 +1913,6 @@ impl Pass<'_, '_, '_> {
         })
     }
 
-    /// Whether a `let` heads a form where the legacy grammar's view-level
-    /// dispatch parsed one: first in a view it parsed, which a group is
-    /// not, unless it is a block.
-    fn legacy_let(&mut self, begins_member: bool) -> bool {
-        begins_member && !matches!(self.top().kind, FrameKind::Group { block: None, .. })
-    }
-
     /// Opens a `let` at `index`. Its bindings are a block above it: braced
     /// when a `{` follows on its line, otherwise a layout block whose first
     /// binding sets its anchor, as a `do` block's first statement does.
@@ -1973,21 +1937,7 @@ impl Pass<'_, '_, '_> {
         );
         frame.first = Some(index);
         self.push(frame);
-        // The legacy grammar skipped line breaks to find the `{`.
-        let next = if legacy_grammar() {
-            self.next_significant(index + 1)
-        } else {
-            Some(index + 1).filter(|next| view.range().contains(*next))
-        };
-        if next.is_some_and(|next| {
-            matches!(
-                token(view, next).kind(),
-                TokenKind::Open {
-                    delimiter: Delimiter::Brace,
-                    ..
-                }
-            )
-        }) {
+        if brace_follows(view, index) {
             self.top().pending = Some(Pending::Bindings(index, BindingsKind::Let));
             return;
         }
@@ -2146,9 +2096,7 @@ impl Pass<'_, '_, '_> {
     }
 
     /// A `with` in keyword position: an object's body after its header, or
-    /// an update's after its base and any `as Name` alias. The legacy
-    /// grammar's base was everything before the `with`, so it ended the
-    /// open tails before it.
+    /// an update's after its base and any `as Name` alias.
     fn with_keyword(&mut self, index: usize) -> Step {
         let view = self.scope.view;
         if let FrameKind::Object(object) = &mut self.top().kind
@@ -2163,9 +2111,6 @@ impl Pass<'_, '_, '_> {
             let top = self.top();
             top.lambda_head = false;
             top.pieces.push(Piece::Token(index));
-            return Step::Next;
-        }
-        if legacy_grammar() && self.legacy_with(index) {
             return Step::Next;
         }
         // `Dict as Name with Defs` names the update's base.
@@ -2212,69 +2157,14 @@ impl Pass<'_, '_, '_> {
         Step::Next
     }
 
-    /// Reads the `with` at `index` as the legacy grammar's view-level
-    /// dispatch did, returning whether it kept the `with` a token. That
-    /// dispatch searched a view's tokens outside groups, up to a match's
-    /// head, for its first `with`, which took everything before it as its
-    /// base, unless a form led the view that owned what followed it. A
-    /// `with` in a group was a reserved word, or the group's own view's.
-    fn legacy_with(&mut self, index: usize) -> bool {
-        let view = self.scope.view;
-        if self
-            .stack
-            .iter()
-            .skip(1)
-            .any(|frame| matches!(frame.kind, FrameKind::Group { block: None, .. }))
-        {
-            let top = self.top();
-            top.view_level = true;
-            top.lambda_head = false;
-            top.pieces.push(Piece::Token(index));
-            return true;
-        }
-        let owned = self.stack[0].first.is_some_and(|first| {
-            matches!(
-                token(view, first).kind(),
-                TokenKind::Name(
-                    "if" | "try" | "match" | "try_match" | "let" | "object" | "abstract"
-                )
-            )
-        });
-        let searched = !owned
-            && self.stack.iter().skip(1).all(|frame| {
-                !matches!(frame.kind, FrameKind::Match(_) | FrameKind::Group { .. })
-                    && frame.arms().is_none()
-            });
-        if searched {
-            while self.stack.len() > 1 {
-                self.close_top(index);
-            }
-        }
-        false
-    }
-
     /// Opens the body after the `with` at `index`: braced when a `{`
     /// follows on its line, otherwise a layout block, hanging when its first
     /// member follows the `with` on its line. Its members are only kept for
     /// the declaration parser, which reads them from their views.
     fn open_members(&mut self, index: usize, members: Members) {
         let view = self.scope.view;
-        // The legacy grammar skipped line breaks to find the `{`.
-        let next = if legacy_grammar() {
-            self.next_significant(index + 1)
-        } else {
-            Some(index + 1).filter(|next| view.range().contains(*next))
-        };
         let parent = self.top();
-        if next.is_some_and(|next| {
-            matches!(
-                token(view, next).kind(),
-                TokenKind::Open {
-                    delimiter: Delimiter::Brace,
-                    ..
-                }
-            )
-        }) {
+        if brace_follows(view, index) {
             parent.pending = Some(Pending::Members(index, members));
             return;
         }
@@ -2733,19 +2623,16 @@ impl Pass<'_, '_, '_> {
             ))
             .or_at(first_token));
         }
-        // A deeper line that binds was a misplaced sibling to the legacy
-        // grammar. Until a `with` or `object` body is a frame whose own
-        // lines it judges, such a line may be one of its members, so only
-        // the line that ended the block is checked now.
+        // A deeper line may continue a binding's value, or be a member of a
+        // `with` body in it, whose lines the block judges, so only the line
+        // that ended the block is checked for a misplaced sibling.
         let extent = structural_view_at(view, head);
-        let deeper = layout.hanging_lines.iter().filter(|_| legacy_grammar());
-        let lines = deeper.chain(&layout.boundary);
-        for line in lines {
+        if let Some(line) = &layout.boundary {
             let line_view = line_view(extent, *line);
             let binds = line_view
                 .top_level()
                 .any(|indexed| matches!(indexed.token().kind(), TokenKind::Symbol("=")));
-            if binds && (legacy_grammar() || keyword_head(line_view, "where").is_none()) {
+            if binds && keyword_head(line_view, "where").is_none() {
                 let indentation = match token(view, *line).kind() {
                     TokenKind::LineStart { indentation } => *indentation,
                     _ => 0,
@@ -3155,29 +3042,8 @@ impl Pass<'_, '_, '_> {
     /// guards are that arm's, as the structural parser split it first.
     fn begin_arms(&mut self, keyword: usize, arms: Arms) {
         let view = self.scope.view;
-        // A `{` on the keyword's line delimits the arms. The legacy grammar
-        // skipped line breaks to find it, and read it as a first arm's
-        // dictionary pattern when a mark followed the group on its line,
-        // unless an enclosing arm read its head or guards there.
-        let legacy = legacy_grammar();
-        let next = if legacy {
-            self.next_significant(keyword + 1)
-        } else {
-            Some(keyword + 1).filter(|next| view.range().contains(*next))
-        };
-        let brace = next.and_then(|next| match token(view, next).kind() {
-            TokenKind::Open {
-                group,
-                delimiter: Delimiter::Brace,
-            } => view.group(*group).and_then(|group| group.close_token()),
-            _ => None,
-        });
-        if let Some(close) = brace
-            && !(legacy
-                && arms.brace_may_begin_arm()
-                && !self.enclosing_head()
-                && self.line_mark(close + 1).is_some())
-        {
+        // A `{` on the keyword's line delimits the arms.
+        if brace_follows(view, keyword) {
             self.top().pending = Some(Pending::Arms(Box::new(arms)));
             return;
         }
@@ -3208,15 +3074,6 @@ impl Pass<'_, '_, '_> {
         ));
     }
 
-    /// Whether an arm enclosing the top frame reads its head or guards.
-    fn enclosing_head(&self) -> bool {
-        self.stack
-            .last()
-            .and_then(|frame| frame.arms_owner)
-            .and_then(|owner| self.stack[owner].arms())
-            .is_some_and(|enclosing| enclosing.phase != ArmPhase::Result)
-    }
-
     /// Takes the `=>`, `=>?` or `when` at `index` for the innermost arms
     /// block at this level whose arm reads its head or guards, if any: the
     /// frames open in the arm close before it. An arrow begins the arm's
@@ -3239,17 +3096,14 @@ impl Pass<'_, '_, '_> {
         self.lambda_ends_at(index);
         let view = self.scope.view;
         let when = matches!(token(view, index).kind(), TokenKind::Name("when"));
-        let next = self.line_mark(index + 1);
         // A `when` ending its line, or before a `{` on its line, heads
-        // nested arms, and any other begins guards; the legacy grammar read
-        // nested arms wherever no mark followed it on its line.
+        // nested arms, and any other begins guards.
         let nested = when
             && match view
                 .token_at(index + 1)
                 .filter(|_| view.range().contains(index + 1))
                 .map(|token| token.kind())
             {
-                _ if legacy_grammar() => next.is_none(),
                 None
                 | Some(
                     TokenKind::LineStart { .. }
@@ -3259,21 +3113,6 @@ impl Pass<'_, '_, '_> {
                     },
                 ) => true,
                 Some(_) => false,
-            };
-        // The legacy grammar allowed one arrow on an arm's first line, since
-        // the structural parser counted them there. Now a later arrow there
-        // belongs to a nested match's hanging arms, and a second arrow of
-        // this arm's own is an error when the arm is read.
-        let mut later = next;
-        let second_arrow = legacy_grammar()
-            && loop {
-                match later {
-                    Some(mark) if !matches!(token(view, mark).kind(), TokenKind::Name("when")) => {
-                        break !when;
-                    }
-                    Some(mark) => later = self.line_mark(mark + 1),
-                    None => break false,
-                }
             };
         let frame = self.top();
         frame.region = false;
@@ -3289,16 +3128,6 @@ impl Pass<'_, '_, '_> {
         }
         let arms = frame.arms_mut().expect("an arms owner holds arms");
         if !when {
-            if second_arrow {
-                let message = format!(
-                    "{} permits exactly one top-level `=>` or `=>?`",
-                    arms.arm_label()
-                );
-                if let Some(arm) = arms.arms.last_mut() {
-                    arm.failure
-                        .get_or_insert(Fail::error(message).or_at(Some(index)));
-                }
-            }
             arms.phase = ArmPhase::Result;
             return true;
         }
@@ -3317,46 +3146,6 @@ impl Pass<'_, '_, '_> {
         );
         self.begin_arms(index, nested);
         true
-    }
-
-    /// The first arm mark from `from` on its line, at the top frame's
-    /// depth: an `=>`, `=>?` or `when` in keyword position, before a line
-    /// start, a close, the depth's separator, or the end of the view. A
-    /// scan resumes where the last one at its depth stopped, so a line
-    /// costs one walk however many marks and braces it holds.
-    fn line_mark(&mut self, from: usize) -> Option<usize> {
-        let view = self.scope.view;
-        let level = self.stack.last().map_or(0, |frame| frame.level);
-        let frame = &mut self.stack[level];
-        if let Some(scan) = frame.mark_scan
-            && scan.from <= from
-            && from <= scan.to
-        {
-            return scan.mark.then_some(scan.to);
-        }
-        let separator = frame.separator;
-        let end = view.range().end();
-        let mut index = from;
-        let (to, mark) = loop {
-            if index >= end {
-                break (end, false);
-            }
-            match token(view, index).kind() {
-                TokenKind::LineStart { .. } | TokenKind::Close { .. } => break (index, false),
-                TokenKind::Symbol("=>" | "=>?") => break (index, true),
-                TokenKind::Symbol(symbol) if separator == Some(*symbol) => break (index, false),
-                TokenKind::Name("when") if in_keyword_position(view, index) => break (index, true),
-                TokenKind::Open { group, .. } => {
-                    if let Some(close) = view.group(*group).and_then(|group| group.close_token()) {
-                        index = close;
-                    }
-                }
-                _ => {}
-            }
-            index += 1;
-        };
-        frame.mark_scan = Some(MarkScan { from, to, mark });
-        mark.then_some(to)
     }
 
     /// Hands a closed block's arms to their owner: nested arms to the arm
@@ -3536,7 +3325,7 @@ impl Pass<'_, '_, '_> {
         });
         let keyword = keyword_text(view, layout.head);
         let list = self.read_arms(scope, arms, members).map_err(|fail| {
-            if braces && !legacy_grammar() {
+            if braces {
                 Fail::error(format!(
                     "a `{{` delimits arms only on the line of its `{keyword}`; on a later line it begins a dictionary pattern"
                 ))
@@ -3594,7 +3383,7 @@ impl Pass<'_, '_, '_> {
         // dictionary pattern, which begins on the next line instead.
         let first_arms = arms.brace_may_begin_arm();
         self.read_arms(scope, arms, members).map_err(|fail| {
-            if first_arms && !legacy_grammar() && mark_follows_on_line(view, close + 1) {
+            if first_arms && mark_follows_on_line(view, close + 1) {
                 let keyword = keyword_text(view, open.saturating_sub(1));
                 Fail::error(format!(
                     "a `{{` on the line of `{keyword}` delimits the arms; begin a dictionary pattern on the next line"
@@ -3999,6 +3788,19 @@ fn keyword_text<'source>(view: TokenView<'_, 'source>, index: usize) -> &'source
     view.token_at(index)
         .and_then(|token| view.source().source_slice(token.span()))
         .unwrap_or("?")
+}
+
+/// Whether a `{` follows the keyword at `index` on its line, opening the
+/// block it heads.
+fn brace_follows(view: TokenView<'_, '_>, index: usize) -> bool {
+    view.range().contains(index + 1)
+        && matches!(
+            token(view, index + 1).kind(),
+            TokenKind::Open {
+                delimiter: Delimiter::Brace,
+                ..
+            }
+        )
 }
 
 /// Whether an `=>` or `=>?` follows `from` on its line, outside groups.

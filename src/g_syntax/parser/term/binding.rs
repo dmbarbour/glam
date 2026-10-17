@@ -23,10 +23,7 @@ use super::super::structural::{
     single_reserved_keyword, trim_layout, where_at, where_suffix,
 };
 use super::pass::FormShape;
-use super::{
-    Fail, Items, Mode, Parse, Piece, Position, Scope, legacy_grammar, piece_token, token,
-    trim_padding,
-};
+use super::{Fail, Items, Mode, Parse, Piece, Position, Scope, piece_token, token, trim_padding};
 
 /// A local binding of a `let` or `where`, `name params = value`, from its
 /// pieces. Parameters are lambda sugar: `go k = Body` is `go = \k -> Body`.
@@ -179,8 +176,7 @@ pub(super) fn guard_clauses(
     let at = pieces.first().map(piece_token);
     // Guards are an `and` chain whose operands may bind, so an `or` among
     // them needs parentheses, as it does in any `and` chain.
-    if !legacy_grammar()
-        && pieces.iter().any(|piece| is_keyword(view, piece, "and"))
+    if pieces.iter().any(|piece| is_keyword(view, piece, "and"))
         && let Some(or) = pieces.iter().find(|piece| is_keyword(view, piece, "or"))
     {
         return Err(Fail::error(
@@ -434,17 +430,8 @@ fn choice_arm<'p>(
     if pieces.is_empty() {
         return fail(format!("{label} cannot be empty"));
     }
-    // An arm's guards may continue onto later lines before its arrow; the
-    // legacy grammar looked for the arrow on its first line only.
-    let searched = if legacy_grammar() {
-        pieces
-            .iter()
-            .position(|piece| is_line_start(view, piece))
-            .unwrap_or(pieces.len())
-    } else {
-        pieces.len()
-    };
-    let arrows = pieces[..searched]
+    // An arm's guards may continue onto later lines before its arrow.
+    let arrows = pieces
         .iter()
         .enumerate()
         .filter_map(|(position, piece)| {
@@ -519,11 +506,6 @@ fn line_of(view: TokenView<'_, '_>, pieces: &[Piece]) -> usize {
         .unwrap_or(1)
 }
 
-fn is_line_start(view: TokenView<'_, '_>, piece: &Piece) -> bool {
-    matches!(piece, Piece::Token(index)
-        if matches!(token(view, *index).kind(), TokenKind::LineStart { .. }))
-}
-
 /// The `<-` or `=` that makes a clause a binding, by position.
 fn pattern_binder(view: TokenView<'_, '_>, pieces: &[Piece]) -> Option<usize> {
     for (position, piece) in pieces.iter().enumerate() {
@@ -554,10 +536,9 @@ fn pattern(scope: Scope<'_, '_, '_>, pieces: &[Piece], position: Position) -> Pa
     let first = piece_token(&pieces[0]);
     // A `where` after a bind's pattern would scope the statement from its
     // end, past the pattern it binds.
-    if !legacy_grammar()
-        && let Some(found) = pieces[1..]
-            .iter()
-            .find(|piece| is_keyword(view, piece, "where"))
+    if let Some(found) = pieces[1..]
+        .iter()
+        .find(|piece| is_keyword(view, piece, "where"))
     {
         return Err(Fail::error(
             "`where` cannot follow a pattern: write `(E where …) -> P` to scope a bind's operation",

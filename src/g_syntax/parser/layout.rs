@@ -7,10 +7,9 @@
 
 use crate::g_syntax::Diagnostic;
 
-use super::conditional::heads_match_when;
 use super::input::{TokenRange, TokenView};
 use super::lexical::{Delimiter, LeadingTrivia, LexedSource, TokenKind};
-use super::structural::in_keyword_position;
+use super::structural::{in_keyword_position, token_is_name, trim_layout, view_between};
 use super::term::may_head_keyword_form;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,10 +29,7 @@ impl LayoutLine {
         self.indentation
     }
 
-    pub(super) fn start(self) -> usize {
-        self.start
-    }
-
+    #[cfg(test)]
     pub(super) fn tokens(self) -> TokenRange {
         self.tokens
     }
@@ -69,6 +65,7 @@ impl LayoutBlock {
         self.anchor
     }
 
+    #[cfg(test)]
     pub(super) fn hanging(&self) -> bool {
         self.hanging
     }
@@ -432,4 +429,20 @@ fn token_begins_line(
                 .token_at(previous)
                 .is_some_and(|token| matches!(token.kind(), TokenKind::LineStart { .. }))
         })
+}
+
+/// Whether the match head at `index` begins a `match when`, which takes no
+/// `as`.
+fn heads_match_when(view: TokenView<'_, '_>, index: usize) -> bool {
+    let star = view.token_at(index + 1).is_some_and(|token| {
+        matches!(token.kind(), TokenKind::Symbol("*")) && token.leading() == LeadingTrivia::Joint
+    });
+    let after = trim_layout(view_between(
+        view,
+        (index + 1 + usize::from(star)).min(view.range().end()),
+        view.range().end(),
+    ));
+    after.first_significant().is_some_and(|(when, token)| {
+        token_is_name(token, "when") && in_keyword_position(after, when)
+    })
 }

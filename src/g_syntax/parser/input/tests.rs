@@ -61,10 +61,15 @@ fn top_level_iteration_jumps_balanced_groups() {
 
     assert_eq!(rendered, ["start of line", "`alpha`", "`(`", "`omega`"]);
     let open_index = top[2].index();
-    let (group, contents) = whole.group_at(open_index, Delimiter::Parenthesis).unwrap();
+    let (group, contents) = whole
+        .group_at(
+            open_index,
+            crate::g_syntax::parser::lexical::Delimiter::Parenthesis,
+        )
+        .unwrap();
     assert_eq!(
         whole.group(group).unwrap().delimiter(),
-        Delimiter::Parenthesis
+        crate::g_syntax::parser::lexical::Delimiter::Parenthesis
     );
     assert_eq!(contents.source_text(), Some("beta [42]"));
     assert_eq!(
@@ -74,37 +79,27 @@ fn top_level_iteration_jumps_balanced_groups() {
             .collect::<Vec<_>>(),
         ["`beta`", "`[`"]
     );
-    assert!(whole.group_at(open_index, Delimiter::Brace).is_none());
+    assert!(
+        whole
+            .group_at(
+                open_index,
+                crate::g_syntax::parser::lexical::Delimiter::Brace
+            )
+            .is_none()
+    );
 }
 
 #[test]
 fn mapped_input_parsers_preserve_token_categories_and_adjacency() {
-    let parsed = parse_expression_fragment(b"command 42->value", |view| {
+    let parsed = parse_expression_fragment(b"command->value", |view| {
         let parser = keyword("command")
-            .ignore_then(space_before(number().map(|id| {
-                view.number(id)
-                    .expect("number token should own parsed data")
-                    .to_string()
-            })))
-            .then_ignore(joint(symbol("->")))
-            .then(joint(name().map(str::to_owned)))
+            .ignore_then(joint(symbol("->")))
+            .ignore_then(joint(name().map(str::to_owned)))
             .then_ignore(end());
         let result = parser.parse(view.chumsky_input()).into_result();
         result.map_err(|errors| diagnostics(view, errors))
     });
-    assert_eq!(parsed.unwrap(), ("42".to_owned(), "value".to_owned()));
-
-    let group = parse_expression_fragment(b"()", |view| {
-        let parser = open(Delimiter::Parenthesis)
-            .then(close(Delimiter::Parenthesis))
-            .then_ignore(end());
-        parser
-            .parse(view.chumsky_input())
-            .into_result()
-            .map_err(|errors| diagnostics(view, errors))
-    })
-    .unwrap();
-    assert_eq!(group.0, group.1);
+    assert_eq!(parsed.unwrap(), "value".to_owned());
 
     let text = parse_expression_fragment(b"\"payload\"", |view| {
         let result = text_id()
@@ -127,7 +122,7 @@ fn line_start_and_layout_spacing_are_explicit_tokens() {
     let parser = line_start()
         .then(name())
         .then(line_break_before(line_start()))
-        .then(space_before(name()))
+        .then(name())
         .then_ignore(end());
 
     assert_eq!(
@@ -158,7 +153,7 @@ fn token_errors_use_source_lines_and_source_lexemes() {
     let parser = line_start()
         .ignore_then(keyword("first"))
         .then_ignore(line_break_before(line_start()))
-        .then_ignore(space_before(keyword("second")))
+        .then_ignore(keyword("second"))
         .then_ignore(end());
     let errors = parser.parse(view.chumsky_input()).into_errors();
     session.record_token_errors(view, errors);

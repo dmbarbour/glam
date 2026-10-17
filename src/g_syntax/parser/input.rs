@@ -12,8 +12,8 @@ use chumsky::prelude::*;
 
 use super::super::Diagnostic;
 use super::lexical::{
-    ByteSpan, DeclarationSection, Delimiter, DelimiterGroup, EmbeddedValueId, GroupId,
-    LeadingTrivia, LexedSource, LexedText, NumberId, SpannedToken, TextId, TokenKind,
+    ByteSpan, DeclarationSection, DelimiterGroup, EmbeddedValueId, GroupId, LeadingTrivia,
+    LexedSource, LexedText, NumberId, SpannedToken, TextId, TokenKind,
 };
 use crate::number::Number;
 
@@ -133,6 +133,7 @@ impl<'lex, 'source> TokenView<'lex, 'source> {
             .then(|| &self.source.tokens()[absolute_index])
     }
 
+    #[cfg(test)]
     pub(super) fn absolute_index(self, relative_index: usize) -> Option<usize> {
         (relative_index < self.len()).then_some(self.range.start + relative_index)
     }
@@ -235,7 +236,7 @@ impl<'lex, 'source> TokenView<'lex, 'source> {
     pub(super) fn group_at(
         self,
         relative_index: usize,
-        delimiter: Delimiter,
+        delimiter: super::lexical::Delimiter,
     ) -> Option<(GroupId, Self)> {
         let TokenKind::Open {
             group,
@@ -403,27 +404,6 @@ pub(super) fn keyword<'lex, 'source: 'lex>(
     .labelled(expected)
 }
 
-/// The keyword `expected` heading a form, as the structural layer's
-/// `keyword_head` judges it: not before a joint `:` or `.`, which make it a
-/// tag's key or a path's root.
-pub(super) fn form_keyword<'lex, 'source: 'lex>(
-    expected: &'static str,
-) -> impl Parser<'lex, TokenInput<'lex, 'source>, (), TokenExtra<'lex, 'source>> {
-    keyword(expected).then_ignore(joint(symbol(":").or(symbol("."))).not())
-}
-
-pub(super) fn number<'lex, 'source: 'lex>()
--> impl Parser<'lex, TokenInput<'lex, 'source>, NumberId, TokenExtra<'lex, 'source>> {
-    chumsky::primitive::select_ref(|token: &'lex SpannedToken<'source>, _| {
-        if let TokenKind::Number(id) = token.kind() {
-            Some(*id)
-        } else {
-            None
-        }
-    })
-    .labelled("number")
-}
-
 pub(super) fn text_id<'lex, 'source: 'lex>()
 -> impl Parser<'lex, TokenInput<'lex, 'source>, TextId, TokenExtra<'lex, 'source>> {
     chumsky::primitive::select_ref(|token: &'lex SpannedToken<'source>, _| {
@@ -436,18 +416,6 @@ pub(super) fn text_id<'lex, 'source: 'lex>()
     .labelled("text")
 }
 
-pub(super) fn embedded_value_id<'lex, 'source: 'lex>()
--> impl Parser<'lex, TokenInput<'lex, 'source>, EmbeddedValueId, TokenExtra<'lex, 'source>> {
-    chumsky::primitive::select_ref(|token: &'lex SpannedToken<'source>, _| {
-        if let TokenKind::Embedded(id) = token.kind() {
-            Some(*id)
-        } else {
-            None
-        }
-    })
-    .labelled("embedded data")
-}
-
 pub(super) fn symbol<'lex, 'source: 'lex>(
     expected: &'static str,
 ) -> impl Parser<'lex, TokenInput<'lex, 'source>, (), TokenExtra<'lex, 'source>> {
@@ -455,36 +423,6 @@ pub(super) fn symbol<'lex, 'source: 'lex>(
         matches!(token.kind(), TokenKind::Symbol(symbol) if *symbol == expected).then_some(())
     })
     .labelled(expected)
-}
-
-pub(super) fn open<'lex, 'source: 'lex>(
-    expected: Delimiter,
-) -> impl Parser<'lex, TokenInput<'lex, 'source>, GroupId, TokenExtra<'lex, 'source>> {
-    chumsky::primitive::select_ref(move |token: &'lex SpannedToken<'source>, _| {
-        if let TokenKind::Open { group, delimiter } = token.kind()
-            && *delimiter == expected
-        {
-            Some(*group)
-        } else {
-            None
-        }
-    })
-    .labelled(delimiter_label(expected))
-}
-
-pub(super) fn close<'lex, 'source: 'lex>(
-    expected: Delimiter,
-) -> impl Parser<'lex, TokenInput<'lex, 'source>, GroupId, TokenExtra<'lex, 'source>> {
-    chumsky::primitive::select_ref(move |token: &'lex SpannedToken<'source>, _| {
-        if let TokenKind::Close { group, delimiter } = token.kind()
-            && *delimiter == expected
-        {
-            Some(*group)
-        } else {
-            None
-        }
-    })
-    .labelled(delimiter_label(expected))
 }
 
 pub(super) fn line_start<'lex, 'source: 'lex>()
@@ -506,15 +444,6 @@ where
     P: Parser<'lex, TokenInput<'lex, 'source>, O, TokenExtra<'lex, 'source>>,
 {
     leading(LeadingTrivia::Joint, "adjacent token").ignore_then(parser)
-}
-
-pub(super) fn space_before<'lex, 'source: 'lex, O, P>(
-    parser: P,
-) -> impl Parser<'lex, TokenInput<'lex, 'source>, O, TokenExtra<'lex, 'source>>
-where
-    P: Parser<'lex, TokenInput<'lex, 'source>, O, TokenExtra<'lex, 'source>>,
-{
-    leading(LeadingTrivia::Space, "same-line space").ignore_then(parser)
 }
 
 #[cfg(test)]
@@ -552,14 +481,6 @@ fn leading<'lex, 'source: 'lex>(
     .rewind()
 }
 
-fn delimiter_label(delimiter: Delimiter) -> &'static str {
-    match delimiter {
-        Delimiter::Parenthesis => "parenthesis",
-        Delimiter::Bracket => "bracket",
-        Delimiter::Brace => "brace",
-    }
-}
-
 pub(super) struct ParseSession {
     diagnostics: Vec<Diagnostic>,
 }
@@ -571,6 +492,7 @@ impl ParseSession {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn record_token_errors<'lex, 'source>(
         &mut self,
         view: TokenView<'lex, 'source>,

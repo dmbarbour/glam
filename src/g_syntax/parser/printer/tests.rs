@@ -2,7 +2,6 @@
 
 use super::print_expression;
 use crate::core::Builtin;
-use crate::g_syntax::parser::expression::term_oracle::suspended;
 use crate::g_syntax::parser::structural::parse_compound_expression_fragment;
 use crate::g_syntax::{
     ConditionalMode, ConditionalResultMode, DefinitionDecl, DefinitionKind, DoExpr, DoStep,
@@ -303,10 +302,7 @@ fn generated_trees_round_trip() {
         let depth = 1 + generator.below(4);
         let tree = generator.expression(depth);
         let printed = print_expression(&tree);
-        // Its trees reach shapes the legacy grammar read otherwise, which
-        // the oracle's sweep is not for.
-        let parsed = suspended(|| parse_compound_expression_fragment(printed.as_bytes()));
-        match parsed {
+        match parse_compound_expression_fragment(printed.as_bytes()) {
             Ok(parsed) if parsed == tree => {}
             Ok(parsed) => failures.push(format!(
                 "printed: {printed}\n  tree: {tree:?}\n  read: {parsed:?}"

@@ -336,9 +336,9 @@ production keeps the old parser until the oracle agrees.
   `parser-keyword-frames-suffixes` on 2026-10-17.
 - `parser-scope-analysis`: added 2026-10-15; not started.
 - `parser-constant-factors`: added 2026-10-16; not started.
-- `parser-grammar-retirement`: not started. Chumsky still parses the
-  views the term parser reports as unsupported, and runs as the oracle in
-  tests.
+- `parser-grammar-retirement`: done 2026-10-17 (see "as built" below).
+  The term parser reads every expression and pattern; Chumsky reads only
+  declaration heads.
 - **Order (maintainer, 2026-10-17):** `parser-keyword-frames-suffixes`,
   then `parser-grammar-retirement`; then the grammar review's
   `grammar-body-declarations` and the
@@ -929,7 +929,8 @@ beside group frames:
    the CPU time at 1,600 bindings; this slice's frames remove those scans,
    and that workload measures them.
 5. The structural parsers' expression paths then serve only the oracle,
-   and go with the Chumsky grammar in `parser-grammar-retirement`.
+   and go with the Chumsky grammar in `parser-grammar-retirement`. Done
+   2026-10-17.
 
 **`parser-keyword-frames-conditionals` as built (2026-10-16).**
 - `parser/term/pass.rs` holds the token pass as a frame machine, and
@@ -1239,9 +1240,35 @@ review's sequencing planned (maintainer, 2026-10-17).
   sugar `using Dict do Body` reads, so a namespace ending in a `do` block
   is parenthesized.
 
+**`parser-grammar-retirement`, the deletion (2026-10-17).**
+- **Deleted:** the Chumsky expression grammar; the oracle and its
+  legacy-grammar switch, with every rule it gated now unconditional; the
+  structural parsers' expression paths (`let`, `where`, `with`, `object`
+  and `using` parsing, view-level dispatch, suffix resumption and dedent
+  yields, and the expression extent that allowed them); the structural
+  conditional, match and `do` parsers; the item interpreter's path into
+  them; and `Fail::Unsupported`, whose cases are errors now (an invalid
+  token, a keyword as a lambda parameter).
+- **Kept:** the structural layer's entry points to the term parser for
+  bodies and views (`parse_body`, `parse_expression_in_context`), and the
+  helpers declarations share with it. Chumsky stays for declaration heads.
+- **Also gone with the legacy grammar:** the one-arrow-per-arm-line rule
+  and the line scans for arm marks it needed.
+- **Tests:** the conditional and match tests moved to
+  `parser/conditional_tests.rs`. The oracle's corpora (edge cases, nesting,
+  samples, keywords as keys, generated token soup and expressions) now
+  check that the parser reads each to its end without panicking; the
+  round trip checks readings. Tests of deleted Chumsky combinators and of
+  the structural `with` header went with them.
+- **Checks:** `check.sh all`, the round trip at 50 times its count, and the
+  generated sources at 200 times theirs.
+
 ## Verification
 
-- The differential oracle above, while both parsers exist.
+- The round trip of generated trees through the printer
+  (`generated_trees_round_trip`), and the generated sources read without
+  panicking. Before `parser-grammar-retirement`, the differential oracle
+  above, while both parsers existed.
 - Regressions parse depth-40 nesting of every survey construct, and flat
   chains of 100k terms. The fixed grammar finishes immediately; a
   reintroduced exponential would hang the test visibly rather than slowly
