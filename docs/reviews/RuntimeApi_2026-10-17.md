@@ -1,7 +1,8 @@
 # Runtime API Review — 2026-10-17
 
-Status: direction agreed with the maintainer on 2026-10-17, in discussion.
-No code changed. It replaces the owner-and-handles design that
+Status: direction agreed with the maintainer on 2026-10-17, in discussion,
+and the [runtime API plan](../plans/RuntimeApi_2026-10-17.md) drafted from
+it. No code changed. It replaces the owner-and-handles design that
 `lifecycle-owner` would have built (the
 [runtime ownership plan](../plans/RuntimeOwnership_2026-10-17.md)); that plan's
 remaining steps are re-planned from here. Communication's conventions,
@@ -173,12 +174,23 @@ Names for a plan that would follow:
 
 ## Open Questions (2026-10-17)
 
+Answered by the maintainer the same day, except the first two, whose
+options are discussed as the work reaches them.
+
 1. **Communication conventions:** retention, backpressure, discovery.
-2. **Names:** `Runtime`, machine, turn and their operations.
+   *Open; discuss options as we go.*
+2. **Names:** `Runtime`, machine, turn and their operations. *Open;
+   discuss options as we go.*
 3. **Glam's side:** whether `.heap.*` suffices for logs and cursors, or
-   glam code wants helpers.
+   glam code wants helpers. *Start with the basic heap operations;
+   specialize or accelerate as profiling shows.*
 4. **Per-machine exclusivity:** a second turn on a busy machine waits or
-   fails.
+   fails. *Perhaps both; or a turn observes a machine's status by key, and
+   so waits transactionally.*
 5. **Rust state:** whether a machine holds only glam values, or Rust data
-   too.
-6. **Threads that are not scoped:** the mutex wrapper, and when.
+   too. *Glam values only.* Carrying opaque Rust data from turn to turn is
+   feasible, but unless it gains something significant, users can work
+   around it, with a container in a shared mutex for instance.
+6. **Threads that are not scoped:** the mutex wrapper, and when. *Scoped
+   threads only, for now;* relax the constraint if a strong use case
+   appears.

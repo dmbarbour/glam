@@ -50,6 +50,11 @@ flags a step for discussion when work reaches it, not a decision.
   Started 2026-10-16; its current items were decided by 2026-10-17, and
   `grammar-body-declarations` (item 15: `alias` and `let` in bodies) was
   built 2026-10-17.
+- [`RuntimeApi_2026-10-17.md`](RuntimeApi_2026-10-17.md): `api-` steps
+  from the runtime API review: `Runtime`, turns on keyed machines,
+  transaction steps, scoped threads, heap communication, hosts as machines,
+  then the handle API's retirement. Drafted 2026-10-17;
+  `api-runtime-turns` is first, its names to discuss.
 - [`RuntimeOwnership_2026-10-17.md`](RuntimeOwnership_2026-10-17.md):
   `lifecycle-` steps, a sketch from the lifecycle review.
   `lifecycle-cli-logger` is done. Its owner-and-handles design is replaced
@@ -104,7 +109,9 @@ flags a step for discussion when work reaches it, not a decision.
   with a stack and local state, transactions as nested steps, fork-join
   through scoped threads, and communication only through the shared heap or
   volumes. It replaces the ownership plan's owner and handles. Direction
-  agreed; communication's conventions remain open.
+  agreed and questions answered, but names and communication's conventions,
+  which the [runtime API plan](RuntimeApi_2026-10-17.md) settles step by
+  step.
 - [`SyntaxTypeErrors_2026-10-17.md`](../reviews/SyntaxTypeErrors_2026-10-17.md)
   reviews which type errors the front end could report from syntax alone:
   applying data, data as a predicate, view or effect, member access on
