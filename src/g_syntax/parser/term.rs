@@ -171,6 +171,34 @@ pub(super) fn parse_term_chain(
     ))
 }
 
+/// A `let`'s or `where`'s bindings, in source order.
+pub(super) type Bindings = Vec<(String, SyntaxExpr)>;
+
+/// Reads the `where` at `where_index` in `view`, which ends the body
+/// before it: its bindings, and where they end.
+pub(super) fn parse_where_group(
+    view: TokenView<'_, '_>,
+    context: ExpressionContext,
+    where_index: usize,
+) -> Result<(Bindings, usize), Vec<crate::g_syntax::Diagnostic>> {
+    let covers = Covers::default();
+    let scope = Scope {
+        view,
+        context,
+        covers: &covers,
+        mode: Mode::Expression,
+    };
+    pass::where_group(scope, where_index).map_err(|fail| match fail {
+        Fail::Error { at, message } => vec![diagnostic(view, at, message)],
+        Fail::Reported(diagnostics) => diagnostics,
+        Fail::Unsupported(reason) => vec![diagnostic(
+            view,
+            Some(where_index),
+            format!("unsupported `where` bindings: {reason}"),
+        )],
+    })
+}
+
 /// Parses `view` as one pattern in `position`, in cover mode.
 pub(super) fn parse_pattern_term(
     view: TokenView<'_, '_>,
@@ -727,7 +755,32 @@ fn interpret_group(scope: Scope<'_, '_, '_>, frame: &GroupBody, close: usize) ->
 
 fn interpret_paren(scope: Scope<'_, '_, '_>, frame: &GroupBody, close: usize) -> Parse<ParenCover> {
     let view = scope.view;
-    let contents = trim_padding(view, &frame.pieces);
+    // A parenthesized expression is a body, which a `where` may end; a
+    // tuple's item is none.
+    let where_head = frame.pieces.iter().find_map(|piece| match piece {
+        Piece::Form { head, form, .. } if scope.covers.form_shape(*form).0 == FormShape::Where => {
+            Some(*head)
+        }
+        _ => None,
+    });
+    if let Some(head) = where_head
+        && frame.pieces.iter().any(|piece| is_symbol(view, piece, ","))
+    {
+        return Err(Fail::error(
+            "`where` cannot stand in a tuple item: it scopes a whole definition, statement or arm; parenthesize `(… where …)` or use `let … in` for part of an expression",
+        )
+        .or_at(Some(head)));
+    }
+    let (contents, suffix) = binding::split_where(scope, &frame.pieces)?;
+    if let Some(binding::WhereSuffix { head, form }) = suffix {
+        if contents.is_empty() {
+            return Err(Fail::error("where expression requires a body").or_at(Some(head)));
+        }
+        let expression = resolved(scope, contents)?;
+        return binding::with_where(scope, form, expression)
+            .map(|expression| ParenCover::Grouped(Term::Expr(expression)));
+    }
+    let contents = trim_padding(view, contents);
     if contents.is_empty() {
         return if frame.pieces.is_empty() && token(view, close).leading() == LeadingTrivia::Joint {
             Ok(ParenCover::Unit)
@@ -1237,9 +1290,18 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
     fn where_at(&self, offset: usize) -> bool {
         !legacy_grammar()
             && self.scope.mode == Mode::Expression
-            && matches!(self.peek_at(offset), Some(Piece::Token(index))
-                if matches!(token(self.scope.view, *index).kind(), TokenKind::Name("where"))
-                    && in_keyword_position(self.scope.view, *index))
+            && match self.peek_at(offset) {
+                Some(Piece::Token(index)) => {
+                    matches!(
+                        token(self.scope.view, *index).kind(),
+                        TokenKind::Name("where")
+                    ) && in_keyword_position(self.scope.view, *index)
+                }
+                Some(Piece::Form { form, .. }) => {
+                    self.scope.covers.form_shape(*form).0 == FormShape::Where
+                }
+                _ => false,
+            }
     }
 
     /// A pattern position's item, in cover mode: an `as` chain, at most one
@@ -1860,6 +1922,13 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                     "{} expression requires `then` and `else`",
                     form.keyword
                 ))
+                .or_at(Some(form.head)));
+            }
+            // A body reads its `where` before its items do.
+            FormShape::Where => {
+                return Err(Fail::error(
+                    "`where` scopes a whole definition, statement or arm; parenthesize `(… where …)` or use `let … in` for part of an expression",
+                )
                 .or_at(Some(form.head)));
             }
         };

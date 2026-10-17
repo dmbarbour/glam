@@ -44,6 +44,13 @@
 //! namespace, as does a layout block's dedent to a line aligned with the
 //! `let`, and the body after it is an open tail.
 //!
+//! A `where` ends the definition, statement, arm or group it stands in: the
+//! open tails before it close, and its bindings are a block like a `let`'s,
+//! which closes into a form piece that the body's reader takes
+//! (`binding::split_where`). A view's own `where` stops the walk, and the
+//! body around the view reads its bindings with a walk of their own
+//! (`where_group`).
+//!
 //! In cover mode a pattern's `when` opens a keyword region, whose groups
 //! are deferred for the guard-clause parser. Inside a region conditionals
 //! are only counted, so that a `then` or `else` still reaches its own, and
@@ -52,7 +59,9 @@
 //! A branch holding a form that view-level dispatch parses (`object`, or a
 //! `with` that no match takes, at its level) is parsed from its view, as
 //! the structural parser did, until those forms are frames too: view-level
-//! dispatch reads them differently from the item interpreter.
+//! dispatch reads them differently from the item interpreter. The legacy
+//! grammar parsed `let` and `where` that way too, except where a `let` led
+//! its view.
 
 use crate::g_syntax::{
     ConditionalMode, ConditionalResultMode, IfExpr, MatchArm, MatchCommitment, MatchExpr,
@@ -71,7 +80,7 @@ use super::super::structural::{
 };
 use super::binding::{self, NestedArms, needs_view_dispatch};
 use super::{
-    Cover, Deferred, Fail, GroupBody, Items, Mode, ParenCover, Parse, Piece, Scope, Term,
+    Bindings, Cover, Deferred, Fail, GroupBody, Items, Mode, ParenCover, Parse, Piece, Scope, Term,
     conditional_argument, ends_operand, form_label, heads_form, interpret_group, is_symbol,
     legacy_grammar, may_head_keyword_form, misplaced_tail, opens_keyword_region, piece_token,
     regions_enabled, token, trim_padding,
@@ -162,8 +171,8 @@ struct LayoutBlock {
     failure: Option<Fail>,
     /// Its arms, or none for a `do` block.
     arms: Option<Box<Arms>>,
-    /// Whether it holds a `let`'s bindings.
-    bindings: bool,
+    /// The local bindings it holds, a `let`'s or a `where`'s, if any.
+    bindings: Option<BindingsKind>,
 }
 
 /// A braced block: a `do` block's head and its own context, or a match's
@@ -172,8 +181,8 @@ struct Block {
     head: usize,
     context: ExpressionContext,
     arms: Option<Box<Arms>>,
-    /// Whether it holds a `let`'s bindings.
-    bindings: bool,
+    /// The local bindings it holds, a `let`'s or a `where`'s, if any.
+    bindings: Option<BindingsKind>,
 }
 
 /// A block whose `{` comes next.
@@ -181,8 +190,24 @@ enum Pending {
     /// A `do`'s statements, after the `do` at this index.
     Do(usize),
     Arms(Box<Arms>),
-    /// A `let`'s bindings, after the `let` at this index.
-    Bindings(usize),
+    /// A `let`'s or `where`'s bindings, after its keyword at this index.
+    Bindings(usize, BindingsKind),
+}
+
+/// Whose local bindings a block holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindingsKind {
+    Let,
+    Where,
+}
+
+impl BindingsKind {
+    fn keyword(self) -> &'static str {
+        match self {
+            Self::Let => "let",
+            Self::Where => "where",
+        }
+    }
 }
 
 /// A `let` or `using` form: its bindings or namespace, then its body, an
@@ -194,7 +219,7 @@ struct Scoped {
     /// The form's own context, floored at its head's line.
     context: ExpressionContext,
     /// A `let`'s bindings, once their block closes.
-    bindings: Option<Parse<Vec<(String, SyntaxExpr)>>>,
+    bindings: Option<Parse<Bindings>>,
     /// Whether its bindings spanned lines, so that no `in` may follow them.
     multiline: bool,
     /// A `using`'s namespace, once its `in` or `do` ends it.
@@ -650,6 +675,8 @@ pub(super) enum FormShape {
     Postfix,
     /// Closed in its guards: an error whose wording depends on its place.
     Unfinished,
+    /// A `where`'s bindings, which end the body before them.
+    Where,
 }
 
 enum Step {
@@ -682,20 +709,7 @@ pub(super) fn top_pieces(scope: Scope<'_, '_, '_>) -> Parse<(Vec<Piece>, usize)>
             && regions_enabled(),
         violation: None,
     };
-    let range = view.range();
-    let mut index = range.start();
-    while index < range.end() {
-        match token(view, index).kind() {
-            TokenKind::Open { group, delimiter } => pass.open_group(index, *group, *delimiter)?,
-            TokenKind::Close { .. } => pass.close_group(index),
-            _ => match pass.token(index) {
-                Step::Next => {}
-                Step::Skip => index += 1,
-                Step::Stop => break,
-            },
-        }
-        index += 1;
-    }
+    let index = pass.walk(view.range().start())?;
     pass.close_open_frames(index);
     if let Some(fail) = pass.violation {
         return Err(fail);
@@ -703,6 +717,49 @@ pub(super) fn top_pieces(scope: Scope<'_, '_, '_>) -> Parse<(Vec<Piece>, usize)>
     let top = pass.stack.pop().expect("the view frame remains");
     debug_assert!(pass.stack.is_empty(), "every group closes inside the view");
     Ok((top.pieces, index))
+}
+
+/// Reads the `where` at `where_index`, which ends the body that `scope`'s
+/// view holds before it: its bindings, read as a frame reads them, and the
+/// token where they end, before anything that follows them.
+pub(super) fn where_group(
+    scope: Scope<'_, '_, '_>,
+    where_index: usize,
+) -> Parse<(Bindings, usize)> {
+    let view = scope.view;
+    super::prescan(view)?;
+    let mut base = Frame::new(
+        FrameKind::View,
+        scope.mode,
+        scope.context,
+        None,
+        false,
+        false,
+    );
+    // The body before the `where` stands for the view's first token.
+    base.first = Some(where_index);
+    let mut pass = Pass {
+        scope,
+        stack: vec![base],
+        stops_at_arrow: false,
+        violation: None,
+    };
+    pass.open_where(where_index);
+    let end = pass.walk(where_index + 1)?;
+    pass.close_open_frames(end);
+    if let Some(fail) = pass.violation {
+        return Err(fail);
+    }
+    let top = pass.stack.pop().expect("the view frame remains");
+    let pieces = trim_padding(view, &top.pieces);
+    let Some((Piece::Form { form, .. }, rest)) = pieces.split_first() else {
+        unreachable!("a `where` delivers its bindings first");
+    };
+    let end = rest.first().map_or(end, piece_token);
+    match scope.covers.take_form(*form).result? {
+        SyntaxExpr::Let { bindings, .. } => Ok((bindings, end)),
+        _ => unreachable!("a `where` holds its bindings around a placeholder"),
+    }
 }
 
 struct Pass<'s, 'lex, 'source> {
@@ -714,6 +771,27 @@ struct Pass<'s, 'lex, 'source> {
 }
 
 impl Pass<'_, '_, '_> {
+    /// Walks the view's tokens from `index`, returning where the walk ended:
+    /// the view's end, or a token that stops it.
+    fn walk(&mut self, mut index: usize) -> Parse<usize> {
+        let view = self.scope.view;
+        while index < view.range().end() {
+            match token(view, index).kind() {
+                TokenKind::Open { group, delimiter } => {
+                    self.open_group(index, *group, *delimiter)?;
+                }
+                TokenKind::Close { .. } => self.close_group(index),
+                _ => match self.token(index) {
+                    Step::Next => {}
+                    Step::Skip => index += 1,
+                    Step::Stop => break,
+                },
+            }
+            index += 1;
+        }
+        Ok(index)
+    }
+
     fn top(&mut self) -> &mut Frame {
         self.stack
             .last_mut()
@@ -739,7 +817,7 @@ impl Pass<'_, '_, '_> {
                 head,
                 context: form_context(view, context, head),
                 arms: None,
-                bindings: false,
+                bindings: None,
             })),
             Some(Pending::Arms(mut arms)) => {
                 arms.begin(0);
@@ -747,20 +825,20 @@ impl Pass<'_, '_, '_> {
                     head: arms.head,
                     context: arms.context,
                     arms: Some(arms),
-                    bindings: false,
+                    bindings: None,
                 }))
             }
             // A `let`'s bindings read as expressions, and own their arrows.
-            Some(Pending::Bindings(head)) => Some(Box::new(Block {
+            Some(Pending::Bindings(head, kind)) => Some(Box::new(Block {
                 head,
                 context,
                 arms: None,
-                bindings: true,
+                bindings: Some(kind),
             })),
             None => None,
         };
         let (mode, arrow) = match &block {
-            Some(block) if block.bindings => (Mode::Expression, false),
+            Some(block) if block.bindings.is_some() => (Mode::Expression, false),
             Some(_) => (Mode::Cover, true),
             None => (mode, mode == Mode::Cover),
         };
@@ -863,10 +941,13 @@ impl Pass<'_, '_, '_> {
                 self.deliver_arms(kind, head, result, index + 1, true);
                 return;
             }
-            if block.bindings {
-                let result = self.finish_braced_bindings(&block, &frame.pieces, open, index);
+            if let Some(kind) = block.bindings {
+                let result = self.finish_braced_bindings(&block, kind, &frame.pieces, open, index);
                 self.top().line_starts += line_starts;
-                self.deliver_bindings(result, false, None);
+                match kind {
+                    BindingsKind::Let => self.deliver_bindings(result, false, None),
+                    BindingsKind::Where => self.deliver_where(block.head, result, index + 1),
+                }
                 return;
             }
             let result = self.finish_block(&block, &frame.pieces, open, index);
@@ -916,39 +997,24 @@ impl Pass<'_, '_, '_> {
                 close: index,
                 in_parent_region: parent.region,
             })
-        } else if view_level && delimiter == Delimiter::Parenthesis && !legacy_grammar() {
-            // A parenthesized expression is a body, whose `where` and
-            // keyword forms its structural parser reads, and never a
-            // pattern, which holds no keyword form. A tuple's item is no
-            // body.
-            let tuple = body.pieces.iter().any(|piece| is_symbol(view, piece, ","));
-            let where_item = body.pieces.iter().find_map(|piece| match piece {
-                Piece::Token(at)
-                    if matches!(token(view, *at).kind(), TokenKind::Name("where"))
-                        && in_keyword_position(view, *at) =>
-                {
-                    Some(*at)
-                }
-                _ => None,
-            });
+        } else if view_level
+            && delimiter == Delimiter::Parenthesis
+            && !legacy_grammar()
+            && !body.pieces.iter().any(|piece| is_symbol(view, piece, ","))
+        {
+            // A parenthesized expression is a body, whose keyword forms
+            // that are no frames yet its structural parser reads, and never
+            // a pattern, which holds no keyword form.
             let contents = view
                 .group_contents(group)
                 .expect("an open frame's group exists");
-            covers.ready(match (tuple, where_item) {
-                (true, Some(at)) => Cover::Invalid(
-                    Fail::error(
-                        "`where` cannot stand in a tuple item: it scopes a whole definition, statement or arm; parenthesize `(… where …)` or use `let … in` for part of an expression",
-                    )
-                    .or_at(Some(at)),
-                ),
-                (true, None) => interpret_group(scope, &body, index)
-                    .unwrap_or_else(|fail| Cover::Invalid(fail.or_at(Some(open)))),
-                (false, _) => parse_body(contents, body.context.complete())
+            covers.ready(
+                parse_body(contents, body.context.complete())
                     .map(|expression| Cover::Paren(ParenCover::Grouped(Term::Expr(expression))))
                     .unwrap_or_else(|diagnostics| {
                         Cover::Invalid(Fail::Reported(diagnostics).or_at(Some(open)))
                     }),
-            })
+            )
         } else {
             covers.ready(
                 interpret_group(scope, &body, index)
@@ -1026,10 +1092,12 @@ impl Pass<'_, '_, '_> {
                                 .token_at(index)
                                 .is_some_and(|token| token.leading() == LeadingTrivia::Joint)
                         {
-                            let message = if layout.bindings {
-                                "`let` must be separated from its bindings"
-                            } else {
-                                "`do` must be separated from its body"
+                            let message = match layout.bindings {
+                                Some(kind) => format!(
+                                    "`{}` must be separated from its bindings",
+                                    kind.keyword()
+                                ),
+                                None => "`do` must be separated from its body".to_owned(),
                             };
                             layout
                                 .failure
@@ -1569,6 +1637,9 @@ impl Pass<'_, '_, '_> {
             );
         } else if single && !begins_member {
             return Step::Stop;
+        } else if !begins_member && self.form_follows(index) {
+            self.open_where(index);
+            return Step::Next;
         }
         let top = self.top();
         top.view_level = true;
@@ -1689,7 +1760,7 @@ impl Pass<'_, '_, '_> {
             };
             if self.closer_only_line(index) || indentation > anchor {
                 if let FrameKind::Layout(layout) = &mut self.stack[owner].kind
-                    && (hanging || layout.bindings)
+                    && (hanging || layout.bindings.is_some())
                 {
                     layout.hanging_lines.push(index);
                 }
@@ -1742,7 +1813,7 @@ impl Pass<'_, '_, '_> {
                 boundary: None,
                 failure: None,
                 arms: None,
-                bindings: false,
+                bindings: None,
             })),
             // Statements may bind patterns, and end their tails at `->`.
             Mode::Cover,
@@ -1811,7 +1882,7 @@ impl Pass<'_, '_, '_> {
                 }
             )
         }) {
-            self.top().pending = Some(Pending::Bindings(index));
+            self.top().pending = Some(Pending::Bindings(index, BindingsKind::Let));
             return;
         }
         self.push(Frame::new(
@@ -1825,7 +1896,7 @@ impl Pass<'_, '_, '_> {
                 boundary: None,
                 failure: None,
                 arms: None,
-                bindings: true,
+                bindings: Some(BindingsKind::Let),
             })),
             // A binding's value reads as an expression, and owns its arrows.
             Mode::Expression,
@@ -1967,12 +2038,77 @@ impl Pass<'_, '_, '_> {
         .map(|(expression, _)| expression)
     }
 
+    /// Opens the bindings of the `where` at `index`, which ends the body on
+    /// top: a braced block when a `{` follows it on its line, otherwise a
+    /// layout block, hanging when its first binding follows it on its line.
+    fn open_where(&mut self, index: usize) {
+        let view = self.scope.view;
+        let parent = self.top();
+        parent.lambda_head = false;
+        parent.lambda = None;
+        let (context, separator) = (parent.context, parent.separator);
+        let braced = view.range().contains(index + 1)
+            && matches!(
+                token(view, index + 1).kind(),
+                TokenKind::Open {
+                    delimiter: Delimiter::Brace,
+                    ..
+                }
+            );
+        if braced {
+            parent.pending = Some(Pending::Bindings(index, BindingsKind::Where));
+            return;
+        }
+        self.push(Frame::new(
+            FrameKind::Layout(Box::new(LayoutBlock {
+                head: index,
+                context,
+                anchor: None,
+                hanging: false,
+                statements: Vec::new(),
+                hanging_lines: Vec::new(),
+                boundary: None,
+                failure: None,
+                arms: None,
+                bindings: Some(BindingsKind::Where),
+            })),
+            Mode::Expression,
+            context,
+            separator,
+            false,
+            false,
+        ));
+    }
+
+    /// Hands a closed `where`'s bindings to the body below it, as a form
+    /// piece that ends the body (see `binding::split_where`). Its result
+    /// holds the bindings around a placeholder body.
+    fn deliver_where(&mut self, head: usize, bindings: Parse<Bindings>, end: usize) {
+        let covers = self.scope.covers;
+        let parent = self.top();
+        parent.lambda_head = false;
+        parent.pieces.push(Piece::Form {
+            head,
+            end,
+            form: covers.form(Form {
+                head,
+                keyword: "where",
+                shape: FormShape::Where,
+                result: bindings.map(|bindings| SyntaxExpr::Let {
+                    bindings,
+                    body: Box::new(SyntaxExpr::Unit),
+                }),
+                ends_with_block: false,
+            }),
+        });
+    }
+
     /// Hands a closed block's bindings to the `let` on top. A layout block
     /// that a shallower line ended at `boundary` begins the body there, a
     /// line aligned with the `let`.
     fn deliver_bindings(
         &mut self,
-        bindings: Parse<Vec<(String, SyntaxExpr)>>,
+        bindings: Parse<Bindings>,
         multiline: bool,
         boundary: Option<usize>,
     ) {
@@ -2016,15 +2152,20 @@ impl Pass<'_, '_, '_> {
         let FrameKind::Layout(mut layout) = frame.kind else {
             unreachable!("only layout blocks close here");
         };
-        if layout.bindings {
+        if let Some(kind) = layout.bindings {
             let multiline = layout.anchor.is_some()
                 && (!layout.hanging
                     || layout.statements.len() > 1
                     || !layout.hanging_lines.is_empty());
-            let result = self.finish_layout_bindings(&layout, &frame.pieces);
+            let result = self.finish_layout_bindings(&layout, kind, &frame.pieces);
             self.top().line_starts += line_starts;
-            let boundary = layout.boundary.filter(|line| *line == index);
-            self.deliver_bindings(result, multiline, boundary);
+            match kind {
+                BindingsKind::Let => {
+                    let boundary = layout.boundary.filter(|line| *line == index);
+                    self.deliver_bindings(result, multiline, boundary);
+                }
+                BindingsKind::Where => self.deliver_where(layout.head, result, index),
+            }
             return;
         }
         if let Some(arms) = layout.arms.take() {
@@ -2064,29 +2205,44 @@ impl Pass<'_, '_, '_> {
     fn finish_layout_bindings(
         &self,
         layout: &LayoutBlock,
+        kind: BindingsKind,
         pieces: &[Piece],
-    ) -> Parse<Vec<(String, SyntaxExpr)>> {
+    ) -> Parse<Bindings> {
         let view = self.scope.view;
         let head = layout.head;
+        let keyword = kind.keyword();
         if let Some(failure) = layout.failure.clone() {
             return Err(failure);
         }
         let Some(anchor) = layout.anchor else {
-            return Err(
-                Fail::error("let expression requires at least one binding").or_at(Some(head))
-            );
+            let message = match kind {
+                BindingsKind::Let => "let expression requires at least one binding",
+                BindingsKind::Where => {
+                    "where expression requires at least one binding or an explicit `{}` group"
+                }
+            };
+            return Err(Fail::error(message).or_at(Some(head)));
         };
         let first = layout.statements[0];
         let first_token = pieces.get(first).map(piece_token);
         if !layout.context.accepts_layout_anchor(anchor) {
+            let layout_name = match kind {
+                BindingsKind::Let => "let layout",
+                BindingsKind::Where => "where binding layout",
+            };
             return Err(Fail::error(format!(
-                "let layout begins at indentation {anchor}; expected more than continuation floor {}",
+                "{layout_name} begins at indentation {anchor}; expected more than continuation floor {}",
                 layout.context.continuation_floor()
             ))
             .or_at(first_token));
         }
+        // A deeper line that binds was a misplaced sibling to the legacy
+        // grammar. Until a `with` or `object` body is a frame whose own
+        // lines it judges, such a line may be one of its members, so only
+        // the line that ended the block is checked now.
         let extent = structural_view_at(view, head);
-        let lines = layout.hanging_lines.iter().chain(&layout.boundary);
+        let deeper = layout.hanging_lines.iter().filter(|_| legacy_grammar());
+        let lines = deeper.chain(&layout.boundary);
         for line in lines {
             let line_view = line_view(extent, *line);
             let binds = line_view
@@ -2098,15 +2254,19 @@ impl Pass<'_, '_, '_> {
                     _ => 0,
                 };
                 return Err(Fail::error(format!(
-                    "multi-line let binding is indented {indentation} spaces; expected sibling indentation {anchor}"
+                    "multi-line {keyword} binding is indented {indentation} spaces; expected sibling indentation {anchor}"
                 ))
                 .or_at(Some(*line)));
             }
         }
         if let Some(semicolon) = pieces.iter().find(|piece| is_symbol(view, piece, ";")) {
-            return Err(Fail::error(
-                "naked semicolon-separated `let` bindings are not supported; use `let { ... } in ...`",
-            )
+            let braced = match kind {
+                BindingsKind::Let => "let { ... } in ...",
+                BindingsKind::Where => "where { ... }",
+            };
+            return Err(Fail::error(format!(
+                "naked semicolon-separated `{keyword}` bindings are not supported; use `{braced}`"
+            ))
             .or_at(Some(piece_token(semicolon))));
         }
         let bounds = layout
@@ -2130,9 +2290,10 @@ impl Pass<'_, '_, '_> {
             bindings.push(binding::local_binding(scope, binding, context)?);
         }
         if bindings.is_empty() {
-            return Err(
-                Fail::error("let expression requires at least one binding").or_at(Some(head))
-            );
+            return Err(Fail::error(format!(
+                "{keyword} expression requires at least one binding"
+            ))
+            .or_at(Some(head)));
         }
         Ok(bindings)
     }
@@ -2142,12 +2303,14 @@ impl Pass<'_, '_, '_> {
     fn finish_braced_bindings(
         &self,
         block: &Block,
+        kind: BindingsKind,
         pieces: &[Piece],
         open: usize,
         close: usize,
-    ) -> Parse<Vec<(String, SyntaxExpr)>> {
+    ) -> Parse<Bindings> {
         let view = self.scope.view;
-        let fail = |message: &str| Err(Fail::error(message).or_at(Some(open)));
+        let keyword = kind.keyword();
+        let fail = |message: String| Err(Fail::error(message).or_at(Some(open)));
         if trim_padding(view, pieces).is_empty() {
             return Ok(Vec::new());
         }
@@ -2158,9 +2321,9 @@ impl Pass<'_, '_, '_> {
         let members = pieces.split(is_semicolon).collect::<Vec<_>>();
         let empty = |member: &&[Piece]| trim_padding(view, member).is_empty();
         if members.iter().all(empty) {
-            return fail(
-                "`let` binding group cannot contain only semicolons; use `{}` for an empty body",
-            );
+            return fail(format!(
+                "`{keyword}` binding group cannot contain only semicolons; use `{{}}` for an empty body"
+            ));
         }
         let last = members.len() - 1;
         if members
@@ -2168,7 +2331,9 @@ impl Pass<'_, '_, '_> {
             .enumerate()
             .any(|(at, member)| empty(member) && at != 0 && at != last)
         {
-            return fail("`let` binding group contains an empty member between semicolons");
+            return fail(format!(
+                "`{keyword}` binding group contains an empty member between semicolons"
+            ));
         }
         let scope = Scope {
             view: subview(view, open + 1, close),
@@ -2534,7 +2699,7 @@ impl Pass<'_, '_, '_> {
                 boundary: None,
                 failure: None,
                 arms: Some(Box::new(arms)),
-                bindings: false,
+                bindings: None,
             })),
             // An arm's head and guards may bind patterns.
             Mode::Cover,

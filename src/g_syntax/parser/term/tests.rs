@@ -731,6 +731,9 @@ const KEYWORD_FRAME_NESTING_SHAPES: &[(&str, &str, &str)] = &[
     ("1 + let a = 1 in ", "", "a"),
     ("using m in ", "", "x"),
     ("using ", " in x", "m"),
+    ("(a where a = ", ")", "1"),
+    ("let a = b where b = ", " in a", "1"),
+    ("do { .r a where a = ", "; .r 1 }", "1"),
 ];
 
 /// Layout arms nested in arms' results, each a line deeper.

@@ -349,9 +349,10 @@ on 2026-10-17, those that change the grammar with an entry in
   bind's pattern; at a statement's or arm's anchor; as a second `where`; or
   before anything else after its bindings.
 - **Cost.** `chain_where`, one line of `where`s, now nests each group in
-  the binding before it, and parses in about five times the CPU time at
-  1,600 bindings: each nested binding's structural parse rescans the rest
-  of the line. The suffix slice's frames remove those scans.
+  the binding before it, and parsed in about five times the CPU time at
+  1,600 bindings: each nested binding's structural parse rescanned the rest
+  of the line. Resolved the same day: the suffix slice's `where` frames read
+  it in its earlier time.
 - **Found while building it.** A `where` in a layout `do` statement failed
   to parse, and a parenthesized `where`, `let` or `with` was rejected as an
   argument, in guards and in statements: view-level dispatch read only

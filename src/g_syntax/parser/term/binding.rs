@@ -22,6 +22,7 @@ use super::super::structural::{
     before_key_mark, in_keyword_position, local_name, misplaced_where, parse_expression_extent,
     single_reserved_keyword, trim_layout, where_at, where_suffix,
 };
+use super::pass::FormShape;
 use super::{
     Fail, Items, Mode, Parse, Piece, Position, Scope, legacy_grammar, piece_token, token,
     trim_padding,
@@ -110,6 +111,62 @@ pub(super) fn local_binding(
         SyntaxExpr::Lambda(parameters, Box::new(value))
     };
     Ok((name.to_owned(), value))
+}
+
+/// A body's `where`: its keyword, and its form, which holds its bindings.
+#[derive(Clone, Copy)]
+pub(super) struct WhereSuffix {
+    pub(super) head: usize,
+    pub(super) form: usize,
+}
+
+/// Splits a body's `where` from its pieces: the pieces before it, and the
+/// `where`, whose bindings end the body. Anything after them is an error.
+pub(super) fn split_where<'p>(
+    scope: Scope<'_, '_, '_>,
+    pieces: &'p [Piece],
+) -> Parse<(&'p [Piece], Option<WhereSuffix>)> {
+    let view = scope.view;
+    let is_where = |piece: &Piece| {
+        matches!(piece, Piece::Form { form, .. }
+            if scope.covers.form_shape(*form).0 == FormShape::Where)
+    };
+    let Some(at) = pieces.iter().position(is_where) else {
+        return Ok((pieces, None));
+    };
+    if let Some(next) = trim_padding(view, &pieces[at + 1..]).first() {
+        let message = if is_where(next) || is_keyword(view, next, "where") {
+            "a definition, statement or arm takes one `where`: put these bindings in its group"
+        } else {
+            "nothing may follow a `where`'s bindings, which end its definition, statement or arm"
+        };
+        return Err(Fail::error(message).or_at(Some(piece_token(next))));
+    }
+    let Piece::Form { head, form, .. } = &pieces[at] else {
+        unreachable!("a `where` is a form piece");
+    };
+    Ok((
+        trim_padding(view, &pieces[..at]),
+        Some(WhereSuffix {
+            head: *head,
+            form: *form,
+        }),
+    ))
+}
+
+/// `body` scoped by the `where` whose form is `form`.
+pub(super) fn with_where(
+    scope: Scope<'_, '_, '_>,
+    form: usize,
+    body: SyntaxExpr,
+) -> Parse<SyntaxExpr> {
+    match scope.covers.take_form(form).result? {
+        SyntaxExpr::Let { bindings, .. } => Ok(SyntaxExpr::Let {
+            bindings,
+            body: Box::new(body),
+        }),
+        _ => unreachable!("a `where` holds its bindings around a placeholder"),
+    }
 }
 
 /// A guard's clauses, split at each `and` in keyword position.
@@ -530,6 +587,25 @@ pub(super) fn expression(
     body: bool,
 ) -> Parse<(SyntaxExpr, Option<usize>)> {
     let view = scope.view;
+    let (pieces, suffix) = split_where(scope, pieces)?;
+    if let Some(form) = suffix {
+        // A `where` after a bind's pattern would scope the statement from
+        // its end, past the pattern it binds.
+        if ends_at_arrow && pieces.iter().any(|piece| is_symbol(view, piece, "->")) {
+            return Err(Fail::error(
+                "`where` cannot follow a pattern: write `(E where …) -> P` to scope a bind's operation",
+            )
+            .or_at(Some(form.head)));
+        }
+        if !body {
+            return Err(Fail::error(
+                "`where` scopes a whole definition, statement or arm; parenthesize `(… where …)` or use `let … in` for part of an expression",
+            )
+            .or_at(Some(form.head)));
+        }
+        let (expression, _) = expression(scope, pieces, context, false, false)?;
+        return Ok((with_where(scope, form.form, expression)?, None));
+    }
     let side = pieces_view(view, pieces);
     let context = if ends_at_arrow {
         context.ending_at_arrow()

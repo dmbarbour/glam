@@ -674,7 +674,8 @@ maps the short names used here to file names.
     the CPU time it did at 1,600 bindings, since each nested binding's
     structural parse rescans the rest of the line, until
     `parser-keyword-frames-suffixes` makes `where` a frame. Its baselines
-    from before are not comparable.
+    from before are not comparable. (Resolved 2026-10-17: with `where`
+    frames it parses in its earlier time.)
   - A parenthesized expression is a body wherever it stands, so
     `f (a where a = 1)`, `f (let a = 1 in a)` and `f (a with B := 1)` parse
     as arguments, in guards and in statements.

@@ -1154,6 +1154,29 @@ first part of the suffix slice; `where`, `with` and `object` remain.
 - **Measures** are deferred to the parser performance work, as the
   maintainer asked.
 
+**`parser-keyword-frames-suffixes`, `where` (2026-10-17).** The second part;
+`with` and `object` remain.
+- **Blocks.** A `where` in a statement, an arm's result, a binding's value
+  or a group opens a bindings block above it, read as a `let`'s are, with
+  the structural parser's messages. The block closes into a form piece
+  (`FormShape::Where`) that ends its body; the body's reader splits it off
+  and scopes its expression with it (`binding::split_where`), and reports
+  anything after it. A view's own `where` still stops its walk; `parse_body`
+  reads its bindings with a walk of their own (`where_group`), so the body
+  and the bindings are each walked once.
+- **No dispatch:** a `where` no longer sends a statement, an arm or a
+  group to view-level dispatch, and the structural `where` parser serves
+  only the legacy grammar.
+- **Checks kept:** the structural parser's messages, but a deeper line of
+  a block that binds is a misplaced sibling only in the legacy grammar:
+  until `with` and `object` are frames, such a line may be one of their
+  members. Only the line that ends the block is checked.
+- **`chain_where`** parses at 1,600 bindings in 0.054 s of CPU time again
+  (0.29 s after `where-scopes-its-definition`, 0.056 s before it), a rough
+  debug-build check.
+- **Depth:** `where`s nested through groups, `let` bindings and braced
+  statements parse 2,000 deep without recursion.
+
 ## Verification
 
 - The differential oracle above, while both parsers exist.

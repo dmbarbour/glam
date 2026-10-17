@@ -114,7 +114,20 @@ pub(in crate::g_syntax::parser) fn where_suffix(
     let body = parsed
         .into_expression()
         .map_err(|message| error_at_view(view, message))?;
-    let parsed = parse_where_suffix(view, context, where_index, body)?;
+    // The term parser reads the bindings as a frame does; the legacy
+    // grammar's structural parser read them from views.
+    let parsed = if legacy_grammar() {
+        parse_where_suffix(view, context, where_index, body)?
+    } else {
+        let (bindings, end) = super::term::parse_where_group(view, context, where_index)?;
+        ParsedExpression::new(
+            SyntaxExpr::Let {
+                bindings,
+                body: Box::new(body),
+            },
+            end,
+        )
+    };
     if parsed.end() < view.range().end() {
         if let Some(another) = where_at(view, parsed.end()).and_then(|index| view.token_at(index)) {
             return Err(error_at_token(
