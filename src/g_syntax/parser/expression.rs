@@ -335,25 +335,5 @@ pub(in crate::g_syntax::parser) fn parse_expression_chain_view(
     }
 }
 
-/// The differential oracle for the prefix-shared term parser: while a test
-/// enables it, every expression the term parser covers is parsed again by
-/// the Chumsky grammar, and any disagreement is recorded.
-///
-/// Setting `GLAM_TERM_ORACLE` enables it for every test instead, panicking on
-/// the first disagreement, which sweeps every expression any test parses:
-///
-/// ```sh
-/// GLAM_TERM_ORACLE=1 cargo test --lib
-/// ```
-///
-/// The grammar predates the grammar review's rules (Syntax.md "Tail
-/// Position" and the review's decisions), so where the term parser and the
-/// grammar disagree, the term parser's reading of the legacy grammar is
-/// compared instead.
-///
-/// Expressions the grammar's keyword forms parse while the oracle runs it
-/// are not compared again. The term parser's own parse reaches the same
-/// expressions, and comparing them would run the grammar again at every
-/// nesting level below, exponential in keyword nesting.
 #[cfg(test)]
 mod tests;

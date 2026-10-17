@@ -208,7 +208,7 @@ const SNIPPETS: &[&str] = &[
     "(and:a)",
     "(and:1)",
     "(and:a 'a []and)",
-    // Keyword forms, delegated to the structural parsers.
+    // Keyword forms.
     "if c then a else b",
     "f if c then a else b",
     "a if c else b",
@@ -354,7 +354,7 @@ fn nested(depth: usize, (open, close, inner): (&str, &str, &str)) -> String {
 }
 
 /// Self-nesting shapes from the parser survey, as open, close and innermost
-/// text. The Chumsky grammar is exponential in the depth of most of them.
+/// text. The retired Chumsky grammar was exponential in most of them.
 const NESTING_SHAPES: &[(&str, &str, &str)] = &[
     ("(", ")", "1"),
     ("[", "]", "1"),
@@ -783,10 +783,10 @@ fn conditional_guard_lines_count_for_the_enclosing_floor() {
     );
 }
 
-/// A group deferred to a structural parser, here a `match` body, still
-/// counts its lines toward the floor of the branch around it.
+/// A group's lines, here a braced match's arms in a branch, count toward
+/// the floor of the branch around it.
 #[test]
-fn deferred_group_lines_count_for_the_enclosing_floor() {
+fn group_lines_count_for_the_enclosing_floor() {
     let parsed = parse_source(
         b"language g0\nx = f if g\n  - h else (match b as { z => y\n  y; _ => y; })\n",
     );
@@ -799,10 +799,9 @@ fn deferred_group_lines_count_for_the_enclosing_floor() {
     );
 }
 
-/// Keyword forms nested in groups, as open, close and innermost text. A
-/// keyword form's structural parser reads its groups from their tokens, so
-/// the term parser must not interpret them too: each level would double the
-/// work below it.
+/// Keyword forms nested in groups, as open, close and innermost text. Each
+/// group is interpreted once: a second interpretation at each level would
+/// double the work below it.
 const KEYWORD_NESTING_SHAPES: &[(&str, &str, &str)] = &[
     ("(if c then ", " else 0)", "1"),
     ("f (if c then ", " else 0)", "1"),
@@ -1038,8 +1037,7 @@ fn long_flat_chains_parse_without_recursion() {
 /// The tail rule (Syntax.md "Tail Position"): a tail form runs to the end of
 /// its region, which a closer, a separator, a line end or a separator
 /// keyword ends, and only an operator or a keyword resumes after its `}` or
-/// a dedent. The oracle compares each source as the legacy grammar reads
-/// it.
+/// a dedent.
 #[test]
 fn tail_forms_stand_alone_only_in_tail_position() {
     const OUTSIDE: &[&str] = &[

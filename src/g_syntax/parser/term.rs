@@ -1,9 +1,7 @@
-//! Prefix-shared term parser for ordinary expressions.
+//! Prefix-shared term parser for expressions and patterns.
 //!
-//! Production parses every ordinary expression with it; the Chumsky grammar
-//! remains only as a fallback for unsupported views and as a differential
-//! oracle, which tests run against every expression the corpus parses. See
-//! the parser backtracking plan, which tracks the remaining steps.
+//! It reads every expression and pattern. The round-trip test (`printer`)
+//! checks that generated trees print and parse back to themselves.
 //!
 //! **Each group is parsed once.** One pass over the view's tokens keeps an
 //! explicit stack of open delimiter groups. When a group closes, its
@@ -30,28 +28,24 @@
 //!
 //! **Errors are deferred to use.** A group whose contents are invalid as an
 //! expression keeps its error in its cover, and the error surfaces only if a
-//! role consumes the cover. A delegated keyword form's own groups, such as a
-//! `using` body, are never consumed here, so they raise nothing.
+//! role consumes the cover. A group the pass only keeps, such as one in a
+//! `with` body, is never consumed here, so it raises nothing.
 //!
-//! **Keyword frames**: conditionals (`if`, `try`, and postfix `if`), `do`
-//! blocks and matches are frames of the token pass (`pass`), interpreted
-//! when they close into form pieces, atoms of the item they stand in. A
-//! postfix `if`, on the same line or a continuation line, ends the innermost
-//! open lambda's body: `\x -> b if c else d` is `\x -> (b if c else d)`.
+//! **Keyword frames**: every keyword form (conditionals, `do` blocks,
+//! matches, `let`, `using`, `where`, `with` and objects) is a frame of the
+//! token pass (`pass`), interpreted when it closes into a form piece, an atom
+//! of the item it stands in. A postfix `if`, on the same line or a
+//! continuation line, ends the innermost open lambda's body:
+//! `\x -> b if c else d` is `\x -> (b if c else d)`.
 //!
-//! **Tail position** (Syntax.md): a conditional, `do` block, match or
-//! lambda that a token able to continue it would end on its line, or that
-//! an argument or path follows, fails its view. The grammar review's rules
-//! are off while the oracle compares a view with the legacy grammar.
+//! **Tail position** (Syntax.md): a tail form that a token able to continue
+//! it would end on its line, or that an argument or path follows, fails its
+//! view.
 //!
-//! **Other keyword forms** (`using`, and any form inside another's region)
-//! are delegated to the structural parsers through the same entry points the
-//! Chumsky grammar uses. The cursor then skips to the end the structural
-//! parser reports. A keyword head opens a region to its group member's end,
-//! and groups closing inside it are deferred, not interpreted: the form's
-//! structural parser reads them from their tokens, so a group is
-//! interpreted by one parser only. A group the term parser consumes after a
-//! form that ended early is interpreted when it is consumed.
+//! **Regions:** a pattern's `when` opens a region to its group member's
+//! end, whose groups are deferred, not interpreted: the guard-clause parser
+//! reads the guards from their tokens, so a group is interpreted by one
+//! parser only.
 //!
 //! **Cover mode** parses a pattern position. Groups are interpreted into
 //! role-neutral cover terms (`cover::Term`) instead of expressions, and the
@@ -92,7 +86,9 @@ pub(super) enum Fail {
     /// The view is not a valid expression. `at` is the token where parsing
     /// stopped, when known.
     Error { at: Option<usize>, message: String },
-    /// A structural parser rejected a keyword form with these diagnostics.
+    /// A parse the term parser ran for part of the view, such as a `with`
+    /// body's members or a `where`'s bindings, failed with these
+    /// diagnostics.
     Reported(Vec<crate::g_syntax::Diagnostic>),
 }
 
@@ -253,17 +249,12 @@ enum Mode {
 }
 
 /// Whether the token at `index` opens a keyword region: the rest of its
-/// group member, up to the group's separator or close, as
-/// `parse_structural_atom` delimits the form. The form's structural parser
-/// reads the region from its tokens, so groups closing inside it are
-/// deferred rather than interpreted, and every group is interpreted by one
-/// parser.
-/// In cover mode, a `when` opens one too: the guard-clause parser reads its
-/// clauses.
+/// group member, up to the group's separator or close. Only a pattern's
+/// `when` does, whose guards the guard-clause parser reads from their
+/// tokens, so groups closing inside it are deferred rather than
+/// interpreted, and every group is interpreted by one parser.
 fn opens_keyword_region(view: TokenView<'_, '_>, index: usize, mode: Mode) -> bool {
-    regions_enabled()
-        && (may_head_keyword_form(view, index)
-            || mode == Mode::Cover && is_pattern_when(view, index))
+    regions_enabled() && mode == Mode::Cover && is_pattern_when(view, index)
 }
 
 /// The error for a tail form at `head` that `follower` follows, so that it
@@ -321,16 +312,12 @@ fn is_pattern_when(view: TokenView<'_, '_>, index: usize) -> bool {
     matches!(token(view, index).kind(), TokenKind::Name("when")) && in_keyword_position(view, index)
 }
 
-/// Whether the token at `index` may head a keyword form, judged from it and
-/// its neighbours. The term parser delegates a keyword form only where this
-/// holds, so every delegated form has its region; a missed one would parse
-/// the form's groups twice, doubling the work below it. A keyword spelled as
-/// a key fails: after a joint `.` (a path segment or effect name), after a
-/// joint `'` (a quoted atom or path), after a constructor's `:`, or before a
-/// key mark, as the structural layer judges it (a tag's key or a path's
-/// root). A keyword that passes but heads nothing, such as a form that ends
-/// before its group member does, costs a deferred interpretation, one level
-/// of Rust recursion each where such regions nest.
+/// Whether the token at `index` heads a keyword form that opens its frame
+/// by its keyword alone (`if`, `try`, `match`, `try_match`, `using`, `do`),
+/// judged from it and its neighbours. A keyword spelled as a key fails:
+/// after a joint `.` (a path segment or effect name), after a joint `'` (a
+/// quoted atom or path), after a constructor's `:`, or before a key mark (a
+/// tag's key or a path's root).
 pub(super) fn may_head_keyword_form(view: TokenView<'_, '_>, index: usize) -> bool {
     let head = token(view, index);
     let TokenKind::Name(name) = head.kind() else {
@@ -387,9 +374,6 @@ enum Piece {
         open: usize,
         close: usize,
         cover: usize,
-        /// Whether a keyword only view-level dispatch parses stands at the
-        /// group's own level.
-        view_level: bool,
     },
     /// A conditional from its head to `end`, exclusive.
     Form {
@@ -410,9 +394,9 @@ struct Covers {
 
 enum Slot {
     Ready(Cover),
-    /// A group in a keyword region, left to the form's structural parser. A
-    /// role that consumes it anyway, after a form that ended before its
-    /// region did, interprets it then.
+    /// A group in a keyword region or a `with` body, which another parse
+    /// reads from its tokens. A role that consumes it anyway interprets it
+    /// then.
     Deferred(Deferred),
     Taken,
 }
@@ -1545,10 +1529,8 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         }
     }
 
-    /// Whether the piece at `offset` is an `if` that the grammar reads as a
-    /// postfix conditional rather than a prefix one.
-    /// An `if` token stands only in a keyword region the term parser takes
-    /// after a form that ended early; the structural parser reads it.
+    /// Whether the piece at `offset` is a conditional that reads as postfix:
+    /// one with no `then`, after an operand.
     fn postfix_if_at(&self, offset: usize) -> bool {
         match self.peek_at(offset) {
             Some(Piece::Form { form, .. }) => matches!(

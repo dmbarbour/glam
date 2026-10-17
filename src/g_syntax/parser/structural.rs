@@ -162,28 +162,6 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
     parse_expression_chain_view(view, context)
 }
 
-/// Parses an open tail: an `else` branch, a postfix `if`'s fallback, or a
-/// `let` body. It runs to `form_end`, its form's end, unless `context` ends
-/// tails at a `->` or a `where` ends it. Returns the tail and where its form
-/// ends.
-pub(in crate::g_syntax::parser) fn parse_open_tail(
-    view: TokenView<'_, '_>,
-    context: ExpressionContext,
-    form_end: usize,
-) -> ParseResult<(SyntaxExpr, usize)> {
-    let view = trim_layout(view);
-    let parsed = parse_expression_extent(view, context)?;
-    let end = if parsed.end() < view.range().end() {
-        parsed.end()
-    } else {
-        form_end
-    };
-    let tail = parsed
-        .into_expression()
-        .map_err(|message| error_at_view(view, message))?;
-    Ok((tail, end))
-}
-
 pub(in crate::g_syntax::parser) fn line_begins_object_member(view: TokenView<'_, '_>) -> bool {
     ["object", "extend"]
         .into_iter()

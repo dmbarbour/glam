@@ -1,11 +1,13 @@
-//! Do statements and guard clauses read from their pieces.
+//! Do statements, guard clauses, arms and local bindings read from their
+//! pieces.
 //!
 //! The binding rule is `pattern::parse_binding`'s, applied to pieces. A
 //! clause binds with `<-` or `=` when that token stands before any `\` and
 //! any keyword but `as` and `when`; a keyword form ends the search, whether
 //! a token in a keyword region or a frame's form piece. Otherwise the clause
-//! is an operation, which may end at a `->` that a pattern follows. A side
-//! holding a form that view-level dispatch parses is parsed from its view.
+//! is an operation, which may end at a `->` that a pattern follows. A body,
+//! a statement's side, an arm's result or a binding's value, takes the
+//! `where` that ends it (`split_where`).
 
 use crate::g_syntax::keywords::{canonical_keyword, g0_keyword, reserved_keyword_message};
 use crate::g_syntax::{
@@ -16,11 +18,10 @@ use crate::g_syntax::{
 use super::super::do_expr::ParsedDoStatement;
 use super::super::expression_context::{ExpressionContext, validate_expression_floor};
 use super::super::input::{TokenRange, TokenView};
-use super::super::lexical::{Delimiter, LeadingTrivia, TokenKind};
+use super::super::lexical::{LeadingTrivia, TokenKind};
 use super::super::pattern::{Binding, BindingSite, Missing};
 use super::super::structural::{
-    before_key_mark, in_keyword_position, local_name, misplaced_where, parse_expression_extent,
-    single_reserved_keyword, trim_layout, where_at, where_suffix,
+    before_key_mark, in_keyword_position, local_name, single_reserved_keyword, trim_layout,
 };
 use super::pass::FormShape;
 use super::{Fail, Items, Mode, Parse, Piece, Position, Scope, piece_token, token, trim_padding};
@@ -593,23 +594,6 @@ pub(super) fn expression(
     } else {
         context.complete()
     };
-    if needs_view_dispatch(view, pieces) {
-        let mut parsed = parse_expression_extent(side, context).map_err(Fail::Reported)?;
-        if where_at(side, parsed.end()).is_some() {
-            if !body {
-                return Err(Fail::Reported(misplaced_where(side, parsed.end())));
-            }
-            parsed = where_suffix(side, context.complete(), parsed).map_err(Fail::Reported)?;
-        }
-        let end = parsed.end();
-        let expression = parsed
-            .into_expression()
-            .map_err(|message| Fail::error(message).or_at(Some(side.range().start())))?;
-        let stop = (end < side.range().end())
-            .then(|| pieces.iter().position(|piece| piece_token(piece) >= end))
-            .flatten();
-        return Ok((expression, stop));
-    }
     let trimmed = trim_layout(side);
     let context = if spans_lines(trimmed) {
         let (context, diagnostics) = validate_expression_floor(trimmed, context);
@@ -633,33 +617,6 @@ pub(super) fn expression(
         .resolve()
         .map_err(|message| Fail::error(message).or_at(Some(side.range().start())))?;
     Ok((expression, stop))
-}
-
-/// Whether pieces hold a form that view-level dispatch parses: `let`,
-/// `object`, `where` or `with` at their level, or one parenthesized group
-/// holding such a form.
-pub(super) fn needs_view_dispatch(view: TokenView<'_, '_>, pieces: &[Piece]) -> bool {
-    let pieces = trim_padding(view, pieces);
-    if let [
-        Piece::Group {
-            open, view_level, ..
-        },
-    ] = pieces
-    {
-        return *view_level
-            && matches!(
-                token(view, *open).kind(),
-                TokenKind::Open {
-                    delimiter: Delimiter::Parenthesis,
-                    ..
-                }
-            );
-    }
-    pieces.iter().any(|piece| {
-        ["let", "object", "where", "with"]
-            .into_iter()
-            .any(|name| is_keyword(view, piece, name))
-    })
 }
 
 /// The view from the first piece to the end of the last.

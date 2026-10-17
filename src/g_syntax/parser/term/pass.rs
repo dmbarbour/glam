@@ -79,12 +79,11 @@ use super::super::layout::group_separator;
 use super::super::lexical::{Delimiter, GroupId, LeadingTrivia, TokenKind};
 use super::super::structural::{
     in_keyword_position, is_layout_empty, keyword_head, line_begins_object_member,
-    object_alias_name, parse_body, parse_expression_in_context, parse_object_expression_header,
-    parse_open_tail, trim_layout,
+    object_alias_name, parse_object_expression_header, trim_layout,
 };
-use super::binding::{self, NestedArms, needs_view_dispatch};
+use super::binding::{self, NestedArms};
 use super::{
-    Bindings, Cover, Deferred, Fail, GroupBody, Items, Mode, ParenCover, Parse, Piece, Scope, Term,
+    Bindings, Cover, Deferred, Fail, GroupBody, Items, Mode, Parse, Piece, Scope,
     conditional_argument, ends_operand, form_label, heads_form, interpret_group, is_symbol,
     may_head_keyword_form, misplaced_tail, opens_keyword_region, piece_token, regions_enabled,
     token, trim_padding,
@@ -119,9 +118,6 @@ struct Frame {
     /// Line starts after its first significant token, nested frames
     /// included, so a frame without any skips checking its floors.
     line_starts: usize,
-    /// Whether a form that view-level dispatch parses stands at a group's
-    /// level: `let`, `object`, `where`, or a `with` no match takes.
-    view_level: bool,
     /// Whether its next significant token starts a member: a guard clause,
     /// a statement, or an arm or its result, which takes its own context.
     member_start: bool,
@@ -479,7 +475,7 @@ fn display(keyword: &str, open: bool) -> String {
 
 /// The context of an object's or update's members after the `with` at
 /// `head`: the enclosing one, floored at the `with`'s line when an infix
-/// operator leads that line, as the structural parser floored it.
+/// operator leads that line, so the members lie right of the operator.
 fn members_context(
     view: TokenView<'_, '_>,
     context: ExpressionContext,
@@ -535,7 +531,6 @@ impl Frame {
             lambda: None,
             first: None,
             line_starts: 0,
-            view_level: false,
             member_start: false,
             pending: None,
             layout_owner: 0,
@@ -622,7 +617,6 @@ impl Frame {
         self.lambda = None;
         self.first = None;
         self.line_starts = 0;
-        self.view_level = false;
     }
 }
 
@@ -666,7 +660,7 @@ impl Conditional {
     }
 
     /// The conditional's own context: a prefix form's is floored at its
-    /// head's line, as for every delegated keyword form.
+    /// head's line, as every keyword form's is.
     fn context(&self, view: TokenView<'_, '_>) -> ExpressionContext {
         if self.postfix() {
             self.enclosing
@@ -976,7 +970,6 @@ impl Pass<'_, '_, '_> {
             .group(group)
             .expect("an open frame's group exists")
             .open_token();
-        let view_level = frame.view_level;
         let line_starts = frame.line_starts;
         if let Some(mut block) = block {
             if let Some(arms) = block.arms.take() {
@@ -1068,23 +1061,6 @@ impl Pass<'_, '_, '_> {
                 close: index,
                 in_parent_region: parent.region,
             })
-        } else if view_level
-            && delimiter == Delimiter::Parenthesis
-            && !body.pieces.iter().any(|piece| is_symbol(view, piece, ","))
-        {
-            // A parenthesized expression is a body, whose keyword forms
-            // that are no frames yet its structural parser reads, and never
-            // a pattern, which holds no keyword form.
-            let contents = view
-                .group_contents(group)
-                .expect("an open frame's group exists");
-            covers.ready(
-                parse_body(contents, body.context.complete())
-                    .map(|expression| Cover::Paren(ParenCover::Grouped(Term::Expr(expression))))
-                    .unwrap_or_else(|diagnostics| {
-                        Cover::Invalid(Fail::Reported(diagnostics).or_at(Some(open)))
-                    }),
-            )
         } else {
             covers.ready(
                 interpret_group(scope, &body, index)
@@ -1095,7 +1071,6 @@ impl Pass<'_, '_, '_> {
             open,
             close: index,
             cover,
-            view_level,
         });
     }
 
@@ -1213,7 +1188,7 @@ impl Pass<'_, '_, '_> {
                 if starts_statement {
                     // A `do` or a trailing `when` before this line heads no
                     // braced block: the line starts the next statement or
-                    // arm, as the structural parser split them.
+                    // arm.
                     let pending = top.pending.take();
                     if let Some(arms) = top.arms_mut() {
                         arms.unfinished_nested(pending);
@@ -1310,8 +1285,8 @@ impl Pass<'_, '_, '_> {
                 "then" | "else" if in_keyword_position(view, index) => {
                     return self.phase_keyword(index);
                 }
-                // A form opens where the term parser always delegated one,
-                // a tag's payload included.
+                // A form opens wherever its keyword heads one, a tag's
+                // payload included.
                 "if" | "try" if may_head_keyword_form(view, index) => {
                     self.open_conditional(index, after_operand);
                     return Step::Next;
@@ -1383,9 +1358,6 @@ impl Pass<'_, '_, '_> {
                 }
                 "where" if in_keyword_position(view, index) => {
                     return self.where_ends(index, begins_member);
-                }
-                "let" | "object" | "where" if in_keyword_position(view, index) => {
-                    self.top().view_level = true;
                 }
                 _ => {}
             },
@@ -1716,7 +1688,6 @@ impl Pass<'_, '_, '_> {
             return Step::Next;
         }
         let top = self.top();
-        top.view_level = true;
         top.lambda_head = false;
         top.pieces.push(Piece::Token(index));
         Step::Next
@@ -2195,7 +2166,8 @@ impl Pass<'_, '_, '_> {
     }
 
     /// A layout block's members, from the `with` at `head` to `end`, read
-    /// by the declaration parser, with the structural parser's checks.
+    /// by the declaration parser, with the checks on the block's anchor and
+    /// a hanging block's next line.
     fn finish_layout_members(
         &self,
         layout: &LayoutBlock,
@@ -2586,8 +2558,7 @@ impl Pass<'_, '_, '_> {
         });
     }
 
-    /// A layout block's bindings, checked as the structural parser checked
-    /// them: a deeper line that binds is a misplaced sibling, unless a
+    /// A layout block's bindings: a deeper line that binds is a misplaced sibling, unless a
     /// `where` begins it, which scopes the binding above.
     fn finish_layout_bindings(
         &self,
@@ -2814,7 +2785,7 @@ impl Pass<'_, '_, '_> {
             end,
             line_starts,
         };
-        let (body, rest) = match self.else_branch(branch, scoped.context) {
+        let (body, rest) = match self.else_branch(branch) {
             Ok(parsed) => parsed,
             Err(fail) => return (Err(fail), Vec::new()),
         };
@@ -2838,8 +2809,8 @@ impl Pass<'_, '_, '_> {
         (result, rest)
     }
 
-    /// A layout `do` block's statements, checked as the structural parser
-    /// checked them.
+    /// A layout `do` block's statements, with the checks on its anchor and a
+    /// hanging block's lines.
     fn finish_layout(
         &self,
         layout: &LayoutBlock,
@@ -2868,7 +2839,7 @@ impl Pass<'_, '_, '_> {
         }
         if layout.hanging {
             // A line is judged within the `do` form's own extent, its group
-            // member, as the structural parser judged it.
+            // member.
             let extent = structural_view_at(view, head);
             for line in layout.boundary.iter().chain(&layout.hanging_lines) {
                 if line_begins_do_statement(line_view(extent, *line)) {
@@ -3039,7 +3010,7 @@ impl Pass<'_, '_, '_> {
     /// if a `{` comes next, unless that group begins the first arm's
     /// pattern, as a mark after it on its line shows; otherwise a layout
     /// block. The marks on a line where an enclosing arm reads its head or
-    /// guards are that arm's, as the structural parser split it first.
+    /// guards are that arm's.
     fn begin_arms(&mut self, keyword: usize, arms: Arms) {
         let view = self.scope.view;
         // A `{` on the keyword's line delimits the arms.
@@ -3274,7 +3245,7 @@ impl Pass<'_, '_, '_> {
         })
     }
 
-    /// A layout block's arms, checked as the structural parser checked them.
+    /// A layout block's arms, with the checks on its anchor.
     fn finish_layout_arms(
         &self,
         layout: &LayoutBlock,
@@ -3583,15 +3554,14 @@ impl Pass<'_, '_, '_> {
         };
         let guards =
             binding::guard_clauses(scope, &conditional.guard_pieces, &construct).map_err(Some)?;
-        let context = conditional.context(view);
         let then_result = conditional
             .then_branch
             .take()
-            .map(|branch| self.then_branch(branch, context))
+            .map(|branch| self.then_branch(branch))
             .transpose()
             .map_err(Some)?;
         else_branch.context = conditional.branch_context.take();
-        let (else_result, rest) = self.else_branch(else_branch, context).map_err(Some)?;
+        let (else_result, rest) = self.else_branch(else_branch).map_err(Some)?;
         let then_mode = match conditional.then {
             Some((_, true)) => ConditionalResultMode::Tentative,
             _ => ConditionalResultMode::Ordinary,
@@ -3613,14 +3583,10 @@ impl Pass<'_, '_, '_> {
     }
 
     /// A `then` branch, which runs to its `else`.
-    fn then_branch(&self, branch: Branch, conditional: ExpressionContext) -> Parse<SyntaxExpr> {
+    fn then_branch(&self, branch: Branch) -> Parse<SyntaxExpr> {
         let view = self.scope.view;
         let whole = subview(view, branch.start, branch.end);
         let trimmed = trim_layout(whole);
-        if needs_view_dispatch(view, &branch.pieces) {
-            return parse_expression_in_context(trimmed, conditional.child_owner(trimmed))
-                .map_err(Fail::Reported);
-        }
         let context = self.checked(trimmed, &branch)?;
         let scope = Scope {
             view: whole,
@@ -3637,26 +3603,11 @@ impl Pass<'_, '_, '_> {
 
     /// An `else` branch, an open tail, with any pieces after a `->` where it
     /// ended.
-    fn else_branch(
-        &self,
-        branch: Branch,
-        conditional: ExpressionContext,
-    ) -> Parse<(SyntaxExpr, Vec<Piece>)> {
+    fn else_branch(&self, branch: Branch) -> Parse<(SyntaxExpr, Vec<Piece>)> {
         let view = self.scope.view;
         let whole = subview(view, branch.start, branch.end);
         let trimmed = trim_layout(whole);
         let mut pieces = branch.pieces;
-        if needs_view_dispatch(view, &pieces) {
-            let (expression, end) =
-                parse_open_tail(trimmed, conditional.child_owner(trimmed), branch.end)
-                    .map_err(Fail::Reported)?;
-            let split = pieces
-                .iter()
-                .position(|piece| piece_token(piece) >= end)
-                .filter(|_| end < trimmed.range().end())
-                .unwrap_or(pieces.len());
-            return Ok((expression, pieces.split_off(split)));
-        }
         let context = self.checked(
             trimmed,
             &Branch {

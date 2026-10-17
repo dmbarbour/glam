@@ -1260,6 +1260,10 @@ review's sequencing planned (maintainer, 2026-10-17).
   check that the parser reads each to its end without panicking; the
   round trip checks readings. Tests of deleted Chumsky combinators and of
   the structural `with` header went with them.
+- **Then:** view-level dispatch went too. No keyword marks a branch,
+  statement or group for a parse from its view any more: a lone keyword
+  stays a token, which the item reports as reserved. Keyword regions remain
+  only for a pattern's `when`.
 - **Checks:** `check.sh all`, the round trip at 50 times its count, and the
   generated sources at 200 times theirs.
 
