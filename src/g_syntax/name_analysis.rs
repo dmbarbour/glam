@@ -34,6 +34,9 @@ struct ResolutionScope {
     definitions: NamespaceId,
     lookup: NamespaceId,
     object_alias: Option<String>,
+    /// Where the locals a bare name may read begin, as in the resolver's
+    /// `NameScope`.
+    local_floor: usize,
     parent: Option<ResolutionScopeId>,
 }
 
@@ -61,6 +64,7 @@ impl FileNameAnalysis {
                 definitions: root_namespace,
                 lookup: root_namespace,
                 object_alias: None,
+                local_floor: 0,
                 parent: None,
             }],
             binders: Vec::new(),
@@ -244,21 +248,20 @@ impl FileNameAnalysis {
         let alias = spec.alias.map(local_name_metadata);
         let canonical_alias = alias.as_ref().and_then(|alias| alias.canonical.clone());
         let parent_lookup = self.scopes[spec.parent.0].lookup;
-        let lookup = match spec.kind {
-            BodyScopeKind::Object
-                if alias.is_none() || canonical_alias.as_deref() == Some("self") =>
-            {
-                spec.namespace
-            }
-            BodyScopeKind::Dictionary if canonical_alias.as_deref() == Some("self") => {
-                spec.namespace
-            }
-            BodyScopeKind::Object | BodyScopeKind::Dictionary => parent_lookup,
+        // `alias self`, an object's default, localizes the body's names,
+        // which hide the locals outside it as they hide its host's names.
+        let localized = canonical_alias.as_deref() == Some("self")
+            || (spec.kind == BodyScopeKind::Object && alias.is_none());
+        let (lookup, local_floor) = if localized {
+            (spec.namespace, locals.len())
+        } else {
+            (parent_lookup, self.scopes[spec.parent.0].local_floor)
         };
         let scope = self.push_scope(ResolutionScope {
             definitions: spec.namespace,
             lookup,
             object_alias: canonical_alias.clone(),
+            local_floor,
             parent: Some(spec.parent),
         });
         if let Some(alias) = alias
@@ -386,6 +389,7 @@ impl FileNameAnalysis {
                     definitions: namespace,
                     lookup: namespace,
                     object_alias: None,
+                    local_floor: self.scopes[scope.0].local_floor,
                     parent: Some(scope),
                 });
                 self.visit_expr(body, line, using_scope, locals);
@@ -627,10 +631,22 @@ impl FileNameAnalysis {
         scope: ResolutionScopeId,
         locals: &[String],
     ) {
+        let floor = self.scopes[scope.0].local_floor.min(locals.len());
         if matches!(name, "module" | "module_origin" | "self")
-            || locals.iter().rev().any(|local| local == name)
+            || locals[floor..].iter().any(|local| local == name)
             || self.scopes[scope.0].object_alias.as_deref() == Some(name)
         {
+            return;
+        }
+        // One name has one meaning in a file: a localized body's own name
+        // may not share a local's that its host sees.
+        if locals[..floor].iter().any(|local| local == name) {
+            self.conflicts.push(Diagnostic::error(
+                line,
+                format!(
+                    "`{name}` reads this body's own `{name}` beside a local `{name}` outside it; write `^{name}` for the local, or `self.{name}`"
+                ),
+            ));
             return;
         }
         let namespace = self.scopes[scope.0].lookup;
@@ -823,7 +839,7 @@ impl FileNameAnalysis {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BodyScopeKind {
     Object,
     Dictionary,

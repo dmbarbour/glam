@@ -234,6 +234,7 @@ pub(in crate::g_syntax) fn object_body_defs_resolved_in_scope(
             reflection_boundary
                 .as_ref()
                 .map(|root| root.duplicate_in(access)),
+            base_len,
         );
         // A `let` group binds here, against the definitions so far, for
         // the members after it.
@@ -493,9 +494,12 @@ pub(in crate::g_syntax) fn object_body_scope_resolved(
     object_prior_defs: ResolvedRoot,
     parent: NameScope<ResolvedRoot>,
     reflection_boundary: Option<ResolvedRoot>,
+    body_locals: usize,
 ) -> NameScope<ResolvedRoot> {
     // An object's names are its own unless an alias other than `self`
     // names it; `alias _` names nothing and leaves names to the parent.
+    // Localized names hide the locals bound outside the body, from
+    // `body_locals` down, as they hide the parent's names: both take `^`.
     let alias = alias.map(local_name_metadata);
     let localized = alias
         .as_ref()
@@ -512,6 +516,11 @@ pub(in crate::g_syntax) fn object_body_scope_resolved(
             parent.prior_defs.duplicate_in(access),
         )
     };
+    let local_floor = if localized {
+        body_locals
+    } else {
+        parent.local_floor
+    };
 
     NameScope {
         final_defs,
@@ -521,6 +530,7 @@ pub(in crate::g_syntax) fn object_body_scope_resolved(
         object_alias,
         object_final_defs: Some(object_final_defs.duplicate_in(access)),
         object_prior_defs: Some(object_prior_defs),
+        local_floor,
         reflection: reflection_boundary.map(|demand| ReflectionBoundary { demand }),
         parent: Some(Box::new(parent)),
     }

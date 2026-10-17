@@ -559,7 +559,8 @@ Prefix "x-" rest => Result # complete match arm may omit outer parentheses
 object foo extends bar, baz with
     def1 = ...              # names bind to self by default
     def2 := ...             # override inherited def2; _def2 = prior
-    def3 = ^a + def1        # ^a escapes to host scope (^^a two levels)
+    def3 = ^a + def1        # ^a escapes to host scope (^^a two levels),
+                            #   host locals too: \v -> object _ with { x = ^v }
     declare def4            # expected by the final object, e.g. from a child
     assume def5             # defined outside any journal, e.g. by a dict
 

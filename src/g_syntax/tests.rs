@@ -7929,3 +7929,45 @@ fn body_lets_follow_local_unused_warning_rules() {
         assert_eq!(warnings, [(3, "unused local `unused`")], "{source}");
     }
 }
+
+/// `alias self`, written or an object's default, localizes a body's names:
+/// the locals outside it take `^`, as its host's names do. Other aliases,
+/// and `using`, leave the locals in reach.
+#[test]
+fn localized_bodies_reach_outer_locals_through_escapes() {
+    for source in [
+        "language g0\nf = \\v -> object _ with\n  text = ^v\nasm.result = (f \"outer\").text\n",
+        "language g0\nf = \\v -> object _ with\n  alias self\n  text = ^v\nasm.result = (f \"outer\").text\n",
+        "language g0\nf = \\v -> {} with\n  alias self\n  text = ^v\nasm.result = (f \"outer\").text\n",
+        "language g0\nf = \\v -> object _ with\n  alias _\n  text = v\nasm.result = (f \"outer\").text\n",
+        "language g0\nf = \\v -> object _ with\n  alias _o\n  text = v\nasm.result = (f \"outer\").text\n",
+        "language g0\nf = \\v -> {} with\n  text = v\nasm.result = (f \"outer\").text\n",
+        "language g0\nf = \\v -> using {} in v\nasm.result = f \"outer\"\n",
+        "language g0\nobject o with\n  let tmp = \"outer\"\n  object inner with\n    text = ^tmp\nasm.result = o.inner.text\n",
+        "language g0\nf = \\v -> object _ with\n  let own = ^v\n  g w = w ++ own\n  text = g \"\"\nasm.result = (f \"outer\").text\n",
+        "language g0\nf = \\_v -> object _ with\n  v = \"outer\"\n  text = self.v\nasm.result = (f \"x\").text\n",
+    ] {
+        assert_eq!(assembly_result_text(source), b"outer", "{source}");
+        assert_eq!(parse(source).diagnostics, [], "{source}");
+    }
+}
+
+#[test]
+fn localized_bodies_hide_outer_locals_from_bare_names() {
+    for source in [
+        "language g0\nf = \\v -> object _ with\n  text = v\n",
+        "language g0\nf = \\v -> {} with\n  alias self\n  text = v\n",
+        "language g0\nobject o with\n  let v = 1\n  object inner with\n    text = v\n",
+    ] {
+        let lowered = lower_parsed_source(parse(source), &CompileContext::default());
+        assert!(
+            lowered.diagnostics.iter().any(|diagnostic| {
+                diagnostic.severity == Severity::Error
+                    && diagnostic.message
+                        == "`v` reads this body's own `v` beside a local `v` outside it; write `^v` for the local, or `self.v`"
+            }),
+            "{source}: {:?}",
+            lowered.diagnostics
+        );
+    }
+}

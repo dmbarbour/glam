@@ -536,6 +536,9 @@ pub(in crate::g_syntax) struct NameScope<V = Value> {
     pub(in crate::g_syntax) object_alias: Option<String>,
     pub(in crate::g_syntax) object_final_defs: Option<V>,
     pub(in crate::g_syntax) object_prior_defs: Option<V>,
+    /// Where the locals a bare name may read begin: a localized body's own,
+    /// so the locals outside it take `^`, as its host's names do.
+    pub(in crate::g_syntax) local_floor: usize,
     /// Final namespace and private heap key used by compiler-generated
     /// reflection demand boundaries. Expression-local objects deliberately
     /// leave this unset.
@@ -588,6 +591,16 @@ impl ResolvedRoot {
     }
 }
 
+impl<V> NameScope<V> {
+    /// The locals a bare name may read here.
+    pub(in crate::g_syntax) fn visible_locals<'a>(
+        &self,
+        locals: &'a ResolverContext,
+    ) -> &'a [LocalName] {
+        &locals[self.local_floor.min(locals.len())..]
+    }
+}
+
 impl NameScope<ResolvedRoot> {
     pub(in crate::g_syntax) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
         Self {
@@ -596,6 +609,7 @@ impl NameScope<ResolvedRoot> {
             module_final_defs: self.module_final_defs.duplicate_in(access),
             module_prior_defs: self.module_prior_defs.duplicate_in(access),
             object_alias: self.object_alias.clone(),
+            local_floor: self.local_floor,
             object_final_defs: self
                 .object_final_defs
                 .as_ref()
@@ -691,6 +705,7 @@ impl NameScope<Value> {
             object_alias: None,
             object_final_defs: None,
             object_prior_defs: None,
+            local_floor: 0,
             reflection: Some(reflection),
             parent: None,
         }
@@ -710,6 +725,7 @@ impl NameScope<Value> {
                 access.duplicate_value(&self.module_prior_defs),
             ),
             object_alias: self.object_alias.clone(),
+            local_floor: self.local_floor,
             object_final_defs: self
                 .object_final_defs
                 .as_ref()

@@ -367,6 +367,13 @@ on 2026-10-17, those that change the grammar with an entry in
       Object` reading of `Object with Body` always said; before, an
       object's `as _` localized.
     - An update in a match subject needs no parentheses.
+    - *Maintainer, same day:* localized names hide the host's locals as
+      well as its names, so a parameter, `let` binding or body `let` bound
+      outside a localized body is `^name` within it. Before, locals took
+      precedence everywhere. `using` keeps its documented precedence for
+      locals. A bare name that reads the body's own member beside a hidden
+      local of that name is an error, one name having one meaning in a file;
+      `self.name` reads the member.
 
 **Item 7 as built (2026-10-17).
 - **Where a `where` ends.** The token pass closes the `else` tails before a

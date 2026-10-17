@@ -358,6 +358,7 @@ pub(in crate::g_syntax) fn lower_dict_with_expr_resolved(
             final_defs.duplicate_in(access),
             definitions.duplicate_in(access),
             scope.duplicate_in(access),
+            base_len,
         );
         if let ObjectBodyDefinitionKind::Let(group) = &body_definition.kind {
             body_bindings.bind_group(
@@ -401,13 +402,22 @@ pub(in crate::g_syntax) fn dict_with_body_scope(
     dict_final_defs: ResolvedRoot,
     dict_prior_defs: ResolvedRoot,
     parent: NameScope<ResolvedRoot>,
+    body_locals: usize,
 ) -> NameScope<ResolvedRoot> {
     let object_alias = alias
         .map(local_name_metadata)
         .and_then(|alias| alias.canonical);
     let object_final_defs = Some(dict_final_defs.duplicate_in(access));
     let object_prior_defs = Some(dict_prior_defs.duplicate_in(access));
-    let (final_defs, prior_defs) = if object_alias.as_deref() == Some("self") {
+    // `alias self` localizes an update's names, hiding the locals outside
+    // its body as an object's do.
+    let localized = object_alias.as_deref() == Some("self");
+    let local_floor = if localized {
+        body_locals
+    } else {
+        parent.local_floor
+    };
+    let (final_defs, prior_defs) = if localized {
         (dict_final_defs, dict_prior_defs)
     } else {
         (
@@ -424,6 +434,7 @@ pub(in crate::g_syntax) fn dict_with_body_scope(
         object_alias,
         object_final_defs,
         object_prior_defs,
+        local_floor,
         reflection: None,
         parent: Some(Box::new(parent)),
     }
@@ -449,6 +460,7 @@ fn lower_using_expr_resolved(
     let base_len = locals.len();
     let namespace_binding = locals.push_internal_binding("<using-namespace>");
     let namespace_root = ResolvedRoot::Local(namespace_binding);
+    // Lexical locals keep their precedence in a `using` scope.
     let using_scope = object_body_scope_resolved(
         access,
         None,
@@ -456,6 +468,7 @@ fn lower_using_expr_resolved(
         ResolvedRoot::Provided(Value::Dict(Dict::new_sync())),
         parent_scope.duplicate_in(access),
         None,
+        parent_scope.local_floor,
     );
     let body = syntax_expr_to_resolved_in_semantic_scope(
         access,
@@ -1293,7 +1306,8 @@ pub(in crate::g_syntax) fn lower_name_expr_resolved(
         _ => {}
     }
 
-    if let Some(local) = locals
+    if let Some(local) = scope
+        .visible_locals(locals)
         .iter()
         .rev()
         .find(|candidate| candidate.canonical.as_deref() == Some(name))
@@ -1332,7 +1346,8 @@ pub(in crate::g_syntax) fn lower_prior_name_expr_resolved(
     }
     // One name has one meaning in a file, so `_x` cannot reach past a
     // local `x` to a prior definition.
-    if locals
+    if scope
+        .visible_locals(locals)
         .iter()
         .any(|local| local.canonical.as_deref() == Some(name))
     {
