@@ -724,6 +724,13 @@ const KEYWORD_FRAME_NESTING_SHAPES: &[(&str, &str, &str)] = &[
     ("match when {c => ", "}", "1"),
     ("match x as {_ when {c => ", "}}", "1"),
     ("do { x <- match y as {_ => ", "}; .r x }", ".r 1"),
+    ("let a = 1 in ", "", "a"),
+    ("let a = ", " in a", "1"),
+    ("(let a = 1 in ", ")", "a"),
+    ("let {a = ", "} in a", "1"),
+    ("1 + let a = 1 in ", "", "a"),
+    ("using m in ", "", "x"),
+    ("using ", " in x", "m"),
 ];
 
 /// Layout arms nested in arms' results, each a line deeper.
@@ -1065,6 +1072,7 @@ fn tail_forms_stand_alone_only_in_tail_position() {
         "do { .r 1 }.x",
         "if y <- if a then b else c and d then 1 else 2",
         "match v as {p when x <- \\z -> z and d => 1}",
+        "if y <- let a = 1 in a and d then 1 else 2",
     ];
     const INSIDE: &[&str] = &[
         "f (match a as {_ => 1}) y",
@@ -1096,6 +1104,11 @@ fn tail_forms_stand_alone_only_in_tail_position() {
         "map xs \\z -> z",
         "if a then b else c where c = 1",
         "[if a then b else c, \\z -> z]",
+        "1 + let a = 1 in a",
+        "f let a = 1 in a",
+        "if c then let a = 1 in a else b",
+        "match let a = 1 in a as {_ => 1}",
+        "do\n    let a = 1 in .r a -> p\n    .r p",
     ];
     for text in OUTSIDE {
         let parsed = parse_source(&source(text));

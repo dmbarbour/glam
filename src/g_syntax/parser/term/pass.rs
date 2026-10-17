@@ -37,15 +37,22 @@
 //! keywords it may meet, as it records its layout owner. An arm's pieces are
 //! read when its block closes (`binding`).
 //!
-//! Other keyword forms open a keyword region, whose groups are deferred for
-//! the form's structural parser. Inside a region conditionals are only
-//! counted, so that a `then` or `else` still reaches its own, and inside a
-//! deferred group nothing is interpreted.
+//! A `let` or `using` is a frame, as a match is: a `let`'s bindings are a
+//! block above it, braced when a `{` follows on its line and otherwise
+//! layout, read binding by binding when the block closes; a `using`'s
+//! namespace runs to its `in` or `do`. An `in` ends the bindings or the
+//! namespace, as does a layout block's dedent to a line aligned with the
+//! `let`, and the body after it is an open tail.
 //!
-//! A branch holding a form that view-level dispatch parses (`let`, `object`,
-//! `where`, or a `with` that no match takes, at its level) is parsed from its
-//! view, as the structural parser did, until those forms are frames too:
-//! view-level dispatch reads them differently from the item interpreter.
+//! In cover mode a pattern's `when` opens a keyword region, whose groups
+//! are deferred for the guard-clause parser. Inside a region conditionals
+//! are only counted, so that a `then` or `else` still reaches its own, and
+//! inside a deferred group nothing is interpreted.
+//!
+//! A branch holding a form that view-level dispatch parses (`object`, or a
+//! `with` that no match takes, at its level) is parsed from its view, as
+//! the structural parser did, until those forms are frames too: view-level
+//! dispatch reads them differently from the item interpreter.
 
 use crate::g_syntax::{
     ConditionalMode, ConditionalResultMode, IfExpr, MatchArm, MatchCommitment, MatchExpr,
@@ -59,15 +66,15 @@ use super::super::input::{TokenRange, TokenView};
 use super::super::layout::group_separator;
 use super::super::lexical::{Delimiter, GroupId, LeadingTrivia, TokenKind};
 use super::super::structural::{
-    in_keyword_position, is_layout_empty, parse_body, parse_expression_in_context, parse_open_tail,
-    trim_layout,
+    in_keyword_position, is_layout_empty, keyword_head, parse_body, parse_expression_in_context,
+    parse_open_tail, trim_layout,
 };
 use super::binding::{self, NestedArms, needs_view_dispatch};
 use super::{
     Cover, Deferred, Fail, GroupBody, Items, Mode, ParenCover, Parse, Piece, Scope, Term,
-    conditional_argument, ends_operand, form_label, interpret_group, is_symbol, legacy_grammar,
-    may_head_keyword_form, misplaced_tail, opens_keyword_region, piece_token, regions_enabled,
-    token, trim_padding,
+    conditional_argument, ends_operand, form_label, heads_form, interpret_group, is_symbol,
+    legacy_grammar, may_head_keyword_form, misplaced_tail, opens_keyword_region, piece_token,
+    regions_enabled, token, trim_padding,
 };
 
 /// One frame on the pass's stack.
@@ -133,6 +140,7 @@ enum FrameKind {
     Conditional(Box<Conditional>),
     Layout(Box<LayoutBlock>),
     Match(Box<Match>),
+    Scoped(Box<Scoped>),
 }
 
 /// A layout block: a `do` block's statements, or a match's arms.
@@ -154,6 +162,8 @@ struct LayoutBlock {
     failure: Option<Fail>,
     /// Its arms, or none for a `do` block.
     arms: Option<Box<Arms>>,
+    /// Whether it holds a `let`'s bindings.
+    bindings: bool,
 }
 
 /// A braced block: a `do` block's head and its own context, or a match's
@@ -162,6 +172,8 @@ struct Block {
     head: usize,
     context: ExpressionContext,
     arms: Option<Box<Arms>>,
+    /// Whether it holds a `let`'s bindings.
+    bindings: bool,
 }
 
 /// A block whose `{` comes next.
@@ -169,6 +181,68 @@ enum Pending {
     /// A `do`'s statements, after the `do` at this index.
     Do(usize),
     Arms(Box<Arms>),
+    /// A `let`'s bindings, after the `let` at this index.
+    Bindings(usize),
+}
+
+/// A `let` or `using` form: its bindings or namespace, then its body, an
+/// open tail.
+struct Scoped {
+    head: usize,
+    keyword: &'static str,
+    phase: ScopedPhase,
+    /// The form's own context, floored at its head's line.
+    context: ExpressionContext,
+    /// A `let`'s bindings, once their block closes.
+    bindings: Option<Parse<Vec<(String, SyntaxExpr)>>>,
+    /// Whether its bindings spanned lines, so that no `in` may follow them.
+    multiline: bool,
+    /// A `using`'s namespace, once its `in` or `do` ends it.
+    namespace: Option<Parse<SyntaxExpr>>,
+    /// Where its body begins.
+    body_start: usize,
+    /// Its body's context, from the body's first token.
+    body_context: Option<ExpressionContext>,
+    failure: Option<Fail>,
+    /// Line starts in its finished phases, which its parent counts too.
+    line_starts: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopedPhase {
+    /// A `let`'s bindings, a block above it.
+    Bindings,
+    /// A `using`'s namespace, up to its `in` or `do`.
+    Namespace,
+    Body,
+}
+
+impl Scoped {
+    fn new(
+        head: usize,
+        keyword: &'static str,
+        phase: ScopedPhase,
+        context: ExpressionContext,
+    ) -> Self {
+        Self {
+            head,
+            keyword,
+            phase,
+            context,
+            bindings: None,
+            multiline: false,
+            namespace: None,
+            body_start: head + 1,
+            body_context: None,
+            failure: None,
+            line_starts: 0,
+        }
+    }
+
+    fn fail(&mut self, at: usize, message: impl Into<String>) {
+        self.failure
+            .get_or_insert(Fail::error(message).or_at(Some(at)));
+    }
 }
 
 /// A `match` or `try_match` form.
@@ -410,6 +484,16 @@ impl Frame {
         self.inherited_region || self.region
     }
 
+    /// Whether it is an open tail: a conditional's `else` branch or fallback,
+    /// or a `let`'s or `using`'s body.
+    fn open_tail(&self) -> bool {
+        match &self.kind {
+            FrameKind::Conditional(conditional) => conditional.phase == Phase::Else,
+            FrameKind::Scoped(scoped) => scoped.phase == ScopedPhase::Body,
+            _ => false,
+        }
+    }
+
     fn arms(&self) -> Option<&Arms> {
         match &self.kind {
             FrameKind::Layout(layout) => layout.arms.as_deref(),
@@ -454,6 +538,7 @@ impl Frame {
                 Phase::Then => false,
                 Phase::Else => self.arrow_ends_tails,
             },
+            FrameKind::Scoped(scoped) => scoped.phase == ScopedPhase::Body && self.arrow_ends_tails,
             _ => self.arrow_ends_tails,
         }
     }
@@ -654,6 +739,7 @@ impl Pass<'_, '_, '_> {
                 head,
                 context: form_context(view, context, head),
                 arms: None,
+                bindings: false,
             })),
             Some(Pending::Arms(mut arms)) => {
                 arms.begin(0);
@@ -661,14 +747,22 @@ impl Pass<'_, '_, '_> {
                     head: arms.head,
                     context: arms.context,
                     arms: Some(arms),
+                    bindings: false,
                 }))
             }
+            // A `let`'s bindings read as expressions, and own their arrows.
+            Some(Pending::Bindings(head)) => Some(Box::new(Block {
+                head,
+                context,
+                arms: None,
+                bindings: true,
+            })),
             None => None,
         };
-        let (mode, arrow) = if block.is_some() {
-            (Mode::Cover, true)
-        } else {
-            (mode, mode == Mode::Cover)
+        let (mode, arrow) = match &block {
+            Some(block) if block.bindings => (Mode::Expression, false),
+            Some(_) => (Mode::Cover, true),
+            None => (mode, mode == Mode::Cover),
         };
         self.push(Frame::new(
             FrameKind::Group {
@@ -717,7 +811,7 @@ impl Pass<'_, '_, '_> {
             ),
             FrameKind::Layout(layout) if layout.arms.is_some() => (at, None, Some(at), level),
             FrameKind::Layout(_) => (at, matches, arms, level),
-            FrameKind::Conditional(_) => (layout, matches, arms, level),
+            FrameKind::Conditional(_) | FrameKind::Scoped(_) => (layout, matches, arms, level),
             FrameKind::Match(_) => (layout, Some(at), arms, level),
         };
         self.stack.push(frame);
@@ -767,6 +861,12 @@ impl Pass<'_, '_, '_> {
                     self.finish_braced_arms(*arms, &frame.pieces, frame.pending, open, index);
                 self.top().line_starts += line_starts;
                 self.deliver_arms(kind, head, result, index + 1, true);
+                return;
+            }
+            if block.bindings {
+                let result = self.finish_braced_bindings(&block, &frame.pieces, open, index);
+                self.top().line_starts += line_starts;
+                self.deliver_bindings(result, false, None);
                 return;
             }
             let result = self.finish_block(&block, &frame.pieces, open, index);
@@ -926,10 +1026,14 @@ impl Pass<'_, '_, '_> {
                                 .token_at(index)
                                 .is_some_and(|token| token.leading() == LeadingTrivia::Joint)
                         {
-                            layout.failure.get_or_insert(
-                                Fail::error("`do` must be separated from its body")
-                                    .or_at(Some(layout.head)),
-                            );
+                            let message = if layout.bindings {
+                                "`let` must be separated from its bindings"
+                            } else {
+                                "`do` must be separated from its body"
+                            };
+                            layout
+                                .failure
+                                .get_or_insert(Fail::error(message).or_at(Some(layout.head)));
                         }
                     } else {
                         layout.anchor = Some(indentation);
@@ -942,6 +1046,16 @@ impl Pass<'_, '_, '_> {
                 top.context = match &mut layout.arms {
                     Some(arms) => arms.member_context(view, index),
                     None => layout.context.child_owner_at(view, index).validated(),
+                };
+            }
+            FrameKind::Scoped(scoped) => {
+                let owner = scoped.context.child_owner_at(view, index);
+                top.context = if scoped.phase == ScopedPhase::Body {
+                    let owner = owner.complete_keeping_arrow();
+                    scoped.body_context = Some(owner);
+                    owner.validated()
+                } else {
+                    owner.complete().validated()
                 };
             }
             _ => {}
@@ -1060,7 +1174,28 @@ impl Pass<'_, '_, '_> {
                     self.open_conditional(index, after_operand);
                     return Step::Next;
                 }
+                "let"
+                    if heads_form(view, index)
+                        && in_keyword_position(view, index)
+                        && self.form_follows(index)
+                        && (!legacy_grammar() || self.legacy_let(begins_member)) =>
+                {
+                    self.open_let(index);
+                    return Step::Next;
+                }
+                "using" if may_head_keyword_form(view, index) => {
+                    self.open_using(index);
+                    return Step::Next;
+                }
+                "in" if in_keyword_position(view, index) => return self.scoped_in(index),
                 "do" if may_head_keyword_form(view, index) => {
+                    // A `do` after a `using`'s namespace begins its body.
+                    if matches!(&self.top().kind,
+                        FrameKind::Scoped(scoped) if scoped.phase == ScopedPhase::Namespace)
+                    {
+                        self.begin_scoped_body(index, index);
+                        self.significant(index);
+                    }
                     if self.braced_do(index) {
                         let top = self.top();
                         top.pending = Some(Pending::Do(index));
@@ -1088,7 +1223,7 @@ impl Pass<'_, '_, '_> {
                 // open in it.
                 "and" if in_keyword_position(view, index) && self.guards_below_tails() => {
                     while !self.top().in_guards() {
-                        self.close_conditional(index);
+                        self.close_top(index);
                     }
                     self.lambda_ends_at(index);
                     let top = self.top();
@@ -1262,9 +1397,11 @@ impl Pass<'_, '_, '_> {
         let is_then = matches!(token(view, index).kind(), TokenKind::Name("then"));
         loop {
             let top = self.top();
-            if matches!(top.kind, FrameKind::Layout(_) | FrameKind::Match(_)) {
-                // A layout block is an open tail too, and a match without
-                // its arms ends unfinished.
+            if matches!(top.kind, FrameKind::Layout(_) | FrameKind::Match(_))
+                || matches!(&top.kind, FrameKind::Scoped(scoped) if scoped.phase == ScopedPhase::Body)
+            {
+                // A layout block and a `let`'s or `using`'s body are open
+                // tails too, and a match without its arms ends unfinished.
                 self.close_top(index);
                 continue;
             }
@@ -1346,10 +1483,7 @@ impl Pass<'_, '_, '_> {
         self.stack
             .iter()
             .rev()
-            .find(|frame| {
-                !matches!(&frame.kind,
-                    FrameKind::Conditional(conditional) if conditional.phase == Phase::Else)
-            })
+            .find(|frame| !frame.open_tail())
             .is_some_and(Frame::in_guards)
     }
 
@@ -1385,10 +1519,8 @@ impl Pass<'_, '_, '_> {
     /// are a group's contents. Elsewhere it would scope only part of an
     /// expression, which parentheses or `let … in` say.
     fn where_ends(&mut self, index: usize, begins_member: bool) -> Step {
-        while matches!(&self.top().kind,
-            FrameKind::Conditional(conditional) if conditional.phase == Phase::Else)
-        {
-            self.close_conditional(index);
+        while self.top().open_tail() {
+            self.close_top(index);
         }
         let single = self.stack.len() == 1;
         let top = self.top();
@@ -1403,6 +1535,10 @@ impl Pass<'_, '_, '_> {
             }
             FrameKind::Conditional(_) => Some("a `then` branch"),
             FrameKind::Match(_) => Some("a match's subject"),
+            FrameKind::Scoped(scoped) if scoped.phase == ScopedPhase::Namespace => {
+                Some("a `using` namespace")
+            }
+            FrameKind::Scoped(_) => Some("a `let`'s bindings"),
             _ if top
                 .arms()
                 .is_some_and(|arms| arms.phase != ArmPhase::Result) =>
@@ -1427,7 +1563,7 @@ impl Pass<'_, '_, '_> {
         } else if begins_member && block {
             self.violate(
                 Fail::error(
-                    "`where` cannot begin a statement or arm: indent it to scope the one above, or dedent it below the block to scope the definition",
+                    "`where` cannot begin a statement, arm or binding: indent it to scope the one above, or dedent it below the block to scope the definition",
                 )
                 .or_at(Some(index)),
             );
@@ -1486,9 +1622,9 @@ impl Pass<'_, '_, '_> {
     fn close_tails_at_arrow(&mut self, index: usize) {
         while let Some(top) = self.stack.last()
             && top.arrow_ends_tails
-            && matches!(&top.kind, FrameKind::Conditional(conditional) if conditional.phase == Phase::Else)
+            && top.open_tail()
         {
-            self.close_conditional(index);
+            self.close_top(index);
         }
     }
 
@@ -1497,7 +1633,12 @@ impl Pass<'_, '_, '_> {
     fn close_open_frames(&mut self, index: usize) {
         while matches!(
             self.stack.last().map(|frame| &frame.kind),
-            Some(FrameKind::Conditional(_) | FrameKind::Layout(_) | FrameKind::Match(_))
+            Some(
+                FrameKind::Conditional(_)
+                    | FrameKind::Layout(_)
+                    | FrameKind::Match(_)
+                    | FrameKind::Scoped(_)
+            )
         ) {
             self.close_top(index);
         }
@@ -1510,6 +1651,7 @@ impl Pass<'_, '_, '_> {
             Some(FrameKind::Conditional(_)) => self.close_conditional(index),
             Some(FrameKind::Layout(_)) => self.close_layout(index),
             Some(FrameKind::Match(_)) => self.close_match(index, None, false),
+            Some(FrameKind::Scoped(_)) => self.close_scoped(index),
             _ => unreachable!("only open tails close before their group"),
         }
     }
@@ -1546,7 +1688,9 @@ impl Pass<'_, '_, '_> {
                 continue;
             };
             if self.closer_only_line(index) || indentation > anchor {
-                if hanging && let FrameKind::Layout(layout) = &mut self.stack[owner].kind {
+                if let FrameKind::Layout(layout) = &mut self.stack[owner].kind
+                    && (hanging || layout.bindings)
+                {
                     layout.hanging_lines.push(index);
                 }
                 return false;
@@ -1598,6 +1742,7 @@ impl Pass<'_, '_, '_> {
                 boundary: None,
                 failure: None,
                 arms: None,
+                bindings: false,
             })),
             // Statements may bind patterns, and end their tails at `->`.
             Mode::Cover,
@@ -1608,6 +1753,261 @@ impl Pass<'_, '_, '_> {
         ));
     }
 
+    /// Whether anything of a form follows its head at `index` in its group
+    /// member; a lone keyword reads as a name, which the item reports.
+    fn form_follows(&self, index: usize) -> bool {
+        let view = self.scope.view;
+        self.next_significant(index + 1).is_some_and(|next| {
+            !matches!(
+                token(view, next).kind(),
+                TokenKind::Close { .. } | TokenKind::Symbol("," | ";")
+            )
+        })
+    }
+
+    /// Whether a `let` heads a form where the legacy grammar's view-level
+    /// dispatch parsed one: first in a view it parsed, which a group is
+    /// not, unless it is a block.
+    fn legacy_let(&mut self, begins_member: bool) -> bool {
+        begins_member && !matches!(self.top().kind, FrameKind::Group { block: None, .. })
+    }
+
+    /// Opens a `let` at `index`. Its bindings are a block above it: braced
+    /// when a `{` follows on its line, otherwise a layout block whose first
+    /// binding sets its anchor, as a `do` block's first statement does.
+    fn open_let(&mut self, index: usize) {
+        let view = self.scope.view;
+        let parent = self.top();
+        parent.lambda_head = false;
+        let context = form_context(view, parent.context, index);
+        let (separator, arrow) = (parent.separator, parent.nested_arrow());
+        let mut frame = Frame::new(
+            FrameKind::Scoped(Box::new(Scoped::new(
+                index,
+                "let",
+                ScopedPhase::Bindings,
+                context,
+            ))),
+            Mode::Expression,
+            context,
+            separator,
+            arrow,
+            false,
+        );
+        frame.first = Some(index);
+        self.push(frame);
+        // The legacy grammar skipped line breaks to find the `{`.
+        let next = if legacy_grammar() {
+            self.next_significant(index + 1)
+        } else {
+            Some(index + 1).filter(|next| view.range().contains(*next))
+        };
+        if next.is_some_and(|next| {
+            matches!(
+                token(view, next).kind(),
+                TokenKind::Open {
+                    delimiter: Delimiter::Brace,
+                    ..
+                }
+            )
+        }) {
+            self.top().pending = Some(Pending::Bindings(index));
+            return;
+        }
+        self.push(Frame::new(
+            FrameKind::Layout(Box::new(LayoutBlock {
+                head: index,
+                context,
+                anchor: None,
+                hanging: false,
+                statements: Vec::new(),
+                hanging_lines: Vec::new(),
+                boundary: None,
+                failure: None,
+                arms: None,
+                bindings: true,
+            })),
+            // A binding's value reads as an expression, and owns its arrows.
+            Mode::Expression,
+            context,
+            separator,
+            false,
+            false,
+        ));
+    }
+
+    /// Opens a `using` at `index`, whose namespace runs to its `in` or `do`.
+    fn open_using(&mut self, index: usize) {
+        let view = self.scope.view;
+        let parent = self.top();
+        parent.lambda_head = false;
+        let context = form_context(view, parent.context, index);
+        let (separator, arrow) = (parent.separator, parent.nested_arrow());
+        let mut frame = Frame::new(
+            FrameKind::Scoped(Box::new(Scoped::new(
+                index,
+                "using",
+                ScopedPhase::Namespace,
+                context,
+            ))),
+            Mode::Expression,
+            context,
+            separator,
+            arrow,
+            false,
+        );
+        frame.first = Some(index);
+        frame.member_start = true;
+        self.push(frame);
+    }
+
+    /// An `in` in keyword position, for the innermost `let` or `using` at
+    /// this level still reading its bindings or namespace: the open tails
+    /// and the bindings block before it close, and its body begins. A
+    /// finished form's body ends at it.
+    fn scoped_in(&mut self, index: usize) -> Step {
+        let view = self.scope.view;
+        loop {
+            let top = self.top();
+            let empty = trim_padding(view, &top.pieces).is_empty();
+            let tail = top.open_tail();
+            match &mut top.kind {
+                FrameKind::Scoped(scoped) if scoped.phase != ScopedPhase::Body => break,
+                // A multi-line `let` whose body a line began, as an `in`.
+                FrameKind::Scoped(scoped) if scoped.multiline && empty => {
+                    scoped.fail(scoped.head, "multi-line let expression must not use `in`");
+                    return Step::Next;
+                }
+                FrameKind::Layout(_) | FrameKind::Match(_) => self.close_top(index),
+                _ if tail => self.close_top(index),
+                _ => {
+                    // A stray keyword, which the item reports.
+                    top.lambda_head = false;
+                    top.pieces.push(Piece::Token(index));
+                    return Step::Next;
+                }
+            }
+        }
+        if let FrameKind::Scoped(scoped) = &mut self.top().kind
+            && scoped.multiline
+        {
+            scoped.fail(scoped.head, "multi-line let expression must not use `in`");
+        }
+        self.begin_scoped_body(index, index + 1);
+        Step::Next
+    }
+
+    /// Ends the bindings or namespace of the `let` or `using` on top at the
+    /// keyword at `index`, and begins its body at `start`.
+    fn begin_scoped_body(&mut self, index: usize, start: usize) {
+        let view = self.scope.view;
+        let top = self.stack.last().expect("a scoped form is open");
+        let FrameKind::Scoped(scoped) = &top.kind else {
+            unreachable!("only a scoped form begins its body here");
+        };
+        let (phase, head, context) = (scoped.phase, scoped.head, scoped.context);
+        let namespace = (phase == ScopedPhase::Namespace)
+            .then(|| self.namespace(context, head, &top.pieces, index));
+        let stray = phase == ScopedPhase::Bindings && !trim_padding(view, &top.pieces).is_empty();
+        let top = self.top();
+        let FrameKind::Scoped(scoped) = &mut top.kind else {
+            unreachable!("only a scoped form begins its body here");
+        };
+        match phase {
+            ScopedPhase::Bindings => {
+                if stray {
+                    scoped.fail(
+                        head,
+                        "a `let`'s braced bindings end at their `}`, which `in` must follow",
+                    );
+                }
+                if scoped.bindings.is_none() {
+                    scoped.fail(head, "let expression requires at least one binding");
+                }
+            }
+            ScopedPhase::Namespace => scoped.namespace = namespace,
+            ScopedPhase::Body => unreachable!("a body begins once"),
+        }
+        scoped.phase = ScopedPhase::Body;
+        scoped.body_start = start;
+        scoped.line_starts += top.line_starts;
+        top.pending = None;
+        top.begin_branch(context);
+    }
+
+    /// A `using`'s namespace, from its pieces before the `in` or `do` at
+    /// `end`.
+    fn namespace(
+        &self,
+        context: ExpressionContext,
+        head: usize,
+        pieces: &[Piece],
+        end: usize,
+    ) -> Parse<SyntaxExpr> {
+        let view = self.scope.view;
+        let pieces = trim_padding(view, pieces);
+        let Some(first) = pieces.first().map(piece_token) else {
+            return Err(
+                Fail::error("using expression requires a namespace before its body")
+                    .or_at(Some(head)),
+            );
+        };
+        let scope = Scope {
+            view: subview(view, first, end),
+            mode: Mode::Expression,
+            ..self.scope
+        };
+        binding::expression(
+            scope,
+            pieces,
+            context.child_owner_at(view, first),
+            false,
+            false,
+        )
+        .map(|(expression, _)| expression)
+    }
+
+    /// Hands a closed block's bindings to the `let` on top. A layout block
+    /// that a shallower line ended at `boundary` begins the body there, a
+    /// line aligned with the `let`.
+    fn deliver_bindings(
+        &mut self,
+        bindings: Parse<Vec<(String, SyntaxExpr)>>,
+        multiline: bool,
+        boundary: Option<usize>,
+    ) {
+        let view = self.scope.view;
+        let top = self.top();
+        let FrameKind::Scoped(scoped) = &mut top.kind else {
+            unreachable!("bindings close into their `let`");
+        };
+        // A misplaced binding, as on a shallower line, reports itself.
+        let misplaced = bindings.is_err();
+        scoped.bindings = Some(bindings);
+        scoped.multiline = multiline;
+        let Some(line) = boundary else {
+            return;
+        };
+        let head = scoped.head;
+        let indentation = match token(view, line).kind() {
+            TokenKind::LineStart { indentation } => *indentation,
+            _ => 0,
+        };
+        let column = view
+            .token_at(head)
+            .and_then(|token| view.column_at_span(token.span()))
+            .unwrap_or(0);
+        if indentation != column && !misplaced {
+            scoped.fail(
+                line,
+                format!(
+                    "multi-line let body is indented {indentation} spaces; expected alignment with `let` at indentation {column}"
+                ),
+            );
+        }
+        self.begin_scoped_body(line, line);
+    }
+
     /// Closes the layout block on top, which ends before `index`, into a
     /// form piece of its parent.
     fn close_layout(&mut self, index: usize) {
@@ -1616,6 +2016,17 @@ impl Pass<'_, '_, '_> {
         let FrameKind::Layout(mut layout) = frame.kind else {
             unreachable!("only layout blocks close here");
         };
+        if layout.bindings {
+            let multiline = layout.anchor.is_some()
+                && (!layout.hanging
+                    || layout.statements.len() > 1
+                    || !layout.hanging_lines.is_empty());
+            let result = self.finish_layout_bindings(&layout, &frame.pieces);
+            self.top().line_starts += line_starts;
+            let boundary = layout.boundary.filter(|line| *line == index);
+            self.deliver_bindings(result, multiline, boundary);
+            return;
+        }
         if let Some(arms) = layout.arms.take() {
             let (kind, head) = (arms.kind, arms.head);
             let result =
@@ -1645,6 +2056,237 @@ impl Pass<'_, '_, '_> {
                 ends_with_block,
             }),
         });
+    }
+
+    /// A layout block's bindings, checked as the structural parser checked
+    /// them: a deeper line that binds is a misplaced sibling, unless a
+    /// `where` begins it, which scopes the binding above.
+    fn finish_layout_bindings(
+        &self,
+        layout: &LayoutBlock,
+        pieces: &[Piece],
+    ) -> Parse<Vec<(String, SyntaxExpr)>> {
+        let view = self.scope.view;
+        let head = layout.head;
+        if let Some(failure) = layout.failure.clone() {
+            return Err(failure);
+        }
+        let Some(anchor) = layout.anchor else {
+            return Err(
+                Fail::error("let expression requires at least one binding").or_at(Some(head))
+            );
+        };
+        let first = layout.statements[0];
+        let first_token = pieces.get(first).map(piece_token);
+        if !layout.context.accepts_layout_anchor(anchor) {
+            return Err(Fail::error(format!(
+                "let layout begins at indentation {anchor}; expected more than continuation floor {}",
+                layout.context.continuation_floor()
+            ))
+            .or_at(first_token));
+        }
+        let extent = structural_view_at(view, head);
+        let lines = layout.hanging_lines.iter().chain(&layout.boundary);
+        for line in lines {
+            let line_view = line_view(extent, *line);
+            let binds = line_view
+                .top_level()
+                .any(|indexed| matches!(indexed.token().kind(), TokenKind::Symbol("=")));
+            if binds && (legacy_grammar() || keyword_head(line_view, "where").is_none()) {
+                let indentation = match token(view, *line).kind() {
+                    TokenKind::LineStart { indentation } => *indentation,
+                    _ => 0,
+                };
+                return Err(Fail::error(format!(
+                    "multi-line let binding is indented {indentation} spaces; expected sibling indentation {anchor}"
+                ))
+                .or_at(Some(*line)));
+            }
+        }
+        if let Some(semicolon) = pieces.iter().find(|piece| is_symbol(view, piece, ";")) {
+            return Err(Fail::error(
+                "naked semicolon-separated `let` bindings are not supported; use `let { ... } in ...`",
+            )
+            .or_at(Some(piece_token(semicolon))));
+        }
+        let bounds = layout
+            .statements
+            .iter()
+            .copied()
+            .chain(std::iter::once(pieces.len()))
+            .collect::<Vec<_>>();
+        let scope = Scope {
+            view: subview(view, head + 1, view.range().end()),
+            mode: Mode::Expression,
+            ..self.scope
+        };
+        let mut bindings = Vec::with_capacity(layout.statements.len());
+        for pair in bounds.windows(2) {
+            let binding = trim_padding(view, &pieces[pair[0]..pair[1]]);
+            let Some(first) = binding.first().map(piece_token) else {
+                continue;
+            };
+            let context = layout.context.child_owner_at(view, first);
+            bindings.push(binding::local_binding(scope, binding, context)?);
+        }
+        if bindings.is_empty() {
+            return Err(
+                Fail::error("let expression requires at least one binding").or_at(Some(head))
+            );
+        }
+        Ok(bindings)
+    }
+
+    /// A braced block's bindings, separated by `;`, of which one leading
+    /// and one trailing may stand alone.
+    fn finish_braced_bindings(
+        &self,
+        block: &Block,
+        pieces: &[Piece],
+        open: usize,
+        close: usize,
+    ) -> Parse<Vec<(String, SyntaxExpr)>> {
+        let view = self.scope.view;
+        let fail = |message: &str| Err(Fail::error(message).or_at(Some(open)));
+        if trim_padding(view, pieces).is_empty() {
+            return Ok(Vec::new());
+        }
+        let is_semicolon = |piece: &Piece| {
+            matches!(piece, Piece::Token(index)
+                if matches!(token(view, *index).kind(), TokenKind::Symbol(";")))
+        };
+        let members = pieces.split(is_semicolon).collect::<Vec<_>>();
+        let empty = |member: &&[Piece]| trim_padding(view, member).is_empty();
+        if members.iter().all(empty) {
+            return fail(
+                "`let` binding group cannot contain only semicolons; use `{}` for an empty body",
+            );
+        }
+        let last = members.len() - 1;
+        if members
+            .iter()
+            .enumerate()
+            .any(|(at, member)| empty(member) && at != 0 && at != last)
+        {
+            return fail("`let` binding group contains an empty member between semicolons");
+        }
+        let scope = Scope {
+            view: subview(view, open + 1, close),
+            mode: Mode::Expression,
+            ..self.scope
+        };
+        let context = block.context;
+        members
+            .into_iter()
+            .map(|member| trim_padding(view, member))
+            .filter(|member| !member.is_empty())
+            .map(|member| {
+                let first = piece_token(&member[0]);
+                binding::local_binding(scope, member, context.child_owner_at(view, first))
+            })
+            .collect()
+    }
+
+    /// Closes the `let` or `using` on top, which ends before `index`, into a
+    /// form piece of its parent, followed by any pieces of its body after a
+    /// `->` where the body ended.
+    fn close_scoped(&mut self, index: usize) {
+        let frame = self.stack.pop().expect("a scoped form is open");
+        let FrameKind::Scoped(scoped) = frame.kind else {
+            unreachable!("only scoped forms close here");
+        };
+        let line_starts = scoped.line_starts + frame.line_starts;
+        let (head, keyword) = (scoped.head, scoped.keyword);
+        let complete = scoped.phase == ScopedPhase::Body;
+        let block = self.ends_with_block(&frame.pieces);
+        let (result, rest) = self.finish_scoped(*scoped, frame.pieces, frame.line_starts, index);
+        let end = rest.first().map_or(index, piece_token);
+        if complete && !block {
+            self.ends_inline(&form_label(keyword), head, end);
+        }
+        let covers = self.scope.covers;
+        let parent = self.top();
+        parent.line_starts += line_starts;
+        parent.lambda_head = false;
+        parent.pieces.push(Piece::Form {
+            head,
+            end,
+            form: covers.form(Form {
+                head,
+                keyword,
+                shape: FormShape::Prefix,
+                result,
+                ends_with_block: complete && block,
+            }),
+        });
+        parent.pieces.extend(rest);
+    }
+
+    /// A closed `let` or `using`, and any pieces of its body after a `->`
+    /// where the body ended.
+    fn finish_scoped(
+        &self,
+        scoped: Scoped,
+        pieces: Vec<Piece>,
+        line_starts: usize,
+        end: usize,
+    ) -> (Parse<SyntaxExpr>, Vec<Piece>) {
+        let view = self.scope.view;
+        let head = scoped.head;
+        let fail = |message: String| (Err(Fail::error(message).or_at(Some(head))), Vec::new());
+        if let Some(failure) = scoped.failure {
+            return (Err(failure), Vec::new());
+        }
+        // Bindings that failed explain what follows them.
+        if let Some(Err(failure)) = scoped.bindings {
+            return (Err(failure), Vec::new());
+        }
+        match scoped.phase {
+            ScopedPhase::Bindings => {
+                return fail("multi-line let expression requires a body".to_owned());
+            }
+            ScopedPhase::Namespace if trim_padding(view, &pieces).is_empty() => {
+                return fail(
+                    "using expression requires a namespace and `in` or `do` body".to_owned(),
+                );
+            }
+            ScopedPhase::Namespace => {
+                return fail("using expression requires `in` or a trailing `do` body".to_owned());
+            }
+            ScopedPhase::Body => {}
+        }
+        if trim_padding(view, &pieces).is_empty() {
+            return fail(format!("{} expression requires a body", scoped.keyword));
+        }
+        let branch = Branch {
+            pieces,
+            context: scoped.body_context,
+            start: scoped.body_start,
+            end,
+            line_starts,
+        };
+        let (body, rest) = match self.else_branch(branch, scoped.context) {
+            Ok(parsed) => parsed,
+            Err(fail) => return (Err(fail), Vec::new()),
+        };
+        let result = if scoped.keyword == "let" {
+            scoped
+                .bindings
+                .expect("a `let`'s body follows its bindings")
+                .map(|bindings| SyntaxExpr::Let {
+                    bindings,
+                    body: Box::new(body),
+                })
+        } else {
+            scoped
+                .namespace
+                .expect("a `using`'s body follows its namespace")
+                .map(|namespace| SyntaxExpr::Using {
+                    namespace: Box::new(namespace),
+                    body: Box::new(body),
+                })
+        };
+        (result, rest)
     }
 
     /// A layout `do` block's statements, checked as the structural parser
@@ -1892,6 +2534,7 @@ impl Pass<'_, '_, '_> {
                 boundary: None,
                 failure: None,
                 arms: Some(Box::new(arms)),
+                bindings: false,
             })),
             // An arm's head and guards may bind patterns.
             Mode::Cover,

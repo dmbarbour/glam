@@ -287,6 +287,10 @@ fn where_scopes_its_definition_statement_or_arm() {
             "a with\n    A := b\n      where b = 2\n    B := 3",
             "a with\n    A := (b\n      where b = 2)\n    B := 3",
         ),
+        (
+            "let a = b\n      where b = 1\na",
+            "let a = (b\n      where b = 1)\na",
+        ),
     ] {
         assert_eq!(
             parse_structural(source),
@@ -318,7 +322,7 @@ fn where_scopes_its_definition_statement_or_arm() {
         ("(a where a = 1, 2)", "cannot stand in a tuple item"),
         (
             "do\n  a <- f b\n  g a\n  where b = 1",
-            "cannot begin a statement or arm",
+            "cannot begin a statement, arm or binding",
         ),
         (
             "do\n  .op b -> a\n    where b = 1\n  g a",

@@ -331,9 +331,12 @@ pub(super) fn may_head_keyword_form(view: TokenView<'_, '_>, index: usize) -> bo
     let TokenKind::Name(name) = head.kind() else {
         return false;
     };
-    if structural_atom_parser(name).is_none() {
-        return false;
-    }
+    structural_atom_parser(name).is_some() && heads_form(view, index)
+}
+
+/// Whether the keyword at `index` heads its form where it stands: it is no
+/// tag's key or path's root, and follows no key mark.
+fn heads_form(view: TokenView<'_, '_>, index: usize) -> bool {
     let joint = |index: usize| {
         view.token_at(index)
             .is_some_and(|token| token.leading() == LeadingTrivia::Joint)

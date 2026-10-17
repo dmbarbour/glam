@@ -1124,6 +1124,36 @@ layout slice. Multi-line `let` moves to the suffix slice, with `let`.
   guard then sent its braced arms to the cover interpreter, which recursed
   through the structural parsers to a stack overflow at 2,000 deep.
 
+**`parser-keyword-frames-suffixes`, `let` and `using` (2026-10-17).** The
+first part of the suffix slice; `where`, `with` and `object` remain.
+- **Frames.** A `let` or `using` is a frame, as a match is. A `let`'s
+  bindings are a block above it: braced when a `{` follows on its line,
+  otherwise a layout block whose first binding sets its anchor. Each
+  binding is read from its pieces when the block closes, its value as a
+  body (`binding::local_binding`). An `in` at the form's level ends the
+  bindings, or a `using`'s namespace, as a `do` after the namespace does;
+  so does a layout block's dedent to a line aligned with the `let`. The
+  body is an open tail, closed where an `else` branch closes.
+- **Routing.** `parse_expression_extent` sends a view led by `let` to the
+  term parser; the legacy grammar keeps the structural parser. The Chumsky
+  grammar never read a `let`, so the oracle's reference reads a view led by
+  one with the legacy view-level dispatch. In the legacy reading a `let`
+  opens a frame only where that dispatch parsed one: first in a view, a
+  branch, a statement, an arm or a binding, but not in a plain group.
+  Breaking the frame on purpose (reversing a group's bindings) fails ten
+  tests under the oracle sweep.
+- **Intended changes** (`tail-forms-end-at-separators`, which listed `let`
+  and `using` as tail forms): a `let` stands wherever a tail form may, as
+  in `1 + let a = 1 in a`, `f let a = 1 in a` or a list item, and one that
+  an `and` in guards follows is parenthesized. A `where` on a deeper line
+  of a multi-line `let`'s binding scopes that binding
+  (`where-scopes-its-definition`); the structural parser reported the line
+  as a misplaced sibling binding.
+- **Depth:** `let` bodies, binding values and braced bindings, and `using`
+  bodies and namespaces, nest 2,000 deep without recursion.
+- **Measures** are deferred to the parser performance work, as the
+  maintainer asked.
+
 ## Verification
 
 - The differential oracle above, while both parsers exist.

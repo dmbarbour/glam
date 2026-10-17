@@ -16,16 +16,101 @@ use crate::g_syntax::{
 use super::super::do_expr::ParsedDoStatement;
 use super::super::expression_context::{ExpressionContext, validate_expression_floor};
 use super::super::input::{TokenRange, TokenView};
-use super::super::lexical::{Delimiter, TokenKind};
+use super::super::lexical::{Delimiter, LeadingTrivia, TokenKind};
 use super::super::pattern::{Binding, BindingSite, Missing};
 use super::super::structural::{
-    before_key_mark, in_keyword_position, misplaced_where, parse_expression_extent, trim_layout,
-    where_at, where_suffix,
+    before_key_mark, in_keyword_position, local_name, misplaced_where, parse_expression_extent,
+    single_reserved_keyword, trim_layout, where_at, where_suffix,
 };
 use super::{
     Fail, Items, Mode, Parse, Piece, Position, Scope, legacy_grammar, piece_token, token,
     trim_padding,
 };
+
+/// A local binding of a `let` or `where`, `name params = value`, from its
+/// pieces. Parameters are lambda sugar: `go k = Body` is `go = \k -> Body`.
+/// The value is a body, which a `where` may end.
+pub(super) fn local_binding(
+    scope: Scope<'_, '_, '_>,
+    pieces: &[Piece],
+    context: ExpressionContext,
+) -> Parse<(String, SyntaxExpr)> {
+    let view = scope.view;
+    let first = piece_token(&pieces[0]);
+    let text = |pieces: &[Piece]| {
+        pieces_view(view, pieces)
+            .source_text()
+            .unwrap_or("")
+            .trim()
+            .to_owned()
+    };
+    let Some(equal) = pieces.iter().position(|piece| is_symbol(view, piece, "=")) else {
+        return Err(
+            Fail::error(format!("local binding `{}` must use `=`", text(pieces)))
+                .or_at(Some(first)),
+        );
+    };
+    let head = trim_padding(view, &pieces[..equal]);
+    let value = trim_padding(view, &pieces[equal + 1..]);
+    let one = |index: usize| {
+        view.subview(TokenRange::new(index, index + 1).expect("a token is a range"))
+            .expect("a piece's token lies in its view")
+    };
+    let mut names = head.iter().filter(|piece| {
+        !matches!(piece, Piece::Token(index)
+            if matches!(token(view, *index).kind(), TokenKind::LineStart { .. }))
+    });
+    let invalid = || {
+        Err(Fail::error(format!("invalid local binding name `{}`", text(head))).or_at(Some(first)))
+    };
+    let Some(Piece::Token(name_index)) = names.next() else {
+        return invalid();
+    };
+    let Some(name) = local_name(one(*name_index)) else {
+        if let Some(keyword) = single_reserved_keyword(one(*name_index)) {
+            return Err(Fail::error(reserved_keyword_message(keyword)).or_at(Some(*name_index)));
+        }
+        return invalid();
+    };
+    let mut parameters = Vec::new();
+    for piece in names {
+        let at = piece_token(piece);
+        let parameter = match piece {
+            Piece::Token(index) => local_name(one(*index)),
+            _ => None,
+        };
+        let Some(parameter) = parameter else {
+            if let Piece::Token(index) = piece
+                && let Some(keyword) = single_reserved_keyword(one(*index))
+            {
+                return Err(Fail::error(reserved_keyword_message(keyword)).or_at(Some(at)));
+            }
+            return Err(Fail::error(format!(
+                "local binding `{name}` parameters must be local names"
+            ))
+            .or_at(Some(at)));
+        };
+        if token(view, at).leading() == LeadingTrivia::Joint {
+            return Err(Fail::error(format!(
+                "local binding `{name}` parameters must be separated from its name"
+            ))
+            .or_at(Some(at)));
+        }
+        parameters.push(parameter.to_owned());
+    }
+    if value.is_empty() {
+        return Err(
+            Fail::error(format!("local binding `{name}` requires a value")).or_at(Some(first)),
+        );
+    }
+    let (value, _) = expression(scope, value, context, false, true)?;
+    let value = if parameters.is_empty() {
+        value
+    } else {
+        SyntaxExpr::Lambda(parameters, Box::new(value))
+    };
+    Ok((name.to_owned(), value))
+}
 
 /// A guard's clauses, split at each `and` in keyword position.
 pub(super) fn guard_clauses(

@@ -169,8 +169,14 @@ pub(in crate::g_syntax::parser) fn parse_expression_extent(
     let mut leading_match = false;
     let parsed = if let Some(result) = parse_parenthesized_structural(view, context) {
         ParsedExpression::new(result?, view.range().end())
-    } else if let Some(result) = parse_let(view, context) {
+    } else if legacy_grammar()
+        && let Some(result) = parse_let(view, context)
+    {
         result?
+    } else if keyword_head(view, "let").is_some() {
+        // A `let` is a frame of the term parser, which the legacy grammar's
+        // structural parser read.
+        parse_expression_chain_view(view, context)?
     } else if let Some(result) = parse_object(view, context) {
         result?
     } else if keyword_head(view, "if").is_some() || keyword_head(view, "try").is_some() {
