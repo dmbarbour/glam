@@ -535,11 +535,13 @@ Position*): it ends any open tail of the operation before it, so
 keeps its own lines, arrows included. Guard clauses follow the same rules.
 
 A non-final bare operation uses the existing `=>>` behavior, including its
-requirement that the discarded result be unit. The final statement should
-express an effect and is not implicitly wrapped with `.r`. A layout block must
-be non-empty and occupy the trailing position of its containing definition,
-lambda body, enclosing do statement, or operator operand such as `<|`'s; it
-is never an application's argument. A singleton may be written inline as `do Effect`.
+requirement that the discarded result be unit. The final statement must
+express an effect and is not implicitly wrapped with `.r`. A lone statement
+still runs as one: `do X` is `.r () >>= \_ -> X`, so `do 42` fails when it
+runs rather than standing for `42`. A layout block must be non-empty and
+occupy the trailing position of its containing definition, lambda body,
+enclosing do statement, or operator operand such as `<|`'s; it is never an
+application's argument. A singleton may be written inline as `do Effect`.
 An inline first statement may also establish a hanging block. Later statements
 must align with that first statement's token column:
 

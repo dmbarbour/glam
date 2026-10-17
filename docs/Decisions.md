@@ -782,6 +782,25 @@ maps the short names used here to file names.
     module, as a global helper does.
 - **Recorded in:** grammar review, item 15.
 
+### A lone `do` statement still runs as an effect
+`lone-do-statements-run-as-effects` · 2026-10-17 · maintainer · accepted
+- **Context:** a `do` block with no statement before its final one lowered
+  to that expression, so `do 42` was `42`, and `using d do x ++ y` a text.
+  The final statement must express an effect, yet nothing checked it until
+  something ran the block, and used as data the block passed for its
+  statement.
+- **Decision:** a lone statement lowers as `.r () >>= \_ -> X`. For an effect
+  that is `X` by left identity; anything else fails when the block runs.
+- **Alternatives rejected:** `.r () =>> X`, which adds a unit assertion that
+  cannot fail; and a builtin that checks for an effect, needless at the
+  measured cost.
+- **Consequences:** on the profiling suite the change costs +0.01% of all
+  instructions, within noise; `hello_elf` takes 71 more WHNF delegations and
+  14 more builtin steps, and no more reflection steps. A test that put a
+  text under `using … do` now uses `using … in`.
+- **Rule lives in:** Syntax.md "Effects"; `SyntaxCheatSheet.md`.
+- **Recorded in:** syntax type errors review, question 2.
+
 ### Tags are prefix operators, read alike everywhere
 `tags-are-prefix-operators` · 2026-10-16 · maintainer · accepted
 - **Context:** tags and dict members read differently by context. `:foo`
@@ -3049,6 +3068,7 @@ Short names used under **Recorded in**, with their files under `docs/`.
 | parser backtracking plan | `plans/ParserBacktrackingPerformance_2026-10-04.md` |
 | grammar review | `plans/GrammarReview_2026-10-16.md` |
 | tag prefix plan | `plans/TagPrefixSyntax_2026-10-16.md` |
+| syntax type errors review | `reviews/SyntaxTypeErrors_2026-10-17.md` |
 | C2C review | `reviews/GarbageCollectorC2C_2026-08-22.md` |
 | C6 review | `reviews/GarbageCollectorC6_2026-08-24.md` |
 | C8 review | `reviews/GarbageCollectorC8_2026-10-03.md` |

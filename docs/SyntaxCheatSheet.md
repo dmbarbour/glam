@@ -398,7 +398,8 @@ nested = f [do { .r 1 }, do {; .r 2; }]
 # - `_name` suppresses its unused warning; `op -> _` discards any result.
 # - A bare intermediate op uses `=>>` semantics and therefore requires unit.
 # - The final statement must express an effect, not a returned value (though
-#   it may express an effect to return a value)
+#   it may express an effect to return a value). A lone one still runs as an
+#   effect: `do X` is `.r () >>= \_ -> X`, so `do 42` fails when run.
 # - A layout do may yield to an aligned leading infix operator after its block.
 #   Otherwise it owns the trailing part of its containing expression, and it
 #   is never an application's argument: write `f <| do` or `f (do …)`.

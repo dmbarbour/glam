@@ -222,7 +222,7 @@ impl DoLowering<'_> {
                 }
             }
 
-            let result = syntax_expr_to_resolved_in_semantic_scope(
+            let mut result = syntax_expr_to_resolved_in_semantic_scope(
                 self.access,
                 &do_expr.result,
                 do_expr.result_line,
@@ -230,6 +230,21 @@ impl DoLowering<'_> {
                 self.scope,
                 locals,
             )?;
+            // A block of one statement still runs it as an effect,
+            // `.r () >>= \_ -> result`, so a value that is no effect fails
+            // when the block runs instead of standing in for the block.
+            if do_expr.steps.is_empty() {
+                let unit = ResolvedExpr::Embedded(self.context.unit_value(self.access));
+                let ignored = locals.fresh_binding();
+                result = effect_call_resolved(
+                    self.access,
+                    "seq",
+                    [
+                        effect_call_resolved(self.access, "r", [unit]),
+                        ResolvedExpr::lambda(vec![ignored], result),
+                    ],
+                );
+            }
             let plan = RecursiveDoPlan::build(
                 steps.iter().map(|step| &step.recursion),
                 forward_names.into_forwards(),
@@ -511,17 +526,26 @@ mod tests {
         }
     }
 
+    /// A lone statement runs as an effect after `.r ()`, so a value that is
+    /// no effect fails when the block runs rather than standing in for it.
     #[test]
-    fn final_expression_is_lowered_without_an_implicit_effect_operation() {
+    fn a_lone_statement_runs_after_a_unit_return() {
         let resolved = resolve(&SyntaxExpr::Do(DoExpr {
             steps: Vec::new(),
             result_line: 2,
             result: Box::new(SyntaxExpr::Number(42.into())),
         }));
 
+        let ResolvedExpr::Apply { arguments, .. } = resolved else {
+            panic!("a lone statement lowers to `seq`");
+        };
+        let [_, ResolvedExpr::Lambda { parameters, body }] = arguments.as_slice() else {
+            panic!("`seq` takes `.r ()` and a continuation");
+        };
+        assert_eq!(parameters.len(), 1);
         assert!(
-            matches!(resolved, ResolvedExpr::Embedded(Value::Number(number))
-            if number == Number::from(42_i64))
+            matches!(body.as_ref(), ResolvedExpr::Embedded(Value::Number(number))
+            if *number == Number::from(42_i64))
         );
     }
 

@@ -43,9 +43,10 @@ received Number" (`whnf.rs:1175`), likewise `Binary` for a text, `List`,
   `.r ()` or `.fail`, a view's `.r View`.
 - **A `do` statement**, bare or final, is an effect; a bare one must return
   unit ("effect-only `do` statement: unit expected"). A `do` with no
-  statements before its final one lowers to that expression
-  (`resolve/do_expr.rs:225`, pinned by a test at `:514`), so `do 42` is `42`, and nothing reports it
-  until something runs it as an effect.
+  statements before its final one lowered to that expression, so `do 42`
+  was `42`, and nothing reported it until something ran it as an effect.
+  Since the maintainer's answer to question 2, it lowers as
+  `.r () >>= \_ -> X`, so `do 42` fails when it runs.
 - **A binding's source**, `p <- E` or `E -> p`, is an effect.
 - **A bare guard clause** is an effect returning unit or failing
   (`resolve/pattern.rs:207-235`, `resolve/conditional.rs:202`).
@@ -148,9 +149,12 @@ and the series gets one `Decisions.md` entry, amending
 1. **Order of work.** The maintainer's order is the parser performance
    steps, then the runtime ownership plan. Where do the `kinds-` steps go?
    They touch only the front end, and `kinds-classifier` is small.
-2. **A literal final `do` statement.** Syntax.md says the final statement
-   "should express an effect". Is `do 42` an error, with the hint `.r 42`,
-   though it lowers to `42` today?
+2. **A literal final `do` statement.** *Answered (maintainer, 2026-10-17):*
+   `do 42` is the kind of code a compiler should question, politely, so K3
+   reports it, and a lone statement now lowers as `.r () >>= \_ -> X`
+   (`lone-do-statements-run-as-effects`), a lightweight runtime check.
+   Measured on the profiling suite, it costs nothing visible: +0.01% of all
+   instructions, and +14 builtin steps in `hello_elf`.
 3. **K5 now or deferred**, and if now, which operators: arithmetic only, or
    `++` too?
 4. **Embedded values.** A macro may embed a value (`SyntaxExpr::Embedded`)
