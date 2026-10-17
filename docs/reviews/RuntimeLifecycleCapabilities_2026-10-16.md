@@ -293,7 +293,7 @@ retires, and explicit retirement tears down sessions, work records and
 stored client objects on the owner's thread, which breaks the remaining
 cycles (L1, L3, L4, L10).
 
-Steps, each a plan step once a plan exists:
+Steps, now in the [runtime ownership plan](../plans/RuntimeOwnership_2026-10-17.md):
 1. `lifecycle-cli-logger`: the CLI's diagnostics become an output that a
    client thread drains and renders (L2, L8), the first instance of the
    message boundary. Small, and independent of the rest. *Done

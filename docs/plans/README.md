@@ -54,6 +54,11 @@ flags a step for discussion when work reaches it, not a decision.
   ease of parsing, and what belongs in the parser, a linter or a formatter.
   Started 2026-10-16; `grammar-tail-position` has a survey. Pauses
   `parser-keyword-frames-suffixes`.
+- [`RuntimeOwnership_2026-10-17.md`](RuntimeOwnership_2026-10-17.md):
+  `lifecycle-` steps, a sketch from the lifecycle review: a thread-affine
+  owner that retires the runtime, handles for everything else, request
+  queues, and hosts reduced to message endpoints. `lifecycle-cli-logger` is
+  done; the rest waits for the grammar review's current items.
 - [`TagPrefixSyntax_2026-10-16.md`](TagPrefixSyntax_2026-10-16.md):
   `path:` becomes a prefix operator and `:name` a pun everywhere, so braces
   lose their member grammar. Agreed 2026-10-16; follows the performance
@@ -91,8 +96,9 @@ flags a step for discussion when work reaches it, not a decision.
   reviews who owns the evaluation runtime and how code the runtime calls
   gets its capabilities. Accepted 2026-10-16: a thread-affine owner that
   retires the runtime explicitly, effects crossing to client threads as
-  messages through request queues. Its decisions are settled; the rest
-  becomes a plan after `lifecycle-cli-logger`.
+  messages through request queues. Its decisions are settled, and
+  [`RuntimeOwnership_2026-10-17.md`](RuntimeOwnership_2026-10-17.md) holds
+  the remediation.
 
 ## Completed, Awaiting Retirement
 
