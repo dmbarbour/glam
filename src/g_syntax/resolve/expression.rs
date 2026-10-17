@@ -460,7 +460,8 @@ fn lower_using_expr_resolved(
     let base_len = locals.len();
     let namespace_binding = locals.push_internal_binding("<using-namespace>");
     let namespace_root = ResolvedRoot::Local(namespace_binding);
-    // Lexical locals keep their precedence in a `using` scope.
+    // A `using` scope localizes names as an object does, hiding the locals
+    // outside it behind `^`.
     let using_scope = object_body_scope_resolved(
         access,
         None,
@@ -468,7 +469,7 @@ fn lower_using_expr_resolved(
         ResolvedRoot::Provided(Value::Dict(Dict::new_sync())),
         parent_scope.duplicate_in(access),
         None,
-        parent_scope.local_floor,
+        base_len,
     );
     let body = syntax_expr_to_resolved_in_semantic_scope(
         access,

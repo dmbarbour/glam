@@ -3458,9 +3458,11 @@ fn using_scopes_bind_temporary_namespaces_and_preserve_outer_escapes() {
         "import 'std\n",
         "outer = \"O\"\n",
         "namespace = {outer:\"I\",value:\"V\",emit:(\\value -> .r value)}\n",
-        "choose value = using namespace in value\n",
+        "choose value = using namespace in ^value\n",
+        "shadow value = using namespace in value\n",
         "asm.scope = using namespace in outer ++ self.value ++ ^outer\n",
         "asm.local = choose \"L\"\n",
+        "asm.shadow = shadow \"L\"\n",
         "asm.namespace = using {copied:outer} in copied\n",
         "asm.short = list.pure (using namespace do emit \"D\")\n",
         "asm.explicit = list.pure (using namespace in do emit \"E\")\n",
@@ -3476,6 +3478,7 @@ fn using_scopes_bind_temporary_namespaces_and_preserve_outer_escapes() {
     for (path, expected) in [
         ("scope", b"IVO".as_slice()),
         ("local", b"L".as_slice()),
+        ("shadow", b"V".as_slice()),
         ("namespace", b"O".as_slice()),
     ] {
         let result = resolved_value_at_path(&value, &["asm", path]);
@@ -7930,9 +7933,9 @@ fn body_lets_follow_local_unused_warning_rules() {
     }
 }
 
-/// `alias self`, written or an object's default, localizes a body's names:
-/// the locals outside it take `^`, as its host's names do. Other aliases,
-/// and `using`, leave the locals in reach.
+/// `alias self`, written or an object's default, localizes a body's names,
+/// as `using` does: the locals outside it take `^`, as its host's names do.
+/// Other aliases leave the locals in reach.
 #[test]
 fn localized_bodies_reach_outer_locals_through_escapes() {
     for source in [
@@ -7942,7 +7945,7 @@ fn localized_bodies_reach_outer_locals_through_escapes() {
         "language g0\nf = \\v -> object _ with\n  alias _\n  text = v\nasm.result = (f \"outer\").text\n",
         "language g0\nf = \\v -> object _ with\n  alias _o\n  text = v\nasm.result = (f \"outer\").text\n",
         "language g0\nf = \\v -> {} with\n  text = v\nasm.result = (f \"outer\").text\n",
-        "language g0\nf = \\v -> using {} in v\nasm.result = f \"outer\"\n",
+        "language g0\nf = \\v -> using {} in ^v\nasm.result = f \"outer\"\n",
         "language g0\nobject o with\n  let tmp = \"outer\"\n  object inner with\n    text = ^tmp\nasm.result = o.inner.text\n",
         "language g0\nf = \\v -> object _ with\n  let own = ^v\n  g w = w ++ own\n  text = g \"\"\nasm.result = (f \"outer\").text\n",
         "language g0\nf = \\_v -> object _ with\n  v = \"outer\"\n  text = self.v\nasm.result = (f \"x\").text\n",
@@ -7952,23 +7955,18 @@ fn localized_bodies_reach_outer_locals_through_escapes() {
     }
 }
 
+/// A localized scope is a controlled shadowing: a bare name reads the
+/// scope's own, even beside a local of that name outside it.
 #[test]
-fn localized_bodies_hide_outer_locals_from_bare_names() {
+fn localized_scopes_shadow_outer_locals() {
     for source in [
-        "language g0\nf = \\v -> object _ with\n  text = v\n",
-        "language g0\nf = \\v -> {} with\n  alias self\n  text = v\n",
-        "language g0\nobject o with\n  let v = 1\n  object inner with\n    text = v\n",
+        "language g0\nf = \\v -> object _ with\n  v = \"own\"\n  text = v ++ ^v\nasm.result = (f \"outer\").text\n",
+        "language g0\nf = \\v -> {} with\n  alias self\n  v = \"own\"\n  text = v ++ ^v\nasm.result = (f \"outer\").text\n",
+        "language g0\nobject o with\n  let v = \"outer\"\n  object inner with\n    v = \"own\"\n    text = v ++ ^v\nasm.result = o.inner.text\n",
+        "language g0\nf = let v = \"outer\" in using {v:\"own\"} do v ++ ^v\nasm.result = f\n",
     ] {
-        let lowered = lower_parsed_source(parse(source), &CompileContext::default());
-        assert!(
-            lowered.diagnostics.iter().any(|diagnostic| {
-                diagnostic.severity == Severity::Error
-                    && diagnostic.message
-                        == "`v` reads this body's own `v` beside a local `v` outside it; write `^v` for the local, or `self.v`"
-            }),
-            "{source}: {:?}",
-            lowered.diagnostics
-        );
+        assert_eq!(assembly_result_text(source), b"ownouter", "{source}");
+        assert_eq!(parse(source).diagnostics, [], "{source}");
     }
 }
 

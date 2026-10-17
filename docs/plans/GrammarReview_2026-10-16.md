@@ -370,10 +370,12 @@ on 2026-10-17, those that change the grammar with an entry in
     - *Maintainer, same day:* localized names hide the host's locals as
       well as its names, so a parameter, `let` binding or body `let` bound
       outside a localized body is `^name` within it. Before, locals took
-      precedence everywhere. `using` keeps its documented precedence for
-      locals. A bare name that reads the body's own member beside a hidden
-      local of that name is an error, one name having one meaning in a file;
-      `self.name` reads the member.
+      precedence everywhere. `using` localizes the same way, restoring the
+      original spec from which it had drifted: in `let tmp = 42 in using d
+      do ... tmp ...`, `tmp` is `d.tmp` and `^tmp` the local. A localized
+      scope is a controlled, coarse-grained shadowing, so a bare name there
+      reads the scope's own even beside a hidden local of that name; the
+      first slice had made that an error.
 
     **`let` members and declarations as built (2026-10-17):**
     - A body's or file's `let` reads its group as a `let` expression's

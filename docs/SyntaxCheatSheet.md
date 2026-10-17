@@ -612,7 +612,9 @@ foo = op1 >>= op2 with
         C c = ... o.F ...
     D ::= \ prior -> prior + 1
 
-using Dict in Expr          # treat any dict as temporary object scope
+using Dict in Expr          # treat any dict as temporary object scope;
+                            #   outer locals too take ^: `let t = 1 in
+                            #   using d in t ++ ^t` reads d.t, then the local
 using Dict do Body          # sugar for: using Dict in do Body
 ```
 
@@ -694,10 +696,10 @@ import 'prelude
 import "x86.g" as x86
 
 writeln msg = using x86 do
-    rodata (msg ++ [10]) -> msg_loc
+    rodata (^msg ++ [10]) -> msg_loc
     movl 'rdi 1
     movl 'rsi msg_loc
-    movl 'rdx (1 + len msg)
+    movl 'rdx (1 + len ^msg)
     syscall
 
 main = do

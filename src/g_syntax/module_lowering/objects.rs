@@ -498,8 +498,9 @@ pub(in crate::g_syntax) fn object_body_scope_resolved(
 ) -> NameScope<ResolvedRoot> {
     // An object's names are its own unless an alias other than `self`
     // names it; `alias _` names nothing and leaves names to the parent.
-    // Localized names hide the locals bound outside the body, from
-    // `body_locals` down, as they hide the parent's names: both take `^`.
+    // Localized names hide the locals bound outside the body, below
+    // `body_locals`, as they hide the parent's names: both take `^`. A
+    // `using` scope localizes the same way.
     let alias = alias.map(local_name_metadata);
     let localized = alias
         .as_ref()

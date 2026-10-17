@@ -337,13 +337,16 @@ The first `do` after a nonempty namespace begins the body, so a namespace
 that ends with a `do` block is parenthesized.
 
 The namespace expression is bound outside the temporary scope, then lazily
-evaluated and shared when that namespace is observed within `Expr`. Lexical
-locals continue to take precedence, allowing a function such as
-`write message = using api do ... message ...` to use both its arguments and
-the temporary API naturally. Within the scope, `self` is equivalent to `Dict`
-and `_self` is equivalent to `{}`.
+evaluated and shared when that namespace is observed within `Expr`. Names
+within the scope are localized as in an object body, and that includes the
+lexical locals outside it: in `let tmp = 42 in using d do ... tmp ...`, `tmp`
+is `d.tmp` while `^tmp` is the local. A using scope is thus a controlled,
+coarse-grained form of shadowing in a language that otherwise blocks it: easy
+to reason about where needed, and easily abstracted via its namespace
+argument. Within the scope, `self` is equivalent to `Dict` and `_self` is
+equivalent to `{}`.
 Users escape to the surrounding scope just as they do for objects, via
-`^name` or `^(Expr)`. `Dict` needs only to provide the dictionary members that
+`^name` or `^(Expr)`, as in `write message = using api do ... ^message ...`. `Dict` needs only to provide the dictionary members that
 are actually observed; it does not need to be a valid object and gains no
 object specification implicitly.
 
@@ -1420,7 +1423,7 @@ We also have syntax `extend Object with ...`, which updates the specification th
 
 ### Object Namespaces
 
-To improve concision, expressions within objects are localized by default. That is, we bind `foo` as `self.foo` and `_foo` as `_self.foo`, where `self` is a keyword referencing the local object namespace, analogous to `module`. Users instead pay a small syntactic tax to access the host scope via `^name`, `^(Expr)`, or use of `module`. The host scope includes its locals: a parameter, `let` binding or body `let` bound outside the body is `^name` within it, while the body's own locals need no escape. One name has one meaning in a file, so a bare `name` in such a body may not read the body's own `name` while a local `name` outside it is in scope; `self.name` reads the member explicitly. 
+To improve concision, expressions within objects are localized by default. That is, we bind `foo` as `self.foo` and `_foo` as `_self.foo`, where `self` is a keyword referencing the local object namespace, analogous to `module`. Users instead pay a small syntactic tax to access the host scope via `^name`, `^(Expr)`, or use of `module`. The host scope includes its locals: a parameter, `let` binding or body `let` bound outside the body is `^name` within it, while the body's own locals need no escape. A localized body, like a `using` scope, is thus a controlled form of shadowing: a bare `name` reads the body's own `name` even beside a local `name` outside it. 
 
         a = 1
 

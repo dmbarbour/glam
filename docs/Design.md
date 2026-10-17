@@ -836,10 +836,10 @@ Long term, with acceleration, it should be feasible to implement constraint solv
 To support direct-style assembly, we express assembly mnemonics as writer effects with a concise API. Logically, we're writing an assembly representation, and higher-order effects serve the role of conventional assembly macros. For aesthetics, assume a do notation that accepts `action -> result` to capture return values.
 
         writeln msg = using x86 do
-            .rodata (msg ++ [10])       -> msg_loc
+            .rodata (^msg ++ [10])      -> msg_loc
             movl 'rdi 1
             movl 'rsi msg_loc
-            movl 'rdx (1 + len msg)
+            movl 'rdx (1 + len ^msg)
             syscall
 
         exit = using x86 do

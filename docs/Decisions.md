@@ -716,8 +716,8 @@ maps the short names used here to file names.
     position; one file, one name, one meaning, so a `let` may not share a
     name the file uses for a global or a local in scope; `alias self`
     localizes names as the default does; `_x` naming any local is an
-    error; a localized body reaches its host's locals, as its host's
-    names, through `^`.
+    error; a localized body or `using` scope reaches its host's locals, as
+    its host's names, through `^`, a controlled shadowing.
 - **Alternatives rejected:** keeping `as Name` in headers; private helpers
   as members or per-member `where`s; one recursive group per body or per
   file, which would let a declaration see a `let` below it whose

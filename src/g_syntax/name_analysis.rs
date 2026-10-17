@@ -398,7 +398,7 @@ impl FileNameAnalysis {
                     definitions: namespace,
                     lookup: namespace,
                     object_alias: None,
-                    local_floor: self.scopes[scope.0].local_floor,
+                    local_floor: locals.len(),
                     parent: Some(scope),
                 });
                 self.visit_expr(body, line, using_scope, locals);
@@ -640,22 +640,13 @@ impl FileNameAnalysis {
         scope: ResolutionScopeId,
         locals: &[String],
     ) {
+        // A localized scope hides the locals outside it: a bare name there
+        // reads the scope's own, a controlled shadowing.
         let floor = self.scopes[scope.0].local_floor.min(locals.len());
         if matches!(name, "module" | "module_origin" | "self")
             || locals[floor..].iter().any(|local| local == name)
             || self.scopes[scope.0].object_alias.as_deref() == Some(name)
         {
-            return;
-        }
-        // One name has one meaning in a file: a localized body's own name
-        // may not share a local's that its host sees.
-        if locals[..floor].iter().any(|local| local == name) {
-            self.conflicts.push(Diagnostic::error(
-                line,
-                format!(
-                    "`{name}` reads this body's own `{name}` beside a local `{name}` outside it; write `^{name}` for the local, or `self.{name}`"
-                ),
-            ));
             return;
         }
         let namespace = self.scopes[scope.0].lookup;
