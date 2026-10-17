@@ -215,7 +215,7 @@ impl FileNameAnalysis {
         self.visit_object_body(
             &object.body,
             BodyScopeSpec {
-                alias: object.alias.as_deref(),
+                alias: object.alias.as_ref().map(Alias::name),
                 line,
                 parent: parent_scope,
                 namespace: object_namespace,
@@ -238,7 +238,7 @@ impl FileNameAnalysis {
         self.visit_object_body(
             &extend.body,
             BodyScopeSpec {
-                alias: extend.alias.as_deref(),
+                alias: extend.alias.as_ref().map(Alias::name),
                 line,
                 parent: parent_scope,
                 namespace: object_namespace,
@@ -367,7 +367,7 @@ impl FileNameAnalysis {
                 self.visit_object_body(
                     &object.body,
                     BodyScopeSpec {
-                        alias: object.alias.as_deref(),
+                        alias: object.alias.as_ref().map(Alias::name),
                         line,
                         parent: scope,
                         namespace,
@@ -382,7 +382,7 @@ impl FileNameAnalysis {
                 self.visit_object_body(
                     body,
                     BodyScopeSpec {
-                        alias: alias.as_deref(),
+                        alias: alias.as_ref().map(Alias::name),
                         line,
                         parent: scope,
                         namespace,

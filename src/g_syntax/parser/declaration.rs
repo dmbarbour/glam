@@ -6,7 +6,7 @@
 
 use super::super::keywords::{g0_keyword, reserved_keyword_message};
 use super::super::{
-    DeclarationKind, DefinitionDecl, DefinitionKind, Diagnostic, ObjectBodyDefinition,
+    Alias, DeclarationKind, DefinitionDecl, DefinitionKind, Diagnostic, ObjectBodyDefinition,
     ObjectBodyDefinitionKind, ObjectDecl, ObjectExtendDecl, ObjectRealization, Severity,
     SyntaxExpr, SyntaxKeyExpr, warn_unused_body_lets, warn_unused_locals, warn_unused_with_alias,
 };
@@ -117,7 +117,7 @@ pub(super) fn is_abstract_object_declaration(view: TokenView<'_, '_>) -> bool {
 /// members.
 #[derive(Default)]
 pub(in crate::g_syntax::parser) struct ObjectBody {
-    pub(in crate::g_syntax::parser) alias: Option<String>,
+    pub(in crate::g_syntax::parser) alias: Option<Alias>,
     pub(in crate::g_syntax::parser) members: Vec<ObjectBodyDefinition>,
 }
 
@@ -150,7 +150,7 @@ pub(in crate::g_syntax::parser) fn parse_object_body(
                 continue;
             }
             match parse_alias_member(statement_view) {
-                Ok(name) => alias = Some(name),
+                Ok(name) => alias = Some(Alias { name, line }),
                 Err(message) => diagnostics.push(Diagnostic::error(line, message)),
             }
             continue;
@@ -694,7 +694,7 @@ fn parse_object_declaration(
         ObjectBody::default()
     };
     if let Some(alias) = &body.alias {
-        warn_unused_with_alias(alias, &body.members, line, diagnostics);
+        warn_unused_with_alias(alias, &body.members, diagnostics);
     }
     Some(ObjectDecl {
         realization,
@@ -758,7 +758,7 @@ fn parse_extend_declaration(
         )?
     };
     if let Some(alias) = &body.alias {
-        warn_unused_with_alias(alias, &body.members, line, diagnostics);
+        warn_unused_with_alias(alias, &body.members, diagnostics);
     }
     Some(ObjectExtendDecl {
         realization,

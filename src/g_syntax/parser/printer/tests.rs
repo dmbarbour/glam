@@ -4,7 +4,7 @@ use super::print_expression;
 use crate::core::Builtin;
 use crate::g_syntax::parser::structural::parse_compound_expression_fragment;
 use crate::g_syntax::{
-    ConditionalMode, ConditionalResultMode, DefinitionDecl, DefinitionKind, DoExpr, DoStep,
+    Alias, ConditionalMode, ConditionalResultMode, DefinitionDecl, DefinitionKind, DoExpr, DoStep,
     DoStepKind, IfExpr, MatchArm, MatchCommitment, MatchExpr, MatchOutcome, ObjectBodyDefinition,
     ObjectBodyDefinitionKind, SyntaxExpr, SyntaxGuardClause, SyntaxKeyExpr, SyntaxOperator,
     SyntaxPattern, SyntaxPatternKind,
@@ -243,7 +243,8 @@ impl Generator {
                     1 => Some("_".to_owned()),
                     2 => Some("self".to_owned()),
                     _ => None,
-                },
+                }
+                .map(|name| Alias { name, line: 1 }),
                 body: (0..self.below(3))
                     .map(|_| ObjectBodyDefinition {
                         line: 1,

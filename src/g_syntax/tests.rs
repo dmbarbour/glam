@@ -1283,7 +1283,7 @@ fn parses_hierarchical_extend_body_declarations() {
         panic!("second parent body item should parse as an extend declaration");
     };
     assert_eq!(extend.target, "child");
-    assert_eq!(extend.alias.as_deref(), Some("prior"));
+    assert_eq!(extend.alias.as_ref().map(Alias::name), Some("prior"));
     assert_eq!(extend.body.len(), 1);
     assert!(extend.body[0].definition().is_some());
 }
@@ -1306,7 +1306,7 @@ fn parses_object_expressions() {
                 ..
             })),
             ..
-        }) if alias == "_h" && deps.len() == 1 && body.len() == 1
+        }) if alias.name == "_h" && deps.len() == 1 && body.len() == 1
     ));
 }
 
@@ -1740,7 +1740,7 @@ fn parses_object_and_extend_aliases() {
     match &parsed.declarations[1].kind {
         DeclarationKind::Object(object) => {
             assert_eq!(object.target, "child");
-            assert_eq!(object.alias.as_deref(), Some("_c"));
+            assert_eq!(object.alias.as_ref().map(Alias::name), Some("_c"));
             assert_eq!(object.deps, [SyntaxExpr::Name("base".to_owned())]);
         }
         other => panic!("expected object declaration, got {other:?}"),
@@ -1748,7 +1748,7 @@ fn parses_object_and_extend_aliases() {
     match &parsed.declarations[2].kind {
         DeclarationKind::Extend(extend) => {
             assert_eq!(extend.target, "child");
-            assert_eq!(extend.alias.as_deref(), Some("_c"));
+            assert_eq!(extend.alias.as_ref().map(Alias::name), Some("_c"));
         }
         other => panic!("expected extend declaration, got {other:?}"),
     }
@@ -1770,12 +1770,12 @@ fn object_declaration_aliases_follow_local_unused_warning_rules() {
     );
     assert!(parsed.diagnostics.iter().any(|diag| {
         diag.severity == Severity::Warning
-            && diag.line == 2
+            && diag.line == 3
             && diag.message == "unused local `unused`"
     }));
     assert!(parsed.diagnostics.iter().any(|diag| {
         diag.severity == Severity::Warning
-            && diag.line == 14
+            && diag.line == 15
             && diag.message == "unused local `update_unused`"
     }));
 }
@@ -5277,7 +5277,7 @@ fn dictionary_with_aliases_follow_local_unused_warning_rules() {
     );
     assert!(parsed.diagnostics.iter().any(|diag| {
         diag.severity == Severity::Warning
-            && diag.line == 2
+            && diag.line == 3
             && diag.message == "unused local `unused`"
     }));
 }

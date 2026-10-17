@@ -92,7 +92,7 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
         SyntaxExpr::With { base, alias, body } => lower_dict_with_expr_resolved(
             access,
             base,
-            alias.as_deref(),
+            alias.as_ref().map(Alias::name),
             body,
             line,
             context,
@@ -315,7 +315,7 @@ pub(in crate::g_syntax) fn lower_object_expr_resolved(
     let defs = object_body_defs_resolved_in_scope(
         access,
         &object.body,
-        object.alias.as_deref(),
+        object.alias.as_ref().map(Alias::name),
         line,
         context,
         scope.duplicate_in(access),

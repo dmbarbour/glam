@@ -334,7 +334,7 @@ impl Printer {
                 self.text(" with {");
                 if let Some(alias) = alias {
                     self.text(" alias ");
-                    self.text(alias);
+                    self.text(&alias.name);
                     self.text(";");
                 }
                 for (at, member) in body.iter().enumerate() {

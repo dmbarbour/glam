@@ -1,5 +1,7 @@
 use super::*;
-use crate::g_syntax::{ObjectBodyDefinition, ObjectBodyDefinitionKind, ObjectExpr, SyntaxExpr};
+use crate::g_syntax::{
+    Alias, ObjectBodyDefinition, ObjectBodyDefinitionKind, ObjectExpr, SyntaxExpr,
+};
 
 fn parse_structural(source: &str) -> SyntaxExpr {
     parse_compound_expression_fragment(source.as_bytes())
@@ -422,7 +424,7 @@ fn token_keywords_ignore_nested_groups_and_text() {
         SyntaxExpr::With {
             alias: Some(alias),
             ..
-        } if alias == "named"
+        } if alias.name == "named"
     ));
 
     assert!(matches!(
@@ -485,7 +487,7 @@ fn update_aliases_name_the_update() {
         let SyntaxExpr::With { alias, .. } = parse_structural(source) else {
             panic!("parser did not produce a with expression");
         };
-        assert_eq!(alias.as_deref(), expected, "{source}");
+        assert_eq!(alias.as_ref().map(Alias::name), expected, "{source}");
     }
 }
 

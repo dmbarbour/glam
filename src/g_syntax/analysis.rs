@@ -33,14 +33,14 @@ fn analyze_expr_locals(expr: &SyntaxExpr, line: usize, diagnostics: &mut Vec<Dia
                 analyze_expr_locals(dep, line, diagnostics);
             }
             if let Some(alias) = &object.alias {
-                warn_unused_with_alias(alias, &object.body, line, diagnostics);
+                warn_unused_with_alias(alias, &object.body, diagnostics);
             }
             analyze_object_body_locals(&object.body, diagnostics);
         }
         SyntaxExpr::With { base, alias, body } => {
             analyze_expr_locals(base, line, diagnostics);
             if let Some(alias) = alias {
-                warn_unused_with_alias(alias, body, line, diagnostics);
+                warn_unused_with_alias(alias, body, diagnostics);
             }
             analyze_object_body_locals(body, diagnostics);
         }
@@ -262,16 +262,17 @@ fn mark_used_declaration_locals(kind: &DeclarationKind, locals: &[LocalName], us
     }
 }
 
+/// Warns, on its member's line, for an alias its body does not use.
 pub(super) fn warn_unused_with_alias(
-    alias: &str,
+    alias: &Alias,
     body: &[ObjectBodyDefinition],
-    line: usize,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    if alias == "self" {
+    if alias.name == "self" {
         return;
     }
-    let alias = local_name_metadata(alias);
+    let line = alias.line;
+    let alias = local_name_metadata(&alias.name);
     if alias.canonical.is_none() || alias.suppress_unused_warning {
         return;
     }
@@ -307,13 +308,13 @@ fn analyze_object_body_locals(body: &[ObjectBodyDefinition], diagnostics: &mut V
                 analyze_expr_locals(parent, item.line, diagnostics);
             }
             if let Some(alias) = &object.alias {
-                warn_unused_with_alias(alias, &object.body, item.line, diagnostics);
+                warn_unused_with_alias(alias, &object.body, diagnostics);
             }
             analyze_object_body_locals(&object.body, diagnostics);
         }
         if let Some(extend) = item.extend() {
             if let Some(alias) = &extend.alias {
-                warn_unused_with_alias(alias, &extend.body, item.line, diagnostics);
+                warn_unused_with_alias(alias, &extend.body, diagnostics);
             }
             analyze_object_body_locals(&extend.body, diagnostics);
         }

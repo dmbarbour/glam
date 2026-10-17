@@ -64,11 +64,25 @@ pub struct ImportDecl {
     pub placement: ImportPlacement,
 }
 
+/// A body's `alias` member: the name it gives the body, `self` or `_`, and
+/// the member's line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Alias {
+    pub name: String,
+    pub line: usize,
+}
+
+impl Alias {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct ObjectDecl {
     pub realization: ObjectRealization,
     pub target: String,
-    pub alias: Option<String>,
+    pub alias: Option<Alias>,
     pub deps: Vec<SyntaxExpr>,
     pub body: Vec<ObjectBodyDefinition>,
 }
@@ -124,7 +138,7 @@ impl ObjectBodyDefinition {
 pub struct ObjectExtendDecl {
     pub realization: ObjectRealization,
     pub target: String,
-    pub alias: Option<String>,
+    pub alias: Option<Alias>,
     pub body: Vec<ObjectBodyDefinition>,
 }
 
@@ -132,7 +146,7 @@ pub struct ObjectExtendDecl {
 pub struct ObjectExpr {
     pub realization: ObjectRealization,
     pub name: Option<Box<SyntaxExpr>>,
-    pub alias: Option<String>,
+    pub alias: Option<Alias>,
     pub deps: Vec<SyntaxExpr>,
     pub body: Vec<ObjectBodyDefinition>,
 }
@@ -604,7 +618,7 @@ pub enum SyntaxExpr {
     Object(ObjectExpr),
     With {
         base: Box<SyntaxExpr>,
-        alias: Option<String>,
+        alias: Option<Alias>,
         body: Vec<ObjectBodyDefinition>,
     },
     Using {

@@ -91,7 +91,7 @@ pub(in crate::g_syntax) fn object_decl_resolved_in_scope(
     let defs = object_body_defs_resolved_in_scope(
         access,
         &object.body,
-        object.alias.as_deref(),
+        object.alias.as_ref().map(Alias::name),
         line,
         context,
         parent_scope.duplicate_in(access),
@@ -600,7 +600,7 @@ fn extend_object_resolved_in_scope(
     let extension_defs = object_body_defs_resolved_in_scope(
         access,
         &extend.body,
-        extend.alias.as_deref(),
+        extend.alias.as_ref().map(Alias::name),
         line,
         context,
         scope.duplicate_in(access),
