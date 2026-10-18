@@ -1,4 +1,4 @@
-//! A thread-affine runtime whose owner thread takes turns on a tree of
+//! An affine runtime whose holding thread takes turns on a tree of
 //! machines (`runtime-api-turns-on-machines`, `machines-form-a-tree`).
 //!
 //! A machine is named by its path of [`Key`]s from the root, the empty path,
@@ -20,11 +20,12 @@
 //! value domain on its own, never across the user's code.
 
 use std::any::Any;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, Scope, ScopedJoinHandle};
 
 use bytes::Bytes;
@@ -62,9 +63,10 @@ impl RuntimeConfig {
     }
 }
 
-/// A glam runtime. It stays on the thread that opened it, where dropping it
-/// retires everything, and only that thread takes turns on it. Concurrency
-/// comes from forks within turns, which may borrow what outlives the turn:
+/// A glam runtime. One thread at a time holds it: it may move between
+/// threads, but no two share it. The thread that holds it takes turns on
+/// it, and dropping it retires everything. Concurrency comes from forks
+/// within turns, which may borrow what outlives the turn:
 ///
 /// ```
 /// let mut rt = glam::Runtime::open(glam::RuntimeConfig::new())?;
@@ -86,17 +88,24 @@ impl RuntimeConfig {
 /// let _ = rt.run("a", |_| rt.run("b", |_| Ok(())));
 /// ```
 ///
-/// It is not `Send`:
+/// It is `Send`, so a thread may hand it to another:
 ///
-/// ```compile_fail
+/// ```
 /// fn send<T: Send>() {}
 /// send::<glam::Runtime>();
+/// ```
+///
+/// It is not `Sync`, so no two threads hold it at once:
+///
+/// ```compile_fail
+/// fn sync<T: Sync>() {}
+/// sync::<glam::Runtime>();
 /// ```
 pub struct Runtime {
     root: MachineState,
     shared: Shared,
-    /// `!Send`, as a mutex guard is.
-    _thread: PhantomData<MutexGuard<'static, ()>>,
+    /// `Send` but not `Sync`, as a `Cell` is: one thread at a time.
+    _affine: PhantomData<Cell<()>>,
 }
 
 /// What a turn's machines share, on every thread of its forks.
@@ -285,7 +294,7 @@ impl Runtime {
         Self {
             root: MachineState::default(),
             shared: Shared { assembler },
-            _thread: PhantomData,
+            _affine: PhantomData,
         }
     }
 
@@ -553,11 +562,15 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 }
                 Err(panic) => Some(panic),
             };
-            ForkReturn {
+            let fork_return = ForkReturn {
                 state: machine.state,
                 panic,
                 branch: machine.cut.take(),
-            }
+            };
+            // The thread ends with its turn, so, as a worker does, it gives
+            // back the collector caches it held.
+            glam_gc::Heap::release_current_thread_caches();
+            fork_return
         });
         match thread {
             Ok(thread) => {

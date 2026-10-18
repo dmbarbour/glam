@@ -29,7 +29,7 @@ not define language semantics or collect subsystem invariants.
 | `api/value/access_inventory.rs` | Test-only audit: no code escapes between public and bare core values |
 | `core/managed.rs`, `core/managed/` | Private managed-family and opaque-payload admission, scoped allocation/access, production managed value nodes, and exact compatibility semantic-edge adapters |
 | `api/diagnostics.rs` | Diagnostic values, buses, subscriptions, enrichment, and runtime ingress |
-| `api/turn.rs` | The thread-affine `Runtime` and turns on keyed machines: a stack, a stash and local state of glam values (`runtime-api-turns-on-machines`) |
+| `api/turn.rs` | The affine `Runtime` and turns on a tree of machines: a stack, a stash, local state of glam values and children; cuts and forks (`runtime-api-turns-on-machines`, `machines-form-a-tree`) |
 | `api/runtime.rs`, `api/runtime/` | Runtime ownership, transactional events, delivery, readiness, deadlock reports, settlement, authoritative explicit GC maintenance activity/failure reporting, and stable pressure promotion |
 | `api/assembly.rs` | Assembler/reasoning construction, protected volumes, sources, imports, and module builds |
 | `g_source.rs` | Non-evaluating public `.g` inspection summary |

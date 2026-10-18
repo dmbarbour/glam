@@ -768,6 +768,14 @@ for why.
   that registered them, and forces its interleavings with forks; so does
   `tests/runtime_virtual_resources.rs`.
 
+Affine runtime (2026-10-18, maintainer, under `api-machine-tree`): the
+runtime is `Send` but not `Sync`, by a `Cell` marker in place of the mutex
+guard's, so a thread may hand it to another, and doc tests check both. A
+test moves a runtime to a new thread, which takes a turn and retires it.
+Thread-local state was checked first: beside debug and test bookkeeping,
+only the collector's per-thread allocation caches, which a forked thread
+now releases as it ends, as a worker does.
+
 `api-forks-in-cuts` (2026-10-18), in `src/api/turn.rs` and the reflection
 store:
 - A fork within a cut takes a branch of the cut's transaction, a clone of

@@ -371,3 +371,26 @@ fn annotations_and_initial_definitions_shape_what_compiles() {
     })
     .expect("the turn should succeed");
 }
+
+#[test]
+fn a_runtime_moves_to_a_thread_that_takes_turns_and_retires_it() {
+    let mut rt = runtime();
+    rt.run("m", |m| {
+        m.push_int(7);
+        m.set("x")
+    })
+    .expect("the turn should succeed");
+    let kept = std::thread::spawn(move || {
+        let kept = rt
+            .run("m", |m| {
+                m.get("x")?;
+                m.pop_int()
+            })
+            .expect("the turn should succeed on the new thread");
+        drop(rt);
+        kept
+    })
+    .join()
+    .expect("the thread should not panic");
+    assert_eq!(kept, 7, "the machines move with the runtime");
+}

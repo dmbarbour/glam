@@ -1962,9 +1962,11 @@ maps the short names used here to file names.
   conventions (retention, backpressure, discovery) remain open.
 - **Amended by:** `turn-cuts-bound-transactions-and-search` (2026-10-18): a
   turn's transactions are cuts, which also bound backtracking search.
-  `machines-form-a-tree` (2026-10-18): only the owner thread takes turns,
-  machines form a tree, and fork-join comes from forks within turns rather
-  than threads that borrow the runtime.
+  `machines-form-a-tree` (2026-10-18): only the thread holding the runtime
+  takes turns, machines form a tree, and fork-join comes from forks within
+  turns rather than threads that borrow the runtime. The runtime is affine
+  rather than thread-affine: `Send`, so it may move between threads, but
+  not `Sync` (maintainer, the same day).
 - **Recorded in:** runtime API review.
 
 ### Effect providers answer within turns; background effects go through queues
@@ -2065,8 +2067,13 @@ maps the short names used here to file names.
   own machine still deadlocked. Settlement could not know whether a thread
   would take another turn.
 - **Decision:** the runtime controls concurrency (maintainer, the same day).
-  - `rt.run(path, …)` takes the runtime mutably, so only its owner thread
-    takes turns, and none nests. A path of keys names a machine; the empty
+  - `rt.run(path, …)` takes the runtime mutably, so only the thread
+    holding it takes turns, and none nests. The runtime is `Send` but not
+    `Sync` (maintainer, the same day): one thread at a time holds it, and
+    may hand it to another, which takes turns and retires it. Nothing in
+    it depends on the thread that opened it, as forks already run its
+    operations elsewhere, and no user code runs on its workers, where it
+    must not retire. A path of keys names a machine; the empty
     path is the root, and a key names a child of the root.
   - A machine's state holds its children. A turn reaches its descendants
     alone: it takes synchronous turns on them (`m.run`), and moves values
