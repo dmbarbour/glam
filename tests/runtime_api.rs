@@ -72,13 +72,16 @@ fn clear_returns_a_machine_to_its_initial_state() {
         m.push_int(2);
         m.set("x")?;
         m.stash(1)?;
-        m.clear();
+        m.push_int(3);
+        m.give("child", 1)?;
+        m.clear()?;
         Ok(())
     })
     .expect("the turn should succeed");
     let missing = rt
         .run("m", |m| {
             assert_eq!((m.depth(), m.stash_depth()), (0, 0));
+            assert!(m.take("child", 1).is_err(), "cleared children are gone");
             m.get("x")
         })
         .expect_err("cleared state is gone");
@@ -207,6 +210,8 @@ fn moving_values_needs_them_and_a_descendant() {
             "a machine takes turns on its descendants"
         );
         assert_eq!(m.depth(), 1, "a failed move leaves the values");
+        m.give("absent", 0)?;
+        m.take("absent", 0)?;
         Ok(())
     })
     .expect("the turn should succeed");

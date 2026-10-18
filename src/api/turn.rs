@@ -246,19 +246,18 @@ impl MachineState {
         })
     }
 
-    /// Empties the machine, but keeps the place of each fork below it,
-    /// which its join fills.
-    fn clear(&mut self) {
-        self.stack.clear();
-        self.stash.clear();
-        self.locals.clear();
-        self.children.retain(|_, child| match child {
-            Child::Idle(state) => {
-                state.clear();
-                !state.is_empty()
+    /// Fails when the descendant at `path`, or a machine between, is
+    /// forked. An absent descendant is an empty one, and stays absent.
+    fn reachable(&self, path: &[Key]) -> Result<(), Error> {
+        let mut state = self;
+        for (depth, key) in path.iter().enumerate() {
+            match state.children.get(key) {
+                None => return Ok(()),
+                Some(Child::Idle(child)) => state = child,
+                Some(Child::Forked) => return Err(forked(&path[..=depth])),
             }
-            Child::Forked => true,
-        });
+        }
+        Ok(())
     }
 }
 
@@ -444,9 +443,13 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     }
 
     /// Moves the top `n` values, keeping their order, onto the stack of the
-    /// descendant at `path`.
+    /// descendant at `path`. Moving none only checks that the descendant is
+    /// not forked.
     pub fn give(&mut self, path: impl Into<MachinePath>, n: usize) -> Result<(), Error> {
         let path = descendant_path(path)?;
+        if n == 0 {
+            return self.state.reachable(&path);
+        }
         let depth = self.require(n)?;
         self.state.descendant(&path)?;
         let items = self.state.stack.split_off(depth - n);
@@ -459,9 +462,13 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     }
 
     /// Moves the top `n` values of the descendant at `path`, keeping their
-    /// order, onto this machine's stack.
+    /// order, onto this machine's stack. Moving none only checks that the
+    /// descendant is not forked.
     pub fn take(&mut self, path: impl Into<MachinePath>, n: usize) -> Result<(), Error> {
         let path = descendant_path(path)?;
+        if n == 0 {
+            return self.state.reachable(&path);
+        }
         let descendant = self.state.descendant(&path)?;
         let held = descendant.stack.len();
         let items = (held >= n).then(|| descendant.stack.split_off(held - n));
@@ -1302,9 +1309,16 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     }
 
     /// Returns the machine to its initial state: an empty stack, stash,
-    /// local state and children. A forked descendant returns at its join.
-    pub fn clear(&mut self) {
-        self.state.clear();
+    /// local state and children. It fails, changing nothing, while a
+    /// descendant is forked.
+    pub fn clear(&mut self) -> Result<(), Error> {
+        if self.state.has_fork() {
+            return Err(Error::new(
+                "a machine clears once its forked descendants have joined",
+            ));
+        }
+        self.state = MachineState::default();
+        Ok(())
     }
 
     fn push(&mut self, value: Value) {

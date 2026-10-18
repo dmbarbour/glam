@@ -742,7 +742,10 @@ for why.
   machine that registered it, relative to the machine whose turn opened
   the cut, and runs there. Forks and joins within a cut fail until
   `api-forks-in-cuts`.
-- `clear` keeps the place of a forked descendant, which its join fills.
+- `clear` fails, changing nothing, while a descendant is forked, and
+  moving zero values with `give` or `take` only checks that the descendant
+  is not forked, creating nothing (maintainer, 2026-10-18, in place of a
+  `clear` that kept a forked descendant's place).
 - CLI slice: `execute_assembly` is one turn on `cli`. `start_logger` takes
   the machine and the assembler, selects the logger on `cli` itself, and
   forks the child `logger` with its name and stack size; `assemble` works

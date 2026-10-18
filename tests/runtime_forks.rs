@@ -71,12 +71,15 @@ fn a_forked_machine_is_unreachable_until_its_join() {
             m.run(["busy", "below"], |_| Ok(()))
                 .expect_err("so is below it"),
             m.give("busy", 0).expect_err("busy is forked"),
+            m.take(["busy", "below"], 0).expect_err("so is below it"),
             m.fork("busy", |_| Ok(()))
                 .map(|_| ())
                 .expect_err("busy is forked"),
         ] {
             assert!(error.to_string().contains("on a fork"), "{error}");
         }
+        let error = m.clear().expect_err("a forked descendant stays");
+        assert!(error.to_string().contains("joined"), "{error}");
         release.send(()).expect("the fork waits");
         m.join(fork)?;
         m.take("busy", 1)?;
