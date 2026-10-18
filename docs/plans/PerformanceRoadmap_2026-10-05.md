@@ -290,6 +290,14 @@ Their sections hold their earlier evidence.
   might skip more, even registration. Root registration was 3% of a
   `.r ()` step on 2026-10-15, but its share should rise as the
   representation steps shrink the rest; measure then.
+- **A module's fixed cost** (`perf-module-fixed-cost`), after the
+  representation steps (maintainer, 2026-10-18), and not ahead of the
+  runtime API plan unless it gets in the way. Compiling a module costs
+  about 10 M instructions beyond its text: the CLI's prelude
+  (`api-cli-prelude`) added 16.7 M per run, `hello_elf` going from 599.5
+  to 616.2 M and a run without configuration from 23.8 to 40.4 M, while
+  the same text compiled within a user's script costs about 6 M. The rest
+  is another session, its tasks and their net work. Every import pays it.
 - **Debug annotations** (`perf-debug-annotations`). Each module definition
   carries `anno {context: {g: {origin, line, definition}}} value` for
   diagnostics; building without it saved 8 to 10% of the `chain` family

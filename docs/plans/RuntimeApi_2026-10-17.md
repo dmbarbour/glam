@@ -1,8 +1,8 @@
 # Runtime API Plan — 2026-10-17
 
 Status: `api-runtime-turns` built 2026-10-17, and `api-cli-bridge` and
-`api-machine-data` 2026-10-18, with `api-cli-prelude` awaiting a verdict
-(see [As built](#as-built)). The CLI's transition was re-planned the
+`api-machine-data` 2026-10-18, with `api-cli-prelude` kept (see
+[As built](#as-built)); `api-cuts` next. The CLI's transition was re-planned the
 same day, after a survey of the CLI (see [CLI Transition](#cli-transition)):
 `api-cli` gave way to a bridge and a CLI slice in each later step, moved
 piecemeal (maintainer, 2026-10-17). On 2026-10-18 the maintainer agreed
@@ -311,6 +311,9 @@ by the CLI.
 If it does not hold up, the policy stays in Rust, built with the data
 operations.
 
+*Kept (maintainer, 2026-10-18),* at about 16.7 M instructions per run (see
+`api-machine-data`'s As built).
+
 ### Effect providers
 
 The configured CLI parses arguments in an isolated search. Its effects
@@ -559,7 +562,10 @@ transaction and search (maintainer, 2026-10-18), in place of the review's
   fixed cost of compiling a second module: another session, its tasks and
   their net work. That cost looks general to module compilation rather
   than particular to the prelude.
-- Verdict: for the maintainer, on these measurements.
+- Verdict (maintainer, 2026-10-18): kept, at an acceptable cost. A
+  module's fixed cost joins the performance roadmap as
+  `perf-module-fixed-cost`, after the representations; this plan goes
+  ahead of performance work unless a cost gets in the way.
 
 ## Verification
 
@@ -575,8 +581,6 @@ the public API, in `tests/`.
   the API specializes queues and the like, by measurement.
 - How a cut's failure and retry appear in Rust (an error, or outcomes of
   their own), at `api-cuts`.
-- `api-cli-prelude`'s verdict, judged as
-  [Policy in glam](#policy-in-glam-experiment) says.
 - The ownership plan's open details, each settled when its step starts:
   retired operations' error (`api-retirement`); the queue capability's
   representation, and a request's status, possibly with a received state

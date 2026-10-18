@@ -57,7 +57,9 @@ flags a step for discussion when work reaches it, not a decision.
   providers, the handle API's retirement, then the runtime's retirement
   protocol. The CLI moves piecemeal, a slice in each step. Drafted
   2026-10-17; `api-runtime-turns`, `api-cli-bridge` and `api-machine-data`
-  are built, and `api-cli-prelude` awaits a verdict. On
+  are built, and the `api-cli-prelude` trial was kept; `api-cuts` is next,
+  and the plan goes ahead of performance work unless a cost gets in the
+  way (maintainer, 2026-10-18). On
   2026-10-18 the maintainer agreed effect providers, run by evaluation
   within turns, and the bridge; cuts bound transactions and search; the
   ownership plan merged in; and a CLI prelude in glam is an experiment,
