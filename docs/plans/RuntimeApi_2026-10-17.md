@@ -1,8 +1,8 @@
 # Runtime API Plan — 2026-10-17
 
 Status: `api-runtime-turns` built 2026-10-17; `api-cli-bridge`,
-`api-machine-data`, `api-cuts` and `api-virtual-resources` 2026-10-18,
-with `api-cli-prelude` kept
+`api-machine-data`, `api-cuts`, `api-virtual-resources` and
+`api-scoped-threads` 2026-10-18, with `api-cli-prelude` kept
 (see [As built](#as-built)). The CLI's transition was re-planned the
 same day, after a survey of the CLI (see [CLI Transition](#cli-transition)):
 `api-cli` gave way to a bridge and a CLI slice in each later step, moved
@@ -146,6 +146,10 @@ handle API goes.
    interleaving.
    - CLI slice: the logger's thread becomes a scoped thread that borrows
      the runtime, so no other thread owns it.
+   - Optional, later, `api-machine-status`: a cut reads whether a machine
+     is in a turn, as a virtual resource that a turn's start and end set,
+     so a cut waits for a machine transactionally and with other reads.
+     Not scheduled; see `api-scoped-threads` in As built.
 6. `api-heap-communication` — state and logs in the heap or a volume, with
    readers' cursors in their own state; abstract global paths as
    capabilities; volumes allocated through the reflection API. Retention,
@@ -487,7 +491,11 @@ for its kind, since `ErrorKind::Failure` names any other error; and
 `on_commit` and `on_abort` for the hooks. For `api-virtual-resources`:
 `virtual_get`, `virtual_set` and `virtual_rewrite`, mirroring the heap's
 (maintainer, 2026-10-18; first built as `virtual_read` and
-`virtual_write`).
+`virtual_write`). For `api-scoped-threads`, a first proposal: `try_run`
+for a turn that declines a busy machine; `rt.scope(|s| …)`, with
+`RuntimeScope`, after `std::thread::scope`; `s.spawn` and `s.spawn_with`
+for threads, after `spawn` and `Builder::spawn_scoped`; and `s.run` for a
+forked turn, after `rt.run`, joined through a `ScopedTurn`.
 
 ## As built
 
@@ -677,6 +685,51 @@ reflection store. Virtual resources mirror the heap (maintainer,
   a resource waits until it is written, running exactly twice, and one
   whose only read its own set covered cannot wait. A store unit test
   checks that data-less edits change no volume on either commit path.
+
+`api-scoped-threads` (2026-10-18), in `src/api/turn.rs`:
+- Exclusivity, settling the review's open question with both of the
+  maintainer's options:
+  - `rt.run(key, …)` waits while the machine is in a turn on another
+    thread, on a `CountedCondvar` that a turn's end signals, at no cost
+    when no thread waits.
+  - It fails at once when the machine is in a turn on the calling thread,
+    which waiting would never end, and when waiting would close a cycle of
+    threads, each waiting for a machine that the next holds. Each thread
+    waits for one machine and each machine has one holder, so the check
+    walks a path; the thread that would close a cycle fails, reporting a
+    deadlock, and the others proceed.
+  - `rt.try_run(key, …)` returns `None` at once when the machine is in a
+    turn on any thread.
+  - Not detected: a turn that joins a thread waiting for one of its
+    machines, and a turn that waits, as a failed cut, for a change that
+    only a waiting thread would make. Settlement (`api-settlement`) is
+    where such deadlocks surface.
+- `rt.scope(|s| …)` wraps `std::thread::scope`, so every thread joins
+  before it returns, and passes a `RuntimeScope`, which is `Copy`, so a
+  scope's threads spawn others. `s.spawn(|rt| …)` and
+  `s.spawn_with(builder, |rt| …)` start threads that borrow the runtime;
+  `s.run(key, |m| …)` forks a turn, whose `ScopedTurn` joins it, resuming a
+  panic. A turn opens a scope to fork turns on other machines. A plain
+  `std::thread::scope` over `&Runtime` still works, since the runtime is
+  `Sync`; the wrapper adds forked turns.
+- The transactional option, a cut that observes a machine's status by
+  key, is left as `api-machine-status`: virtual resources make it cheap,
+  with a turn's start and end setting a status resource only for a machine
+  some cut has read, but no use needs it yet, and it would not replace
+  waiting, since a turn begun after the cut commits may find the machine
+  taken again.
+- CLI slice: `start_logger` takes a `RuntimeScope` and starts the logger
+  on a scoped thread, with its name and stack size; `batch` runs from the
+  logger's start to its join within `runtime.scope`. The thread still
+  holds the logger's handles, which go with `api-heap-communication`.
+  Bridge uses in the CLI are unchanged. `hello_elf` runs in 616.2 M
+  instructions, as it did after `api-cli-prelude`.
+- Tests: `tests/runtime_threads.rs` covers `try_run` declining, forced
+  through channels, scopes forking and joining turns, a turn forking
+  turns, a panic resuming at the join with the machine's state kept, and a
+  configured thread. Unit tests in `src/api/turn/tests.rs` force a turn to
+  wait before the holder's turn ends, and a wait that would close a cycle
+  to fail, by watching the runtime's record of waiting threads.
 
 ## Verification
 

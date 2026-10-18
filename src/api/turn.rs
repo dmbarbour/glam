@@ -13,8 +13,10 @@
 //! value domain on its own, never across the user's code.
 
 use std::collections::HashMap;
+use std::io;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread::{self, ScopedJoinHandle, ThreadId};
 
 use bytes::Bytes;
 
@@ -23,6 +25,7 @@ use super::{
     Assembler, Diagnostic, Error, ErrorKind, EvaluationRuntime, ModuleInput, Value, ValueKind,
 };
 use crate::core::Key;
+use crate::counted_condvar::CountedCondvar;
 use crate::reflection::{ConflictAnalysisStrategy, StoreCommitResult, StoreJournal};
 
 /// What opening a runtime takes. It configures the runtime alone:
@@ -69,15 +72,33 @@ impl RuntimeConfig {
 /// sync::<glam::Runtime>();
 /// ```
 pub struct Runtime {
-    machines: Mutex<HashMap<Key, Slot>>,
+    machines: Mutex<Machines>,
+    /// Signalled when a turn ends while another thread waits for a machine.
+    turn_ended: CountedCondvar,
     assembler: Assembler,
     /// `!Send` but `Sync`, as a mutex guard is.
     _thread: PhantomData<MutexGuard<'static, ()>>,
 }
 
+#[derive(Default)]
+struct Machines {
+    slots: HashMap<Key, Slot>,
+    /// The machine each waiting thread waits for.
+    waiting: HashMap<ThreadId, Key>,
+}
+
 enum Slot {
     Idle(MachineState),
-    InTurn,
+    /// In a turn on this thread.
+    InTurn(ThreadId),
+}
+
+/// Why a turn did not start at once.
+enum Busy {
+    /// The machine is in a turn on another thread, which may end.
+    Elsewhere,
+    /// The machine cannot start a turn until this thread's own turns end.
+    Never(Error),
 }
 
 #[derive(Clone, Default)]
@@ -109,7 +130,8 @@ impl Runtime {
     /// transition (`crate::transition`).
     pub(crate) fn around(assembler: Assembler) -> Self {
         Self {
-            machines: Mutex::new(HashMap::new()),
+            machines: Mutex::new(Machines::default()),
+            turn_ended: CountedCondvar::new(),
             assembler,
             _thread: PhantomData,
         }
@@ -137,25 +159,75 @@ impl Runtime {
     }
 
     /// Takes a turn on the machine named `key`, which starts empty if it
-    /// holds nothing. A machine takes one turn at a time.
+    /// holds nothing. A machine takes one turn at a time: while it is in a
+    /// turn on another thread, this waits for that turn to end. It fails at
+    /// once when the machine is in a turn on this thread, and when waiting
+    /// would close a cycle of threads, each waiting for a machine that the
+    /// next holds. A turn that joins a thread waiting for one of its
+    /// machines still deadlocks.
     pub fn run<R>(
         &self,
         key: impl Into<Key>,
         turn: impl FnOnce(&mut Machine<'_>) -> Result<R, Error>,
     ) -> Result<R, Error> {
         let key = key.into();
-        let state = {
-            let mut machines = self.machines();
-            match machines.insert(key.clone(), Slot::InTurn) {
-                Some(Slot::Idle(state)) => state,
-                None => MachineState::default(),
-                Some(Slot::InTurn) => {
-                    return Err(Error::new(format!(
-                        "machine {key:?} is already taking a turn"
-                    )));
+        let me = thread::current().id();
+        let mut machines = self.machines();
+        let state = loop {
+            match machines.begin(&key, me) {
+                Ok(state) => break state,
+                Err(Busy::Never(error)) => return Err(error),
+                Err(Busy::Elsewhere) => {
+                    machines.waiting.insert(me, key.clone());
+                    machines = self
+                        .turn_ended
+                        .wait(machines)
+                        .unwrap_or_else(PoisonError::into_inner);
+                    machines.waiting.remove(&me);
                 }
             }
         };
+        drop(machines);
+        self.turn_on(key, state, turn)
+    }
+
+    /// As [`Self::run`], but returns `None` at once, without a turn, when
+    /// the machine is in a turn on any thread.
+    pub fn try_run<R>(
+        &self,
+        key: impl Into<Key>,
+        turn: impl FnOnce(&mut Machine<'_>) -> Result<R, Error>,
+    ) -> Result<Option<R>, Error> {
+        let key = key.into();
+        let begun = self.machines().begin(&key, thread::current().id());
+        match begun {
+            Ok(state) => self.turn_on(key, state, turn).map(Some),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Runs `body` with a scope for threads that borrow this runtime, as
+    /// [`std::thread::scope`] does: every thread spawned in it joins before
+    /// this returns. Those threads take turns on the runtime, and a turn may
+    /// open a scope to fork turns on other machines and join them.
+    pub fn scope<'env, T>(
+        &'env self,
+        body: impl for<'scope> FnOnce(RuntimeScope<'scope, 'env>) -> T,
+    ) -> T {
+        thread::scope(|scope| {
+            body(RuntimeScope {
+                scope,
+                runtime: self,
+            })
+        })
+    }
+
+    fn turn_on<R>(
+        &self,
+        key: Key,
+        state: MachineState,
+        turn: impl FnOnce(&mut Machine<'_>) -> Result<R, Error>,
+    ) -> Result<R, Error> {
         let mut machine = Machine {
             runtime: self,
             key: Some(key),
@@ -166,17 +238,122 @@ impl Runtime {
     }
 
     /// The machines, under a leaf lock: no user code runs while it is held.
-    fn machines(&self) -> MutexGuard<'_, HashMap<Key, Slot>> {
+    fn machines(&self) -> MutexGuard<'_, Machines> {
         self.machines.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn end_turn(&self, key: Key, state: MachineState) {
         let mut machines = self.machines();
         if state.is_empty() {
-            machines.remove(&key);
+            machines.slots.remove(&key);
         } else {
-            machines.insert(key, Slot::Idle(state));
+            machines.slots.insert(key, Slot::Idle(state));
         }
+        self.turn_ended.notify_all();
+    }
+}
+
+impl Machines {
+    /// Takes the machine `key` into a turn on thread `me`, returning its
+    /// state, unless it is in a turn already.
+    fn begin(&mut self, key: &Key, me: ThreadId) -> Result<MachineState, Busy> {
+        match self.slots.get(key) {
+            Some(Slot::InTurn(holder)) if *holder == me => Err(Busy::Never(Error::new(format!(
+                "machine {key:?} is already taking a turn on this thread"
+            )))),
+            Some(Slot::InTurn(holder)) if self.waits_for(*holder, me) => {
+                Err(Busy::Never(Error::new(format!(
+                    "waiting for machine {key:?} would deadlock: its turn waits, through \
+                     other threads' turns, for a machine in a turn on this thread"
+                ))))
+            }
+            Some(Slot::InTurn(_)) => Err(Busy::Elsewhere),
+            Some(Slot::Idle(_)) | None => match self.slots.insert(key.clone(), Slot::InTurn(me)) {
+                Some(Slot::Idle(state)) => Ok(state),
+                _ => Ok(MachineState::default()),
+            },
+        }
+    }
+
+    /// Whether thread `from` waits, directly or through the threads holding
+    /// the machines it waits for, for thread `to`.
+    fn waits_for(&self, mut from: ThreadId, to: ThreadId) -> bool {
+        // Each thread waits for one machine, which one thread holds, so the
+        // chain is a path; a cycle elsewhere ends it after every waiter.
+        for _ in 0..=self.waiting.len() {
+            if from == to {
+                return true;
+            }
+            match self.waiting.get(&from).and_then(|key| self.slots.get(key)) {
+                Some(Slot::InTurn(holder)) => from = *holder,
+                _ => return false,
+            }
+        }
+        false
+    }
+}
+
+/// A scope for threads that borrow a [`Runtime`], from [`Runtime::scope`].
+/// It is `Copy`, so a thread spawned in it may spawn others.
+#[derive(Clone, Copy)]
+pub struct RuntimeScope<'scope, 'env: 'scope> {
+    scope: &'scope thread::Scope<'scope, 'env>,
+    runtime: &'env Runtime,
+}
+
+impl<'scope, 'env> RuntimeScope<'scope, 'env> {
+    /// The runtime the scope's threads borrow.
+    pub fn runtime(&self) -> &'env Runtime {
+        self.runtime
+    }
+
+    /// Spawns a thread that runs `body` with the runtime.
+    pub fn spawn<T: Send + 'scope>(
+        &self,
+        body: impl FnOnce(&'env Runtime) -> T + Send + 'scope,
+    ) -> ScopedJoinHandle<'scope, T> {
+        let runtime = self.runtime;
+        self.scope.spawn(move || body(runtime))
+    }
+
+    /// As [`Self::spawn`], with the thread configured by `builder`, such as
+    /// its name and stack size.
+    pub fn spawn_with<T: Send + 'scope>(
+        &self,
+        builder: thread::Builder,
+        body: impl FnOnce(&'env Runtime) -> T + Send + 'scope,
+    ) -> io::Result<ScopedJoinHandle<'scope, T>> {
+        let runtime = self.runtime;
+        builder.spawn_scoped(self.scope, move || body(runtime))
+    }
+
+    /// Forks a turn on the machine named `key`: spawns a thread that takes
+    /// it, as [`Runtime::run`] does. Its handle joins it.
+    pub fn run<R: Send + 'scope>(
+        &self,
+        key: impl Into<Key>,
+        turn: impl FnOnce(&mut Machine<'_>) -> Result<R, Error> + Send + 'scope,
+    ) -> ScopedTurn<'scope, R> {
+        let key = key.into();
+        ScopedTurn(self.spawn(move |runtime| runtime.run(key, turn)))
+    }
+}
+
+/// A turn forked by [`RuntimeScope::run`].
+pub struct ScopedTurn<'scope, R>(ScopedJoinHandle<'scope, Result<R, Error>>);
+
+impl<R> ScopedTurn<'_, R> {
+    /// Waits for the turn to end and returns its result. A panic in the
+    /// turn resumes on this thread.
+    pub fn join(self) -> Result<R, Error> {
+        self.0
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    }
+
+    /// Whether the turn has ended, so that [`Self::join`] would not wait.
+    pub fn is_finished(&self) -> bool {
+        self.0.is_finished()
     }
 }
 
@@ -932,3 +1109,6 @@ fn underflow(what: &str, needed: usize, held: usize) -> Error {
 fn key_path<K: Into<Key>>(path: impl IntoIterator<Item = K>) -> Vec<Key> {
     path.into_iter().map(Into::into).collect()
 }
+
+#[cfg(test)]
+mod tests;

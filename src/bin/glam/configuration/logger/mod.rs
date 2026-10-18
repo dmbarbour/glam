@@ -1,8 +1,8 @@
 use std::sync::Arc;
-use std::thread;
+use std::thread::{self, ScopedJoinHandle};
 
 use glam::reflection::{EffectRun, TaskOutcome};
-use glam::{Diagnostic, DiagnosticBus, Error, Runtime, Severity, Value};
+use glam::{Diagnostic, DiagnosticBus, Error, Runtime, RuntimeScope, Severity, Value};
 
 use crate::DiagnosticBusLocal;
 use crate::configuration::{CLI, entry_context, select_entry, selects_nothing};
@@ -16,7 +16,12 @@ pub(crate) use supervisor::{
     LogHost, LoggerSupervisor, SettledReportSelection, settled_report_diagnostics,
 };
 
-pub(crate) fn start_logger(runtime: &Runtime, input: Arc<LogHost>) -> LoggerRun {
+/// Starts the logger on a thread of `scope`, which borrows the runtime.
+pub(crate) fn start_logger<'scope>(
+    scope: RuntimeScope<'scope, '_>,
+    input: Arc<LogHost>,
+) -> LoggerRun<'scope> {
+    let runtime = scope.runtime();
     let assembler = glam::transition::assembler(runtime);
     let logger = Arc::new(DefaultLogger::new(assembler.clone()));
     let evaluation_runtime = assembler.evaluation_runtime();
@@ -87,15 +92,16 @@ pub(crate) fn start_logger(runtime: &Runtime, input: Arc<LogHost>) -> LoggerRun 
         }
     });
     let task_supervisor = supervisor.clone();
-    let thread = thread::Builder::new()
+    let builder = thread::Builder::new()
         .name("glam-logger".to_owned())
         // The logger evaluates ordinary Glam configuration and therefore
         // needs the same practical stack headroom as the process main thread.
         // Deep evaluator paths are being migrated to explicit machines, but
         // the bootstrap must not make a configured logger depend on the
         // platform's smaller default child-thread stack in the meantime.
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
+        .stack_size(8 * 1024 * 1024);
+    let thread = scope
+        .spawn_with(builder, move |_| {
             let _subscription = subscription;
             if let Some((installation, task)) = scheduled {
                 // This client thread delivers what the logger task commits,
@@ -160,8 +166,8 @@ fn select_logger(runtime: &Runtime) -> Result<Option<Value>, Error> {
     })
 }
 
-pub(crate) struct LoggerRun {
-    pub(crate) thread: thread::JoinHandle<()>,
+pub(crate) struct LoggerRun<'scope> {
+    pub(crate) thread: ScopedJoinHandle<'scope, ()>,
     pub(crate) diagnostics: DiagnosticBus,
     pub(crate) supervisor: Arc<LoggerSupervisor>,
 }
@@ -170,7 +176,7 @@ pub(crate) struct LoggerRun {
 mod owner_tests {
     use super::*;
 
-    fn assert_logger_run_owner_inventory(run: &LoggerRun) {
+    fn assert_logger_run_owner_inventory(run: &LoggerRun<'_>) {
         let LoggerRun {
             thread: _,
             diagnostics: _,
@@ -180,6 +186,6 @@ mod owner_tests {
 
     #[test]
     fn logger_run_owner_inventory_is_compile_exhaustive() {
-        let _: fn(&LoggerRun) = assert_logger_run_owner_inventory;
+        let _: fn(&LoggerRun<'_>) = assert_logger_run_owner_inventory;
     }
 }

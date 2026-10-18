@@ -149,57 +149,61 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
     } = prepared;
     let assembler = glam::transition::assembler(&runtime);
     let assembler_diagnostics = assembler.diagnostic_bus();
-    let logger = start_logger(&runtime, log_host.clone());
-    let result = assemble(&runtime, inputs, &assembly_args);
-    let mut operation_failed = false;
-    match result {
-        Ok(bytes) => {
-            if let Err(error) = io::stdout().write_all(&bytes) {
+    // The logger's thread borrows the runtime, so it joins before the
+    // runtime drops.
+    runtime.scope(|scope| {
+        let logger = start_logger(scope, log_host.clone());
+        let result = assemble(&runtime, inputs, &assembly_args);
+        let mut operation_failed = false;
+        match result {
+            Ok(bytes) => {
+                if let Err(error) = io::stdout().write_all(&bytes) {
+                    operation_failed = true;
+                    assembler_diagnostics.publish_local(Diagnostic::new(
+                        &assembler.values(),
+                        Severity::Error,
+                        format!("could not write stdout: {error}"),
+                    ));
+                }
+            }
+            Err(error) => {
                 operation_failed = true;
-                assembler_diagnostics.publish_local(Diagnostic::new(
-                    &assembler.values(),
-                    Severity::Error,
-                    format!("could not write stdout: {error}"),
-                ));
+                publish_error(&assembler_diagnostics, &assembler.values(), &error);
             }
         }
-        Err(error) => {
+
+        operation_failed |= finish_local_files(
+            &local_files,
+            manifest.as_deref(),
+            &assembler_diagnostics,
+            &assembler.values(),
+        );
+        let LoggerRun {
+            thread: logger_thread,
+            diagnostics: logger_diagnostics,
+            supervisor: logger_supervisor,
+        } = logger;
+        operation_failed |= super::profile::time("settle", || {
+            settle_batch_runtime(&assembler.evaluation_runtime(), &logger_supervisor)
+        });
+        super::profile::report(&runtime);
+
+        logger_thread.join().expect("logger task should not panic");
+        if let Err(error) = logger_supervisor.deliver_fallback() {
             operation_failed = true;
-            publish_error(&assembler_diagnostics, &assembler.values(), &error);
+            eprintln!("error: could not drain fallback diagnostics: {error}");
         }
-    }
+        drop(logger_supervisor);
 
-    operation_failed |= finish_local_files(
-        &local_files,
-        manifest.as_deref(),
-        &assembler_diagnostics,
-        &assembler.values(),
-    );
-    let LoggerRun {
-        thread: logger_thread,
-        diagnostics: logger_diagnostics,
-        supervisor: logger_supervisor,
-    } = logger;
-    operation_failed |= super::profile::time("settle", || {
-        settle_batch_runtime(&assembler.evaluation_runtime(), &logger_supervisor)
-    });
-    super::profile::report(&runtime);
-
-    logger_thread.join().expect("logger task should not panic");
-    if let Err(error) = logger_supervisor.deliver_fallback() {
-        operation_failed = true;
-        eprintln!("error: could not drain fallback diagnostics: {error}");
-    }
-    drop(logger_supervisor);
-
-    if operation_failed
-        || assembler_diagnostics.counts().errors() > 0
-        || logger_diagnostics.counts().errors() > 0
-    {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
-    }
+        if operation_failed
+            || assembler_diagnostics.counts().errors() > 0
+            || logger_diagnostics.counts().errors() > 0
+        {
+            ExitCode::from(1)
+        } else {
+            ExitCode::SUCCESS
+        }
+    })
 }
 
 /// Pumps and settles the complete batch runtime, retaining report failures as
