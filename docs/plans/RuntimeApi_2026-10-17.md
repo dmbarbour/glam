@@ -8,7 +8,10 @@ piecemeal (maintainer, 2026-10-17). On 2026-10-18 the maintainer agreed
 effect providers (option A), which tie into the queue-based effects of the
 [runtime ownership plan](RuntimeOwnership_2026-10-17.md), and its remaining
 steps merged here (see [From the ownership plan](#from-the-ownership-plan)).
-Drafted 2026-10-17 from the
+The same day the maintainer clarified that a turn is no transaction: a cut
+bounds transactions and search (`turn-cuts-bound-transactions-and-search`),
+and a turn runs an effect by evaluating it. They agreed the bridge, and the
+CLI prelude as an experiment. Drafted 2026-10-17 from the
 [runtime API review](../reviews/RuntimeApi_2026-10-17.md), whose direction
 the maintainer agreed the same day (`runtime-api-turns-on-machines`). Names
 and communication's conventions are discussed as each step reaches them.
@@ -17,9 +20,11 @@ and communication's conventions are discussed as each step reaches them.
 
 A public API in which a Rust thread acts within the runtime: it opens a
 thread-affine runtime and runs turns on machines named by user-chosen keys,
-each with a stack and local state of glam values. Transactions are steps
-within turns, fork-join comes from scoped threads, and tasks and machines
-communicate only through the shared heap or volumes. The handle API goes.
+each with a stack and local state of glam values. Each action on shared
+state is atomic, and a cut groups actions into a transaction that also
+bounds a backtracking search. Fork-join comes from scoped threads, and tasks
+and machines communicate only through the shared heap or volumes. The
+handle API goes.
 
 ## Principles
 
@@ -41,6 +46,12 @@ communicate only through the shared heap or volumes. The handle API goes.
   worker (the lifecycle review's decisions 3 and 4, 2026-10-16). Workers
   run runtime code; what a background task needs from Rust crosses as data,
   through the heap and request queues, to a machine that answers it.
+- **Communication is transactional operations on shared state**
+  (maintainer, 2026-10-18). Queues, data buses and publish-subscribe are,
+  logically, transactions on state in the heap or a specialized volume. How
+  far the API specializes, abstracts and accelerates them is open, since
+  each choice trades performance, reasoning and robustness. The minimal
+  API, a shared heap alone, would leave optimizations on the table.
 
 ## Steps
 
@@ -83,15 +94,26 @@ communicate only through the shared heap or volumes. The handle API goes.
      of representation.
    - CLI slice: loading the configuration, the assembly, selecting
      `conf.log`, and the configured completion script run in turns on a
-     `cli` machine, whose state holds the configuration. The CLI's policy
-     moves into a glam prelude (proposed; see
-     [Policy in glam](#policy-in-glam-proposed)).
-4. `api-transaction-steps` — `m.transact(|t| …)`, nesting: shared heap
-   reads and writes staged in the runtime transaction, the machine's stack
-   and state restored on abort, and `t.retry()` waiting until a read
-   changes. Rust side effects belong after commit (an after-commit hook).
-   No CLI slice: the CLI's transactional code is the logger's, which moves
-   with heap communication.
+     `cli` machine, whose state holds the configuration.
+   - Experiment, `api-cli-prelude`: the CLI's policy moves into a glam
+     prelude, kept if it proves good in practice (see
+     [Policy in glam](#policy-in-glam-experiment)).
+4. `api-cuts` — a turn's transactions and backtracking search
+   (maintainer, 2026-10-18; `turn-cuts-bound-transactions-and-search`). A
+   turn is no transaction: each action on shared state is atomic by
+   itself, without the setup of an isolated transaction.
+   - `m.cut(|t| …)` groups actions into one atomic, isolated transaction:
+     shared heap reads and writes staged in a runtime transaction, the
+     machine's stack and state restored on failure, and `t.retry()` waiting
+     until a read changes. Cuts nest.
+   - As `.cut` does in reflection tasks, a cut also bounds a backtracking
+     search: a failure undoes what the cut did, so the caller may try
+     another alternative. Rust code chooses alternatives by ordinary control
+     flow, or by nested cuts; it is not restricted to backtracking.
+   - Rust side effects within a cut must tolerate a rerun, or wait for
+     commit (an after-commit hook).
+   - No CLI slice: the CLI's transactional code is the logger's, which
+     moves with heap communication.
 5. `api-scoped-threads` — `rt.scope(|s| …)`, fork-join within a turn, and
    waiting. One turn at a time per machine: a second waits or fails, or
    observes the machine's status by key and so waits transactionally
@@ -115,22 +137,27 @@ communicate only through the shared heap or volumes. The handle API goes.
    - CLI slice, environment: `process.args` and `process.refl_args` become
      state at paths that the CLI writes after expansion, in place of
      promises.
-7. `api-request-queues` — absorbs `lifecycle-queues`. A request queue is a
-   log whose elements pair a value with an optional promise, so writes and
-   queries mix in one queue (the lifecycle review's decision 8).
-   - A request becomes visible on commit, so an aborted transaction sends
-     nothing. A queue's order is its transactions' commit order; queues
-     promise no order among themselves, and resolvers need not resolve in
-     the order read.
+7. `api-request-queues` — absorbs `lifecycle-queues`. A request queue is,
+   logically, transactional operations on a log in the heap or a volume,
+   whose elements pair a value with an optional promise, so writes and
+   queries mix in one queue (the lifecycle review's decision 8). Whether
+   the API specializes or accelerates it beyond heap operations is decided
+   by measurement.
+   - A request posted within a cut becomes visible when the cut commits,
+     so a failed cut sends nothing; one posted outside a cut is visible at
+     once. A queue's order is commit order; queues promise no order among
+     themselves, and resolvers need not resolve in the order read.
    - The requester holds the promise. It takes the result as a promised
      value, or observes the request's status (uncommitted, sent, broken,
-     fulfilled) and awaits a change with `.cut` retry.
-   - A machine that reads the queue holds the elements' resolvers as glam
-     values and resolves or fails them in turns; a resolver collected
-     unresolved breaks its promise.
-   - Tests: an aborted transaction sends nothing; a queue's order matches
-     commit order; a dropped resolver breaks the request; a status change
-     wakes a waiting retry.
+     fulfilled) and awaits a change with a cut's retry.
+   - Resolvers, like volumes, are opaque glam values (maintainer,
+     2026-10-18). Nothing affine stops a program from resolving one twice,
+     so the runtime enforces single assignment: a second resolution fails
+     (proposed). A resolver collected unresolved breaks its promise, through
+     the collector's finalization (proposed).
+   - Tests: a failed cut sends nothing; a queue's order matches commit
+     order; a second resolution fails; a collected resolver breaks the
+     request; a status change wakes a waiting retry.
 8. `api-settlement` — `rt.settle()` runs until no work and no other turn
    remains, services maintenance, kills a deadlock, and appends the
    runtime's reports (task, delivery and maintenance failures, exit errors,
@@ -153,19 +180,27 @@ communicate only through the shared heap or volumes. The handle API goes.
      reads, for the manifest and the final check that no file changed. The
      CLI opens its runtime with `Runtime::open`, and the bridge's
      constructor goes.
-10. `api-effect-providers` — absorbs `lifecycle-leases`. A provider is Rust
-    code that answers effects synchronously within a search or transaction
-    step that a turn runs, on that turn's thread (option A, maintainer,
+10. `api-effect-providers` — absorbs `lifecycle-leases`. A turn runs a
+    monadic effect by evaluation, on its own thread (option A, maintainer,
     2026-10-18; see [Effect providers](#effect-providers)).
-    - A turn runs a search with a provider (`m.search(provider, …)`), which
-      pushes the branches; a transaction step may take one too.
-    - A provider receives per-call capabilities through its request context
-      and stores none, so none holds an owner (L7).
-    - A provider answers only what is local to its search, such as a cursor
-      in argv or a query of the file system. A background task's requests
-      go through queues, and shared state through the heap.
+    - The turn supplies the effects API, evaluates the program to weak-head
+      normal form, and observes either a yielded request with its
+      continuation or the final result. It interprets a request, and the
+      answer resumes the continuation.
+    - Helpers interpret the standard effects (`.r`, `.seq`, `.alt`,
+      `.fail`, `.cut`, `.fix`, `.get`, `.set`, `.reset`, `.shift`, and the
+      heap's), so a user handles only the unique ones. `.alt`, `.fail` and
+      `.cut` map to the turn's cuts. The helpers may run today's effect
+      machine on the turn's thread, returning to Rust only for unique
+      requests, to keep its performance.
+    - A *provider* is the Rust code that answers the unique requests. It
+      receives per-call capabilities and stores none, so none holds an
+      owner (L7). It answers what is local to its run, such as a cursor in
+      argv or a query of the file system; a background task's requests go
+      through queues, and shared state through the heap.
     - CLI slice: the configured CLI's `CliEffects` and `TokenEffects` become
-      providers, and `IsolatedTaskHost` and `IsolatedEffectSearch` leave the
+      providers, their per-branch journals become machine state that cuts
+      restore, and `IsolatedTaskHost` and `IsolatedEffectSearch` leave the
       public API.
 11. `api-handle-retirement` — the public handle types go: `Assembler`,
     `ModuleBuilder`, readiness results, `EffectRun`, endpoints and buses,
@@ -191,7 +226,7 @@ Two steps from the ownership plan stand beside these, under their names:
 - `lifecycle-external-owners` checks L11, independently.
 
 `api-runtime-turns` comes first, then the bridge. The data operations
-precede the CLI's first slice. Transactions precede heap communication,
+precede the CLI's first slice. Cuts precede heap communication,
 whose logs request queues extend; scoped threads precede the loggers' move;
 settlement follows the logs it appends to. Hosts follow queues, since their
 requests are queue elements, and precede effect providers, which take what
@@ -232,7 +267,10 @@ The alternative, the CLI moving whole once turns cover all of it, would
 leave it on the handle API until `api-handle-retirement`, with nothing
 moved piecemeal.
 
-### Policy in glam (proposed)
+*Agreed (maintainer, 2026-10-18):* the bridge, since holding the CLI back
+until a late step would hinder validating the new API as it grows.
+
+### Policy in glam (experiment)
 
 The CLI builds records in Rust today: the assembly's initial definitions
 and their journal records, `conf.entry` contexts, path-lookup annotations,
@@ -243,8 +281,18 @@ compiler's `defined_or` helper is a match on `{}`, the undefined value,
 which glam code can write. Rust then pushes argv and paths,
 applies the prelude's functions, and pops bytes, so the machine's
 operations stay general, as any embedder needs them, rather than shaped
-by the CLI. The prelude's compile cost per run is measured on `hello_elf`
-before it lands.
+by the CLI.
+
+*Maintainer, 2026-10-18:* a good idea in theory; try it, as
+`api-cli-prelude`, and see whether it is one in practice. It is judged on:
+- the prelude's compile cost per run, by `hello_elf`'s instruction count;
+- whether the CLI's Rust shrinks to pushes, applications and pops, and the
+  prelude reads as plainly as the Rust it replaces;
+- whether errors in the configuration still point to the user's source
+  rather than into the prelude.
+
+If it does not hold up, the policy stays in Rust, built with the data
+operations.
 
 ### Effect providers
 
@@ -269,18 +317,27 @@ cannot serve them. The options were:
 *Agreed (maintainer, 2026-10-18):* A, since the parser's file-system
 queries within hypothetical branches need Rust that answers without
 committing. It ties into the queue-based effects of the ownership plan,
-whose remaining steps merged here:
+whose remaining steps merged here. The maintainer clarified it the same
+day:
+- **Running an effect is evaluation.** A turn supplies the effects API,
+  evaluates the program to weak-head normal form, and observes a yielded
+  request with its continuation, or the final result; it interprets a
+  request and resumes. Helpers interpret the standard effects, so a user
+  sees only the unique ones, which the provider answers.
+- **Search is cuts.** The search's branches are cuts within the turn, so a
+  branch's journal is machine state that a failed cut restores, and A's
+  `m.search(provider, …)` is no separate operation.
 - **Where providers run:** within a turn, on its thread. The lifecycle
   review's decisions keep Rust code off workers, so a provider never serves
   a background task.
-- **What they answer:** what is local to their search. A background task's
+- **What they answer:** what is local to their run. A background task's
   requests go through queues to machines, and shared state, such as the
   reflection environment's `.env`, is state at paths that any reader sees.
-- **A committed effect from a search** is a request posted in the step's
-  transaction. It is published on commit, so its result comes after: as a
-  promised value, or as a status that a later step awaits with `.cut`
-  retry. Nothing waits for a request within the transaction that posts it
-  (the lifecycle review's target model).
+- **A committed effect within a cut** is a request posted there, published
+  when the cut commits, so its result comes after: as a promised value, or
+  as a status that a later cut awaits with retry. Nothing waits for a
+  request within the cut that posts it (the lifecycle review's target
+  model).
 
 ### Tests and measurement
 
@@ -355,13 +412,16 @@ The review's findings, by the step that resolves each:
 - **L11:** `lifecycle-external-owners`. **L12** (runtime IDs checked at run
   time) is information: values within a turn come from one runtime.
 
-Where the merge changes the ownership plan's design (proposed):
-- **Queues in volumes.** Decision 8 stored queues apart from the user heap,
-  and `runtime-api-turns-on-machines` models everything in the same heap
-  or volume. A queue as a log in a volume satisfies both.
-- **Resolvers as glam values.** A machine holds glam values only, so the
-  resolver it reads from a queue is a glam value, no longer an affine Rust
-  handle. A second resolution fails, and collection breaks the promise.
+Where the merge changes the ownership plan's design:
+- **Queues are shared state.** Decision 8 stored queues apart from the user
+  heap. *Maintainer, 2026-10-18:* queues, data buses and publish-subscribe
+  are, logically, transactional operations on shared state, in the heap or
+  a specialized volume; how far the API specializes them is open.
+- **Resolvers are glam values.** A machine holds glam values only, so the
+  resolver it reads from a queue is an opaque glam value, as a volume is,
+  no longer an affine Rust handle (maintainer, 2026-10-18). Single
+  assignment is easy to enforce, and proposed; breaking the promise when a
+  resolver is collected is proposed too.
 
 ## Names (to discuss as each step reaches them)
 
@@ -383,6 +443,10 @@ For `api-runtime-turns`, a first proposal:
 For `api-machine-data`, a first proposal: building operations named for
 what they build (`list`, `record`), and reading operations named for what
 they leave on the stack (`unpack_list`, `unpack_dict`).
+
+For `api-cuts`: `m.cut(|t| …)`, after glam's `.cut`, which bounds the same
+transaction and search (maintainer, 2026-10-18), in place of the review's
+`m.transact`.
 
 ## As built (2026-10-17)
 
@@ -420,10 +484,14 @@ the public API, in `tests/`.
 ## Open Questions (2026-10-18)
 
 - Names, per step (above).
-- Communication's conventions, at `api-heap-communication`.
-- The bridge and the CLI prelude, proposed for the maintainer's agreement.
-- Queues in volumes and resolvers as glam values, proposed by the merge
-  (see [From the ownership plan](#from-the-ownership-plan)).
+- Communication's conventions, at `api-heap-communication`, and how far
+  the API specializes queues and the like, by measurement.
+- How a cut's failure and retry appear in Rust (an error, or outcomes of
+  their own), at `api-cuts`.
+- `api-cli-prelude`'s verdict, judged as
+  [Policy in glam](#policy-in-glam-experiment) says.
+- Resolvers' single assignment and breaking on collection, proposed at
+  `api-request-queues`.
 - The ownership plan's open details, each settled when its step starts:
   retired operations' error (`api-retirement`); the queue capability's
   representation, and a request's status, possibly with a received state

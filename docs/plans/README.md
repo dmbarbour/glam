@@ -52,13 +52,14 @@ flags a step for discussion when work reaches it, not a decision.
   built 2026-10-17.
 - [`RuntimeApi_2026-10-17.md`](RuntimeApi_2026-10-17.md): `api-` steps
   from the runtime API review: `Runtime`, turns on keyed machines, a
-  bridge for the CLI, data operations, transaction steps, scoped threads,
-  heap communication, request queues, settlement, hosts as machines, effect
+  bridge for the CLI, data operations, cuts, scoped threads, heap
+  communication, request queues, settlement, hosts as machines, effect
   providers, the handle API's retirement, then the runtime's retirement
-  protocol. The CLI moves piecemeal, a slice in each
-  step. Drafted 2026-10-17; `api-runtime-turns` is built. Effect
-  providers were agreed, and the ownership plan merged in, on 2026-10-18;
-  the bridge and a CLI prelude in glam are proposed.
+  protocol. The CLI moves piecemeal, a slice in each step. Drafted
+  2026-10-17; `api-runtime-turns` is built. On 2026-10-18 the maintainer
+  agreed effect providers, run by evaluation within turns, and the bridge;
+  cuts bound transactions and search; the ownership plan merged in; and a
+  CLI prelude in glam is an experiment, `api-cli-prelude`.
 - [`TagPrefixSyntax_2026-10-16.md`](TagPrefixSyntax_2026-10-16.md):
   `path:` is a prefix operator and `:name` a pun everywhere, so braces lost
   their member grammar; follow-ups retired bare tags, rejected tags as

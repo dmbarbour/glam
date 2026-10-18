@@ -1960,6 +1960,8 @@ maps the short names used here to file names.
   its thread, scoped threads joined by construction. The ownership plan's
   remaining steps are re-planned from the review. Communication's
   conventions (retention, backpressure, discovery) remain open.
+- **Amended by:** `turn-cuts-bound-transactions-and-search` (2026-10-18): a
+  turn's transactions are cuts, which also bound backtracking search.
 - **Recorded in:** runtime API review.
 
 ### Effect providers answer within turns; background effects go through queues
@@ -1969,24 +1971,62 @@ maps the short names used here to file names.
   and query the file system within branches that may never commit. A
   machine answers only committed requests, through the heap, so turns and
   heap communication alone cannot serve them.
-- **Decision:** Rust code may answer effects synchronously as a *provider*,
-  the successor to `TaskSpecialization`, within a search or transaction
-  step that a turn runs, on that turn's thread.
-  - A provider answers what is local to its search. Shared state is state
-    at paths in the heap.
+- **Decision:** Rust code answers effects synchronously within a turn, on
+  that turn's thread, as the maintainer clarified the same day:
+  - A turn runs a monadic effect by evaluation: it supplies the effects
+    API, evaluates the program to weak-head normal form, and observes a
+    yielded request with its continuation, or the final result. It
+    interprets a request and resumes the continuation.
+  - Helpers interpret the standard effects, so a user handles only the
+    unique ones. A *provider*, the successor to `TaskSpecialization`, is
+    the Rust code that answers those. Backtracking maps to the turn's cuts
+    (`turn-cuts-bound-transactions-and-search`).
+  - A provider answers what is local to its run. Shared state is state at
+    paths in the heap.
   - Background tasks reach Rust only through request queues served by
     machines, as the lifecycle review's target model has it: Rust code
-    never runs on a worker.
+    never runs on a worker. Queues, data buses and publish-subscribe are,
+    logically, transactional operations on shared state, in the heap or a
+    specialized volume; how far the API specializes them is open.
+  - Volumes and resolvers are opaque glam values, so single assignment is
+    the runtime's to enforce, if it chooses.
   - The ownership plan's remaining steps (queues, host messages, leases,
     host calls, the retirement protocol) merge into the runtime API plan.
 - **Alternatives rejected:** the parser rewritten in glam, which has no
   file access within a branch; a search in a turn that pushes every branch
-  as data over glam primitives, which has the same gap.
+  as data over glam primitives, which has the same gap; and queues stored
+  apart from the heap (the lifecycle review's decision 8), since all
+  communication is modeled in shared state.
 - **Consequences:** a provider stores no capabilities and receives them
-  per call. A committed effect from a search is a request published on
-  commit, whose result arrives after it.
+  per call. A committed effect within a cut is a request published when
+  the cut commits, whose result arrives after it.
 - **Recorded in:** runtime API plan, "Effect providers" and "From the
   ownership plan".
+
+### A cut bounds a turn's transactions and its backtracking search
+`turn-cuts-bound-transactions-and-search` · 2026-10-18 · maintainer · accepted
+- **Context:** `runtime-api-turns-on-machines` made transactions nested
+  steps within a turn (`m.transact`). Plans then spoke of a turn's work as
+  if it ran in a transaction. In reflection tasks, `.cut` is both a
+  transaction boundary and the commitment of a backtracking search.
+- **Decision:** a turn is no transaction.
+  - Each action on shared state is atomic by itself, without the setup of
+    an isolated transaction.
+  - `m.cut(|t| …)` groups actions into one atomic, isolated transaction,
+    with abort, retry and backtracking: a failure undoes what the cut did,
+    and `t.retry()` waits until something it read changes. Cuts nest.
+  - The Rust interface matches reflection tasks', where search and
+    transactions share the boundary. Rust code may still choose by
+    ordinary control flow; it is not restricted to backtracking.
+- **Alternatives rejected:** a turn as one transaction (already rejected by
+  `runtime-api-turns-on-machines`); and a transaction step beside a
+  separate search operation, two boundaries where reflection tasks have
+  one.
+- **Consequences:** `api-transaction-steps` becomes `api-cuts`, and effect
+  searches run as cuts, so a branch's journal is machine state that a
+  failed cut restores. Rust side effects within a cut tolerate a rerun or
+  wait for commit.
+- **Recorded in:** runtime API plan, `api-cuts`.
 
 ### Resumable WHNF through bounded regional quanta and durable checkpoints
 `resumable-whnf-regional-quanta` · 2026-09-12 · agent · accepted
