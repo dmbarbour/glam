@@ -131,12 +131,12 @@ handle API goes.
      cuts that had committed into it. Like their counterparts in C
      transaction libraries, they are best effort: they make compensation
      convenient, not certain.
-   - Beside it, `api-virtual-resources`: a cut reads and writes *virtual
-     resources*, proxies named by key for host resources the runtime does
-     not see (maintainer, 2026-10-18). Conflict analysis covers them, and a
-     failed cut that read one runs again when a later cut writes it, so
-     Rust code that observes a host change writes its proxy to wake the
-     waiters.
+   - Beside it, `api-virtual-resources`: a cut gets, sets and rewrites
+     *virtual resources*, as it does the heap, proxies named by key for
+     host resources the runtime does not see (maintainer, 2026-10-18).
+     Conflict analysis covers them, and a failed cut that read one runs
+     again when a later cut writes it, so Rust code that observes a host
+     change writes its proxy to wake the waiters.
    - No CLI slice: the CLI's transactional code is the logger's, which
      moves with heap communication.
 5. `api-scoped-threads` — `rt.scope(|s| …)`, fork-join within a turn, and
@@ -485,7 +485,9 @@ transaction and search (maintainer, 2026-10-18), in place of the review's
 `fail`, after `.fail` (first built as `retry`); `ErrorKind::Backtrack`
 for its kind, since `ErrorKind::Failure` names any other error; and
 `on_commit` and `on_abort` for the hooks. For `api-virtual-resources`:
-`virtual_read` and `virtual_write`, after the heap's names.
+`virtual_get`, `virtual_set` and `virtual_rewrite`, mirroring the heap's
+(maintainer, 2026-10-18; first built as `virtual_read` and
+`virtual_write`).
 
 ## As built
 
@@ -637,32 +639,44 @@ journal and the runtime's snapshot, commit, validation and wait:
   within a cut.
 
 `api-virtual-resources` (2026-10-18), in `src/api/turn.rs` and the
-reflection store:
-- `virtual_read(path)` records, within a cut, a read of the virtual
-  resource at a path of keys, a proxy for host state the runtime does not
-  see; it counts as an observation, so a failed cut that read only virtual
-  resources waits. Outside a cut it does nothing, as a read there joins no
-  transaction. `virtual_write(path)` writes it: within a cut, when the
-  outermost commits; outside one, at once.
+reflection store. Virtual resources mirror the heap (maintainer,
+2026-10-18), with the heap's conflict rules and no data:
+- `virtual_get(path)` reads, within a cut, the virtual resource at a path
+  of keys, a proxy for host state the runtime does not see. It pushes
+  nothing. Like a heap read, it counts as an observation, so a failed cut
+  that read only virtual resources waits. Outside a cut it does nothing, as
+  a read there joins no transaction.
+- `virtual_set(path)` and `virtual_rewrite(path)` write it: within a cut,
+  when the outermost commits; outside one, at once. A set covers a later
+  read of its path in the same cut, which then records nothing, since Rust
+  code that sets a resource knows the state it stands for. A rewrite, for
+  a change that depends on the state before it, such as an append, widens
+  a later read to its own path instead, as on the heap.
 - Paths are hierarchical, as the heap's are: a write conflicts with reads
   of its path and of paths above and below it, and wakes the failed cuts
   that made them. Virtual resources lie apart from the heap.
-- In the store, a write is a `Touch` edit, which changes no volume but
-  records a change at its address for conflict analysis, and wakes
-  waiters as a commit that changed the store. Addresses lie under a
-  namespace of the runtime's private volume, apart from its queries.
-  Writing data, such as `{}` at the path, was rejected: each write would
-  add a lazy update to a volume root that nothing forces.
+- In the store, virtual writes are the heap's `Set` and `Rewrite` edits
+  without data (maintainer's suggestion, 2026-10-18): conflict analysis,
+  coverage and widening treat them as their data counterparts, and only
+  applying an edit skips them, so they change no volume. Addresses lie
+  under a namespace of the runtime's private volume, apart from its
+  queries.
+  - First built with a separate `Touch` edit, which matched only a
+    rewrite's conflicts and needed its own cases.
+  - Writing data, such as `{}` at the path, was rejected: each write would
+    add a lazy update to a volume root that nothing forces.
 - As for every address, the store keeps the latest change of each address
   ever written, so distinct resource names accumulate there, as distinct
   heap paths already do.
 - Tests in `tests/runtime_virtual_resources.rs` force each interleaving
-  through channels: a write between a cut's read and its commit conflicts
-  below or above the read path, not for an unrelated resource or a heap
-  write; a cut's write takes effect at its commit, and a failed cut's or
-  failed nested cut's write never; and a failed cut that read a resource
-  waits until it is written, running exactly twice. A store unit test
-  checks that a `Touch` changes no volume on either commit path.
+  through channels. A write between a cut's read and its commit conflicts
+  below or above the read path, and as a rewrite, but not for an unrelated
+  resource or a heap write. A cut's own set covers its later read, and its
+  own rewrite widens it. A cut's write takes effect at its commit, and a
+  failed cut's or failed nested cut's write never. A failed cut that read
+  a resource waits until it is written, running exactly twice, and one
+  whose only read its own set covered cannot wait. A store unit test
+  checks that data-less edits change no volume on either commit path.
 
 ## Verification
 

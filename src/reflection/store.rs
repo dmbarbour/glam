@@ -228,28 +228,25 @@ impl StoreSnapshot {
     }
 }
 
+/// An edit at an address. One without data writes a virtual resource: it
+/// joins conflict analysis as its data counterpart does, but changes no
+/// volume.
 #[derive(Clone)]
 enum StoreEdit {
     Set {
         address: ConflictAddress,
-        value: PublicValue,
+        value: Option<PublicValue>,
     },
     Rewrite {
         address: ConflictAddress,
-        updater: PublicValue,
+        updater: Option<PublicValue>,
     },
-    /// A change at an address that holds no data: a virtual resource's
-    /// write, which conflicts with its readers but leaves every volume as
-    /// it was.
-    Touch { address: ConflictAddress },
 }
 
 impl StoreEdit {
     fn address(&self) -> &ConflictAddress {
         match self {
-            Self::Set { address, .. } | Self::Rewrite { address, .. } | Self::Touch { address } => {
-                address
-            }
+            Self::Set { address, .. } | Self::Rewrite { address, .. } => address,
         }
     }
 }
@@ -310,7 +307,7 @@ impl StoreJournal {
                         dependency = edit_path.clone();
                     }
                 }
-                StoreEdit::Set { .. } | StoreEdit::Rewrite { .. } | StoreEdit::Touch { .. } => {}
+                StoreEdit::Set { .. } | StoreEdit::Rewrite { .. } => {}
             }
         }
         self.observations
@@ -321,29 +318,42 @@ impl StoreJournal {
     }
 
     /// Records a read of the virtual resource at `path`: a proxy for host
-    /// state that the store does not hold. A later write to it, or to a path
-    /// above or below it, conflicts with this transaction. A write by this
-    /// journal does not cover the read, since no data stands behind it.
-    pub(crate) fn observe_virtual_read(&mut self, path: &[Key]) {
-        let address = self.virtual_address(path);
-        self.observations.lock().unwrap().observe(&address);
+    /// state that the store does not hold. Virtual resources follow the
+    /// heap's rules: a set covers a later read, which then records nothing,
+    /// and a rewrite widens it. Returns whether the read observed the
+    /// snapshot.
+    pub(crate) fn observe_virtual_read(&mut self, path: &[Key]) -> bool {
+        let keys = virtual_keys(path);
+        self.observe_volume_read(self.snapshot.runtime_volume, &keys)
     }
 
-    /// Records a write of the virtual resource at `path`, which changes no
+    /// Records a set of the virtual resource at `path`, which changes no
     /// data: once committed, it conflicts with the transactions that read
     /// the resource and wakes those waiting on it.
     pub(crate) fn write_virtual(&mut self, path: &[Key]) {
         let address = self.virtual_address(path);
-        self.edits.push(StoreEdit::Touch { address });
+        self.edits.push(StoreEdit::Set {
+            address,
+            value: None,
+        });
+    }
+
+    /// As [`Self::write_virtual`], for a rewrite.
+    pub(crate) fn rewrite_virtual(&mut self, path: &[Key]) {
+        let address = self.virtual_address(path);
+        self.edits.push(StoreEdit::Rewrite {
+            address,
+            updater: None,
+        });
     }
 
     /// Virtual resources' addresses lie in the runtime's private volume,
     /// apart from its queries.
     fn virtual_address(&self, path: &[Key]) -> ConflictAddress {
-        let keys = std::iter::once(VIRTUAL_NAMESPACE.clone())
-            .chain(path.iter().cloned())
-            .collect();
-        ConflictAddress::reflection(self.snapshot.runtime_volume, ConflictPath::from_keys(keys))
+        ConflictAddress::reflection(
+            self.snapshot.runtime_volume,
+            ConflictPath::from_keys(virtual_keys(path)),
+        )
     }
 
     pub(crate) fn view(&self) -> PublicValue {
@@ -509,7 +519,7 @@ impl StoreJournal {
         debug_assert_eq!(value.runtime_id(), self.snapshot.values.runtime_id());
         StoreEdit::Set {
             address: ConflictAddress::reflection(volume, ConflictPath::from_keys(path)),
-            value,
+            value: Some(value),
         }
     }
 
@@ -517,7 +527,7 @@ impl StoreJournal {
         debug_assert_eq!(updater.runtime_id(), self.snapshot.values.runtime_id());
         StoreEdit::Rewrite {
             address: ConflictAddress::reflection(volume, ConflictPath::from_keys(path)),
-            updater,
+            updater: Some(updater),
         }
     }
 
@@ -799,9 +809,6 @@ fn apply_edits(
     edits: &[StoreEdit],
 ) -> RedBlackTreeMapSync<VolumeId, PublicValue> {
     for edit in edits {
-        if matches!(edit, StoreEdit::Touch { .. }) {
-            continue;
-        }
         let volume = edit.address().reflection_parts().0;
         let root = roots
             .get(&volume)
@@ -837,6 +844,12 @@ fn query_belongs_to(domain: &Arc<QueryDomain>, handle: &Arc<EvaluationQueryHandl
         .domain
         .upgrade()
         .is_some_and(|owner| Arc::ptr_eq(domain, &owner))
+}
+
+fn virtual_keys(path: &[Key]) -> Vec<Key> {
+    std::iter::once(VIRTUAL_NAMESPACE.clone())
+        .chain(path.iter().cloned())
+        .collect()
 }
 
 fn query_path(id: EvaluationQueryId) -> Vec<Key> {
@@ -898,8 +911,13 @@ pub(crate) fn decode_query_state(
 
 fn apply_edit(access: &RuntimeValueAccess<'_>, root: PublicValue, edit: &StoreEdit) -> PublicValue {
     PublicValue::from_runtime_root(access.root_runtime_value(match edit {
-        StoreEdit::Touch { .. } => return root,
-        StoreEdit::Set { address, value } => {
+        StoreEdit::Set { value: None, .. } | StoreEdit::Rewrite { updater: None, .. } => {
+            return root;
+        }
+        StoreEdit::Set {
+            address,
+            value: Some(value),
+        } => {
             let (_, path) = address.reflection_parts();
             apply_value_at_path_in(
                 access,
@@ -908,7 +926,10 @@ fn apply_edit(access: &RuntimeValueAccess<'_>, root: PublicValue, edit: &StoreEd
                 value.clone().into_runtime_root().clone_core_with(access),
             )
         }
-        StoreEdit::Rewrite { address, updater } => {
+        StoreEdit::Rewrite {
+            address,
+            updater: Some(updater),
+        } => {
             let (_, path) = address.reflection_parts();
             let prior = lazy_core_value_path(
                 access,

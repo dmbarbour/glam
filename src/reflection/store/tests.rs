@@ -95,14 +95,11 @@ fn assert_store_root_boundary_inventory(
     match edit {
         StoreEdit::Set { address, value } => {
             let _: &ConflictAddress = address;
-            let _: &PublicValue = value;
+            let _: &Option<PublicValue> = value;
         }
         StoreEdit::Rewrite { address, updater } => {
             let _: &ConflictAddress = address;
-            let _: &PublicValue = updater;
-        }
-        StoreEdit::Touch { address } => {
-            let _: &ConflictAddress = address;
+            let _: &Option<PublicValue> = updater;
         }
     }
 
@@ -657,7 +654,7 @@ fn virtual_writes_change_no_volume_but_conflict_with_their_readers() {
     let mut first = StoreJournal::new(snapshot.clone());
     first.write_virtual(&path(&["fs", "a"]));
     let mut second = StoreJournal::new(snapshot);
-    second.write_virtual(&path(&["net"]));
+    second.rewrite_virtual(&path(&["net"]));
 
     // The first installs its cached view; the second, from a stale
     // snapshot, replays its edits.

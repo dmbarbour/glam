@@ -579,30 +579,45 @@ impl Machine<'_> {
         self.store_edit(|journal| journal.rewrite(path.clone(), updater.clone()))
     }
 
-    /// Records that this cut read the virtual resource at `path`: a proxy,
-    /// named by a path of keys, for host state that the runtime does not
-    /// see. Should another cut write it, or a path above or below it, and
-    /// commit first, this cut's commit conflicts; once this cut has failed,
-    /// that write wakes it. Outside a cut a read joins no transaction, so
-    /// this does nothing.
-    pub fn virtual_read<K: Into<Key>>(&mut self, path: impl IntoIterator<Item = K>) {
+    /// Reads the virtual resource at `path` within a cut: a proxy, named by
+    /// a path of keys, for host state that the runtime does not see. It
+    /// holds no value, so the read pushes nothing, but it joins the cut's
+    /// transaction as [`Self::heap_get`]'s read does: should another cut
+    /// set or rewrite the resource, or a path above or below it, and commit
+    /// first, this cut's commit conflicts, and once this cut has failed,
+    /// that write wakes it. As on the heap, the cut's own earlier set of
+    /// the path covers the read, which then records nothing. Outside a cut,
+    /// a read joins no transaction, so this does nothing.
+    pub fn virtual_get<K: Into<Key>>(&mut self, path: impl IntoIterator<Item = K>) {
         if let Some(cut) = &mut self.cut {
-            cut.journal.observe_virtual_read(&key_path(path));
-            cut.observed = true;
+            cut.observed |= cut.journal.observe_virtual_read(&key_path(path));
         }
     }
 
-    /// Writes the virtual resource at `path`, as Rust code does once it
+    /// Sets the virtual resource at `path`, as Rust code does once it
     /// changes, or sees a change in, the host state that the resource
-    /// stands for. A write holds no data. Outside a cut, it commits at
-    /// once; within one, with the outermost cut, so a failed cut writes
-    /// nothing.
-    pub fn virtual_write<K: Into<Key>>(
+    /// stands for, and so knows that state. Outside a cut, the write
+    /// commits at once; within one, with the outermost cut, so a failed cut
+    /// writes nothing.
+    pub fn virtual_set<K: Into<Key>>(
         &mut self,
         path: impl IntoIterator<Item = K>,
     ) -> Result<(), Error> {
         let path = key_path(path);
         self.store_edit(|journal| journal.write_virtual(&path))
+    }
+
+    /// Rewrites the virtual resource at `path`: a write, as
+    /// [`Self::virtual_set`] is, for a change that depends on the state
+    /// before it, such as an append. As on the heap, it does not cover a
+    /// later read of the path, which still depends on what other cuts
+    /// write.
+    pub fn virtual_rewrite<K: Into<Key>>(
+        &mut self,
+        path: impl IntoIterator<Item = K>,
+    ) -> Result<(), Error> {
+        let path = key_path(path);
+        self.store_edit(|journal| journal.rewrite_virtual(&path))
     }
 
     /// Runs `body` as a cut: its actions on shared state, the heap and
