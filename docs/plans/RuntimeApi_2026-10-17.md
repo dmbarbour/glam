@@ -167,6 +167,14 @@ handle API goes.
      machines, error states and their explicit clearing, diagnostics
      captured in machine state, and joining a child's diagnostics into its
      parent's queue (maintainer, 2026-10-18).
+   - After it, `api-fine-grained-reruns` (maintainer, 2026-10-18): today
+     every inconsistency reruns the outermost cut, whether a commit
+     conflict, a fork's branch that read what the cut wrote after the
+     fork, or a conflict inside a nested cut that then failed. A finer
+     rerun would redo only the part whose reads went stale, such as a fork
+     rerun at its join on the cut's current state, or a nested cut rerun
+     in place, keeping the work before it. Rust effects in the redone part
+     (hooks, errors) need the error story first.
 6. `api-heap-communication` — state and logs in the heap or a volume, with
    readers' cursors in their own state; abstract global paths as
    capabilities; volumes allocated through the reflection API. Retention,
