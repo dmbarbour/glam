@@ -4,7 +4,6 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::mpsc;
-use std::thread;
 
 use glam::{Error, ErrorKind, Machine, ModuleInput, Runtime, RuntimeConfig, ValueKind};
 
@@ -13,7 +12,7 @@ fn runtime() -> Runtime {
 }
 
 /// The integer at `path` in the shared heap, read outside any cut.
-fn heap_int(rt: &Runtime, path: &[&str]) -> i64 {
+fn heap_int(rt: &mut Runtime, path: &[&str]) -> i64 {
     rt.run("reader", |m| {
         m.heap_get(path.iter().copied());
         m.pop_int()
@@ -23,7 +22,7 @@ fn heap_int(rt: &Runtime, path: &[&str]) -> i64 {
 
 /// Whether the value at `path` in the shared heap is undefined, read
 /// outside any cut.
-fn heap_undefined(rt: &Runtime, path: &[&str]) -> bool {
+fn heap_undefined(rt: &mut Runtime, path: &[&str]) -> bool {
     rt.run("reader", |m| {
         m.heap_get(path.iter().copied());
         m.eval()?;
@@ -38,7 +37,7 @@ type Log = Rc<RefCell<Vec<&'static str>>>;
 fn record(
     log: &Log,
     entry: &'static str,
-) -> impl FnOnce(&mut Machine<'_>) -> Result<(), Error> + use<> {
+) -> impl FnOnce(&mut Machine<'_, '_>) -> Result<(), Error> + use<> {
     let log = log.clone();
     move |_| {
         log.borrow_mut().push(entry);
@@ -47,7 +46,7 @@ fn record(
 }
 
 /// Whether the top value, evaluated, is `{}`; it is popped.
-fn undefined(m: &mut Machine<'_>) -> Result<bool, Error> {
+fn undefined(m: &mut Machine<'_, '_>) -> Result<bool, Error> {
     if m.kind()? != ValueKind::Dict {
         m.discard(1)?;
         return Ok(false);
@@ -59,9 +58,9 @@ fn undefined(m: &mut Machine<'_>) -> Result<bool, Error> {
 
 #[test]
 fn heap_actions_outside_a_cut_commit_at_once() {
-    let rt = runtime();
+    let mut rt = runtime();
     assert!(
-        heap_undefined(&rt, &["counter"]),
+        heap_undefined(&mut rt, &["counter"]),
         "a missing key reads {{}}"
     );
     rt.run("writer", |m| {
@@ -75,12 +74,12 @@ fn heap_actions_outside_a_cut_commit_at_once() {
         m.heap_rewrite(["counter"])
     })
     .expect("the writes should commit");
-    assert_eq!(heap_int(&rt, &["counter"]), 42);
+    assert_eq!(heap_int(&mut rt, &["counter"]), 42);
 }
 
 #[test]
 fn a_cut_commits_its_writes_together_and_reads_its_own() {
-    let rt = runtime();
+    let mut rt = runtime();
     let seen = rt
         .run("writer", |m| {
             m.cut(|m| {
@@ -94,12 +93,15 @@ fn a_cut_commits_its_writes_together_and_reads_its_own() {
         })
         .expect("the cut should commit");
     assert_eq!(seen, 1, "a cut reads its own writes");
-    assert_eq!((heap_int(&rt, &["a"]), heap_int(&rt, &["b"])), (1, 2));
+    assert_eq!(
+        (heap_int(&mut rt, &["a"]), heap_int(&mut rt, &["b"])),
+        (1, 2)
+    );
 }
 
 #[test]
 fn a_failed_cut_undoes_its_writes_and_the_machine_s_state() {
-    let rt = runtime();
+    let mut rt = runtime();
     rt.run("writer", |m| {
         m.push_int(7);
         m.set("kept")?;
@@ -118,7 +120,7 @@ fn a_failed_cut_undoes_its_writes_and_the_machine_s_state() {
         Ok(())
     })
     .expect("the turn should succeed");
-    assert!(heap_undefined(&rt, &["a"]), "the cut's write is undone");
+    assert!(heap_undefined(&mut rt, &["a"]), "the cut's write is undone");
     let attempts = Cell::new(0);
     let error = rt
         .run("writer", |m| -> Result<(), Error> {
@@ -135,7 +137,7 @@ fn a_failed_cut_undoes_its_writes_and_the_machine_s_state() {
 
 #[test]
 fn nested_cuts_backtrack_alone_and_merge_on_success() {
-    let rt = runtime();
+    let mut rt = runtime();
     rt.run("writer", |m| {
         m.cut(|m| {
             m.push_int(1);
@@ -165,14 +167,14 @@ fn nested_cuts_backtrack_alone_and_merge_on_success() {
         })
     })
     .expect("the outer cut should commit");
-    assert_eq!(heap_int(&rt, &["outer"]), 1);
-    assert!(heap_undefined(&rt, &["first"]));
-    assert_eq!(heap_int(&rt, &["second"]), 3);
+    assert_eq!(heap_int(&mut rt, &["outer"]), 1);
+    assert!(heap_undefined(&mut rt, &["first"]));
+    assert_eq!(heap_int(&mut rt, &["second"]), 3);
 }
 
 #[test]
 fn hooks_run_in_order_on_commit_and_in_reverse_on_abort() {
-    let rt = runtime();
+    let mut rt = runtime();
     let log = Log::default();
     rt.run("hooks", |m| {
         m.cut(|m| {
@@ -216,7 +218,7 @@ fn hooks_run_in_order_on_commit_and_in_reverse_on_abort() {
 
 #[test]
 fn a_hook_runs_on_the_machine_with_the_items_it_captured() {
-    let rt = runtime();
+    let mut rt = runtime();
     rt.run("hooks", |m| {
         m.push_int(1);
         m.set("count")?;
@@ -275,7 +277,7 @@ fn a_hook_runs_on_the_machine_with_the_items_it_captured() {
     })
     .expect("the turn should succeed");
     assert_eq!(
-        heap_int(&rt, &["total"]),
+        heap_int(&mut rt, &["total"]),
         52,
         "a hook sees the state as it stands when the hook runs"
     );
@@ -290,7 +292,7 @@ fn a_hook_runs_on_the_machine_with_the_items_it_captured() {
 
 #[test]
 fn a_hook_s_error_replaces_a_result_or_a_failure_but_not_another_error() {
-    let rt = runtime();
+    let mut rt = runtime();
     let log = Log::default();
     rt.run("hooks", |m| {
         let committed: Result<i64, Error> = m.cut(|m| {
@@ -333,62 +335,54 @@ fn a_hook_s_error_replaces_a_result_or_a_failure_but_not_another_error() {
 
 #[test]
 fn a_failed_cut_waits_until_something_it_observed_changes() {
-    let rt = runtime();
+    let mut rt = runtime();
     let (waiting, blocked) = mpsc::channel();
-    let attempts = thread::scope(|scope| {
-        let reader = scope.spawn(|| {
-            let attempts = Cell::new(0);
-            let value = rt
-                .run("reader", |m| {
-                    m.cut(|m| {
-                        attempts.set(attempts.get() + 1);
-                        m.heap_get(["ready"]);
-                        m.eval()?;
-                        if m.kind()? == ValueKind::Number {
-                            return m.pop_int();
-                        }
-                        // Signals the writer as the failure backtracks,
-                        // before the cut waits, forcing the write after the
-                        // read.
-                        let waiting = waiting.clone();
-                        m.on_abort(0, move |_| {
-                            waiting.send(()).expect("the writer listens");
-                            Ok(())
-                        })?;
-                        Err(m.fail())
-                    })
-                })
-                .expect("the cut should commit once the value is ready");
-            assert_eq!(value, 5);
-            attempts.get()
-        });
-        blocked.recv().expect("the reader should fail first");
-        rt.run("writer", |m| {
-            m.push_int(5);
-            m.heap_set(["ready"])
+    let attempts = rt
+        .run((), |root| {
+            let reader = root.fork("reader", move |m| {
+                let attempts = Cell::new(0);
+                let value = m.cut(|m| {
+                    attempts.set(attempts.get() + 1);
+                    m.heap_get(["ready"]);
+                    m.eval()?;
+                    if m.kind()? == ValueKind::Number {
+                        return m.pop_int();
+                    }
+                    // Signals the writer as the failure backtracks, before
+                    // the cut waits, forcing the write after the read.
+                    let waiting = waiting.clone();
+                    m.on_abort(0, move |_| {
+                        waiting.send(()).expect("the writer listens");
+                        Ok(())
+                    })?;
+                    Err(m.fail())
+                })?;
+                assert_eq!(value, 5);
+                Ok(attempts.get())
+            })?;
+            blocked.recv().expect("the reader should fail first");
+            root.push_int(5);
+            root.heap_set(["ready"])?;
+            root.join(reader)
         })
-        .expect("the write should commit");
-        reader.join().expect("the reader should not panic")
-    });
+        .expect("the cut should commit once the value is ready");
     assert_eq!(attempts, 2, "the cut runs again once, after the write");
 }
 
 #[test]
 fn a_conflicting_commit_reruns_the_cut_at_once() {
-    let rt = runtime();
-    let (read, proceed) = (mpsc::channel(), mpsc::channel());
-    let (read_sender, read_receiver) = read;
-    let (written_sender, written_receiver) = proceed;
+    let mut rt = runtime();
+    let (read_sender, read_receiver) = mpsc::channel();
+    let (written_sender, written_receiver) = mpsc::channel();
     rt.run("setup", |m| {
         m.push_int(1);
         m.heap_set(["x"])
     })
     .expect("the setup should commit");
-    let rt = &rt;
-    let attempts = thread::scope(|scope| {
-        let doubler = scope.spawn(move || {
-            let attempts = Cell::new(0);
-            rt.run("doubler", |m| {
+    let attempts = rt
+        .run((), |root| {
+            let doubler = root.fork("doubler", move |m| {
+                let attempts = Cell::new(0);
                 m.cut(|m| {
                     attempts.set(attempts.get() + 1);
                     m.heap_get(["x"]);
@@ -401,31 +395,110 @@ fn a_conflicting_commit_reruns_the_cut_at_once() {
                     }
                     m.push_int(x * 2);
                     m.heap_set(["doubled"])
-                })
-            })
-            .expect("the cut should commit");
-            attempts.get()
-        });
-        read_receiver.recv().expect("the doubler reads first");
-        rt.run("writer", |m| {
-            m.push_int(10);
-            m.heap_set(["x"])
+                })?;
+                Ok(attempts.get())
+            })?;
+            read_receiver.recv().expect("the doubler reads first");
+            root.push_int(10);
+            root.heap_set(["x"])?;
+            written_sender.send(()).expect("the doubler waits");
+            root.join(doubler)
         })
-        .expect("the write should commit");
-        written_sender.send(()).expect("the doubler waits");
-        doubler.join().expect("the doubler should not panic")
-    });
+        .expect("the cut should commit");
     assert_eq!(attempts, 2, "the conflict reruns the cut");
     assert_eq!(
-        heap_int(rt, &["doubled"]),
+        heap_int(&mut rt, &["doubled"]),
         20,
         "the rerun reads the new value"
     );
 }
 
 #[test]
+fn a_child_turn_joins_its_parent_s_cut() {
+    let mut rt = runtime();
+    rt.run("parent", |m| {
+        let failed: Result<(), Error> = m.cut(|m| {
+            m.run("child", |c| {
+                c.push_int(1);
+                c.heap_set(["by_child"])?;
+                c.push_int(7);
+                c.set("mark")
+            })?;
+            Err(m.fail())
+        });
+        assert!(failed.is_err());
+        m.run("child", |c| {
+            assert!(c.get("mark").is_err(), "the cut undid the child's state");
+            Ok(())
+        })?;
+        m.cut(|m| {
+            m.push_int(3);
+            m.heap_set(["by_parent"])?;
+            m.run("child", |c| {
+                c.heap_get(["by_parent"]);
+                assert_eq!(c.pop_int()?, 3, "a child reads its parent's staged write");
+                c.push_int(2);
+                c.heap_set(["by_child"])
+            })
+        })
+    })
+    .expect("the turn should succeed");
+    assert_eq!(
+        (
+            heap_int(&mut rt, &["by_parent"]),
+            heap_int(&mut rt, &["by_child"])
+        ),
+        (3, 2),
+        "the cut commits the parent's and the child's writes together"
+    );
+}
+
+#[test]
+fn hooks_run_on_the_machine_that_registered_them() {
+    let mut rt = runtime();
+    let log = Log::default();
+    rt.run("parent", |m| {
+        let failed: Result<(), Error> = m.cut(|m| {
+            m.run("child", |c| {
+                c.on_abort(0, |c| {
+                    c.push_int(1);
+                    c.set("compensated")
+                })
+            })?;
+            Err(Error::new("the cut errs"))
+        });
+        assert!(failed.is_err());
+        m.cut(|m| {
+            m.run("child", |c| {
+                c.push_text("child");
+                c.set("name")?;
+                let log = log.clone();
+                c.on_commit(0, move |c| {
+                    c.get("name")?;
+                    log.borrow_mut().push(if c.pop_text()? == "child" {
+                        "the child's hook ran on the child"
+                    } else {
+                        "elsewhere"
+                    });
+                    Ok(())
+                })
+            })
+        })
+    })
+    .expect("the turn should succeed");
+    assert_eq!(*log.borrow(), ["the child's hook ran on the child"]);
+    let compensated = rt
+        .run(["parent", "child"], |c| {
+            c.get("compensated")?;
+            c.pop_int()
+        })
+        .expect("the abort hook ran on the child, after the undo");
+    assert_eq!(compensated, 1);
+}
+
+#[test]
 fn a_failure_without_observations_or_outside_a_cut_ends_the_turn() {
-    let rt = runtime();
+    let mut rt = runtime();
     rt.run("m", |m| {
         let unwakeable: Result<(), Error> = m.cut(|m| Err(m.fail()));
         let error = unwakeable.expect_err("nothing could wake the cut");

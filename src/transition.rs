@@ -22,6 +22,6 @@ pub fn assembler(runtime: &Runtime) -> &Assembler {
 /// Pops a machine's top value without evaluating it. Used by the CLI's
 /// `configuration` module to hand the configuration, and the logger it
 /// selects, to what has not moved to turns.
-pub fn pop_value(machine: &mut Machine<'_>) -> Result<Value, Error> {
+pub fn pop_value(machine: &mut Machine<'_, '_>) -> Result<Value, Error> {
     machine.pop()
 }

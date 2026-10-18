@@ -102,28 +102,28 @@ fn completion_command(request: command_line::CompletionRequest) -> ExitCode {
 
 fn configured_completion(request: command_line::CompletionRequest) -> ExitCode {
     let cli_arguments = CliArguments::from_args(request.arguments().iter().cloned());
-    let prepared = match prepare_assembly(cli_arguments, None, None) {
+    let mut prepared = match prepare_assembly(cli_arguments, None, None) {
         Ok(prepared) => prepared,
         Err(exit) => return exit,
     };
-    let completion =
-        match complete_configured(prepared.assembler(), &prepared.configuration(), request) {
-            Ok(completion) => completion,
-            Err(error) => {
-                for diagnostic in error.diagnostics() {
-                    prepared
-                        .assembler()
-                        .diagnostic_bus()
-                        .publish_local(diagnostic.clone());
-                }
-                prepared.assembler().diagnostic_bus().publish_local(
-                    error
-                        .diagnostic(&prepared.assembler().values())
-                        .expect("configured CLI diagnostics belong to its assembler runtime"),
-                );
-                return finish_without_logger(prepared, None, true);
+    let configuration = prepared.configuration();
+    let completion = match complete_configured(prepared.assembler(), &configuration, request) {
+        Ok(completion) => completion,
+        Err(error) => {
+            for diagnostic in error.diagnostics() {
+                prepared
+                    .assembler()
+                    .diagnostic_bus()
+                    .publish_local(diagnostic.clone());
             }
-        };
+            prepared.assembler().diagnostic_bus().publish_local(
+                error
+                    .diagnostic(&prepared.assembler().values())
+                    .expect("configured CLI diagnostics belong to its assembler runtime"),
+            );
+            return finish_without_logger(prepared, None, true);
+        }
+    };
     for diagnostic in completion.diagnostics() {
         prepared
             .assembler()
@@ -159,11 +159,11 @@ fn completion_script_command(name: &std::ffi::OsStr, cli_arguments: CliArguments
         return ExitCode::from(2);
     };
     let initial_environment = Some((Arc::from(cli_arguments.args().to_vec()), Arc::from([])));
-    let prepared = match prepare_assembly(cli_arguments, None, initial_environment) {
+    let mut prepared = match prepare_assembly(cli_arguments, None, initial_environment) {
         Ok(prepared) => prepared,
         Err(exit) => return exit,
     };
-    let output = match run_completion_script(&prepared.runtime, name) {
+    let output = match run_completion_script(&mut prepared.runtime, name) {
         Ok(output) => output,
         Err(error) => {
             let diagnostic = error
@@ -206,7 +206,10 @@ fn completion_script_command(name: &std::ffi::OsStr, cli_arguments: CliArguments
 /// Runs the completion script that `conf.completion_script.<name>`
 /// selects, or takes the built-in one where it selects nothing. A failure to
 /// select is the error; a selected script's failure is the output's.
-fn run_completion_script(runtime: &Runtime, name: &str) -> Result<Result<Vec<u8>, String>, Error> {
+fn run_completion_script(
+    runtime: &mut Runtime,
+    name: &str,
+) -> Result<Result<Vec<u8>, String>, Error> {
     let path = format!("conf.completion_script.{name}");
     runtime.run(CLI, |m| {
         m.make_list(0)?;

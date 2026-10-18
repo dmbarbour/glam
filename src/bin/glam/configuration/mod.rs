@@ -35,7 +35,7 @@ impl PreparedAssembly {
     }
 
     /// The configuration module, for what has not moved to turns.
-    pub(super) fn configuration(&self) -> Value {
+    pub(super) fn configuration(&mut self) -> Value {
         self.runtime
             .run(CLI, |m| {
                 m.get("configuration")?;
@@ -109,7 +109,7 @@ pub(super) fn prepare(
         .expect("main's reflection environment must be a dictionary")
         .build()
         .expect("main's assembler configuration must be valid");
-    let runtime = glam::transition::runtime_around(assembler);
+    let mut runtime = glam::transition::runtime_around(assembler);
     let assembler = glam::transition::assembler(&runtime);
     if let Some((process_arguments, reflection_arguments)) = initial_environment {
         let values = assembler.values();
@@ -124,7 +124,7 @@ pub(super) fn prepare(
             .resolve(argument_values(&values, &reflection_arguments))
             .expect("fresh bootstrap reflection argument promise should resolve");
     }
-    if let Err(error) = load(&runtime) {
+    if let Err(error) = load(&mut runtime) {
         return Err(Box::new(PreparationFailure {
             local_files,
             log_host,
@@ -199,7 +199,7 @@ fn argument_values(values: &Values, arguments: &[std::ffi::OsString]) -> Value {
 
 /// Compiles the prelude and the configuration on the `cli` machine, and
 /// selects the environment.
-fn load(runtime: &Runtime) -> Result<(), Error> {
+fn load(runtime: &mut Runtime) -> Result<(), Error> {
     runtime.run(CLI, |m| {
         m.compile(["glam_cli"], [ModuleInput::script("g", PRELUDE)])?;
         m.set("prelude")?;
@@ -223,7 +223,7 @@ fn load(runtime: &Runtime) -> Result<(), Error> {
 /// Replaces a fallback and a candidate, the configuration's value at
 /// `path`, with the entry the prelude selects: the candidate, or the
 /// fallback where it is undefined.
-pub(super) fn select_entry(m: &mut Machine<'_>, entry: &str, path: &str) -> Result<(), Error> {
+pub(super) fn select_entry(m: &mut Machine<'_, '_>, entry: &str, path: &str) -> Result<(), Error> {
     m.stash(2)?;
     m.get("prelude")?;
     m.access("entry")?;
@@ -235,7 +235,7 @@ pub(super) fn select_entry(m: &mut Machine<'_>, entry: &str, path: &str) -> Resu
 
 /// Whether the top value, evaluated, is the empty list by which a
 /// configuration selects nothing. The value stays.
-pub(super) fn selects_nothing(m: &mut Machine<'_>) -> Result<bool, Error> {
+pub(super) fn selects_nothing(m: &mut Machine<'_, '_>) -> Result<bool, Error> {
     if m.kind()? != ValueKind::List {
         return Ok(false);
     }

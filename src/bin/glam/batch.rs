@@ -10,9 +10,9 @@ use crate::command_line::{
 };
 use bytes::Bytes;
 use glam::{
-    Diagnostic, DiagnosticBus, Error, EvaluationRuntime, FileSourceSystem, ModuleInput,
-    QuiescenceReport, Runtime, RuntimeDispositionKind, RuntimeKillReason, RuntimeReadiness,
-    Severity, Values,
+    Diagnostic, DiagnosticBus, Error, EvaluationRuntime, FileSourceSystem, Machine, ModuleInput,
+    QuiescenceReport, RuntimeDispositionKind, RuntimeKillReason, RuntimeReadiness, Severity,
+    Values,
 };
 
 use crate::DiagnosticBusLocal;
@@ -143,67 +143,69 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
     } = command_parts;
     let PreparedAssembly {
         local_files,
-        runtime,
+        mut runtime,
         log_host,
         ..
     } = prepared;
-    let assembler = glam::transition::assembler(&runtime);
+    let assembler = glam::transition::assembler(&runtime).clone();
     let assembler_diagnostics = assembler.diagnostic_bus();
-    // The logger's thread borrows the runtime, so it joins before the
-    // runtime drops.
-    runtime.scope(|scope| {
-        let logger = start_logger(scope, log_host.clone());
-        let result = assemble(&runtime, inputs, &assembly_args);
-        let mut operation_failed = false;
-        match result {
-            Ok(bytes) => {
-                if let Err(error) = io::stdout().write_all(&bytes) {
+    // The batch is one turn on the `cli` machine, which forks the logger and
+    // joins it before the turn ends.
+    let (operation_failed, logger_diagnostics) = runtime
+        .run(CLI, |m| {
+            let logger = start_logger(m, &assembler, log_host.clone());
+            let result = assemble(m, inputs, &assembly_args);
+            let mut operation_failed = false;
+            match result {
+                Ok(bytes) => {
+                    if let Err(error) = io::stdout().write_all(&bytes) {
+                        operation_failed = true;
+                        assembler_diagnostics.publish_local(Diagnostic::new(
+                            &assembler.values(),
+                            Severity::Error,
+                            format!("could not write stdout: {error}"),
+                        ));
+                    }
+                }
+                Err(error) => {
                     operation_failed = true;
-                    assembler_diagnostics.publish_local(Diagnostic::new(
-                        &assembler.values(),
-                        Severity::Error,
-                        format!("could not write stdout: {error}"),
-                    ));
+                    publish_error(&assembler_diagnostics, &assembler.values(), &error);
                 }
             }
-            Err(error) => {
+
+            operation_failed |= finish_local_files(
+                &local_files,
+                manifest.as_deref(),
+                &assembler_diagnostics,
+                &assembler.values(),
+            );
+            let LoggerRun {
+                thread: logger_thread,
+                diagnostics: logger_diagnostics,
+                supervisor: logger_supervisor,
+            } = logger;
+            operation_failed |= super::profile::time("settle", || {
+                settle_batch_runtime(&assembler.evaluation_runtime(), &logger_supervisor)
+            });
+
+            m.join(logger_thread)?;
+            if let Err(error) = logger_supervisor.deliver_fallback() {
                 operation_failed = true;
-                publish_error(&assembler_diagnostics, &assembler.values(), &error);
+                eprintln!("error: could not drain fallback diagnostics: {error}");
             }
-        }
+            Ok((operation_failed, logger_diagnostics))
+        })
+        .expect("the batch's turn returns its failures as diagnostics");
+    super::profile::report(&runtime);
 
-        operation_failed |= finish_local_files(
-            &local_files,
-            manifest.as_deref(),
-            &assembler_diagnostics,
-            &assembler.values(),
-        );
-        let LoggerRun {
-            thread: logger_thread,
-            diagnostics: logger_diagnostics,
-            supervisor: logger_supervisor,
-        } = logger;
-        operation_failed |= super::profile::time("settle", || {
-            settle_batch_runtime(&assembler.evaluation_runtime(), &logger_supervisor)
-        });
-        super::profile::report(&runtime);
-
-        logger_thread.join().expect("logger task should not panic");
-        if let Err(error) = logger_supervisor.deliver_fallback() {
-            operation_failed = true;
-            eprintln!("error: could not drain fallback diagnostics: {error}");
-        }
-        drop(logger_supervisor);
-
-        if operation_failed
-            || assembler_diagnostics.counts().errors() > 0
-            || logger_diagnostics.counts().errors() > 0
-        {
-            ExitCode::from(1)
-        } else {
-            ExitCode::SUCCESS
-        }
-    })
+    if operation_failed
+        || assembler_diagnostics.counts().errors() > 0
+        || logger_diagnostics.counts().errors() > 0
+    {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 /// Pumps and settles the complete batch runtime, retaining report failures as
@@ -389,25 +391,25 @@ pub(super) fn configured_cli(arguments: CliArguments, inspection: Option<bool>) 
         Ok(prepared) => prepared,
         Err(exit) => return exit,
     };
-    let expansion =
-        match expand_configured(prepared.assembler(), &prepared.configuration(), arguments) {
-            Ok(expansion) => expansion,
-            Err(error) => {
-                prepared.fail_environment("configured CLI expansion failed");
-                for diagnostic in error.diagnostics() {
-                    prepared
-                        .assembler()
-                        .diagnostic_bus()
-                        .publish_local(diagnostic.clone());
-                }
-                prepared.assembler().diagnostic_bus().publish_local(
-                    error
-                        .diagnostic(&prepared.assembler().values())
-                        .expect("configured CLI diagnostics belong to its assembler runtime"),
-                );
-                return finish_without_logger(prepared, None, true);
+    let configuration = prepared.configuration();
+    let expansion = match expand_configured(prepared.assembler(), &configuration, arguments) {
+        Ok(expansion) => expansion,
+        Err(error) => {
+            prepared.fail_environment("configured CLI expansion failed");
+            for diagnostic in error.diagnostics() {
+                prepared
+                    .assembler()
+                    .diagnostic_bus()
+                    .publish_local(diagnostic.clone());
             }
-        };
+            prepared.assembler().diagnostic_bus().publish_local(
+                error
+                    .diagnostic(&prepared.assembler().values())
+                    .expect("configured CLI diagnostics belong to its assembler runtime"),
+            );
+            return finish_without_logger(prepared, None, true);
+        }
+    };
     let (command, diagnostics) = expansion.into_parts();
     for diagnostic in diagnostics {
         prepared
@@ -460,27 +462,25 @@ fn configured_worker_count(command_line: Option<usize>) -> Result<usize, ExitCod
 /// Compiles the assembly on the `cli` machine, over the prelude's initial
 /// definitions, and evaluates its result to bytes.
 fn assemble(
-    runtime: &Runtime,
+    m: &mut Machine<'_, '_>,
     inputs: Vec<ModuleInput>,
     cli_args: &[std::ffi::OsString],
 ) -> Result<Bytes, Error> {
-    runtime.run(CLI, |m| {
-        m.get("prelude")?;
-        m.access("assembly_definitions")?;
-        for argument in cli_args {
-            m.push_bytes(argument.as_encoded_bytes().to_vec());
-        }
-        m.make_list(cli_args.len())?;
-        m.get("environment")?;
-        m.apply(2)?;
-        super::profile::time("build", || m.compile_over(["assembly"], inputs))?;
-        m.stash(1)?;
-        m.get("prelude")?;
-        m.access("assembly_result")?;
-        m.stash_pop(1)?;
-        m.apply(1)?;
-        super::profile::time("evaluate", || m.pop_bytes())
-    })
+    m.get("prelude")?;
+    m.access("assembly_definitions")?;
+    for argument in cli_args {
+        m.push_bytes(argument.as_encoded_bytes().to_vec());
+    }
+    m.make_list(cli_args.len())?;
+    m.get("environment")?;
+    m.apply(2)?;
+    super::profile::time("build", || m.compile_over(["assembly"], inputs))?;
+    m.stash(1)?;
+    m.get("prelude")?;
+    m.access("assembly_result")?;
+    m.stash_pop(1)?;
+    m.apply(1)?;
+    super::profile::time("evaluate", || m.pop_bytes())
 }
 
 #[cfg(test)]

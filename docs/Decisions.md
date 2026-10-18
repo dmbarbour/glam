@@ -1962,6 +1962,9 @@ maps the short names used here to file names.
   conventions (retention, backpressure, discovery) remain open.
 - **Amended by:** `turn-cuts-bound-transactions-and-search` (2026-10-18): a
   turn's transactions are cuts, which also bound backtracking search.
+  `machines-form-a-tree` (2026-10-18): only the owner thread takes turns,
+  machines form a tree, and fork-join comes from forks within turns rather
+  than threads that borrow the runtime.
 - **Recorded in:** runtime API review.
 
 ### Effect providers answer within turns; background effects go through queues
@@ -2050,6 +2053,52 @@ maps the short names used here to file names.
   empty stash (maintainer, the same day), so it reaches glam values and
   the machine without borrowing the turn's.
 - **Recorded in:** runtime API plan, `api-cuts`.
+
+### Machines form a tree under the owner thread; forks are scoped to turns
+`machines-form-a-tree` · 2026-10-18 · maintainer · accepted
+- **Context:** `api-scoped-threads` built the first reading of
+  `runtime-api-turns-on-machines`: a `Sync` runtime that threads borrow,
+  each taking turns on machines by key, as on per-key locks. A turn waited
+  for a busy machine, `try_run` declined one, and a check failed a wait
+  that would close a cycle. Waiting on any of several machines had no
+  answer short of polling, and a turn that joined a thread waiting for its
+  own machine still deadlocked. Settlement could not know whether a thread
+  would take another turn.
+- **Decision:** the runtime controls concurrency (maintainer, the same day).
+  - `rt.run(path, …)` takes the runtime mutably, so only its owner thread
+    takes turns, and none nests. A path of keys names a machine; the empty
+    path is the root, and a key names a child of the root.
+  - A machine's state holds its children. A turn reaches its descendants
+    alone: it takes synchronous turns on them (`m.run`), and moves values
+    to and from their stacks (`m.give`, `m.take`), operations kept apart so
+    that machine error states can build on them later.
+  - Concurrency is a fork of a descendant onto a thread (`m.fork`), which
+    joins at `m.join` or by the end of the turn that made it: the turn is a
+    thread scope, so a fork may borrow what outlives the turn's
+    `rt.run`. `m.scope` gives a group of forks the same rule. A fork moves
+    no values; a joined machine does, synchronously.
+  - A synchronous turn within a cut joins the cut: its actions on shared
+    state join the transaction, and its state, part of its parent's,
+    returns when the cut undoes. A fork within a cut will join the cut
+    too, with its siblings serializable; until then it fails.
+- **Alternatives rejected:**
+  - threads taking turns on arbitrary machines (as built in
+    `api-scoped-threads`), with waiting, declining, an `await_any` or
+    `run_any` for several machines, and deadlock checks;
+  - a separate thread-scope type beside the machine, since the turn
+    already brackets its forks;
+  - forks with `'static` closures only;
+  - moving values within `m.run`, since separate operations explain more
+    simply.
+- **Consequences:**
+  - Machines cannot deadlock over machines: holding is a tree, joins point
+    downward, and nothing waits for a machine. The waits that remain are
+    failed cuts and joins, both visible to the runtime, so settlement and
+    deadlock detection see every thread.
+  - A tree of synchronous turns communicates as monadic effects do: a
+    child leaves a request in its stack, and the parent answers it.
+  - A host embeds its threads as forked machines within a long turn.
+- **Recorded in:** runtime API plan, `api-machine-tree`.
 
 ### Resumable WHNF through bounded regional quanta and durable checkpoints
 `resumable-whnf-regional-quanta` · 2026-09-12 · agent · accepted

@@ -1,22 +1,31 @@
-//! A thread-affine runtime in which Rust threads take turns on keyed machines
-//! (`runtime-api-turns-on-machines`).
+//! A thread-affine runtime whose owner thread takes turns on a tree of
+//! machines (`runtime-api-turns-on-machines`, `machines-form-a-tree`).
 //!
-//! A machine is named by a user-chosen [`Key`] and holds glam values: a
-//! stack, a stash beside it, and local state by key. It starts empty, and an
-//! empty machine stores nothing. A turn is not atomic: what it changes before
-//! an error stays. Each action on the shared heap is atomic by itself, and a
-//! cut groups actions into one transaction that also bounds a backtracking
-//! search (`turn-cuts-bound-transactions-and-search`).
+//! A machine is named by its path of [`Key`]s from the root, the empty path,
+//! and holds glam values: a stack, a stash beside it, local state by key,
+//! and its children. It starts empty, and an empty machine stores nothing. A
+//! turn is not atomic: what it changes before an error stays. Each action on
+//! the shared heap is atomic by itself, and a cut groups actions into one
+//! transaction that also bounds a backtracking search
+//! (`turn-cuts-bound-transactions-and-search`).
+//!
+//! Only the thread that owns the runtime takes turns on it. A turn reaches
+//! its machine's descendants alone: it takes synchronous turns on them,
+//! moves values to and from them, and forks them onto threads that join by
+//! the turn's end. So no thread waits for a machine, and waits form no
+//! cycle.
 //!
 //! This first form is a facade over the assembler and its evaluation
 //! runtime, which the runtime holds privately; each operation enters the
 //! value domain on its own, never across the user's code.
 
+use std::any::Any;
 use std::collections::HashMap;
-use std::io;
 use std::marker::PhantomData;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::thread::{self, ScopedJoinHandle, ThreadId};
+use std::thread::{self, Scope, ScopedJoinHandle};
 
 use bytes::Bytes;
 
@@ -25,7 +34,6 @@ use super::{
     Assembler, Diagnostic, Error, ErrorKind, EvaluationRuntime, ModuleInput, Value, ValueKind,
 };
 use crate::core::Key;
-use crate::counted_condvar::CountedCondvar;
 use crate::reflection::{ConflictAnalysisStrategy, StoreCommitResult, StoreJournal};
 
 /// What opening a runtime takes. It configures the runtime alone:
@@ -55,8 +63,28 @@ impl RuntimeConfig {
 }
 
 /// A glam runtime. It stays on the thread that opened it, where dropping it
-/// retires everything, but threads scoped within that thread's lifetime of
-/// it may share it, each taking turns on machines.
+/// retires everything, and only that thread takes turns on it. Concurrency
+/// comes from forks within turns, which may borrow what outlives the turn:
+///
+/// ```
+/// let mut rt = glam::Runtime::open(glam::RuntimeConfig::new())?;
+/// let words = ["forks", "may", "borrow"];
+/// let total = rt.run("parent", |m| {
+///     let left = m.fork("left", |_| Ok(words[..1].len()))?;
+///     let right = m.fork("right", |_| Ok(words[1..].len()))?;
+///     Ok(m.join(left)? + m.join(right)?)
+/// })?;
+/// assert_eq!(total, 3);
+/// # Ok::<(), glam::Error>(())
+/// ```
+///
+/// A turn takes the runtime mutably, so no turn takes another on it; a turn
+/// reaches other machines through its own descendants:
+///
+/// ```compile_fail
+/// let mut rt = glam::Runtime::open(glam::RuntimeConfig::new()).unwrap();
+/// let _ = rt.run("a", |_| rt.run("b", |_| Ok(())));
+/// ```
 ///
 /// It is not `Send`:
 ///
@@ -64,41 +92,68 @@ impl RuntimeConfig {
 /// fn send<T: Send>() {}
 /// send::<glam::Runtime>();
 /// ```
-///
-/// It is `Sync`, so scoped threads may borrow it:
-///
-/// ```
-/// fn sync<T: Sync>() {}
-/// sync::<glam::Runtime>();
-/// ```
 pub struct Runtime {
-    machines: Mutex<Machines>,
-    /// Signalled when a turn ends while another thread waits for a machine.
-    turn_ended: CountedCondvar,
-    assembler: Assembler,
-    /// `!Send` but `Sync`, as a mutex guard is.
+    root: MachineState,
+    shared: Shared,
+    /// `!Send`, as a mutex guard is.
     _thread: PhantomData<MutexGuard<'static, ()>>,
 }
 
-#[derive(Default)]
-struct Machines {
-    slots: HashMap<Key, Slot>,
-    /// The machine each waiting thread waits for.
-    waiting: HashMap<ThreadId, Key>,
+/// What a turn's machines share, on every thread of its forks.
+struct Shared {
+    assembler: Assembler,
 }
 
-enum Slot {
-    Idle(MachineState),
-    /// In a turn on this thread.
-    InTurn(ThreadId),
+/// A machine's place in the tree of machines: the keys from the root, which
+/// the empty path, `()`, names. A key or text names a child of the root.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MachinePath(Vec<Key>);
+
+impl MachinePath {
+    /// The root machine's path, which is empty.
+    pub fn root() -> Self {
+        Self::default()
+    }
+
+    pub fn keys(&self) -> &[Key] {
+        &self.0
+    }
 }
 
-/// Why a turn did not start at once.
-enum Busy {
-    /// The machine is in a turn on another thread, which may end.
-    Elsewhere,
-    /// The machine cannot start a turn until this thread's own turns end.
-    Never(Error),
+impl From<()> for MachinePath {
+    fn from((): ()) -> Self {
+        Self::root()
+    }
+}
+
+impl From<Key> for MachinePath {
+    fn from(key: Key) -> Self {
+        Self(vec![key])
+    }
+}
+
+impl From<&str> for MachinePath {
+    fn from(key: &str) -> Self {
+        Self(vec![key.into()])
+    }
+}
+
+impl From<String> for MachinePath {
+    fn from(key: String) -> Self {
+        Self(vec![key.into()])
+    }
+}
+
+impl<K: Into<Key>, const N: usize> From<[K; N]> for MachinePath {
+    fn from(keys: [K; N]) -> Self {
+        Self(keys.into_iter().map(Into::into).collect())
+    }
+}
+
+impl<K: Into<Key>> From<Vec<K>> for MachinePath {
+    fn from(keys: Vec<K>) -> Self {
+        Self(keys.into_iter().map(Into::into).collect())
+    }
 }
 
 #[derive(Clone, Default)]
@@ -106,12 +161,111 @@ struct MachineState {
     stack: Vec<Value>,
     stash: Vec<Value>,
     locals: HashMap<Key, Value>,
+    children: HashMap<Key, Child>,
+}
+
+#[derive(Clone)]
+enum Child {
+    Idle(MachineState),
+    /// Running on a fork's thread, with its descendants, until its join.
+    Forked,
 }
 
 impl MachineState {
     fn is_empty(&self) -> bool {
-        self.stack.is_empty() && self.stash.is_empty() && self.locals.is_empty()
+        self.stack.is_empty()
+            && self.stash.is_empty()
+            && self.locals.is_empty()
+            && self.children.is_empty()
     }
+
+    /// The descendant at `path`, created empty if absent. It fails when the
+    /// descendant, or a machine between, is forked.
+    fn descendant(&mut self, path: &[Key]) -> Result<&mut MachineState, Error> {
+        let mut state = self;
+        for (depth, key) in path.iter().enumerate() {
+            match state
+                .children
+                .entry(key.clone())
+                .or_insert_with(|| Child::Idle(MachineState::default()))
+            {
+                Child::Idle(child) => state = child,
+                Child::Forked => return Err(forked(&path[..=depth])),
+            }
+        }
+        Ok(state)
+    }
+
+    /// Removes the empty machines along `path`, deepest first.
+    fn prune(&mut self, path: &[Key]) {
+        let Some((key, rest)) = path.split_first() else {
+            return;
+        };
+        if let Some(Child::Idle(child)) = self.children.get_mut(key) {
+            child.prune(rest);
+            if child.is_empty() {
+                self.children.remove(key);
+            }
+        }
+    }
+
+    /// Takes the descendant at `path` to a fork, leaving it marked as
+    /// forked until its join returns it.
+    fn fork_out(&mut self, path: &[Key]) -> Result<MachineState, Error> {
+        let (key, parent) = path
+            .split_last()
+            .ok_or_else(|| Error::new("a machine forks its descendants, not itself"))?;
+        let parent = self.descendant(parent)?;
+        match parent.children.insert(key.clone(), Child::Forked) {
+            Some(Child::Idle(state)) if state.has_fork() => {
+                parent.children.insert(key.clone(), Child::Idle(state));
+                Err(Error::new(format!(
+                    "machine {path:?} cannot fork while a machine below it is forked"
+                )))
+            }
+            Some(Child::Idle(state)) => Ok(state),
+            None => Ok(MachineState::default()),
+            Some(Child::Forked) => Err(forked(path)),
+        }
+    }
+
+    /// Returns a fork's machine to its place.
+    fn join_in(&mut self, path: &[Key], state: MachineState) {
+        let (key, parent) = path.split_last().expect("a fork's path is not empty");
+        let parent = self
+            .descendant(parent)
+            .expect("the machines above a fork stay until its join");
+        parent.children.insert(key.clone(), Child::Idle(state));
+        self.prune(path);
+    }
+
+    fn has_fork(&self) -> bool {
+        self.children.values().any(|child| match child {
+            Child::Idle(state) => state.has_fork(),
+            Child::Forked => true,
+        })
+    }
+
+    /// Empties the machine, but keeps the place of each fork below it,
+    /// which its join fills.
+    fn clear(&mut self) {
+        self.stack.clear();
+        self.stash.clear();
+        self.locals.clear();
+        self.children.retain(|_, child| match child {
+            Child::Idle(state) => {
+                state.clear();
+                !state.is_empty()
+            }
+            Child::Forked => true,
+        });
+    }
+}
+
+fn forked(path: &[Key]) -> Error {
+    Error::new(format!(
+        "machine {path:?} is running on a fork until its join"
+    ))
 }
 
 impl Runtime {
@@ -130,9 +284,8 @@ impl Runtime {
     /// transition (`crate::transition`).
     pub(crate) fn around(assembler: Assembler) -> Self {
         Self {
-            machines: Mutex::new(Machines::default()),
-            turn_ended: CountedCondvar::new(),
-            assembler,
+            root: MachineState::default(),
+            shared: Shared { assembler },
             _thread: PhantomData,
         }
     }
@@ -140,13 +293,14 @@ impl Runtime {
     /// The assembler the runtime holds, for the CLI's transition
     /// (`crate::transition`).
     pub(crate) fn assembler(&self) -> &Assembler {
-        &self.assembler
+        &self.shared.assembler
     }
 
     /// Starts the background workers, once, in a runtime opened with none:
     /// for a host that learns how many it wants after opening the runtime.
     pub fn activate_workers(&self, worker_threads: usize) -> Result<(), Error> {
-        self.assembler
+        self.shared
+            .assembler
             .evaluation_runtime()
             .activate_workers(worker_threads)
     }
@@ -155,217 +309,295 @@ impl Runtime {
     /// `glam-prof` build.
     #[cfg(feature = "glam-prof")]
     pub fn profile(&self) -> crate::profiling::RuntimeProfileSnapshot {
-        self.assembler.evaluation_runtime().profile()
+        self.shared.assembler.evaluation_runtime().profile()
     }
 
-    /// Takes a turn on the machine named `key`, which starts empty if it
-    /// holds nothing. A machine takes one turn at a time: while it is in a
-    /// turn on another thread, this waits for that turn to end. It fails at
-    /// once when the machine is in a turn on this thread, and when waiting
-    /// would close a cycle of threads, each waiting for a machine that the
-    /// next holds. A turn that joins a thread waiting for one of its
-    /// machines still deadlocks.
-    pub fn run<R>(
-        &self,
-        key: impl Into<Key>,
-        turn: impl FnOnce(&mut Machine<'_>) -> Result<R, Error>,
+    /// Takes a turn on the machine at `path`, which starts empty if it holds
+    /// nothing: `()` is the root, and a key names a child of the root.
+    ///
+    /// The turn is a scope for threads, as [`std::thread::scope`] is: a
+    /// fork's closure may borrow what outlives this call, and every fork
+    /// joins before it returns. A panic in the turn, or in a fork it left
+    /// unjoined, resumes here once every fork has joined; what the turn
+    /// changed stays.
+    pub fn run<'env, R>(
+        &'env mut self,
+        path: impl Into<MachinePath>,
+        turn: impl for<'scope> FnOnce(&mut Machine<'scope, 'env>) -> Result<R, Error>,
     ) -> Result<R, Error> {
-        let key = key.into();
-        let me = thread::current().id();
-        let mut machines = self.machines();
-        let state = loop {
-            match machines.begin(&key, me) {
-                Ok(state) => break state,
-                Err(Busy::Never(error)) => return Err(error),
-                Err(Busy::Elsewhere) => {
-                    machines.waiting.insert(me, key.clone());
-                    machines = self
-                        .turn_ended
-                        .wait(machines)
-                        .unwrap_or_else(PoisonError::into_inner);
-                    machines.waiting.remove(&me);
-                }
-            }
-        };
-        drop(machines);
-        self.turn_on(key, state, turn)
-    }
-
-    /// As [`Self::run`], but returns `None` at once, without a turn, when
-    /// the machine is in a turn on any thread.
-    pub fn try_run<R>(
-        &self,
-        key: impl Into<Key>,
-        turn: impl FnOnce(&mut Machine<'_>) -> Result<R, Error>,
-    ) -> Result<Option<R>, Error> {
-        let key = key.into();
-        let begun = self.machines().begin(&key, thread::current().id());
-        match begun {
-            Ok(state) => self.turn_on(key, state, turn).map(Some),
-            Err(_) => Ok(None),
-        }
-    }
-
-    /// Runs `body` with a scope for threads that borrow this runtime, as
-    /// [`std::thread::scope`] does: every thread spawned in it joins before
-    /// this returns. Those threads take turns on the runtime, and a turn may
-    /// open a scope to fork turns on other machines and join them.
-    pub fn scope<'env, T>(
-        &'env self,
-        body: impl for<'scope> FnOnce(RuntimeScope<'scope, 'env>) -> T,
-    ) -> T {
-        thread::scope(|scope| {
-            body(RuntimeScope {
-                scope,
-                runtime: self,
-            })
-        })
-    }
-
-    fn turn_on<R>(
-        &self,
-        key: Key,
-        state: MachineState,
-        turn: impl FnOnce(&mut Machine<'_>) -> Result<R, Error>,
-    ) -> Result<R, Error> {
-        let mut machine = Machine {
-            runtime: self,
-            key: Some(key),
-            state,
-            cut: None,
-        };
-        turn(&mut machine)
-    }
-
-    /// The machines, under a leaf lock: no user code runs while it is held.
-    fn machines(&self) -> MutexGuard<'_, Machines> {
-        self.machines.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn end_turn(&self, key: Key, state: MachineState) {
-        let mut machines = self.machines();
-        if state.is_empty() {
-            machines.slots.remove(&key);
-        } else {
-            machines.slots.insert(key, Slot::Idle(state));
-        }
-        self.turn_ended.notify_all();
+        let path = path.into();
+        let Runtime { root, shared, .. } = self;
+        let state = std::mem::take(root.descendant(path.keys())?);
+        let shared: &'env Shared = shared;
+        let (state, outcome) = thread::scope(|scope| {
+            let mut machine = Machine::new(shared, scope, state);
+            let outcome = machine.take_turn(turn);
+            (machine.state, outcome)
+        });
+        *root
+            .descendant(path.keys())
+            .expect("no machine is forked between turns") = state;
+        root.prune(path.keys());
+        outcome.unwrap_or_else(|panic| resume_unwind(panic))
     }
 }
 
-impl Machines {
-    /// Takes the machine `key` into a turn on thread `me`, returning its
-    /// state, unless it is in a turn already.
-    fn begin(&mut self, key: &Key, me: ThreadId) -> Result<MachineState, Busy> {
-        match self.slots.get(key) {
-            Some(Slot::InTurn(holder)) if *holder == me => Err(Busy::Never(Error::new(format!(
-                "machine {key:?} is already taking a turn on this thread"
-            )))),
-            Some(Slot::InTurn(holder)) if self.waits_for(*holder, me) => {
-                Err(Busy::Never(Error::new(format!(
-                    "waiting for machine {key:?} would deadlock: its turn waits, through \
-                     other threads' turns, for a machine in a turn on this thread"
-                ))))
-            }
-            Some(Slot::InTurn(_)) => Err(Busy::Elsewhere),
-            Some(Slot::Idle(_)) | None => match self.slots.insert(key.clone(), Slot::InTurn(me)) {
-                Some(Slot::Idle(state)) => Ok(state),
-                _ => Ok(MachineState::default()),
-            },
-        }
-    }
-
-    /// Whether thread `from` waits, directly or through the threads holding
-    /// the machines it waits for, for thread `to`.
-    fn waits_for(&self, mut from: ThreadId, to: ThreadId) -> bool {
-        // Each thread waits for one machine, which one thread holds, so the
-        // chain is a path; a cycle elsewhere ends it after every waiter.
-        for _ in 0..=self.waiting.len() {
-            if from == to {
-                return true;
-            }
-            match self.waiting.get(&from).and_then(|key| self.slots.get(key)) {
-                Some(Slot::InTurn(holder)) => from = *holder,
-                _ => return false,
-            }
-        }
-        false
-    }
-}
-
-/// A scope for threads that borrow a [`Runtime`], from [`Runtime::scope`].
-/// It is `Copy`, so a thread spawned in it may spawn others.
-#[derive(Clone, Copy)]
-pub struct RuntimeScope<'scope, 'env: 'scope> {
-    scope: &'scope thread::Scope<'scope, 'env>,
-    runtime: &'env Runtime,
-}
-
-impl<'scope, 'env> RuntimeScope<'scope, 'env> {
-    /// The runtime the scope's threads borrow.
-    pub fn runtime(&self) -> &'env Runtime {
-        self.runtime
-    }
-
-    /// Spawns a thread that runs `body` with the runtime.
-    pub fn spawn<T: Send + 'scope>(
-        &self,
-        body: impl FnOnce(&'env Runtime) -> T + Send + 'scope,
-    ) -> ScopedJoinHandle<'scope, T> {
-        let runtime = self.runtime;
-        self.scope.spawn(move || body(runtime))
-    }
-
-    /// As [`Self::spawn`], with the thread configured by `builder`, such as
-    /// its name and stack size.
-    pub fn spawn_with<T: Send + 'scope>(
-        &self,
-        builder: thread::Builder,
-        body: impl FnOnce(&'env Runtime) -> T + Send + 'scope,
-    ) -> io::Result<ScopedJoinHandle<'scope, T>> {
-        let runtime = self.runtime;
-        builder.spawn_scoped(self.scope, move || body(runtime))
-    }
-
-    /// Forks a turn on the machine named `key`: spawns a thread that takes
-    /// it, as [`Runtime::run`] does. Its handle joins it.
-    pub fn run<R: Send + 'scope>(
-        &self,
-        key: impl Into<Key>,
-        turn: impl FnOnce(&mut Machine<'_>) -> Result<R, Error> + Send + 'scope,
-    ) -> ScopedTurn<'scope, R> {
-        let key = key.into();
-        ScopedTurn(self.spawn(move |runtime| runtime.run(key, turn)))
-    }
-}
-
-/// A turn forked by [`RuntimeScope::run`].
-pub struct ScopedTurn<'scope, R>(ScopedJoinHandle<'scope, Result<R, Error>>);
-
-impl<R> ScopedTurn<'_, R> {
-    /// Waits for the turn to end and returns its result. A panic in the
-    /// turn resumes on this thread.
-    pub fn join(self) -> Result<R, Error> {
-        self.0
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-    }
-
-    /// Whether the turn has ended, so that [`Self::join`] would not wait.
-    pub fn is_finished(&self) -> bool {
-        self.0.is_finished()
-    }
-}
-
-/// A machine during a turn: its stack, its stash and its local state. The
-/// turn ends when it drops, returning what it holds to the runtime.
-pub struct Machine<'rt> {
-    runtime: &'rt Runtime,
-    key: Option<Key>,
+/// A machine during a turn: its stack, its stash, its local state and its
+/// children. The turn is also a scope for the threads its forks run on,
+/// which join by its end.
+pub struct Machine<'scope, 'env: 'scope> {
+    runtime: &'scope Shared,
+    scope: &'scope Scope<'scope, 'env>,
     state: MachineState,
     /// The transaction of the outermost cut in progress, which nested cuts
-    /// share.
+    /// share, and which a synchronous turn on a descendant joins.
     cut: Option<CutTransaction>,
+    /// This machine's path from the machine whose turn opened the cut.
+    cut_offset: Vec<Key>,
+    /// Forks not yet joined, oldest first.
+    forks: Vec<PendingFork<'scope>>,
+}
+
+/// A fork's thread, and where its machine returns.
+struct PendingFork<'scope> {
+    id: u64,
+    path: Vec<Key>,
+    thread: ScopedJoinHandle<'scope, ForkReturn>,
+}
+
+/// What a fork's thread returns at its join: its machine, and a panic that
+/// ended its turn.
+struct ForkReturn {
+    state: MachineState,
+    panic: Option<Box<dyn Any + Send>>,
+}
+
+/// A fork of a machine, from [`Machine::fork`], which [`Machine::join`]
+/// joins.
+pub struct Fork<R> {
+    id: u64,
+    result: Arc<Mutex<Option<Result<R, Error>>>>,
+}
+
+static NEXT_FORK: AtomicU64 = AtomicU64::new(0);
+
+impl<'scope, 'env> Machine<'scope, 'env> {
+    fn new(
+        runtime: &'scope Shared,
+        scope: &'scope Scope<'scope, 'env>,
+        state: MachineState,
+    ) -> Self {
+        Self {
+            runtime,
+            scope,
+            state,
+            cut: None,
+            cut_offset: Vec::new(),
+            forks: Vec::new(),
+        }
+    }
+
+    /// Runs `turn` on this machine, then joins the forks it left. A panic,
+    /// in the turn or in such a fork, returns once every fork has joined.
+    fn take_turn<R>(
+        &mut self,
+        turn: impl FnOnce(&mut Self) -> Result<R, Error>,
+    ) -> thread::Result<Result<R, Error>> {
+        let outcome = catch_unwind(AssertUnwindSafe(|| turn(self)));
+        let fork_panic = self.join_forks_since(0);
+        match (outcome, fork_panic) {
+            (Err(panic), _) | (Ok(_), Some(panic)) => Err(panic),
+            (Ok(outcome), None) => Ok(outcome),
+        }
+    }
+
+    /// Takes a synchronous turn on the descendant at `path`, relative to
+    /// this machine, which starts empty if it holds nothing. Within a cut,
+    /// the turn joins it: its actions on shared state join the cut's
+    /// transaction, and the descendant's state, part of this machine's,
+    /// returns with it when the cut undoes what it did.
+    pub fn run<R>(
+        &mut self,
+        path: impl Into<MachinePath>,
+        turn: impl FnOnce(&mut Machine<'scope, 'env>) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        let path = path.into().0;
+        if path.is_empty() {
+            return Err(Error::new(
+                "a machine takes turns on its descendants, not itself",
+            ));
+        }
+        let state = std::mem::take(self.state.descendant(&path)?);
+        let mut child = Machine::new(self.runtime, self.scope, state);
+        if self.cut.is_some() {
+            child.cut = self.cut.take();
+            child.cut_offset = self.cut_offset.iter().chain(&path).cloned().collect();
+        }
+        let outcome = child.take_turn(turn);
+        self.cut = child.cut.take();
+        *self
+            .state
+            .descendant(&path)
+            .expect("a descendant's place stays during its turn") = child.state;
+        self.state.prune(&path);
+        outcome.unwrap_or_else(|panic| resume_unwind(panic))
+    }
+
+    /// Moves the top `n` values, keeping their order, onto the stack of the
+    /// descendant at `path`.
+    pub fn give(&mut self, path: impl Into<MachinePath>, n: usize) -> Result<(), Error> {
+        let path = descendant_path(path)?;
+        let depth = self.require(n)?;
+        self.state.descendant(&path)?;
+        let items = self.state.stack.split_off(depth - n);
+        self.state
+            .descendant(&path)
+            .expect("the descendant was just reached")
+            .stack
+            .extend(items);
+        Ok(())
+    }
+
+    /// Moves the top `n` values of the descendant at `path`, keeping their
+    /// order, onto this machine's stack.
+    pub fn take(&mut self, path: impl Into<MachinePath>, n: usize) -> Result<(), Error> {
+        let path = descendant_path(path)?;
+        let descendant = self.state.descendant(&path)?;
+        let held = descendant.stack.len();
+        let items = (held >= n).then(|| descendant.stack.split_off(held - n));
+        self.state.prune(&path);
+        let items = items.ok_or_else(|| underflow("descendant's stack", n, held))?;
+        self.state.stack.extend(items);
+        Ok(())
+    }
+
+    /// Forks the descendant at `path`: takes it, with its own descendants,
+    /// to a new thread that takes a turn on it. The fork's closure may
+    /// borrow what outlives the turn's [`Runtime::run`]; it joins at
+    /// [`Self::join`], or at the end of the turn or [`Self::scope`] that
+    /// made it. Until then, neither it nor a machine below it is reachable.
+    /// Forks within a cut are not supported yet.
+    pub fn fork<R: Send + 'scope>(
+        &mut self,
+        path: impl Into<MachinePath>,
+        turn: impl FnOnce(&mut Machine<'scope, 'env>) -> Result<R, Error> + Send + 'scope,
+    ) -> Result<Fork<R>, Error> {
+        self.fork_with(thread::Builder::new(), path, turn)
+    }
+
+    /// As [`Self::fork`], with the thread configured by `builder`, such as
+    /// its name and stack size.
+    pub fn fork_with<R: Send + 'scope>(
+        &mut self,
+        builder: thread::Builder,
+        path: impl Into<MachinePath>,
+        turn: impl FnOnce(&mut Machine<'scope, 'env>) -> Result<R, Error> + Send + 'scope,
+    ) -> Result<Fork<R>, Error> {
+        if self.cut.is_some() {
+            return Err(Error::new("forking within a cut is not supported yet"));
+        }
+        let path = path.into().0;
+        let state = self.state.fork_out(&path)?;
+        let id = NEXT_FORK.fetch_add(1, Ordering::Relaxed);
+        let result = Arc::new(Mutex::new(None));
+        let fork_result = Arc::clone(&result);
+        let (runtime, scope) = (self.runtime, self.scope);
+        let thread = builder.spawn_scoped(scope, move || {
+            let mut machine = Machine::new(runtime, scope, state);
+            let panic = match machine.take_turn(turn) {
+                Ok(outcome) => {
+                    *fork_result.lock().unwrap_or_else(PoisonError::into_inner) = Some(outcome);
+                    None
+                }
+                Err(panic) => Some(panic),
+            };
+            ForkReturn {
+                state: machine.state,
+                panic,
+            }
+        });
+        match thread {
+            Ok(thread) => {
+                self.forks.push(PendingFork { id, path, thread });
+                Ok(Fork { id, result })
+            }
+            Err(error) => {
+                self.state.join_in(&path, MachineState::default());
+                Err(Error::new(format!(
+                    "a fork's thread did not start: {error}"
+                )))
+            }
+        }
+    }
+
+    /// Waits for `fork`'s turn to end, returns its machine to its place, and
+    /// returns the turn's result. A panic in the fork resumes here. Joins
+    /// within a cut are not supported yet.
+    pub fn join<R>(&mut self, fork: Fork<R>) -> Result<R, Error> {
+        if self.cut.is_some() {
+            return Err(Error::new("joining within a cut is not supported yet"));
+        }
+        let index = self
+            .forks
+            .iter()
+            .position(|pending| pending.id == fork.id)
+            .ok_or_else(|| Error::new("the fork belongs to another machine"))?;
+        let pending = self.forks.remove(index);
+        if let Some(panic) = self.join_pending(pending) {
+            resume_unwind(panic);
+        }
+        fork.result
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .expect("a joined fork that did not panic left its result")
+    }
+
+    /// Runs `body`, then joins the forks it made and left unjoined, so a
+    /// scope's forks end with it as a turn's do. A panic in `body` or in such
+    /// a fork resumes once they have joined.
+    pub fn scope<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R {
+        let first = NEXT_FORK.load(Ordering::Relaxed);
+        let outcome = catch_unwind(AssertUnwindSafe(|| body(self)));
+        let fork_panic = self.join_forks_since(first);
+        match (outcome, fork_panic) {
+            (Err(panic), _) | (Ok(_), Some(panic)) => resume_unwind(panic),
+            (Ok(outcome), None) => outcome,
+        }
+    }
+
+    /// Joins the unjoined forks made since `first`, oldest first, returning
+    /// the first panic among them.
+    fn join_forks_since(&mut self, first: u64) -> Option<Box<dyn Any + Send>> {
+        let (since, before) = std::mem::take(&mut self.forks)
+            .into_iter()
+            .partition::<Vec<_>, _>(|pending| pending.id >= first);
+        self.forks = before;
+        let mut first_panic = None;
+        for pending in since {
+            if let Some(panic) = self.join_pending(pending) {
+                first_panic.get_or_insert(panic);
+            }
+        }
+        first_panic
+    }
+
+    fn join_pending(&mut self, pending: PendingFork<'scope>) -> Option<Box<dyn Any + Send>> {
+        let ForkReturn { state, panic } = pending
+            .thread
+            .join()
+            .unwrap_or_else(|panic| resume_unwind(panic));
+        self.state.join_in(&pending.path, state);
+        panic
+    }
+}
+
+fn descendant_path(path: impl Into<MachinePath>) -> Result<Vec<Key>, Error> {
+    let path = path.into().0;
+    if path.is_empty() {
+        return Err(Error::new("the operation needs a descendant's path"));
+    }
+    Ok(path)
 }
 
 /// A cut's transaction: reads and writes staged against one snapshot of the
@@ -379,13 +611,16 @@ struct CutTransaction {
     abort_hooks: Vec<Hook>,
 }
 
-/// A hook, and the stack items it captured when registered.
+/// A hook, the stack items it captured when registered, and the path of
+/// the machine that registered it, from the machine whose turn opened the
+/// cut.
 struct Hook {
+    machine: Vec<Key>,
     items: Vec<Value>,
     run: Box<HookFn>,
 }
 
-type HookFn = dyn FnOnce(&mut Machine<'_>) -> Result<(), Error>;
+type HookFn = dyn FnOnce(&mut Machine<'_, '_>) -> Result<(), Error>;
 
 /// When an aborted outermost cut runs again.
 enum CutRetry {
@@ -397,15 +632,7 @@ enum CutRetry {
     Never(Error),
 }
 
-impl Drop for Machine<'_> {
-    fn drop(&mut self) {
-        if let Some(key) = self.key.take() {
-            self.runtime.end_turn(key, std::mem::take(&mut self.state));
-        }
-    }
-}
-
-impl Machine<'_> {
+impl<'scope, 'env> Machine<'scope, 'env> {
     /// How many values the stack holds.
     pub fn depth(&self) -> usize {
         self.state.stack.len()
@@ -891,7 +1118,7 @@ impl Machine<'_> {
     pub fn on_commit(
         &mut self,
         items: usize,
-        hook: impl FnOnce(&mut Machine<'_>) -> Result<(), Error> + 'static,
+        hook: impl FnOnce(&mut Machine<'_, '_>) -> Result<(), Error> + 'static,
     ) -> Result<(), Error> {
         let hook = self.hook(items, hook)?;
         match &mut self.cut {
@@ -912,7 +1139,7 @@ impl Machine<'_> {
     pub fn on_abort(
         &mut self,
         items: usize,
-        hook: impl FnOnce(&mut Machine<'_>) -> Result<(), Error> + 'static,
+        hook: impl FnOnce(&mut Machine<'_, '_>) -> Result<(), Error> + 'static,
     ) -> Result<(), Error> {
         let hook = self.hook(items, hook)?;
         if let Some(cut) = &mut self.cut {
@@ -924,30 +1151,48 @@ impl Machine<'_> {
     fn hook(
         &mut self,
         items: usize,
-        run: impl FnOnce(&mut Machine<'_>) -> Result<(), Error> + 'static,
+        run: impl FnOnce(&mut Machine<'_, '_>) -> Result<(), Error> + 'static,
     ) -> Result<Hook, Error> {
         let depth = self.require(items)?;
         Ok(Hook {
+            machine: self.cut_offset.clone(),
             items: self.state.stack.split_off(depth - items),
             run: Box::new(run),
         })
     }
 
-    /// Runs hooks in turn, each on a stack of its captured values and an
-    /// empty stash, and returns the first error.
+    /// Runs hooks in turn, each on the machine that registered it, which is
+    /// this one or a descendant, and returns the first error.
     fn run_hooks(&mut self, hooks: impl IntoIterator<Item = Hook>) -> Option<Error> {
         let mut first_error = None;
-        for hook in hooks {
-            let stack = std::mem::replace(&mut self.state.stack, hook.items);
-            let stash = std::mem::take(&mut self.state.stash);
-            let outcome = (hook.run)(self);
-            self.state.stack = stack;
-            self.state.stash = stash;
+        for Hook {
+            machine,
+            items,
+            run,
+        } in hooks
+        {
+            debug_assert!(machine.starts_with(&self.cut_offset));
+            let below = machine[self.cut_offset.len()..].to_vec();
+            let outcome = if below.is_empty() {
+                self.run_hook(items, run)
+            } else {
+                self.run(below, move |m| m.run_hook(items, run))
+            };
             if let Err(error) = outcome {
                 first_error.get_or_insert(error);
             }
         }
         first_error
+    }
+
+    /// Runs a hook on a stack of its captured values and an empty stash.
+    fn run_hook(&mut self, items: Vec<Value>, run: Box<HookFn>) -> Result<(), Error> {
+        let stack = std::mem::replace(&mut self.state.stack, items);
+        let stash = std::mem::take(&mut self.state.stash);
+        let outcome = run(self);
+        self.state.stack = stack;
+        self.state.stash = stash;
+        outcome
     }
 
     fn nested_cut<R>(
@@ -1056,10 +1301,10 @@ impl Machine<'_> {
         Ok(())
     }
 
-    /// Returns the machine to its initial state: an empty stack, stash and
-    /// local state.
+    /// Returns the machine to its initial state: an empty stack, stash,
+    /// local state and children. A forked descendant returns at its join.
     pub fn clear(&mut self) {
-        self.state = MachineState::default();
+        self.state.clear();
     }
 
     fn push(&mut self, value: Value) {
@@ -1109,6 +1354,3 @@ fn underflow(what: &str, needed: usize, held: usize) -> Error {
 fn key_path<K: Into<Key>>(path: impl IntoIterator<Item = K>) -> Vec<Key> {
     path.into_iter().map(Into::into).collect()
 }
-
-#[cfg(test)]
-mod tests;

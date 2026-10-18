@@ -1,5 +1,5 @@
-//! The runtime as an environment: turns on keyed machines
-//! (`runtime-api-turns-on-machines`).
+//! The runtime as an environment: turns on a tree of machines
+//! (`runtime-api-turns-on-machines`, `machines-form-a-tree`).
 
 use glam::{Key, ModuleInput, Runtime, RuntimeConfig, ValueKind};
 
@@ -9,7 +9,7 @@ fn runtime() -> Runtime {
 
 #[test]
 fn a_turn_compiles_a_module_and_takes_its_bytes() {
-    let rt = runtime();
+    let mut rt = runtime();
     let text = rt
         .run("cli", |m| {
             let warnings = m.compile(
@@ -29,7 +29,7 @@ fn a_turn_compiles_a_module_and_takes_its_bytes() {
 
 #[test]
 fn a_machine_keeps_its_stack_and_state_between_turns() {
-    let rt = runtime();
+    let mut rt = runtime();
     rt.run("counter", |m| {
         m.push_int(41);
         m.set("count")?;
@@ -49,7 +49,7 @@ fn a_machine_keeps_its_stack_and_state_between_turns() {
 
 #[test]
 fn machines_with_other_keys_are_separate_and_start_empty() {
-    let rt = runtime();
+    let mut rt = runtime();
     rt.run("a", |m| {
         m.push_int(1);
         Ok(())
@@ -66,7 +66,7 @@ fn machines_with_other_keys_are_separate_and_start_empty() {
 
 #[test]
 fn clear_returns_a_machine_to_its_initial_state() {
-    let rt = runtime();
+    let mut rt = runtime();
     rt.run("m", |m| {
         m.push_int(1);
         m.push_int(2);
@@ -87,7 +87,7 @@ fn clear_returns_a_machine_to_its_initial_state() {
 
 #[test]
 fn stash_moves_values_as_a_block_and_back() {
-    let rt = runtime();
+    let mut rt = runtime();
     let popped = rt
         .run("m", |m| {
             for value in 1..=4 {
@@ -109,7 +109,7 @@ fn stash_moves_values_as_a_block_and_back() {
 
 #[test]
 fn stack_operations_and_application_compose() {
-    let rt = runtime();
+    let mut rt = runtime();
     let result = rt
         .run("m", |m| {
             m.compile(
@@ -132,7 +132,7 @@ fn stack_operations_and_application_compose() {
 
 #[test]
 fn an_operation_without_its_values_fails_and_the_turn_keeps_what_it_did() {
-    let rt = runtime();
+    let mut rt = runtime();
     let underflow = rt
         .run("m", |m| {
             m.push_int(1);
@@ -149,50 +149,72 @@ fn an_operation_without_its_values_fails_and_the_turn_keeps_what_it_did() {
 }
 
 #[test]
-fn a_machine_takes_one_turn_at_a_time() {
-    let rt = runtime();
-    rt.run("outer", |_| {
-        let nested = rt
-            .run("outer", |_| Ok(()))
-            .expect_err("a machine in a turn takes no other");
-        assert!(nested.to_string().contains("already taking a turn"));
-        rt.run("other", |m| {
-            m.push_int(1);
-            Ok(())
-        })
+fn a_turn_reaches_its_descendants_and_moves_values_to_and_from_them() {
+    let mut rt = runtime();
+    rt.run("parent", |m| {
+        m.push_int(1);
+        m.push_int(2);
+        m.give("child", 2)?;
+        assert_eq!(m.depth(), 0, "given values leave");
+        m.run("child", |c| {
+            let (top, below) = (c.pop_int()?, c.pop_int()?);
+            assert_eq!((below, top), (1, 2), "given values keep their order");
+            c.push_int(below + top);
+            c.set("sum")?;
+            c.push_int(below + top);
+            c.run("grandchild", |g| {
+                g.push_text("deep");
+                Ok(())
+            })
+        })?;
+        m.take("child", 1)?;
+        assert_eq!(m.pop_int()?, 3, "taken values arrive");
+        Ok(())
     })
-    .expect("a turn may take a turn on another machine");
+    .expect("the turn should succeed");
+    let (sum, deep) = rt
+        .run(["parent", "child"], |c| {
+            c.get("sum")?;
+            let sum = c.pop_int()?;
+            c.take("grandchild", 1)?;
+            Ok((sum, c.pop_text()?))
+        })
+        .expect("a path from the root reaches the same machine");
+    assert_eq!((sum, deep.as_str()), (3, "deep"));
+    let sum = rt
+        .run((), |root| {
+            root.run(["parent", "child"], |c| {
+                c.get("sum")?;
+                c.pop_int()
+            })
+        })
+        .expect("the root's children are the machines that keys name");
+    assert_eq!(sum, 3);
 }
 
 #[test]
-fn scoped_threads_take_turns_on_one_runtime() {
-    let rt = runtime();
-    std::thread::scope(|scope| {
-        for index in 0..4 {
-            let rt = &rt;
-            scope.spawn(move || {
-                rt.run(format!("worker{index}"), |m| {
-                    m.push_int(index);
-                    m.set("index")
-                })
-                .expect("the turn should succeed");
-            });
-        }
-    });
-    for index in 0..4 {
-        let value = rt
-            .run(format!("worker{index}"), |m| {
-                m.get("index")?;
-                m.pop_int()
-            })
-            .expect("the turn should succeed");
-        assert_eq!(value, index);
-    }
+fn moving_values_needs_them_and_a_descendant() {
+    let mut rt = runtime();
+    rt.run("m", |m| {
+        let error = m.give("child", 1).expect_err("nothing to give");
+        assert!(error.to_string().contains("needs 1"), "{error}");
+        let error = m.take("child", 1).expect_err("nothing to take");
+        assert!(error.to_string().contains("needs 1"), "{error}");
+        m.push_int(1);
+        assert!(m.give((), 1).is_err(), "values move to descendants");
+        assert!(
+            m.run((), |_| Ok(())).is_err(),
+            "a machine takes turns on its descendants"
+        );
+        assert_eq!(m.depth(), 1, "a failed move leaves the values");
+        Ok(())
+    })
+    .expect("the turn should succeed");
 }
 
 #[test]
 fn workers_activate_once_in_a_runtime_opened_without_them() {
-    let rt = runtime();
+    let mut rt = runtime();
     rt.activate_workers(2).expect("workers should activate");
     assert!(
         rt.activate_workers(2).is_err(),
@@ -223,7 +245,7 @@ fn workers_activate_once_in_a_runtime_opened_without_them() {
 
 #[test]
 fn lists_and_dicts_build_from_the_stack_and_unpack_onto_it() {
-    let rt = runtime();
+    let mut rt = runtime();
     rt.run("data", |m| {
         m.push_int(1);
         m.push_int(2);
@@ -257,7 +279,7 @@ fn lists_and_dicts_build_from_the_stack_and_unpack_onto_it() {
 
 #[test]
 fn a_dict_rejects_repeated_names_and_reading_the_wrong_kind_fails() {
-    let rt = runtime();
+    let mut rt = runtime();
     rt.run("data", |m| {
         m.push_int(1);
         m.push_int(2);
@@ -277,7 +299,7 @@ fn a_dict_rejects_repeated_names_and_reading_the_wrong_kind_fails() {
 
 #[test]
 fn kinds_and_representations_are_observed_without_evaluation() {
-    let rt = runtime();
+    let mut rt = runtime();
     rt.run("data", |m| {
         m.compile(
             ["kinds"],
@@ -311,7 +333,7 @@ fn kinds_and_representations_are_observed_without_evaluation() {
 
 #[test]
 fn annotations_and_initial_definitions_shape_what_compiles() {
-    let rt = runtime();
+    let mut rt = runtime();
     let text = rt
         .run("cli", |m| {
             m.push_text("Hello");

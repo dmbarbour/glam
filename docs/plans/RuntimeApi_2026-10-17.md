@@ -2,7 +2,8 @@
 
 Status: `api-runtime-turns` built 2026-10-17; `api-cli-bridge`,
 `api-machine-data`, `api-cuts`, `api-virtual-resources` and
-`api-scoped-threads` 2026-10-18, with `api-cli-prelude` kept
+`api-machine-tree` 2026-10-18, with `api-cli-prelude` kept and
+`api-scoped-threads` superseded by `api-machine-tree`
 (see [As built](#as-built)). The CLI's transition was re-planned the
 same day, after a survey of the CLI (see [CLI Transition](#cli-transition)):
 `api-cli` gave way to a bridge and a CLI slice in each later step, moved
@@ -14,7 +15,10 @@ The same day the maintainer clarified that a turn is no transaction: a cut
 bounds transactions and search (`turn-cuts-bound-transactions-and-search`),
 and a turn runs an effect by evaluating it. They agreed the bridge, and the
 CLI prelude as an experiment. After `api-cuts` was built, they made failure
-explicit and retry implicit, as in glam, and gave hooks the machine. Drafted 2026-10-17 from the
+explicit and retry implicit, as in glam, and gave hooks the machine. After
+`api-scoped-threads`, they chose a runtime that controls concurrency:
+machines form a tree under the owner thread, and forks are scoped to turns
+(`machines-form-a-tree`). Drafted 2026-10-17 from the
 [runtime API review](../reviews/RuntimeApi_2026-10-17.md), whose direction
 the maintainer agreed the same day (`runtime-api-turns-on-machines`). Names
 and communication's conventions are discussed as each step reaches them.
@@ -25,7 +29,7 @@ A public API in which a Rust thread acts within the runtime: it opens a
 thread-affine runtime and runs turns on machines named by user-chosen keys,
 each with a stack and local state of glam values. Each action on shared
 state is atomic, and a cut groups actions into a transaction that also
-bounds a backtracking search. Fork-join comes from scoped threads, and tasks
+bounds a backtracking search. Fork-join comes from forks within turns, and tasks
 and machines communicate only through the shared heap or volumes. The
 handle API goes.
 
@@ -38,8 +42,10 @@ handle API goes.
 - **One heap region per operation,** never one across user code: waits and
   callbacks happen outside regions (`no-recursive-heap-entries`).
 - **Glam values only** in a machine (maintainer, 2026-10-17).
-- **Scoped threads only** (maintainer, 2026-10-17); relax later on a strong
-  use case.
+- **Concurrency is the runtime's** (maintainer, 2026-10-18; first, scoped
+  threads only, 2026-10-17): only the owner thread takes turns, and Rust
+  code runs concurrently as forks of machines within turns
+  (`machines-form-a-tree`).
 - **Measure before accelerating:** glam code starts with the basic heap
   operations, and specializes as profiling shows (maintainer, 2026-10-17).
 - **The CLI moves piecemeal** (maintainer, 2026-10-17): each step moves
@@ -139,17 +145,27 @@ handle API goes.
      change writes its proxy to wake the waiters.
    - No CLI slice: the CLI's transactional code is the logger's, which
      moves with heap communication.
-5. `api-scoped-threads` — `rt.scope(|s| …)`, fork-join within a turn, and
-   waiting. One turn at a time per machine: a second waits or fails, or
-   observes the machine's status by key and so waits transactionally
-   (maintainer, 2026-10-17: perhaps both). Ordering tests force each
-   interleaving.
-   - CLI slice: the logger's thread becomes a scoped thread that borrows
-     the runtime, so no other thread owns it.
-   - Optional, later, `api-machine-status`: a cut reads whether a machine
-     is in a turn, as a virtual resource that a turn's start and end set,
-     so a cut waits for a machine transactionally and with other reads.
-     Not scheduled; see `api-scoped-threads` in As built.
+5. `api-machine-tree` — machines form a tree under the owner thread, and
+   forks are scoped to turns (maintainer, 2026-10-18;
+   `machines-form-a-tree`), superseding `api-scoped-threads`, which built
+   threads that borrow the runtime and take turns on machines by key.
+   - `rt.run(&mut self, path, …)` on a path of keys, the empty path the
+     root. A turn reaches its descendants alone: synchronous turns
+     (`m.run`), and values moved to and from their stacks (`m.give`,
+     `m.take`).
+   - `m.fork` takes a descendant to a thread that joins at `m.join` or by
+     the end of its turn, or of an `m.scope`; the turn is a thread scope,
+     so forks borrow what outlives `rt.run`.
+   - A synchronous turn within a cut joins the cut.
+   - CLI slice: the batch is one turn on `cli`, which forks the logger.
+   - Next, `api-forks-in-cuts`: a fork within a cut joins the cut, on a
+     branch of its journal that merges at the join, with siblings
+     serializable: a child whose reads overlap what the cut wrote after
+     its fork reruns the outermost cut (maintainer, 2026-10-18).
+   - Then, to discuss first, `api-machine-errors`: error isolation between
+     machines, error states and their explicit clearing, diagnostics
+     captured in machine state, and joining a child's diagnostics into its
+     parent's queue (maintainer, 2026-10-18).
 6. `api-heap-communication` — state and logs in the heap or a volume, with
    readers' cursors in their own state; abstract global paths as
    capabilities; volumes allocated through the reflection API. Retention,
@@ -158,7 +174,7 @@ handle API goes.
    - CLI slice, diagnostics: the CLI appends diagnostics to a log in turns.
      `DiagnosticBus`, `LogHost` and the supervisor's fallback endpoint
      retire.
-   - CLI slice, loggers: the default logger is a machine on a scoped thread
+   - CLI slice, loggers: the default logger is a forked machine
      that reads the log and applies the glam formatter, into which the
      Rust frame summaries of `rendering.rs` move. A configured logger reads
      the log with heap operations and appends its stderr output to a log
@@ -247,7 +263,8 @@ handle API goes.
     join the workers; fail pending operations as retired; close sessions
     and work records, dropping stored providers and closures; release the
     background demand and retire the queues; retire the value domain. No
-    turn is in flight, since scoped threads join before the drop.
+    turn is in flight, since a turn borrows the runtime mutably and joins
+    its forks.
     - Tests force each ordering: retirement with work queued, a pending
       operation failing as retired, and values inert afterwards.
 
@@ -260,7 +277,7 @@ Two steps from the ownership plan stand beside these, under their names:
 
 `api-runtime-turns` comes first, then the bridge. The data operations
 precede the CLI's first slice. Cuts precede heap communication,
-whose logs request queues extend; scoped threads precede the loggers' move;
+whose logs request queues extend; the machine tree precedes the loggers' move;
 settlement follows the logs it appends to. Hosts follow queues, since their
 requests are queue elements, and precede effect providers, which take what
 remains of the hosts' role. Handle retirement precedes the retirement
@@ -277,7 +294,7 @@ need no runtime, and stay as they are.
 |---|---|---|---|
 | Preparation | `FileSourceSystem`, `EvaluationRuntime`, `DiagnosticBus`, and an `Assembler` whose reflection environment holds two promises | an owner, then the environment and sources in their target form | 2, 6, 9 |
 | Configuration and assembly | compiles `configuration` and `assembly` over initial definitions; access, `defined_or`, `context:` annotations, evaluation to bytes | data operations | 3 |
-| Logging | `DefaultLogger` renders as a subscriber; a configured logger is an `EffectRun` on its own thread with `MainEffects` (`read_log`, `write_stderr`), supervised, with a fallback endpoint | scoped threads, logs | 5, 6 |
+| Logging | `DefaultLogger` renders as a subscriber; a configured logger is an `EffectRun` on its own thread with `MainEffects` (`read_log`, `write_stderr`), supervised, with a fallback endpoint | forks, logs | 5, 6 |
 | Settlement | two loops over readiness, maintenance, deadlock kills and quiescence reports | `rt.settle()`, a report log | 8 |
 | Configured CLI | `conf.cli` runs as an isolated effect search over argv: `CliEffects`, with nested `TokenEffects` searches, per-branch journals, and a search again for each completion candidate | effect providers | 10 |
 
@@ -491,11 +508,12 @@ for its kind, since `ErrorKind::Failure` names any other error; and
 `on_commit` and `on_abort` for the hooks. For `api-virtual-resources`:
 `virtual_get`, `virtual_set` and `virtual_rewrite`, mirroring the heap's
 (maintainer, 2026-10-18; first built as `virtual_read` and
-`virtual_write`). For `api-scoped-threads`, a first proposal: `try_run`
-for a turn that declines a busy machine; `rt.scope(|s| …)`, with
-`RuntimeScope`, after `std::thread::scope`; `s.spawn` and `s.spawn_with`
-for threads, after `spawn` and `Builder::spawn_scoped`; and `s.run` for a
-forked turn, after `rt.run`, joined through a `ScopedTurn`.
+`virtual_write`). For `api-scoped-threads`, since withdrawn: `try_run`,
+`rt.scope` with `RuntimeScope`, and `ScopedTurn`; the maintainer found
+the scope wrapper added nothing to `std::thread::scope`. For
+`api-machine-tree`: `give` and `take` (maintainer, 2026-10-18); `run`,
+`fork`, `fork_with`, `join` and `scope` on the machine, with `MachinePath`
+and `Fork`, a first proposal.
 
 ## As built
 
@@ -686,50 +704,64 @@ reflection store. Virtual resources mirror the heap (maintainer,
   whose only read its own set covered cannot wait. A store unit test
   checks that data-less edits change no volume on either commit path.
 
-`api-scoped-threads` (2026-10-18), in `src/api/turn.rs`:
-- Exclusivity, settling the review's open question with both of the
-  maintainer's options:
-  - `rt.run(key, …)` waits while the machine is in a turn on another
-    thread, on a `CountedCondvar` that a turn's end signals, at no cost
-    when no thread waits.
-  - It fails at once when the machine is in a turn on the calling thread,
-    which waiting would never end, and when waiting would close a cycle of
-    threads, each waiting for a machine that the next holds. Each thread
-    waits for one machine and each machine has one holder, so the check
-    walks a path; the thread that would close a cycle fails, reporting a
-    deadlock, and the others proceed.
-  - `rt.try_run(key, …)` returns `None` at once when the machine is in a
-    turn on any thread.
-  - Not detected: a turn that joins a thread waiting for one of its
-    machines, and a turn that waits, as a failed cut, for a change that
-    only a waiting thread would make. Settlement (`api-settlement`) is
-    where such deadlocks surface.
-- `rt.scope(|s| …)` wraps `std::thread::scope`, so every thread joins
-  before it returns, and passes a `RuntimeScope`, which is `Copy`, so a
-  scope's threads spawn others. `s.spawn(|rt| …)` and
-  `s.spawn_with(builder, |rt| …)` start threads that borrow the runtime;
-  `s.run(key, |m| …)` forks a turn, whose `ScopedTurn` joins it, resuming a
-  panic. A turn opens a scope to fork turns on other machines. A plain
-  `std::thread::scope` over `&Runtime` still works, since the runtime is
-  `Sync`; the wrapper adds forked turns.
-- The transactional option, a cut that observes a machine's status by
-  key, is left as `api-machine-status`: virtual resources make it cheap,
-  with a turn's start and end setting a status resource only for a machine
-  some cut has read, but no use needs it yet, and it would not replace
-  waiting, since a turn begun after the cut commits may find the machine
-  taken again.
-- CLI slice: `start_logger` takes a `RuntimeScope` and starts the logger
-  on a scoped thread, with its name and stack size; `batch` runs from the
-  logger's start to its join within `runtime.scope`. The thread still
-  holds the logger's handles, which go with `api-heap-communication`.
-  Bridge uses in the CLI are unchanged. `hello_elf` runs in 616.2 M
-  instructions, as it did after `api-cli-prelude`.
-- Tests: `tests/runtime_threads.rs` covers `try_run` declining, forced
-  through channels, scopes forking and joining turns, a turn forking
-  turns, a panic resuming at the join with the machine's state kept, and a
-  configured thread. Unit tests in `src/api/turn/tests.rs` force a turn to
-  wait before the holder's turn ends, and a wait that would close a cycle
-  to fail, by watching the runtime's record of waiting threads.
+`api-scoped-threads` (2026-10-18), superseded the same day by
+`api-machine-tree`. It built `rt.run` waiting for a machine in a turn on
+another thread, with a check that failed a wait closing a cycle of
+threads, `try_run` declining instead, and `rt.scope`, a wrapper around
+`std::thread::scope` with forked turns; the CLI's logger ran on a scoped
+thread. Its code went with `api-machine-tree`; see `machines-form-a-tree`
+for why.
+
+`api-machine-tree` (2026-10-18), in `src/api/turn.rs`:
+- The runtime holds the root machine's state, and each machine's state
+  holds its children by key; an empty machine is pruned. Its shared part,
+  the assembler, sits apart, so a turn borrows it while the tree stays
+  mutable. Exclusive access comes from ownership: `rt.run(&mut self,
+  path, …)` takes the machine at the path out of the tree, and returns it
+  after, panic or not. The machine map, its lock and condition variable,
+  waiting, `try_run` and the cycle check are gone, and a nested `rt.run`
+  does not compile (a doc test).
+- `MachinePath` converts from `()`, a key, a text, an array or a vector of
+  keys. `m.run(path, …)` takes a synchronous turn on a descendant, created
+  empty if absent. `m.give(path, n)` and `m.take(path, n)` move the top
+  values, keeping their order. A machine's own path is no descendant's,
+  so these fail on the empty path.
+- `rt.run` opens a `std::thread::scope` for the turn, and `Machine` carries
+  its lifetimes, `Machine<'scope, 'env>`. `m.fork(path, …)` and
+  `m.fork_with(builder, path, …)` spawn a scoped thread that takes a turn
+  on the descendant, leaving a `Forked` mark in its place, so neither it
+  nor a machine below it is reachable until the join; a machine with a
+  fork below it cannot fork. `m.join(fork)` returns the machine and the
+  turn's result, resuming a panic. A turn joins its unjoined forks at its
+  end, and `m.scope(|m| …)` joins those it made, by fork ID. A fork's
+  state returns through the join, so a dropped `Fork` loses nothing; its
+  result travels through a shared slot.
+- Cuts: a synchronous turn within a cut takes the cut's transaction, so
+  its reads and writes join it and its nested cuts nest; its state is part
+  of the parent's, which the cut restores. A hook records the path of the
+  machine that registered it, relative to the machine whose turn opened
+  the cut, and runs there. Forks and joins within a cut fail until
+  `api-forks-in-cuts`.
+- `clear` keeps the place of a forked descendant, which its join fills.
+- CLI slice: `execute_assembly` is one turn on `cli`. `start_logger` takes
+  the machine and the assembler, selects the logger on `cli` itself, and
+  forks the child `logger` with its name and stack size; `assemble` works
+  on the machine; the turn settles and joins the logger. The profile
+  report moved after the turn, as it needs the runtime. `PreparedAssembly`
+  gives mutable access for its turns. Bridge uses in the CLI:
+  `runtime_around` once, `assembler` four times and `pop_value` twice;
+  `start_logger` receives the assembler from `batch` rather than asking
+  the bridge. `hello_elf` runs in 616.3 M instructions, against 616.2 M
+  before, with every runtime counter equal.
+- Tests: `tests/runtime_forks.rs` covers fork and join, a fork borrowing
+  what outlives the turn, forked machines unreachable until the join,
+  forks joined by a scope's and a turn's end, panics resuming with the
+  machine kept, joins on another machine, forks within a cut failing, and
+  a configured thread. `tests/runtime_api.rs` covers descendants' turns,
+  paths from the root, and moved values; `tests/runtime_cuts.rs` covers a
+  child turn joining its parent's cut and hooks running on the machine
+  that registered them, and forces its interleavings with forks; so does
+  `tests/runtime_virtual_resources.rs`.
 
 ## Verification
 
