@@ -192,6 +192,12 @@ impl StoreSnapshot {
             .expect("the user heap volume must always exist")
     }
 
+    /// The value at `path` in the user heap, as a lazy access, so nothing is
+    /// evaluated: a missing key reads `{}`.
+    pub(crate) fn heap_value(&self, path: &[Key]) -> PublicValue {
+        value_at_path(&self.values, self.root(), path)
+    }
+
     pub(crate) fn volume(&self, volume: VolumeId) -> Option<&PublicValue> {
         self.roots.get(&volume)
     }
@@ -311,6 +317,12 @@ impl StoreJournal {
     pub(crate) fn view(&self) -> PublicValue {
         self.volume_view(self.snapshot.heap_volume)
             .expect("the user heap volume must always exist")
+    }
+
+    /// As [`StoreSnapshot::heap_value`], in this journal's view, which
+    /// holds its own writes. It records no read.
+    pub(crate) fn heap_value(&self, path: &[Key]) -> PublicValue {
+        value_at_path(&self.snapshot.values, &self.view(), path)
     }
 
     pub(crate) fn volume_view(&self, volume: VolumeId) -> Option<PublicValue> {
@@ -900,6 +912,12 @@ fn apply_value_at_path_in(
             root.clone().into_runtime_root().clone_core_with(access),
         ],
     )
+}
+
+fn value_at_path(values: &CoreValueFactory, root: &PublicValue, path: &[Key]) -> PublicValue {
+    PublicValue::from_runtime_root(values.construct_runtime_value_root(|access| {
+        lazy_core_value_path(access, root.runtime_root().clone_core_with(access), path)
+    }))
 }
 
 fn lazy_core_value_path(

@@ -4,7 +4,9 @@
 //! A machine is named by a user-chosen [`Key`] and holds glam values: a
 //! stack, a stash beside it, and local state by key. It starts empty, and an
 //! empty machine stores nothing. A turn is not atomic: what it changes before
-//! an error stays.
+//! an error stays. Each action on the shared heap is atomic by itself, and a
+//! cut groups actions into one transaction that also bounds a backtracking
+//! search (`turn-cuts-bound-transactions-and-search`).
 //!
 //! This first form is a facade over the assembler and its evaluation
 //! runtime, which the runtime holds privately; each operation enters the
@@ -16,9 +18,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bytes::Bytes;
 
-use super::{Assembler, Diagnostic, Error, EvaluationRuntime, ModuleInput, Value, ValueKind};
+use super::runtime::RuntimeSharedResources;
+use super::{
+    Assembler, Diagnostic, Error, ErrorKind, EvaluationRuntime, ModuleInput, Value, ValueKind,
+};
 use crate::core::Key;
-use crate::reflection::ConflictAnalysisStrategy;
+use crate::reflection::{ConflictAnalysisStrategy, StoreCommitResult, StoreJournal};
 
 /// What opening a runtime takes. It configures the runtime alone:
 /// compilation's settings travel with what is compiled.
@@ -75,7 +80,7 @@ enum Slot {
     InTurn,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct MachineState {
     stack: Vec<Value>,
     stash: Vec<Value>,
@@ -155,6 +160,7 @@ impl Runtime {
             runtime: self,
             key: Some(key),
             state,
+            cut: None,
         };
         turn(&mut machine)
     }
@@ -180,6 +186,51 @@ pub struct Machine<'rt> {
     runtime: &'rt Runtime,
     key: Option<Key>,
     state: MachineState,
+    /// The transaction of the outermost cut in progress, which nested cuts
+    /// share.
+    cut: Option<CutTransaction>,
+}
+
+/// A cut's transaction: reads and writes staged against one snapshot of the
+/// shared heap, and the hooks its outcome runs.
+struct CutTransaction {
+    journal: StoreJournal,
+    /// Whether a read observed shared state, so a change could wake a retry.
+    observed: bool,
+    commit_hooks: Vec<Hook>,
+    abort_hooks: Vec<Hook>,
+}
+
+type Hook = Box<dyn FnOnce()>;
+
+/// When an aborted outermost cut runs again.
+enum CutRetry {
+    /// At once: its commit conflicted.
+    Now,
+    /// Once something its journal read has changed.
+    AfterChange(StoreJournal),
+    /// Never: it failed.
+    Never(Error),
+}
+
+impl CutTransaction {
+    fn committed(self) {
+        for hook in self.commit_hooks {
+            hook();
+        }
+    }
+
+    fn aborted(self) {
+        run_abort_hooks(self.abort_hooks);
+    }
+}
+
+/// Runs abort hooks as a failure backtracks through them: the last
+/// registered first.
+fn run_abort_hooks(hooks: Vec<Hook>) {
+    for hook in hooks.into_iter().rev() {
+        hook();
+    }
 }
 
 impl Drop for Machine<'_> {
@@ -502,6 +553,219 @@ impl Machine<'_> {
         Ok(diagnostics)
     }
 
+    /// Pushes the value at `path` in the shared heap, without evaluating
+    /// it: a missing key reads `{}`. Within a cut, the read joins the cut's
+    /// transaction and sees its writes; outside one, it reads the heap as it
+    /// stands.
+    pub fn heap_get<K: Into<Key>>(&mut self, path: impl IntoIterator<Item = K>) {
+        let path = heap_path(path);
+        let value = match &mut self.cut {
+            Some(cut) => {
+                cut.observed |= cut.journal.observe_read(&path);
+                cut.journal.heap_value(&path)
+            }
+            None => self.resources().reflection_snapshot().1.heap_value(&path),
+        };
+        self.push(value);
+    }
+
+    /// Pops a value and writes it at `path` in the shared heap. Outside a
+    /// cut, the write commits at once; within one, with the outermost cut.
+    pub fn heap_set<K: Into<Key>>(
+        &mut self,
+        path: impl IntoIterator<Item = K>,
+    ) -> Result<(), Error> {
+        let path = heap_path(path);
+        let value = self.pop_own()?;
+        self.heap_edit(|journal| journal.write(path.clone(), value.clone()))
+    }
+
+    /// Pops a function and rewrites the value at `path` in the shared heap
+    /// with it. The function applies lazily to the value the write finds
+    /// when it commits, so rewrites compose rather than conflict.
+    pub fn heap_rewrite<K: Into<Key>>(
+        &mut self,
+        path: impl IntoIterator<Item = K>,
+    ) -> Result<(), Error> {
+        let path = heap_path(path);
+        let updater = self.pop_own()?;
+        self.heap_edit(|journal| journal.rewrite(path.clone(), updater.clone()))
+    }
+
+    /// Runs `body` as a cut: its actions on the shared heap form one atomic,
+    /// isolated transaction that commits when it returns `Ok`, and cuts
+    /// within it nest. When `body` fails, the cut undoes what it did, the
+    /// machine's stack, stash and state included, so the caller may try
+    /// another alternative; reads stay recorded, for a retry.
+    ///
+    /// The outermost cut runs `body` again, on the state it started from,
+    /// when its commit conflicts with another's, and when `body` fails with
+    /// [`Self::retry`], once something it read has changed. Rust effects
+    /// within `body` must tolerate a rerun, or wait for a commit or undo an
+    /// abort with [`Self::on_commit`] and [`Self::on_abort`].
+    pub fn cut<R>(
+        &mut self,
+        mut body: impl FnMut(&mut Self) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        if self.cut.is_some() {
+            return self.nested_cut(body);
+        }
+        let resources = self.resources();
+        loop {
+            let start = self.state.clone();
+            self.cut = Some(CutTransaction {
+                journal: StoreJournal::new(resources.reflection_snapshot().1),
+                observed: false,
+                commit_hooks: Vec::new(),
+                abort_hooks: Vec::new(),
+            });
+            let outcome = body(self);
+            let cut = self
+                .cut
+                .take()
+                .expect("the outermost cut keeps its transaction");
+            let next = match outcome {
+                Ok(result) => match resources.commit_reflection(&cut.journal) {
+                    StoreCommitResult::Committed => {
+                        cut.committed();
+                        return Ok(result);
+                    }
+                    StoreCommitResult::Conflict => CutRetry::Now,
+                    StoreCommitResult::MissingVolume(volume) => {
+                        CutRetry::Never(Error::new(format!(
+                            "reflection volume {} was revoked before the cut committed",
+                            volume.get()
+                        )))
+                    }
+                },
+                Err(error) if error.kind() == ErrorKind::Retry && cut.observed => {
+                    CutRetry::AfterChange(cut.journal.clone())
+                }
+                Err(error) if error.kind() == ErrorKind::Retry => CutRetry::Never(Error::new(
+                    "a cut retried without reading shared state, so no change could wake it",
+                )),
+                Err(error) => CutRetry::Never(error),
+            };
+            self.state = start;
+            cut.aborted();
+            match next {
+                CutRetry::Now => {}
+                CutRetry::AfterChange(journal) => self.await_change(&resources, &journal),
+                CutRetry::Never(error) => return Err(error),
+            }
+        }
+    }
+
+    /// A request to retry the outermost cut once something it read has
+    /// changed, which `body` returns as its error: `return Err(m.retry())`.
+    /// A nested cut fails with it as with any error, so its caller may try
+    /// an alternative first.
+    pub fn retry(&self) -> Error {
+        Error::retry()
+    }
+
+    /// Registers `hook` to run once the outermost cut commits, after the
+    /// hooks registered before it. Outside a cut it runs at once, since each
+    /// action there commits by itself. Hooks are best effort: a panic within
+    /// a cut abandons it without running them.
+    pub fn on_commit(&mut self, hook: impl FnOnce() + 'static) {
+        match &mut self.cut {
+            Some(cut) => cut.commit_hooks.push(Box::new(hook)),
+            None => hook(),
+        }
+    }
+
+    /// Registers `hook` to run if a failure backtracks through it: when the
+    /// cut it was registered in, or one enclosing it, aborts, before the
+    /// hooks registered before it. Outside a cut nothing aborts, and the
+    /// hook is dropped.
+    pub fn on_abort(&mut self, hook: impl FnOnce() + 'static) {
+        if let Some(cut) = &mut self.cut {
+            cut.abort_hooks.push(Box::new(hook));
+        }
+    }
+
+    fn nested_cut<R>(
+        &mut self,
+        mut body: impl FnMut(&mut Self) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        let start = self.state.clone();
+        let cut = self.cut.as_ref().expect("a nested cut runs within a cut");
+        let journal = cut.journal.clone();
+        let (commit_hooks, abort_hooks) = (cut.commit_hooks.len(), cut.abort_hooks.len());
+        let outcome = body(self);
+        if outcome.is_err() {
+            self.state = start;
+            let cut = self
+                .cut
+                .as_mut()
+                .expect("a nested cut's transaction outlives it");
+            // The journal's clone shares its reads, which stay recorded.
+            cut.journal = journal;
+            cut.commit_hooks.truncate(commit_hooks);
+            run_abort_hooks(cut.abort_hooks.split_off(abort_hooks));
+        }
+        outcome
+    }
+
+    /// Waits until a retrying cut's reads have changed. The thread first runs
+    /// the runtime's background work, which, without workers, nothing else
+    /// may run.
+    fn await_change(&self, resources: &RuntimeSharedResources, journal: &StoreJournal) {
+        loop {
+            self.runtime
+                .assembler
+                .evaluation_runtime()
+                .pump_until_stable();
+            match resources.validate_reflection(journal) {
+                (StoreCommitResult::Committed, generation) => {
+                    resources.wait_for_change(generation);
+                }
+                _ => return,
+            }
+        }
+    }
+
+    /// Stages an edit within a cut, or commits it at once outside one.
+    fn heap_edit(&mut self, edit: impl Fn(&mut StoreJournal)) -> Result<(), Error> {
+        if let Some(cut) = &mut self.cut {
+            edit(&mut cut.journal);
+            return Ok(());
+        }
+        let resources = self.resources();
+        loop {
+            let mut journal = StoreJournal::new(resources.reflection_snapshot().1);
+            edit(&mut journal);
+            match resources.commit_reflection(&journal) {
+                StoreCommitResult::Committed => return Ok(()),
+                // A write that reads nothing conflicts with nothing, but a
+                // conflict analysis may be coarse: write again, afresh.
+                StoreCommitResult::Conflict => continue,
+                StoreCommitResult::MissingVolume(volume) => {
+                    return Err(Error::new(format!(
+                        "reflection volume {} was revoked before the write committed",
+                        volume.get()
+                    )));
+                }
+            }
+        }
+    }
+
+    fn resources(&self) -> std::sync::Arc<RuntimeSharedResources> {
+        self.runtime
+            .assembler
+            .evaluation_runtime()
+            .shared_resources()
+    }
+
+    /// Pops a value, checking that it belongs to this runtime before the
+    /// store takes it.
+    fn pop_own(&mut self) -> Result<Value, Error> {
+        let value = self.pop()?;
+        self.runtime.assembler.values().require(&value)?;
+        Ok(value)
+    }
+
     /// Pops the top value into local state at `key`, replacing what was
     /// there.
     pub fn set(&mut self, key: impl Into<Key>) -> Result<(), Error> {
@@ -561,4 +825,8 @@ fn underflow(what: &str, needed: usize, held: usize) -> Error {
     Error::new(format!(
         "the machine's {what} holds {held} values, and the operation needs {needed}"
     ))
+}
+
+fn heap_path<K: Into<Key>>(path: impl IntoIterator<Item = K>) -> Vec<Key> {
+    path.into_iter().map(Into::into).collect()
 }

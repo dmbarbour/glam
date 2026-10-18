@@ -1,8 +1,8 @@
 # Runtime API Plan — 2026-10-17
 
-Status: `api-runtime-turns` built 2026-10-17, and `api-cli-bridge` and
-`api-machine-data` 2026-10-18, with `api-cli-prelude` kept (see
-[As built](#as-built)); `api-cuts` next. The CLI's transition was re-planned the
+Status: `api-runtime-turns` built 2026-10-17; `api-cli-bridge`,
+`api-machine-data` and `api-cuts` 2026-10-18, with `api-cli-prelude` kept
+(see [As built](#as-built)). The CLI's transition was re-planned the
 same day, after a survey of the CLI (see [CLI Transition](#cli-transition)):
 `api-cli` gave way to a bridge and a CLI slice in each later step, moved
 piecemeal (maintainer, 2026-10-17). On 2026-10-18 the maintainer agreed
@@ -468,7 +468,9 @@ seeing them used, `make_list` and `make_dict`.
 
 For `api-cuts`: `m.cut(|t| …)`, after glam's `.cut`, which bounds the same
 transaction and search (maintainer, 2026-10-18), in place of the review's
-`m.transact`.
+`m.transact`. As built, a first proposal: `heap_get`, `heap_set` and
+`heap_rewrite`, after `.heap.get`, `.heap.set` and `.heap.rewrite`;
+`retry`; and `on_commit` and `on_abort` for the hooks.
 
 ## As built
 
@@ -567,6 +569,43 @@ transaction and search (maintainer, 2026-10-18), in place of the review's
   `perf-module-fixed-cost`, after the representations; this plan goes
   ahead of performance work unless a cost gets in the way.
 
+`api-cuts` (2026-10-18), in `src/api/turn.rs`, over the reflection store's
+journal and the runtime's snapshot, commit, validation and wait:
+- Heap actions: `heap_get(path)` pushes the value at a path of keys
+  without evaluating it, `heap_set(path)` pops a value to write, and
+  `heap_rewrite(path)` pops a function that applies lazily at commit.
+  Outside a cut, each is atomic by itself: a read takes the heap as it
+  stands, and a write commits at once.
+- `m.cut(|m| …)` runs its body against one snapshot, staging reads and
+  writes in a journal; reads see the cut's own writes. The body takes the
+  same `Machine`, so every operation works within a cut.
+  - On `Ok`, the outermost cut commits. A conflict reruns the body at once
+    on the state the cut started from; a revoked volume fails it.
+  - On an error, a cut restores the machine's stack, stash and state and
+    the journal, keeping its reads, and returns the error, so the caller
+    may try an alternative.
+  - Retry is an error of its own kind, `ErrorKind::Retry`, from
+    `m.retry()`, settling how failure and retry appear in Rust. A nested
+    cut fails with it like any error. The outermost cut waits until
+    validation finds a read changed, pumping the runtime's background
+    work before each wait, since without workers nothing else may run it,
+    and then reruns. A retry without reads fails, since nothing could
+    wake it, and one outside any cut fails the turn.
+- Hooks are `'static` closures, run on the turn's thread once the commit
+  has released its locks. `on_commit` hooks run in order after the
+  outermost commit; `on_abort` hooks run in reverse as a failure
+  backtracks through them, including those of nested cuts that committed
+  into the failing one. A conflict's rerun aborts the attempt, running its
+  abort hooks. Outside a cut, `on_commit` runs at once and `on_abort` is
+  dropped. A panic within a cut abandons it without running hooks.
+- Tests in `tests/runtime_cuts.rs`. Two force their interleavings through
+  channels between scoped threads: a retry blocks before the write that
+  wakes it, running exactly twice; and a write commits between a cut's
+  read and its commit, which reruns once and reads the new value.
+- Not built: `api-virtual-resources`; volumes other than the user heap; a
+  heap path taken from the stack, as a glam list of keys; and runtime
+  events (inputs and outputs) within a cut.
+
 ## Verification
 
 Runtime changes run `scripts/check.sh full` before commit. Concurrency
@@ -579,8 +618,6 @@ the public API, in `tests/`.
 - Names, per step (above).
 - Communication's conventions, at `api-heap-communication`, and how far
   the API specializes queues and the like, by measurement.
-- How a cut's failure and retry appear in Rust (an error, or outcomes of
-  their own), at `api-cuts`.
 - The ownership plan's open details, each settled when its step starts:
   retired operations' error (`api-retirement`); the queue capability's
   representation, and a request's status, possibly with a received state

@@ -14,6 +14,7 @@ pub struct Error {
     diagnostic: Option<Arc<Diagnostic>>,
     diagnostics: Vec<Diagnostic>,
     panic: Option<EvaluationPanic>,
+    retry: bool,
 }
 
 /// How an operation failed.
@@ -28,6 +29,9 @@ pub enum ErrorKind {
     /// panicked keeps that state, so a later demand of it reports the same
     /// panic instead of running it again.
     Panic,
+    /// A cut's request to retry: abandon the cut, and run it again once
+    /// something it read has changed. Outside a cut, it is a failure.
+    Retry,
 }
 
 impl Error {
@@ -39,6 +43,7 @@ impl Error {
             diagnostic: None,
             diagnostics: Vec::new(),
             panic: None,
+            retry: false,
         }
     }
 
@@ -60,6 +65,7 @@ impl Error {
             diagnostic: Some(Arc::new(diagnostic)),
             diagnostics: Vec::new(),
             panic: None,
+            retry: false,
         }
     }
 
@@ -71,14 +77,25 @@ impl Error {
             diagnostic: None,
             diagnostics: Vec::new(),
             panic: Some(report),
+            retry: false,
         }
     }
 
     pub fn kind(&self) -> ErrorKind {
         if self.panic.is_some() {
             ErrorKind::Panic
+        } else if self.retry {
+            ErrorKind::Retry
         } else {
             ErrorKind::Failure
+        }
+    }
+
+    /// A cut's request to retry ([`ErrorKind::Retry`]).
+    pub(crate) fn retry() -> Self {
+        Self {
+            retry: true,
+            ..Self::new("a retry reached no cut")
         }
     }
 
