@@ -51,10 +51,12 @@ flags a step for discussion when work reaches it, not a decision.
   `grammar-body-declarations` (item 15: `alias` and `let` in bodies) was
   built 2026-10-17.
 - [`RuntimeApi_2026-10-17.md`](RuntimeApi_2026-10-17.md): `api-` steps
-  from the runtime API review: `Runtime`, turns on keyed machines,
-  transaction steps, scoped threads, heap communication, hosts as machines,
-  then the handle API's retirement. Drafted 2026-10-17;
-  `api-runtime-turns` is first, its names to discuss.
+  from the runtime API review: `Runtime`, turns on keyed machines, a
+  bridge for the CLI, data operations, transaction steps, scoped threads,
+  heap communication, settlement, hosts as machines, effect providers, then
+  the handle API's retirement. The CLI moves piecemeal, a slice in each
+  step. Drafted 2026-10-17; `api-runtime-turns` is built, and the bridge,
+  a CLI prelude in glam, and effect providers are proposed.
 - [`RuntimeOwnership_2026-10-17.md`](RuntimeOwnership_2026-10-17.md):
   `lifecycle-` steps, a sketch from the lifecycle review.
   `lifecycle-cli-logger` is done. Its owner-and-handles design is replaced
