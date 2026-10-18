@@ -228,9 +228,9 @@ fn lists_and_dicts_build_from_the_stack_and_unpack_onto_it() {
         m.push_int(1);
         m.push_int(2);
         m.push_int(3);
-        m.list(3)?;
+        m.make_list(3)?;
         m.push_text("numbers");
-        m.dict(["items", "name"])?;
+        m.make_dict(["items", "name"])?;
         m.dup()?;
         m.access("name")?;
         assert_eq!(m.pop_text()?, "numbers");
@@ -240,7 +240,7 @@ fn lists_and_dicts_build_from_the_stack_and_unpack_onto_it() {
 
         m.push_int(2);
         m.push_int(1);
-        m.dict(["b", "a"])?;
+        m.make_dict(["b", "a"])?;
         assert_eq!(m.unpack_dict()?, 2);
         let mut entries = Vec::new();
         for _ in 0..2 {
@@ -261,7 +261,7 @@ fn a_dict_rejects_repeated_names_and_reading_the_wrong_kind_fails() {
     rt.run("data", |m| {
         m.push_int(1);
         m.push_int(2);
-        assert!(m.dict(["x", "x"]).is_err());
+        assert!(m.make_dict(["x", "x"]).is_err());
         assert_eq!(m.depth(), 2, "a rejected dict pops nothing");
         m.discard(2)?;
         m.push_int(7);
@@ -315,7 +315,7 @@ fn annotations_and_initial_definitions_shape_what_compiles() {
     let text = rt
         .run("cli", |m| {
             m.push_text("Hello");
-            m.dict(["greeting"])?;
+            m.make_dict(["greeting"])?;
             m.compile_over(
                 ["over"],
                 [ModuleInput::script(

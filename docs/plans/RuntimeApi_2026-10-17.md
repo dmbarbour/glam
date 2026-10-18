@@ -1,7 +1,8 @@
 # Runtime API Plan — 2026-10-17
 
-Status: `api-runtime-turns` built 2026-10-17 and `api-cli-bridge`
-2026-10-18 (see [As built](#as-built)). The CLI's transition was re-planned the
+Status: `api-runtime-turns` built 2026-10-17, and `api-cli-bridge` and
+`api-machine-data` 2026-10-18, with `api-cli-prelude` awaiting a verdict
+(see [As built](#as-built)). The CLI's transition was re-planned the
 same day, after a survey of the CLI (see [CLI Transition](#cli-transition)):
 `api-cli` gave way to a bridge and a CLI slice in each later step, moved
 piecemeal (maintainer, 2026-10-17). On 2026-10-18 the maintainer agreed
@@ -87,8 +88,8 @@ handle API goes.
      `PreparedAssembly` holds it. Behavior does not change.
 3. `api-machine-data` — operations that build and read data, and the CLI's
    first slice.
-   - Building: `list(n)`, `dict(names)`, `anno`, and a push of an
-     abstract global path; `compile` from several inputs, over initial
+   - Building: `make_list(n)`, `make_dict(names)`, `anno`, and a push of
+     an abstract global path; `compile` from several inputs, over initial
      definitions popped from the stack.
    - Reading, for consumers, which evaluate: a list's items onto the stack,
      a dictionary's entries, a value's kind, an atom's name, and equality
@@ -457,9 +458,10 @@ For `api-runtime-turns`, a first proposal:
 *Agreed (maintainer, 2026-10-17):* `Runtime` and `run`.
 
 For `api-machine-data`, a first proposal: building operations named for
-what they build (`list`, `dict`), and reading operations named for what
+what they build (`list`, `record`), and reading operations named for what
 they leave on the stack (`unpack_list`, `unpack_dict`). *Maintainer,
-2026-10-18:* `dict`, glam's name for the type, rather than `record`.
+2026-10-18:* `dict`, glam's name for the type, rather than `record`; then,
+seeing them used, `make_list` and `make_dict`.
 
 For `api-cuts`: `m.cut(|t| …)`, after glam's `.cut`, which bounds the same
 transaction and search (maintainer, 2026-10-18), in place of the review's
@@ -510,11 +512,12 @@ transaction and search (maintainer, 2026-10-18), in place of the review's
   counter equal.
 
 `api-machine-data`, its operations (2026-10-18):
-- Building: `push_abstract_path(parts)`; `list(n)`; `dict(names)`, whose
-  deepest value takes the first name, and which rejects a repeated name
-  without popping; `anno`, the annotation pushed before its target, as
-  `anno Annotation Target` reads. `compile` takes its inputs in order, and
-  `compile_over` pops the initial definitions first.
+- Building: `push_abstract_path(parts)`; `make_list(n)`;
+  `make_dict(names)`, whose deepest value takes the first name, and which
+  rejects a repeated name without popping; `anno`, the annotation pushed
+  before its target, as `anno Annotation Target` reads. `compile` takes
+  its inputs in order, and `compile_over` pops the initial definitions
+  first.
 - Reading: `unpack_list` evaluates under the `array` annotation and pushes
   the items, the first deepest; `unpack_dict` pushes each key before its
   value, in the runtime's canonical key order, as reflection, since glam
@@ -524,6 +527,39 @@ transaction and search (maintainer, 2026-10-18), in place of the review's
 - Not built: a dict with keys other than names, until something needs one;
   and reading an error's structured diagnostic within a turn, for which
   `context:` frames are checked through the CLI's tests for now.
+
+`api-machine-data`, its CLI slice with `api-cli-prelude` (2026-10-18):
+- The prelude, `src/bin/glam/configuration/prelude.g`, holds the CLI's
+  policy: the default environment object; the configuration's initial
+  definitions; `entry`, an entry's value or its fallback, with `context:`
+  frames naming the entry and the path looked up; the assembly's initial
+  definitions with their journal records; the result under the `binary`
+  annotation with an `asm.result` frame; and a completion script's request.
+- Preparation compiles the prelude and the configuration in a turn on the
+  `cli` machine, whose state holds `prelude`, `configuration` and
+  `environment`. The assembly, `conf.log`'s selection and the completion
+  script run in turns there too, sharing two Rust helpers, `select_entry`
+  and `selects_nothing`.
+- Error contexts come from `context:` annotations, no longer from
+  `Error::with_context`. The CLI's Rust lost 121 lines net, the prelude
+  has 36, and `LoadedConfiguration`, the journal and context builders and
+  the Rust completion-script runner went.
+- The bridge's `pop_value` hands the configuration to the configured CLI
+  and the selected logger to its `EffectRun`. Uses: `runtime_around` once,
+  `assembler` five times (one is `PreparedAssembly::assembler`, called at
+  31 sites), `pop_value` twice.
+- Tests: `tests/cli.rs` gains a test of the result's frame, in place of
+  the unit test of the Rust context it replaces. Error output, compared by
+  hand with the previous commit's for a failing result, environment, log
+  and completion script, a configured script, and the built-in fallback,
+  is identical.
+- Cost: `hello_elf` rose from 599.5 to 616.2 M instructions (2.8%), and a
+  run with no configuration from 23.8 to 40.4 M. The prelude's text
+  compiled within a user's script costs about 6 M, so about 10 M is the
+  fixed cost of compiling a second module: another session, its tasks and
+  their net work. That cost looks general to module compilation rather
+  than particular to the prelude.
+- Verdict: for the maintainer, on these measurements.
 
 ## Verification
 

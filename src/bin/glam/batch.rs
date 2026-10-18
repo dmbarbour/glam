@@ -10,16 +10,16 @@ use crate::command_line::{
 };
 use bytes::Bytes;
 use glam::{
-    Assembler, Diagnostic, DiagnosticBus, Error, EvaluationRuntime, FileSourceSystem, ModuleInput,
-    QuiescenceReport, RuntimeDispositionKind, RuntimeKillReason, RuntimeReadiness, Severity, Value,
-    Values,
+    Diagnostic, DiagnosticBus, Error, EvaluationRuntime, FileSourceSystem, ModuleInput,
+    QuiescenceReport, Runtime, RuntimeDispositionKind, RuntimeKillReason, RuntimeReadiness,
+    Severity, Values,
 };
 
 use crate::DiagnosticBusLocal;
 use crate::configuration::logger::{
     LoggerRun, LoggerSupervisor, SettledReportSelection, settled_report_diagnostics, start_logger,
 };
-use crate::configuration::{InitialCliEnvironment, PreparationFailure, PreparedAssembly};
+use crate::configuration::{CLI, InitialCliEnvironment, PreparationFailure, PreparedAssembly};
 use crate::rendering::DefaultLogger;
 
 pub(super) fn finish_local_files(
@@ -145,13 +145,12 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
         local_files,
         runtime,
         log_host,
-        configuration,
         ..
     } = prepared;
     let assembler = glam::transition::assembler(&runtime);
     let assembler_diagnostics = assembler.diagnostic_bus();
-    let logger = start_logger(assembler, &configuration.value, log_host.clone());
-    let result = assemble(assembler, inputs, assembly_args, configuration.environment);
+    let logger = start_logger(&runtime, log_host.clone());
+    let result = assemble(&runtime, inputs, &assembly_args);
     let mut operation_failed = false;
     match result {
         Ok(bytes) => {
@@ -386,28 +385,25 @@ pub(super) fn configured_cli(arguments: CliArguments, inspection: Option<bool>) 
         Ok(prepared) => prepared,
         Err(exit) => return exit,
     };
-    let expansion = match expand_configured(
-        prepared.assembler(),
-        &prepared.configuration.value,
-        arguments,
-    ) {
-        Ok(expansion) => expansion,
-        Err(error) => {
-            prepared.fail_environment("configured CLI expansion failed");
-            for diagnostic in error.diagnostics() {
-                prepared
-                    .assembler()
-                    .diagnostic_bus()
-                    .publish_local(diagnostic.clone());
+    let expansion =
+        match expand_configured(prepared.assembler(), &prepared.configuration(), arguments) {
+            Ok(expansion) => expansion,
+            Err(error) => {
+                prepared.fail_environment("configured CLI expansion failed");
+                for diagnostic in error.diagnostics() {
+                    prepared
+                        .assembler()
+                        .diagnostic_bus()
+                        .publish_local(diagnostic.clone());
+                }
+                prepared.assembler().diagnostic_bus().publish_local(
+                    error
+                        .diagnostic(&prepared.assembler().values())
+                        .expect("configured CLI diagnostics belong to its assembler runtime"),
+                );
+                return finish_without_logger(prepared, None, true);
             }
-            prepared.assembler().diagnostic_bus().publish_local(
-                error
-                    .diagnostic(&prepared.assembler().values())
-                    .expect("configured CLI diagnostics belong to its assembler runtime"),
-            );
-            return finish_without_logger(prepared, None, true);
-        }
-    };
+        };
     let (command, diagnostics) = expansion.into_parts();
     for diagnostic in diagnostics {
         prepared
@@ -457,84 +453,30 @@ fn configured_worker_count(command_line: Option<usize>) -> Result<usize, ExitCod
     })
 }
 
+/// Compiles the assembly on the `cli` machine, over the prelude's initial
+/// definitions, and evaluates its result to bytes.
 fn assemble(
-    assembler: &Assembler,
+    runtime: &Runtime,
     inputs: Vec<ModuleInput>,
-    cli_args: Vec<std::ffi::OsString>,
-    environment: Value,
+    cli_args: &[std::ffi::OsString],
 ) -> Result<Bytes, Error> {
-    let values = assembler.values();
-    let arguments = values.list(
-        cli_args
-            .iter()
-            .map(|argument| values.bytes(argument.as_encoded_bytes().to_vec())),
-    )?;
-    let initial_definitions = values.record([
-        (
-            "asm",
-            values.record([
-                ("args", arguments),
-                (
-                    "meta",
-                    journal_record(&values, [("intro", "args"), ("declare", "result")])?,
-                ),
-            ])?,
-        ),
-        ("env", environment),
-        (
-            "meta",
-            journal_record(&values, [("intro", "asm"), ("intro", "env")])?,
-        ),
-    ])?;
-    let module = super::profile::time("build", || {
-        assembler
-            .module(["assembly"])
-            .initial_definitions(initial_definitions)
-            .inputs(inputs)
-            .build()
-    })?;
-    let context = assembly_result_context(&values)?;
-    let result = values.access_names(module.value(), ["asm", "result"])?;
-    values
-        .anno_binary(result)
-        .and_then(|binary| super::profile::time("evaluate", || assembler.evaluator().eval(&binary)))
-        .and_then(|binary| {
-            binary
-                .as_bytes()?
-                .ok_or_else(|| Error::new("asm.result did not evaluate to binary data"))
-        })
-        .map_err(|error| {
-            error
-                .with_context(&values, context)
-                .expect("assembly-result context belongs to the assembler runtime")
-        })
-}
-
-/// `{journal: [...]}` recording what the assembler provides and expects
-/// before the first input, by the `.g` journal convention
-/// (`perf-definition-assertions`): `{op:Op:[name], at:asm:()}`.
-fn journal_record<const N: usize>(
-    values: &Values,
-    entries: [(&str, &str); N],
-) -> Result<Value, Error> {
-    let entries = entries
-        .into_iter()
-        .map(|(op, name)| {
-            let path = values.list([values.atom_from_text(name)])?;
-            values.record([
-                ("op", values.record([(op, path)])?),
-                ("at", values.record([("asm", values.unit())])?),
-            ])
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
-    values.record([("journal", values.list(entries)?)])
-}
-
-pub(super) fn assembly_result_context(values: &Values) -> Result<Value, Error> {
-    values.record([(
-        "asm",
-        values.record([("result", values.text("asm.result"))])?,
-    )])
+    runtime.run(CLI, |m| {
+        m.get("prelude")?;
+        m.access("assembly_definitions")?;
+        for argument in cli_args {
+            m.push_bytes(argument.as_encoded_bytes().to_vec());
+        }
+        m.make_list(cli_args.len())?;
+        m.get("environment")?;
+        m.apply(2)?;
+        super::profile::time("build", || m.compile_over(["assembly"], inputs))?;
+        m.stash(1)?;
+        m.get("prelude")?;
+        m.access("assembly_result")?;
+        m.stash_pop(1)?;
+        m.apply(1)?;
+        super::profile::time("evaluate", || m.pop_bytes())
+    })
 }
 
 #[cfg(test)]

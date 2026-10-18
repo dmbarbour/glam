@@ -2,10 +2,10 @@ use std::sync::Arc;
 use std::thread;
 
 use glam::reflection::{EffectRun, TaskOutcome};
-use glam::{Assembler, Diagnostic, DiagnosticBus, Severity, Value};
+use glam::{Diagnostic, DiagnosticBus, Error, Runtime, Severity, Value};
 
 use crate::DiagnosticBusLocal;
-use crate::configuration::{entry_context, with_path_lookup_context};
+use crate::configuration::{CLI, entry_context, select_entry, selects_nothing};
 use crate::rendering::DefaultLogger;
 
 mod effects;
@@ -16,11 +16,8 @@ pub(crate) use supervisor::{
     LogHost, LoggerSupervisor, SettledReportSelection, settled_report_diagnostics,
 };
 
-pub(crate) fn start_logger(
-    assembler: &Assembler,
-    configuration: &Value,
-    input: Arc<LogHost>,
-) -> LoggerRun {
+pub(crate) fn start_logger(runtime: &Runtime, input: Arc<LogHost>) -> LoggerRun {
+    let assembler = glam::transition::assembler(runtime);
     let logger = Arc::new(DefaultLogger::new(assembler.clone()));
     let evaluation_runtime = assembler.evaluation_runtime();
     let fallback_logger = logger.clone();
@@ -35,29 +32,11 @@ pub(crate) fn start_logger(
         assembler.reflection_environment_for_role("logger"),
     ));
     let values = assembler.values();
-    let custom = match values
-        .access_names(configuration, ["conf", "log"])
-        .and_then(|candidate| with_path_lookup_context(&values, candidate, "conf.log"))
-        .and_then(|candidate| {
-            values.apply(&values.defined_or_function(), [values.list([])?, candidate])
-        })
-        .and_then(|selected| assembler.evaluator().eval(&selected))
-    {
-        Ok(logger)
-            if logger
-                .array_items()
-                .is_ok_and(|items| items.is_some_and(|items| items.is_empty())) =>
-        {
-            None
-        }
-        Ok(logger) => Some(logger.into_value()),
+    let custom = match select_logger(runtime) {
+        Ok(custom) => custom,
         Err(error) => {
             let diagnostic = error
-                .with_context(
-                    &values,
-                    entry_context(&values, "log").expect("configuration context is local"),
-                )
-                .and_then(|error| error.diagnostic(&values))
+                .diagnostic(&values)
                 .expect("configuration failure belongs to the assembler runtime");
             diagnostics.publish_local(diagnostic);
             None
@@ -163,6 +142,22 @@ pub(crate) fn start_logger(
         diagnostics,
         supervisor,
     }
+}
+
+/// The logger `conf.log` selects, evaluated, or none.
+fn select_logger(runtime: &Runtime) -> Result<Option<Value>, Error> {
+    runtime.run(CLI, |m| {
+        m.make_list(0)?;
+        m.get("configuration")?;
+        m.access("conf.log")?;
+        select_entry(m, "log", "conf.log")?;
+        m.eval()?;
+        if selects_nothing(m)? {
+            m.discard(1)?;
+            return Ok(None);
+        }
+        glam::transition::pop_value(m).map(Some)
+    })
 }
 
 pub(crate) struct LoggerRun {

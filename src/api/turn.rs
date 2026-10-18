@@ -234,7 +234,7 @@ impl Machine<'_> {
     }
 
     /// Replaces the top `n` values with a list of them, the deepest first.
-    pub fn list(&mut self, n: usize) -> Result<(), Error> {
+    pub fn make_list(&mut self, n: usize) -> Result<(), Error> {
         let depth = self.require(n)?;
         let items = self.state.stack.split_off(depth - n);
         let list = self.runtime.assembler.values().list(items)?;
@@ -244,7 +244,7 @@ impl Machine<'_> {
 
     /// Replaces the top values, one for each name, with a dict from the
     /// names to them: the deepest value takes the first name.
-    pub fn dict<I, S>(&mut self, names: I) -> Result<(), Error>
+    pub fn make_dict<I, S>(&mut self, names: I) -> Result<(), Error>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -533,7 +533,7 @@ impl Machine<'_> {
         self.state.stack.push(value);
     }
 
-    fn pop(&mut self) -> Result<Value, Error> {
+    pub(crate) fn pop(&mut self) -> Result<Value, Error> {
         self.state
             .stack
             .pop()

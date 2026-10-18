@@ -5,19 +5,25 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use glam::{
-    Assembler, Error, EvaluationRuntime, FileSourceSystem, ModuleInput, PromiseResolver, Runtime,
-    Value, Values,
+    Assembler, Error, EvaluationRuntime, FileSourceSystem, Machine, ModuleInput, PromiseResolver,
+    Runtime, Value, ValueKind, Values,
 };
 
 use crate::command_line::{CliArguments, CommandPlanParts};
 use logger::LogHost;
+
+/// The machine on which the CLI takes its turns. Its state holds the
+/// `prelude`, the `configuration` and the `environment` it selects.
+pub(super) const CLI: &str = "cli";
+
+/// The CLI's policy, in glam.
+const PRELUDE: &str = include_str!("prelude.g");
 
 pub(super) struct PreparedAssembly {
     pub(super) local_files: FileSourceSystem,
     /// The CLI's runtime, which the main thread opens and drops.
     pub(super) runtime: Runtime,
     pub(super) log_host: Arc<LogHost>,
-    pub(super) configuration: LoadedConfiguration,
     process_args: Option<PromiseResolver>,
     reflection_args: Option<PromiseResolver>,
 }
@@ -26,6 +32,16 @@ impl PreparedAssembly {
     /// The runtime's assembler, for what has not moved to turns.
     pub(super) fn assembler(&self) -> &Assembler {
         glam::transition::assembler(&self.runtime)
+    }
+
+    /// The configuration module, for what has not moved to turns.
+    pub(super) fn configuration(&self) -> Value {
+        self.runtime
+            .run(CLI, |m| {
+                m.get("configuration")?;
+                glam::transition::pop_value(m)
+            })
+            .expect("a prepared assembly's machine holds its configuration")
     }
 
     pub(super) fn resolve_environment(&mut self, command: &CommandPlanParts) -> Result<(), Error> {
@@ -108,22 +124,18 @@ pub(super) fn prepare(
             .resolve(argument_values(&values, &reflection_arguments))
             .expect("fresh bootstrap reflection argument promise should resolve");
     }
-    let configuration = match load(assembler) {
-        Ok(configuration) => configuration,
-        Err(error) => {
-            return Err(Box::new(PreparationFailure {
-                local_files,
-                log_host,
-                runtime,
-                error,
-            }));
-        }
-    };
+    if let Err(error) = load(&runtime) {
+        return Err(Box::new(PreparationFailure {
+            local_files,
+            log_host,
+            runtime,
+            error,
+        }));
+    }
     Ok(PreparedAssembly {
         local_files,
         runtime,
         log_host,
-        configuration,
         process_args,
         reflection_args,
     })
@@ -185,69 +197,56 @@ fn argument_values(values: &Values, arguments: &[std::ffi::OsString]) -> Value {
         .expect("argument values share one runtime")
 }
 
-pub(super) struct LoadedConfiguration {
-    pub(super) value: Value,
-    pub(super) environment: Value,
+/// Compiles the prelude and the configuration on the `cli` machine, and
+/// selects the environment.
+fn load(runtime: &Runtime) -> Result<(), Error> {
+    runtime.run(CLI, |m| {
+        m.compile(["glam_cli"], [ModuleInput::script("g", PRELUDE)])?;
+        m.set("prelude")?;
+        m.get("prelude")?;
+        m.access("configuration_definitions")?;
+        m.compile_over(
+            ["configuration"],
+            configuration_paths().into_iter().map(ModuleInput::file),
+        )?;
+        m.set("configuration")?;
+        m.get("prelude")?;
+        m.access("empty_env")?;
+        m.get("configuration")?;
+        m.access("conf.env")?;
+        select_entry(m, "env", "conf.env")?;
+        m.eval()?;
+        m.set("environment")
+    })
 }
 
-fn load(assembler: &Assembler) -> Result<LoadedConfiguration, Error> {
-    let default_environment = empty_environment_object(&assembler.values());
-    let values = assembler.values();
-    let initial_definitions = values.record([("env", default_environment.clone())])?;
-    let module = assembler
-        .module(["configuration"])
-        .initial_definitions(initial_definitions)
-        .inputs(configuration_paths().into_iter().map(ModuleInput::file))
-        .build()?;
+/// Replaces a fallback and a candidate, the configuration's value at
+/// `path`, with the entry the prelude selects: the candidate, or the
+/// fallback where it is undefined.
+pub(super) fn select_entry(m: &mut Machine<'_>, entry: &str, path: &str) -> Result<(), Error> {
+    m.stash(2)?;
+    m.get("prelude")?;
+    m.access("entry")?;
+    m.push_text(entry);
+    m.push_text(path);
+    m.stash_pop(2)?;
+    m.apply(4)
+}
 
-    let environment = values
-        .access_names(module.value(), ["conf", "env"])
-        .and_then(|candidate| with_path_lookup_context(&values, candidate, "conf.env"))
-        .and_then(|candidate| {
-            values.apply(
-                &values.defined_or_function(),
-                [default_environment, candidate],
-            )
-        })
-        .and_then(|environment| assembler.evaluator().eval(&environment))
-        .map(glam::EvaluatedValue::into_value)
-        .map_err(|error| {
-            error
-                .with_context(
-                    &values,
-                    entry_context(&values, "env").expect("configuration context is local"),
-                )
-                .expect("configuration context is local")
-        })?;
-    Ok(LoadedConfiguration {
-        value: module.into_value(),
-        environment,
-    })
+/// Whether the top value, evaluated, is the empty list by which a
+/// configuration selects nothing. The value stays.
+pub(super) fn selects_nothing(m: &mut Machine<'_>) -> Result<bool, Error> {
+    if m.kind()? != ValueKind::List {
+        return Ok(false);
+    }
+    m.dup()?;
+    let items = m.unpack_list()?;
+    m.discard(items)?;
+    Ok(items == 0)
 }
 
 pub(super) fn entry_context(values: &Values, entry: &str) -> Result<Value, Error> {
     values.record([("conf", values.record([("entry", values.text(entry))])?)])
-}
-
-pub(super) fn with_path_lookup_context(
-    values: &Values,
-    value: Value,
-    path: &str,
-) -> Result<Value, Error> {
-    let frame = values.record([(
-        "eval",
-        values.record([
-            ("op", values.atom_from_text("path_lookup")),
-            ("args", values.record([("path", values.text(path))])?),
-        ])?,
-    )])?;
-    values.anno(values.record([("context", frame)])?, value)
-}
-
-fn empty_environment_object(values: &Values) -> Value {
-    values
-        .empty_object(values.abstract_global_path(["configuration", "env"]))
-        .expect("empty environment components belong to one runtime")
 }
 
 fn configuration_paths() -> Vec<PathBuf> {
@@ -315,13 +314,11 @@ mod owner_tests {
     fn assert_configuration_owner_inventory(
         prepared: &PreparedAssembly,
         failure: &PreparationFailure,
-        loaded: &LoadedConfiguration,
     ) {
         let PreparedAssembly {
             local_files: _,
             runtime: _,
             log_host: _,
-            configuration: _,
             process_args: _,
             reflection_args: _,
         } = prepared;
@@ -331,14 +328,10 @@ mod owner_tests {
             runtime: _,
             error: _,
         } = failure;
-        let LoadedConfiguration { value, environment } = loaded;
-        let _: &Value = value;
-        let _: &Value = environment;
     }
 
     #[test]
     fn configuration_owner_inventory_is_compile_exhaustive() {
-        let _: fn(&PreparedAssembly, &PreparationFailure, &LoadedConfiguration) =
-            assert_configuration_owner_inventory;
+        let _: fn(&PreparedAssembly, &PreparationFailure) = assert_configuration_owner_inventory;
     }
 }

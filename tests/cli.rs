@@ -19,6 +19,23 @@ fn short_file_option_writes_asm_result_to_stdout() {
 }
 
 #[test]
+fn assembly_result_failure_reports_the_result() {
+    let output = glam_command()
+        .arg("--script.g")
+        .arg("language g0\nasm.result = 42\n")
+        .output()
+        .expect("failed to run glam");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("`binary` annotation requires a list or binary target")
+            && stderr.contains("asm: result `asm.result`"),
+        "assembly result context was not rendered:\n{stderr}"
+    );
+}
+
+#[test]
 fn configuration_environment_failure_reports_its_entry_and_path() {
     let dir = unique_temp_dir("glam-conf-env-context");
     fs::create_dir_all(&dir)

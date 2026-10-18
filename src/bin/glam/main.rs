@@ -17,15 +17,15 @@ use command_line::{
     format_parse_summary, route_completion,
 };
 use glam::{
-    Assembler, Diagnostic, DiagnosticBus, DiagnosticEvent, Error, Severity, Value,
-    check_local_manifest, inspect_g_source,
+    Diagnostic, DiagnosticBus, DiagnosticEvent, Error, Runtime, Severity, check_local_manifest,
+    inspect_g_source,
 };
 
 use batch::{assemble_inputs, configured_cli, finish_without_logger, prepare_assembly};
-use configuration::with_path_lookup_context;
+use configuration::{CLI, select_entry, selects_nothing};
 
 #[cfg(test)]
-use batch::{assembly_result_context, finish_local_files, settle_batch_runtime};
+use batch::{finish_local_files, settle_batch_runtime};
 
 #[cfg(test)]
 use configuration::logger::{LogHost, LoggerSupervisor, LoggerTaskHost, MainEffects};
@@ -107,7 +107,7 @@ fn configured_completion(request: command_line::CompletionRequest) -> ExitCode {
         Err(exit) => return exit,
     };
     let completion =
-        match complete_configured(prepared.assembler(), &prepared.configuration.value, request) {
+        match complete_configured(prepared.assembler(), &prepared.configuration(), request) {
             Ok(completion) => completion,
             Err(error) => {
                 for diagnostic in error.diagnostics() {
@@ -163,41 +163,11 @@ fn completion_script_command(name: &std::ffi::OsStr, cli_arguments: CliArguments
         Ok(prepared) => prepared,
         Err(exit) => return exit,
     };
-    let values = prepared.assembler().values();
-    let selected = values
-        .access_names(
-            &prepared.configuration.value,
-            ["conf", "completion_script", name],
-        )
-        .and_then(|candidate| {
-            with_path_lookup_context(
-                &values,
-                candidate,
-                &format!("conf.completion_script.{name}"),
-            )
-        })
-        .and_then(|candidate| {
-            values.apply(&values.defined_or_function(), [values.list([])?, candidate])
-        })
-        .and_then(|selected| prepared.assembler().evaluator().eval(&selected));
-    // An undefined binding falls back to the built-in script. A configured
-    // binding that fails to evaluate is reported, never silently replaced.
-    let configured = match selected {
-        Ok(selected) => selected
-            .array_items()
-            .ok()
-            .flatten()
-            .filter(Vec::is_empty)
-            .map(|_| None)
-            .unwrap_or_else(|| Some(selected.into_value())),
+    let output = match run_completion_script(&prepared.runtime, name) {
+        Ok(output) => output,
         Err(error) => {
             let diagnostic = error
-                .with_context(
-                    &values,
-                    configuration::entry_context(&values, "completion_script")
-                        .expect("configuration context is local"),
-                )
-                .and_then(|error| error.diagnostic(&values))
+                .diagnostic(&prepared.assembler().values())
                 .expect("configuration context is local");
             prepared
                 .assembler()
@@ -205,12 +175,6 @@ fn completion_script_command(name: &std::ffi::OsStr, cli_arguments: CliArguments
                 .publish_local(diagnostic);
             return finish_without_logger(prepared, None, true);
         }
-    };
-    let output: Result<Vec<u8>, String> = match configured {
-        Some(function) => configured_completion_script(prepared.assembler(), &function),
-        None => builtin_completion_script(name)
-            .map(|script| script.as_bytes().to_vec())
-            .ok_or_else(|| format!("unknown completion script binding `{name}`")),
     };
     let failed = match output {
         Ok(output) => io::stdout().write_all(&output).is_err_and(|error| {
@@ -239,33 +203,36 @@ fn completion_script_command(name: &std::ffi::OsStr, cli_arguments: CliArguments
     finish_without_logger(prepared, None, failed)
 }
 
-fn configured_completion_script(
-    assembler: &Assembler,
-    function: &Value,
-) -> Result<Vec<u8>, String> {
-    let executable = env::args_os().next().unwrap_or_else(|| "glam".into());
-    let values = assembler.values();
-    let context = values
-        .record([
-            (
-                "executable",
-                values.bytes(executable.as_encoded_bytes().to_vec()),
-            ),
-            ("protocol", values.text("v0")),
-            ("request", values.text("--completions")),
-        ])
-        .expect("completion-script context uses one runtime");
-    values
-        .apply(function, [context])
-        .and_then(|value| values.anno_binary(value))
-        .and_then(|binary| assembler.evaluator().eval(&binary))
-        .and_then(|binary| {
-            binary
-                .as_bytes()?
-                .map(|bytes| bytes.to_vec())
-                .ok_or_else(|| Error::new("completion script did not evaluate to binary data"))
-        })
-        .map_err(|error| error.to_string())
+/// Runs the completion script that `conf.completion_script.<name>`
+/// selects, or takes the built-in one where it selects nothing. A failure to
+/// select is the error; a selected script's failure is the output's.
+fn run_completion_script(runtime: &Runtime, name: &str) -> Result<Result<Vec<u8>, String>, Error> {
+    let path = format!("conf.completion_script.{name}");
+    runtime.run(CLI, |m| {
+        m.make_list(0)?;
+        m.get("configuration")?;
+        m.access(&path)?;
+        select_entry(m, "completion_script", &path)?;
+        // An undefined binding falls back to the built-in script. A
+        // configured binding that fails to evaluate is reported, never
+        // silently replaced.
+        m.eval()?;
+        if selects_nothing(m)? {
+            m.discard(1)?;
+            return Ok(builtin_completion_script(name)
+                .map(|script| script.as_bytes().to_vec())
+                .ok_or_else(|| format!("unknown completion script binding `{name}`")));
+        }
+        let executable = env::args_os().next().unwrap_or_else(|| "glam".into());
+        m.get("prelude")?;
+        m.access("completion_request")?;
+        m.push_bytes(executable.as_encoded_bytes().to_vec());
+        m.apply(1)?;
+        m.apply(1)?;
+        Ok(m.pop_bytes()
+            .map(|bytes| bytes.to_vec())
+            .map_err(|error| error.to_string()))
+    })
 }
 
 fn check_manifest_command(manifest: &Path, quiet: bool) -> ExitCode {
@@ -315,7 +282,7 @@ fn inspect_g_source_command(path: &Path, verbosity: command_line::ParseVerbosity
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glam::SourceSystem;
+    use glam::{Assembler, SourceSystem, Value};
     use rendering::rendered_text_for_test;
 
     trait TestValueFacade {
@@ -358,24 +325,6 @@ mod tests {
         assert_eq!(warning.severity(), Severity::Warning);
         assert_eq!(diagnostics.counts().warnings(), 1);
         assert_eq!(diagnostics.counts().errors(), 0);
-    }
-
-    #[test]
-    fn assembly_result_context_names_the_executable_output_boundary() {
-        let assembler = Assembler::default();
-        assert_eq!(
-            assembler
-                .get_evaluated(
-                    &assembly_result_context(&assembler.values())
-                        .expect("result context should be local"),
-                    "asm.result",
-                )
-                .expect("assembly result context should identify its output")
-                .as_bytes()
-                .unwrap()
-                .as_deref(),
-            Some(b"asm.result".as_slice())
-        );
     }
 
     #[test]
