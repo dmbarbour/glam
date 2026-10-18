@@ -87,7 +87,7 @@ handle API goes.
      `PreparedAssembly` holds it. Behavior does not change.
 3. `api-machine-data` — operations that build and read data, and the CLI's
    first slice.
-   - Building: `list(n)`, `record(names)`, `anno`, and a push of an
+   - Building: `list(n)`, `dict(names)`, `anno`, and a push of an
      abstract global path; `compile` from several inputs, over initial
      definitions popped from the stack.
    - Reading, for consumers, which evaluate: a list's items onto the stack,
@@ -111,8 +111,19 @@ handle API goes.
      search: a failure undoes what the cut did, so the caller may try
      another alternative. Rust code chooses alternatives by ordinary control
      flow, or by nested cuts; it is not restricted to backtracking.
-   - Rust side effects within a cut must tolerate a rerun, or wait for
-     commit (an after-commit hook).
+   - Rust side effects within a cut must tolerate a rerun, wait for
+     commit, or be undone on abort, through hooks a cut registers
+     (maintainer, 2026-10-18). Commit hooks run in the order registered
+     once the outermost cut commits. Abort hooks run in reverse order as a
+     failure backtracks through them to a cut, including those of nested
+     cuts that had committed into it. Like their counterparts in C
+     transaction libraries, they are best effort: they make compensation
+     convenient, not certain.
+   - Beside it, `api-virtual-resources`: a cut reads and writes *virtual
+     resources*, proxies named by key for host resources the runtime does
+     not see (maintainer, 2026-10-18). Conflict analysis covers them, and a
+     retry that read one wakes when a later cut writes it, so Rust code
+     that observes a host change writes its proxy to wake the waiters.
    - No CLI slice: the CLI's transactional code is the logger's, which
      moves with heap communication.
 5. `api-scoped-threads` — `rt.scope(|s| …)`, fork-join within a turn, and
@@ -153,12 +164,15 @@ handle API goes.
      fulfilled) and awaits a change with a cut's retry.
    - Resolvers, like volumes, are opaque glam values (maintainer,
      2026-10-18). Nothing affine stops a program from resolving one twice,
-     so the runtime enforces single assignment: a second resolution fails
-     (proposed). A resolver collected unresolved breaks its promise, through
-     the collector's finalization (proposed).
+     so the runtime enforces single assignment: a second resolution fails.
+     A resolver collected unresolved breaks its promise, through the
+     collector's finalization. A resolver's holder may read the request's
+     status without resolving it, and break the promise itself rather than
+     wait for collection (maintainer, 2026-10-18).
    - Tests: a failed cut sends nothing; a queue's order matches commit
-     order; a second resolution fails; a collected resolver breaks the
-     request; a status change wakes a waiting retry.
+     order; a second resolution fails; a collected resolver, or one broken
+     by hand, breaks the request; a resolver reads the status; a status
+     change wakes a waiting retry.
 8. `api-settlement` — `rt.settle()` runs until no work and no other turn
    remains, services maintenance, kills a deadlock, and appends the
    runtime's reports (task, delivery and maintenance failures, exit errors,
@@ -191,9 +205,10 @@ handle API goes.
     - Helpers interpret the standard effects (`.r`, `.seq`, `.alt`,
       `.fail`, `.cut`, `.fix`, `.get`, `.set`, `.reset`, `.shift`, and the
       heap's), so a user handles only the unique ones. `.alt`, `.fail` and
-      `.cut` map to the turn's cuts. The helpers may run today's effect
-      machine on the turn's thread, returning to Rust only for unique
-      requests, to keep its performance.
+      `.cut` map to the turn's cuts. The helpers start by running today's
+      effect machine on the turn's thread, returning to Rust only for
+      unique requests (maintainer, 2026-10-18); their performance is
+      `perf-reflection-effects`'s concern, as an independent task.
     - A *provider* is the Rust code that answers the unique requests. It
       receives per-call capabilities and stores none, so none holds an
       owner (L7). It answers what is local to its run, such as a cursor in
@@ -442,8 +457,9 @@ For `api-runtime-turns`, a first proposal:
 *Agreed (maintainer, 2026-10-17):* `Runtime` and `run`.
 
 For `api-machine-data`, a first proposal: building operations named for
-what they build (`list`, `record`), and reading operations named for what
-they leave on the stack (`unpack_list`, `unpack_dict`).
+what they build (`list`, `dict`), and reading operations named for what
+they leave on the stack (`unpack_list`, `unpack_dict`). *Maintainer,
+2026-10-18:* `dict`, glam's name for the type, rather than `record`.
 
 For `api-cuts`: `m.cut(|t| …)`, after glam's `.cut`, which bounds the same
 transaction and search (maintainer, 2026-10-18), in place of the review's
@@ -490,6 +506,24 @@ transaction and search (maintainer, 2026-10-18), in place of the review's
 - Bridge uses in the CLI: `runtime_around` once and `assembler` four times.
   One of those is `PreparedAssembly::assembler`, which `main` and `batch`
   call at 34 sites.
+- `hello_elf`: 599.5 M instructions before, 599.4 after, with every runtime
+  counter equal.
+
+`api-machine-data`, its operations (2026-10-18):
+- Building: `push_abstract_path(parts)`; `list(n)`; `dict(names)`, whose
+  deepest value takes the first name, and which rejects a repeated name
+  without popping; `anno`, the annotation pushed before its target, as
+  `anno Annotation Target` reads. `compile` takes its inputs in order, and
+  `compile_over` pops the initial definitions first.
+- Reading: `unpack_list` evaluates under the `array` annotation and pushes
+  the items, the first deepest; `unpack_dict` pushes each key before its
+  value, in the runtime's canonical key order, as reflection, since glam
+  offers no key iteration; `pop_atom_name` takes a text-named atom's name.
+  `kind` and `same_representation` observe the top values without popping
+  or evaluating them.
+- Not built: a dict with keys other than names, until something needs one;
+  and reading an error's structured diagnostic within a turn, for which
+  `context:` frames are checked through the CLI's tests for now.
 
 ## Verification
 
@@ -507,8 +541,6 @@ the public API, in `tests/`.
   their own), at `api-cuts`.
 - `api-cli-prelude`'s verdict, judged as
   [Policy in glam](#policy-in-glam-experiment) says.
-- Resolvers' single assignment and breaking on collection, proposed at
-  `api-request-queues`.
 - The ownership plan's open details, each settled when its step starts:
   retired operations' error (`api-retirement`); the queue capability's
   representation, and a request's status, possibly with a received state

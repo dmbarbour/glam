@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bytes::Bytes;
 
-use super::{Assembler, Diagnostic, Error, EvaluationRuntime, ModuleInput, Value};
+use super::{Assembler, Diagnostic, Error, EvaluationRuntime, ModuleInput, Value, ValueKind};
 use crate::core::Key;
 use crate::reflection::ConflictAnalysisStrategy;
 
@@ -223,6 +223,55 @@ impl Machine<'_> {
         self.push(self.runtime.assembler.values().atom_from_text(name));
     }
 
+    /// Pushes the abstract global path with these parts, an atom that glam
+    /// source names only as `abstract_global_path`.
+    pub fn push_abstract_path<I, S>(&mut self, parts: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.push(self.runtime.assembler.values().abstract_global_path(parts));
+    }
+
+    /// Replaces the top `n` values with a list of them, the deepest first.
+    pub fn list(&mut self, n: usize) -> Result<(), Error> {
+        let depth = self.require(n)?;
+        let items = self.state.stack.split_off(depth - n);
+        let list = self.runtime.assembler.values().list(items)?;
+        self.push(list);
+        Ok(())
+    }
+
+    /// Replaces the top values, one for each name, with a dict from the
+    /// names to them: the deepest value takes the first name.
+    pub fn dict<I, S>(&mut self, names: I) -> Result<(), Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let names = names.into_iter().collect::<Vec<_>>();
+        for (index, name) in names.iter().enumerate() {
+            if names[..index]
+                .iter()
+                .any(|earlier| earlier.as_ref() == name.as_ref())
+            {
+                return Err(Error::new(format!(
+                    "a dict's names must differ, and `{}` repeats",
+                    name.as_ref()
+                )));
+            }
+        }
+        let depth = self.require(names.len())?;
+        let items = self.state.stack.split_off(depth - names.len());
+        let dict = self
+            .runtime
+            .assembler
+            .values()
+            .record(names.into_iter().zip(items))?;
+        self.push(dict);
+        Ok(())
+    }
+
     /// Evaluates the top value to an integer and pops it.
     pub fn pop_int(&mut self) -> Result<i64, Error> {
         let value = self.pop()?;
@@ -246,6 +295,71 @@ impl Machine<'_> {
     pub fn pop_text(&mut self) -> Result<String, Error> {
         let bytes = self.pop_bytes()?;
         String::from_utf8(bytes.to_vec()).map_err(|_| Error::new("the top value is not UTF-8 text"))
+    }
+
+    /// Evaluates the top value to an atom named by text, such as `'name`,
+    /// and pops its name.
+    pub fn pop_atom_name(&mut self) -> Result<String, Error> {
+        let value = self.pop()?;
+        let assembler = &self.runtime.assembler;
+        let key = assembler.reflection().atom_key(&value)?;
+        let name = assembler.evaluator().eval(&key)?.as_bytes()?;
+        name.and_then(|name| String::from_utf8(name.to_vec()).ok())
+            .ok_or_else(|| Error::new("the atom is not named by text"))
+    }
+
+    /// Evaluates the top value to a list and replaces it with its items, the
+    /// first deepest, returning how many there are.
+    pub fn unpack_list(&mut self) -> Result<usize, Error> {
+        let value = self.pop()?;
+        let assembler = &self.runtime.assembler;
+        let array = assembler.values().anno_array(value)?;
+        let items = assembler
+            .evaluator()
+            .eval(&array)?
+            .array_items()?
+            .ok_or_else(|| Error::new("the top value is not a list"))?;
+        let count = items.len();
+        self.state.stack.extend(items);
+        Ok(count)
+    }
+
+    /// Evaluates the top value to a dict and replaces it with its entries,
+    /// each key pushed before its value, returning how many there are.
+    ///
+    /// This is reflection: glam offers no iteration of a dict's keys, and the
+    /// entries come in the runtime's canonical order of keys.
+    pub fn unpack_dict(&mut self) -> Result<usize, Error> {
+        let value = self.pop()?;
+        let entries = self
+            .runtime
+            .assembler
+            .reflection()
+            .dictionary_items(&value)?;
+        let count = entries.len();
+        for (key, value) in entries {
+            self.push(key);
+            self.push(value);
+        }
+        Ok(count)
+    }
+
+    /// The kind of the top value as it stands, without popping or evaluating
+    /// it: a value not yet evaluated is [`ValueKind::Lazy`].
+    pub fn kind(&self) -> Result<ValueKind, Error> {
+        self.runtime.assembler.reflection().kind(self.peek()?)
+    }
+
+    /// Whether the top two values have the same representation, without
+    /// popping or evaluating them. This is reflection rather than glam's
+    /// equality: values not yet evaluated compare by identity.
+    pub fn same_representation(&self) -> Result<bool, Error> {
+        let depth = self.require(2)?;
+        let stack = &self.state.stack;
+        self.runtime
+            .assembler
+            .reflection()
+            .same_representation(&stack[depth - 2], &stack[depth - 1])
     }
 
     /// Copies the top value.
@@ -303,6 +417,17 @@ impl Machine<'_> {
         Ok(())
     }
 
+    /// Annotates a value: the annotation is pushed first, then its target,
+    /// and the annotated value replaces them, as `anno Annotation Target`
+    /// reads. Nothing is evaluated.
+    pub fn anno(&mut self) -> Result<(), Error> {
+        let target = self.pop()?;
+        let annotation = self.pop()?;
+        let annotated = self.runtime.assembler.values().anno(annotation, target)?;
+        self.push(annotated);
+        Ok(())
+    }
+
     /// Applies a function to `n` arguments: the function is pushed first,
     /// then the arguments in order, and the application replaces them.
     /// Nothing is evaluated.
@@ -327,23 +452,51 @@ impl Machine<'_> {
         Ok(())
     }
 
-    /// Compiles a module at `module_path` from `input` and pushes it,
-    /// returning its warnings.
+    /// Compiles a module at `module_path` from `inputs`, in order, and
+    /// pushes it, returning its warnings.
     pub fn compile<I, S>(
         &mut self,
         module_path: I,
-        input: ModuleInput,
+        inputs: impl IntoIterator<Item = ModuleInput>,
     ) -> Result<Vec<Diagnostic>, Error>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let module = self
-            .runtime
-            .assembler
-            .module(module_path)
-            .input(input)
-            .build()?;
+        self.compile_module(module_path, inputs, None)
+    }
+
+    /// As [`Self::compile`], over initial definitions popped from the
+    /// stack: a dict whose names the module starts with, as if an input
+    /// before the first had defined them.
+    pub fn compile_over<I, S>(
+        &mut self,
+        module_path: I,
+        inputs: impl IntoIterator<Item = ModuleInput>,
+    ) -> Result<Vec<Diagnostic>, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let definitions = self.pop()?;
+        self.compile_module(module_path, inputs, Some(definitions))
+    }
+
+    fn compile_module<I, S>(
+        &mut self,
+        module_path: I,
+        inputs: impl IntoIterator<Item = ModuleInput>,
+        definitions: Option<Value>,
+    ) -> Result<Vec<Diagnostic>, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut builder = self.runtime.assembler.module(module_path).inputs(inputs);
+        if let Some(definitions) = definitions {
+            builder = builder.initial_definitions(definitions);
+        }
+        let module = builder.build()?;
         let diagnostics = module.diagnostics().to_vec();
         self.push(module.into_value());
         Ok(diagnostics)

@@ -1,7 +1,7 @@
 //! The runtime as an environment: turns on keyed machines
 //! (`runtime-api-turns-on-machines`).
 
-use glam::{Key, ModuleInput, Runtime, RuntimeConfig};
+use glam::{Key, ModuleInput, Runtime, RuntimeConfig, ValueKind};
 
 fn runtime() -> Runtime {
     Runtime::open(RuntimeConfig::new()).expect("a runtime should open")
@@ -14,7 +14,10 @@ fn a_turn_compiles_a_module_and_takes_its_bytes() {
         .run("cli", |m| {
             let warnings = m.compile(
                 ["example"],
-                ModuleInput::script("g", "language g0\nasm.result = \"Hello, \" ++ \"turns!\"\n"),
+                [ModuleInput::script(
+                    "g",
+                    "language g0\nasm.result = \"Hello, \" ++ \"turns!\"\n",
+                )],
             )?;
             assert!(warnings.is_empty());
             m.access("asm.result")?;
@@ -111,7 +114,7 @@ fn stack_operations_and_application_compose() {
         .run("m", |m| {
             m.compile(
                 ["math"],
-                ModuleInput::script("g", "language g0\nsub a b = a - b\n"),
+                [ModuleInput::script("g", "language g0\nsub a b = a - b\n")],
             )?;
             m.access("sub")?;
             m.push_int(2);
@@ -199,7 +202,10 @@ fn workers_activate_once_in_a_runtime_opened_without_them() {
         .run("cli", |m| {
             m.compile(
                 ["example"],
-                ModuleInput::script("g", "language g0\nasm.result = \"with workers\"\n"),
+                [ModuleInput::script(
+                    "g",
+                    "language g0\nasm.result = \"with workers\"\n",
+                )],
             )?;
             m.access("asm.result")?;
             m.pop_text()
@@ -213,4 +219,128 @@ fn workers_activate_once_in_a_runtime_opened_without_them() {
         opened_with_workers.activate_workers(1).is_err(),
         "a runtime opened with workers has activated them"
     );
+}
+
+#[test]
+fn lists_and_dicts_build_from_the_stack_and_unpack_onto_it() {
+    let rt = runtime();
+    rt.run("data", |m| {
+        m.push_int(1);
+        m.push_int(2);
+        m.push_int(3);
+        m.list(3)?;
+        m.push_text("numbers");
+        m.dict(["items", "name"])?;
+        m.dup()?;
+        m.access("name")?;
+        assert_eq!(m.pop_text()?, "numbers");
+        m.access("items")?;
+        assert_eq!(m.unpack_list()?, 3);
+        assert_eq!((m.pop_int()?, m.pop_int()?, m.pop_int()?), (3, 2, 1));
+
+        m.push_int(2);
+        m.push_int(1);
+        m.dict(["b", "a"])?;
+        assert_eq!(m.unpack_dict()?, 2);
+        let mut entries = Vec::new();
+        for _ in 0..2 {
+            let value = m.pop_int()?;
+            entries.push((m.pop_atom_name()?, value));
+        }
+        entries.sort();
+        assert_eq!(entries, [("a".to_owned(), 1), ("b".to_owned(), 2)]);
+        assert_eq!(m.depth(), 0);
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
+fn a_dict_rejects_repeated_names_and_reading_the_wrong_kind_fails() {
+    let rt = runtime();
+    rt.run("data", |m| {
+        m.push_int(1);
+        m.push_int(2);
+        assert!(m.dict(["x", "x"]).is_err());
+        assert_eq!(m.depth(), 2, "a rejected dict pops nothing");
+        m.discard(2)?;
+        m.push_int(7);
+        assert!(m.unpack_list().is_err());
+        m.push_text("text");
+        assert!(m.unpack_dict().is_err());
+        m.push_int(7);
+        assert!(m.pop_atom_name().is_err());
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
+fn kinds_and_representations_are_observed_without_evaluation() {
+    let rt = runtime();
+    rt.run("data", |m| {
+        m.compile(
+            ["kinds"],
+            [ModuleInput::script("g", "language g0\nanswer = 6 * 7\n")],
+        )?;
+        m.access("answer")?;
+        assert_eq!(m.kind()?, ValueKind::Lazy);
+        m.eval()?;
+        assert_eq!(m.kind()?, ValueKind::Number);
+        assert_eq!(m.depth(), 1, "observation pops nothing");
+
+        m.push_atom("same");
+        m.push_atom("same");
+        assert!(m.same_representation()?);
+        m.discard(1)?;
+        m.push_atom("other");
+        assert!(!m.same_representation()?);
+        m.discard(2)?;
+
+        m.push_abstract_path(["runtime_api", "path"]);
+        assert_eq!(m.kind()?, ValueKind::Atom);
+        assert!(
+            m.pop_atom_name().is_err(),
+            "a path atom is not named by text"
+        );
+        assert_eq!(m.pop_int()?, 42);
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
+fn annotations_and_initial_definitions_shape_what_compiles() {
+    let rt = runtime();
+    let text = rt
+        .run("cli", |m| {
+            m.push_text("Hello");
+            m.dict(["greeting"])?;
+            m.compile_over(
+                ["over"],
+                [ModuleInput::script(
+                    "g",
+                    "language g0\nasm.result = greeting ++ \", over\"\n",
+                )],
+            )?;
+            m.access("asm.result")?;
+            m.pop_text()
+        })
+        .expect("the turn should succeed");
+    assert_eq!(text, "Hello, over");
+
+    rt.run("cli", |m| {
+        m.push_atom("binary");
+        m.push_text("bytes");
+        m.anno()?;
+        m.eval()?;
+        assert_eq!(m.kind()?, ValueKind::Binary);
+        assert_eq!(m.pop_bytes()?, "bytes");
+        m.push_atom("binary");
+        m.push_int(7);
+        m.anno()?;
+        assert!(m.eval().is_err(), "a number is no binary");
+        Ok(())
+    })
+    .expect("the turn should succeed");
 }

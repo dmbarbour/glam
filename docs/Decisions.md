@@ -1988,8 +1988,10 @@ maps the short names used here to file names.
     never runs on a worker. Queues, data buses and publish-subscribe are,
     logically, transactional operations on shared state, in the heap or a
     specialized volume; how far the API specializes them is open.
-  - Volumes and resolvers are opaque glam values, so single assignment is
-    the runtime's to enforce, if it chooses.
+  - Volumes and resolvers are opaque glam values. The runtime enforces a
+    resolver's single assignment, and a resolver collected unresolved
+    breaks its promise; its holder may read the request's status, or break
+    the promise itself (maintainer, the same day).
   - The ownership plan's remaining steps (queues, host messages, leases,
     host calls, the retirement protocol) merge into the runtime API plan.
 - **Alternatives rejected:** the parser rewritten in glam, which has no
@@ -2024,8 +2026,11 @@ maps the short names used here to file names.
   one.
 - **Consequences:** `api-transaction-steps` becomes `api-cuts`, and effect
   searches run as cuts, so a branch's journal is machine state that a
-  failed cut restores. Rust side effects within a cut tolerate a rerun or
-  wait for commit.
+  failed cut restores. Rust side effects within a cut tolerate a rerun,
+  wait for commit, or are undone on abort: commit hooks run in order once
+  the outermost cut commits, and abort hooks in reverse as a failure
+  backtracks through them, on a best-effort basis (maintainer, the same
+  day).
 - **Recorded in:** runtime API plan, `api-cuts`.
 
 ### Resumable WHNF through bounded regional quanta and durable checkpoints
