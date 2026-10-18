@@ -18,11 +18,11 @@ pub(crate) use supervisor::{
 
 /// Starts the logger, which the `cli` machine `m` selects, on a fork of
 /// its child `logger`.
-pub(crate) fn start_logger(
-    m: &mut Machine<'_, '_>,
+pub(crate) fn start_logger<'scope>(
+    m: &mut Machine<'scope, '_>,
     assembler: &Assembler,
     input: Arc<LogHost>,
-) -> LoggerRun {
+) -> LoggerRun<'scope> {
     let logger = Arc::new(DefaultLogger::new(assembler.clone()));
     let evaluation_runtime = assembler.evaluation_runtime();
     let fallback_logger = logger.clone();
@@ -165,8 +165,8 @@ fn select_logger(m: &mut Machine<'_, '_>) -> Result<Option<Value>, Error> {
     glam::transition::pop_value(m).map(Some)
 }
 
-pub(crate) struct LoggerRun {
-    pub(crate) thread: Fork<()>,
+pub(crate) struct LoggerRun<'scope> {
+    pub(crate) thread: Fork<'scope, ()>,
     pub(crate) diagnostics: DiagnosticBus,
     pub(crate) supervisor: Arc<LoggerSupervisor>,
 }
@@ -175,7 +175,7 @@ pub(crate) struct LoggerRun {
 mod owner_tests {
     use super::*;
 
-    fn assert_logger_run_owner_inventory(run: &LoggerRun) {
+    fn assert_logger_run_owner_inventory(run: &LoggerRun<'_>) {
         let LoggerRun {
             thread: _,
             diagnostics: _,
@@ -185,6 +185,6 @@ mod owner_tests {
 
     #[test]
     fn logger_run_owner_inventory_is_compile_exhaustive() {
-        let _: fn(&LoggerRun) = assert_logger_run_owner_inventory;
+        let _: fn(&LoggerRun<'_>) = assert_logger_run_owner_inventory;
     }
 }

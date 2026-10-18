@@ -2094,6 +2094,11 @@ maps the short names used here to file names.
     what the cut wrote after the fork makes the outermost cut run again.
     A fork joins in the cut it was made in, and a cut's end joins the
     forks it made.
+  - Forks are branded (maintainer, the same day): each turn, cut attempt
+    and `m.scope` opens a thread scope, and its lifetime marks the forks
+    made in it, so the compiler admits a join only on the machine, and in
+    the cut or scope, that made the fork, and no fork leaves its scope. A
+    fork within a cut may borrow what its turn declared before the cut.
 - **Alternatives rejected:**
   - threads taking turns on arbitrary machines (as built in
     `api-scoped-threads`), with waiting, declining, an `await_any` or

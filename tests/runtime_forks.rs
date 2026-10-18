@@ -159,20 +159,6 @@ fn a_panic_in_a_fork_resumes_at_its_join_and_its_machine_stays() {
 }
 
 #[test]
-fn a_fork_joins_on_the_machine_that_made_it() {
-    let mut rt = runtime();
-    rt.run("m", |m| {
-        let fork = m.fork("c", |_| Ok(()))?;
-        let error = m
-            .run("other", move |o| o.join(fork))
-            .expect_err("another machine cannot join it");
-        assert!(error.to_string().contains("another machine"), "{error}");
-        Ok(())
-    })
-    .expect("the turn joins the fork at its end");
-}
-
-#[test]
 fn a_fork_s_thread_may_be_configured() {
     let mut rt = runtime();
     let name = rt

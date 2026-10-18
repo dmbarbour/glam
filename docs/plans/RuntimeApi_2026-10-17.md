@@ -801,10 +801,11 @@ store:
   into another passes up its reads, less those its parent branch's own
   earlier writes cover. A fork whose turn fails still merges, as a turn is
   not atomic; a nested cut within the fork makes its work atomic.
-- Levels: a machine counts the cuts it is within, one for a cut it joined
-  as a descendant or a fork. A fork records its level, joins only at it,
-  and a cut's end, nested or outermost, joins the forks it made, merging
-  them, before the cut commits, undoes or runs again.
+- Levels, first: a machine counted the cuts it was within, and a fork
+  joined only at its level, a rule checked as the program ran. Branded
+  forks replaced it the same day (below). A cut's end, nested or
+  outermost, joins the forks it made, merging them, before the cut
+  commits, undoes or runs again.
 - A fork's hooks return to its parent's thread, so hooks are now `Send`;
   the tests' hook logs moved from `Rc` to `Arc`.
 - A thread that does not start leaves the forked machine to return to its
@@ -817,6 +818,27 @@ store:
   hooks on its machine, and a failed cut waiting on what its fork read. A
   store unit test covers merges, a refused merge, and a fork's fork whose
   read its parent branch covered.
+
+Branded forks (2026-10-18, maintainer, under `api-forks-in-cuts`): a
+fork's lifetime is the thread scope it was made in, as a scoped thread's
+join handle's is, so the compiler rejects a join on another machine or in
+another cut or scope, and a fork leaving its scope.
+- Each turn (the runtime's, a descendant's or a fork's), each attempt of a
+  cut and each `m.scope` opens a `std::thread::scope`, and hands its body a
+  machine of a fresh `'scope`: the same machine's state, cut and offset,
+  moved in and back, with its own forks, which join at the scope's end.
+  `Fork<'scope, R>` is invariant in `'scope`, so no fork passes for one of
+  a narrower scope.
+- The cut-level count, its check, and the check that a fork belongs to the
+  machine joining it are gone. Three `compile_fail` doc tests on `Fork`
+  stand in for the tests that checked them; their errors read as borrowed
+  data escaping a closure.
+- `m.cut`, `m.scope` and `m.run` take a fresh lifetime `'b` for what their
+  forks may borrow, bounded by the machine's scope, so a fork within a cut
+  may borrow what the turn declared before the cut; a test shows it.
+- Each such scope costs an allocation of the standard library's scope
+  data, beside a cut's snapshot and journal; the CLI's batch, with no
+  cuts or descendants' turns, does not pay it.
 
 ## Verification
 

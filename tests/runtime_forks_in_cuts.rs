@@ -195,27 +195,6 @@ fn a_fork_conflicts_with_what_its_cut_wrote_after_the_fork() {
 }
 
 #[test]
-fn a_fork_joins_in_the_cut_it_was_made_in() {
-    let mut rt = runtime();
-    rt.run("m", |m| {
-        let mut outside = Some(m.fork("outside", |_| Ok(()))?);
-        m.cut(|m| {
-            let error = m
-                .join(outside.take().expect("one attempt"))
-                .expect_err("it was made outside the cut");
-            assert!(error.to_string().contains("made in"), "{error}");
-            let mut inner = Some(m.fork("inner", |_| Ok(()))?);
-            let error = m
-                .cut(|m| m.join(inner.take().expect("one attempt")))
-                .expect_err("it was made outside the nested cut");
-            assert!(error.to_string().contains("made in"), "{error}");
-            Ok(())
-        })
-    })
-    .expect("each fork joins at the end of what made it");
-}
-
-#[test]
 fn a_fork_s_hooks_run_on_its_machine() {
     let mut rt = runtime();
     let log = Arc::new(Mutex::new(Vec::new()));
@@ -272,4 +251,22 @@ fn a_failed_cut_waits_on_what_its_forks_read() {
     })
     .expect("the cut should commit once the fork's read changes");
     assert_eq!(attempts.get(), 2);
+}
+
+#[test]
+fn a_fork_within_a_cut_borrows_what_the_turn_declared_before_it() {
+    let mut rt = runtime();
+    let total = rt
+        .run("m", |m| {
+            let words = ["declared", "in", "the", "turn"];
+            // Made at the turn's level, it joins there, after the cut.
+            let outside = m.fork("outside", |_| Ok(1))?;
+            let inside = m.cut(|m| {
+                let fork = m.fork("inside", |_| Ok(words.len()))?;
+                m.join(fork)
+            })?;
+            Ok(inside + m.join(outside)?)
+        })
+        .expect("the turn should succeed");
+    assert_eq!(total, 5);
 }
