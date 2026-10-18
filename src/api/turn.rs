@@ -195,42 +195,29 @@ pub struct Machine<'rt> {
 /// shared heap, and the hooks its outcome runs.
 struct CutTransaction {
     journal: StoreJournal,
-    /// Whether a read observed shared state, so a change could wake a retry.
+    /// Whether a read observed shared state, so a change could wake the cut
+    /// after a failure.
     observed: bool,
     commit_hooks: Vec<Hook>,
     abort_hooks: Vec<Hook>,
 }
 
-type Hook = Box<dyn FnOnce()>;
+/// A hook, and the stack items it captured when registered.
+struct Hook {
+    items: Vec<Value>,
+    run: Box<HookFn>,
+}
+
+type HookFn = dyn FnOnce(&mut Machine<'_>) -> Result<(), Error>;
 
 /// When an aborted outermost cut runs again.
 enum CutRetry {
     /// At once: its commit conflicted.
     Now,
-    /// Once something its journal read has changed.
+    /// Once something its journal observed has changed: it failed.
     AfterChange(StoreJournal),
-    /// Never: it failed.
+    /// Never: an error ended it.
     Never(Error),
-}
-
-impl CutTransaction {
-    fn committed(self) {
-        for hook in self.commit_hooks {
-            hook();
-        }
-    }
-
-    fn aborted(self) {
-        run_abort_hooks(self.abort_hooks);
-    }
-}
-
-/// Runs abort hooks as a failure backtracks through them: the last
-/// registered first.
-fn run_abort_hooks(hooks: Vec<Hook>) {
-    for hook in hooks.into_iter().rev() {
-        hook();
-    }
 }
 
 impl Drop for Machine<'_> {
@@ -594,15 +581,18 @@ impl Machine<'_> {
 
     /// Runs `body` as a cut: its actions on the shared heap form one atomic,
     /// isolated transaction that commits when it returns `Ok`, and cuts
-    /// within it nest. When `body` fails, the cut undoes what it did, the
-    /// machine's stack, stash and state included, so the caller may try
-    /// another alternative; reads stay recorded, for a retry.
+    /// within it nest. When `body` returns an error, the cut undoes what it
+    /// did, the machine's stack, stash and state included, and returns the
+    /// error; reads stay recorded.
     ///
-    /// The outermost cut runs `body` again, on the state it started from,
-    /// when its commit conflicts with another's, and when `body` fails with
-    /// [`Self::retry`], once something it read has changed. Rust effects
-    /// within `body` must tolerate a rerun, or wait for a commit or undo an
-    /// abort with [`Self::on_commit`] and [`Self::on_abort`].
+    /// An explicit failure, from [`Self::fail`], is the intent to
+    /// backtrack: a nested cut returns it, so its caller may try another
+    /// alternative, and the outermost cut runs `body` again, on the state it
+    /// started from, once something it observed has changed. The outermost
+    /// cut also runs `body` again when its commit conflicts with another's.
+    /// Other errors end the outermost cut. Rust effects within `body` must
+    /// tolerate a rerun, or wait for a commit or undo an abort with
+    /// [`Self::on_commit`] and [`Self::on_abort`].
     pub fn cut<R>(
         &mut self,
         mut body: impl FnMut(&mut Self) -> Result<R, Error>,
@@ -627,8 +617,8 @@ impl Machine<'_> {
             let next = match outcome {
                 Ok(result) => match resources.commit_reflection(&cut.journal) {
                     StoreCommitResult::Committed => {
-                        cut.committed();
-                        return Ok(result);
+                        let hook_error = self.run_hooks(cut.commit_hooks);
+                        return with_hook_error(Ok(result), hook_error);
                     }
                     StoreCommitResult::Conflict => CutRetry::Now,
                     StoreCommitResult::MissingVolume(volume) => {
@@ -638,16 +628,23 @@ impl Machine<'_> {
                         )))
                     }
                 },
-                Err(error) if error.kind() == ErrorKind::Retry && cut.observed => {
+                Err(error) if error.kind() == ErrorKind::Backtrack && cut.observed => {
                     CutRetry::AfterChange(cut.journal.clone())
                 }
-                Err(error) if error.kind() == ErrorKind::Retry => CutRetry::Never(Error::new(
-                    "a cut retried without reading shared state, so no change could wake it",
+                Err(error) if error.kind() == ErrorKind::Backtrack => CutRetry::Never(Error::new(
+                    "a cut failed without observing shared state, so no change could wake it",
                 )),
                 Err(error) => CutRetry::Never(error),
             };
             self.state = start;
-            cut.aborted();
+            if let Some(hook_error) = self.run_hooks(cut.abort_hooks.into_iter().rev()) {
+                // An error that ended the cut came first; a hook's error
+                // ends a cut that would run again.
+                return Err(match next {
+                    CutRetry::Never(error) => error,
+                    _ => hook_error,
+                });
+            }
             match next {
                 CutRetry::Now => {}
                 CutRetry::AfterChange(journal) => self.await_change(&resources, &journal),
@@ -656,33 +653,83 @@ impl Machine<'_> {
         }
     }
 
-    /// A request to retry the outermost cut once something it read has
-    /// changed, which `body` returns as its error: `return Err(m.retry())`.
-    /// A nested cut fails with it as with any error, so its caller may try
-    /// an alternative first.
-    pub fn retry(&self) -> Error {
-        Error::retry()
+    /// An explicit failure, the intent to backtrack, which `body` returns
+    /// as its error: `return Err(m.fail())`. See [`Self::cut`].
+    pub fn fail(&self) -> Error {
+        Error::fail()
     }
 
-    /// Registers `hook` to run once the outermost cut commits, after the
-    /// hooks registered before it. Outside a cut it runs at once, since each
-    /// action there commits by itself. Hooks are best effort: a panic within
-    /// a cut abandons it without running them.
-    pub fn on_commit(&mut self, hook: impl FnOnce() + 'static) {
+    /// Pops `items` values and registers `hook` to run once the outermost
+    /// cut commits, after the hooks registered before it. Outside a cut it
+    /// runs at once, since each action there commits by itself.
+    ///
+    /// A hook runs on this machine, with its local state as it then stands,
+    /// but on a stack holding only the captured values, in their order, and
+    /// an empty stash; the machine's own stack and stash return after. Hooks
+    /// are best effort: each runs although one before it failed, and a
+    /// panic within a cut abandons it without running them. A cut returns a
+    /// hook's error in place of its result, or of an explicit failure, but
+    /// not of another error.
+    pub fn on_commit(
+        &mut self,
+        items: usize,
+        hook: impl FnOnce(&mut Machine<'_>) -> Result<(), Error> + 'static,
+    ) -> Result<(), Error> {
+        let hook = self.hook(items, hook)?;
         match &mut self.cut {
-            Some(cut) => cut.commit_hooks.push(Box::new(hook)),
-            None => hook(),
+            Some(cut) => {
+                cut.commit_hooks.push(hook);
+                Ok(())
+            }
+            None => self.run_hooks([hook]).map_or(Ok(()), Err),
         }
     }
 
-    /// Registers `hook` to run if a failure backtracks through it: when the
-    /// cut it was registered in, or one enclosing it, aborts, before the
-    /// hooks registered before it. Outside a cut nothing aborts, and the
-    /// hook is dropped.
-    pub fn on_abort(&mut self, hook: impl FnOnce() + 'static) {
+    /// Pops `items` values and registers `hook` to run if a failure
+    /// backtracks through it: when the cut it was registered in, or one
+    /// enclosing it, aborts, before the hooks registered before it. It runs
+    /// as [`Self::on_commit`]'s hooks do, once the cut has undone what it
+    /// did, and within the enclosing cut when there is one. Outside a cut
+    /// nothing aborts, and the hook is dropped.
+    pub fn on_abort(
+        &mut self,
+        items: usize,
+        hook: impl FnOnce(&mut Machine<'_>) -> Result<(), Error> + 'static,
+    ) -> Result<(), Error> {
+        let hook = self.hook(items, hook)?;
         if let Some(cut) = &mut self.cut {
-            cut.abort_hooks.push(Box::new(hook));
+            cut.abort_hooks.push(hook);
         }
+        Ok(())
+    }
+
+    fn hook(
+        &mut self,
+        items: usize,
+        run: impl FnOnce(&mut Machine<'_>) -> Result<(), Error> + 'static,
+    ) -> Result<Hook, Error> {
+        let depth = self.require(items)?;
+        Ok(Hook {
+            items: self.state.stack.split_off(depth - items),
+            run: Box::new(run),
+        })
+    }
+
+    /// Runs hooks in turn, each on a stack of its captured values and an
+    /// empty stash, and returns the first error.
+    fn run_hooks(&mut self, hooks: impl IntoIterator<Item = Hook>) -> Option<Error> {
+        let mut first_error = None;
+        for hook in hooks {
+            let stack = std::mem::replace(&mut self.state.stack, hook.items);
+            let stash = std::mem::take(&mut self.state.stash);
+            let outcome = (hook.run)(self);
+            self.state.stack = stack;
+            self.state.stash = stash;
+            if let Err(error) = outcome {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error
     }
 
     fn nested_cut<R>(
@@ -703,14 +750,18 @@ impl Machine<'_> {
             // The journal's clone shares its reads, which stay recorded.
             cut.journal = journal;
             cut.commit_hooks.truncate(commit_hooks);
-            run_abort_hooks(cut.abort_hooks.split_off(abort_hooks));
+            let aborted = cut.abort_hooks.split_off(abort_hooks);
+            let hook_error = self.run_hooks(aborted.into_iter().rev());
+            return with_hook_error(outcome, hook_error);
         }
         outcome
     }
 
-    /// Waits until a retrying cut's reads have changed. The thread first runs
-    /// the runtime's background work, which, without workers, nothing else
-    /// may run.
+    /// Waits until something a failed cut observed has changed. The thread
+    /// first runs the runtime's background work, which, without workers,
+    /// nothing else may run. Today a wake follows any change in the
+    /// runtime, and validation decides whether the cut's observations
+    /// changed; a finer wake keeps the same contract.
     fn await_change(&self, resources: &RuntimeSharedResources, journal: &StoreJournal) {
         loop {
             self.runtime
@@ -818,6 +869,16 @@ impl Machine<'_> {
             return Err(underflow("stack", n, depth));
         }
         Ok(depth)
+    }
+}
+
+/// A cut's outcome once its hooks have run: a hook's error replaces a
+/// result or an explicit failure, but not another error, which came first.
+fn with_hook_error<R>(outcome: Result<R, Error>, hook_error: Option<Error>) -> Result<R, Error> {
+    match (outcome, hook_error) {
+        (Err(error), _) if error.kind() != ErrorKind::Backtrack => Err(error),
+        (_, Some(hook_error)) => Err(hook_error),
+        (outcome, None) => outcome,
     }
 }
 

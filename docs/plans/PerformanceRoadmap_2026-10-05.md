@@ -298,6 +298,14 @@ Their sections hold their earlier evidence.
   to 616.2 M and a run without configuration from 23.8 to 40.4 M, while
   the same text compiled within a user's script costs about 6 M. The rest
   is another session, its tasks and their net work. Every import pays it.
+- **Waking a failed cut** (`perf-fine-grained-wakes`), not measured. A cut
+  that fails after observing shared state awaits a change in what it
+  observed (`turn-cuts-bound-transactions-and-search`). As `api-cuts`
+  built it, any commit in the runtime wakes every such waiter, which
+  validates its reads and sleeps again if they stand, so each commit costs
+  a validation per waiter. A wake indexed by what each waiter observed
+  keeps the contract. Measure once machines wait in numbers, from
+  `api-request-queues`.
 - **Debug annotations** (`perf-debug-annotations`). Each module definition
   carries `anno {context: {g: {origin, line, definition}}} value` for
   diagnostics; building without it saved 8 to 10% of the `chain` family

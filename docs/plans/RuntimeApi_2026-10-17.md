@@ -12,7 +12,8 @@ steps merged here (see [From the ownership plan](#from-the-ownership-plan)).
 The same day the maintainer clarified that a turn is no transaction: a cut
 bounds transactions and search (`turn-cuts-bound-transactions-and-search`),
 and a turn runs an effect by evaluating it. They agreed the bridge, and the
-CLI prelude as an experiment. Drafted 2026-10-17 from the
+CLI prelude as an experiment. After `api-cuts` was built, they made failure
+explicit and retry implicit, as in glam, and gave hooks the machine. Drafted 2026-10-17 from the
 [runtime API review](../reviews/RuntimeApi_2026-10-17.md), whose direction
 the maintainer agreed the same day (`runtime-api-turns-on-machines`). Names
 and communication's conventions are discussed as each step reaches them.
@@ -105,13 +106,22 @@ handle API goes.
    turn is no transaction: each action on shared state is atomic by
    itself, without the setup of an isolated transaction.
    - `m.cut(|t| …)` groups actions into one atomic, isolated transaction:
-     shared heap reads and writes staged in a runtime transaction, the
-     machine's stack and state restored on failure, and `t.retry()` waiting
-     until a read changes. Cuts nest.
+     shared heap reads and writes staged in a runtime transaction, and the
+     machine's stack and state restored on failure. Cuts nest.
    - As `.cut` does in reflection tasks, a cut also bounds a backtracking
      search: a failure undoes what the cut did, so the caller may try
      another alternative. Rust code chooses alternatives by ordinary control
      flow, or by nested cuts; it is not restricted to backtracking.
+   - Failure is explicit and retry implicit, as in glam (maintainer,
+     2026-10-18): `t.fail()` is the intent to backtrack, and the outermost
+     cut it reaches awaits a change in what it observed, then runs again.
+     Other errors end the outermost cut. The API promises a change in the
+     observations, not how the runtime detects one, so coarse wakes stay
+     an implementation choice (`perf-fine-grained-wakes`).
+   - Optional, later, `api-alternatives`: an alternative operation after
+     `.alt`, which tries the next alternative on explicit failure alone and
+     passes other errors on (maintainer, 2026-10-18, as the reason failure
+     is explicit). Not scheduled.
    - Rust side effects within a cut must tolerate a rerun, wait for
      commit, or be undone on abort, through hooks a cut registers
      (maintainer, 2026-10-18). Commit hooks run in the order registered
@@ -123,8 +133,9 @@ handle API goes.
    - Beside it, `api-virtual-resources`: a cut reads and writes *virtual
      resources*, proxies named by key for host resources the runtime does
      not see (maintainer, 2026-10-18). Conflict analysis covers them, and a
-     retry that read one wakes when a later cut writes it, so Rust code
-     that observes a host change writes its proxy to wake the waiters.
+     failed cut that read one runs again when a later cut writes it, so
+     Rust code that observes a host change writes its proxy to wake the
+     waiters.
    - No CLI slice: the CLI's transactional code is the logger's, which
      moves with heap communication.
 5. `api-scoped-threads` — `rt.scope(|s| …)`, fork-join within a turn, and
@@ -162,7 +173,7 @@ handle API goes.
      themselves, and resolvers need not resolve in the order read.
    - The requester holds the promise. It takes the result as a promised
      value, or observes the request's status (uncommitted, sent, broken,
-     fulfilled) and awaits a change with a cut's retry.
+     fulfilled) and awaits a change by failing a cut that read it.
    - Resolvers, like volumes, are opaque glam values (maintainer,
      2026-10-18). Nothing affine stops a program from resolving one twice,
      so the runtime enforces single assignment: a second resolution fails.
@@ -173,7 +184,7 @@ handle API goes.
    - Tests: a failed cut sends nothing; a queue's order matches commit
      order; a second resolution fails; a collected resolver, or one broken
      by hand, breaks the request; a resolver reads the status; a status
-     change wakes a waiting retry.
+     change wakes a cut that failed on it.
 8. `api-settlement` — `rt.settle()` runs until no work and no other turn
    remains, services maintenance, kills a deadlock, and appends the
    runtime's reports (task, delivery and maintenance failures, exit errors,
@@ -355,7 +366,7 @@ day:
   reflection environment's `.env`, is state at paths that any reader sees.
 - **A committed effect within a cut** is a request posted there, published
   when the cut commits, so its result comes after: as a promised value, or
-  as a status that a later cut awaits with retry. Nothing waits for a
+  as a status that a later cut awaits by failing. Nothing waits for a
   request within the cut that posts it (the lifecycle review's target
   model).
 
@@ -470,7 +481,9 @@ For `api-cuts`: `m.cut(|t| …)`, after glam's `.cut`, which bounds the same
 transaction and search (maintainer, 2026-10-18), in place of the review's
 `m.transact`. As built, a first proposal: `heap_get`, `heap_set` and
 `heap_rewrite`, after `.heap.get`, `.heap.set` and `.heap.rewrite`;
-`retry`; and `on_commit` and `on_abort` for the hooks.
+`fail`, after `.fail` (first built as `retry`); `ErrorKind::Backtrack`
+for its kind, since `ErrorKind::Failure` names any other error; and
+`on_commit` and `on_abort` for the hooks.
 
 ## As built
 
@@ -584,23 +597,36 @@ journal and the runtime's snapshot, commit, validation and wait:
   - On an error, a cut restores the machine's stack, stash and state and
     the journal, keeping its reads, and returns the error, so the caller
     may try an alternative.
-  - Retry is an error of its own kind, `ErrorKind::Retry`, from
-    `m.retry()`, settling how failure and retry appear in Rust. A nested
-    cut fails with it like any error. The outermost cut waits until
-    validation finds a read changed, pumping the runtime's background
-    work before each wait, since without workers nothing else may run it,
-    and then reruns. A retry without reads fails, since nothing could
-    wake it, and one outside any cut fails the turn.
-- Hooks are `'static` closures, run on the turn's thread once the commit
-  has released its locks. `on_commit` hooks run in order after the
-  outermost commit; `on_abort` hooks run in reverse as a failure
-  backtracks through them, including those of nested cuts that committed
-  into the failing one. A conflict's rerun aborts the attempt, running its
-  abort hooks. Outside a cut, `on_commit` runs at once and `on_abort` is
-  dropped. A panic within a cut abandons it without running hooks.
+  - Explicit failure is an error of its own kind, `ErrorKind::Backtrack`,
+    from `m.fail()`. A nested cut returns it. The outermost cut waits until
+    validation finds an observation changed, pumping the runtime's
+    background work before each wait, since without workers nothing else
+    may run it, and then reruns. A failure without observations ends the
+    cut with an error, since nothing could wake it, and one outside any cut
+    ends the turn. Other errors end the outermost cut at once.
+  - First built with any error backtracking and an explicit `m.retry()`;
+    revised the same day (maintainer) to the above.
+- Hooks: `on_commit(items, hook)` and `on_abort(items, hook)` pop `items`
+  values and register a `'static` closure over the machine,
+  `FnOnce(&mut Machine) -> Result<(), Error>` (maintainer, 2026-10-18,
+  in place of plain closures). A hook runs on the machine with its local
+  state as it then stands, over a stack holding only its captured values
+  and an empty stash; the machine's own stack and stash return after.
+  - `on_commit` hooks run in order after the outermost commit, outside any
+    cut, so their heap actions commit at once. `on_abort` hooks run in
+    reverse as a failure backtracks through them, once the cut has undone
+    what it did: within the enclosing cut for a nested one, so their
+    actions join it, and outside any cut for the outermost. A conflict's
+    rerun aborts the attempt, running its abort hooks. Outside a cut,
+    `on_commit` runs at once and `on_abort` is dropped.
+  - Best effort: each hook runs although one before it erred. A cut
+    returns a hook's first error in place of its result or of an explicit
+    failure, which ends an outermost cut that would have run again, but
+    not in place of another error, which came first. A panic within a cut
+    abandons it without running hooks.
 - Tests in `tests/runtime_cuts.rs`. Two force their interleavings through
-  channels between scoped threads: a retry blocks before the write that
-  wakes it, running exactly twice; and a write commits between a cut's
+  channels between scoped threads: a failed cut blocks before the write
+  that wakes it, running exactly twice; and a write commits between a cut's
   read and its commit, which reruns once and reads the new value.
 - Not built: `api-virtual-resources`; volumes other than the user heap; a
   heap path taken from the stack, as a glam list of keys; and runtime

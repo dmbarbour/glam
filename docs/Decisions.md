@@ -2015,22 +2015,40 @@ maps the short names used here to file names.
   - Each action on shared state is atomic by itself, without the setup of
     an isolated transaction.
   - `m.cut(|t| …)` groups actions into one atomic, isolated transaction,
-    with abort, retry and backtracking: a failure undoes what the cut did,
-    and `t.retry()` waits until something it read changes. Cuts nest.
+    with abort, retry and backtracking. Cuts nest.
   - The Rust interface matches reflection tasks', where search and
     transactions share the boundary. Rust code may still choose by
     ordinary control flow; it is not restricted to backtracking.
-- **Alternatives rejected:** a turn as one transaction (already rejected by
-  `runtime-api-turns-on-machines`); and a transaction step beside a
-  separate search operation, two boundaries where reflection tasks have
-  one.
+  - Failure is explicit and retry implicit, as in glam (maintainer, the
+    same day): `t.fail()`, after `.fail`, is the intent to backtrack, an
+    error of its own kind. Each cut it passes through undoes what it did.
+    The outermost cut it reaches is non-productive: it awaits a change in
+    what it observed, then runs again. A conflicting commit runs it again
+    at once. Any other error also undoes the cuts it passes through, but
+    ends the outermost. So an alternative operation, like `.alt`, can
+    backtrack on failure alone, and the runtime can recognize failure where
+    it wraps a step.
+  - The contract is a change in a cut's observations. How the runtime
+    detects one is no part of the API: the first implementation wakes on
+    any change and validates, and a finer wake may replace it.
+- **Alternatives rejected:**
+  - a turn as one transaction (already rejected by
+    `runtime-api-turns-on-machines`);
+  - a transaction step beside a separate search operation, two boundaries
+    where reflection tasks have one;
+  - backtracking on any error, with an explicit retry, as first built the
+    same day: it reverses glam's dynamic, and leaves unclear how far an
+    alternative operation should carry an arbitrary error.
 - **Consequences:** `api-transaction-steps` becomes `api-cuts`, and effect
   searches run as cuts, so a branch's journal is machine state that a
   failed cut restores. Rust side effects within a cut tolerate a rerun,
   wait for commit, or are undone on abort: commit hooks run in order once
   the outermost cut commits, and abort hooks in reverse as a failure
   backtracks through them, on a best-effort basis (maintainer, the same
-  day).
+  day). A hook runs on its machine, with the local state as it stands,
+  over a fresh stack of the values it captured when registered and an
+  empty stash (maintainer, the same day), so it reaches glam values and
+  the machine without borrowing the turn's.
 - **Recorded in:** runtime API plan, `api-cuts`.
 
 ### Resumable WHNF through bounded regional quanta and durable checkpoints

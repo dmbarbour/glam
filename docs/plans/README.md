@@ -61,7 +61,8 @@ flags a step for discussion when work reaches it, not a decision.
   plan goes ahead of performance work unless a cost gets in the way
   (maintainer, 2026-10-18). On
   2026-10-18 the maintainer agreed effect providers, run by evaluation
-  within turns, and the bridge; cuts bound transactions and search; the
+  within turns, and the bridge; cuts bound transactions and search, with
+  failure explicit as in glam; the
   ownership plan merged in; and a CLI prelude in glam is an experiment,
   `api-cli-prelude`.
 - [`TagPrefixSyntax_2026-10-16.md`](TagPrefixSyntax_2026-10-16.md):
