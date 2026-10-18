@@ -1,8 +1,9 @@
 # Runtime API Plan — 2026-10-17
 
 Status: `api-runtime-turns` built 2026-10-17; `api-cli-bridge`,
-`api-machine-data`, `api-cuts`, `api-virtual-resources` and
-`api-machine-tree` 2026-10-18, with `api-cli-prelude` kept and
+`api-machine-data`, `api-cuts`, `api-virtual-resources`,
+`api-machine-tree` and `api-forks-in-cuts` 2026-10-18, with
+`api-cli-prelude` kept and
 `api-scoped-threads` superseded by `api-machine-tree`
 (see [As built](#as-built)). The CLI's transition was re-planned the
 same day, after a survey of the CLI (see [CLI Transition](#cli-transition)):
@@ -158,7 +159,7 @@ handle API goes.
      so forks borrow what outlives `rt.run`.
    - A synchronous turn within a cut joins the cut.
    - CLI slice: the batch is one turn on `cli`, which forks the logger.
-   - Next, `api-forks-in-cuts`: a fork within a cut joins the cut, on a
+   - Then `api-forks-in-cuts`: a fork within a cut joins the cut, on a
      branch of its journal that merges at the join, with siblings
      serializable: a child whose reads overlap what the cut wrote after
      its fork reruns the outermost cut (maintainer, 2026-10-18).
@@ -637,7 +638,8 @@ journal and the runtime's snapshot, commit, validation and wait:
   - First built with any error backtracking and an explicit `m.retry()`;
     revised the same day (maintainer) to the above.
 - Hooks: `on_commit(items, hook)` and `on_abort(items, hook)` pop `items`
-  values and register a `'static` closure over the machine,
+  values and register a `'static` closure over the machine, `Send` since
+  `api-forks-in-cuts`,
   `FnOnce(&mut Machine) -> Result<(), Error>` (maintainer, 2026-10-18,
   in place of plain closures). A hook runs on the machine with its local
   state as it then stands, over a stack holding only its captured values
@@ -740,8 +742,8 @@ for why.
   its reads and writes join it and its nested cuts nest; its state is part
   of the parent's, which the cut restores. A hook records the path of the
   machine that registered it, relative to the machine whose turn opened
-  the cut, and runs there. Forks and joins within a cut fail until
-  `api-forks-in-cuts`.
+  the cut, and runs there. Forks and joins within a cut failed until
+  `api-forks-in-cuts`, the same day.
 - `clear` fails, changing nothing, while a descendant is forked, and
   moving zero values with `give` or `take` only checks that the descendant
   is not forked, creating nothing (maintainer, 2026-10-18, in place of a
@@ -765,6 +767,40 @@ for why.
   child turn joining its parent's cut and hooks running on the machine
   that registered them, and forces its interleavings with forks; so does
   `tests/runtime_virtual_resources.rs`.
+
+`api-forks-in-cuts` (2026-10-18), in `src/api/turn.rs` and the reflection
+store:
+- A fork within a cut takes a branch of the cut's transaction, a clone of
+  its journal that shares the cut's observations, so the fork's reads join
+  the cut's validation and its wait after a failure. The branch also
+  records its own reads, computed over its own edits alone: a read that a
+  write of the cut's before the fork covers is internal to the cut, but
+  the branch depends on it.
+- At the join, the branch's edits replay onto the cut's journal, and its
+  hooks and whether it observed anything join the cut's. Should a read of
+  the branch overlap an edit the cut made after the fork, by the parent or
+  a sibling joined first, nothing merges but the hooks, the join fails,
+  and the outermost cut runs again whatever its body returns. So a cut
+  behaves as if each fork ran at its join, in join order. A branch merged
+  into another passes up its reads, less those its parent branch's own
+  earlier writes cover. A fork whose turn fails still merges, as a turn is
+  not atomic; a nested cut within the fork makes its work atomic.
+- Levels: a machine counts the cuts it is within, one for a cut it joined
+  as a descendant or a fork. A fork records its level, joins only at it,
+  and a cut's end, nested or outermost, joins the forks it made, merging
+  them, before the cut commits, undoes or runs again.
+- A fork's hooks return to its parent's thread, so hooks are now `Send`;
+  the tests' hook logs moved from `Rc` to `Arc`.
+- A thread that does not start leaves the forked machine to return to its
+  place, which `api-machine-tree` lost.
+- Tests: `tests/runtime_forks_in_cuts.rs` covers forks joining the cut's
+  transaction, with a fork's fork, a failed cut undoing its forks, write
+  skew between siblings forced through channels and run again into join
+  order, a fork conflicting with the cut's write after it even where the
+  cut's earlier write covered the read, joins at the wrong level, a fork's
+  hooks on its machine, and a failed cut waiting on what its fork read. A
+  store unit test covers merges, a refused merge, and a fork's fork whose
+  read its parent branch covered.
 
 ## Verification
 

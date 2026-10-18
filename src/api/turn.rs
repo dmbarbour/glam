@@ -353,6 +353,9 @@ pub struct Machine<'scope, 'env: 'scope> {
     cut: Option<CutTransaction>,
     /// This machine's path from the machine whose turn opened the cut.
     cut_offset: Vec<Key>,
+    /// How deeply cuts nest here: those this machine's turn opened, and one
+    /// for a cut it joined. A fork joins at the level it was made at.
+    cut_levels: usize,
     /// Forks not yet joined, oldest first.
     forks: Vec<PendingFork<'scope>>,
 }
@@ -361,14 +364,18 @@ pub struct Machine<'scope, 'env: 'scope> {
 struct PendingFork<'scope> {
     id: u64,
     path: Vec<Key>,
+    /// The cut level it was made at.
+    level: usize,
     thread: ScopedJoinHandle<'scope, ForkReturn>,
 }
 
-/// What a fork's thread returns at its join: its machine, and a panic that
-/// ended its turn.
+/// What a fork's thread returns at its join: its machine, a panic that
+/// ended its turn, and, for a fork within a cut, its branch of the cut's
+/// transaction.
 struct ForkReturn {
     state: MachineState,
     panic: Option<Box<dyn Any + Send>>,
+    branch: Option<CutTransaction>,
 }
 
 /// A fork of a machine, from [`Machine::fork`], which [`Machine::join`]
@@ -392,6 +399,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             state,
             cut: None,
             cut_offset: Vec::new(),
+            cut_levels: 0,
             forks: Vec::new(),
         }
     }
@@ -431,6 +439,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         if self.cut.is_some() {
             child.cut = self.cut.take();
             child.cut_offset = self.cut_offset.iter().chain(&path).cloned().collect();
+            child.cut_levels = 1;
         }
         let outcome = child.take_turn(turn);
         self.cut = child.cut.take();
@@ -481,9 +490,15 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// Forks the descendant at `path`: takes it, with its own descendants,
     /// to a new thread that takes a turn on it. The fork's closure may
     /// borrow what outlives the turn's [`Runtime::run`]; it joins at
-    /// [`Self::join`], or at the end of the turn or [`Self::scope`] that
-    /// made it. Until then, neither it nor a machine below it is reachable.
-    /// Forks within a cut are not supported yet.
+    /// [`Self::join`], or at the end of the turn, [`Self::scope`] or cut
+    /// that made it. Until then, neither it nor a machine below it is
+    /// reachable.
+    ///
+    /// Within a cut, the fork joins the cut's transaction: it works on a
+    /// branch of it, which sees what the cut wrote before the fork and
+    /// merges at the join, in join order. Should the fork have read what the
+    /// cut wrote after the fork, no serial order explains it, and the
+    /// outermost cut runs again.
     pub fn fork<R: Send + 'scope>(
         &mut self,
         path: impl Into<MachinePath>,
@@ -500,17 +515,37 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         path: impl Into<MachinePath>,
         turn: impl FnOnce(&mut Machine<'scope, 'env>) -> Result<R, Error> + Send + 'scope,
     ) -> Result<Fork<R>, Error> {
-        if self.cut.is_some() {
-            return Err(Error::new("forking within a cut is not supported yet"));
-        }
         let path = path.into().0;
         let state = self.state.fork_out(&path)?;
+        let branch = self.cut.as_ref().map(|cut| CutTransaction {
+            journal: cut.journal.branch(),
+            observed: false,
+            conflicted: false,
+            commit_hooks: Vec::new(),
+            abort_hooks: Vec::new(),
+        });
+        let cut_offset: Vec<Key> = match branch {
+            Some(_) => self.cut_offset.iter().chain(&path).cloned().collect(),
+            None => Vec::new(),
+        };
+        // The thread takes its machine from here, so a thread that does not
+        // start leaves it to return.
+        let start = Arc::new(Mutex::new(Some((state, branch))));
+        let taken = Arc::clone(&start);
         let id = NEXT_FORK.fetch_add(1, Ordering::Relaxed);
         let result = Arc::new(Mutex::new(None));
         let fork_result = Arc::clone(&result);
         let (runtime, scope) = (self.runtime, self.scope);
         let thread = builder.spawn_scoped(scope, move || {
+            let (state, branch) = taken
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+                .expect("a fork's thread takes its machine once");
             let mut machine = Machine::new(runtime, scope, state);
+            machine.cut_levels = usize::from(branch.is_some());
+            machine.cut = branch;
+            machine.cut_offset = cut_offset;
             let panic = match machine.take_turn(turn) {
                 Ok(outcome) => {
                     *fork_result.lock().unwrap_or_else(PoisonError::into_inner) = Some(outcome);
@@ -521,15 +556,26 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             ForkReturn {
                 state: machine.state,
                 panic,
+                branch: machine.cut.take(),
             }
         });
         match thread {
             Ok(thread) => {
-                self.forks.push(PendingFork { id, path, thread });
+                self.forks.push(PendingFork {
+                    id,
+                    path,
+                    level: self.cut_levels,
+                    thread,
+                });
                 Ok(Fork { id, result })
             }
             Err(error) => {
-                self.state.join_in(&path, MachineState::default());
+                let (state, _) = start
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take()
+                    .expect("a thread that did not start took nothing");
+                self.state.join_in(&path, state);
                 Err(Error::new(format!(
                     "a fork's thread did not start: {error}"
                 )))
@@ -538,20 +584,29 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     }
 
     /// Waits for `fork`'s turn to end, returns its machine to its place, and
-    /// returns the turn's result. A panic in the fork resumes here. Joins
-    /// within a cut are not supported yet.
+    /// returns the turn's result. A panic in the fork resumes here. A fork
+    /// joins in the cut it was made in, outside any if it was made outside
+    /// any. Within a cut, its branch merges; should the fork have read what
+    /// the cut wrote after the fork, this fails, and the outermost cut runs
+    /// again whatever its body returns.
     pub fn join<R>(&mut self, fork: Fork<R>) -> Result<R, Error> {
-        if self.cut.is_some() {
-            return Err(Error::new("joining within a cut is not supported yet"));
-        }
         let index = self
             .forks
             .iter()
             .position(|pending| pending.id == fork.id)
             .ok_or_else(|| Error::new("the fork belongs to another machine"))?;
+        if self.forks[index].level != self.cut_levels {
+            return Err(Error::new("a fork joins in the cut it was made in"));
+        }
         let pending = self.forks.remove(index);
-        if let Some(panic) = self.join_pending(pending) {
+        let (panic, serial) = self.join_pending(pending);
+        if let Some(panic) = panic {
             resume_unwind(panic);
+        }
+        if !serial {
+            return Err(Error::new(
+                "the fork read what its cut wrote after the fork, so the cut runs again",
+            ));
         }
         fork.result
             .lock()
@@ -582,20 +637,35 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         self.forks = before;
         let mut first_panic = None;
         for pending in since {
-            if let Some(panic) = self.join_pending(pending) {
+            if let (Some(panic), _) = self.join_pending(pending) {
                 first_panic.get_or_insert(panic);
             }
         }
         first_panic
     }
 
-    fn join_pending(&mut self, pending: PendingFork<'scope>) -> Option<Box<dyn Any + Send>> {
-        let ForkReturn { state, panic } = pending
+    /// Joins a fork's thread and returns its machine to its place, merging
+    /// its branch into this machine's cut. Returns the fork's panic, and
+    /// whether its branch merged in a serial order.
+    fn join_pending(
+        &mut self,
+        pending: PendingFork<'scope>,
+    ) -> (Option<Box<dyn Any + Send>>, bool) {
+        let ForkReturn {
+            state,
+            panic,
+            branch,
+        } = pending
             .thread
             .join()
             .unwrap_or_else(|panic| resume_unwind(panic));
         self.state.join_in(&pending.path, state);
-        panic
+        // A panic may have abandoned the cut a branch came from.
+        let serial = match (branch, &mut self.cut) {
+            (Some(branch), Some(cut)) => cut.merge(branch),
+            _ => true,
+        };
+        (panic, serial)
     }
 }
 
@@ -614,8 +684,25 @@ struct CutTransaction {
     /// Whether a read observed shared state, so a change could wake the cut
     /// after a failure.
     observed: bool,
+    /// Whether a fork's branch read what the cut wrote after the fork, so
+    /// the outermost cut must run again.
+    conflicted: bool,
     commit_hooks: Vec<Hook>,
     abort_hooks: Vec<Hook>,
+}
+
+impl CutTransaction {
+    /// Merges a fork's branch of this transaction, returning whether it
+    /// merged in a serial order. A branch that did not still brings its
+    /// hooks, so that its abort hooks run as the attempt aborts.
+    fn merge(&mut self, branch: CutTransaction) -> bool {
+        let serial = self.journal.merge_branch(&branch.journal);
+        self.observed |= branch.observed;
+        self.conflicted |= branch.conflicted || !serial;
+        self.commit_hooks.extend(branch.commit_hooks);
+        self.abort_hooks.extend(branch.abort_hooks);
+        serial
+    }
 }
 
 /// A hook, the stack items it captured when registered, and the path of
@@ -627,7 +714,7 @@ struct Hook {
     run: Box<HookFn>,
 }
 
-type HookFn = dyn FnOnce(&mut Machine<'_, '_>) -> Result<(), Error>;
+type HookFn = dyn FnOnce(&mut Machine<'_, '_>) -> Result<(), Error> + Send;
 
 /// When an aborted outermost cut runs again.
 enum CutRetry {
@@ -1058,15 +1145,19 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             self.cut = Some(CutTransaction {
                 journal: StoreJournal::new(resources.reflection_snapshot().1),
                 observed: false,
+                conflicted: false,
                 commit_hooks: Vec::new(),
                 abort_hooks: Vec::new(),
             });
-            let outcome = body(self);
+            let outcome = self.within_cut_level(&mut body);
             let cut = self
                 .cut
                 .take()
                 .expect("the outermost cut keeps its transaction");
             let next = match outcome {
+                // An attempt whose forks merged in no serial order is
+                // inconsistent, whatever it returned.
+                _ if cut.conflicted => CutRetry::Now,
                 Ok(result) => match resources.commit_reflection(&cut.journal) {
                     StoreCommitResult::Committed => {
                         let hook_error = self.run_hooks(cut.commit_hooks);
@@ -1125,7 +1216,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     pub fn on_commit(
         &mut self,
         items: usize,
-        hook: impl FnOnce(&mut Machine<'_, '_>) -> Result<(), Error> + 'static,
+        hook: impl FnOnce(&mut Machine<'_, '_>) -> Result<(), Error> + Send + 'static,
     ) -> Result<(), Error> {
         let hook = self.hook(items, hook)?;
         match &mut self.cut {
@@ -1146,7 +1237,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     pub fn on_abort(
         &mut self,
         items: usize,
-        hook: impl FnOnce(&mut Machine<'_, '_>) -> Result<(), Error> + 'static,
+        hook: impl FnOnce(&mut Machine<'_, '_>) -> Result<(), Error> + Send + 'static,
     ) -> Result<(), Error> {
         let hook = self.hook(items, hook)?;
         if let Some(cut) = &mut self.cut {
@@ -1158,7 +1249,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     fn hook(
         &mut self,
         items: usize,
-        run: impl FnOnce(&mut Machine<'_, '_>) -> Result<(), Error> + 'static,
+        run: impl FnOnce(&mut Machine<'_, '_>) -> Result<(), Error> + Send + 'static,
     ) -> Result<Hook, Error> {
         let depth = self.require(items)?;
         Ok(Hook {
@@ -1202,6 +1293,24 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         outcome
     }
 
+    /// Runs a cut's body one level deeper, then joins the forks it made and
+    /// left unjoined, merging their branches. A fork's panic resumes once
+    /// they have joined.
+    fn within_cut_level<R>(
+        &mut self,
+        body: &mut impl FnMut(&mut Self) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        let first = NEXT_FORK.load(Ordering::Relaxed);
+        self.cut_levels += 1;
+        let outcome = body(self);
+        let fork_panic = self.join_forks_since(first);
+        self.cut_levels -= 1;
+        if let Some(panic) = fork_panic {
+            resume_unwind(panic);
+        }
+        outcome
+    }
+
     fn nested_cut<R>(
         &mut self,
         mut body: impl FnMut(&mut Self) -> Result<R, Error>,
@@ -1210,7 +1319,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         let cut = self.cut.as_ref().expect("a nested cut runs within a cut");
         let journal = cut.journal.clone();
         let (commit_hooks, abort_hooks) = (cut.commit_hooks.len(), cut.abort_hooks.len());
-        let outcome = body(self);
+        let outcome = self.within_cut_level(&mut body);
         if outcome.is_err() {
             self.state = start;
             let cut = self

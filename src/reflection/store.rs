@@ -263,6 +263,20 @@ pub struct StoreJournal {
     views: RedBlackTreeMapSync<VolumeId, PublicValue>,
     observations: Arc<Mutex<Box<dyn ConflictObservationIndex>>>,
     edits: Vec<StoreEdit>,
+    branch: Option<Branch>,
+}
+
+/// A branch of a journal, for concurrent work within one transaction that
+/// merges back at its join ([`StoreJournal::branch`]).
+#[derive(Clone)]
+struct Branch {
+    /// How many edits the journal held at the fork: the branch's own edits
+    /// follow them.
+    base: usize,
+    /// What the branch read of the transaction's state at the fork, which
+    /// the journal's later edits must not overlap at the merge. Clones of
+    /// the branch, its alternatives, share it, as they share observations.
+    reads: Arc<Mutex<Vec<ConflictAddress>>>,
 }
 
 impl StoreJournal {
@@ -275,6 +289,76 @@ impl StoreJournal {
             views,
             observations,
             edits: Vec::new(),
+            branch: None,
+        }
+    }
+
+    /// A branch of this journal, for work concurrent with the rest of its
+    /// transaction. It shares the transaction's observations, so its reads
+    /// join the transaction's validation, and it records them apart too,
+    /// for its merge.
+    pub(crate) fn branch(&self) -> Self {
+        let mut branch = self.clone();
+        branch.branch = Some(Branch {
+            base: self.edits.len(),
+            reads: Arc::new(Mutex::new(Vec::new())),
+        });
+        branch
+    }
+
+    /// Merges `branch`, a branch of this journal, as if its work ran now:
+    /// its edits replay onto this journal. It fails, merging nothing, when
+    /// the branch read what this journal wrote after the fork, so that no
+    /// serial order explains the branch's reads.
+    pub(crate) fn merge_branch(&mut self, branch: &StoreJournal) -> bool {
+        let Branch { base, reads } = branch
+            .branch
+            .as_ref()
+            .expect("only a branch merges into its journal");
+        let base = *base;
+        let reads = reads.lock().unwrap().clone();
+        let Some(later) = self.edits.get(base..) else {
+            return false;
+        };
+        if reads
+            .iter()
+            .any(|read| later.iter().any(|edit| edit.address().overlaps(read)))
+        {
+            return false;
+        }
+        // What the branch read, this journal's own edits before the fork may
+        // cover or widen, as for a read of its own.
+        if let Some(Branch {
+            base: own_base,
+            reads: own_reads,
+        }) = &self.branch
+        {
+            let own = self.edits.get(*own_base..base).unwrap_or_default();
+            let inherited = reads.iter().filter_map(|read| {
+                let (volume, path) = read.reflection_parts();
+                dependency(own, volume, path.clone())
+                    .map(|path| ConflictAddress::reflection(volume, path))
+            });
+            own_reads.lock().unwrap().extend(inherited);
+        }
+        for edit in branch.edits[base..].iter().cloned() {
+            self.replay(edit);
+        }
+        true
+    }
+
+    fn replay(&mut self, edit: StoreEdit) {
+        match &edit {
+            StoreEdit::Set { value: None, .. } | StoreEdit::Rewrite { updater: None, .. } => {
+                self.edits.push(edit);
+            }
+            StoreEdit::Set { .. } | StoreEdit::Rewrite { .. } => {
+                let volume = edit.address().reflection_parts().0;
+                let values = self.snapshot.values.clone();
+                self.push_edit(volume, edit, |view, edit| {
+                    values.with_boundary_access(|access| apply_edit(&access, view, edit))
+                });
+            }
         }
     }
 
@@ -286,30 +370,27 @@ impl StoreJournal {
     }
 
     pub(crate) fn observe_volume_read(&mut self, volume: VolumeId, path: &[Key]) -> bool {
-        let address = ConflictAddress::reflection(volume, ConflictPath::from_keys(path.to_vec()));
+        let path = ConflictPath::from_keys(path.to_vec());
+        // A branch's read depends on the transaction's state at the fork,
+        // which the branch's own edits alone may cover.
+        if let Some(Branch { base, reads }) = &self.branch
+            && let Some(read) = dependency(&self.edits[*base..], volume, path.clone())
+        {
+            reads
+                .lock()
+                .unwrap()
+                .push(ConflictAddress::reflection(volume, read));
+        }
         if self.snapshot.volume(volume).is_none() {
-            self.observations.lock().unwrap().observe(&address);
+            self.observations
+                .lock()
+                .unwrap()
+                .observe(&ConflictAddress::reflection(volume, path));
             return true;
         }
-        let mut dependency = ConflictPath::from_keys(path.to_vec());
-        for edit in self.edits.iter().rev() {
-            let (edit_volume, edit_path) = edit.address().reflection_parts();
-            match edit {
-                StoreEdit::Set { .. }
-                    if edit_volume == volume && edit_path.is_prefix_of(&dependency) =>
-                {
-                    return false;
-                }
-                StoreEdit::Rewrite { .. }
-                    if edit_volume == volume && edit_path.overlaps(&dependency) =>
-                {
-                    if edit_path.is_prefix_of(&dependency) {
-                        dependency = edit_path.clone();
-                    }
-                }
-                StoreEdit::Set { .. } | StoreEdit::Rewrite { .. } => {}
-            }
-        }
+        let Some(dependency) = dependency(&self.edits, volume, path) else {
+            return false;
+        };
         self.observations
             .lock()
             .unwrap()
@@ -844,6 +925,30 @@ fn query_belongs_to(domain: &Arc<QueryDomain>, handle: &Arc<EvaluationQueryHandl
         .domain
         .upgrade()
         .is_some_and(|owner| Arc::ptr_eq(domain, &owner))
+}
+
+/// What a read of `path` in `volume` depends on, given the `edits` before
+/// it: nothing when a set covers it, and a rewrite's whole path when one
+/// above it applies.
+fn dependency(edits: &[StoreEdit], volume: VolumeId, path: ConflictPath) -> Option<ConflictPath> {
+    let mut dependency = path;
+    for edit in edits.iter().rev() {
+        let (edit_volume, edit_path) = edit.address().reflection_parts();
+        match edit {
+            StoreEdit::Set { .. }
+                if edit_volume == volume && edit_path.is_prefix_of(&dependency) =>
+            {
+                return None;
+            }
+            StoreEdit::Rewrite { .. }
+                if edit_volume == volume && edit_path.is_prefix_of(&dependency) =>
+            {
+                dependency = edit_path.clone();
+            }
+            StoreEdit::Set { .. } | StoreEdit::Rewrite { .. } => {}
+        }
+    }
+    Some(dependency)
 }
 
 fn virtual_keys(path: &[Key]) -> Vec<Key> {

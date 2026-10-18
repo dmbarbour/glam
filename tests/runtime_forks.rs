@@ -173,23 +173,6 @@ fn a_fork_joins_on_the_machine_that_made_it() {
 }
 
 #[test]
-fn forks_within_a_cut_are_not_supported_yet() {
-    let mut rt = runtime();
-    rt.run("m", |m| {
-        let mut fork = Some(m.fork("before", |_| Ok(()))?);
-        let (forked, joined) = m.cut(|m| {
-            let forked = m.fork("within", |_| Ok(())).map(|_| ()).unwrap_err();
-            let joined = m.join(fork.take().expect("one attempt")).unwrap_err();
-            Ok((forked, joined))
-        })?;
-        assert!(forked.to_string().contains("not supported"), "{forked}");
-        assert!(joined.to_string().contains("not supported"), "{joined}");
-        Ok(())
-    })
-    .expect("the turn should succeed");
-}
-
-#[test]
 fn a_fork_s_thread_may_be_configured() {
     let mut rt = runtime();
     let name = rt

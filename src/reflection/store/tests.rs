@@ -108,11 +108,16 @@ fn assert_store_root_boundary_inventory(
         views,
         observations,
         edits,
+        branch,
     } = journal;
     let _: &StoreSnapshot = snapshot;
     let _: &RedBlackTreeMapSync<VolumeId, PublicValue> = views;
     let _: &Arc<Mutex<Box<dyn ConflictObservationIndex>>> = observations;
     let _: &Vec<StoreEdit> = edits;
+    if let Some(Branch { base, reads }) = branch {
+        let _: &usize = base;
+        let _: &Arc<Mutex<Vec<ConflictAddress>>> = reads;
+    }
 
     let ReflectionStore {
         identity,
@@ -670,6 +675,51 @@ fn virtual_writes_change_no_volume_but_conflict_with_their_readers() {
     assert!(same_representation(&store, store.root(), &heap_root));
     assert_eq!(store.try_commit(&heap_reader), StoreCommitResult::Committed);
     assert_eq!(store.try_commit(&reader), StoreCommitResult::Conflict);
+}
+
+#[test]
+fn branches_merge_in_a_serial_order_or_not_at_all() {
+    let store = store();
+    let mut journal = StoreJournal::new(store.snapshot());
+    journal.write(path(&["x"]), integer(&store, 1));
+    let mut branch = journal.branch();
+    assert!(
+        !branch.observe_read(&path(&["x"])),
+        "the transaction's write covers the read for its validation"
+    );
+    branch.write(path(&["y"]), integer(&store, 2));
+    let mut sibling = journal.branch();
+    sibling.write(path(&["z"]), integer(&store, 3));
+    assert!(journal.merge_branch(&sibling), "the sibling read nothing");
+    assert!(
+        journal.merge_branch(&branch),
+        "nothing the branch read changed after its fork"
+    );
+    assert_eq!(journal.edits.len(), 3, "both branches' edits replayed");
+
+    let mut late = journal.branch();
+    late.observe_read(&path(&["x"]));
+    journal.write(path(&["x"]), integer(&store, 4));
+    assert!(
+        !journal.merge_branch(&late),
+        "the transaction wrote what the branch read, after its fork"
+    );
+    assert_eq!(
+        journal.edits.len(),
+        4,
+        "an inconsistent branch merges nothing"
+    );
+
+    let mut child = journal.branch();
+    child.write(path(&["w"]), integer(&store, 5));
+    let mut grandchild = child.branch();
+    grandchild.observe_read(&path(&["w"]));
+    assert!(child.merge_branch(&grandchild));
+    journal.write(path(&["w"]), integer(&store, 6));
+    assert!(
+        journal.merge_branch(&child),
+        "the child's own write covered what its branch read"
+    );
 }
 
 #[test]

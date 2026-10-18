@@ -94,7 +94,7 @@ impl ConflictAddress {
         }
     }
 
-    fn overlaps(&self, other: &Self) -> bool {
+    pub(super) fn overlaps(&self, other: &Self) -> bool {
         self.is_prefix_of(other) || other.is_prefix_of(self)
     }
 

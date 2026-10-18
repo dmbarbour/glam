@@ -2079,8 +2079,14 @@ maps the short names used here to file names.
     no values; a joined machine does, synchronously.
   - A synchronous turn within a cut joins the cut: its actions on shared
     state join the transaction, and its state, part of its parent's,
-    returns when the cut undoes. A fork within a cut will join the cut
-    too, with its siblings serializable; until then it fails.
+    returns when the cut undoes.
+  - A fork within a cut joins the cut too, with its siblings serializable
+    (maintainer, the same day; built in `api-forks-in-cuts`). It works on
+    a branch of the cut's journal that merges at its join, in join order,
+    so the cut behaves as if each fork ran at its join. A fork that read
+    what the cut wrote after the fork makes the outermost cut run again.
+    A fork joins in the cut it was made in, and a cut's end joins the
+    forks it made.
 - **Alternatives rejected:**
   - threads taking turns on arbitrary machines (as built in
     `api-scoped-threads`), with waiting, declining, an `await_any` or
@@ -2091,6 +2097,8 @@ maps the short names used here to file names.
   - moving values within `m.run`, since separate operations explain more
     simply.
 - **Consequences:**
+  - Hooks are `Send`, since a fork's hooks return to its parent's thread
+    at the join.
   - Machines cannot deadlock over machines: holding is a tree, joins point
     downward, and nothing waits for a machine. The waits that remain are
     failed cuts and joins, both visible to the runtime, so settlement and

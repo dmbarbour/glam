@@ -1,9 +1,9 @@
 //! Cuts: a turn's transactions over the shared heap, which also bound a
 //! backtracking search (`turn-cuts-bound-transactions-and-search`).
 
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::cell::Cell;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 use glam::{Error, ErrorKind, Machine, ModuleInput, Runtime, RuntimeConfig, ValueKind};
 
@@ -31,7 +31,7 @@ fn heap_undefined(rt: &mut Runtime, path: &[&str]) -> bool {
     .expect("the read should succeed")
 }
 
-type Log = Rc<RefCell<Vec<&'static str>>>;
+type Log = Arc<Mutex<Vec<&'static str>>>;
 
 /// A hook that records `entry` in `log`.
 fn record(
@@ -40,7 +40,7 @@ fn record(
 ) -> impl FnOnce(&mut Machine<'_, '_>) -> Result<(), Error> + use<> {
     let log = log.clone();
     move |_| {
-        log.borrow_mut().push(entry);
+        log.lock().unwrap().push(entry);
         Ok(())
     }
 }
@@ -190,10 +190,10 @@ fn hooks_run_in_order_on_commit_and_in_reverse_on_abort() {
             m.cut(|m| m.on_commit(0, record(&log, "commit 2")))
         })?;
         assert_eq!(
-            *log.borrow(),
+            *log.lock().unwrap(),
             ["nested abort 2", "nested abort 1", "commit 1", "commit 2"]
         );
-        log.borrow_mut().clear();
+        log.lock().unwrap().clear();
 
         let failed: Result<(), Error> = m.cut(|m| {
             m.on_abort(0, record(&log, "outer abort"))?;
@@ -202,18 +202,18 @@ fn hooks_run_in_order_on_commit_and_in_reverse_on_abort() {
         });
         assert!(failed.is_err());
         assert_eq!(
-            *log.borrow(),
+            *log.lock().unwrap(),
             ["committed nested abort", "outer abort"],
             "an abort backtracks through the hooks of nested cuts that committed"
         );
-        log.borrow_mut().clear();
+        log.lock().unwrap().clear();
 
         m.on_commit(0, record(&log, "outside a cut"))?;
         m.on_abort(0, record(&log, "never"))?;
         Ok(())
     })
     .expect("the turn should succeed");
-    assert_eq!(*log.borrow(), ["outside a cut"]);
+    assert_eq!(*log.lock().unwrap(), ["outside a cut"]);
 }
 
 #[test]
@@ -306,7 +306,7 @@ fn a_hook_s_error_replaces_a_result_or_a_failure_but_not_another_error() {
                 .to_string(),
             "the first hook errs"
         );
-        assert_eq!(*log.borrow(), ["the second hook runs"]);
+        assert_eq!(*log.lock().unwrap(), ["the second hook runs"]);
         m.cut(|m| {
             let failed: Result<(), Error> = m.cut(|m| {
                 m.on_abort(0, |_| Err(Error::new("the abort hook errs")))?;
@@ -475,7 +475,7 @@ fn hooks_run_on_the_machine_that_registered_them() {
                 let log = log.clone();
                 c.on_commit(0, move |c| {
                     c.get("name")?;
-                    log.borrow_mut().push(if c.pop_text()? == "child" {
+                    log.lock().unwrap().push(if c.pop_text()? == "child" {
                         "the child's hook ran on the child"
                     } else {
                         "elsewhere"
@@ -486,7 +486,7 @@ fn hooks_run_on_the_machine_that_registered_them() {
         })
     })
     .expect("the turn should succeed");
-    assert_eq!(*log.borrow(), ["the child's hook ran on the child"]);
+    assert_eq!(*log.lock().unwrap(), ["the child's hook ran on the child"]);
     let compensated = rt
         .run(["parent", "child"], |c| {
             c.get("compensated")?;
