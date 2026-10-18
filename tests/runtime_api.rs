@@ -186,3 +186,31 @@ fn scoped_threads_take_turns_on_one_runtime() {
         assert_eq!(value, index);
     }
 }
+
+#[test]
+fn workers_activate_once_in_a_runtime_opened_without_them() {
+    let rt = runtime();
+    rt.activate_workers(2).expect("workers should activate");
+    assert!(
+        rt.activate_workers(2).is_err(),
+        "workers activate only once"
+    );
+    let text = rt
+        .run("cli", |m| {
+            m.compile(
+                ["example"],
+                ModuleInput::script("g", "language g0\nasm.result = \"with workers\"\n"),
+            )?;
+            m.access("asm.result")?;
+            m.pop_text()
+        })
+        .expect("the turn should succeed");
+    assert_eq!(text, "with workers");
+
+    let opened_with_workers = Runtime::open(RuntimeConfig::new().worker_threads(1))
+        .expect("a runtime with a worker should open");
+    assert!(
+        opened_with_workers.activate_workers(1).is_err(),
+        "a runtime opened with workers has activated them"
+    );
+}

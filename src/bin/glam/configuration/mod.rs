@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use glam::{
-    Assembler, Error, EvaluationRuntime, FileSourceSystem, ModuleInput, PromiseResolver, Value,
-    Values,
+    Assembler, Error, EvaluationRuntime, FileSourceSystem, ModuleInput, PromiseResolver, Runtime,
+    Value, Values,
 };
 
 use crate::command_line::{CliArguments, CommandPlanParts};
@@ -14,27 +14,27 @@ use logger::LogHost;
 
 pub(super) struct PreparedAssembly {
     pub(super) local_files: FileSourceSystem,
-    pub(super) runtime: EvaluationRuntime,
+    /// The CLI's runtime, which the main thread opens and drops.
+    pub(super) runtime: Runtime,
     pub(super) log_host: Arc<LogHost>,
-    pub(super) assembler: Assembler,
     pub(super) configuration: LoadedConfiguration,
     process_args: Option<PromiseResolver>,
     reflection_args: Option<PromiseResolver>,
 }
 
 impl PreparedAssembly {
+    /// The runtime's assembler, for what has not moved to turns.
+    pub(super) fn assembler(&self) -> &Assembler {
+        glam::transition::assembler(&self.runtime)
+    }
+
     pub(super) fn resolve_environment(&mut self, command: &CommandPlanParts) -> Result<(), Error> {
+        let values = self.assembler().values();
         if let Some(resolver) = self.process_args.take() {
-            resolver.resolve(argument_values(
-                &self.assembler.values(),
-                &command.process_args,
-            ))?;
+            resolver.resolve(argument_values(&values, &command.process_args))?;
         }
         if let Some(resolver) = self.reflection_args.take() {
-            resolver.resolve(argument_values(
-                &self.assembler.values(),
-                &command.reflection_args,
-            ))?;
+            resolver.resolve(argument_values(&values, &command.reflection_args))?;
         }
         Ok(())
     }
@@ -52,7 +52,7 @@ impl PreparedAssembly {
 pub(super) struct PreparationFailure {
     pub(super) local_files: FileSourceSystem,
     pub(super) log_host: Arc<LogHost>,
-    pub(super) assembler: Assembler,
+    pub(super) runtime: Runtime,
     pub(super) error: Error,
 }
 
@@ -63,14 +63,18 @@ pub(super) fn prepare(
     initial_environment: Option<InitialCliEnvironment>,
 ) -> Result<PreparedAssembly, Box<PreparationFailure>> {
     let local_files = FileSourceSystem::default();
-    let runtime = EvaluationRuntime::new(0).expect("a dormant evaluation runtime is valid");
-    let diagnostics = glam::DiagnosticBus::for_runtime(&runtime);
-    let log_host = Arc::new(LogHost::with_runtime(runtime.clone(), &diagnostics));
+    let evaluation_runtime =
+        EvaluationRuntime::new(0).expect("a dormant evaluation runtime is valid");
+    let diagnostics = glam::DiagnosticBus::for_runtime(&evaluation_runtime);
+    let log_host = Arc::new(LogHost::with_runtime(
+        evaluation_runtime.clone(),
+        &diagnostics,
+    ));
     let mut process_args = None;
     let mut reflection_args = None;
     let assembler = Assembler::builder()
         .source_system(local_files.clone())
-        .evaluation_runtime(runtime.clone())
+        .evaluation_runtime(evaluation_runtime)
         .diagnostic_bus(diagnostics)
         .reflection_environment(|environment| {
             let (process_value, process_resolver) =
@@ -89,6 +93,8 @@ pub(super) fn prepare(
         .expect("main's reflection environment must be a dictionary")
         .build()
         .expect("main's assembler configuration must be valid");
+    let runtime = glam::transition::runtime_around(assembler);
+    let assembler = glam::transition::assembler(&runtime);
     if let Some((process_arguments, reflection_arguments)) = initial_environment {
         let values = assembler.values();
         process_args
@@ -102,19 +108,21 @@ pub(super) fn prepare(
             .resolve(argument_values(&values, &reflection_arguments))
             .expect("fresh bootstrap reflection argument promise should resolve");
     }
-    let configuration = load(&assembler).map_err(|error| {
-        Box::new(PreparationFailure {
-            local_files: local_files.clone(),
-            log_host: log_host.clone(),
-            assembler: assembler.clone(),
-            error,
-        })
-    })?;
+    let configuration = match load(assembler) {
+        Ok(configuration) => configuration,
+        Err(error) => {
+            return Err(Box::new(PreparationFailure {
+                local_files,
+                log_host,
+                runtime,
+                error,
+            }));
+        }
+    };
     Ok(PreparedAssembly {
         local_files,
         runtime,
         log_host,
-        assembler,
         configuration,
         process_args,
         reflection_args,
@@ -313,7 +321,6 @@ mod owner_tests {
             local_files: _,
             runtime: _,
             log_host: _,
-            assembler: _,
             configuration: _,
             process_args: _,
             reflection_args: _,
@@ -321,7 +328,7 @@ mod owner_tests {
         let PreparationFailure {
             local_files: _,
             log_host: _,
-            assembler: _,
+            runtime: _,
             error: _,
         } = failure;
         let LoadedConfiguration { value, environment } = loaded;

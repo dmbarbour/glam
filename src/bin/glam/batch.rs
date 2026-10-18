@@ -62,9 +62,10 @@ pub(super) fn prepare_assembly(
         let PreparationFailure {
             local_files,
             log_host,
-            assembler,
+            runtime,
             error,
         } = *failure;
+        let assembler = glam::transition::assembler(&runtime);
         let diagnostics = assembler.diagnostic_bus();
         publish_error(&diagnostics, &assembler.values(), &error);
         finish_local_files(
@@ -73,7 +74,7 @@ pub(super) fn prepare_assembly(
             &diagnostics,
             &assembler.values(),
         );
-        log_host.drain_default(&DefaultLogger::new(assembler));
+        log_host.drain_default(&DefaultLogger::new(assembler.clone()));
         ExitCode::from(1)
     })
 }
@@ -113,8 +114,8 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
     };
     if let Err(error) = prepared.resolve_environment(&command_parts) {
         publish_error(
-            &prepared.assembler.diagnostic_bus(),
-            &prepared.assembler.values(),
+            &prepared.assembler().diagnostic_bus(),
+            &prepared.assembler().values(),
             &error,
         );
         return finish_without_logger(prepared, command_parts.manifest.as_deref(), true);
@@ -128,8 +129,8 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
     };
     if let Err(error) = prepared.runtime.activate_workers(worker_threads) {
         publish_error(
-            &prepared.assembler.diagnostic_bus(),
-            &prepared.assembler.values(),
+            &prepared.assembler().diagnostic_bus(),
+            &prepared.assembler().values(),
             &error,
         );
         return finish_without_logger(prepared, command_parts.manifest.as_deref(), true);
@@ -142,14 +143,15 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
     } = command_parts;
     let PreparedAssembly {
         local_files,
+        runtime,
         log_host,
-        assembler,
         configuration,
         ..
     } = prepared;
+    let assembler = glam::transition::assembler(&runtime);
     let assembler_diagnostics = assembler.diagnostic_bus();
-    let logger = start_logger(&assembler, &configuration.value, log_host.clone());
-    let result = assemble(&assembler, inputs, assembly_args, configuration.environment);
+    let logger = start_logger(assembler, &configuration.value, log_host.clone());
+    let result = assemble(assembler, inputs, assembly_args, configuration.environment);
     let mut operation_failed = false;
     match result {
         Ok(bytes) => {
@@ -182,7 +184,7 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
     operation_failed |= super::profile::time("settle", || {
         settle_batch_runtime(&assembler.evaluation_runtime(), &logger_supervisor)
     });
-    super::profile::report(&assembler.evaluation_runtime());
+    super::profile::report(&runtime);
 
     logger_thread.join().expect("logger task should not panic");
     if let Err(error) = logger_supervisor.deliver_fallback() {
@@ -357,21 +359,21 @@ pub(super) fn finish_without_logger(
     manifest: Option<&Path>,
     operation_failed: bool,
 ) -> ExitCode {
-    let diagnostics = prepared.assembler.diagnostic_bus();
+    let diagnostics = prepared.assembler().diagnostic_bus();
     let runtime_failed = settle_batch_runtime_default(
-        &prepared.assembler.evaluation_runtime(),
+        &prepared.assembler().evaluation_runtime(),
         &diagnostics,
-        &prepared.assembler.values(),
+        &prepared.assembler().values(),
     );
     let file_failure = finish_local_files(
         &prepared.local_files,
         manifest,
         &diagnostics,
-        &prepared.assembler.values(),
+        &prepared.assembler().values(),
     );
     prepared
         .log_host
-        .drain_default(&DefaultLogger::new(prepared.assembler));
+        .drain_default(&DefaultLogger::new(prepared.assembler().clone()));
     if operation_failed || runtime_failed || file_failure || diagnostics.counts().errors() != 0 {
         ExitCode::from(1)
     } else {
@@ -385,7 +387,7 @@ pub(super) fn configured_cli(arguments: CliArguments, inspection: Option<bool>) 
         Err(exit) => return exit,
     };
     let expansion = match expand_configured(
-        &prepared.assembler,
+        prepared.assembler(),
         &prepared.configuration.value,
         arguments,
     ) {
@@ -394,13 +396,13 @@ pub(super) fn configured_cli(arguments: CliArguments, inspection: Option<bool>) 
             prepared.fail_environment("configured CLI expansion failed");
             for diagnostic in error.diagnostics() {
                 prepared
-                    .assembler
+                    .assembler()
                     .diagnostic_bus()
                     .publish_local(diagnostic.clone());
             }
-            prepared.assembler.diagnostic_bus().publish_local(
+            prepared.assembler().diagnostic_bus().publish_local(
                 error
-                    .diagnostic(&prepared.assembler.values())
+                    .diagnostic(&prepared.assembler().values())
                     .expect("configured CLI diagnostics belong to its assembler runtime"),
             );
             return finish_without_logger(prepared, None, true);
@@ -409,7 +411,7 @@ pub(super) fn configured_cli(arguments: CliArguments, inspection: Option<bool>) 
     let (command, diagnostics) = expansion.into_parts();
     for diagnostic in diagnostics {
         prepared
-            .assembler
+            .assembler()
             .diagnostic_bus()
             .publish_local(diagnostic);
     }
@@ -417,8 +419,8 @@ pub(super) fn configured_cli(arguments: CliArguments, inspection: Option<bool>) 
         let parts = command.into_parts();
         if let Err(error) = prepared.resolve_environment(&parts) {
             publish_error(
-                &prepared.assembler.diagnostic_bus(),
-                &prepared.assembler.values(),
+                &prepared.assembler().diagnostic_bus(),
+                &prepared.assembler().values(),
                 &error,
             );
             return finish_without_logger(prepared, None, true);
@@ -426,10 +428,10 @@ pub(super) fn configured_cli(arguments: CliArguments, inspection: Option<bool>) 
         let output = format_configured_arguments(&parts.process_args, nul_terminated);
         let failed = if let Err(error) = io::stdout().write_all(&output) {
             prepared
-                .assembler
+                .assembler()
                 .diagnostic_bus()
                 .publish_local(Diagnostic::new(
-                    &prepared.assembler.values(),
+                    &prepared.assembler().values(),
                     Severity::Error,
                     format!("could not write configured CLI inspection to stdout: {error}"),
                 ));

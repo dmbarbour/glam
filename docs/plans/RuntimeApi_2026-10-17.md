@@ -1,7 +1,7 @@
 # Runtime API Plan — 2026-10-17
 
-Status: `api-runtime-turns` built 2026-10-17 (see
-[As built](#as-built-2026-10-17)). The CLI's transition was re-planned the
+Status: `api-runtime-turns` built 2026-10-17 and `api-cli-bridge`
+2026-10-18 (see [As built](#as-built)). The CLI's transition was re-planned the
 same day, after a survey of the CLI (see [CLI Transition](#cli-transition)):
 `api-cli` gave way to a bridge and a CLI slice in each later step, moved
 piecemeal (maintainer, 2026-10-17). On 2026-10-18 the maintainer agreed
@@ -78,7 +78,8 @@ handle API goes.
    [The bridge](#the-bridge)).
    - A hidden module, `glam::transition`, with four functions: a `Runtime`
      around an `Assembler` the caller built, that runtime's assembler, and
-     a `Value` pushed onto or popped from a machine.
+     a `Value` pushed onto or popped from a machine. The last two come with
+     their first use, in `api-machine-data`.
    - `Runtime::activate_workers(n)`, since the configured CLI learns its
      worker count from the configuration after the runtime opens; and
      `Runtime::profile()` under `glam-prof`.
@@ -448,9 +449,9 @@ For `api-cuts`: `m.cut(|t| …)`, after glam's `.cut`, which bounds the same
 transaction and search (maintainer, 2026-10-18), in place of the review's
 `m.transact`.
 
-## As built (2026-10-17)
+## As built
 
-`api-runtime-turns`, in `src/api/turn.rs`:
+`api-runtime-turns` (2026-10-17), in `src/api/turn.rs`:
 - `Runtime::open(RuntimeConfig)` builds an evaluation runtime and an
   assembler on it, held privately; dropping the `Runtime` drops the
   machines' values, then retires both through today's path. A
@@ -473,6 +474,22 @@ transaction and search (maintainer, 2026-10-18), in place of the review's
   no binary fails as evaluation does, with its structured error.
 - Tests in `tests/runtime_api.rs`, including scoped threads taking turns
   on one runtime.
+
+`api-cli-bridge` (2026-10-18):
+- `src/transition.rs` is `glam::transition`, hidden from the docs, with
+  `runtime_around` and `assembler`; each function's doc names the CLI
+  modules that use it. A value's push and pop wait for their first use.
+- `Runtime::activate_workers` starts the workers once in a runtime opened
+  with none, and `Runtime::profile` returns the `glam-prof` snapshot. A
+  test activates workers, takes a turn, and checks that activation happens
+  once.
+- The CLI wraps its assembler in a `Runtime` as soon as it is built, so
+  `PreparedAssembly` and `PreparationFailure` hold the `Runtime` and no
+  separate assembler or evaluation runtime. The main thread drops it; the
+  logger's thread still holds assembler handles until `api-scoped-threads`.
+- Bridge uses in the CLI: `runtime_around` once and `assembler` four times.
+  One of those is `PreparedAssembly::assembler`, which `main` and `batch`
+  call at 34 sites.
 
 ## Verification
 

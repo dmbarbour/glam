@@ -56,10 +56,11 @@ flags a step for discussion when work reaches it, not a decision.
   communication, request queues, settlement, hosts as machines, effect
   providers, the handle API's retirement, then the runtime's retirement
   protocol. The CLI moves piecemeal, a slice in each step. Drafted
-  2026-10-17; `api-runtime-turns` is built. On 2026-10-18 the maintainer
-  agreed effect providers, run by evaluation within turns, and the bridge;
-  cuts bound transactions and search; the ownership plan merged in; and a
-  CLI prelude in glam is an experiment, `api-cli-prelude`.
+  2026-10-17; `api-runtime-turns` and `api-cli-bridge` are built. On
+  2026-10-18 the maintainer agreed effect providers, run by evaluation
+  within turns, and the bridge; cuts bound transactions and search; the
+  ownership plan merged in; and a CLI prelude in glam is an experiment,
+  `api-cli-prelude`.
 - [`TagPrefixSyntax_2026-10-16.md`](TagPrefixSyntax_2026-10-16.md):
   `path:` is a prefix operator and `:name` a pun everywhere, so braces lost
   their member grammar; follow-ups retired bare tags, rejected tags as

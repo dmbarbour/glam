@@ -107,18 +107,18 @@ fn configured_completion(request: command_line::CompletionRequest) -> ExitCode {
         Err(exit) => return exit,
     };
     let completion =
-        match complete_configured(&prepared.assembler, &prepared.configuration.value, request) {
+        match complete_configured(prepared.assembler(), &prepared.configuration.value, request) {
             Ok(completion) => completion,
             Err(error) => {
                 for diagnostic in error.diagnostics() {
                     prepared
-                        .assembler
+                        .assembler()
                         .diagnostic_bus()
                         .publish_local(diagnostic.clone());
                 }
-                prepared.assembler.diagnostic_bus().publish_local(
+                prepared.assembler().diagnostic_bus().publish_local(
                     error
-                        .diagnostic(&prepared.assembler.values())
+                        .diagnostic(&prepared.assembler().values())
                         .expect("configured CLI diagnostics belong to its assembler runtime"),
                 );
                 return finish_without_logger(prepared, None, true);
@@ -126,16 +126,16 @@ fn configured_completion(request: command_line::CompletionRequest) -> ExitCode {
         };
     for diagnostic in completion.diagnostics() {
         prepared
-            .assembler
+            .assembler()
             .diagnostic_bus()
             .publish_local(diagnostic.clone());
     }
     let failed = write_completion(&completion).is_err_and(|error| {
         prepared
-            .assembler
+            .assembler()
             .diagnostic_bus()
             .publish_local(Diagnostic::new(
-                &prepared.assembler.values(),
+                &prepared.assembler().values(),
                 Severity::Error,
                 error,
             ));
@@ -163,7 +163,7 @@ fn completion_script_command(name: &std::ffi::OsStr, cli_arguments: CliArguments
         Ok(prepared) => prepared,
         Err(exit) => return exit,
     };
-    let values = prepared.assembler.values();
+    let values = prepared.assembler().values();
     let selected = values
         .access_names(
             &prepared.configuration.value,
@@ -179,7 +179,7 @@ fn completion_script_command(name: &std::ffi::OsStr, cli_arguments: CliArguments
         .and_then(|candidate| {
             values.apply(&values.defined_or_function(), [values.list([])?, candidate])
         })
-        .and_then(|selected| prepared.assembler.evaluator().eval(&selected));
+        .and_then(|selected| prepared.assembler().evaluator().eval(&selected));
     // An undefined binding falls back to the built-in script. A configured
     // binding that fails to evaluate is reported, never silently replaced.
     let configured = match selected {
@@ -200,14 +200,14 @@ fn completion_script_command(name: &std::ffi::OsStr, cli_arguments: CliArguments
                 .and_then(|error| error.diagnostic(&values))
                 .expect("configuration context is local");
             prepared
-                .assembler
+                .assembler()
                 .diagnostic_bus()
                 .publish_local(diagnostic);
             return finish_without_logger(prepared, None, true);
         }
     };
     let output: Result<Vec<u8>, String> = match configured {
-        Some(function) => configured_completion_script(&prepared.assembler, &function),
+        Some(function) => configured_completion_script(prepared.assembler(), &function),
         None => builtin_completion_script(name)
             .map(|script| script.as_bytes().to_vec())
             .ok_or_else(|| format!("unknown completion script binding `{name}`")),
@@ -215,10 +215,10 @@ fn completion_script_command(name: &std::ffi::OsStr, cli_arguments: CliArguments
     let failed = match output {
         Ok(output) => io::stdout().write_all(&output).is_err_and(|error| {
             prepared
-                .assembler
+                .assembler()
                 .diagnostic_bus()
                 .publish_local(Diagnostic::new(
-                    &prepared.assembler.values(),
+                    &prepared.assembler().values(),
                     Severity::Error,
                     format!("could not write completion script to stdout: {error}"),
                 ));
@@ -226,10 +226,10 @@ fn completion_script_command(name: &std::ffi::OsStr, cli_arguments: CliArguments
         }),
         Err(error) => {
             prepared
-                .assembler
+                .assembler()
                 .diagnostic_bus()
                 .publish_local(Diagnostic::new(
-                    &prepared.assembler.values(),
+                    &prepared.assembler().values(),
                     Severity::Error,
                     error,
                 ));

@@ -6,7 +6,7 @@
 //! only the pass-through signatures below, so call sites need no
 //! configuration.
 
-use glam::EvaluationRuntime;
+use glam::Runtime;
 
 /// Runs `work` as the named binary phase, timing it in profiling builds.
 pub(super) fn time<R>(phase: &'static str, work: impl FnOnce() -> R) -> R {
@@ -25,7 +25,7 @@ pub(super) fn time<R>(phase: &'static str, work: impl FnOnce() -> R) -> R {
 }
 
 /// Writes the report if this is a profiling build and `GLAM_PROF` is set.
-pub(super) fn report(runtime: &EvaluationRuntime) {
+pub(super) fn report(runtime: &Runtime) {
     #[cfg(feature = "glam-prof")]
     enabled::report(runtime);
     #[cfg(not(feature = "glam-prof"))]
@@ -37,7 +37,7 @@ mod enabled {
     use std::sync::{Mutex, OnceLock, PoisonError};
     use std::time::{Duration, Instant};
 
-    use glam::EvaluationRuntime;
+    use glam::Runtime;
 
     /// Phase durations in the order the phases first ran.
     static PHASES: Mutex<Vec<(&str, Duration)>> = Mutex::new(Vec::new());
@@ -56,7 +56,7 @@ mod enabled {
         }
     }
 
-    pub(super) fn report(runtime: &EvaluationRuntime) {
+    pub(super) fn report(runtime: &Runtime) {
         let Some(path) = std::env::var_os("GLAM_PROF") else {
             return;
         };

@@ -97,11 +97,38 @@ impl Runtime {
             None => EvaluationRuntime::new(config.worker_threads)?,
         };
         let assembler = Assembler::builder().evaluation_runtime(runtime).build()?;
-        Ok(Self {
+        Ok(Self::around(assembler))
+    }
+
+    /// A runtime around an assembler its caller built, for the CLI's
+    /// transition (`crate::transition`).
+    pub(crate) fn around(assembler: Assembler) -> Self {
+        Self {
             machines: Mutex::new(HashMap::new()),
             assembler,
             _thread: PhantomData,
-        })
+        }
+    }
+
+    /// The assembler the runtime holds, for the CLI's transition
+    /// (`crate::transition`).
+    pub(crate) fn assembler(&self) -> &Assembler {
+        &self.assembler
+    }
+
+    /// Starts the background workers, once, in a runtime opened with none:
+    /// for a host that learns how many it wants after opening the runtime.
+    pub fn activate_workers(&self, worker_threads: usize) -> Result<(), Error> {
+        self.assembler
+            .evaluation_runtime()
+            .activate_workers(worker_threads)
+    }
+
+    /// Every profiling counter and phase timer of the runtime, in a
+    /// `glam-prof` build.
+    #[cfg(feature = "glam-prof")]
+    pub fn profile(&self) -> crate::profiling::RuntimeProfileSnapshot {
+        self.assembler.evaluation_runtime().profile()
     }
 
     /// Takes a turn on the machine named `key`, which starts empty if it

@@ -26,6 +26,8 @@ mod source;
 #[cfg(test)]
 mod test_support;
 mod text_pattern;
+#[doc(hidden)]
+pub mod transition;
 mod trusted_hash;
 mod walk_cycle;
 
