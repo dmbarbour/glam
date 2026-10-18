@@ -56,8 +56,8 @@ flags a step for discussion when work reaches it, not a decision.
   communication, request queues, settlement, hosts as machines, effect
   providers, the handle API's retirement, then the runtime's retirement
   protocol. The CLI moves piecemeal, a slice in each step. Drafted
-  2026-10-17; `api-runtime-turns`, `api-cli-bridge`, `api-machine-data`
-  and `api-cuts` are built, and the `api-cli-prelude` trial was kept; the
+  2026-10-17; `api-runtime-turns`, `api-cli-bridge`, `api-machine-data`,
+  `api-cuts` and `api-virtual-resources` are built, and the `api-cli-prelude` trial was kept; the
   plan goes ahead of performance work unless a cost gets in the way
   (maintainer, 2026-10-18). On
   2026-10-18 the maintainer agreed effect providers, run by evaluation

@@ -101,6 +101,9 @@ fn assert_store_root_boundary_inventory(
             let _: &ConflictAddress = address;
             let _: &PublicValue = updater;
         }
+        StoreEdit::Touch { address } => {
+            let _: &ConflictAddress = address;
+        }
     }
 
     let StoreJournal {
@@ -639,6 +642,37 @@ fn disjoint_nested_siblings_rebase() {
 
     assert_eq!(store.try_commit(&left), StoreCommitResult::Committed);
     assert_eq!(store.try_commit(&right), StoreCommitResult::Committed);
+}
+
+#[test]
+fn virtual_writes_change_no_volume_but_conflict_with_their_readers() {
+    let mut store = store();
+    let runtime_root = store.volume_root(store.runtime_volume).unwrap().clone();
+    let heap_root = store.root().clone();
+    let snapshot = store.snapshot();
+    let mut reader = StoreJournal::new(snapshot.clone());
+    reader.observe_virtual_read(&path(&["fs"]));
+    let mut heap_reader = StoreJournal::new(snapshot.clone());
+    heap_reader.observe_read(&[]);
+    let mut first = StoreJournal::new(snapshot.clone());
+    first.write_virtual(&path(&["fs", "a"]));
+    let mut second = StoreJournal::new(snapshot);
+    second.write_virtual(&path(&["net"]));
+
+    // The first installs its cached view; the second, from a stale
+    // snapshot, replays its edits.
+    for writer in [&first, &second] {
+        assert_eq!(
+            store.try_commit_with_change(writer),
+            (StoreCommitResult::Committed, true),
+            "a virtual write is a change"
+        );
+    }
+    let runtime_volume = store.volume_root(store.runtime_volume).unwrap();
+    assert!(same_representation(&store, runtime_volume, &runtime_root));
+    assert!(same_representation(&store, store.root(), &heap_root));
+    assert_eq!(store.try_commit(&heap_reader), StoreCommitResult::Committed);
+    assert_eq!(store.try_commit(&reader), StoreCommitResult::Conflict);
 }
 
 #[test]

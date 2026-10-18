@@ -1,7 +1,8 @@
 # Runtime API Plan — 2026-10-17
 
 Status: `api-runtime-turns` built 2026-10-17; `api-cli-bridge`,
-`api-machine-data` and `api-cuts` 2026-10-18, with `api-cli-prelude` kept
+`api-machine-data`, `api-cuts` and `api-virtual-resources` 2026-10-18,
+with `api-cli-prelude` kept
 (see [As built](#as-built)). The CLI's transition was re-planned the
 same day, after a survey of the CLI (see [CLI Transition](#cli-transition)):
 `api-cli` gave way to a bridge and a CLI slice in each later step, moved
@@ -483,7 +484,8 @@ transaction and search (maintainer, 2026-10-18), in place of the review's
 `heap_rewrite`, after `.heap.get`, `.heap.set` and `.heap.rewrite`;
 `fail`, after `.fail` (first built as `retry`); `ErrorKind::Backtrack`
 for its kind, since `ErrorKind::Failure` names any other error; and
-`on_commit` and `on_abort` for the hooks.
+`on_commit` and `on_abort` for the hooks. For `api-virtual-resources`:
+`virtual_read` and `virtual_write`, after the heap's names.
 
 ## As built
 
@@ -622,15 +624,45 @@ journal and the runtime's snapshot, commit, validation and wait:
   - Best effort: each hook runs although one before it erred. A cut
     returns a hook's first error in place of its result or of an explicit
     failure, which ends an outermost cut that would have run again, but
-    not in place of another error, which came first. A panic within a cut
+    not in place of another error, which came first. This rule is open for
+    a later discussion and review (see
+    [Open Questions](#open-questions-2026-10-18)). A panic within a cut
     abandons it without running hooks.
 - Tests in `tests/runtime_cuts.rs`. Two force their interleavings through
   channels between scoped threads: a failed cut blocks before the write
   that wakes it, running exactly twice; and a write commits between a cut's
   read and its commit, which reruns once and reads the new value.
-- Not built: `api-virtual-resources`; volumes other than the user heap; a
-  heap path taken from the stack, as a glam list of keys; and runtime
-  events (inputs and outputs) within a cut.
+- Not built: volumes other than the user heap; a heap path taken from the
+  stack, as a glam list of keys; and runtime events (inputs and outputs)
+  within a cut.
+
+`api-virtual-resources` (2026-10-18), in `src/api/turn.rs` and the
+reflection store:
+- `virtual_read(path)` records, within a cut, a read of the virtual
+  resource at a path of keys, a proxy for host state the runtime does not
+  see; it counts as an observation, so a failed cut that read only virtual
+  resources waits. Outside a cut it does nothing, as a read there joins no
+  transaction. `virtual_write(path)` writes it: within a cut, when the
+  outermost commits; outside one, at once.
+- Paths are hierarchical, as the heap's are: a write conflicts with reads
+  of its path and of paths above and below it, and wakes the failed cuts
+  that made them. Virtual resources lie apart from the heap.
+- In the store, a write is a `Touch` edit, which changes no volume but
+  records a change at its address for conflict analysis, and wakes
+  waiters as a commit that changed the store. Addresses lie under a
+  namespace of the runtime's private volume, apart from its queries.
+  Writing data, such as `{}` at the path, was rejected: each write would
+  add a lazy update to a volume root that nothing forces.
+- As for every address, the store keeps the latest change of each address
+  ever written, so distinct resource names accumulate there, as distinct
+  heap paths already do.
+- Tests in `tests/runtime_virtual_resources.rs` force each interleaving
+  through channels: a write between a cut's read and its commit conflicts
+  below or above the read path, not for an unrelated resource or a heap
+  write; a cut's write takes effect at its commit, and a failed cut's or
+  failed nested cut's write never; and a failed cut that read a resource
+  waits until it is written, running exactly twice. A store unit test
+  checks that a `Touch` changes no volume on either commit path.
 
 ## Verification
 
@@ -642,6 +674,13 @@ the public API, in `tests/`.
 ## Open Questions (2026-10-18)
 
 - Names, per step (above).
+- Hook errors, for a later discussion and review (maintainer,
+  2026-10-18, unsure of the rule built in `api-cuts`): each hook runs
+  although one before it erred, and the first hook error replaces a cut's
+  result or explicit failure but not another error. Alternatives include
+  hooks that stop at the first error, hook errors reported apart from the
+  cut's outcome, such as to a log once `api-heap-communication` lands, and
+  hooks that return no error.
 - Communication's conventions, at `api-heap-communication`, and how far
   the API specializes queues and the like, by measurement.
 - The ownership plan's open details, each settled when its step starts:

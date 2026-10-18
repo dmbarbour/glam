@@ -238,12 +238,18 @@ enum StoreEdit {
         address: ConflictAddress,
         updater: PublicValue,
     },
+    /// A change at an address that holds no data: a virtual resource's
+    /// write, which conflicts with its readers but leaves every volume as
+    /// it was.
+    Touch { address: ConflictAddress },
 }
 
 impl StoreEdit {
     fn address(&self) -> &ConflictAddress {
         match self {
-            Self::Set { address, .. } | Self::Rewrite { address, .. } => address,
+            Self::Set { address, .. } | Self::Rewrite { address, .. } | Self::Touch { address } => {
+                address
+            }
         }
     }
 }
@@ -304,7 +310,7 @@ impl StoreJournal {
                         dependency = edit_path.clone();
                     }
                 }
-                StoreEdit::Set { .. } | StoreEdit::Rewrite { .. } => {}
+                StoreEdit::Set { .. } | StoreEdit::Rewrite { .. } | StoreEdit::Touch { .. } => {}
             }
         }
         self.observations
@@ -312,6 +318,32 @@ impl StoreJournal {
             .unwrap()
             .observe(&ConflictAddress::reflection(volume, dependency));
         true
+    }
+
+    /// Records a read of the virtual resource at `path`: a proxy for host
+    /// state that the store does not hold. A later write to it, or to a path
+    /// above or below it, conflicts with this transaction. A write by this
+    /// journal does not cover the read, since no data stands behind it.
+    pub(crate) fn observe_virtual_read(&mut self, path: &[Key]) {
+        let address = self.virtual_address(path);
+        self.observations.lock().unwrap().observe(&address);
+    }
+
+    /// Records a write of the virtual resource at `path`, which changes no
+    /// data: once committed, it conflicts with the transactions that read
+    /// the resource and wakes those waiting on it.
+    pub(crate) fn write_virtual(&mut self, path: &[Key]) {
+        let address = self.virtual_address(path);
+        self.edits.push(StoreEdit::Touch { address });
+    }
+
+    /// Virtual resources' addresses lie in the runtime's private volume,
+    /// apart from its queries.
+    fn virtual_address(&self, path: &[Key]) -> ConflictAddress {
+        let keys = std::iter::once(VIRTUAL_NAMESPACE.clone())
+            .chain(path.iter().cloned())
+            .collect();
+        ConflictAddress::reflection(self.snapshot.runtime_volume, ConflictPath::from_keys(keys))
     }
 
     pub(crate) fn view(&self) -> PublicValue {
@@ -767,6 +799,9 @@ fn apply_edits(
     edits: &[StoreEdit],
 ) -> RedBlackTreeMapSync<VolumeId, PublicValue> {
     for edit in edits {
+        if matches!(edit, StoreEdit::Touch { .. }) {
+            continue;
+        }
         let volume = edit.address().reflection_parts().0;
         let root = roots
             .get(&volume)
@@ -790,6 +825,7 @@ static QUERY_PRESENT: LazyLock<Key> = LazyLock::new(|| {
     Key::abstract_global_path(["reflection_runtime", "v0", "query_state", "present"])
 });
 static QUERY_NAMESPACE: LazyLock<Key> = LazyLock::new(|| Key::atom_from_text("queries"));
+static VIRTUAL_NAMESPACE: LazyLock<Key> = LazyLock::new(|| Key::atom_from_text("virtual"));
 
 pub(crate) enum EvaluationQueryState {
     Pending,
@@ -862,6 +898,7 @@ pub(crate) fn decode_query_state(
 
 fn apply_edit(access: &RuntimeValueAccess<'_>, root: PublicValue, edit: &StoreEdit) -> PublicValue {
     PublicValue::from_runtime_root(access.root_runtime_value(match edit {
+        StoreEdit::Touch { .. } => return root,
         StoreEdit::Set { address, value } => {
             let (_, path) = address.reflection_parts();
             apply_value_at_path_in(

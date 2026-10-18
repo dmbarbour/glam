@@ -545,7 +545,7 @@ impl Machine<'_> {
     /// transaction and sees its writes; outside one, it reads the heap as it
     /// stands.
     pub fn heap_get<K: Into<Key>>(&mut self, path: impl IntoIterator<Item = K>) {
-        let path = heap_path(path);
+        let path = key_path(path);
         let value = match &mut self.cut {
             Some(cut) => {
                 cut.observed |= cut.journal.observe_read(&path);
@@ -562,9 +562,9 @@ impl Machine<'_> {
         &mut self,
         path: impl IntoIterator<Item = K>,
     ) -> Result<(), Error> {
-        let path = heap_path(path);
+        let path = key_path(path);
         let value = self.pop_own()?;
-        self.heap_edit(|journal| journal.write(path.clone(), value.clone()))
+        self.store_edit(|journal| journal.write(path.clone(), value.clone()))
     }
 
     /// Pops a function and rewrites the value at `path` in the shared heap
@@ -574,16 +574,42 @@ impl Machine<'_> {
         &mut self,
         path: impl IntoIterator<Item = K>,
     ) -> Result<(), Error> {
-        let path = heap_path(path);
+        let path = key_path(path);
         let updater = self.pop_own()?;
-        self.heap_edit(|journal| journal.rewrite(path.clone(), updater.clone()))
+        self.store_edit(|journal| journal.rewrite(path.clone(), updater.clone()))
     }
 
-    /// Runs `body` as a cut: its actions on the shared heap form one atomic,
-    /// isolated transaction that commits when it returns `Ok`, and cuts
-    /// within it nest. When `body` returns an error, the cut undoes what it
-    /// did, the machine's stack, stash and state included, and returns the
-    /// error; reads stay recorded.
+    /// Records that this cut read the virtual resource at `path`: a proxy,
+    /// named by a path of keys, for host state that the runtime does not
+    /// see. Should another cut write it, or a path above or below it, and
+    /// commit first, this cut's commit conflicts; once this cut has failed,
+    /// that write wakes it. Outside a cut a read joins no transaction, so
+    /// this does nothing.
+    pub fn virtual_read<K: Into<Key>>(&mut self, path: impl IntoIterator<Item = K>) {
+        if let Some(cut) = &mut self.cut {
+            cut.journal.observe_virtual_read(&key_path(path));
+            cut.observed = true;
+        }
+    }
+
+    /// Writes the virtual resource at `path`, as Rust code does once it
+    /// changes, or sees a change in, the host state that the resource
+    /// stands for. A write holds no data. Outside a cut, it commits at
+    /// once; within one, with the outermost cut, so a failed cut writes
+    /// nothing.
+    pub fn virtual_write<K: Into<Key>>(
+        &mut self,
+        path: impl IntoIterator<Item = K>,
+    ) -> Result<(), Error> {
+        let path = key_path(path);
+        self.store_edit(|journal| journal.write_virtual(&path))
+    }
+
+    /// Runs `body` as a cut: its actions on shared state, the heap and
+    /// virtual resources, form one atomic, isolated transaction that commits
+    /// when it returns `Ok`, and cuts within it nest. When `body` returns an
+    /// error, the cut undoes what it did, the machine's stack, stash and
+    /// state included, and returns the error; reads stay recorded.
     ///
     /// An explicit failure, from [`Self::fail`], is the intent to
     /// backtrack: a nested cut returns it, so its caller may try another
@@ -778,7 +804,7 @@ impl Machine<'_> {
     }
 
     /// Stages an edit within a cut, or commits it at once outside one.
-    fn heap_edit(&mut self, edit: impl Fn(&mut StoreJournal)) -> Result<(), Error> {
+    fn store_edit(&mut self, edit: impl Fn(&mut StoreJournal)) -> Result<(), Error> {
         if let Some(cut) = &mut self.cut {
             edit(&mut cut.journal);
             return Ok(());
@@ -888,6 +914,6 @@ fn underflow(what: &str, needed: usize, held: usize) -> Error {
     ))
 }
 
-fn heap_path<K: Into<Key>>(path: impl IntoIterator<Item = K>) -> Vec<Key> {
+fn key_path<K: Into<Key>>(path: impl IntoIterator<Item = K>) -> Vec<Key> {
     path.into_iter().map(Into::into).collect()
 }
