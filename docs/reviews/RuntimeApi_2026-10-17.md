@@ -5,8 +5,9 @@ and the [runtime API plan](../plans/RuntimeApi_2026-10-17.md) drafted from
 it. No code changed. It replaces the owner-and-handles design that
 `lifecycle-owner` would have built (the
 [runtime ownership plan](../plans/RuntimeOwnership_2026-10-17.md)); that plan's
-remaining steps are re-planned from here. Communication's conventions,
-names and the open questions below remain.
+remaining steps merged into the runtime API plan on 2026-10-18, with
+effect providers (`effect-providers-answer-within-turns`). Communication's
+conventions, names and the open questions below remain.
 
 Revision reviewed: `fd97593e`.
 

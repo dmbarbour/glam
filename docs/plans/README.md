@@ -53,16 +53,12 @@ flags a step for discussion when work reaches it, not a decision.
 - [`RuntimeApi_2026-10-17.md`](RuntimeApi_2026-10-17.md): `api-` steps
   from the runtime API review: `Runtime`, turns on keyed machines, a
   bridge for the CLI, data operations, transaction steps, scoped threads,
-  heap communication, settlement, hosts as machines, effect providers, then
-  the handle API's retirement. The CLI moves piecemeal, a slice in each
-  step. Drafted 2026-10-17; `api-runtime-turns` is built, and the bridge,
-  a CLI prelude in glam, and effect providers are proposed.
-- [`RuntimeOwnership_2026-10-17.md`](RuntimeOwnership_2026-10-17.md):
-  `lifecycle-` steps, a sketch from the lifecycle review.
-  `lifecycle-cli-logger` is done. Its owner-and-handles design is replaced
-  by the [runtime API review](../reviews/RuntimeApi_2026-10-17.md)
-  (2026-10-17), from which its remaining steps are to be re-planned;
-  `lifecycle-audits` and `lifecycle-external-owners` still apply.
+  heap communication, request queues, settlement, hosts as machines, effect
+  providers, the handle API's retirement, then the runtime's retirement
+  protocol. The CLI moves piecemeal, a slice in each
+  step. Drafted 2026-10-17; `api-runtime-turns` is built. Effect
+  providers were agreed, and the ownership plan merged in, on 2026-10-18;
+  the bridge and a CLI prelude in glam are proposed.
 - [`TagPrefixSyntax_2026-10-16.md`](TagPrefixSyntax_2026-10-16.md):
   `path:` is a prefix operator and `:name` a pun everywhere, so braces lost
   their member grammar; follow-ups retired bare tags, rejected tags as
@@ -124,6 +120,12 @@ flags a step for discussion when work reaches it, not a decision.
 ## Completed, Awaiting Retirement
 
 Each is done; what keeps it under the retention rule is listed.
+
+- [`RuntimeOwnership_2026-10-17.md`](RuntimeOwnership_2026-10-17.md),
+  `lifecycle-` steps, merged 2026-10-18 into the runtime API plan, which
+  carries its remaining steps; `lifecycle-cli-logger` was done 2026-10-16.
+  Still cited by the runtime API plan and review and `Decisions.md`; it
+  holds the queue and retirement designs the merged steps adapt.
 
 - [`ParserBacktrackingPerformance_2026-10-04.md`](ParserBacktrackingPerformance_2026-10-04.md),
   `perf-parser`, closed 2026-10-17 (maintainer): the term parser, keyword

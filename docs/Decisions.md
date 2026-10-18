@@ -1962,6 +1962,32 @@ maps the short names used here to file names.
   conventions (retention, backpressure, discovery) remain open.
 - **Recorded in:** runtime API review.
 
+### Effect providers answer within turns; background effects go through queues
+`effect-providers-answer-within-turns` · 2026-10-18 · maintainer · accepted
+- **Context:** the configured CLI parses its arguments in an isolated
+  search whose Rust effects return alternatives, edit per-branch journals,
+  and query the file system within branches that may never commit. A
+  machine answers only committed requests, through the heap, so turns and
+  heap communication alone cannot serve them.
+- **Decision:** Rust code may answer effects synchronously as a *provider*,
+  the successor to `TaskSpecialization`, within a search or transaction
+  step that a turn runs, on that turn's thread.
+  - A provider answers what is local to its search. Shared state is state
+    at paths in the heap.
+  - Background tasks reach Rust only through request queues served by
+    machines, as the lifecycle review's target model has it: Rust code
+    never runs on a worker.
+  - The ownership plan's remaining steps (queues, host messages, leases,
+    host calls, the retirement protocol) merge into the runtime API plan.
+- **Alternatives rejected:** the parser rewritten in glam, which has no
+  file access within a branch; a search in a turn that pushes every branch
+  as data over glam primitives, which has the same gap.
+- **Consequences:** a provider stores no capabilities and receives them
+  per call. A committed effect from a search is a request published on
+  commit, whose result arrives after it.
+- **Recorded in:** runtime API plan, "Effect providers" and "From the
+  ownership plan".
+
 ### Resumable WHNF through bounded regional quanta and durable checkpoints
 `resumable-whnf-regional-quanta` · 2026-09-12 · agent · accepted
 - **Context:** the recursive evaluator replayed prefixes after retryable
@@ -3137,6 +3163,7 @@ Short names used under **Recorded in**, with their files under `docs/`.
 | tag prefix plan | `plans/TagPrefixSyntax_2026-10-16.md` |
 | syntax type errors review | `reviews/SyntaxTypeErrors_2026-10-17.md` |
 | runtime API review | `reviews/RuntimeApi_2026-10-17.md` |
+| runtime API plan | `plans/RuntimeApi_2026-10-17.md` |
 | C2C review | `reviews/GarbageCollectorC2C_2026-08-22.md` |
 | C6 review | `reviews/GarbageCollectorC6_2026-08-24.md` |
 | C8 review | `reviews/GarbageCollectorC8_2026-10-03.md` |

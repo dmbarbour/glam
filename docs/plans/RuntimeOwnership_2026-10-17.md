@@ -1,11 +1,14 @@
 # Runtime Ownership and Host Messaging Plan — 2026-10-17
 
-Status: sketch, design superseded. The
+Status: merged 2026-10-18 into the
+[runtime API plan](RuntimeApi_2026-10-17.md), which maps each remaining
+step to its own ("From the Ownership Plan"); `lifecycle-audits` and
+`lifecycle-external-owners` continue there under their names. The
 [runtime API review](../reviews/RuntimeApi_2026-10-17.md) (2026-10-17)
-replaces the owner-and-handles design below with a thread-affine runtime in
-which Rust threads run turns on keyed machines; the remaining steps are to
-be re-planned from it, and `lifecycle-audits` and
-`lifecycle-external-owners` still apply. A survey for `lifecycle-owner` at
+replaced the owner-and-handles design below with a thread-affine runtime in
+which Rust threads run turns on keyed machines. The queues, host messages
+and retirement protocol below hold, adapted to turns
+(`effect-providers-answer-within-turns`). A survey for `lifecycle-owner` at
 `fd97593e` found, against the design below: assemblers create their own
 runtimes, the drop order releases the background demand before joining the
 workers, and the logger thread still holds owners. The design was agreed
