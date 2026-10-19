@@ -1361,6 +1361,14 @@ maintainer's agreement):
   `process.refl_args` and compare `process.args` with `process.cli.args`,
   and whose configured CLIs and assemblies read the arguments, all pass
   unchanged.
+- Profiles (`scripts/profile.sh`; `perf` cannot count instructions in
+  this container, so the glam-prof counters, which are exact), from
+  `d4ea2d78`, before this session's CLI slices, to `bafbfb92`: `hello_elf`
+  78,846 to 78,865 reductions, 39,081 to 39,116 roots and 70,620 to 70,677
+  allocations; `hello_do` and `minimal` by the same constants, 19
+  reductions, 13 accesses, 35 roots and 57 allocations a run, the cost of
+  binding and composing the environment and wiring the logger, under half a
+  percent of `minimal`'s.
 
 ## Verification
 
