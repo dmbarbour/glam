@@ -226,6 +226,36 @@ impl Endpoint {
     }
 }
 
+/// The wiring a machine owns, as [`Machine::wiring`] reports it: its own
+/// wires, the default rule that applies to it, and the default wires it
+/// removed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MachineWiring {
+    wires: Vec<(Endpoint, Endpoint)>,
+    default_wiring: DiagnosticsWiring,
+    unwired_defaults: Vec<(Endpoint, Endpoint)>,
+}
+
+impl MachineWiring {
+    /// The machine's own wires, each from its source to its destination, in
+    /// a fixed order.
+    pub fn wires(&self) -> &[(Endpoint, Endpoint)] {
+        &self.wires
+    }
+
+    /// The default rule that applies to the wires the machine owns, as
+    /// [`DiagnosticsWiring`] states it: the runtime's configured rule, or
+    /// [`DiagnosticsWiring::None`] where the machine turned it off.
+    pub fn default_wiring(&self) -> DiagnosticsWiring {
+        self.default_wiring
+    }
+
+    /// The wires of the default rule that the machine removed.
+    pub fn unwired_defaults(&self) -> &[(Endpoint, Endpoint)] {
+        &self.unwired_defaults
+    }
+}
+
 #[derive(Clone, Default)]
 struct MachineState {
     stack: Vec<Value>,
@@ -1644,6 +1674,42 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     pub fn output_connected(&mut self, port: impl Into<Key>) -> bool {
         let (machine, port) = (self.path.clone(), port.into());
         self.port_view(|ports| ports.output_connected(&machine, &port))
+    }
+
+    /// The wiring this machine owns: its own wires, with the default rule
+    /// that applies to it and the default wires it removed. The wires its
+    /// parent owns to and from it are the parent's.
+    pub fn wiring(&mut self) -> MachineWiring {
+        let machine = self.path.clone();
+        let owned = self.port_view(|ports| ports.owned_wiring(&machine));
+        let pairs = |wires: Vec<Wire>| {
+            wires
+                .into_iter()
+                .map(|wire| (Endpoint(wire.source), Endpoint(wire.destination)))
+                .collect()
+        };
+        MachineWiring {
+            wires: pairs(owned.wires),
+            default_wiring: if owned.defaults {
+                DiagnosticsWiring::ToRoot
+            } else {
+                DiagnosticsWiring::None
+            },
+            unwired_defaults: pairs(owned.suppressed),
+        }
+    }
+
+    /// Turns the default rule for the wires this machine owns on or off:
+    /// its children's diagnostics outputs to its diagnostics input, and,
+    /// below the root, that input on to its own output. Off, the machine
+    /// starts from its own wires alone, and a wire of the rule's shape that
+    /// it adds is its own. [`Self::clear`] turns the rule back on.
+    pub fn set_default_wiring(&mut self, enabled: bool) -> Result<(), Error> {
+        let owner = self.path.clone();
+        self.port_action(|ports| {
+            ports.set_defaults(owner.clone(), enabled);
+            Ok(())
+        })
     }
 
     /// Pushback, which `body` returns as its error, `return Err(m.retry())`,

@@ -1207,6 +1207,22 @@ second stage:
   disturbs runs again and keeps their order (forced within the cut's first
   attempt).
 
+`api-ports`, discovering and switching a machine's wiring (2026-10-19,
+maintainer's agreement):
+- `m.wiring()` reports the wiring a machine owns as a `MachineWiring`: its
+  own wires, the default rule that applies to it (`DiagnosticsWiring`), and
+  the default wires it removed. Wires its parent owns to and from it are
+  the parent's. Rules such as one endpoint for every child are not wires;
+  the default rule is reported beside the listing instead (maintainer).
+- `m.set_default_wiring(enabled)` turns the default rule for the wires a
+  machine owns on or off, transactionally; off, a wire of the rule's shape
+  it adds is its own, and a default wire it also owns delivers once when
+  the rule is on again. `clear` turns the rule back on. An operation that
+  removed every wire at once was rejected as combining too much
+  (maintainer).
+- Tests added to `tests/runtime_ports.rs`: a machine reporting its own
+  wiring with the default rule, and turning its default wiring off and on.
+
 ## Verification
 
 Runtime changes run `scripts/check.sh full` before commit. Concurrency

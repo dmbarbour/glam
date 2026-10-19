@@ -57,7 +57,8 @@ pub use api::{
     NetDriverCounts, NetReductionCounts, PhaseTimes, RuntimeProfileSnapshot,
 };
 pub use api::{
-    DiagnosticsWiring, Endpoint, Fork, Machine, MachinePath, MachineStatus, Runtime, RuntimeConfig,
+    DiagnosticsWiring, Endpoint, Fork, Machine, MachinePath, MachineStatus, MachineWiring, Runtime,
+    RuntimeConfig,
 };
 pub use diagnostic::Severity;
 pub use g_source::{

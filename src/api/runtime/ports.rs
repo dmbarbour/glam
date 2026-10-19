@@ -64,11 +64,32 @@ impl PortBuffer {
     }
 }
 
-/// The wiring a machine owns: its wires, and the default wires it removed.
+/// The wiring a machine owns: its wires, the default wires it removed, and
+/// whether it turned the default wiring off.
 #[derive(Clone, Default)]
 struct OwnedWiring {
     wires: BTreeSet<Wire>,
     suppressed: BTreeSet<Wire>,
+    defaults_off: bool,
+}
+
+impl OwnedWiring {
+    fn is_empty(&self) -> bool {
+        self.wires.is_empty() && self.suppressed.is_empty() && !self.defaults_off
+    }
+}
+
+/// What [`PortJournal::owned_wiring`] reports of the wiring a machine owns.
+pub(in crate::api) struct OwnedWiringView {
+    pub(in crate::api) wires: Vec<Wire>,
+    pub(in crate::api) defaults: bool,
+    pub(in crate::api) suppressed: Vec<Wire>,
+}
+
+/// Whether the default diagnostics wiring applies to the wiring that the
+/// machine at `owner` owns.
+fn defaults_apply(wiring: &Wiring, diagnostics: bool, owner: &[Key]) -> bool {
+    diagnostics && !wiring.get(owner).is_some_and(|owned| owned.defaults_off)
 }
 
 /// Wiring by the path of the machine that owns it.
@@ -231,10 +252,13 @@ enum WiringEdit {
     Remove(Vec<Key>, Wire),
     /// Returns the wiring a machine owns to the defaults.
     Reset(Vec<Key>),
+    /// Turns the default wiring a machine owns on or off.
+    Defaults(Vec<Key>, bool),
 }
 
 /// Applies a wiring edit. Removing a default wire suppresses it, and adding
-/// it back lifts the suppression.
+/// it back lifts the suppression; where the machine turned its defaults off,
+/// such a wire is one of its own.
 fn apply_edit(wiring: &mut Wiring, diagnostics: bool, edit: &WiringEdit) {
     let (owner, wire, add) = match edit {
         WiringEdit::Add(owner, wire) => (owner, wire, true),
@@ -243,10 +267,17 @@ fn apply_edit(wiring: &mut Wiring, diagnostics: bool, edit: &WiringEdit) {
             wiring.remove_mut(owner);
             return;
         }
+        WiringEdit::Defaults(owner, enabled) => {
+            let mut owned = wiring.get(owner).cloned().unwrap_or_default();
+            Arc::make_mut(&mut owned).defaults_off = !enabled;
+            store_owned(wiring, owner, owned);
+            return;
+        }
     };
+    let default =
+        defaults_apply(wiring, diagnostics, owner) && is_default(diagnostics, owner, wire);
     let mut owned = wiring.get(owner).cloned().unwrap_or_default();
     let set = Arc::make_mut(&mut owned);
-    let default = is_default(diagnostics, owner, wire);
     match (add, default) {
         (true, true) => {
             set.suppressed.remove(wire);
@@ -261,10 +292,16 @@ fn apply_edit(wiring: &mut Wiring, diagnostics: bool, edit: &WiringEdit) {
             set.wires.remove(wire);
         }
     }
-    if set.wires.is_empty() && set.suppressed.is_empty() {
+    store_owned(wiring, owner, owned);
+}
+
+/// Stores the wiring the machine at `owner` owns, or drops it where it says
+/// nothing beyond the defaults.
+fn store_owned(wiring: &mut Wiring, owner: &[Key], owned: Arc<OwnedWiring>) {
+    if owned.is_empty() {
         wiring.remove_mut(owner);
     } else {
-        wiring.insert_mut(owner.clone(), owned);
+        wiring.insert_mut(owner.to_vec(), owned);
     }
 }
 
@@ -504,6 +541,30 @@ impl PortJournal {
         self.edit(WiringEdit::Remove(owner, wire));
     }
 
+    /// Turns the default wiring that the machine at `owner` owns on or off.
+    pub(in crate::api) fn set_defaults(&mut self, owner: Vec<Key>, enabled: bool) {
+        self.edit(WiringEdit::Defaults(owner, enabled));
+    }
+
+    /// The wiring the machine at `owner` owns, observing the wiring: its
+    /// wires, whether the default wiring applies to it, and the default
+    /// wires it removed.
+    pub(in crate::api) fn owned_wiring(&mut self, owner: &[Key]) -> OwnedWiringView {
+        self.observe_wiring();
+        let owned = self.wiring.get(owner);
+        OwnedWiringView {
+            wires: owned
+                .iter()
+                .flat_map(|owned| owned.wires.iter().cloned())
+                .collect(),
+            defaults: defaults_apply(&self.wiring, self.snapshot.diagnostics, owner),
+            suppressed: owned
+                .iter()
+                .flat_map(|owned| owned.suppressed.iter().cloned())
+                .collect(),
+        }
+    }
+
     fn edit(&mut self, edit: WiringEdit) {
         apply_edit(&mut self.wiring, self.snapshot.diagnostics, &edit);
         self.edits.push(edit);
@@ -606,12 +667,18 @@ impl PortJournal {
             .collect();
         let defaults = self.default_destinations(owner, source);
         let suppressed = |wire: &Wire| owned.is_some_and(|owned| owned.suppressed.contains(wire));
-        destinations.extend(defaults.iter().filter(|destination| {
-            !suppressed(&Wire {
-                source: source.clone(),
-                destination: (*destination).clone(),
+        // A default wire the machine also owns as its own delivers once.
+        let defaults = defaults
+            .iter()
+            .filter(|destination| {
+                !suppressed(&Wire {
+                    source: source.clone(),
+                    destination: (*destination).clone(),
+                })
             })
-        }));
+            .filter(|destination| !destinations.contains(destination))
+            .collect::<Vec<_>>();
+        destinations.extend(defaults);
         destinations
             .into_iter()
             .map(|destination| match destination {
@@ -627,6 +694,9 @@ impl PortJournal {
     /// The destinations of the default wires from `source` that the machine
     /// at `owner` would own.
     fn default_destinations(&self, owner: &[Key], source: &WireEnd) -> Vec<WireEnd> {
+        if !defaults_apply(&self.wiring, self.snapshot.diagnostics, owner) {
+            return Vec::new();
+        }
         let port = &*DIAGNOSTICS;
         let candidates = match source {
             WireEnd::Child(_, source) if source == port => vec![WireEnd::In(port.clone())],
@@ -666,7 +736,8 @@ impl PortJournal {
             leads_into(parent, &WireEnd::Child(child.clone(), port.clone()))
         });
         let own = leads_into(machine, &WireEnd::In(port.clone()));
-        let by_default = self.snapshot.diagnostics && *port == *DIAGNOSTICS;
+        let by_default = *port == *DIAGNOSTICS
+            && defaults_apply(&self.wiring, self.snapshot.diagnostics, machine);
         from_parent || own || by_default
     }
 

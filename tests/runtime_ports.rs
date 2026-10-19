@@ -455,6 +455,89 @@ fn diagnostics_gather_at_the_root_by_default_and_a_machine_may_intervene() {
 }
 
 #[test]
+fn a_machine_reports_its_own_wiring_with_the_default_rule() {
+    let mut rt = runtime();
+    let wiring = rt
+        .run("p", |p| {
+            p.wire(Endpoint::child("a", "out"), Endpoint::child("b", "in"))?;
+            p.unwire(
+                Endpoint::input("diagnostics"),
+                Endpoint::output("diagnostics"),
+            )?;
+            p.run("b", |b| {
+                b.wire(Endpoint::input("in"), Endpoint::output("out"))
+            })?;
+            Ok(p.wiring())
+        })
+        .expect("the turn should succeed");
+    assert_eq!(
+        wiring.wires(),
+        [(Endpoint::child("a", "out"), Endpoint::child("b", "in"))],
+        "its own wires only, not its child's"
+    );
+    assert_eq!(wiring.default_wiring(), DiagnosticsWiring::ToRoot);
+    assert_eq!(
+        wiring.unwired_defaults(),
+        [(
+            Endpoint::input("diagnostics"),
+            Endpoint::output("diagnostics")
+        )]
+    );
+
+    let mut quiet = Runtime::open(RuntimeConfig::new().diagnostics_wiring(DiagnosticsWiring::None))
+        .expect("a runtime should open");
+    let wiring = quiet.run("p", |p| Ok(p.wiring())).expect("a turn");
+    assert_eq!(wiring.default_wiring(), DiagnosticsWiring::None);
+    assert!(wiring.wires().is_empty() && wiring.unwired_defaults().is_empty());
+}
+
+#[test]
+fn a_machine_may_turn_its_default_wiring_off_and_on() {
+    let mut rt = runtime();
+    rt.run("p", |p| {
+        p.set_default_wiring(false)?;
+        assert_eq!(p.wiring().default_wiring(), DiagnosticsWiring::None);
+        assert!(!p.input_connected("diagnostics"), "no child's reaches it");
+        let error = send(p, "c", "diagnostics", &[1]).expect_err("nothing collects it");
+        assert!(error.to_string().contains("not connected"), "{error}");
+        p.recover("c", |c| c.discard(1))?;
+
+        // A wire of the rule's shape is now the machine's own.
+        p.wire(
+            Endpoint::child("c", "diagnostics"),
+            Endpoint::input("diagnostics"),
+        )?;
+        send(p, "c", "diagnostics", &[2])?;
+        assert_eq!(p.available("diagnostics"), 1, "kept, with no pass-through");
+        p.set_default_wiring(true)?;
+        send(p, "c", "diagnostics", &[3])?;
+        Ok(())
+    })
+    .expect("the turn should succeed");
+    let at_root = rt
+        .run((), |root| {
+            let count = root.available("diagnostics");
+            root.read("diagnostics", count)?;
+            Ok((count, root.pop_int()?))
+        })
+        .expect("a turn");
+    assert_eq!(
+        at_root,
+        (1, 3),
+        "on again, the rule passes it through once, though the machine owns a like wire"
+    );
+
+    rt.run("p", |p| {
+        p.set_default_wiring(false)?;
+        p.clear()?;
+        assert_eq!(p.wiring().default_wiring(), DiagnosticsWiring::ToRoot);
+        assert!(p.wiring().wires().is_empty(), "clear resets the wiring");
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
 fn clearing_a_machine_resets_its_ports_and_its_descendants() {
     let mut rt = runtime();
     rt.run("p", |p| {
