@@ -2298,6 +2298,46 @@ maps the short names used here to file names.
   environment closure and its promise resolvers retire from the CLI.
 - **Recorded in:** runtime API plan, `api-machine-environment`.
 
+### Requests travel on ports; volumes are first-class capabilities
+`requests-travel-on-ports` · 2026-10-19 · maintainer · accepted
+- **Context:** the lifecycle review's decision 8 made *queues* the request
+  primitive: capabilities apart from the user heap, whose elements pair a
+  value with an optional promise, so that a background task's effect
+  crosses to a host as data. Machines have since gained ports wired from
+  outside (`machines-communicate-through-wired-ports`) and promises they
+  allocate and resolve (`machines-inherit-an-environment`).
+- **Decision:**
+  - A request is a value written to an output port, carrying a resolver in
+    a fixed place where an answer is wanted; wiring routes it to a server
+    machine, which resolves the reply. Queues are no primitive: a request
+    channel is a server's input port, with the order, transactions and
+    merging that ports give.
+  - A request on duplicate wires reaches each server, and they race: the
+    first resolution wins and a later one fails. A server may read a
+    promise's status, pending, fulfilled or broken, read without forcing
+    it, to avoid duplicate work.
+  - Ports offer no first-class channel capabilities: authority over a
+    channel is the wiring. First-class capabilities are volumes: an opaque
+    handle and generic effects (`.vol.new`, `.vol.get`, `.vol.set`,
+    `.vol.rewrite`), the shared heap one volume among them (`.heap.vol`),
+    over which users model queues or anything else. Allocation is
+    transactional, and a volume lives until the runtime retires, until a
+    representation review decides how collection reclaims it
+    (`api-opaque-finalization`).
+- **Alternatives rejected:** queues as their own primitive, with
+  capability values, cursors and conflict rules of their own, which would
+  duplicate ports; logs in the shared heap with readers' cursors, which
+  hide the topology inside machines; first-class port capabilities, which
+  would make authority invisible in data; requiring one route for a
+  channel that carries resolvers; an effect to revoke a volume, which would
+  make destruction an authority of every holder.
+- **Consequences:** this amends the review's decision 8: a queue is a
+  server's input port, or a structure users build over a volume. Volumes
+  that glam allocates are not reclaimed before the runtime retires. The
+  capability dict that `Assembler::create_volume` returns retires with the
+  handle API.
+- **Recorded in:** runtime API plan, `api-requests`.
+
 ### Quiescence is every machine waiting; settlement reports what remains unresolved
 `quiescence-reports-unresolved-state` · 2026-10-19 · maintainer · accepted
 - **Context:** the batch CLI has no clear end, unlike `--interactive`, which

@@ -291,7 +291,7 @@ handle API goes.
    - What is not known yet is a promised value within a share, waited on
      alone: a small machine API allocates a promise and fulfills or breaks
      it, its resolver an opaque glam value whose second resolution fails,
-     which `api-request-queues` builds on.
+     which `api-requests` builds on.
    - Reflection tasks are logical children of a `refl` machine under the
      root: it supplies their environment, and the runtime's own
      diagnostics enter its diagnostics input, as if they were its
@@ -303,31 +303,55 @@ handle API goes.
      `process.args` and `process.refl_args` promised values that the CLI
      fulfills after `conf.cli`'s expansion, in place of the builder's
      promises, which retire with its environment closure.
-8. `api-request-queues` — absorbs `lifecycle-queues`. A request queue is,
-   logically, transactional operations on a log in the heap or a volume,
-   whose elements pair a value with an optional promise, so writes and
-   queries mix in one queue (the lifecycle review's decision 8). Whether
-   the API specializes or accelerates it beyond heap operations is decided
-   by measurement.
-   - A request posted within a cut becomes visible when the cut commits,
-     so a failed cut sends nothing; one posted outside a cut is visible at
-     once. A queue's order is commit order; queues promise no order among
-     themselves, and resolvers need not resolve in the order read.
-   - The requester holds the promise. It takes the result as a promised
-     value, or observes the request's status (uncommitted, sent, broken,
-     fulfilled) and awaits a change by failing a cut that read it.
-   - Resolvers, like volumes, are opaque glam values (maintainer,
-     2026-10-18). Nothing affine stops a program from resolving one twice,
-     so the runtime enforces single assignment: a second resolution fails.
-     A resolver collected unresolved breaks its promise, through the
-     collector's finalization. A resolver's holder may read the request's
-     status without resolving it, and break the promise itself rather than
-     wait for collection (maintainer, 2026-10-18).
-   - Tests: a failed cut sends nothing; a queue's order matches commit
-     order; a second resolution fails; a collected resolver, or one broken
-     by hand, breaks the request; a resolver reads the status; a status
-     change wakes a cut that failed on it.
-9. `api-reflection-model` — a design step, without code, ahead of the
+8. `api-requests` — absorbs `lifecycle-queues`, renamed from
+   `api-request-queues` (maintainer, 2026-10-19): requests travel on ports,
+   their answers through promises, and no queue of its own is a primitive
+   (`requests-travel-on-ports`).
+   - A request is a value written to an output port, carrying in a fixed
+     place, `{request:…, reply:…}`, a resolver where an answer is wanted;
+     wiring routes it to a server machine's input, and the server resolves
+     the reply. A write commits with its cut, so a failed cut sends
+     nothing; a channel's order is its commit order, and channels promise
+     no order among themselves. The requester holds the promised answer,
+     or waits for it in a cut, since evaluating it is pushback until it
+     resolves. `m.ask(port)` posts one.
+   - Duplicate wires duplicate a request, and its servers race: the first
+     resolution wins, and a later one fails (maintainer). A server may read
+     a promise's status to avoid duplicate work.
+   - A promise's status, pending, fulfilled or broken, read without
+     forcing it, by a machine operation and a reflection effect. A cut
+     that reads it waits as one whose evaluation waited does.
+   - Volumes as first-class capabilities (maintainer): an opaque volume
+     handle and generic effects, `.vol.new`, `.vol.get`, `.vol.set` and
+     `.vol.rewrite`, with `.heap.vol` the shared heap's handle, so `.heap.*`
+     is shorthand; and machine operations to match, `m.volume_new`,
+     `m.volume_get`, `m.volume_set` and `m.volume_rewrite`, beside
+     `m.heap_*`. Allocation is transactional: its ID is reserved at once and
+     its root installed at commit, so an aborted transaction burns the ID.
+     A volume lives until the runtime retires, for now
+     (`api-opaque-finalization`). Users model queues and other first-class
+     capabilities over volumes; ports offer no first-class channel
+     capabilities (maintainer). The capability dict of `get`, `set` and
+     `rewrite` that `Assembler::create_volume` returns retires with the
+     handle API.
+   - Effect channels from reflection: the runtime's route into `refl`,
+     diagnostics' today, generalizes to an output per effect channel as each
+     channel's consumer moves: stderr with the logger's third stage
+     (`api-effect-providers`), imports with `api-hosts-as-machines`.
+   - Tests: a failed cut sends no request; a channel's order matches commit
+     order; a server answering a request a requester awaits; duplicate
+     servers racing, the second resolution failing; a promise's status as
+     it resolves, and a cut waiting on it; a volume allocated, written and
+     read, a failed cut's allocation leaving nothing, and its handle passed
+     between machines.
+9. `api-opaque-finalization` — a representation review, then collection of
+   what opaque values stand for (maintainer, 2026-10-19): a resolver
+   collected unresolved breaks its promise, and a volume whose handles are
+   all unreachable is reclaimed. Opaque payloads hold no managed edge, and
+   the runtime's external-owner registry retires them, never the
+   collector's finalization, so the review decides how a payload learns
+   that it is unreachable.
+10. `api-reflection-model` — a design step, without code, ahead of the
    settlement it shapes (maintainer, 2026-10-19): how the reflection API, as
    `refl.*` and `anno refl:(…)` present it, maps to machines. Spawned tasks
    (`.task.new` and its relatives) become named machines in the tree that
@@ -348,7 +372,7 @@ handle API goes.
      network is designed. Reflection's operations come when it is time,
      such as `.todo.add`, `.todo.del` and `.todo.list` (maintainer, the same
      day).
-10. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
+11. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
    decides (maintainer, 2026-10-19), in place of exit votes. The runtime is
    quiescent when every machine waits on input or a heap change, retrying
    its current atomic step, and no evaluation work remains; turns in
@@ -364,7 +388,7 @@ handle API goes.
    machine as it was.
    - CLI slice: the CLI's two settlement loops become one, and the bridge
      behavior below that settlement retires goes.
-11. `api-hosts-as-machines` — absorbs `lifecycle-host-messages` and
+12. `api-hosts-as-machines` — absorbs `lifecycle-host-messages` and
    `lifecycle-host-calls` (L3, L7, L8, L9). The reflection hosts
    (`AssemblerReflectionHost`, `LoggerTaskHost`, `IsolatedTaskHost`) reduce
    to queues and store state that machines serve, and `TaskHost`'s
@@ -379,7 +403,7 @@ handle API goes.
      reads, for the manifest and the final check that no file changed. The
      CLI opens its runtime with `Runtime::open`, and the bridge's
      constructor goes.
-12. `api-effect-providers` — absorbs `lifecycle-leases`. A turn runs a
+13. `api-effect-providers` — absorbs `lifecycle-leases`. A turn runs a
     monadic effect by evaluation, on its own thread (option A, maintainer,
     2026-10-18; see [Effect providers](#effect-providers)).
     - The turn supplies the effects API, evaluates the program to weak-head
@@ -402,13 +426,13 @@ handle API goes.
       providers, their per-branch journals become machine state that cuts
       restore, and `IsolatedTaskHost` and `IsolatedEffectSearch` leave the
       public API.
-13. `api-handle-retirement` — the public handle types go: `Assembler`,
+14. `api-handle-retirement` — the public handle types go: `Assembler`,
     `ModuleBuilder`, readiness results, `EffectRun`, endpoints and buses,
     and `Values` as a separate handle. The bridge goes with them, and the
     public tests move to turns (see
     [Parity](#parity-for-handle-retirement)). Standing docs describe the new
     API.
-14. `api-retirement` — absorbs `lifecycle-owner`'s retirement protocol (L1,
+15. `api-retirement` — absorbs `lifecycle-owner`'s retirement protocol (L1,
     L5, L6, L10). With the handles gone, the `Runtime` is the only owner,
     and dropping it retires in order: admit no new work; stop, wake and
     join the workers; fail pending operations as retired; close sessions
@@ -443,11 +467,11 @@ need no runtime, and stay as they are.
 
 | Concern | Today | Needs | Steps |
 |---|---|---|---|
-| Preparation | `FileSourceSystem`, `EvaluationRuntime`, `DiagnosticBus`, and an `Assembler` whose reflection environment holds two promises | an owner, then the environment and sources in their target form | 2, 6, 7, 11 |
+| Preparation | `FileSourceSystem`, `EvaluationRuntime`, `DiagnosticBus`, and an `Assembler` whose reflection environment holds two promises | an owner, then the environment and sources in their target form | 2, 6, 7, 12 |
 | Configuration and assembly | compiles `configuration` and `assembly` over initial definitions; access, `defined_or`, `context:` annotations, evaluation to bytes | data operations | 3 |
-| Logging | `DefaultLogger` renders as a subscriber; a configured logger is an `EffectRun` on its own thread with `MainEffects` (`read_log`, `write_stderr`), supervised, with a fallback endpoint | forks, ports, then turns that run effects | 5, 6, 12 |
-| Settlement | two loops over readiness, maintenance, deadlock kills and quiescence reports | the reflection model, then `rt.settle()` and a report that a machine emits | 9, 10 |
-| Configured CLI | `conf.cli` runs as an isolated effect search over argv: `CliEffects`, with nested `TokenEffects` searches, per-branch journals, and a search again for each completion candidate | effect providers | 12 |
+| Logging | `DefaultLogger` renders as a subscriber; a configured logger is an `EffectRun` on its own thread with `MainEffects` (`read_log`, `write_stderr`), supervised, with a fallback endpoint | forks, ports, then turns that run effects | 5, 6, 13 |
+| Settlement | two loops over readiness, maintenance, deadlock kills and quiescence reports | the reflection model, then `rt.settle()` and a report that a machine emits | 10, 11 |
+| Configured CLI | `conf.cli` runs as an isolated effect search over argv: `CliEffects`, with nested `TokenEffects` searches, per-branch journals, and a search again for each completion candidate | effect providers | 13 |
 
 ### The bridge
 
@@ -600,13 +624,13 @@ Before the handles go, turns cover what `tests/public_api.rs` (47 tests),
   reading operations (3);
 - promises, protected volumes, reflection environments and roles, by state
   at paths, request queues, and volumes allocated through the reflection
-  API (7, 8, 11);
+  API (7, 8, 12);
 - the diagnostic formatter and diagnostic updates, by the logger machine
   (6);
 - reasoning reports, retryable blocked errors and draining, by settlement
-  (10);
-- sources, imports, invocations and provenance, by hosts as machines (11);
-- effect specialization, by effect providers (12);
+  (11);
+- sources, imports, invocations and provenance, by hosts as machines (12);
+- effect specialization, by effect providers (13);
 - conflict analysis and workers, by `RuntimeConfig` and `activate_workers`
   (1, 2).
 
@@ -627,7 +651,7 @@ are turns.
 |---|---|
 | `lifecycle-cli-logger` | done 2026-10-16 |
 | `lifecycle-owner` | the owner: `api-runtime-turns`; the retirement protocol: `api-retirement` |
-| `lifecycle-queues` | `api-request-queues` |
+| `lifecycle-queues` | `api-requests` |
 | `lifecycle-host-messages` | `api-hosts-as-machines` |
 | `lifecycle-leases` | `api-effect-providers` |
 | `lifecycle-host-calls` | `api-hosts-as-machines` |
@@ -1298,7 +1322,7 @@ maintainer's agreement):
   is an error within a cut, which cannot undo it, so a cut resolves in a
   commit hook. It advances the observation epoch, so a cut waiting on a
   change wakes. Breaking a promise whose resolver is collected stays with
-  `api-request-queues`.
+  `api-request-queues`, now `api-opaque-finalization`.
 - An evaluation that waits on what is not known yet, an unresolved promise
   or other blocked work that a client demand abandons, is pushback: its
   error is `Retry`, where it was a plain failure. A machine's evaluating
@@ -1434,5 +1458,5 @@ the public API, in `tests/`.
 - The ownership plan's open details, each settled when its step starts:
   retired operations' error (`api-retirement`); the queue capability's
   representation, and a request's status, possibly with a received state
-  (`api-request-queues`); which host state moves into the store
+  (`api-requests`); which host state moves into the store
   (`api-hosts-as-machines`).
