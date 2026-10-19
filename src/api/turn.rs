@@ -32,7 +32,9 @@ use std::thread::{self, Scope, ScopedJoinHandle};
 
 use bytes::Bytes;
 
-use super::runtime::RuntimeSharedResources;
+use super::runtime::{
+    PortAddress, PortJournal, RuntimeEventJournal, RuntimeSharedResources, Wire, WireEnd,
+};
 use super::{
     Assembler, Diagnostic, Error, ErrorKind, EvaluationRuntime, ModuleInput, Value, ValueKind,
 };
@@ -175,6 +177,34 @@ impl<K: Into<Key>, const N: usize> From<[K; N]> for MachinePath {
 impl<K: Into<Key>> From<Vec<K>> for MachinePath {
     fn from(keys: Vec<K>) -> Self {
         Self(keys.into_iter().map(Into::into).collect())
+    }
+}
+
+/// One end of a wire, as the wiring machine names it: a port of the machine
+/// at a relative path, which `()` makes the wiring machine itself. As a
+/// source, it is a descendant's output or the machine's own input; as a
+/// destination, a descendant's input or the machine's own output.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Endpoint {
+    path: MachinePath,
+    port: Key,
+}
+
+impl<P: Into<MachinePath>, K: Into<Key>> From<(P, K)> for Endpoint {
+    fn from((path, port): (P, K)) -> Self {
+        Self {
+            path: path.into(),
+            port: port.into(),
+        }
+    }
+}
+
+impl Endpoint {
+    fn wire_end(self) -> WireEnd {
+        WireEnd {
+            path: self.path.0,
+            port: self.port,
+        }
     }
 }
 
@@ -458,7 +488,7 @@ impl Runtime {
         state.failed &= reach != Reach::Recover;
         let shared: &'env Shared = shared;
         let (state, outcome) = thread::scope(|scope| {
-            let mut machine = Machine::new(shared, scope, state);
+            let mut machine = Machine::new(shared, scope, path.keys().to_vec(), state);
             let outcome = machine.take_turn(turn);
             (machine.state, outcome)
         });
@@ -511,6 +541,8 @@ pub struct Machine<'scope, 'env: 'scope> {
     /// The transaction of the outermost cut in progress, which nested cuts
     /// share, and which a synchronous turn on a descendant joins.
     cut: Option<CutTransaction>,
+    /// This machine's path from the root, which names its ports.
+    path: Vec<Key>,
     /// This machine's path from the machine whose turn opened the cut.
     cut_offset: Vec<Key>,
     /// Forks not yet joined, oldest first.
@@ -597,12 +629,14 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     fn new(
         runtime: &'scope Shared,
         scope: &'scope Scope<'scope, 'env>,
+        path: Vec<Key>,
         state: MachineState,
     ) -> Self {
         Self {
             runtime,
             scope,
             state,
+            path,
             cut: None,
             cut_offset: Vec::new(),
             forks: Vec::new(),
@@ -648,6 +682,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 runtime,
                 scope,
                 state: std::mem::take(&mut self.state),
+                path: self.path.clone(),
                 cut: self.cut.take(),
                 cut_offset: std::mem::take(&mut self.cut_offset),
                 forks: Vec::new(),
@@ -716,8 +751,9 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             Some(_) => self.cut_offset.iter().chain(&path).cloned().collect(),
             None => Vec::new(),
         };
+        let child_path = self.path.iter().chain(&path).cloned().collect();
         let (state, cut, outcome) = thread::scope(|scope| {
-            let mut child = Machine::new(runtime, scope, state);
+            let mut child = Machine::new(runtime, scope, child_path, state);
             child.cut = cut;
             child.cut_offset = cut_offset;
             let outcome = child.take_turn(turn);
@@ -829,6 +865,11 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         let state = self.state.fork_out(&path)?;
         let branch = self.cut.as_ref().map(|cut| CutTransaction {
             journal: cut.journal.branch(),
+            events: {
+                let mut events = cut.events.clone();
+                events.ports = cut.events.ports.branch();
+                events
+            },
             observed: false,
             conflicted: false,
             commit_hooks: Vec::new(),
@@ -844,6 +885,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         let taken = Arc::clone(&start);
         let id = NEXT_FORK.fetch_add(1, Ordering::Relaxed);
         let runtime = self.runtime;
+        let fork_path: Vec<Key> = self.path.iter().chain(&path).cloned().collect();
         let thread = builder.spawn_scoped(self.scope, move || {
             let (state, branch) = taken
                 .lock()
@@ -852,7 +894,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 .expect("a fork's thread takes its machine once");
             // The fork's turn is a scope of its own, as every turn is.
             let fork_return = thread::scope(|scope| {
-                let mut machine = Machine::new(runtime, scope, state);
+                let mut machine = Machine::new(runtime, scope, fork_path, state);
                 machine.cut = branch;
                 machine.cut_offset = cut_offset;
                 let (outcome, panic) = match machine.take_turn(turn) {
@@ -988,6 +1030,8 @@ fn descendant_path(path: impl Into<MachinePath>) -> Result<Vec<Key>, Error> {
 /// shared heap, and the hooks its outcome runs.
 struct CutTransaction {
     journal: StoreJournal,
+    /// Its port actions, which commit with its store journal.
+    events: RuntimeEventJournal,
     /// Whether a read observed shared state, so a change could wake the cut
     /// after a failure.
     observed: bool,
@@ -1003,7 +1047,12 @@ impl CutTransaction {
     /// merged in a serial order. A branch that did not still brings its
     /// hooks, so that its abort hooks run as the attempt aborts.
     fn merge(&mut self, branch: CutTransaction) -> bool {
-        let serial = self.journal.merge_branch(&branch.journal);
+        // Both journals merge, or neither: the ports' check changes nothing.
+        let serial = !self.events.ports.conflicts_with(&branch.events.ports)
+            && self.journal.merge_branch(&branch.journal);
+        if serial {
+            self.events.ports.merge(&branch.events.ports);
+        }
         self.observed |= branch.observed;
         self.conflicted |= branch.conflicted || !serial;
         self.commit_hooks.extend(branch.commit_hooks);
@@ -1027,8 +1076,9 @@ type HookFn = dyn FnOnce(&mut Machine<'_, '_>) + Send;
 enum CutRetry {
     /// At once: its commit conflicted.
     Now,
-    /// Once something its journal observed has changed: it failed.
-    AfterChange(StoreJournal),
+    /// Once something its journals observed has changed: it failed, or
+    /// met pushback.
+    AfterChange(Box<(StoreJournal, RuntimeEventJournal)>),
     /// Never: an error ended it.
     Never(Error),
 }
@@ -1384,6 +1434,212 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         self.store_edit(|journal| journal.rewrite(path.clone(), updater.clone()))
     }
 
+    /// Pops `n` values and writes them, in order, to this machine's output
+    /// `port`. Each value reaches every buffer its wires lead to, through
+    /// pass-throughs, and arrives when the write commits: at once outside a
+    /// cut, with the outermost cut within one. An output with no wire is an
+    /// error, which pops nothing. Buffers have no bound yet, so a write
+    /// never waits.
+    pub fn write(&mut self, port: impl Into<Key>, n: usize) -> Result<(), Error> {
+        let port = port.into();
+        let depth = self.require(n)?;
+        let values = self.state.stack[depth - n..].to_vec();
+        for value in &values {
+            self.runtime.assembler.values().require(value)?;
+        }
+        let machine = self.path.clone();
+        self.port_action(|ports| {
+            let buffers = ports.route(&machine, &port).map_err(Error::new)?;
+            for value in &values {
+                for buffer in &buffers {
+                    ports.append(buffer.clone(), value.clone());
+                }
+            }
+            Ok(())
+        })?;
+        self.state.stack.truncate(depth - n);
+        Ok(())
+    }
+
+    /// As [`Self::write`]; once buffers may be bounded, it returns
+    /// [`ErrorKind::Retry`] where a write would wait.
+    pub fn try_write(&mut self, port: impl Into<Key>, n: usize) -> Result<(), Error> {
+        self.write(port, n)
+    }
+
+    /// Pushes the next `n` values of this machine's input `port`, in the
+    /// order they arrived, taking them. It reads what is committed, never
+    /// this transaction's own writes. When fewer than `n` are there, it is
+    /// pushback: within a cut it returns [`ErrorKind::Retry`], which the
+    /// outermost cut waits out, and outside one it waits until they are.
+    pub fn read(&mut self, port: impl Into<Key>, n: usize) -> Result<(), Error> {
+        self.read_port(port.into(), n, true)
+    }
+
+    /// As [`Self::read`], but returns [`ErrorKind::Retry`] outside a cut too,
+    /// rather than waiting.
+    pub fn try_read(&mut self, port: impl Into<Key>, n: usize) -> Result<(), Error> {
+        self.read_port(port.into(), n, false)
+    }
+
+    fn read_port(&mut self, port: Key, n: usize, wait: bool) -> Result<(), Error> {
+        let address = PortAddress {
+            machine: self.path.clone(),
+            port,
+        };
+        if let Some(cut) = &mut self.cut {
+            cut.observed = true;
+            let values = cut
+                .events
+                .ports
+                .claim(&address, n)
+                .ok_or_else(|| short(&address, n))?;
+            self.state.stack.extend(values);
+            return Ok(());
+        }
+        let resources = self.resources();
+        loop {
+            let (_, store, events) = resources.transaction_snapshot();
+            let store = StoreJournal::new(store);
+            let mut events = RuntimeEventJournal::new(events);
+            match events.ports.claim(&address, n) {
+                Some(values) => match resources.try_commit_transaction(&store, &events) {
+                    StoreCommitResult::Committed => {
+                        self.state.stack.extend(values);
+                        return Ok(());
+                    }
+                    _ => continue,
+                },
+                None if wait => self.await_change(&resources, &store, &events),
+                None => return Err(short(&address, n)),
+            }
+        }
+    }
+
+    /// How many values this machine's input `port` holds beyond what this
+    /// transaction took. Within a cut the count is a read of the port, so a
+    /// cut that fails after counting waits for it to change.
+    pub fn available(&mut self, port: impl Into<Key>) -> usize {
+        let address = PortAddress {
+            machine: self.path.clone(),
+            port: port.into(),
+        };
+        match &mut self.cut {
+            Some(cut) => {
+                cut.observed = true;
+                cut.events.ports.available(&address)
+            }
+            None => {
+                let (_, _, events) = self.resources().transaction_snapshot();
+                RuntimeEventJournal::new(events).ports.available(&address)
+            }
+        }
+    }
+
+    /// Wires `source` to `destination`, both named from this machine: a
+    /// descendant's output, or this machine's own input, to a descendant's
+    /// input, or this machine's own output. A wire from this machine's own
+    /// input to its own output passes the input through. The wire is this
+    /// machine's, and takes effect as a write does: at once outside a cut,
+    /// with the outermost cut within one.
+    pub fn wire(
+        &mut self,
+        source: impl Into<Endpoint>,
+        destination: impl Into<Endpoint>,
+    ) -> Result<(), Error> {
+        let wire = Wire {
+            source: source.into().wire_end(),
+            destination: destination.into().wire_end(),
+        };
+        let owner = self.path.clone();
+        self.port_action(|ports| {
+            ports.wire(owner.clone(), wire.clone());
+            Ok(())
+        })
+    }
+
+    /// Removes the wire from `source` to `destination` that this machine
+    /// owns, if there is one, as [`Self::wire`] adds it.
+    pub fn unwire(
+        &mut self,
+        source: impl Into<Endpoint>,
+        destination: impl Into<Endpoint>,
+    ) -> Result<(), Error> {
+        let wire = Wire {
+            source: source.into().wire_end(),
+            destination: destination.into().wire_end(),
+        };
+        let owner = self.path.clone();
+        self.port_action(|ports| {
+            ports.unwire(owner.clone(), wire.clone());
+            Ok(())
+        })
+    }
+
+    /// Whether a wire leads into this machine's input `port`.
+    pub fn input_connected(&mut self, port: impl Into<Key>) -> bool {
+        let (machine, port) = (self.path.clone(), port.into());
+        self.port_view(|ports| ports.input_connected(&machine, &port))
+    }
+
+    /// Whether a wire leads from this machine's output `port`.
+    pub fn output_connected(&mut self, port: impl Into<Key>) -> bool {
+        let (machine, port) = (self.path.clone(), port.into());
+        self.port_view(|ports| ports.output_connected(&machine, &port))
+    }
+
+    /// Pushback, which `body` returns as its error, `return Err(m.retry())`,
+    /// to say that what it needs is not there yet: a divergence that no
+    /// alternative takes, which the outermost cut waits out by running again
+    /// once what it observed has changed. See [`Self::cut`].
+    pub fn retry(&self) -> Error {
+        Error::retry("a retry reached no cut")
+    }
+
+    /// Runs a port action within this machine's cut, or, outside one, in a
+    /// transaction of its own that commits at once, again on a conflict.
+    fn port_action<T>(
+        &mut self,
+        mut action: impl FnMut(&mut PortJournal) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        if let Some(cut) = &mut self.cut {
+            cut.observed = true;
+            return action(&mut cut.events.ports);
+        }
+        let resources = self.resources();
+        loop {
+            let (_, store, events) = resources.transaction_snapshot();
+            let store = StoreJournal::new(store);
+            let mut events = RuntimeEventJournal::new(events);
+            let result = action(&mut events.ports)?;
+            match resources.try_commit_transaction(&store, &events) {
+                StoreCommitResult::Committed => return Ok(result),
+                StoreCommitResult::Conflict => continue,
+                StoreCommitResult::MissingVolume(volume) => {
+                    return Err(Error::new(format!(
+                        "reflection volume {} was revoked before the port action committed",
+                        volume.get()
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Observes the ports within this machine's cut, or, outside one, as
+    /// they stand.
+    fn port_view<T>(&mut self, view: impl FnOnce(&mut PortJournal) -> T) -> T {
+        match &mut self.cut {
+            Some(cut) => {
+                cut.observed = true;
+                view(&mut cut.events.ports)
+            }
+            None => {
+                let (_, _, events) = self.resources().transaction_snapshot();
+                view(&mut RuntimeEventJournal::new(events).ports)
+            }
+        }
+    }
+
     /// Reads the virtual resource at `path` within a cut: a proxy, named by
     /// a path of keys, for host state that the runtime does not see. It
     /// holds no value, so the read pushes nothing, but it joins the cut's
@@ -1452,8 +1708,10 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         let resources = self.resources();
         loop {
             let start = self.state.clone();
+            let (_, store, events) = resources.transaction_snapshot();
             self.cut = Some(CutTransaction {
-                journal: StoreJournal::new(resources.reflection_snapshot().1),
+                journal: StoreJournal::new(store),
+                events: RuntimeEventJournal::new(events),
                 observed: false,
                 conflicted: false,
                 commit_hooks: Vec::new(),
@@ -1468,7 +1726,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 // An attempt whose forks merged in no serial order is
                 // inconsistent, whatever it returned.
                 _ if cut.conflicted => CutRetry::Now,
-                Ok(result) => match resources.commit_reflection(&cut.journal) {
+                Ok(result) => match resources.try_commit_transaction(&cut.journal, &cut.events) {
                     StoreCommitResult::Committed => {
                         self.run_hooks(cut.commit_hooks);
                         return Ok(result);
@@ -1481,19 +1739,30 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                         )))
                     }
                 },
-                Err(error) if error.kind() == ErrorKind::Backtrack && cut.observed => {
-                    CutRetry::AfterChange(cut.journal.clone())
+                // With no alternative left, a failure diverges as pushback
+                // does: the cut waits for a change in what it observed.
+                Err(error)
+                    if matches!(error.kind(), ErrorKind::Backtrack | ErrorKind::Retry)
+                        && cut.observed =>
+                {
+                    CutRetry::AfterChange(Box::new((cut.journal.clone(), cut.events.clone())))
                 }
-                Err(error) if error.kind() == ErrorKind::Backtrack => CutRetry::Never(Error::new(
-                    "a cut failed without observing shared state, so no change could wake it",
-                )),
+                Err(error) if matches!(error.kind(), ErrorKind::Backtrack | ErrorKind::Retry) => {
+                    CutRetry::Never(Error::new(
+                        "a cut failed or retried without observing shared state, so no \
+                         change could wake it",
+                    ))
+                }
                 Err(error) => CutRetry::Never(error),
             };
             self.state = start;
             self.run_hooks(cut.abort_hooks.into_iter().rev());
             match next {
                 CutRetry::Now => {}
-                CutRetry::AfterChange(journal) => self.await_change(&resources, &journal),
+                CutRetry::AfterChange(journals) => {
+                    let (journal, events) = &*journals;
+                    self.await_change(&resources, journal, events)
+                }
                 CutRetry::Never(error) => return Err(error),
             }
         }
@@ -1603,6 +1872,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         let start = self.state.clone();
         let cut = self.cut.as_ref().expect("a nested cut runs within a cut");
         let journal = cut.journal.clone();
+        let events = cut.events.clone();
         let (commit_hooks, abort_hooks) = (cut.commit_hooks.len(), cut.abort_hooks.len());
         let outcome = self.within_scope(|m| body(m));
         if outcome.is_err() {
@@ -1611,8 +1881,9 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 .cut
                 .as_mut()
                 .expect("a nested cut's transaction outlives it");
-            // The journal's clone shares its reads, which stay recorded.
+            // The journals' clones share their reads, which stay recorded.
             cut.journal = journal;
+            cut.events = events;
             cut.commit_hooks.truncate(commit_hooks);
             let aborted = cut.abort_hooks.split_off(abort_hooks);
             self.run_hooks(aborted.into_iter().rev());
@@ -1625,13 +1896,18 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// nothing else may run. Today a wake follows any change in the
     /// runtime, and validation decides whether the cut's observations
     /// changed; a finer wake keeps the same contract.
-    fn await_change(&self, resources: &RuntimeSharedResources, journal: &StoreJournal) {
+    fn await_change(
+        &self,
+        resources: &RuntimeSharedResources,
+        journal: &StoreJournal,
+        events: &RuntimeEventJournal,
+    ) {
         loop {
             self.runtime
                 .assembler
                 .evaluation_runtime()
                 .pump_until_stable();
-            match resources.validate_reflection(journal) {
+            match resources.validate_transaction(journal, events) {
                 (StoreCommitResult::Committed, generation) => {
                     resources.wait_for_change(generation);
                 }
@@ -1740,6 +2016,14 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         }
         Ok(depth)
     }
+}
+
+/// Pushback from an input port that holds fewer than a read needs.
+fn short(address: &PortAddress, n: usize) -> Error {
+    Error::retry(format!(
+        "input {:?} of machine {:?} holds fewer than {n} values",
+        address.port, address.machine
+    ))
 }
 
 fn underflow(what: &str, needed: usize, held: usize) -> Error {

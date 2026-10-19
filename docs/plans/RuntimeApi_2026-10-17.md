@@ -966,6 +966,53 @@ with the maintainer that day:
   their counts on their machines' stacks; a cut's forked reader now fails
   until its value is ready, and the cut waits on what it read.
 
+`api-ports`, first slice (2026-10-19), in `src/api/runtime/ports.rs`,
+`src/api/runtime/events.rs` and `src/api/turn.rs`:
+- `PortState` sits in the runtime's event state beside the runtime
+  inputs: buffers by receiving port, a machine's path and a port name, and
+  wires by the machine that owns them, with a revision that each wiring
+  change advances. A cut's transaction gains an event journal beside its
+  store journal; they snapshot, validate and commit together, through the
+  existing `transaction_snapshot`, `validate_transaction` and
+  `try_commit_transaction`.
+- `PortJournal` claims from buffers through FIFO cursors, with
+  observations that every alternative of a transaction shares, as runtime
+  inputs do; appends at commit; and edits a view of the wiring that its
+  routing follows. Validation fails when a buffer a journal read was
+  consumed, a buffer it found short gained an item, or the wiring it
+  followed changed (coarsely, by revision).
+- Machines know their paths from the root. `write(port, n)` routes from
+  the machine's output through the wires its ancestors own and the
+  pass-throughs of machines on the way, appending each value to every
+  buffer reached; an output with no wire on the way is a plain error, and
+  a loop is an error. `try_write` is the same until buffers may be
+  bounded. `read(port, n)` and `try_read` claim `n` values or meet
+  pushback, `Retry`: within a cut both return it, and outside one `read`
+  waits, as a failed cut does, while `try_read` returns it. `available`,
+  `input_connected` and `output_connected` observe; `wire` and `unwire`
+  edit the machine's own wiring. Each acts within the machine's cut, or,
+  outside one, commits at once.
+- `ErrorKind::Retry` and `m.retry()`: the outermost cut waits out `Retry`
+  as it does a `Backtrack` from its last alternative.
+- A fork within a cut branches the cut's port journal too. The merge
+  refuses a branch, and the cut runs again, when the cut claimed from a
+  buffer the branch read, or changed wiring the branch followed, after
+  the fork; the store's and the ports' merges happen both or neither.
+- Local wiring has a consequence: a machine cannot feed its own child
+  through a port, since its own output routes outward only. A sibling
+  that the machine fills with `give` and runs, writing to its output, can
+  stand in for now.
+- Tests: `tests/runtime_ports.rs` covers ordered delivery between wired
+  siblings, an unconnected output, duplication and merging, a switchboard,
+  the connection queries, a wiring loop, pushback from a short read, a
+  read waiting outside a cut, a cut waiting out pushback (forced by an
+  abort hook), a failed cut sending nothing, reads seeing committed values
+  only, rewiring undone with a cut, a fork whose routing its cut changed
+  running again (forced through channels), and `retry`.
+- Not yet: bounded buffers, the default diagnostics wiring and its
+  collecting machine, the runtime feeding its diagnostics there, and the
+  CLI slices.
+
 ## Verification
 
 Runtime changes run `scripts/check.sh full` before commit. Concurrency

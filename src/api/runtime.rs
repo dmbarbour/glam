@@ -28,6 +28,7 @@ use crate::runtime::{
 mod events;
 #[cfg(test)]
 mod gc_activity_inventory;
+mod ports;
 mod readiness;
 
 pub use events::*;
@@ -39,6 +40,7 @@ pub(in crate::api) use events::{
     register_runtime_diagnostic_route, route_runtime_diagnostic_guarded,
     set_runtime_diagnostic_route, set_runtime_diagnostic_route_guarded,
 };
+pub(in crate::api) use ports::{PortAddress, PortJournal, Wire, WireEnd};
 pub use readiness::*;
 use readiness::{
     RuntimeSettlementSnapshot, reasoning_diagnostic, runtime_deadlock_work_from_snapshot,

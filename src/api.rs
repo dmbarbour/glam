@@ -37,7 +37,7 @@ pub use evaluator::{ReflectionInspector, ValueEvaluator};
 #[cfg(test)]
 use runtime::publish_runtime_observation;
 pub use runtime::*;
-pub use turn::{Fork, Machine, MachinePath, MachineStatus, Runtime, RuntimeConfig};
+pub use turn::{Endpoint, Fork, Machine, MachinePath, MachineStatus, Runtime, RuntimeConfig};
 pub(crate) use value::EffectTokenKey;
 #[cfg(test)]
 pub(crate) use value::assert_effect_token_family_shape;

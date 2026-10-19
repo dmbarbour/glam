@@ -15,6 +15,7 @@ pub struct Error {
     diagnostics: Vec<Diagnostic>,
     panic: Option<EvaluationPanic>,
     backtrack: bool,
+    retry: bool,
 }
 
 /// How an operation failed.
@@ -29,11 +30,17 @@ pub enum ErrorKind {
     /// panicked keeps that state, so a later demand of it reports the same
     /// panic instead of running it again.
     Panic,
-    /// An explicit failure, from `Machine::fail`: the intent to backtrack.
-    /// It undoes the cuts it passes through, and the outermost cut it
-    /// reaches runs again once what it observed has changed. Other errors
-    /// also undo the cuts they pass, but end the outermost one.
+    /// An explicit failure, from `Machine::fail`: the intent to backtrack
+    /// to another alternative. It undoes the cuts it passes through, and the
+    /// outermost cut it reaches, having no alternative left, runs again once
+    /// what it observed has changed. Other errors also undo the cuts they
+    /// pass, but end the outermost one.
     Backtrack,
+    /// Pushback, a divergence that a cut recognizes: what it needs is not
+    /// there yet, such as items on a port, or `Machine::retry` says so. It
+    /// undoes the cuts it passes through, no alternative takes it, and the
+    /// outermost cut runs again once what it observed has changed.
+    Retry,
 }
 
 impl Error {
@@ -46,6 +53,7 @@ impl Error {
             diagnostics: Vec::new(),
             panic: None,
             backtrack: false,
+            retry: false,
         }
     }
 
@@ -68,6 +76,7 @@ impl Error {
             diagnostics: Vec::new(),
             panic: None,
             backtrack: false,
+            retry: false,
         }
     }
 
@@ -80,6 +89,7 @@ impl Error {
             diagnostics: Vec::new(),
             panic: Some(report),
             backtrack: false,
+            retry: false,
         }
     }
 
@@ -88,6 +98,8 @@ impl Error {
             ErrorKind::Panic
         } else if self.backtrack {
             ErrorKind::Backtrack
+        } else if self.retry {
+            ErrorKind::Retry
         } else {
             ErrorKind::Failure
         }
@@ -98,6 +110,14 @@ impl Error {
         Self {
             backtrack: true,
             ..Self::new("an explicit failure reached no cut")
+        }
+    }
+
+    /// Pushback, a divergence a cut waits out ([`ErrorKind::Retry`]).
+    pub(crate) fn retry(message: impl Into<Arc<str>>) -> Self {
+        Self {
+            retry: true,
+            ..Self::new(message)
         }
     }
 

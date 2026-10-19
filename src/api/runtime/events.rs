@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use rpds::RedBlackTreeMapSync;
 
+use super::ports::{PortJournal, PortState};
 use super::{
     RuntimeObservationNotification, RuntimeSharedResources, prepare_runtime_observation,
     publish_runtime_observation,
@@ -186,6 +187,8 @@ pub(in crate::api) struct RuntimeEventState {
     pub(in crate::api) inputs: RedBlackTreeMapSync<RuntimeInputEndpointId, Arc<RuntimeInputBuffer>>,
     pub(in crate::api) outputs: RuntimeOutputState,
     diagnostic_routes: BTreeMap<RuntimeInputEndpointId, RuntimeDiagnosticRoute>,
+    /// Machines' port buffers and wiring.
+    pub(in crate::api) ports: PortState,
 }
 
 impl RuntimeEventState {
@@ -194,6 +197,7 @@ impl RuntimeEventState {
             inputs: RedBlackTreeMapSync::new_sync(),
             outputs: RuntimeOutputState::default(),
             diagnostic_routes: BTreeMap::new(),
+            ports: PortState::new(),
         }
     }
 
@@ -201,6 +205,7 @@ impl RuntimeEventState {
         RuntimeEventSnapshot {
             runtime,
             inputs: self.inputs.clone(),
+            ports: self.ports.clone(),
         }
     }
 
@@ -234,6 +239,7 @@ impl RuntimeEventState {
                     .contains_key(&intent.endpoint)
                     && !self.outputs.accepted.contains(&intent.delivery)
             })
+            && self.ports.validate(&journal.ports)
     }
 
     pub(super) fn commit_validated(&mut self, journal: &RuntimeEventJournal) -> bool {
@@ -281,7 +287,8 @@ impl RuntimeEventState {
                 .expect("event validation retained every output endpoint")
                 .push_back(intent.delivery);
         }
-        input_changed || !journal.outputs.is_empty()
+        let ports_changed = self.ports.commit(&journal.ports);
+        input_changed || !journal.outputs.is_empty() || ports_changed
     }
 
     fn admit_input(
@@ -352,6 +359,7 @@ impl RuntimeEventState {
 pub struct RuntimeEventSnapshot {
     runtime: EvaluationRuntimeId,
     pub(in crate::api) inputs: RedBlackTreeMapSync<RuntimeInputEndpointId, Arc<RuntimeInputBuffer>>,
+    pub(in crate::api) ports: PortState,
 }
 
 #[derive(Clone)]
@@ -377,17 +385,21 @@ pub struct RuntimeEventJournal {
     observations: Arc<Mutex<BTreeMap<RuntimeInputEndpointId, RuntimeInputCursor>>>,
     cursors: BTreeMap<RuntimeInputEndpointId, RuntimeInputCursor>,
     outputs: Vec<RuntimeOutputIntent>,
+    /// Machines' port actions in this transaction.
+    pub(in crate::api) ports: PortJournal,
 }
 
 impl RuntimeEventJournal {
     #[doc(hidden)]
     pub fn new(snapshot: RuntimeEventSnapshot) -> Self {
+        let ports = PortJournal::new(snapshot.ports.clone());
         Self {
             runtime: snapshot.runtime,
             snapshot,
             observations: Arc::new(Mutex::new(BTreeMap::new())),
             cursors: BTreeMap::new(),
             outputs: Vec::new(),
+            ports,
         }
     }
 
