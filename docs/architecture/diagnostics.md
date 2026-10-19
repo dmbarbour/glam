@@ -208,6 +208,11 @@ rather than an extension of evaluation.
 
 ## Logger Completion and Fallback
 
+This section describes the CLI's logger as it is during the runtime API's
+transition: its exit vote and the settled reports the CLI renders are bridge
+behavior, which `quiescence-reports-unresolved-state` replaces with machines
+that outlive quiescence and a report that a machine emits.
+
 The diagnostic stream has no semantic closed state. A conventional logger loop
 uses `.read_log` as the first branch and `.exit.success` as its terminal vote.
 New committed input disturbs the vote and retries the read. Runtime readiness

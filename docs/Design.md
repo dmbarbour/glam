@@ -748,7 +748,7 @@ Interactive mode is enabled by command-line switch:
 - `(-i|--interactive)` - configurable user interface, maintains result
   - `--discard` by default, but compatible with `-o`
 
-When interactive mode is enabled, the assembler will run `conf.ide`, and continues running until `conf.ide` terminates. Aside from the reflection API, the IDE has access to logging (downstream of `conf.log`) and user interaction via TTY (REPL, TUI) and network (listen on TCP or unix domain sockets). A lightweight GUI is feasible, e.g. Rust's egui or Dear ImGUI. Just enough filesystem access to update sources.
+When interactive mode is enabled, the assembler will run `conf.ide`, and continues running until `conf.ide` terminates. Aside from the reflection API, the IDE takes over logging entirely, to support a TUI, with access to the fallback logger, and has user interaction via TTY (REPL, TUI) and network (listen on TCP or unix domain sockets). A lightweight GUI is feasible, e.g. Rust's egui or Dear ImGUI. Just enough filesystem access to update sources.
 
 ### Integration
 

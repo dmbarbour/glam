@@ -331,6 +331,9 @@ derived from module paths or final object `spec.name`.
 
 ## CLI Logger Session
 
+This is the configured logger during the runtime API's transition; its exit
+vote retires with `quiescence-reports-unresolved-state`.
+
 Configured `conf.log` is a reflection task with a broader specialization.
 Main-only requests read the diagnostics waiting at the CLI's `logger`
 machine, buffer stderr or diagnostic output, and coordinate

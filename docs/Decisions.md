@@ -2248,6 +2248,57 @@ maps the short names used here to file names.
   and the hand-over is its own rewiring (maintainer, the same day).
 - **Recorded in:** runtime API plan, `api-ports`.
 
+### Quiescence is every machine waiting; settlement reports what remains unresolved
+`quiescence-reports-unresolved-state` · 2026-10-19 · maintainer · accepted
+- **Context:** the batch CLI has no clear end, unlike `--interactive`, which
+  ends when its user says. Settlement solved that for anonymous tasks that
+  terminate: each live task votes `.exit`, a vote stays retryable until the
+  runtime settles, and a final phase renders the settled reports, which may
+  start more work and another settlement. Failures known when they happen,
+  a delivery's or a maintenance failure, wait for settlement beside those
+  that exist only if the runtime quiesces with them unresolved. Machines in
+  a tree that communicate through ports (`machines-form-a-tree`,
+  `machines-communicate-through-wired-ports`) are named and extended
+  rather than terminated.
+- **Decision:**
+  - A machine is always retrying its current atomic step, whether it runs
+    or waits, forever. One that waits on input or on a heap change is
+    idle, so the runtime is quiescent when every machine waits and no
+    evaluation work remains. Waiting on an input replaces `.exit`, and
+    machines, loggers among them, outlive quiescence.
+  - What remains unresolved at quiescence is a report: obligations no one
+    will meet (a demand blocked on a promise no one will resolve, a request
+    no one answered), machines still in error, and task failures no one
+    observed, with the work settlement kills. A task failure belongs here
+    though it is known when it happens, since a parent may still observe
+    it.
+  - The report reflects on the other machines' state; it is not their
+    output. A machine builds it and emits it as diagnostics, so only that
+    machine's wiring matters, checked before settlement is attempted, never
+    the wiring of the machines it reflects on.
+  - Failures known when they happen, which nothing in glam can
+    acknowledge, a delivery's or a maintenance failure, are diagnostics
+    when they happen.
+  - Settlement does not stop the logger: it renders the report, which may
+    start work and another quiescence. A batch ends when a quiescence finds
+    nothing new, and ends each fork then waiting in an outermost cut,
+    cleanly: the cut committed nothing, so its machine stays as it was,
+    without an error.
+  - An IDE takes over logging entirely, to support a TUI, with access to
+    the fallback logger.
+- **Alternatives rejected:** exit votes, a consensus among terminating tasks
+  that named, waiting machines no longer need; checking that diagnostics
+  stay deliverable on every wiring change; filing a misrouted diagnostic in
+  the settlement report, which reflects on machines rather than carrying
+  their output; stopping the logger for settlement.
+- **Consequences:** the CLI's settlement loops, its configured logger's exit
+  vote, and settled reports that the CLI renders are bridge behavior until
+  `api-settlement`. Aligning the reflection API becomes a design step,
+  `api-reflection-model`, ahead of `api-settlement`. `--interactive` can
+  build on settlement without its tangles.
+- **Recorded in:** runtime API plan, `api-reflection-model` and
+  `api-settlement`.
+
 ### Resumable WHNF through bounded regional quanta and durable checkpoints
 `resumable-whnf-regional-quanta` · 2026-09-12 · agent · accepted
 - **Context:** the recursive evaluator replayed prefixes after retryable

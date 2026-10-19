@@ -149,6 +149,10 @@ construct an assembler or load configuration.
 
 ## Batch Lifecycle
 
+The settlement steps below are the CLI's during the runtime API's
+transition; `quiescence-reports-unresolved-state` replaces exit votes and
+the CLI's report rendering with a report that a machine emits.
+
 ```text
 construct one dormant assembler, wire diagnostics to the logger machine,
   and compile configuration

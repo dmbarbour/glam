@@ -302,14 +302,33 @@ handle API goes.
      order; a second resolution fails; a collected resolver, or one broken
      by hand, breaks the request; a resolver reads the status; a status
      change wakes a cut that failed on it.
-8. `api-settlement` — `rt.settle()` runs until no work and no other turn
-   remains, services maintenance, kills a deadlock, and appends the
-   runtime's reports (task, delivery and maintenance failures, exit errors,
-   killed work) to a log. Turns in progress are known, so settlement
-   counts them, which the handle API could not.
-   - CLI slice: the CLI's two settlement loops become one, and its exit
-     status reads the report log.
-9. `api-hosts-as-machines` — absorbs `lifecycle-host-messages` and
+8. `api-reflection-model` — a design step, without code, ahead of the
+   settlement it shapes (maintainer, 2026-10-19): how the reflection API, as
+   `refl.*` and `anno refl:(…)` present it, maps to machines. Spawned tasks
+   (`.task.new` and its relatives) become named machines in the tree that
+   outlive quiescence; `.exit` retires, since a machine waiting on input is
+   idle; `.log` and `.read_log` become ports; observing or acknowledging a
+   task's failure becomes recovering its machine; and the step settles
+   which waits count as unresolved (`quiescence-reports-unresolved-state`).
+   It ends in an ADR. Its implementation is a later step, after
+   `api-effect-providers`.
+9. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
+   decides (maintainer, 2026-10-19), in place of exit votes. The runtime is
+   quiescent when every machine waits on input or a heap change, retrying
+   its current atomic step, and no evaluation work remains; turns in
+   progress are known, so settlement counts them, which the handle API
+   could not. `rt.settle()` waits for quiescence, services maintenance,
+   kills a deadlock, and has a machine whose diagnostics output it checks
+   first build and emit a report of what remains unresolved: obligations
+   no one will meet, machines still in error, task failures no one
+   observed, and the work it killed. Failures known when they happen, a
+   delivery's or a maintenance failure, are diagnostics then. Settlement
+   leaves the logger running; a batch ends when a quiescence finds nothing
+   new, ending each fork that then waits in an outermost cut with its
+   machine as it was.
+   - CLI slice: the CLI's two settlement loops become one, and the bridge
+     behavior below that settlement retires goes.
+10. `api-hosts-as-machines` — absorbs `lifecycle-host-messages` and
    `lifecycle-host-calls` (L3, L7, L8, L9). The reflection hosts
    (`AssemblerReflectionHost`, `LoggerTaskHost`, `IsolatedTaskHost`) reduce
    to queues and store state that machines serve, and `TaskHost`'s
@@ -324,7 +343,7 @@ handle API goes.
      reads, for the manifest and the final check that no file changed. The
      CLI opens its runtime with `Runtime::open`, and the bridge's
      constructor goes.
-10. `api-effect-providers` — absorbs `lifecycle-leases`. A turn runs a
+11. `api-effect-providers` — absorbs `lifecycle-leases`. A turn runs a
     monadic effect by evaluation, on its own thread (option A, maintainer,
     2026-10-18; see [Effect providers](#effect-providers)).
     - The turn supplies the effects API, evaluates the program to weak-head
@@ -347,13 +366,13 @@ handle API goes.
       providers, their per-branch journals become machine state that cuts
       restore, and `IsolatedTaskHost` and `IsolatedEffectSearch` leave the
       public API.
-11. `api-handle-retirement` — the public handle types go: `Assembler`,
+12. `api-handle-retirement` — the public handle types go: `Assembler`,
     `ModuleBuilder`, readiness results, `EffectRun`, endpoints and buses,
     and `Values` as a separate handle. The bridge goes with them, and the
     public tests move to turns (see
     [Parity](#parity-for-handle-retirement)). Standing docs describe the new
     API.
-12. `api-retirement` — absorbs `lifecycle-owner`'s retirement protocol (L1,
+13. `api-retirement` — absorbs `lifecycle-owner`'s retirement protocol (L1,
     L5, L6, L10). With the handles gone, the `Runtime` is the only owner,
     and dropping it retires in order: admit no new work; stop, wake and
     join the workers; fail pending operations as retired; close sessions
@@ -388,11 +407,11 @@ need no runtime, and stay as they are.
 
 | Concern | Today | Needs | Steps |
 |---|---|---|---|
-| Preparation | `FileSourceSystem`, `EvaluationRuntime`, `DiagnosticBus`, and an `Assembler` whose reflection environment holds two promises | an owner, then the environment and sources in their target form | 2, 6, 9 |
+| Preparation | `FileSourceSystem`, `EvaluationRuntime`, `DiagnosticBus`, and an `Assembler` whose reflection environment holds two promises | an owner, then the environment and sources in their target form | 2, 6, 10 |
 | Configuration and assembly | compiles `configuration` and `assembly` over initial definitions; access, `defined_or`, `context:` annotations, evaluation to bytes | data operations | 3 |
-| Logging | `DefaultLogger` renders as a subscriber; a configured logger is an `EffectRun` on its own thread with `MainEffects` (`read_log`, `write_stderr`), supervised, with a fallback endpoint | forks, logs | 5, 6 |
-| Settlement | two loops over readiness, maintenance, deadlock kills and quiescence reports | `rt.settle()`, a report log | 8 |
-| Configured CLI | `conf.cli` runs as an isolated effect search over argv: `CliEffects`, with nested `TokenEffects` searches, per-branch journals, and a search again for each completion candidate | effect providers | 10 |
+| Logging | `DefaultLogger` renders as a subscriber; a configured logger is an `EffectRun` on its own thread with `MainEffects` (`read_log`, `write_stderr`), supervised, with a fallback endpoint | forks, ports, then turns that run effects | 5, 6, 11 |
+| Settlement | two loops over readiness, maintenance, deadlock kills and quiescence reports | the reflection model, then `rt.settle()` and a report that a machine emits | 8, 9 |
+| Configured CLI | `conf.cli` runs as an isolated effect search over argv: `CliEffects`, with nested `TokenEffects` searches, per-branch journals, and a search again for each completion candidate | effect providers | 11 |
 
 ### The bridge
 
@@ -415,6 +434,26 @@ moved piecemeal.
 
 *Agreed (maintainer, 2026-10-18):* the bridge, since holding the CLI back
 until a late step would hinder validating the new API as it grows.
+
+### Bridge behavior
+
+Some of what the CLI and the runtime do now is scaffolding for the
+transition, not design (maintainer, 2026-10-19). Each goes with the step
+named:
+- The CLI's settlement loops, the configured logger's exit vote, and the
+  settled reports the CLI renders itself, or publishes on the bus where no
+  logger runs: `api-settlement`, where a machine reports what remains
+  unresolved (`quiescence-reports-unresolved-state`).
+- The configured logger as an `EffectRun` with `MainEffects`, reading the
+  logger's input through `RuntimeEventJournal::read_port`, with a lifecycle
+  that closes its session when its root ends
+  (`EffectLifecycle::new_closing_session`): `api-effect-providers` and the
+  reflection model's implementation.
+- The runtime's own diagnostics, routed from the assembler's bus into the
+  root's diagnostics input as if a child had sent them, and one whose
+  routing fails waiting at the root: the reflection model's
+  implementation, when reflection tasks are machines whose writes fail as
+  any machine's do.
 
 ### Policy in glam (experiment)
 
@@ -1063,7 +1102,8 @@ slice's first stage:
   read wakes. It arrives as a child's write would, passing through where
   the machine wired the input on; where that routing fails, by a loop or
   an unconnected output, it waits in the input itself, since the runtime
-  has no writer to fail and nothing should be lost.
+  has no writer to fail and nothing should be lost. Both are bridge
+  behavior (see [Bridge behavior](#bridge-behavior)).
 - `Runtime::open` routes its assembler's bus to the root's diagnostics
   input under `DiagnosticsWiring::ToRoot`; under `None`, the bus keeps
   them. The CLI's runtime, built around its assembler by the bridge, is
@@ -1116,7 +1156,9 @@ second stage:
   unjoined, as the ingress's lifecycle terminal had done.
 - `LogHost`, `LoggerSupervisor`, its fallback endpoint and the route
   activation leave the CLI. The bus stays as the publishers' entry, and its
-  counts, with the logger's bus's, decide the exit code.
+  counts, with the logger's bus's, decide the exit code. The configured
+  logger's reads, its lifecycle, and the CLI's settlement are bridge
+  behavior (see [Bridge behavior](#bridge-behavior)).
 - The bridge's uses in the CLI rise from seven to nine: the fallback pops
   the transport values it renders, and the CLI's ends without a batch find
   their assembler for the renderer. The logger's test support adds two.
@@ -1169,8 +1211,9 @@ the public API, in `tests/`.
   is only its own.
 - Aligning the reflection API, as `refl.*` and `anno refl:(…)` present it,
   with this model (maintainer, 2026-10-19), perhaps making spawned tasks
-  (`.task.new` and its relatives) persistent machines in the tree. A later
-  step, ordered after the ports re-plan and `api-effect-providers`.
+  (`.task.new` and its relatives) persistent machines in the tree: its
+  design is now a step ahead of settlement, `api-reflection-model`, and its
+  implementation a later step, after `api-effect-providers`.
 - Communication's open details, at `api-ports`: how far the API
   specializes buffers, by measurement.
 - The ownership plan's open details, each settled when its step starts:

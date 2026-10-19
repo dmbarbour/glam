@@ -87,7 +87,9 @@ configuration live in [`../CLI.md`](../CLI.md).
 
 ## Batch Ordering
 
-For a selected assembly command, preserve this lifecycle:
+For a selected assembly command, preserve this lifecycle, the CLI's during
+the runtime API's transition (`quiescence-reports-unresolved-state` replaces
+its exit votes and report rendering):
 
 ```text
 load configuration on dormant runtime
