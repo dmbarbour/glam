@@ -190,7 +190,10 @@ handle API goes.
      diagnostics channel, redirected per machine or subtree. That amends
      rather than reverses `runtime-api-turns-on-machines`'s rejection of
      point-to-point channels, since the channels stay shared state and the
-     topology belongs to the wiring.
+     topology belongs to the wiring. A turn that ends in error might emit
+     its error on its machine's diagnostics port by default, so that an
+     unobserved failure, such as a fork's left to its turn's end, still
+     reaches a person (maintainer, 2026-10-19).
    - CLI slice, diagnostics: the CLI appends diagnostics to a log in turns.
      `DiagnosticBus`, `LogHost` and the supervisor's fallback endpoint
      retire.
@@ -872,15 +875,26 @@ with the maintainer that day:
   `take` after the join, and `Fork<'scope>` carries no result type. `m.join`
   returns the fork's outcome, success, a failure (`Backtrack`) or another
   error, and the forked machine stays flagged.
-- Implicit joins, at the end of a turn, cut attempt or `m.scope`, join in
-  the order the forks were made, and the outcome is the body's own error,
-  or else the first fork's: an operation diverges if a join does, and
-  fails if a join fails, in that deterministic order. `m.scope`'s body
-  returns a `Result`.
+- Implicit joins at the end of a cut attempt or `m.scope` join in the
+  order the forks were made, and the outcome is the body's own error, or
+  else the first fork's: an operation diverges if a join does, and fails
+  if a join fails, in that deterministic order. `m.scope`'s body returns
+  a `Result`.
 - Hooks are `FnOnce(&mut Machine) + Send + 'static` and return nothing:
   they handle their own failures, and a cut's outcome is only its own. A
   hook runs on its machine even if a later error flagged it, since it sees
   only the values it captured.
+- The end of a turn does not observe the forks it joins (maintainer, the
+  same day): once the body has returned, a fork's error stays in its own
+  machine, and its panic resumes without flagging the turn's machine. The
+  end of an `m.scope` or a cut still observes them, as a join does.
+  `Fork` is `#[must_use]`, so a fork left unjoined shows in a warning; the
+  tests that leave one do so with `let _ =`.
+- Discovery: `rt.machines(path)` and `m.machines(path)` return the
+  machines below a path, depth first in key order, each with its path and
+  a `MachineStatus` (idle, failed, forked), collected as they stand. The
+  walk does not descend into a forked machine, and the machine's version
+  fails where the path is forked.
 - First built the same day with a list of the errors' diagnostics in place
   of the flag, pushed by recovery, and `m.register_error`; the maintainer
   reduced it to the flag, since recovery reads the machine's state, not
@@ -892,7 +906,9 @@ with the maintainer that day:
   barring its parent's operations. `tests/runtime_forks.rs` covers a join
   returning a fork's outcome with its machine left flagged, a failure
   staying `Backtrack`, implicit joins in join order after the body, and a
-  panic flagging each machine it unwinds. The forked tests elsewhere leave
+  panic flagging each machine it unwinds, a fork left to a turn's end
+  flagging only itself, and the walk from the runtime and from a machine.
+  The forked tests elsewhere leave
   their counts on their machines' stacks; a cut's forked reader now fails
   until its value is ready, and the cut waits on what it read.
 

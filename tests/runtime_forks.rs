@@ -7,7 +7,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc;
 use std::thread;
 
-use glam::{Error, ErrorKind, Machine, Runtime, RuntimeConfig};
+use glam::{Error, ErrorKind, Machine, MachinePath, MachineStatus, Runtime, RuntimeConfig};
 
 fn runtime() -> Runtime {
     Runtime::open(RuntimeConfig::new()).expect("a runtime should open")
@@ -114,7 +114,7 @@ fn unjoined_forks_join_at_the_end_of_their_scope_or_turn() {
     let mut rt = runtime();
     rt.run("m", |m| {
         m.scope(|m| {
-            m.fork("scoped", |s| {
+            let _ = m.fork("scoped", |s| {
                 s.push_int(1);
                 Ok(())
             })?;
@@ -122,7 +122,7 @@ fn unjoined_forks_join_at_the_end_of_their_scope_or_turn() {
         })?;
         m.take("scoped", 1)?;
         assert_eq!(m.pop_int()?, 1, "the scope joined its fork");
-        m.fork("unjoined", |u| {
+        let _ = m.fork("unjoined", |u| {
             u.push_int(2);
             Ok(())
         })?;
@@ -163,7 +163,7 @@ fn a_panic_in_a_fork_resumes_at_its_join_and_marks_each_machine_it_unwinds() {
 
     let unjoined = catch_unwind(AssertUnwindSafe(|| {
         rt.run("n", |m| {
-            m.fork("q", |_| -> Result<(), Error> {
+            let _ = m.fork("q", |_| -> Result<(), Error> {
                 panic!("an unjoined fork panics")
             })?;
             Ok(())
@@ -172,6 +172,14 @@ fn a_panic_in_a_fork_resumes_at_its_join_and_marks_each_machine_it_unwinds() {
     assert!(
         unjoined.is_err(),
         "an unjoined fork's panic resumes at the turn's end"
+    );
+    assert!(
+        rt.failed(["n", "q"]),
+        "the panic left the fork's machine in error"
+    );
+    assert!(
+        !rt.failed("n"),
+        "but not the turn's, whose body had returned"
     );
 }
 
@@ -216,9 +224,9 @@ fn implicit_joins_propagate_the_first_error_in_join_order() {
     };
     rt.run("m", |m| {
         let first = m.scope(|m| {
-            m.fork("a", |_| Ok(()))?;
-            m.fork("b", erring("b errs"))?;
-            m.fork("c", erring("c errs"))?;
+            let _ = m.fork("a", |_| Ok(()))?;
+            let _ = m.fork("b", erring("b errs"))?;
+            let _ = m.fork("c", erring("c errs"))?;
             Ok(())
         });
         assert_eq!(
@@ -227,7 +235,7 @@ fn implicit_joins_propagate_the_first_error_in_join_order() {
             "the first in join order, the order the forks were made"
         );
         let body = m.scope(|m| -> Result<(), Error> {
-            m.fork("d", erring("d errs"))?;
+            let _ = m.fork("d", erring("d errs"))?;
             Err(Error::new("the body errs"))
         });
         assert_eq!(
@@ -239,17 +247,73 @@ fn implicit_joins_propagate_the_first_error_in_join_order() {
     })
     .expect("the scopes returned their errors to the turn");
 
-    let error = rt
-        .run("n", |m| {
-            m.fork("e", erring("e errs"))?;
-            Ok(())
-        })
-        .expect_err("an unjoined fork's error ends the turn");
-    assert_eq!(error.to_string(), "e errs");
+    rt.run("n", |m| {
+        let _ = m.fork("e", erring("e errs"))?;
+        Ok(())
+    })
+    .expect("a fork left to the turn's end is no early exit of the turn");
     assert!(
-        rt.failed("n") && rt.failed(["n", "e"]),
-        "the fork's error left its machine, and the turn's, in error"
+        rt.failed(["n", "e"]) && !rt.failed("n"),
+        "the fork's error stays in its own machine"
     );
+}
+
+#[test]
+fn the_walk_reports_each_machine_below_a_path_with_its_status() {
+    let mut rt = runtime();
+    rt.run("m", |m| {
+        m.push_int(1);
+        m.give("b", 1)?;
+        let _ = m.fork(["a", "x"], |_| -> Result<(), Error> {
+            Err(Error::new("x errs"))
+        })?;
+        Ok(())
+    })
+    .expect("the turn should succeed");
+    let walked: Vec<_> = rt
+        .machines("m")
+        .map(|(path, status)| (path.keys().len(), status))
+        .collect();
+    assert_eq!(
+        walked,
+        [
+            (2, MachineStatus::Idle),
+            (3, MachineStatus::Failed),
+            (2, MachineStatus::Idle),
+        ],
+        "m/a, m/a/x, m/b: depth first, in key order, from the root"
+    );
+    let failures: Vec<_> = rt
+        .machines(())
+        .filter(|(_, status)| *status == MachineStatus::Failed)
+        .map(|(path, _)| path)
+        .collect();
+    assert_eq!(failures, [MachinePath::from(["m", "a", "x"])]);
+
+    let (release, released) = mpsc::channel::<()>();
+    rt.run("m", |m| {
+        let fork = m.fork("b", move |_| {
+            released.recv().expect("the turn releases the fork");
+            Ok(())
+        })?;
+        let walked: Vec<_> = m.machines(())?.collect();
+        assert_eq!(
+            walked,
+            [
+                (MachinePath::from(["a"]), MachineStatus::Idle),
+                (MachinePath::from(["a", "x"]), MachineStatus::Failed),
+                (MachinePath::from(["b"]), MachineStatus::Forked),
+            ],
+            "from the machine, relative to it"
+        );
+        assert!(
+            m.machines("b").is_err(),
+            "a forked machine's subtree is on its thread"
+        );
+        release.send(()).expect("the fork waits");
+        m.join(fork)
+    })
+    .expect("the turn should succeed");
 }
 
 #[test]

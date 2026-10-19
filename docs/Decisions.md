@@ -2130,23 +2130,32 @@ maps the short names used here to file names.
 - **Decision:**
   - An error or panic that ends a turn sets its machine's error flag, part
     of the machine's state. Only that sets it, and only as the turn
-    returns. Observing an error, as a turn's or a join's result, never
-    clears it.
+    returns. The flag records an early exit, which may have left the
+    machine's own state half-done (maintainer, the same day). Observing an
+    error, as a turn's or a join's result, never clears it.
   - Recovery is an entry: `rt.recover` and `m.recover` clear the flag and
     enter the machine as the failed turn left it, to inspect and repair by
     its own conventions, while `run`, `give`, `take` and `fork` fail on a
     machine in error. No machine runs normally with a pending error. Only
     the target's own flag matters, not that of machines between.
   - `rt.failed(path)` and `m.failed(path)` read the flag without clearing
-    it, so a host or parent decides whether and how to recover.
+    it, so a host or parent decides whether and how to recover, and
+    `rt.machines(path)` and `m.machines(path)` walk the machines below a
+    path with their statuses (idle, failed, forked), to discover them.
   - Forks return nothing to Rust: what a fork computes stays on its
     machine's stack. A join returns the fork's outcome, keeping success,
-    failure (`Backtrack`) and divergence (another error) apart, and an
-    implicit join propagates them: the body's own outcome first, then the
-    forks' in the deterministic order they were made.
+    failure (`Backtrack`) and divergence (another error) apart. The end of
+    an `m.scope` or a cut observes its forks' outcomes as joins do: the
+    body's own outcome first, then the forks' in the deterministic order
+    they were made. The end of a turn does not: once the body has
+    returned, nothing of it is left to spoil, so a fork left to the turn's
+    end leaves its error only in its own machine, and `Fork` is
+    `#[must_use]` so that leaving it is visible.
   - Hooks return nothing and handle their own errors.
   - Panics resume at the join, explicit or implicit, and flag each machine
-    whose turn they unwind.
+    whose body they unwind: a panic that a body observed, through a join
+    or a scope's end, flags it, while one resumed at a turn's end, after
+    its body returned, flags only the fork's machine.
 - **Alternatives rejected:**
   - first built the same day: a list of the errors' diagnostics in the
     machine's state, pushed onto its stack by recovery, with
@@ -2159,13 +2168,19 @@ maps the short names used here to file names.
   - diagnostics captured in machine state, which a long turn would hold
     back; communication takes them instead;
   - failure winning over an earlier divergence among joins, which would
-    open non-determinism's interaction with transactions and backtracking.
+    open non-determinism's interaction with transactions and backtracking;
+  - a turn's end propagating its leftover forks' errors to the turn and
+    its machine, as first built: errors concern the state of machines
+    that exited early, and the parent's body had not (maintainer, the
+    same day).
 - **Consequences:** settlement can find every machine left in error. The
   open question on hook errors is settled. A fork's results travel as
   glam values, as a machine's always have. Of several forks that fail at
-  an implicit join, only the first's error reaches the outcome; the
-  others leave their flags, and their diagnostics await the diagnostics
-  channel of the ports re-plan.
+  a scope's or cut's end, only the first's error reaches the outcome, and
+  a fork left to a turn's end reaches none; the others leave their flags,
+  for the walk to find, and their diagnostics await the ports re-plan,
+  where a turn that ends in error might emit one on its machine's
+  diagnostics port by default.
 - **Recorded in:** runtime API plan, `api-machine-errors`.
 
 ### Resumable WHNF through bounded regional quanta and durable checkpoints

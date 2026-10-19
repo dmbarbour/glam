@@ -103,7 +103,7 @@ fn a_failed_cut_undoes_its_forks_which_join_at_its_end() {
     let mut rt = runtime();
     rt.run("m", |m| {
         let failed: Result<(), Error> = m.cut(|m| {
-            m.fork("child", |c| {
+            let _ = m.fork("child", |c| {
                 c.push_int(1);
                 c.heap_set(["x"])?;
                 c.push_int(2);

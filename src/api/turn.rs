@@ -219,6 +219,28 @@ impl MachineState {
             && !self.failed
     }
 
+    /// Appends the machines below this one, at `path`, with their statuses,
+    /// depth first, in key order.
+    fn walk(&self, path: &mut Vec<Key>, found: &mut Vec<(MachinePath, MachineStatus)>) {
+        let mut children: Vec<_> = self.children.iter().collect();
+        children.sort_by_key(|&(key, _)| key);
+        for (key, child) in children {
+            path.push(key.clone());
+            match child {
+                Child::Idle(state) => {
+                    let status = match state.failed {
+                        true => MachineStatus::Failed,
+                        false => MachineStatus::Idle,
+                    };
+                    found.push((MachinePath(path.clone()), status));
+                    state.walk(path, found);
+                }
+                Child::Forked => found.push((MachinePath(path.clone()), MachineStatus::Forked)),
+            }
+            path.pop();
+        }
+    }
+
     /// The descendant at `path`, if present, without creating it. It fails
     /// when the descendant, or a machine between, is forked.
     fn find(&self, path: &[Key]) -> Result<Option<&MachineState>, Error> {
@@ -396,9 +418,13 @@ impl Runtime {
     /// unjoined, resumes here once every fork has joined; what the turn
     /// changed stays.
     ///
-    /// An error or panic that ends the turn leaves the machine in error, and
-    /// returning it is no recovery: until [`Self::recover`] enters it, this
-    /// fails on it without entering. Machines below it stay reachable.
+    /// An error or panic that ends the turn exits it early, and leaves the
+    /// machine in error. Returning the error is no recovery: until
+    /// [`Self::recover`] enters it, this fails on it without entering.
+    /// Machines below it stay reachable. The forks the turn left unjoined
+    /// join once its body has returned, when there is nothing of it left to
+    /// spoil: their errors leave only their own machines in error, and their
+    /// panics resume here without one.
     pub fn run<'env, R>(
         &'env mut self,
         path: impl Into<MachinePath>,
@@ -443,6 +469,25 @@ impl Runtime {
         outcome.unwrap_or_else(|panic| resume_unwind(panic))
     }
 
+    /// The machines below the one at `path`, each with its path from the
+    /// root and its status, depth first, in key order. Only machines that
+    /// hold something are present.
+    pub fn machines(
+        &self,
+        path: impl Into<MachinePath>,
+    ) -> std::vec::IntoIter<(MachinePath, MachineStatus)> {
+        let path = path.into();
+        let mut found = Vec::new();
+        if let Some(state) = self
+            .root
+            .find(path.keys())
+            .expect("no machine is forked between turns")
+        {
+            state.walk(&mut path.0.clone(), &mut found);
+        }
+        found.into_iter()
+    }
+
     /// Whether the machine at `path` is in error, which only
     /// [`Self::recover`] clears. An absent machine is an empty one, in no
     /// error.
@@ -477,6 +522,17 @@ struct PendingFork<'scope> {
     id: u64,
     path: Vec<Key>,
     thread: ScopedJoinHandle<'scope, ForkReturn>,
+}
+
+/// A machine's status, as [`Runtime::machines`] and [`Machine::machines`]
+/// report it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MachineStatus {
+    Idle,
+    /// In error, until a recovering entry.
+    Failed,
+    /// Running on a fork; what lies below it is on the fork's thread.
+    Forked,
 }
 
 /// What a fork's thread returns at its join: its machine, how its turn
@@ -527,6 +583,8 @@ struct Joined {
 ///     m.join(fork)
 /// });
 /// ```
+#[must_use = "a fork's outcome is observed only by joining it: one left \
+              unjoined to its turn's end leaves its error only in its machine"]
 pub struct Fork<'scope> {
     id: u64,
     /// Invariant, so that no fork passes for one of a narrower scope.
@@ -551,26 +609,25 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         }
     }
 
-    /// Runs `turn` on this machine, then joins the forks it left, in the
-    /// order they were made: the turn's outcome is its own error, or else
-    /// the first of theirs. A panic, in the turn or in such a fork, returns
-    /// once every fork has joined. An error or panic that ends the turn
-    /// leaves the machine in error.
+    /// Runs `turn` on this machine, then joins the forks it left. An error
+    /// or panic that ends `turn` exits it early, and leaves the machine in
+    /// error. Once `turn` has returned, nothing of it is left to spoil, so
+    /// the forks' errors are only theirs: each leaves its own machine in
+    /// error, and goes no further. A panic, in the turn or in such a fork,
+    /// returns once every fork has joined.
     fn take_turn<R>(
         &mut self,
         turn: impl FnOnce(&mut Self) -> Result<R, Error>,
     ) -> thread::Result<Result<R, Error>> {
         let outcome = catch_unwind(AssertUnwindSafe(|| turn(self)));
-        let (fork_panic, fork_error) = self.join_forks();
-        let outcome = match (outcome, fork_panic) {
-            (Err(panic), _) | (Ok(_), Some(panic)) => Err(panic),
-            (Ok(Ok(result)), None) => Ok(fork_error.map_or(Ok(result), Err)),
-            (Ok(Err(error)), None) => Ok(Err(error)),
-        };
         if matches!(outcome, Err(_) | Ok(Err(_))) {
             self.state.failed = true;
         }
-        outcome
+        let (fork_panic, _) = self.join_forks();
+        match (outcome, fork_panic) {
+            (Err(panic), _) | (Ok(_), Some(panic)) => Err(panic),
+            (Ok(outcome), None) => Ok(outcome),
+        }
     }
 
     /// Runs `body` on this machine within a fresh thread scope, whose
@@ -675,6 +732,23 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         outcome.unwrap_or_else(|panic| resume_unwind(panic))
     }
 
+    /// The machines below the one at `path`, relative to this machine, which
+    /// `()` names, each with its path from this machine and its status,
+    /// depth first, in key order. Only machines that hold something are
+    /// present, and the walk does not descend into a forked one. It fails
+    /// when the machine at `path`, or one between, is forked.
+    pub fn machines(
+        &self,
+        path: impl Into<MachinePath>,
+    ) -> Result<std::vec::IntoIter<(MachinePath, MachineStatus)>, Error> {
+        let path = path.into();
+        let mut found = Vec::new();
+        if let Some(state) = self.state.find(path.keys())? {
+            state.walk(&mut path.0.clone(), &mut found);
+        }
+        Ok(found.into_iter())
+    }
+
     /// Whether the descendant at `path` is in error, which only
     /// [`Self::recover`] clears. An absent descendant is an empty one, in no
     /// error. It fails when the descendant, or a machine between, is forked.
@@ -726,6 +800,9 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// its machine's stack, for [`Self::take`] after the join. It joins at
     /// [`Self::join`], or at the end of the turn, [`Self::scope`] or cut that
     /// made it. Until then, neither it nor a machine below it is reachable.
+    /// A scope's or cut's end observes its outcome, as a join does; a turn's
+    /// end, after its body has returned, does not, and its error stays in its
+    /// machine (see [`Runtime::run`]).
     ///
     /// Within a cut, the fork joins the cut's transaction: it works on a
     /// branch of it, which sees what the cut wrote before the fork and
