@@ -10,6 +10,7 @@ mod protocol;
 mod requests;
 mod search;
 mod store;
+mod volume_handle;
 
 pub(crate) use lifecycle::coordinator_task_launcher;
 pub use lifecycle::{
@@ -17,6 +18,7 @@ pub use lifecycle::{
 };
 pub(crate) use machine::ContinuationKey;
 pub(crate) use machine::volume_effects;
+pub(crate) use volume_handle::{handle_volume, volume_handle_in};
 
 pub use protocol::{
     CommitResult, EffectRequestSpec, HostSnapshot, ReasoningSessionId, ReflectionEffects,

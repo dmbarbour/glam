@@ -79,6 +79,7 @@ fn assert_store_root_boundary_inventory(
         heap_volume,
         runtime_volume,
         environment_volume,
+        next_volume,
         query_domain,
         roots,
         strategy,
@@ -89,6 +90,7 @@ fn assert_store_root_boundary_inventory(
     let _: &VolumeId = heap_volume;
     let _: &VolumeId = runtime_volume;
     let _: &VolumeId = environment_volume;
+    let _: &Arc<AtomicU64> = next_volume;
     let _: &Arc<QueryDomain> = query_domain;
     let _: &RedBlackTreeMapSync<VolumeId, PublicValue> = roots;
     let _: &Arc<dyn ConflictAnalysisStrategy> = strategy;
@@ -102,6 +104,10 @@ fn assert_store_root_boundary_inventory(
         StoreEdit::Rewrite { address, updater } => {
             let _: &ConflictAddress = address;
             let _: &Option<PublicValue> = updater;
+        }
+        StoreEdit::Create { address, initial } => {
+            let _: &ConflictAddress = address;
+            let _: &PublicValue = initial;
         }
     }
 
@@ -141,7 +147,7 @@ fn assert_store_root_boundary_inventory(
     let _: &VolumeId = environment_volume;
     let _: &Arc<QueryDomain> = query_domain;
     let _: &Receiver<EvaluationQueryId> = query_retirements;
-    let _: &u64 = next_volume;
+    let _: &Arc<AtomicU64> = next_volume;
     let _: &RedBlackTreeMapSync<VolumeId, PublicValue> = roots;
     let _: &u64 = revision;
     let _: &BTreeMap<ConflictAddress, u64> = latest_changes;

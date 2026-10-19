@@ -179,6 +179,8 @@ pub struct StoreSnapshot {
     heap_volume: VolumeId,
     runtime_volume: VolumeId,
     environment_volume: VolumeId,
+    /// The store's next volume ID, which a transaction reserves from.
+    next_volume: Arc<AtomicU64>,
     query_domain: Arc<QueryDomain>,
     roots: RedBlackTreeMapSync<VolumeId, PublicValue>,
     strategy: Arc<dyn ConflictAnalysisStrategy>,
@@ -186,6 +188,18 @@ pub struct StoreSnapshot {
 }
 
 impl StoreSnapshot {
+    /// The shared heap's volume.
+    pub(crate) fn heap_volume(&self) -> VolumeId {
+        self.heap_volume
+    }
+
+    /// The value at `path` in `volume`, as a lazy access, or `None` where
+    /// the volume does not exist.
+    pub(crate) fn volume_value(&self, volume: VolumeId, path: &[Key]) -> Option<PublicValue> {
+        let root = self.roots.get(&volume)?;
+        Some(value_at_path(&self.values, root, path))
+    }
+
     #[doc(hidden)]
     pub fn root(&self) -> &PublicValue {
         self.roots
@@ -252,14 +266,31 @@ enum StoreEdit {
         address: ConflictAddress,
         updater: Option<PublicValue>,
     },
+    /// Allocates a volume whose ID the transaction reserved, with its
+    /// initial root, at the volume's root address.
+    Create {
+        address: ConflictAddress,
+        initial: PublicValue,
+    },
 }
 
 impl StoreEdit {
     fn address(&self) -> &ConflictAddress {
         match self {
-            Self::Set { address, .. } | Self::Rewrite { address, .. } => address,
+            Self::Set { address, .. }
+            | Self::Rewrite { address, .. }
+            | Self::Create { address, .. } => address,
         }
     }
+}
+
+/// Reserves the next volume ID from `next`, shared by a store and its
+/// snapshots, so a transaction reserves one without the store's lock.
+fn reserve_volume(next: &AtomicU64) -> Result<VolumeId, Arc<str>> {
+    next.try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .ok()
+        .and_then(VolumeId::from_u64)
+        .ok_or_else(|| Arc::from("reflection volume IDs exhausted"))
 }
 
 /// Reads and ordered edits accumulated by one optimistic transaction.
@@ -370,7 +401,33 @@ impl StoreJournal {
                     values.with_boundary_access(|access| apply_edit(&access, view, edit))
                 });
             }
+            StoreEdit::Create { initial, .. } => {
+                let volume = edit.address().reflection_parts().0;
+                self.views.insert_mut(volume, initial.clone());
+                self.edits.push(edit);
+            }
         }
+    }
+
+    /// Allocates a volume with `initial` as its root: its ID is reserved at
+    /// once, and the volume exists from the commit on, so an aborted
+    /// transaction burns the ID. This journal reads and writes it as any
+    /// other volume.
+    pub(crate) fn create_volume(&mut self, initial: PublicValue) -> Result<VolumeId, Arc<str>> {
+        debug_assert_eq!(initial.runtime_id(), self.snapshot.values.runtime_id());
+        let volume = reserve_volume(&self.snapshot.next_volume)?;
+        self.replay(StoreEdit::Create {
+            address: ConflictAddress::reflection_root(volume),
+            initial,
+        });
+        Ok(volume)
+    }
+
+    /// The value at `path` in `volume`, with this journal's writes, as a
+    /// lazy access, or `None` where the volume does not exist.
+    pub(crate) fn volume_value(&self, volume: VolumeId, path: &[Key]) -> Option<PublicValue> {
+        let root = self.volume_view(volume)?;
+        Some(value_at_path(&self.snapshot.values, &root, path))
     }
 
     /// Records the portion of the snapshot needed by this read. Local rewrites
@@ -676,7 +733,7 @@ pub struct ReflectionStore {
     environment_volume: VolumeId,
     query_domain: Arc<QueryDomain>,
     query_retirements: Receiver<EvaluationQueryId>,
-    next_volume: u64,
+    next_volume: Arc<AtomicU64>,
     roots: RedBlackTreeMapSync<VolumeId, PublicValue>,
     revision: u64,
     latest_changes: BTreeMap<ConflictAddress, u64>,
@@ -701,7 +758,7 @@ impl ReflectionStore {
             environment_volume,
             query_domain,
             query_retirements,
-            next_volume: 4,
+            next_volume: Arc::new(AtomicU64::new(4)),
             roots: RedBlackTreeMapSync::new_sync()
                 .insert(heap_volume, public_values.empty_dict())
                 .insert(runtime_volume, public_values.empty_dict())
@@ -721,6 +778,7 @@ impl ReflectionStore {
             heap_volume: self.heap_volume,
             runtime_volume: self.runtime_volume,
             environment_volume: self.environment_volume,
+            next_volume: self.next_volume.clone(),
             query_domain: self.query_domain.clone(),
             roots: self.roots.clone(),
             strategy: self.strategy.clone(),
@@ -763,12 +821,7 @@ impl ReflectionStore {
 
     pub(crate) fn create_volume(&mut self, initial: PublicValue) -> Result<VolumeId, Arc<str>> {
         debug_assert_eq!(initial.runtime_id(), self.values.runtime_id());
-        let volume = VolumeId::from_u64(self.next_volume)
-            .ok_or_else(|| Arc::from("reflection volume IDs exhausted"))?;
-        self.next_volume = self
-            .next_volume
-            .checked_add(1)
-            .ok_or_else(|| Arc::from("reflection volume IDs exhausted"))?;
+        let volume = reserve_volume(&self.next_volume)?;
         self.roots.insert_mut(volume, initial);
         self.revision = self.revision.wrapping_add(1);
         self.latest_changes
@@ -838,11 +891,17 @@ impl ReflectionStore {
     /// exclusive access to the store until [`commit_validated`](Self::commit_validated)
     /// is called.
     pub(crate) fn validate(&self, journal: &StoreJournal) -> StoreCommitResult {
+        let created = journal
+            .edits
+            .iter()
+            .filter(|edit| matches!(edit, StoreEdit::Create { .. }))
+            .map(|edit| edit.address().reflection_parts().0)
+            .collect::<std::collections::BTreeSet<_>>();
         if let Some(volume) = journal
             .edits
             .iter()
             .map(|edit| edit.address().reflection_parts().0)
-            .find(|volume| self.roots.get(volume).is_none())
+            .find(|volume| self.roots.get(volume).is_none() && !created.contains(volume))
         {
             return StoreCommitResult::MissingVolume(volume);
         }
@@ -932,6 +991,10 @@ fn apply_edits(
 ) -> RedBlackTreeMapSync<VolumeId, PublicValue> {
     for edit in edits {
         let volume = edit.address().reflection_parts().0;
+        if let StoreEdit::Create { initial, .. } = edit {
+            roots.insert_mut(volume, initial.clone());
+            continue;
+        }
         let root = roots
             .get(&volume)
             .cloned()
@@ -981,12 +1044,14 @@ fn dependency(edits: &[StoreEdit], volume: VolumeId, path: ConflictPath) -> Opti
             {
                 return None;
             }
+            // Nothing outside the transaction knows a volume it created.
+            StoreEdit::Create { .. } if edit_volume == volume => return None,
             StoreEdit::Rewrite { .. }
                 if edit_volume == volume && edit_path.is_prefix_of(&dependency) =>
             {
                 dependency = edit_path.clone();
             }
-            StoreEdit::Set { .. } | StoreEdit::Rewrite { .. } => {}
+            StoreEdit::Set { .. } | StoreEdit::Rewrite { .. } | StoreEdit::Create { .. } => {}
         }
     }
     Some(dependency)
@@ -1060,6 +1125,7 @@ fn apply_edit(access: &RuntimeValueAccess<'_>, root: PublicValue, edit: &StoreEd
         StoreEdit::Set { value: None, .. } | StoreEdit::Rewrite { updater: None, .. } => {
             return root;
         }
+        StoreEdit::Create { initial, .. } => return initial.clone(),
         StoreEdit::Set {
             address,
             value: Some(value),

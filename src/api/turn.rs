@@ -1757,6 +1757,127 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         Ok(())
     }
 
+    /// Pushes the handle of the shared heap's volume, as `.heap.vol` gives
+    /// it, so the volume operations reach the heap too
+    /// (`requests-travel-on-ports`).
+    pub fn heap_volume(&mut self) {
+        let volume = self.resources().reflection_snapshot().1.heap_volume();
+        self.push_volume_handle(volume);
+    }
+
+    /// Allocates a volume whose root is the top value, replacing it with the
+    /// volume's handle: an opaque glam value whose holder reads and writes
+    /// the volume. Allocation is transactional: outside a cut, the volume
+    /// exists at once; within one, from the outermost cut's commit, and a
+    /// failed cut allocates nothing. A volume lives until the runtime
+    /// retires, for now.
+    pub fn volume_new(&mut self) -> Result<(), Error> {
+        let initial = self.peek()?.clone();
+        self.runtime.assembler.values().require(&initial)?;
+        let volume = self.transact(|store, _| {
+            store
+                .create_volume(initial.clone())
+                .map_err(|error| Error::new(error.as_ref()))
+        })?;
+        self.pop()?;
+        self.push_volume_handle(volume);
+        Ok(())
+    }
+
+    /// Replaces the top value, a volume's handle, with the value at `path`
+    /// in the volume, without evaluating it: a missing key reads `{}`. It
+    /// evaluates the handle, never the value. Within a cut, the read joins
+    /// the cut's transaction, as [`Self::heap_get`]'s does.
+    pub fn volume_get<K: Into<Key>>(
+        &mut self,
+        path: impl IntoIterator<Item = K>,
+    ) -> Result<(), Error> {
+        let path = key_path(path);
+        let volume = self.volume_at(1)?;
+        let value = match &mut self.cut {
+            Some(cut) => {
+                cut.observed |= cut.journal.observe_volume_read(volume, &path);
+                cut.journal.volume_value(volume, &path)
+            }
+            None => self
+                .resources()
+                .reflection_snapshot()
+                .1
+                .volume_value(volume, &path),
+        }
+        .ok_or_else(|| revoked(volume))?;
+        self.pop()?;
+        self.push(value);
+        Ok(())
+    }
+
+    /// Pops a value, then a volume's handle, and writes the value at `path`
+    /// in the volume, as [`Self::heap_set`] writes the heap's.
+    pub fn volume_set<K: Into<Key>>(
+        &mut self,
+        path: impl IntoIterator<Item = K>,
+    ) -> Result<(), Error> {
+        let path = key_path(path);
+        self.volume_edit(|journal, volume, value| journal.write_volume(volume, path.clone(), value))
+    }
+
+    /// Pops a function, then a volume's handle, and rewrites the value at
+    /// `path` in the volume with it, as [`Self::heap_rewrite`] rewrites the
+    /// heap's.
+    pub fn volume_rewrite<K: Into<Key>>(
+        &mut self,
+        path: impl IntoIterator<Item = K>,
+    ) -> Result<(), Error> {
+        let path = key_path(path);
+        self.volume_edit(|journal, volume, updater| {
+            journal.rewrite_volume(volume, path.clone(), updater)
+        })
+    }
+
+    /// Writes with `edit` the top value to the volume whose handle lies
+    /// below it, popping both once it has.
+    fn volume_edit(
+        &mut self,
+        edit: impl Fn(&mut StoreJournal, crate::reflection::VolumeId, Value),
+    ) -> Result<(), Error> {
+        let depth = self.require(2)?;
+        let value = self.state.stack[depth - 1].clone();
+        self.runtime.assembler.values().require(&value)?;
+        let volume = self.volume_at(2)?;
+        self.store_edit(|journal| edit(journal, volume, value.clone()))?;
+        self.state.stack.truncate(depth - 2);
+        Ok(())
+    }
+
+    /// The volume that the handle `n` values down names, evaluating the
+    /// handle, which stays.
+    fn volume_at(&mut self, n: usize) -> Result<crate::reflection::VolumeId, Error> {
+        let depth = self.require(n)?;
+        let handle = self.state.stack[depth - n].clone();
+        let evaluated = self.runtime.assembler.evaluator().eval(&handle);
+        let evaluated = self.note_evaluation(evaluated)?.into_value();
+        let values = self.runtime.assembler.values();
+        values
+            .with_access(|scoped| {
+                Ok::<_, Error>(crate::reflection::handle_volume(
+                    scoped.runtime_access(),
+                    &scoped.clone_core(&evaluated)?,
+                ))
+            })?
+            .ok_or_else(|| Error::new("the value is not a handle of this runtime's volume"))
+    }
+
+    fn push_volume_handle(&mut self, volume: crate::reflection::VolumeId) {
+        let values = self.runtime.assembler.values();
+        let handle = values.with_access(|scoped| {
+            scoped.wrap(crate::reflection::volume_handle_in(
+                scoped.runtime_access(),
+                volume,
+            ))
+        });
+        self.push(handle);
+    }
+
     /// Pops `n` values and writes them, in order, to this machine's output
     /// `port`. Each value follows every wire from it, outward by its
     /// parent's wiring and inward by its own, through pass-throughs, to every
@@ -2493,4 +2614,9 @@ fn binary(evaluated: crate::api::EvaluatedValue) -> Result<Bytes, Error> {
     evaluated
         .as_bytes()?
         .ok_or_else(|| Error::new("the top value is not binary data"))
+}
+
+/// The error for a volume that no longer exists.
+fn revoked(volume: crate::reflection::VolumeId) -> Error {
+    Error::new(format!("reflection volume {} was revoked", volume.get()))
 }

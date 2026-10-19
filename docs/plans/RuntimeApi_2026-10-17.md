@@ -1431,6 +1431,27 @@ maintainer's agreement):
   broken promise's readers failing with its message
   (`src/api/turn/tests.rs`).
 
+`api-requests`, first-class volumes in turns (2026-10-19):
+- A volume's handle is an opaque glam value naming a runtime's volume
+  (`reflection::volume_handle`); it holds the IDs alone, as a promise's
+  resolver does. `m.volume_new()` allocates a volume whose root is the top
+  value, replacing it with the handle; `m.volume_get(path)` replaces a
+  handle with the value at `path`; `m.volume_set(path)` and
+  `m.volume_rewrite(path)` pop a value or function, then a handle; and
+  `m.heap_volume()` pushes the shared heap's handle. Each evaluates the
+  handle, never the value, and fails having done nothing.
+- Allocation is a store edit, `Create`, whose ID the transaction reserves
+  at once from a counter the store shares with its snapshots, so a
+  machine's cut and, later, a reflection task reserve one without the
+  store's lock. Validation exempts a volume the journal created from the
+  missing-volume check; a commit installs its root; reads of it within the
+  transaction depend on nothing outside it. An aborted transaction burns
+  the ID.
+- Tests in `tests/runtime_volumes.rs`: a volume allocated, written and
+  read; its handle passed between machines; a failed cut allocating
+  nothing and a committed one keeping its volume; the heap as a volume;
+  a value that names no volume as an error that pops nothing.
+
 ## Verification
 
 Runtime changes run `scripts/check.sh full` before commit. Concurrency
