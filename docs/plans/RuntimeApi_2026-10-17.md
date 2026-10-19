@@ -190,12 +190,22 @@ handle API goes.
      (`Backtrack`) when fewer are available, so a cut reading a port waits
      for them. Stack operations keep a static arity, with `n` a static
      parameter, as `dup(4)` stands for a Forth-like `dup4` (maintainer).
-   - Wiring is directional and external: `m.wire(source, destination)` and
-     `m.unwire`, with endpoints a relative path and a port, on the
-     machine's own ports and its descendants' (maintainer). A machine that
-     wires its own input to its own output is a switchboard, which the
-     runtime may collapse into direct routes. Wiring is transactional
-     state, so rewiring within a cut is atomic.
+   - A port name has two independent roles, input and output
+     (maintainer). Wiring is directional and external:
+     `m.wire(source, destination)` and `m.unwire`, with endpoints a
+     relative path and a port, on the machine's own ports and its
+     descendants' (maintainer). A source is a descendant's output or the
+     machine's own input; a destination is a descendant's input or the
+     machine's own output. A machine that wires its own input to its own
+     output is a switchboard, which the runtime may collapse into direct
+     routes. Wiring is transactional state, so rewiring within a cut is
+     atomic. `m.input_connected(port)` and `m.output_connected(port)` tell
+     whether a role has a wire.
+   - A write to an unconnected output fails (maintainer), as a read of
+     fewer than are available and a write into a full buffer do: all with
+     `Backtrack`, a proposal, so that a cut waits for data, space or a wire.
+     `m.available(port)` counts what an input holds, transactionally
+     (maintainer), so a reader drains a port with a static `n`.
    - Buffers belong to receiving ports: several wires from one port
      duplicate, several into one merge in commit order. They are unbounded
      by default (maintainer: for reflection's purposes, at the risk any
@@ -205,13 +215,20 @@ handle API goes.
      so they are serializable within cuts, and an empty read or a full
      buffer waits through the existing wakes. Their cost is measured before
      anything specializes them.
-   - Unwired ports do not default to their parent's (maintainer); the
-     diagnostics port is wired by default, to the parent's diagnostics
-     port, up to the root's, which the host reads. `m.connected(port)`
-     detects a port with no wire. A turn that ends in error might emit its
-     error on its machine's diagnostics port by default, so that an
-     unobserved failure, such as a fork's left to its turn's end, still
-     reaches a person.
+   - Unwired ports do not default to their parent's (maintainer), but the
+     diagnostics port is wired by default (maintainer): each child's
+     diagnostics output to its parent's diagnostics input, and each
+     machine's diagnostics input to its own output, but the root's. So
+     diagnostics accumulate at the root's input, and any machine may
+     intervene, by unwiring its own pass-through and reading its input. A
+     turn that ends in error might emit its error on its machine's
+     diagnostics output by default, so that an unobserved failure, such as
+     a fork's left to its turn's end, still reaches a person.
+   - The host reads the root's diagnostics input in a root turn, or wires
+     it to a logger's input. Until reflection tasks are machines, the
+     runtime feeds their diagnostics (`.log`) and its own reports into the
+     root's diagnostics input, as if a hidden child of the root wrote
+     them: a bridge that goes with the reflection API's alignment.
    - Deferred: hierarchical subchannels; closing a channel and the end of
      a stream; built-in mergers, duplicators and filters, which machines
      users write stand in for meanwhile; further buffer policies.
@@ -951,9 +968,8 @@ the public API, in `tests/`.
   (`.task.new` and its relatives) persistent machines in the tree. A later
   step, ordered after the ports re-plan and `api-effect-providers`.
 - Communication's open details, at `api-ports`: whether a write to an
-  unwired port fails or drops, a count of what a port holds, the
-  diagnostics port's host end, and how far the API specializes buffers,
-  by measurement.
+  unconnected output fails with `Backtrack` or with another error, and how
+  far the API specializes buffers, by measurement.
 - The ownership plan's open details, each settled when its step starts:
   retired operations' error (`api-retirement`); the queue capability's
   representation, and a request's status, possibly with a received state
