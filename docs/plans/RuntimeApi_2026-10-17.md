@@ -312,6 +312,12 @@ handle API goes.
    which waits count as unresolved (`quiescence-reports-unresolved-state`).
    It ends in an ADR. Its implementation is a later step, after
    `api-effect-providers`.
+   - `.exit` also said that a machine, locally, had no outstanding
+     obligations, and something replaces that role (maintainer,
+     2026-10-19). Proposed: a machine's outstanding obligations as explicit
+     state, a set of keys in its local state beside its stack, a checklist;
+     settlement reports the machines whose sets are not empty, or at least
+     their count.
 9. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
    decides (maintainer, 2026-10-19), in place of exit votes. The runtime is
    quiescent when every machine waits on input or a heap change, retrying
@@ -550,13 +556,13 @@ Before the handles go, turns cover what `tests/public_api.rs` (47 tests),
   reading operations (3);
 - promises, protected volumes, reflection environments and roles, by state
   at paths, request queues, and volumes allocated through the reflection
-  API (6, 7, 9);
+  API (6, 7, 10);
 - the diagnostic formatter and diagnostic updates, by the logger machine
   (6);
 - reasoning reports, retryable blocked errors and draining, by settlement
-  (8);
-- sources, imports, invocations and provenance, by hosts as machines (9);
-- effect specialization, by effect providers (10);
+  (9);
+- sources, imports, invocations and provenance, by hosts as machines (10);
+- effect specialization, by effect providers (11);
 - conflict analysis and workers, by `RuntimeConfig` and `activate_workers`
   (1, 2).
 
