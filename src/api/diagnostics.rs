@@ -4,11 +4,11 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use super::runtime::{
-    RuntimeDiagnosticRouteMode, RuntimeInputReader, RuntimeInputSender, RuntimeOutputWriter,
-    RuntimePreparedInput, RuntimeSharedResources, configure_runtime_diagnostic_fallback,
-    prepare_runtime_observation, register_runtime_diagnostic_route,
-    route_runtime_diagnostic_guarded, set_runtime_diagnostic_route,
-    set_runtime_diagnostic_route_guarded,
+    PortAddress, RuntimeDiagnosticRouteMode, RuntimeInputReader, RuntimeInputSender,
+    RuntimeOutputWriter, RuntimePreparedInput, RuntimeSharedResources,
+    configure_runtime_diagnostic_fallback, prepare_runtime_observation,
+    register_runtime_diagnostic_route, route_runtime_diagnostic_guarded,
+    set_runtime_diagnostic_route, set_runtime_diagnostic_route_guarded,
 };
 use super::{Error, EvaluationRuntime, Value, Values};
 use crate::core::{CoreValueFactory, Dict, Key, Value as CoreValue};
@@ -614,6 +614,32 @@ impl DiagnosticBus {
         &self,
         runtime: &EvaluationRuntime,
     ) -> Result<(DiagnosticIngress, RuntimeInputReader), Error> {
+        self.install_ingress(runtime, None)
+    }
+
+    /// Routes every diagnostic this bus publishes, in sequence order, to the
+    /// input `port` of the machine at `machine`, as a transport value
+    /// ([`Diagnostic::from_transport_value`] reads it back): its single
+    /// runtime ingress, as [`Self::diagnostic_ingress`] installs one, whose
+    /// route never changes. The runtime keeps the route for its lifetime.
+    pub fn route_to_port(
+        &self,
+        runtime: &EvaluationRuntime,
+        machine: impl Into<crate::api::MachinePath>,
+        port: impl Into<Key>,
+    ) -> Result<(), Error> {
+        let address = PortAddress {
+            machine: machine.into().keys().to_vec(),
+            port: port.into(),
+        };
+        self.install_ingress(runtime, Some(address)).map(|_| ())
+    }
+
+    fn install_ingress(
+        &self,
+        runtime: &EvaluationRuntime,
+        port: Option<PortAddress>,
+    ) -> Result<(DiagnosticIngress, RuntimeInputReader), Error> {
         self.bind_runtime(runtime)?;
         let mut state = self
             .inner
@@ -638,7 +664,7 @@ impl DiagnosticBus {
         // during the one-time installation.
         let endpoint = runtime.input_endpoint::<Value, _>(Ok)?;
         let (sender, reader) = endpoint.into_parts();
-        register_runtime_diagnostic_route(&runtime.state.shared_resources, sender.id())?;
+        register_runtime_diagnostic_route(&runtime.state.shared_resources, sender.id(), port)?;
         let ingress = DiagnosticIngress {
             inner: Arc::new(DiagnosticIngressInner {
                 sender,

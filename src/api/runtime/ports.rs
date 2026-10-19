@@ -105,6 +105,24 @@ impl PortState {
         }
     }
 
+    /// Delivers `value` to the input at `address` at once, outside any
+    /// transaction, as runtime inputs are admitted: for diagnostics that the
+    /// runtime routes to a port. It arrives as a child's write would, passing
+    /// through where the machine wired the input on; where that routing
+    /// fails, by a loop or an unconnected output, it waits in the input
+    /// itself, so that nothing is lost. The caller holds the transaction lock
+    /// and publishes the change.
+    pub(in crate::api) fn admit(&mut self, address: PortAddress, value: RuntimeValueRoot) {
+        let buffers = PortJournal::new(self.clone())
+            .route_input(&address.machine, &address.port)
+            .unwrap_or_else(|_| vec![address]);
+        for address in buffers {
+            let mut buffer = self.buffers.get(&address).cloned().unwrap_or_default();
+            Arc::make_mut(&mut buffer).items.push_back(value.clone());
+            self.buffers.insert_mut(address, buffer);
+        }
+    }
+
     /// Whether `journal`'s reads and routing still hold: no buffer it read
     /// was consumed, nor one it found short added to, no machine's buffers
     /// it surveyed changed, and the wiring it followed is unchanged.
@@ -506,6 +524,19 @@ impl PortJournal {
         self.follow(
             RouteEnd::Output(machine.to_vec(), port.clone()),
             &mut route,
+            &mut buffers,
+        )?;
+        Ok(buffers)
+    }
+
+    /// The buffers that a value arriving at the input `port` of the machine
+    /// at `machine` reaches, as [`Self::route`] follows a write, without
+    /// observing the wiring.
+    fn route_input(&self, machine: &[Key], port: &Key) -> Result<Vec<PortAddress>, String> {
+        let mut buffers = Vec::new();
+        self.follow(
+            RouteEnd::Input(machine.to_vec(), port.clone()),
+            &mut Vec::new(),
             &mut buffers,
         )?;
         Ok(buffers)

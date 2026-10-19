@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use rpds::RedBlackTreeMapSync;
 
-use super::ports::{PortJournal, PortState};
+use super::ports::{PortAddress, PortJournal, PortState};
 use super::{
     RuntimeObservationNotification, RuntimeSharedResources, prepare_runtime_observation,
     publish_runtime_observation,
@@ -106,6 +106,9 @@ pub(in crate::api) enum RuntimeDiagnosticRouteMode {
 struct RuntimeDiagnosticRoute {
     fallback: Option<RuntimeOutputEndpointId>,
     mode: RuntimeDiagnosticRouteMode,
+    /// A machine's input port that takes every diagnostic, whatever the
+    /// mode, in place of the input FIFO and fallback.
+    port: Option<PortAddress>,
 }
 
 /// Stage of external output delivery which failed after semantic commit.
@@ -778,6 +781,7 @@ impl<T> RuntimeDeliveryTicket<T> {
 pub(in crate::api) fn register_runtime_diagnostic_route(
     resources: &Arc<RuntimeSharedResources>,
     endpoint: RuntimeInputEndpointId,
+    port: Option<PortAddress>,
 ) -> Result<(), Error> {
     let _mutation = resources.mutation_admission.mutation_guard();
     let mut state = resources
@@ -802,6 +806,7 @@ pub(in crate::api) fn register_runtime_diagnostic_route(
         RuntimeDiagnosticRoute {
             fallback: None,
             mode: RuntimeDiagnosticRouteMode::Active,
+            port,
         },
     );
     Ok(())
@@ -982,6 +987,10 @@ pub(in crate::api) fn route_runtime_diagnostic_guarded(
         .diagnostic_routes
         .get(&prepared.endpoint)
         .ok_or_else(|| Error::new("diagnostic ingress route is not registered"))?;
+    if let Some(address) = route.port.clone() {
+        state.events.ports.admit(address, prepared.payload);
+        return Ok(());
+    }
     match route.mode {
         RuntimeDiagnosticRouteMode::Active => {
             state

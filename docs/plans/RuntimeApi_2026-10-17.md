@@ -250,15 +250,27 @@ handle API goes.
    - Deferred: hierarchical subchannels; closing a channel and the end of
      a stream; built-in mergers, duplicators and filters, which machines
      users write stand in for meanwhile; further buffer policies.
-   - CLI slice, diagnostics: the CLI writes diagnostics to the diagnostics
-     port in turns.
-     `DiagnosticBus`, `LogHost` and the supervisor's fallback endpoint
-     retire.
-   - CLI slice, loggers: the default logger is a forked machine wired to
-     read the diagnostics, which applies the glam formatter, into which the
-     Rust frame summaries of `rendering.rs` move. A configured logger reads
-     the same port and writes its stderr output to a port that a CLI
-     machine drains, so `MainEffects` retires.
+   - CLI slice, diagnostics and loggers, in three stages (maintainer,
+     2026-10-19):
+     1. The runtime routes its assembler's diagnostic bus into the root's
+        diagnostics input, so what the bus's publishers report, the
+        assembler's and the CLI's alike, reaches the port unchanged.
+     2. The CLI's batch turn runs on the root and forks `logger`, a direct
+        child of the root, wired from the root's diagnostics input. The
+        default logger is the logger's own child, `logger/fallback`, which
+        renders what reaches it as `DefaultLogger` does. A configured
+        logger reads the logger's input through `read_log`; when it ends,
+        the logger passes what remains to `logger/fallback` and wires its
+        input there in one cut, an internal rewiring (maintainer). Without
+        a configured logger, the input is wired to `logger/fallback` from
+        the start. `LogHost`'s buffer, the bus's route switching and the
+        supervisor's fallback endpoint retire; the bus stays as the
+        publishers' entry, and its counts decide the exit code.
+     3. With `api-effect-providers`, the configured logger becomes a turn
+        whose stderr output goes to a port that a CLI machine drains, so
+        `MainEffects` and the logger's `EffectRun` retire.
+     Later, `logger/fallback` applies the glam formatter, into which the
+     Rust frame summaries of `rendering.rs` move.
    - CLI slice, environment: `process.args` and `process.refl_args` become
      state at paths that the CLI writes after expansion, in place of
      promises.
@@ -1036,6 +1048,29 @@ with the maintainer that day:
   (forced by an abort hook), and the default diagnostics wiring: gathered
   at the root, a machine intervening by unwiring its pass-through, and a
   runtime configured with none.
+
+`api-ports`, the runtime's diagnostics at the root (2026-10-19), the CLI
+slice's first stage:
+- A diagnostic bus may route its single runtime ingress to a machine's
+  input port (`DiagnosticBus::route_to_port`) in place of the input FIFO
+  and the fallback output, whatever the route's mode. Each diagnostic's
+  transport value arrives outside any transaction, in the bus's order, as
+  runtime inputs are admitted, and the change is published, so a waiting
+  read wakes. It arrives as a child's write would, passing through where
+  the machine wired the input on; where that routing fails, by a loop or
+  an unconnected output, it waits in the input itself, since the runtime
+  has no writer to fail and nothing should be lost.
+- `Runtime::open` routes its assembler's bus to the root's diagnostics
+  input under `DiagnosticsWiring::ToRoot`; under `None`, the bus keeps
+  them. The CLI's runtime, built around its assembler by the bridge, is
+  left for the second stage.
+- Unread, they gather at the root without bound, the buffers' one policy
+  for now.
+- Tests, in `src/api/turn/tests.rs`, since only the handle API publishes
+  on the bus: the diagnostics arrive in the bus's order and decode, a
+  runtime configured with none keeps them on the bus, a read waits for one
+  published from another thread, and they follow the root's wiring, or
+  wait at the root where it loops.
 
 `api-ports`, `clear` and presence (2026-10-19, maintainer's agreement):
 - `clear` returns the machine's ports and its descendants' to their

@@ -33,7 +33,8 @@ use std::thread::{self, Scope, ScopedJoinHandle};
 use bytes::Bytes;
 
 use super::runtime::{
-    PortAddress, PortJournal, RuntimeEventJournal, RuntimeSharedResources, Wire, WireEnd,
+    DIAGNOSTICS, PortAddress, PortJournal, RuntimeEventJournal, RuntimeSharedResources, Wire,
+    WireEnd,
 };
 use super::{
     Assembler, Diagnostic, Error, ErrorKind, EvaluationRuntime, ModuleInput, Value, ValueKind,
@@ -428,6 +429,16 @@ impl Runtime {
             .evaluation_runtime()
             .shared_resources()
             .set_diagnostics_wiring(config.diagnostics_wiring == DiagnosticsWiring::ToRoot);
+        // Until reflection tasks are machines, the runtime's own diagnostics
+        // join the root's diagnostics input as if a child had sent them.
+        if config.diagnostics_wiring == DiagnosticsWiring::ToRoot {
+            let assembler = &runtime.shared.assembler;
+            assembler.diagnostic_bus().route_to_port(
+                &assembler.evaluation_runtime(),
+                (),
+                DIAGNOSTICS.clone(),
+            )?;
+        }
         Ok(runtime)
     }
 
@@ -2120,3 +2131,6 @@ fn underflow(what: &str, needed: usize, held: usize) -> Error {
 fn key_path<K: Into<Key>>(path: impl IntoIterator<Item = K>) -> Vec<Key> {
     path.into_iter().map(Into::into).collect()
 }
+
+#[cfg(test)]
+mod tests;
