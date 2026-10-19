@@ -1665,6 +1665,44 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         self.push(resolver);
     }
 
+    /// The status of the promise that the top value stands for, which stays:
+    /// a promised value, read as it stands, without forcing it, or a
+    /// promise's resolver, which is evaluated. Within a cut, the read counts
+    /// as an observation, so a cut that fails after it runs again once
+    /// anything has changed, as one whose evaluation waited does.
+    pub fn promise_status(&mut self) -> Result<PromiseStatus, Error> {
+        let top = self.peek()?.clone();
+        let values = self.runtime.assembler.values();
+        let promised = values.with_access(|scoped| {
+            Ok::<_, Error>(match scoped.clone_core(&top)? {
+                crate::core::Value::Promised(promise) => {
+                    Some(match promise.access(scoped.runtime_access()).assignment() {
+                        None => PromiseStatus::Pending,
+                        Some(Ok(_)) => PromiseStatus::Fulfilled,
+                        Some(Err(_)) => PromiseStatus::Broken,
+                    })
+                }
+                _ => None,
+            })
+        })?;
+        let status = match promised {
+            Some(status) => status,
+            None => {
+                let evaluated = self.runtime.assembler.evaluator().eval(&top);
+                let resolver = self.note_evaluation(evaluated)?.into_value();
+                self.runtime
+                    .promises
+                    .status(&values, &resolver)?
+                    .ok_or_else(|| Error::new("the value is neither a promise nor its resolver"))?
+            }
+        };
+        if let Some(cut) = &mut self.cut {
+            cut.observed = true;
+            cut.awaits_evaluation = true;
+        }
+        Ok(status)
+    }
+
     /// Pops a value, then a resolver, and fulfills the resolver's promise
     /// with the value, waking what waits on it. It evaluates the resolver,
     /// never the value. A promise resolves once, so resolving it again is an
@@ -1886,24 +1924,52 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// error, which pops nothing. Buffers have no bound yet, so a write
     /// never waits.
     pub fn write(&mut self, port: impl Into<Key>, n: usize) -> Result<(), Error> {
-        let port = port.into();
         let depth = self.require(n)?;
         let values = self.state.stack[depth - n..].to_vec();
-        for value in &values {
+        self.send(port.into(), &values)?;
+        self.state.stack.truncate(depth - n);
+        Ok(())
+    }
+
+    /// Posts a request on the output `port` (`requests-travel-on-ports`):
+    /// replaces the top value with the promise of its reply, and writes
+    /// `{request:value, reply:resolver}`, as [`Self::write`] writes, for a
+    /// server to read and resolve with [`Self::fulfill`] or
+    /// [`Self::break_promise`]. Where several servers receive it, the first
+    /// resolution wins. Where the write fails, it does nothing.
+    pub fn ask(&mut self, port: impl Into<Key>) -> Result<(), Error> {
+        let value = self.peek()?.clone();
+        let values = self.runtime.assembler.values();
+        values.require(&value)?;
+        let (promised, resolver) = self.runtime.promises.allocate(&values);
+        let sent = values
+            .record([("request", value), ("reply", resolver.clone())])
+            .and_then(|request| self.send(port.into(), &[request]));
+        if let Err(error) = sent {
+            self.runtime.promises.forget(&values, &resolver);
+            return Err(error);
+        }
+        self.pop()?;
+        self.push(promised);
+        Ok(())
+    }
+
+    /// Sends `values`, in order, from this machine's output `port` to every
+    /// buffer its wiring reaches.
+    fn send(&mut self, port: Key, values: &[Value]) -> Result<(), Error> {
+        for value in values {
             self.runtime.assembler.values().require(value)?;
         }
         let machine = self.path.clone();
         self.port_action(|ports| {
             let buffers = ports.route(&machine, &port).map_err(Error::new)?;
-            for value in &values {
+            for value in values {
                 for buffer in &buffers {
                     ports.append(buffer.clone(), value.clone());
                 }
             }
             Ok(())
-        })?;
-        self.state.stack.truncate(depth - n);
-        Ok(())
+        })
     }
 
     /// Pushes the next `n` values of this machine's input `port`, in the
@@ -2605,6 +2671,8 @@ fn key_path<K: Into<Key>>(path: impl IntoIterator<Item = K>) -> Vec<Key> {
 
 pub(in crate::api) mod environment;
 mod promises;
+
+pub use promises::PromiseStatus;
 
 #[cfg(test)]
 mod tests;

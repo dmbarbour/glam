@@ -1452,6 +1452,29 @@ maintainer's agreement):
   nothing and a committed one keeping its volume; the heap as a volume;
   a value that names no volume as an error that pops nothing.
 
+`api-requests`, requests and promise status in turns (2026-10-19):
+- `m.ask(port)` replaces the top value with the promise of its reply and
+  writes `{request:value, reply:resolver}` from the output `port`, as
+  `write` writes (they share one path, `send`). A server reads the request
+  and resolves its `reply`. Where the write fails, `ask` forgets the
+  promise it allocated and does nothing. Within a cut that fails, nothing
+  is sent, but the promise it allocated stays pending in the runtime's
+  record until `api-opaque-finalization`.
+- `m.promise_status()` returns a `PromiseStatus`, pending, fulfilled or
+  broken, for the top value, which stays: a promised value as it stands,
+  read from its cell without forcing it, or a resolver, evaluated, read
+  from the runtime's record, which keeps how each promise resolved, a
+  marker without its value. Within a cut the read counts as an
+  observation, waking on any change, as an evaluation that waited does.
+- Tests in `tests/runtime_requests.rs`: a server answering what a
+  requester asks; a requester waiting in a cut for its answer (forced
+  through a channel after the first attempt waits); a failed cut sending
+  no request and a channel keeping commit order; duplicate servers
+  racing, the second seeing the promise fulfilled and its resolution
+  failing; a promise's status as it resolves, from the promised value and
+  from its resolver; a cut waiting on a status woken by the resolution
+  (forced).
+
 ## Verification
 
 Runtime changes run `scripts/check.sh full` before commit. Concurrency
