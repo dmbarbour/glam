@@ -52,8 +52,8 @@ flags a step for discussion when work reaches it, not a decision.
   built 2026-10-17.
 - [`RuntimeApi_2026-10-17.md`](RuntimeApi_2026-10-17.md): `api-` steps
   from the runtime API review: `Runtime`, turns on keyed machines, a
-  bridge for the CLI, data operations, cuts, scoped threads, heap
-  communication, request queues, settlement, hosts as machines, effect
+  bridge for the CLI, data operations, cuts, a tree of machines with
+  forks, machine errors, ports, request queues, settlement, hosts as machines, effect
   providers, the handle API's retirement, then the runtime's retirement
   protocol. The CLI moves piecemeal, a slice in each step. Drafted
   2026-10-17; `api-runtime-turns`, `api-cli-bridge`, `api-machine-data`,

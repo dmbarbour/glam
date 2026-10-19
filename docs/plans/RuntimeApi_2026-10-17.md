@@ -145,7 +145,7 @@ handle API goes.
      again when a later cut writes it, so Rust code that observes a host
      change writes its proxy to wake the waiters.
    - No CLI slice: the CLI's transactional code is the logger's, which
-     moves with heap communication.
+     moves with ports (`api-ports`).
 5. `api-machine-tree` — machines form a tree under the owner thread, and
    forks are scoped to turns (maintainer, 2026-10-18;
    `machines-form-a-tree`), superseding `api-scoped-threads`, which built
@@ -178,31 +178,52 @@ handle API goes.
      rerun at its join on the cut's current state, or a nested cut rerun
      in place, keeping the work before it. It belongs with backtracking
      finer than a whole cut, so it follows the alternative operation.
-6. `api-heap-communication` — state and logs in the heap or a volume, with
-   readers' cursors in their own state; abstract global paths as
-   capabilities; volumes allocated through the reflection API. Retention,
-   backpressure and discovery are settled here, after a look at Kafka, DDS
-   and MQTT conventions.
-   - To be re-planned, to discuss first (maintainer, 2026-10-19): with a
-     tree of machines, communication may be ports, named by machines and
-     wired from outside by their parents to channels in shared state,
-     unwired ports taking their parent's, as in dataflow and Kahn process
-     networks. Diagnostics would be the first convention: a default
-     diagnostics channel, redirected per machine or subtree. That amends
-     rather than reverses `runtime-api-turns-on-machines`'s rejection of
-     point-to-point channels, since the channels stay shared state and the
-     topology belongs to the wiring. A turn that ends in error might emit
-     its error on its machine's diagnostics port by default, so that an
+6. `api-ports` — communication through ports wired from outside, as in
+   dataflow and Kahn process networks (maintainer, 2026-10-19), renamed
+   from `api-heap-communication`, whose state at heap paths stays for
+   state rather than streams. It amends rather than reverses
+   `runtime-api-turns-on-machines`'s rejection of point-to-point channels:
+   the buffers are shared state, and the topology belongs to the wiring.
+   - A machine reads and writes named ports. `m.write(port, n)` pops `n`
+     values, in order, and sends them; values rather than lists, so that
+     nothing is forced. `m.read(port, n)` pushes the next `n`, and fails
+     (`Backtrack`) when fewer are available, so a cut reading a port waits
+     for them. Stack operations keep a static arity, with `n` a static
+     parameter, as `dup(4)` stands for a Forth-like `dup4` (maintainer).
+   - Wiring is directional and external: `m.wire(source, destination)` and
+     `m.unwire`, with endpoints a relative path and a port, on the
+     machine's own ports and its descendants' (maintainer). A machine that
+     wires its own input to its own output is a switchboard, which the
+     runtime may collapse into direct routes. Wiring is transactional
+     state, so rewiring within a cut is atomic.
+   - Buffers belong to receiving ports: several wires from one port
+     duplicate, several into one merge in commit order. They are unbounded
+     by default (maintainer: for reflection's purposes, at the risk any
+     evaluation already runs), with a capacity that blocks the writer as an
+     option; dropping with a report, or breaking the connection, later.
+   - Buffers and wiring live in the reflection store, in a private volume,
+     so they are serializable within cuts, and an empty read or a full
+     buffer waits through the existing wakes. Their cost is measured before
+     anything specializes them.
+   - Unwired ports do not default to their parent's (maintainer); the
+     diagnostics port is wired by default, to the parent's diagnostics
+     port, up to the root's, which the host reads. `m.connected(port)`
+     detects a port with no wire. A turn that ends in error might emit its
+     error on its machine's diagnostics port by default, so that an
      unobserved failure, such as a fork's left to its turn's end, still
-     reaches a person (maintainer, 2026-10-19).
-   - CLI slice, diagnostics: the CLI appends diagnostics to a log in turns.
+     reaches a person.
+   - Deferred: hierarchical subchannels; closing a channel and the end of
+     a stream; built-in mergers, duplicators and filters, which machines
+     users write stand in for meanwhile; further buffer policies.
+   - CLI slice, diagnostics: the CLI writes diagnostics to the diagnostics
+     port in turns.
      `DiagnosticBus`, `LogHost` and the supervisor's fallback endpoint
      retire.
-   - CLI slice, loggers: the default logger is a forked machine
-     that reads the log and applies the glam formatter, into which the
+   - CLI slice, loggers: the default logger is a forked machine wired to
+     read the diagnostics, which applies the glam formatter, into which the
      Rust frame summaries of `rendering.rs` move. A configured logger reads
-     the log with heap operations and appends its stderr output to a log
-     that a CLI machine drains, so `MainEffects` retires.
+     the same port and writes its stderr output to a port that a CLI
+     machine drains, so `MainEffects` retires.
    - CLI slice, environment: `process.args` and `process.refl_args` become
      state at paths that the CLI writes after expansion, in place of
      promises.
@@ -300,8 +321,8 @@ Two steps from the ownership plan stand beside these, under their names:
 - `lifecycle-external-owners` checks L11, independently.
 
 `api-runtime-turns` comes first, then the bridge. The data operations
-precede the CLI's first slice. Cuts precede heap communication,
-whose logs request queues extend; the machine tree precedes the loggers' move;
+precede the CLI's first slice. Cuts precede ports,
+whose buffers request queues extend; the machine tree precedes the loggers' move;
 settlement follows the logs it appends to. Hosts follow queues, since their
 requests are queue elements, and precede effect providers, which take what
 remains of the hosts' role. Handle retirement precedes the retirement
@@ -478,11 +499,11 @@ The review's findings, by the step that resolves each:
   owners, sessions outliving retirement): `api-handle-retirement` removes
   the handles, and `api-retirement` retires in order.
 - **L2** (the CLI logger on workers): done with `lifecycle-cli-logger`; the
-  logger machine (`api-heap-communication`) ends what remains.
+  logger machine (`api-ports`) ends what remains.
 - **L3, L9** (workers upgrading `DeferredAssembler` for imports):
   `api-hosts-as-machines`.
-- **L4** (a subscriber leaking its runtime): the diagnostic log
-  (`api-heap-communication`) retires subscribers.
+- **L4** (a subscriber leaking its runtime): the diagnostics port
+  (`api-ports`) retires subscribers.
 - **L7, L8** (callbacks that capture owners, client code on workers):
   `api-hosts-as-machines` and `api-effect-providers`, with
   `lifecycle-audits` to keep them out.
@@ -899,8 +920,7 @@ with the maintainer that day:
 - First built the same day with a list of the errors' diagnostics in place
   of the flag, pushed by recovery, and `m.register_error`; the maintainer
   reduced it to the flag, since recovery reads the machine's state, not
-  messages. Diagnostics are left to communication, at the ports re-plan of
-  `api-heap-communication`.
+  messages. Diagnostics are left to communication, at `api-ports`.
 - Tests: `tests/runtime_api.rs` covers a turn's error flagging its machine,
   the queries, recovery finding the machine as the turn left it and
   entering an unflagged one, a panic flagging, and a descendant in error
@@ -930,8 +950,10 @@ the public API, in `tests/`.
   with this model (maintainer, 2026-10-19), perhaps making spawned tasks
   (`.task.new` and its relatives) persistent machines in the tree. A later
   step, ordered after the ports re-plan and `api-effect-providers`.
-- Communication's conventions, at `api-heap-communication`, and how far
-  the API specializes queues and the like, by measurement.
+- Communication's open details, at `api-ports`: whether a write to an
+  unwired port fails or drops, a count of what a port holds, the
+  diagnostics port's host end, and how far the API specializes buffers,
+  by measurement.
 - The ownership plan's open details, each settled when its step starts:
   retired operations' error (`api-retirement`); the queue capability's
   representation, and a request's status, possibly with a received state
