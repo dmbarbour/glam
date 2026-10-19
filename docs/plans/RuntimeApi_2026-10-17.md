@@ -78,8 +78,12 @@ handle API goes.
      `access`, `apply`, `eval`, `compile`, local state (`get`, `set`), and
      `clear`.
    - A `stash` beside the stack (maintainer, 2026-10-17): `stash(n)` moves
-     the top `n` values there as a block, and `stash_pop(n)` moves them
-     back, so the pair leaves them as they were.
+     the top `n` values there, and `stash_pop(n)` moves them back, so the
+     pair leaves them as they were. The stash is the stack's other side, as
+     in a zipper (maintainer, 2026-10-19): `stash(n)` is `stash(1)` `n`
+     times, and `stash_pop(n)` likewise, so values move one at a time and
+     `stash(n)` then `stash_pop(1)` `n` times also leaves them as they were.
+     `flip(n)` reverses the top `n` values, generalizing `swap`.
    - Tests: the Hello World sample's bytes through a turn; state across
      turns; `clear`; errors on underflow and on a pop of the wrong kind; a
      compile-fail test that `Runtime` is not `Send`.
@@ -624,8 +628,8 @@ and `Fork`, a first proposal.
 - Text keys name atoms (`From<&str>` for `Key`), and `Key` is public.
 - Operations: `push_unit`, `push_int`, `push_text`, `push_bytes`,
   `push_atom`; `pop_int`, `pop_bytes`, `pop_text`, which evaluate;
-  `depth`, `dup`, `swap`, `discard` (a method named `drop` would read as
-  `Drop`), `stash`, `stash_pop`, `stash_depth`; `access` (a dotted path),
+  `depth`, `dup`, `swap`, `flip` (added 2026-10-19), `discard` (a method
+  named `drop` would read as `Drop`), `stash`, `stash_pop`, `stash_depth`; `access` (a dotted path),
   `apply`, `eval` (to weak-head normal form); `compile`, which pushes the
   module and returns its warnings; `get`, `set`, `clear`.
 - `pop_bytes` evaluates under the `binary` annotation, so a value that is

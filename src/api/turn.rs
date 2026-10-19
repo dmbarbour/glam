@@ -1326,24 +1326,33 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         Ok(())
     }
 
-    /// Moves the top `n` values to the stash, keeping their order, so
-    /// `stash_pop(n)` returns them as they were.
-    pub fn stash(&mut self, n: usize) -> Result<(), Error> {
+    /// Reverses the order of the top `n` values: `flip(2)` is `swap`.
+    pub fn flip(&mut self, n: usize) -> Result<(), Error> {
         let depth = self.require(n)?;
-        let moved = self.state.stack.split_off(depth - n);
-        self.state.stash.extend(moved);
+        self.state.stack[depth - n..].reverse();
         Ok(())
     }
 
-    /// Moves the top `n` values of the stash back to the stack, keeping
-    /// their order.
+    /// Moves the top `n` values to the stash one at a time, as `stash(1)`
+    /// does `n` times. The stash is the stack's other side, as in a zipper:
+    /// the top value moves first, so it ends deepest, and `stash_pop(n)`
+    /// returns the values as they were.
+    pub fn stash(&mut self, n: usize) -> Result<(), Error> {
+        let depth = self.require(n)?;
+        let moved = self.state.stack.split_off(depth - n);
+        self.state.stash.extend(moved.into_iter().rev());
+        Ok(())
+    }
+
+    /// Moves the top `n` values of the stash back to the stack one at a
+    /// time, as `stash_pop(1)` does `n` times.
     pub fn stash_pop(&mut self, n: usize) -> Result<(), Error> {
         let depth = self.state.stash.len();
         if depth < n {
             return Err(underflow("stash", n, depth));
         }
         let moved = self.state.stash.split_off(depth - n);
-        self.state.stack.extend(moved);
+        self.state.stack.extend(moved.into_iter().rev());
         Ok(())
     }
 

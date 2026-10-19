@@ -1,7 +1,7 @@
 //! The runtime as an environment: turns on a tree of machines
 //! (`runtime-api-turns-on-machines`, `machines-form-a-tree`).
 
-use glam::{Error, Key, ModuleInput, Runtime, RuntimeConfig, ValueKind};
+use glam::{Error, Key, Machine, ModuleInput, Runtime, RuntimeConfig, ValueKind};
 
 fn runtime() -> Runtime {
     Runtime::open(RuntimeConfig::new()).expect("a runtime should open")
@@ -89,7 +89,7 @@ fn clear_returns_a_machine_to_its_initial_state() {
 }
 
 #[test]
-fn stash_moves_values_as_a_block_and_back() {
+fn stash_moves_values_aside_and_back() {
     let mut rt = runtime();
     let popped = rt
         .run("m", |m| {
@@ -108,6 +108,65 @@ fn stash_moves_values_as_a_block_and_back() {
         })
         .expect("the turn should succeed");
     assert_eq!(popped, [4, 3, 2, 10, 1]);
+}
+
+/// Pops every value of the stack, top first.
+fn pop_all(m: &mut Machine<'_, '_>) -> Result<Vec<i64>, Error> {
+    let mut popped = Vec::new();
+    while m.depth() > 0 {
+        popped.push(m.pop_int()?);
+    }
+    Ok(popped)
+}
+
+#[test]
+fn the_stash_is_the_stack_s_other_side() {
+    let mut rt = runtime();
+    let (one_at_a_time, flipped) = rt
+        .run("m", |m| {
+            for value in 1..=3 {
+                m.push_int(value);
+            }
+            m.stash(3)?;
+            for _ in 0..3 {
+                m.stash_pop(1)?;
+            }
+            let one_at_a_time = pop_all(m)?;
+            for value in 1..=3 {
+                m.push_int(value);
+            }
+            for _ in 0..3 {
+                m.stash(1)?;
+            }
+            m.stash_pop(3)?;
+            m.flip(3)?;
+            Ok((one_at_a_time, pop_all(m)?))
+        })
+        .expect("the turn should succeed");
+    assert_eq!(
+        one_at_a_time,
+        [3, 2, 1],
+        "stash(3) is stash(1) three times, and so returns them as they were"
+    );
+    assert_eq!(flipped, [1, 2, 3], "flip(3) reverses the top three");
+}
+
+#[test]
+fn flip_generalizes_swap() {
+    let mut rt = runtime();
+    let flipped = rt
+        .run("m", |m| {
+            for value in 1..=4 {
+                m.push_int(value);
+            }
+            m.flip(2)?;
+            m.flip(0)?;
+            m.flip(1)?;
+            assert!(m.flip(5).is_err(), "too few values");
+            pop_all(m)
+        })
+        .expect("the turn should succeed");
+    assert_eq!(flipped, [3, 4, 2, 1]);
 }
 
 #[test]
